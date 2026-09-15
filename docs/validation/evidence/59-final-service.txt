@@ -1,0 +1,8 @@
+9384b7f44993d8e519a6ad55b3b6ea2086746b58ca8147f89cf85192ace2e5da  /opt/bin/reader-buddy
+NRestarts=0
+ActiveState=active
+SubState=running
+Sep 15 07:03:12 reMarkable reader-buddy[9951]: [2026-09-15T07:03:12.874Z INFO  remarkable_reader_buddy::workflow::orchestrator] Starting Reader Buddy main loop
+Sep 15 07:03:12 reMarkable reader-buddy[9951]: [2026-09-15T07:03:12.874Z INFO  remarkable_reader_buddy::workflow::orchestrator] === Starting Reader Buddy Iteration ===
+Sep 15 07:03:12 reMarkable reader-buddy[9951]: [2026-09-15T07:03:12.874Z INFO  remarkable_reader_buddy::workflow] Waiting for trigger...
+Sep 15 07:03:12 reMarkable reader-buddy[9951]: [2026-09-15T07:03:12.874Z INFO  remarkable_reader_buddy::device::touch] Waiting for 2s hold in trigger zone...

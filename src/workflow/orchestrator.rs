@@ -230,10 +230,25 @@ impl Orchestrator {
     fn transcriptions_agree(question: &str, reading: &str) -> bool {
         let independent = Self::extract_field(reading, "TRANSCRIPTION:");
         let normalize = |text: &str| -> String {
-            text.chars()
-                .filter(|c| c.is_alphanumeric())
-                .flat_map(char::to_lowercase)
-                .collect()
+            let chars: Vec<char> = text.to_lowercase().chars().collect();
+            let mut normalized = String::new();
+            for (i, &c) in chars.iter().enumerate() {
+                let numeric_separator = matches!(c, '.' | ',')
+                    && i > 0
+                    && chars[i - 1].is_ascii_digit()
+                    && chars.get(i + 1).is_some_and(char::is_ascii_digit);
+                if c.is_alphanumeric() || numeric_separator {
+                    normalized.push(c);
+                } else if c.is_whitespace() || ".?,;:".contains(c) {
+                    normalized.push(' ');
+                } else {
+                    // Keep operators/grouping distinct, regardless of spacing.
+                    normalized.push(' ');
+                    normalized.push(c);
+                    normalized.push(' ');
+                }
+            }
+            normalized.split_whitespace().collect::<Vec<_>>().join(" ")
         };
         let a = normalize(question);
         let b = normalize(&independent);
@@ -487,6 +502,21 @@ mod tests {
             "TRANSCRIPTION: G value?"
         ));
         assert!(!Orchestrator::transcriptions_agree("", "TRANSCRIPTION:"));
+        assert!(Orchestrator::transcriptions_agree(
+            "Is G=5?",
+            "TRANSCRIPTION: is G = 5?"
+        ));
+        for (first, second) in [
+            ("2+2?", "2-2?"),
+            ("Is G=1.0?", "Is G=10?"),
+            ("why not able?", "why notable?"),
+            ("(2+3)*4?", "2+3*4?"),
+        ] {
+            assert!(!Orchestrator::transcriptions_agree(
+                first,
+                &format!("TRANSCRIPTION: {second}")
+            ));
+        }
     }
 
     #[test]
