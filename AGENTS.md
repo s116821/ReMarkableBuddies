@@ -1,5 +1,21 @@
 # Repository guidance
 
+## Pull request presentation
+
+- Begin the PR body exactly with `# Summary`, followed by concise bullets explaining
+  the changes. Do not add testing plans, validation sections, or report boilerplate.
+- Put actual test evidence in grouped PR comments: embed visible screenshots,
+  explain each observed result, identify the tested build, and state material limits.
+  Distinguish live model tests, offline replay, and final-build regression checks.
+- Prefer durable GitHub attachments. If unavailable, retain only the minimal
+  repository-hosted images needed for inline comments and pin their URLs to a commit.
+  Verify rendering before removing redundant evidence from the source diff; preserve
+  local originals. Keep reusable fixtures/tooling, not one-off execution archives.
+- Follow the scoped semantic-title convention in README; include verified related
+  ticket IDs when applicable and do not imply incomplete tickets are fully resolved.
+
+## Tablet testing
+
 For tablet compatibility, integration, or end-to-end Reader Buddy testing, when
 full unattended SSH is available to an authorized development tablet the user is
 not actively using, use

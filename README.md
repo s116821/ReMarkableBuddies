@@ -33,9 +33,8 @@ and general knowledge; paper-specific values must match the visible paper. The
 default model is `gpt-5.6-terra`; use `--model` to override it. The extra question
 check adds an API request for recognized questions. It reduces confident misreads
 but can reject valid handwriting when the readings differ; agreement is not a
-guarantee of correctness. See the [model comparison](docs/validation/model-comparison.md)
-and [hardware validation](docs/validation/2026-09-15-status.md) for measured cost, evidence,
-and the limits of tested handwriting and firmware.
+guarantee of correctness. See the [hardware evidence comments](https://github.com/s116821/ReMarkableBuddies/pull/10#issuecomment-5687876142)
+for results and limitations, and the [build and cost details](https://github.com/s116821/ReMarkableBuddies/pull/10#issuecomment-5687876514).
 
 ## Installation
 

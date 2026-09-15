@@ -80,8 +80,8 @@ appropriate to changed behavior, and verify the final installed build on hardwar
 Do not equate an architecture build with hardware validation on that device.
 
 Use [the hardware probe](../../../examples/hardware_probe.rs) for bounded offline
-input actions and [the validation report](../../../docs/validation/rm2-3.28.md)
-for the documented fixture setup and evidence. Adapt coordinates to observed UI
+input actions and [the fixture guide](../../../docs/validation/README.md)
+for reusable fixture setup and links to PR evidence. Adapt coordinates to observed UI
 state; do not fossilize another machine's paths, addresses or credentials.
 
 Before stopping, restore the agreed service state, leave the test document in a
