@@ -240,7 +240,7 @@ impl Screenshot {
             file.seek(std::io::SeekFrom::Start(start_address + offset + 8))?;
             let mut header = [0u8; 8];
             file.read_exact(&mut header)?;
-            debug!("  ... header: {:?}", &header);
+            debug!("  ... header: {:?}", header);
 
             length = (header[0] as u64)
                 | ((header[1] as u64) << 8)
@@ -331,7 +331,12 @@ impl Screenshot {
         if self.rm2_bgra {
             // RM2 is monochrome: the blue channel carries the grayscale value.
             // New firmware stores portrait BGRA with full-range gray values.
-            let pixels: Vec<u8> = raw_data.chunks_exact(4).map(|pixel| pixel[0]).collect();
+            let pixels: Vec<u8> = raw_data
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|pixel| pixel[0])
+                .collect();
             let mut png = Vec::new();
             image::codecs::png::PngEncoder::new(&mut png).write_image(
                 &pixels,
@@ -342,7 +347,9 @@ impl Screenshot {
             return Ok(png);
         }
         let raw_u8: Vec<u8> = raw_data
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|chunk| u8::from_le_bytes([chunk[1]]))
             .collect();
         let width = self.screen_width();
