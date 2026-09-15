@@ -1,4 +1,7 @@
-# ReMarkable Reader Buddy
+# ReMarkableBuddies
+
+This repository currently contains Reader Buddy. The Rust package, `reader-buddy`
+executable, service, and release archive names retain their existing names.
 
 An AI-powered reading assistant for the reMarkable tablet that watches for circled content and handwritten questions, then provides answers directly on your device using ChatGPT.
 
@@ -104,7 +107,7 @@ rustup target add armv7-unknown-linux-gnueabihf aarch64-unknown-linux-gnu
 
 #### Option 1: Download Pre-built Binary (Recommended)
 
-Download the latest release from the [Releases page](https://github.com/s116821/ReMarkableReaderBuddy/releases):
+Download the latest release from the [Releases page](https://github.com/s116821/ReMarkableBuddies/releases):
 
 ```bash
 # Extract the binary
@@ -554,6 +557,16 @@ killall reader-buddy
 - **Outline Detection**: Currently LLM-based (future: add local CV algorithms as optimization)
 - **Internet Required**: Requires connection for ChatGPT API
 - **No Context Retention**: Each trigger is independent (no follow-up question support)
+
+## Pull request titles
+
+Use a Conventional Commit title with a scope: `type(scope): description`.
+Include related Linear ticket IDs in the scope when applicable, for example
+`fix(REM-17,REM-18): restore RM2 capture and verify handwritten questions`.
+For work without a related ticket, use a descriptive scope such as `ci` or `docs`.
+The title check runs when a pull request is opened, edited, updated, or reopened.
+Link related tickets in the description and distinguish partial work from completed
+acceptance criteria.
 
 ## Automated Releases
 
