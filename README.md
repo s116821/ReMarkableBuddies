@@ -17,13 +17,22 @@ An AI-powered reading assistant for the reMarkable tablet that watches for circl
 3. **Write Question**: Write your question near the outlined content
 4. **Trigger**: Touch and **hold for 3 seconds** in the **lower-left corner** of your reMarkable screen
 5. **Capture**: The app takes a screenshot of your current page
-6. **AI Magic**: Single ChatGPT vision call detects outline, reads question, and generates answer (all in one!)
+6. **Read and Verify**: A vision request identifies the selected concept, reads the question, and proposes an answer. An independent transcription pass over the page, without seeing the proposed question or answer, must agree before anything is written. Unreadable or conflicting readings produce an X instead.
 7. **Page Check**: App navigates right and checks for a valid answer page:
    - **Valid**: Blank page or existing Reader Buddy answer page → renders Q&A
    - **Invalid**: No page exists or page has other content → draws an **X** in the bottom-right corner of the original page
 8. **Render**: Displays the question and answer on the answer page (with "=== Reader Buddy Answers ===" header on first use)
 
 **Important**: You must manually create a blank page to the right of your question page before triggering. The app will NOT create pages automatically.
+
+The circle selects the topic to explain. Answers may use surrounding page content
+and general knowledge; paper-specific values must match the visible paper. The
+default model is `gpt-5.6-terra`; use `--model` to override it. The extra question
+check adds an API request for recognized questions. It reduces confident misreads
+but can reject valid handwriting when the readings differ; agreement is not a
+guarantee of correctness. See the [model comparison](docs/validation/model-comparison.md)
+and [hardware validation](docs/validation/2026-09-15-status.md) for measured cost, evidence,
+and the limits of tested handwriting and firmware.
 
 ## Installation
 
@@ -151,7 +160,7 @@ reader-buddy [OPTIONS]
 
 Options:
   --api-key <KEY>           OpenAI API key
-  --model <MODEL>           Model to use [default: gpt-4o]
+  --model <MODEL>           Model to use [default: gpt-5.6-terra]
   --base-url <URL>          Custom OpenAI endpoint
   --no-draw                 Disable drawing (testing)
   --no-trigger              Skip waiting for trigger

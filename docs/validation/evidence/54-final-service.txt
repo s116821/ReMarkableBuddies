@@ -1,0 +1,27 @@
+NRestarts=0
+ExecMainStatus=0
+ActiveState=active
+SubState=running
+enabled
+Sep 15 06:39:42 reMarkable reader-buddy[9859]: [2026-09-15T06:39:42.806Z INFO  reader_buddy] Model: gpt-5.6-terra
+Sep 15 06:39:42 reMarkable reader-buddy[9859]: [2026-09-15T06:39:42.806Z INFO  reader_buddy] Trigger Corner: LL
+Sep 15 06:39:42 reMarkable reader-buddy[9859]: [2026-09-15T06:39:42.806Z INFO  remarkable_reader_buddy::workflow] Initializing cache directory: /var/cache/reader-buddy
+Sep 15 06:39:42 reMarkable reader-buddy[9859]: [2026-09-15T06:39:42.807Z INFO  remarkable_reader_buddy::workflow] Cache directory created/verified: /var/cache/reader-buddy
+Sep 15 06:39:42 reMarkable reader-buddy[9859]: [2026-09-15T06:39:42.807Z INFO  remarkable_reader_buddy::workflow] Cache initialized successfully
+Sep 15 06:39:42 reMarkable reader-buddy[9859]: [2026-09-15T06:39:42.807Z INFO  remarkable_reader_buddy::device::screenshot] Screen detected device: Remarkable2
+Sep 15 06:39:42 reMarkable reader-buddy[9859]: [2026-09-15T06:39:42.807Z INFO  remarkable_reader_buddy::device::pen] Pen using device model: Remarkable2
+Sep 15 06:39:42 reMarkable reader-buddy[9859]: [2026-09-15T06:39:42.810Z INFO  remarkable_reader_buddy::device::touch] Touch using device model: Remarkable2
+Sep 15 06:39:43 reMarkable reader-buddy[9859]: [2026-09-15T06:39:43.810Z INFO  reader_buddy] Initialization complete
+Sep 15 06:39:43 reMarkable reader-buddy[9859]: [2026-09-15T06:39:43.810Z INFO  reader_buddy] Starting main loop
+Sep 15 06:39:43 reMarkable reader-buddy[9859]: [2026-09-15T06:39:43.810Z INFO  remarkable_reader_buddy::workflow::orchestrator] Starting Reader Buddy main loop
+Sep 15 06:39:43 reMarkable reader-buddy[9859]: [2026-09-15T06:39:43.810Z INFO  remarkable_reader_buddy::workflow::orchestrator] === Starting Reader Buddy Iteration ===
+Sep 15 06:39:43 reMarkable reader-buddy[9859]: [2026-09-15T06:39:43.811Z INFO  remarkable_reader_buddy::workflow] Waiting for trigger...
+Sep 15 06:39:43 reMarkable reader-buddy[9859]: [2026-09-15T06:39:43.811Z INFO  remarkable_reader_buddy::device::touch] Waiting for 2s hold in trigger zone...
+  UNIT                 LOAD   ACTIVE SUB     DESCRIPTION
+  reader-buddy.service loaded active running ReMarkable Reader Buddy
+
+Legend: LOAD   → Reflects whether the unit definition was properly loaded.
+        ACTIVE → The high-level unit activation state, i.e. generalization of SUB.
+        SUB    → The low-level unit activation state, values depend on unit type.
+
+1 loaded units listed.

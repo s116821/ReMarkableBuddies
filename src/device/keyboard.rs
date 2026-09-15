@@ -18,6 +18,7 @@ use evdev::{
 #[cfg(target_os = "linux")]
 pub struct Keyboard {
     device: Option<evdev::uinput::VirtualDevice>,
+    rm2_keyboard: bool,
     key_map: HashMap<char, (EvdevKey, bool)>,
     progress_count: u32,
     no_draw_progress: bool,
@@ -38,9 +39,14 @@ impl Keyboard {
             Some(Self::create_virtual_device())
         };
 
+        let rm2_keyboard = matches!(
+            super::DeviceModel::detect(),
+            super::DeviceModel::Remarkable2
+        );
         Self {
             device,
-            key_map: Self::create_key_map(),
+            rm2_keyboard,
+            key_map: Self::create_key_map(rm2_keyboard),
             progress_count: 0,
             no_draw_progress,
         }
@@ -95,6 +101,7 @@ impl Keyboard {
         keys.insert(EvdevKey::KEY_LEFTSHIFT);
         keys.insert(EvdevKey::KEY_MINUS);
         keys.insert(EvdevKey::KEY_EQUAL);
+        keys.insert(EvdevKey::KEY_KPPLUS);
         keys.insert(EvdevKey::KEY_LEFTBRACE);
         keys.insert(EvdevKey::KEY_RIGHTBRACE);
         keys.insert(EvdevKey::KEY_BACKSLASH);
@@ -120,7 +127,7 @@ impl Keyboard {
             .unwrap()
     }
 
-    fn create_key_map() -> HashMap<char, (EvdevKey, bool)> {
+    fn create_key_map(rm2_keyboard: bool) -> HashMap<char, (EvdevKey, bool)> {
         let mut key_map = HashMap::new();
 
         // Lowercase letters
@@ -203,7 +210,14 @@ impl Keyboard {
         key_map.insert('(', (EvdevKey::KEY_9, true));
         key_map.insert(')', (EvdevKey::KEY_0, true));
         key_map.insert('_', (EvdevKey::KEY_MINUS, true));
-        key_map.insert('+', (EvdevKey::KEY_EQUAL, true));
+        key_map.insert(
+            '+',
+            if rm2_keyboard {
+                (EvdevKey::KEY_KPPLUS, false)
+            } else {
+                (EvdevKey::KEY_EQUAL, true)
+            },
+        );
         key_map.insert('{', (EvdevKey::KEY_LEFTBRACE, true));
         key_map.insert('}', (EvdevKey::KEY_RIGHTBRACE, true));
         key_map.insert('|', (EvdevKey::KEY_BACKSLASH, true));
@@ -216,7 +230,7 @@ impl Keyboard {
 
         // Common punctuation
         key_map.insert('-', (EvdevKey::KEY_MINUS, false));
-        key_map.insert('=', (EvdevKey::KEY_EQUAL, false));
+        key_map.insert('=', (EvdevKey::KEY_EQUAL, rm2_keyboard));
         key_map.insert('[', (EvdevKey::KEY_LEFTBRACE, false));
         key_map.insert(']', (EvdevKey::KEY_RIGHTBRACE, false));
         key_map.insert('\\', (EvdevKey::KEY_BACKSLASH, false));
@@ -247,6 +261,14 @@ impl Keyboard {
 
             for c in input.chars() {
                 if let Some(&(key, shift)) = self.key_map.get(&c) {
+                    // Firmware 3.28 maps the equals sign through Alt+Shift.
+                    if self.rm2_keyboard && c == '=' {
+                        device.emit(&[InputEvent::new(
+                            EvdevEventType::KEY.0,
+                            EvdevKey::KEY_LEFTALT.code(),
+                            1,
+                        )])?;
+                    }
                     if shift {
                         // Press Shift
                         device.emit(&[InputEvent::new(
@@ -256,12 +278,15 @@ impl Keyboard {
                         )])?;
                     }
 
+                    thread::sleep(time::Duration::from_millis(10));
                     // Press key
                     device.emit(&[InputEvent::new(EvdevEventType::KEY.0, key.code(), 1)])?;
 
+                    thread::sleep(time::Duration::from_millis(10));
                     // Release key
                     device.emit(&[InputEvent::new(EvdevEventType::KEY.0, key.code(), 0)])?;
 
+                    thread::sleep(time::Duration::from_millis(10));
                     if shift {
                         // Release Shift
                         device.emit(&[InputEvent::new(
@@ -271,6 +296,30 @@ impl Keyboard {
                         )])?;
                     }
 
+                    if self.rm2_keyboard && c == '=' {
+                        device.emit(&[InputEvent::new(
+                            EvdevEventType::KEY.0,
+                            EvdevKey::KEY_LEFTALT.code(),
+                            0,
+                        )])?;
+                    }
+                    if self.rm2_keyboard && c == '^' {
+                        // RM2 treats Shift+6 as a dead superscript key. Space
+                        // commits a literal caret instead of consuming the next
+                        // exponent character (e.g. turning ^-11 into superscript
+                        // minus followed by baseline 11).
+                        thread::sleep(time::Duration::from_millis(10));
+                        device.emit(&[InputEvent::new(
+                            EvdevEventType::KEY.0,
+                            EvdevKey::KEY_SPACE.code(),
+                            1,
+                        )])?;
+                        device.emit(&[InputEvent::new(
+                            EvdevEventType::KEY.0,
+                            EvdevKey::KEY_SPACE.code(),
+                            0,
+                        )])?;
+                    }
                     // Sync event
                     device.emit(&[InputEvent::new(EvdevEventType::SYNCHRONIZATION.0, 0, 0)])?;
                     thread::sleep(time::Duration::from_millis(10));

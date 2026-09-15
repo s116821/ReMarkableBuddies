@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 use dotenv::dotenv;
 use log::info;
+use remarkable_reader_buddy::llm::openai::DEFAULT_MODEL;
 use remarkable_reader_buddy::{OpenAI, Orchestrator, TriggerCorner, Workflow};
 use std::thread::sleep;
 use std::time::Duration;
@@ -14,12 +15,15 @@ use std::time::Duration;
                         then uses ChatGPT to provide answers directly on your reMarkable tablet."
 )]
 pub struct Args {
+    /// Capture a PNG and exit without credentials, input devices, or an AI call
+    #[arg(long, value_name = "FILE")]
+    screenshot_only: Option<String>,
     /// OpenAI API key (can also be set via OPENAI_API_KEY env var)
     #[arg(long, env = "OPENAI_API_KEY")]
     api_key: Option<String>,
 
     /// OpenAI model to use
-    #[arg(long, short, default_value = "gpt-4o")]
+    #[arg(long, short, default_value = DEFAULT_MODEL)]
     model: String,
 
     /// OpenAI base URL (for custom endpoints)
@@ -71,6 +75,13 @@ fn main() -> Result<()> {
         .init();
 
     info!("=== ReMarkable Reader Buddy Starting ===");
+    if let Some(path) = args.screenshot_only {
+        let mut screenshot = remarkable_reader_buddy::Screenshot::new()?;
+        screenshot.take_screenshot()?;
+        screenshot.save_image(&path)?;
+        info!("Screenshot saved to {}", path);
+        return Ok(());
+    }
     info!("Model: {}", args.model);
     info!("Trigger Corner: {}", args.trigger_corner);
 
@@ -92,6 +103,7 @@ fn main() -> Result<()> {
 
     // Create orchestrator
     let mut orchestrator = Orchestrator::new(workflow, llm);
+    orchestrator.set_trigger_enabled(!args.no_trigger);
 
     info!("Initialization complete");
 

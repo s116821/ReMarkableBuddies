@@ -1,0 +1,18 @@
+[Unit]
+Description=ReMarkable Reader Buddy
+After=home.mount xochitl.service network-online.target
+Wants=xochitl.service
+ConditionPathExists=/home/root/.config/reader-buddy/environment
+
+[Service]
+Type=simple
+WorkingDirectory=/home/root
+EnvironmentFile=/home/root/.config/reader-buddy/environment
+ExecStart=/opt/bin/reader-buddy
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

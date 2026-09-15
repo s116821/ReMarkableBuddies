@@ -4,6 +4,8 @@ use log::{debug, info};
 use serde_json::json;
 use serde_json::Value as JsonValue;
 
+pub const DEFAULT_MODEL: &str = "gpt-5.6-terra";
+
 pub struct OpenAI {
     model: String,
     base_url: String,
@@ -27,7 +29,7 @@ impl OpenAI {
         let api_key = std::env::var("OPENAI_API_KEY")
             .map_err(|_| anyhow::anyhow!("OPENAI_API_KEY environment variable not set"))?;
         let base_url = std::env::var("OPENAI_BASE_URL").ok();
-        let model = model.unwrap_or_else(|| "gpt-4o".to_string());
+        let model = model.unwrap_or_else(|| DEFAULT_MODEL.to_string());
 
         Ok(Self::new(model, api_key, base_url))
     }
@@ -49,7 +51,8 @@ impl LLMEngine for OpenAI {
         self.add_content(json!({
             "type": "image_url",
             "image_url": {
-                "url": format!("data:image/png;base64,{}", base64_image)
+                "url": format!("data:image/png;base64,{}", base64_image),
+                "detail": "high"
             }
         }));
     }
@@ -65,7 +68,7 @@ impl LLMEngine for OpenAI {
                 "role": "user",
                 "content": self.content
             }],
-            "max_tokens": 4000
+            "max_completion_tokens": 4000
         });
 
         // print body for debugging
@@ -86,6 +89,7 @@ impl LLMEngine for OpenAI {
         // Read response body as string
         let body_text = response.body_mut().read_to_string().unwrap();
         let json: JsonValue = serde_json::from_str(&body_text).unwrap();
+        info!("API usage: model={} usage={}", json["model"], json["usage"]);
         debug!("Response: {}", json);
 
         // Extract the response text
