@@ -6,14 +6,10 @@ pub mod xochitl_integration;
 pub use navigation::ReturnOutcome;
 
 use anyhow::Result;
-use log::{debug, info, warn};
+use log::{debug, info};
 
-use crate::device::{
-    keyboard::Keyboard,
-    pen::Pen,
-    screenshot::{Screenshot, SCREENSHOT_VIRTUAL_HEIGHT, SCREENSHOT_VIRTUAL_WIDTH},
-    touch::Touch,
-};
+use crate::device::backend::{DeviceBackend, Frame, RealDevice};
+use crate::device::screenshot::{SCREENSHOT_VIRTUAL_HEIGHT, SCREENSHOT_VIRTUAL_WIDTH};
 
 /// Result of checking if a page is valid for rendering answers
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -25,12 +21,6 @@ pub enum AnswerPageType {
     /// Page is not valid for answers
     Invalid,
 }
-
-/// Cache directory for Reader Buddy (standard Linux location for cache files)
-const CACHE_DIR: &str = "/var/cache/reader-buddy";
-
-/// Path to the cached header pattern image
-const HEADER_PATTERN_PATH: &str = "/var/cache/reader-buddy/header-pattern.png";
 
 // Image comparison mask constants - skip UI elements that can change between screenshots
 // These are in virtual coordinates (768x1024) and work for all devices since screenshots are normalized
@@ -50,10 +40,8 @@ const BLANK_PAGE_SAMPLE_RATE: u32 = 2;
 
 /// Main workflow coordinator
 pub struct Workflow {
-    screenshot: Screenshot,
-    pen: Pen,
-    keyboard: Keyboard,
-    touch: Touch,
+    device: Box<dyn DeviceBackend>,
+    frame: Frame,
     debug_dump: bool,
     iteration_count: u32,
 }
@@ -64,63 +52,54 @@ impl Workflow {
         trigger_corner: crate::device::touch::TriggerCorner,
         debug_dump: bool,
     ) -> Result<Self> {
-        // Initialize cache directory (creates if needed, clears old files)
-        Self::init_cache()?;
-
-        Ok(Self {
-            screenshot: Screenshot::new()?,
-            pen: Pen::new(no_draw),
-            keyboard: Keyboard::new(no_draw, false),
-            touch: Touch::new(no_draw, trigger_corner),
+        Ok(Self::with_device(
+            Box::new(RealDevice::new(no_draw, trigger_corner)?),
             debug_dump,
-            iteration_count: 0,
-        })
+        ))
     }
 
-    /// Initialize the cache directory
-    /// Creates the directory if it doesn't exist
-    /// Note: We intentionally preserve cached files (like header patterns) across restarts
-    /// so that existing QA pages can still be recognized after a service restart
-    fn init_cache() -> Result<()> {
-        use std::fs;
-
-        info!("Initializing cache directory: {}", CACHE_DIR);
-
-        // Create cache directory (and parent directories if needed)
-        match fs::create_dir_all(CACHE_DIR) {
-            Ok(_) => info!("Cache directory created/verified: {}", CACHE_DIR),
-            Err(e) => {
-                // Log error but don't fail - cache is optional
-                warn!("Failed to create cache directory {}: {}", CACHE_DIR, e);
-                return Ok(());
-            }
+    pub fn with_device(device: Box<dyn DeviceBackend>, debug_dump: bool) -> Self {
+        Self {
+            device,
+            frame: Frame::default(),
+            debug_dump,
+            iteration_count: 0,
         }
+    }
 
-        info!("Cache initialized successfully");
-        Ok(())
+    pub fn delay(&mut self, duration: std::time::Duration) {
+        self.device.delay(duration);
+    }
+
+    pub fn detail_images_base64(&self) -> Result<Vec<String>> {
+        self.device.detail_images()
+    }
+
+    pub fn current_image_base64(&self) -> String {
+        self.frame.base64()
     }
 
     /// Wait for user to trigger the workflow (touch in corner)
     pub fn wait_for_trigger(&mut self) -> Result<()> {
         info!("Waiting for trigger...");
-        self.touch.wait_for_trigger()?;
-        self.touch.tap_middle_bottom()?;
+        self.device.wait_for_trigger()?;
+        self.device.dismiss_trigger()?;
         Ok(())
     }
 
     /// Take a screenshot and return the base64-encoded image
     pub fn capture_screenshot(&mut self) -> Result<String> {
         info!("Capturing screenshot...");
-        self.screenshot.take_screenshot()?;
-        self.screenshot.base64()
+        self.frame = self.device.capture()?;
+        Ok(self.frame.base64())
     }
 
     /// Take a screenshot and return both base64 and raw PNG data
     pub fn capture_screenshot_with_data(&mut self) -> Result<(String, Vec<u8>)> {
         info!("Capturing screenshot...");
-        self.screenshot.take_screenshot()?;
-        let base64 = self.screenshot.base64()?;
-        let png_data = self.screenshot.get_image_data().to_vec();
+        self.frame = self.device.capture()?;
+        let base64 = self.frame.base64();
+        let png_data = self.frame.png.clone();
 
         // Debug dump if enabled
         if self.debug_dump {
@@ -129,7 +108,7 @@ impl Workflow {
                 "/tmp/reader-buddy-screenshot-{:03}.png",
                 self.iteration_count
             );
-            if let Err(e) = self.screenshot.save_image(&filename) {
+            if let Err(e) = std::fs::write(&filename, &self.frame.png) {
                 log::warn!("Failed to save debug screenshot: {}", e);
             } else {
                 log::debug!("Saved debug screenshot to {}", filename);
@@ -141,13 +120,13 @@ impl Workflow {
 
     /// Show progress indicator to user
     pub fn show_progress(&mut self, message: &str) -> Result<()> {
-        self.keyboard.progress(message)?;
+        self.device.progress(Some(message))?;
         Ok(())
     }
 
     /// Clear progress indicator
     pub fn clear_progress(&mut self) -> Result<()> {
-        self.keyboard.progress_end()?;
+        self.device.progress(None)?;
         Ok(())
     }
 
@@ -162,7 +141,7 @@ impl Workflow {
         let bottom_right = (region.x + region.width, region.y + region.height);
 
         // Use the eraser tool to erase the rectangle
-        self.pen.erase_rectangle(top_left, bottom_right)?;
+        self.device.erase(top_left, bottom_right)?;
 
         Ok(())
     }
@@ -266,7 +245,7 @@ impl Workflow {
             for erase_y in erase_y_start..erase_y_end {
                 let top_left = (region.x, erase_y);
                 let bottom_right = ((region.x + region.width).min(768), erase_y + 1);
-                self.pen.erase_rectangle(top_left, bottom_right)?;
+                self.device.erase(top_left, bottom_right)?;
             }
         }
 
@@ -300,7 +279,7 @@ impl Workflow {
             }
         }
 
-        self.pen.draw_bitmap(&positioned_bitmap)?;
+        self.device.bitmap(&positioned_bitmap)?;
 
         Ok(())
     }
@@ -309,46 +288,27 @@ impl Workflow {
     /// Note: The caller is responsible for including any desired newlines in the text
     pub fn render_text(&mut self, text: &str) -> Result<()> {
         info!("Rendering text: {}", text);
-        self.keyboard.string_to_keypresses(text)?;
+        self.device.render_text(text)?;
         Ok(())
     }
 
     /// Switch keyboard to body text mode (should be called once before rendering)
     pub fn set_body_text_mode(&mut self) -> Result<()> {
-        self.keyboard.key_cmd_body()?;
+        self.device.body_mode()?;
         Ok(())
-    }
-
-    /// Get access to the keyboard for direct manipulation
-    pub fn get_keyboard_mut(&mut self) -> &mut Keyboard {
-        &mut self.keyboard
-    }
-
-    /// Get access to the pen for direct manipulation
-    pub fn get_pen_mut(&mut self) -> &mut Pen {
-        &mut self.pen
-    }
-
-    /// Get access to the touch device for direct manipulation
-    pub fn get_touch_mut(&mut self) -> &mut Touch {
-        &mut self.touch
     }
 
     /// Navigate to the next page (swipe left)
     pub fn navigate_to_next_page(&mut self) -> Result<()> {
-        xochitl_integration::XochitlIntegration::navigate_to_page(
-            &mut self.touch,
-            xochitl_integration::NavigationDirection::Next,
-        )?;
+        self.device
+            .navigate(xochitl_integration::NavigationDirection::Next)?;
         Ok(())
     }
 
     /// Navigate back to the previous page (swipe right)
     pub fn navigate_to_previous_page(&mut self) -> Result<()> {
-        xochitl_integration::XochitlIntegration::navigate_to_page(
-            &mut self.touch,
-            xochitl_integration::NavigationDirection::Previous,
-        )?;
+        self.device
+            .navigate(xochitl_integration::NavigationDirection::Previous)?;
         Ok(())
     }
 
@@ -369,12 +329,10 @@ impl Workflow {
 
         // Draw two diagonal lines to form an X (using screen coordinates)
         // Line 1: top-left to bottom-right
-        self.pen
-            .draw_line_screen((x_start, y_start), (x_end, y_end))?;
+        self.device.line((x_start, y_start), (x_end, y_end))?;
 
         // Line 2: top-right to bottom-left
-        self.pen
-            .draw_line_screen((x_end, y_start), (x_start, y_end))?;
+        self.device.line((x_end, y_start), (x_start, y_end))?;
 
         debug!(
             "Failure X drawn at ({}, {}) to ({}, {})",
@@ -390,26 +348,28 @@ impl Workflow {
     ///
     /// Returns the page type: Blank, ExistingQA, or Invalid
     pub fn is_valid_answer_page(&mut self) -> Result<AnswerPageType> {
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        self.screenshot.take_screenshot()?;
-        let img = match image::load_from_memory(self.screenshot.get_image_data()) {
+        self.delay(std::time::Duration::from_millis(500));
+        self.frame = self.device.capture()?;
+        let img = match image::load_from_memory(&self.frame.png) {
             Ok(img) => img,
             Err(error) => {
                 log::warn!("Failed to load screenshot for page check: {}", error);
                 return Ok(AnswerPageType::Invalid);
             }
         };
-        let saved = std::fs::read(HEADER_PATTERN_PATH)
-            .ok()
-            .and_then(|data| image::load_from_memory(&data).ok());
+        let saved = self.device.load_header();
         let page_type = Self::classify_answer_page(&img, saved.as_ref());
         info!("Answer page classification: {:?}", page_type);
         Ok(page_type)
     }
 
     pub fn capture_page(&mut self) -> Result<image::DynamicImage> {
-        self.screenshot.take_screenshot()?;
-        Ok(image::load_from_memory(self.screenshot.get_image_data())?)
+        Ok(image::load_from_memory(&self.capture_page_data()?)?)
+    }
+
+    pub fn capture_page_data(&mut self) -> Result<Vec<u8>> {
+        self.frame = self.device.capture()?;
+        Ok(self.frame.png.clone())
     }
 
     pub fn verify_navigation_to(&mut self, original: &image::DynamicImage) -> Result<bool> {
@@ -478,10 +438,10 @@ impl Workflow {
 
     /// Save the header pattern for future fast detection
     /// Should be called after successfully detecting an answer page via LLM
-    pub fn save_header_pattern(&self, header_img: &image::DynamicImage) -> Result<()> {
-        info!("Saving header pattern to {}", HEADER_PATTERN_PATH);
+    pub fn save_header_pattern(&mut self, header_img: &image::DynamicImage) -> Result<()> {
+        info!("Saving header pattern");
 
-        header_img.save(HEADER_PATTERN_PATH)?;
+        self.device.save_header(header_img)?;
         debug!("Header pattern saved successfully");
 
         Ok(())

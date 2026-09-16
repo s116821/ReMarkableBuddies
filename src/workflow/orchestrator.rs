@@ -51,14 +51,14 @@ struct AnalysisResult {
 }
 
 /// High-level orchestrator for the complete workflow
-pub struct Orchestrator {
+pub struct Orchestrator<M: LLMEngine = OpenAI> {
     workflow: Workflow,
-    llm: OpenAI,
+    llm: M,
     trigger_enabled: bool,
 }
 
-impl Orchestrator {
-    pub fn new(workflow: Workflow, llm: OpenAI) -> Self {
+impl<M: LLMEngine> Orchestrator<M> {
+    pub fn new(workflow: Workflow, llm: M) -> Self {
         Self {
             workflow,
             llm,
@@ -138,7 +138,7 @@ impl Orchestrator {
         self.llm.clear_content();
         self.llm.add_text_content(ANALYSIS_PROMPT);
         self.llm.add_image_content(screenshot_base64);
-        for detail in self.workflow.screenshot.detail_images_base64()? {
+        for detail in self.workflow.detail_images_base64()? {
             self.llm.add_image_content(&detail);
         }
 
@@ -209,8 +209,8 @@ impl Orchestrator {
              return one line: TRANSCRIPTION: [exact handwritten text].",
         );
         self.llm
-            .add_image_content(&self.workflow.screenshot.base64()?);
-        for detail in self.workflow.screenshot.detail_images_base64()? {
+            .add_image_content(&self.workflow.current_image_base64());
+        for detail in self.workflow.detail_images_base64()? {
             self.llm.add_image_content(&detail);
         }
         let reading = match self.llm.execute() {
@@ -300,7 +300,7 @@ impl Orchestrator {
 
         // Step 2: Attempt to navigate to next page
         self.workflow.navigate_to_next_page()?;
-        std::thread::sleep(std::time::Duration::from_millis(800));
+        self.workflow.delay(std::time::Duration::from_millis(800));
 
         if self.workflow.verify_navigation_to(&original_img)? {
             info!("No page movement detected; drawing X on original");
@@ -335,10 +335,9 @@ impl Orchestrator {
                     .render_text("=== Reader Buddy Answers ===\n\n\n")?;
 
                 // Save header pattern for future detection (only on first blank page)
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                self.workflow.screenshot.take_screenshot()?;
-                let new_png = self.workflow.screenshot.get_image_data();
-                if let Ok(new_img) = image::load_from_memory(new_png) {
+                self.workflow.delay(std::time::Duration::from_millis(500));
+                let new_png = self.workflow.capture_page_data()?;
+                if let Ok(new_img) = image::load_from_memory(&new_png) {
                     const HEADER_HEIGHT: u32 = 150; // Capture full header region from top
                     let header_img = new_img.crop_imm(
                         0,
@@ -390,28 +389,34 @@ impl Orchestrator {
 #[cfg(test)]
 mod tests {
     use super::Orchestrator;
+    use crate::OpenAI;
 
     #[test]
     fn independent_transcription_requires_the_same_words() {
-        assert!(Orchestrator::transcriptions_agree(
+        assert!(Orchestrator::<OpenAI>::transcriptions_agree(
             "G unc.?",
             "TRANSCRIPTION: g unc?"
         ));
-        assert!(!Orchestrator::transcriptions_agree(
+        assert!(!Orchestrator::<OpenAI>::transcriptions_agree(
             "why not atom?",
             "TRANSCRIPTION: why rot. attr.?"
         ));
-        assert!(!Orchestrator::transcriptions_agree("G unc?", "NONE"));
-        assert!(!Orchestrator::transcriptions_agree(
+        assert!(!Orchestrator::<OpenAI>::transcriptions_agree(
+            "G unc?", "NONE"
+        ));
+        assert!(!Orchestrator::<OpenAI>::transcriptions_agree(
             "G unc?",
             "TRANSCRIPTION: NONE"
         ));
-        assert!(!Orchestrator::transcriptions_agree(
+        assert!(!Orchestrator::<OpenAI>::transcriptions_agree(
             "G unc?",
             "TRANSCRIPTION: G value?"
         ));
-        assert!(!Orchestrator::transcriptions_agree("", "TRANSCRIPTION:"));
-        assert!(Orchestrator::transcriptions_agree(
+        assert!(!Orchestrator::<OpenAI>::transcriptions_agree(
+            "",
+            "TRANSCRIPTION:"
+        ));
+        assert!(Orchestrator::<OpenAI>::transcriptions_agree(
             "Is G=5?",
             "TRANSCRIPTION: is G = 5?"
         ));
@@ -421,7 +426,7 @@ mod tests {
             ("why not able?", "why notable?"),
             ("(2+3)*4?", "2+3*4?"),
         ] {
-            assert!(!Orchestrator::transcriptions_agree(
+            assert!(!Orchestrator::<OpenAI>::transcriptions_agree(
                 first,
                 &format!("TRANSCRIPTION: {second}")
             ));
@@ -439,14 +444,14 @@ mod tests {
             "QUESTION: readable?\n---\nAn unlabelled answer",
             "QUESTION_BOX: 1,2,3,4\n---\nANSWER: 4",
         ] {
-            assert!(Orchestrator::parse_analysis_response(response, vec![]).is_none());
+            assert!(Orchestrator::<OpenAI>::parse_analysis_response(response, vec![]).is_none());
         }
     }
 
     #[test]
     fn valid_indented_response_preserves_question_and_complete_answer() {
         let response = "  QUESTION: G unc.?\n  QUESTION_BOX: 1,2,3,4\n  OUTLINE_BOX: 5,6,7,8\n---\n  ANSWER: G = (6.674215 +/- 0.000092) * 10^-11 m^3 kg^-1 s^-2.\n---\nExtra answer line.";
-        let result = Orchestrator::parse_analysis_response(response, vec![]).unwrap();
+        let result = Orchestrator::<OpenAI>::parse_analysis_response(response, vec![]).unwrap();
         assert_eq!(result.question, "G unc.?");
         assert!(result.answer.ends_with("---\nExtra answer line."));
         assert!(result._question_box.is_some());

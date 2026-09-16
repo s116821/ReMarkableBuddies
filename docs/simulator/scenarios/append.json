@@ -1,0 +1,56 @@
+{
+  "name": "append",
+  "mode": "reader",
+  "expect": {
+    "errors": [],
+    "x_count": {
+      "1": 0,
+      "0": 0
+    },
+    "unchanged_pages": [
+      0
+    ],
+    "operations": {
+      "body": 2,
+      "capture": 9,
+      "text": 3,
+      "line": 0,
+      "previous": 0,
+      "next": 2
+    },
+    "model_calls": 4,
+    "active_page": 1,
+    "text": {
+      "0": "",
+      "1": "=== Reader Buddy Answers ===\n\n\nQ: G unc.?\n\nA: G = (6.674215 +/- 0.000092) * 10^-11 m^3 kg^-1 s^-2.\n---\nQ: G unc.?\n\nA: G = (6.674215 +/- 0.000092) * 10^-11 m^3 kg^-1 s^-2.\n---\n"
+    }
+  },
+  "replies": [
+    {
+      "text": "QUESTION: G unc.?\nQUESTION_BOX: 130,35,200,50\nOUTLINE_BOX: 110,165,550,130\n---\nANSWER: G = (6.674215 +/- 0.000092) * 10^-11 m^3 kg^-1 s^-2."
+    },
+    {
+      "text": "TRANSCRIPTION: G unc.?"
+    },
+    {
+      "text": "QUESTION: G unc.?\nQUESTION_BOX: 130,35,200,50\nOUTLINE_BOX: 110,165,550,130\n---\nANSWER: G = (6.674215 +/- 0.000092) * 10^-11 m^3 kg^-1 s^-2."
+    },
+    {
+      "text": "TRANSCRIPTION: G unc.?"
+    }
+  ],
+  "active_page": 0,
+  "iterations": [
+    {},
+    {
+      "page": 0
+    }
+  ],
+  "output": "../../../target/simulator/append",
+  "pages": [
+    {
+      "image": "../../validation/images/rem13/final-input.png"
+    },
+    {}
+  ]
+}

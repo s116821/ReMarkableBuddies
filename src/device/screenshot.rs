@@ -151,10 +151,23 @@ impl Screenshot {
         // 3.28 can place the mmap-backed pixel allocation away from fb0.
         // Validate glibc's 32-bit mmap chunk header instead of reading through
         // unrelated mappings at the historical fixed offset.
-        let bytes = 1404_u64 * 1872 * 4;
-        let allocation_size = (bytes + 8 + 4095) & !4095;
         let maps = std::fs::read_to_string(format!("/proc/{pid}/maps"))?;
         let mut mem = File::open(format!("/proc/{pid}/mem"))?;
+        Self::locate_rm2_allocation(&maps, |address| {
+            mem.seek(std::io::SeekFrom::Start(address))?;
+            let mut header = [0u8; 8];
+            mem.read_exact(&mut header)?;
+            Ok(header)
+        })
+    }
+
+    fn locate_rm2_allocation(
+        maps: &str,
+        mut read_header: impl FnMut(u64) -> Result<[u8; 8]>,
+    ) -> Result<u64> {
+        const PAGE_SIZE: u64 = 4096;
+        let bytes = 1404_u64 * 1872 * 4;
+        let allocation_size = (bytes + 8 + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
         let mut candidates = Vec::new();
         for line in maps.lines() {
             let fields: Vec<_> = line.split_whitespace().collect();
@@ -166,16 +179,21 @@ impl Screenshot {
             };
             let start = u64::from_str_radix(start, 16)?;
             let end = u64::from_str_radix(end, 16)?;
-            if end - start < allocation_size {
+            let Some(last_start) = end.checked_sub(allocation_size) else {
+                continue;
+            };
+            if start > last_start || start % PAGE_SIZE != 0 || end % PAGE_SIZE != 0 {
                 continue;
             }
-            mem.seek(std::io::SeekFrom::Start(start))?;
-            let mut header = [0u8; 8];
-            mem.read_exact(&mut header)?;
-            let previous = u32::from_le_bytes(header[..4].try_into()?);
-            let size = u32::from_le_bytes(header[4..].try_into()?) as u64;
-            if previous == 0 && size & 7 == 2 && size & !7 == allocation_size {
-                candidates.push(start + 8);
+            // Linux may coalesce adjacent mmap chunks into one VMA. Check only
+            // page-aligned headers whose complete allocation stays in this map.
+            for address in (start..=last_start).step_by(PAGE_SIZE as usize) {
+                let header = read_header(address)?;
+                let previous = u32::from_le_bytes(header[..4].try_into()?);
+                let size = u32::from_le_bytes(header[4..].try_into()?) as u64;
+                if previous == 0 && size & 7 == 2 && size & !7 == allocation_size {
+                    candidates.push(address + 8);
+                }
             }
         }
         anyhow::ensure!(
@@ -434,6 +452,78 @@ impl Screenshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mmap_header(previous: u32, size: u32) -> [u8; 8] {
+        let mut header = [0; 8];
+        header[..4].copy_from_slice(&previous.to_le_bytes());
+        header[4..].copy_from_slice(&size.to_le_bytes());
+        header
+    }
+
+    #[test]
+    fn framebuffer_header_can_be_at_start_or_inside_merged_map() {
+        for offset in [0, 0x282000] {
+            let start = 0x1000;
+            let end = start + offset + 0xa07000;
+            let maps = format!("{start:x}-{end:x} rw-p 00000000 00:00 0\n");
+            let mut reads = 0;
+            let found = Screenshot::locate_rm2_allocation(&maps, |address| {
+                reads += 1;
+                assert_eq!(address % 4096, 0);
+                assert!(address + 0xa07000 <= end);
+                Ok(if address == start + offset {
+                    mmap_header(0, 0xa07002)
+                } else {
+                    [0; 8]
+                })
+            })
+            .unwrap();
+            assert_eq!(found, start + offset + 8);
+            assert_eq!(reads, offset / 4096 + 1);
+        }
+    }
+
+    #[test]
+    fn invalid_headers_and_ambiguous_allocations_fail_closed() {
+        let maps = "1000-a09000 rw-p 00000000 00:00 0\n";
+        for header in [
+            mmap_header(1, 0xa07002),
+            mmap_header(0, 0xa07003),
+            mmap_header(0, 0xa06002),
+            [0; 8],
+        ] {
+            assert!(Screenshot::locate_rm2_allocation(maps, |_| Ok(header)).is_err());
+        }
+        assert!(
+            Screenshot::locate_rm2_allocation(maps, |_| Ok(mmap_header(0, 0xa07002)))
+                .unwrap_err()
+                .to_string()
+                .contains("found 2")
+        );
+        assert!(
+            Screenshot::locate_rm2_allocation(maps, |_| anyhow::bail!("unreadable mapping"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn mapping_bounds_permissions_and_alignment_exclude_unsafe_reads() {
+        for maps in [
+            "1000-a07000 rw-p 00000000 00:00 0", // Allocation would cross end.
+            "1000-a08000 rw-p 00000000 00:00 0 [heap]",
+            "1000-a08000 rw-s 00000000 00:00 0",
+            "1000-a08000 rw-p 00000000 00:00 123 /file",
+            "1001-a08000 rw-p 00000000 00:00 0",
+            "1000-a08001 rw-p 00000000 00:00 0",
+            "a08000-1000 rw-p 00000000 00:00 0",
+            "0-0 rw-p 00000000 00:00 0",
+        ] {
+            assert!(
+                Screenshot::locate_rm2_allocation(maps, |_| panic!("unexpected memory read"))
+                    .is_err()
+            );
+        }
+    }
 
     #[test]
     fn firmware_boundary_and_invalid_versions() {

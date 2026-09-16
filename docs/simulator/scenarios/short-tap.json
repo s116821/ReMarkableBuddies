@@ -1,0 +1,52 @@
+{
+  "gestures": [
+    [
+      {
+        "y": 990,
+        "at_ms": 0,
+        "contact": true,
+        "x": 30
+      },
+      {
+        "y": 990,
+        "at_ms": 500,
+        "contact": false,
+        "x": 30
+      }
+    ]
+  ],
+  "name": "short-tap",
+  "mode": "reader",
+  "expect": {
+    "unchanged_pages": [
+      0,
+      1
+    ],
+    "model_calls": 0,
+    "operations": {
+      "line": 0,
+      "capture": 0,
+      "next": 0,
+      "trigger": 1,
+      "text": 0
+    },
+    "active_page": 0,
+    "errors": [
+      "ended without a valid hold"
+    ]
+  },
+  "replies": [],
+  "active_page": 0,
+  "iterations": [
+    {
+      "wait_for_trigger": true
+    }
+  ],
+  "output": "../../../target/simulator/short-tap",
+  "pages": [
+    {
+      "image": "../../validation/images/rem13/final-input.png"
+    },
+    {}
+  ]
+}
