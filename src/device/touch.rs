@@ -99,78 +99,56 @@ impl Touch {
 
     pub fn wait_for_trigger(&mut self) -> Result<()> {
         use std::time::Instant;
-
-        const HOLD_DURATION_SECS: f32 = 2.0;
-
-        let mut position_x = 0;
-        let mut position_y = 0;
+        let device = self
+            .device
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Touch trigger is disabled"))?;
+        device.set_nonblocking(true)?;
+        let mut position = (0, 0);
+        let mut slot = 0;
+        let mut touching = false;
         let mut hold_start: Option<Instant> = None;
-        let mut in_zone = false;
-
-        log::info!(
-            "Waiting for {:.0}s hold in trigger zone...",
-            HOLD_DURATION_SECS
-        );
-
+        info!("Waiting for 2s hold in trigger zone...");
         loop {
-            // Store events in a temporary vector to avoid borrowing issues
-            let mut events_to_process = Vec::new();
-            if let Some(device) = &mut self.device {
-                for event in device.fetch_events()? {
-                    events_to_process.push(event);
-                }
-            }
-
-            // Process the events after releasing the mutable borrow
-            for event in events_to_process {
-                if event.code() == ABS_MT_POSITION_X {
-                    position_x = event.value();
-                }
-                if event.code() == ABS_MT_POSITION_Y {
-                    position_y = event.value();
-                }
-
-                // Check for touch start (tracking ID assigned)
-                if event.code() == ABS_MT_TRACKING_ID && event.value() >= 0 {
-                    let (x, y) = self.input_to_virtual((position_x, position_y));
-                    if self.is_in_trigger_zone(x, y) && !in_zone {
-                        log::debug!("Touch started in trigger zone at ({}, {})", x, y);
-                        hold_start = Some(Instant::now());
-                        in_zone = true;
+            let events: Vec<_> = match self.device.as_mut().unwrap().fetch_events() {
+                Ok(events) => events.collect(),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Vec::new(),
+                Err(e) => return Err(e.into()),
+            };
+            for event in events {
+                if event.event_type() == EvdevEventType::ABSOLUTE {
+                    if event.code() == ABS_MT_SLOT {
+                        slot = event.value();
+                    }
+                    if slot == 0 {
+                        match event.code() {
+                            ABS_MT_POSITION_X => position.0 = event.value(),
+                            ABS_MT_POSITION_Y => position.1 = event.value(),
+                            ABS_MT_TRACKING_ID => {
+                                touching = event.value() >= 0;
+                                hold_start = None;
+                            }
+                            _ => {}
+                        }
                     }
                 }
-
-                // Check for touch release (tracking ID becomes -1)
-                if event.code() == ABS_MT_TRACKING_ID && event.value() == -1 {
-                    if in_zone {
-                        log::debug!("Touch released before hold completed");
+                // Evaluate coordinates only after the complete input frame.
+                if event.event_type() == EvdevEventType::SYNCHRONIZATION && event.code() == 0 {
+                    let (x, y) = self.input_to_virtual(position);
+                    if touching && self.is_in_trigger_zone(x, y) {
+                        hold_start.get_or_insert_with(Instant::now);
+                    } else {
+                        hold_start = None;
                     }
-                    hold_start = None;
-                    in_zone = false;
                 }
             }
-
-            // Check if touch moved out of zone while being held
-            if in_zone {
-                let (x, y) = self.input_to_virtual((position_x, position_y));
-                if !self.is_in_trigger_zone(x, y) {
-                    log::debug!("Touch moved out of trigger zone");
-                    hold_start = None;
-                    in_zone = false;
-                }
+            if hold_start.is_some_and(|start| start.elapsed() >= Duration::from_secs(2)) {
+                info!("Trigger activated after 2s hold!");
+                return Ok(());
             }
-
-            // Check if hold duration has been reached
-            if let Some(start) = hold_start {
-                let elapsed = start.elapsed().as_secs_f32();
-                if elapsed >= HOLD_DURATION_SECS {
-                    log::info!("Trigger activated after {:.1}s hold!", elapsed);
-                    return Ok(());
-                }
-            }
+            sleep(Duration::from_millis(10));
         }
     }
-
     pub fn touch_start(&mut self, xy: (i32, i32)) -> Result<()> {
         let (x, y) = self.virtual_to_input(xy);
         if let Some(device) = &mut self.device {

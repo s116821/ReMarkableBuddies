@@ -440,13 +440,13 @@ impl Workflow {
         if let Ok(saved_pattern_data) = std::fs::read(HEADER_PATTERN_PATH) {
             if let Ok(saved_pattern) = image::load_from_memory(&saved_pattern_data) {
                 // Use masked similarity comparison
-                // Note: top_offset and bottom_offset are 0 for header comparison since header is already cropped
+                // Apply same masking as full-page comparisons to skip toolbar/UI elements
                 let similarity = Self::compute_image_similarity_masked(
                     &header_img,
                     &saved_pattern,
                     MASK_LEFT_OFFSET,
                     MASK_RIGHT_OFFSET,
-                    0,
+                    MASK_TOP_OFFSET,
                     0,
                     DEFAULT_SAMPLE_RATE,
                 );

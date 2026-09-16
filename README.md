@@ -1,4 +1,7 @@
-# ReMarkable Reader Buddy
+# ReMarkableBuddies
+
+This repository currently contains Reader Buddy. The Rust package, `reader-buddy`
+executable, service, and release archive names retain their existing names.
 
 An AI-powered reading assistant for the reMarkable tablet that watches for circled content and handwritten questions, then provides answers directly on your device using ChatGPT.
 
@@ -17,13 +20,21 @@ An AI-powered reading assistant for the reMarkable tablet that watches for circl
 3. **Write Question**: Write your question near the outlined content
 4. **Trigger**: Touch and **hold for 3 seconds** in the **lower-left corner** of your reMarkable screen
 5. **Capture**: The app takes a screenshot of your current page
-6. **AI Magic**: Single ChatGPT vision call detects outline, reads question, and generates answer (all in one!)
+6. **Read and Verify**: A vision request identifies the selected concept, reads the question, and proposes an answer. An independent transcription pass over the page, without seeing the proposed question or answer, must agree before anything is written. Unreadable or conflicting readings produce an X instead.
 7. **Page Check**: App navigates right and checks for a valid answer page:
    - **Valid**: Blank page or existing Reader Buddy answer page → renders Q&A
    - **Invalid**: No page exists or page has other content → draws an **X** in the bottom-right corner of the original page
 8. **Render**: Displays the question and answer on the answer page (with "=== Reader Buddy Answers ===" header on first use)
 
 **Important**: You must manually create a blank page to the right of your question page before triggering. The app will NOT create pages automatically.
+
+The circle selects the topic to explain. Answers may use surrounding page content
+and general knowledge; paper-specific values must match the visible paper. The
+default model is `gpt-5.6-terra`; use `--model` to override it. The extra question
+check adds an API request for recognized questions. It reduces confident misreads
+but can reject valid handwriting when the readings differ; agreement is not a
+guarantee of correctness. See the [hardware evidence comments](https://github.com/s116821/ReMarkableBuddies/pull/10#issuecomment-5687876142)
+for results and limitations, and the [build and cost details](https://github.com/s116821/ReMarkableBuddies/pull/10#issuecomment-5687876514).
 
 ## Installation
 
@@ -33,6 +44,47 @@ An AI-powered reading assistant for the reMarkable tablet that watches for circl
 - SSH access to your reMarkable
 - OpenAI API key
 - Rust toolchain and `cross` for cross-compilation
+
+### SSH Host Configuration
+
+Throughout this documentation, `RM2` refers to your reMarkable 2 and `RMPP` refers to your reMarkable Paper Pro. You should replace these with your device's actual connection info.
+
+**Option 1: Use IP address directly**
+
+Replace `RM2` or `RMPP` with `root@<IP_ADDRESS>` in all commands:
+```bash
+# Example: if your IP is 10.11.99.1
+ssh root@10.11.99.1
+scp file.txt root@10.11.99.1:
+```
+
+**Option 2: Configure SSH host alias (recommended)**
+
+Add an entry to your SSH config file (`~/.ssh/config` on Linux/Mac, `%USERPROFILE%\.ssh\config` on Windows):
+
+```
+Host RM2
+    HostName 10.11.99.1
+    User root
+
+Host RMPP
+    HostName 10.11.99.1
+    User root
+```
+
+Then you can simply use `ssh RM2` or `scp file.txt RM2:` in all commands.
+
+**Finding your reMarkable's IP address:**
+
+1. **USB connection**: Connect via USB cable → IP is typically `10.11.99.1`
+2. **Wi-Fi connection**: On your reMarkable, go to **Settings > Help > Copyrights and licenses** → scroll to the bottom to find the IP (usually starts with `192.168.x.x`)
+3. **reMarkable app**: If using the reMarkable desktop app, check the connection settings
+
+**Troubleshooting connection issues:**
+- Ensure your reMarkable is awake (not in sleep mode)
+- Verify developer mode is enabled
+- Check that SSH is enabled in device settings
+- Try both USB and Wi-Fi IPs if one doesn't work
 
 ### Building
 
@@ -54,7 +106,7 @@ rustup target add armv7-unknown-linux-gnueabihf aarch64-unknown-linux-gnu
 
 #### Option 1: Download Pre-built Binary (Recommended)
 
-Download the latest release from the [Releases page](https://github.com/s116821/ReMarkableReaderBuddy/releases):
+Download the latest release from the [Releases page](https://github.com/s116821/ReMarkableBuddies/releases):
 
 ```bash
 # Extract the binary
@@ -62,11 +114,11 @@ tar xzf reader-buddy-armv7-unknown-linux-gnueabihf.tar.gz  # For reMarkable 2
 # or
 tar xzf reader-buddy-aarch64-unknown-linux-gnu.tar.gz      # For Paper Pro
 
-# Copy to reMarkable (replace IP address)
-scp reader-buddy root@10.11.99.1:
+# Copy to reMarkable
+scp reader-buddy RM2:    # or RMPP: for Paper Pro
 
 # SSH into reMarkable
-ssh root@10.11.99.1
+ssh RM2    # or RMPP for Paper Pro
 
 # Set environment variables
 export OPENAI_API_KEY=your-key-here
@@ -81,11 +133,13 @@ export OPENAI_API_KEY=your-key-here
 # Build using the script
 ./build.sh rm2    # or ./build.sh rmpp
 
-# Copy to reMarkable (replace IP address)
-scp target/armv7-unknown-linux-gnueabihf/release/reader-buddy root@10.11.99.1:
+# Copy to reMarkable
+scp target/armv7-unknown-linux-gnueabihf/release/reader-buddy RM2:
+# For Paper Pro use:
+# scp target/aarch64-unknown-linux-gnu/release/reader-buddy RMPP:
 
 # SSH into reMarkable
-ssh root@10.11.99.1
+ssh RM2    # or RMPP for Paper Pro
 
 # Set environment variables
 export OPENAI_API_KEY=your-key-here
@@ -108,7 +162,7 @@ reader-buddy [OPTIONS]
 
 Options:
   --api-key <KEY>           OpenAI API key
-  --model <MODEL>           Model to use [default: gpt-4o]
+  --model <MODEL>           Model to use [default: gpt-5.6-terra]
   --base-url <URL>          Custom OpenAI endpoint
   --no-draw                 Disable drawing (testing)
   --no-trigger              Skip waiting for trigger
@@ -171,23 +225,24 @@ To have Reader Buddy start automatically when your reMarkable boots:
 
 ```bash
 # SSH into reMarkable and create the directory
-ssh root@10.11.99.1 "mkdir -p /opt/bin"
+ssh RM2 "mkdir -p /opt/bin"
 
 # Copy the binary to the proper location
-scp reader-buddy root@10.11.99.1:/opt/bin/reader-buddy
+scp reader-buddy RM2:/opt/bin/reader-buddy
 
 # Or if building from source:
-scp target/armv7-unknown-linux-gnueabihf/release/reader-buddy root@10.11.99.1:/opt/bin/reader-buddy
-# For Paper Pro use: target/aarch64-unknown-linux-gnu/release/reader-buddy
+scp target/armv7-unknown-linux-gnueabihf/release/reader-buddy RM2:/opt/bin/reader-buddy
+# For Paper Pro use:
+# scp target/aarch64-unknown-linux-gnu/release/reader-buddy RMPP:/opt/bin/reader-buddy
 
 # Make sure it's executable
-ssh root@10.11.99.1 "chmod +x /opt/bin/reader-buddy"
+ssh RM2 "chmod +x /opt/bin/reader-buddy"
 ```
 
 **1. Create the systemd service file:**
 
 ```bash
-ssh root@10.11.99.1
+ssh RM2
 cat > /etc/systemd/system/reader-buddy.service << 'EOF'
 [Unit]
 Description=ReMarkable Reader Buddy
@@ -383,22 +438,61 @@ This will save to `/tmp/` on the reMarkable:
 On Windows (PowerShell):
 ```powershell
 # Copy all debug images from reMarkable to current directory
-scp root@10.11.99.1:/tmp/reader-buddy-*.png .
+scp RM2:/tmp/reader-buddy-*.png .
 
 # Or copy to a specific folder
-scp root@10.11.99.1:/tmp/reader-buddy-*.png C:\path\to\debug\folder\
+scp RM2:/tmp/reader-buddy-*.png C:\path\to\debug\folder\
 ```
 
 On Linux/Mac:
 ```bash
 # Copy all debug images from reMarkable to current directory
-scp root@10.11.99.1:/tmp/reader-buddy-*.png .
+scp RM2:/tmp/reader-buddy-*.png .
 
 # Or copy to a specific folder
-scp root@10.11.99.1:/tmp/reader-buddy-*.png ~/debug/
+scp RM2:/tmp/reader-buddy-*.png ~/debug/
 ```
 
-Replace `10.11.99.1` with your reMarkable's IP address. You can find the IP address in **Settings > Help > Copyrights and licenses** at the bottom.
+### Downloading Temp and Cache Files for Debugging
+
+For deeper debugging, you can copy all temp files and cache data to your local machine:
+
+**Temp files** (`/tmp/`) contain:
+- `reader-buddy-screenshot-*.png` - Screenshots captured during execution
+- `reader-buddy-erase-mask-*.png` - Erase mask visualizations
+- Other runtime debug files
+
+**Cache files** (`/var/cache/reader-buddy/`) contain:
+- Header pattern used for answer page detection
+- Other cached recognition data
+
+#### Windows (PowerShell)
+
+```powershell
+# Copy all temp files to Downloads folder
+scp RM2:/tmp/reader-buddy-* $env:USERPROFILE\Downloads\
+
+# Copy entire cache directory to Downloads folder
+scp -r RM2:/var/cache/reader-buddy $env:USERPROFILE\Downloads\
+
+# Copy both temp and cache in one session
+scp RM2:/tmp/reader-buddy-* $env:USERPROFILE\Downloads\; scp -r RM2:/var/cache/reader-buddy $env:USERPROFILE\Downloads\
+```
+
+#### Linux/Mac
+
+```bash
+# Copy all temp files to Downloads folder
+scp RM2:/tmp/reader-buddy-* ~/Downloads/
+
+# Copy entire cache directory to Downloads folder
+scp -r RM2:/var/cache/reader-buddy ~/Downloads/
+
+# Copy both temp and cache in one session
+scp RM2:/tmp/reader-buddy-* ~/Downloads/ && scp -r RM2:/var/cache/reader-buddy ~/Downloads/
+```
+
+**Tip**: If you're debugging an issue, run with `--debug-dump --log-level debug` first to generate the temp files.
 
 ## Cleanup and Uninstall
 
@@ -406,7 +500,7 @@ Replace `10.11.99.1` with your reMarkable's IP address. You can find the IP addr
 
 SSH into your reMarkable and remove the binary:
 ```bash
-ssh root@10.11.99.1
+ssh RM2
 rm -f /opt/bin/reader-buddy
 ```
 
@@ -414,7 +508,7 @@ rm -f /opt/bin/reader-buddy
 
 Remove debug images from the reMarkable:
 ```bash
-ssh root@10.11.99.1
+ssh RM2
 rm -f /tmp/reader-buddy-*.png
 ```
 
@@ -428,7 +522,7 @@ Reader Buddy stores cached data in `/var/cache/reader-buddy/`, including the hea
 - To force Reader Buddy to re-learn what an answer page looks like
 
 ```bash
-ssh root@10.11.99.1
+ssh RM2
 rm -rf /var/cache/reader-buddy/
 ```
 
@@ -437,14 +531,14 @@ After clearing the cache, the next blank page you use will become the new refere
 ### Complete cleanup (all at once)
 
 ```bash
-ssh root@10.11.99.1 "rm -f /opt/bin/reader-buddy /tmp/reader-buddy-*.png && rm -rf /var/cache/reader-buddy/"
+ssh RM2 "rm -f /opt/bin/reader-buddy /tmp/reader-buddy-*.png && rm -rf /var/cache/reader-buddy/"
 ```
 
 ### Stopping a running instance
 
 If Reader Buddy is running in the background:
 ```bash
-ssh root@10.11.99.1
+ssh RM2
 # Find the process
 ps | grep reader-buddy
 
@@ -462,6 +556,16 @@ killall reader-buddy
 - **Outline Detection**: Currently LLM-based (future: add local CV algorithms as optimization)
 - **Internet Required**: Requires connection for ChatGPT API
 - **No Context Retention**: Each trigger is independent (no follow-up question support)
+
+## Pull request titles
+
+Use a Conventional Commit title with a scope: `type(scope): description`.
+Include related Linear ticket IDs in the scope when applicable, for example
+`fix(REM-17,REM-18): restore RM2 capture and verify handwritten questions`.
+For work without a related ticket, use a descriptive scope such as `ci` or `docs`.
+The title check runs when a pull request is opened, edited, updated, or reopened.
+Link related tickets in the description and distinguish partial work from completed
+acceptance criteria.
 
 ## Automated Releases
 

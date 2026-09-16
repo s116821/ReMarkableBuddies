@@ -60,17 +60,14 @@ impl Pen {
     pub fn draw_line(&mut self, (x1, y1): (i32, i32), (x2, y2): (i32, i32)) -> Result<()> {
         let length = ((x2 as f32 - x1 as f32).powf(2.0) + (y2 as f32 - y1 as f32).powf(2.0)).sqrt();
         // 5.0 is the maximum distance between points
-        let steps = (length / 5.0).ceil() as i32;
-        let dx = (x2 - x1) / steps;
-        let dy = (y2 - y1) / steps;
+        let steps = ((length / 5.0).ceil() as i32).max(1);
 
         self.pen_up()?;
-        self.goto_xy((x1, y1))?;
-        self.pen_down()?;
+        self.pen_down_at((x1, y1))?;
 
-        for i in 0..steps {
-            let x = x1 + dx * i;
-            let y = y1 + dy * i;
+        for i in 0..=steps {
+            let x = x1 + (((x2 - x1) as i64 * i as i64) / steps as i64) as i32;
+            let y = y1 + (((y2 - y1) as i64 * i as i64) / steps as i64) as i32;
             self.goto_xy((x, y))?;
         }
 
@@ -130,6 +127,22 @@ impl Pen {
         Ok(())
     }
 
+    // Hover-before-contact follows Ghostwriter; see THIRD_PARTY_NOTICES.md.
+    pub fn pen_down_at(&mut self, (x, y): (i32, i32)) -> Result<()> {
+        if let Some(device) = &mut self.device {
+            device.send_events(&[
+                InputEvent::new(EvdevEventType::ABSOLUTE.0, 0, x),
+                InputEvent::new(EvdevEventType::ABSOLUTE.0, 1, y),
+                InputEvent::new(EvdevEventType::KEY.0, 320, 1),
+                InputEvent::new(EvdevEventType::KEY.0, 330, 0),
+                InputEvent::new(EvdevEventType::ABSOLUTE.0, 24, 0),
+                InputEvent::new(EvdevEventType::ABSOLUTE.0, 25, 100),
+                InputEvent::new(EvdevEventType::SYNCHRONIZATION.0, 0, 0),
+            ])?;
+            sleep(Duration::from_millis(10));
+        }
+        self.pen_down()
+    }
     pub fn pen_down(&mut self) -> Result<()> {
         if let Some(device) = &mut self.device {
             device.send_events(&[
@@ -139,6 +152,7 @@ impl Pen {
                 InputEvent::new(EvdevEventType::ABSOLUTE.0, 25, 0),    // ABS_DISTANCE
                 InputEvent::new(EvdevEventType::SYNCHRONIZATION.0, 0, 0), // SYN_REPORT
             ])?;
+            sleep(Duration::from_millis(10));
         }
         Ok(())
     }
@@ -152,6 +166,7 @@ impl Pen {
                 InputEvent::new(EvdevEventType::KEY.0, 320, 0),     // BTN_TOOL_PEN
                 InputEvent::new(EvdevEventType::SYNCHRONIZATION.0, 0, 0), // SYN_REPORT
             ])?;
+            sleep(Duration::from_millis(10));
         }
         Ok(())
     }
@@ -221,6 +236,7 @@ impl Pen {
                 InputEvent::new(EvdevEventType::ABSOLUTE.0, 1, y), // ABS_Y
                 InputEvent::new(EvdevEventType::SYNCHRONIZATION.0, 0, 0), // SYN_REPORT
             ])?;
+            sleep(Duration::from_millis(1));
         }
         Ok(())
     }

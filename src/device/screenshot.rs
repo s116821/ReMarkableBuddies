@@ -18,17 +18,40 @@ pub const SCREENSHOT_VIRTUAL_HEIGHT: u32 = 1024;
 
 pub struct Screenshot {
     data: Vec<u8>,
+    native_data: Vec<u8>,
     device_model: DeviceModel,
+    rm2_bgra: bool,
 }
 
 impl Screenshot {
     pub fn new() -> Result<Screenshot> {
         let device_model = DeviceModel::detect();
         info!("Screen detected device: {}", device_model.name());
+        let rm2_bgra = if device_model == DeviceModel::Remarkable2 {
+            Self::rm2_uses_bgra(&std::fs::read_to_string("/etc/os-release")?)?
+        } else {
+            false
+        };
         Ok(Screenshot {
             data: vec![],
+            native_data: vec![],
             device_model,
+            rm2_bgra,
         })
+    }
+
+    // Firmware layout change documented by awwaiid/ghostwriter commit dd48e60.
+    fn rm2_uses_bgra(os_release: &str) -> Result<bool> {
+        let version = os_release
+            .lines()
+            .find_map(|line| line.strip_prefix("IMG_VERSION="))
+            .ok_or_else(|| {
+                anyhow::anyhow!("Missing IMG_VERSION; cannot select RM2 framebuffer layout")
+            })?;
+        let mut parts = version.trim().trim_matches('"').split('.');
+        let major: u32 = parts.next().unwrap_or("").parse()?;
+        let minor: u32 = parts.next().unwrap_or("").parse()?;
+        Ok((major, minor) >= (3, 24))
     }
 
     fn screen_width(&self) -> u32 {
@@ -49,7 +72,13 @@ impl Screenshot {
 
     pub fn bytes_per_pixel(&self) -> usize {
         match self.device_model {
-            DeviceModel::Remarkable2 => 2,
+            DeviceModel::Remarkable2 => {
+                if self.rm2_bgra {
+                    4
+                } else {
+                    2
+                }
+            }
             DeviceModel::RemarkablePaperPro => 4,
             DeviceModel::Unknown => 2, // Default to RM2
         }
@@ -63,10 +92,16 @@ impl Screenshot {
         // Find framebuffer location in memory
         debug!("screenshot: finding address");
         let skip_bytes = self.find_framebuffer_address(&pid)?;
+        info!(
+            "Framebuffer address={:#x}, bytes_per_pixel={}",
+            skip_bytes,
+            self.bytes_per_pixel()
+        );
 
         // Read the framebuffer data
         debug!("screenshot: reading data");
         let screenshot_data = self.read_framebuffer(&pid, skip_bytes)?;
+        self.native_data = self.encode_png(&screenshot_data)?;
         // Process the image data (transpose, color correction, etc.)
         debug!("screenshot: processing image");
         let processed_data = self.process_image(screenshot_data)?;
@@ -86,6 +121,9 @@ impl Screenshot {
     }
 
     fn find_framebuffer_address(&self, pid: &str) -> Result<u64> {
+        if self.rm2_bgra {
+            return self.find_rm2_bgra_allocation(pid);
+        }
         match self.device_model {
             DeviceModel::RemarkablePaperPro => {
                 // For RMPP (arm64), we need to use the approach from pointer_arm64.go
@@ -104,9 +142,48 @@ impl Screenshot {
                     .output()?;
                 let address_hex = String::from_utf8(output.stdout)?.trim().to_string();
                 let address = u64::from_str_radix(&address_hex, 16)?;
-                Ok(address + 7)
+                Ok(address + if self.rm2_bgra { 2_629_632 + 8 } else { 7 })
             }
         }
+    }
+
+    fn find_rm2_bgra_allocation(&self, pid: &str) -> Result<u64> {
+        // 3.28 can place the mmap-backed pixel allocation away from fb0.
+        // Validate glibc's 32-bit mmap chunk header instead of reading through
+        // unrelated mappings at the historical fixed offset.
+        let bytes = 1404_u64 * 1872 * 4;
+        let allocation_size = (bytes + 8 + 4095) & !4095;
+        let maps = std::fs::read_to_string(format!("/proc/{pid}/maps"))?;
+        let mut mem = File::open(format!("/proc/{pid}/mem"))?;
+        let mut candidates = Vec::new();
+        for line in maps.lines() {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            if fields.len() != 5 || fields[1] != "rw-p" || fields[4] != "0" {
+                continue;
+            }
+            let Some((start, end)) = fields[0].split_once('-') else {
+                continue;
+            };
+            let start = u64::from_str_radix(start, 16)?;
+            let end = u64::from_str_radix(end, 16)?;
+            if end - start < allocation_size {
+                continue;
+            }
+            mem.seek(std::io::SeekFrom::Start(start))?;
+            let mut header = [0u8; 8];
+            mem.read_exact(&mut header)?;
+            let previous = u32::from_le_bytes(header[..4].try_into()?);
+            let size = u32::from_le_bytes(header[4..].try_into()?) as u64;
+            if previous == 0 && size & 7 == 2 && size & !7 == allocation_size {
+                candidates.push(start + 8);
+            }
+        }
+        anyhow::ensure!(
+            candidates.len() == 1,
+            "Expected one RM2 framebuffer allocation, found {}; refusing ambiguous capture",
+            candidates.len()
+        );
+        Ok(candidates[0])
     }
 
     // Get memory range for RMPP based on goMarkableStream/pointer_arm64.go
@@ -163,7 +240,7 @@ impl Screenshot {
             file.seek(std::io::SeekFrom::Start(start_address + offset + 8))?;
             let mut header = [0u8; 8];
             file.read_exact(&mut header)?;
-            debug!("  ... header: {:?}", &header);
+            debug!("  ... header: {:?}", header);
 
             length = (header[0] as u64)
                 | ((header[1] as u64) << 8)
@@ -247,8 +324,32 @@ impl Screenshot {
     }
 
     fn encode_png_rm2(&self, raw_data: &[u8]) -> Result<Vec<u8>> {
+        anyhow::ensure!(
+            raw_data.len() == 1404 * 1872 * self.bytes_per_pixel(),
+            "Invalid RM2 framebuffer length"
+        );
+        if self.rm2_bgra {
+            // RM2 is monochrome: the blue channel carries the grayscale value.
+            // New firmware stores portrait BGRA with full-range gray values.
+            let pixels: Vec<u8> = raw_data
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|pixel| pixel[0])
+                .collect();
+            let mut png = Vec::new();
+            image::codecs::png::PngEncoder::new(&mut png).write_image(
+                &pixels,
+                1404,
+                1872,
+                image::ExtendedColorType::L8,
+            )?;
+            return Ok(png);
+        }
         let raw_u8: Vec<u8> = raw_data
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|chunk| u8::from_le_bytes([chunk[1]]))
             .collect();
         let width = self.screen_width();
@@ -308,7 +409,105 @@ impl Screenshot {
         Ok(base64_image)
     }
 
+    /// Overlapping full-width strips preserve small PDF text without splitting
+    /// questions or text lines across left/right crops. Order: top to bottom.
+    /// Navigation still uses the normalized overview.
+    pub fn detail_images_base64(&self) -> Result<Vec<String>> {
+        let img = image::load_from_memory(&self.native_data)?;
+        let (w, h) = (img.width(), img.height());
+        let th = h * 2 / 5;
+        let mut tiles = Vec::new();
+        for y in [0, (h - th) / 2, h - th] {
+            let tile = img.crop_imm(0, y, w, th);
+            let mut out = std::io::Cursor::new(Vec::new());
+            tile.write_to(&mut out, image::ImageFormat::Png)?;
+            tiles.push(general_purpose::STANDARD.encode(out.into_inner()));
+        }
+        Ok(tiles)
+    }
+
     pub fn get_image_data(&self) -> &[u8] {
         &self.data
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn firmware_boundary_and_invalid_versions() {
+        for (version, expected) in [
+            ("3.23.0.1", false),
+            ("3.24.0.1", true),
+            ("3.28.0.172", true),
+            ("4.0.0", true),
+        ] {
+            assert_eq!(
+                Screenshot::rm2_uses_bgra(&format!("IMG_VERSION=\"{version}\"\n")).unwrap(),
+                expected
+            );
+        }
+        assert!(Screenshot::rm2_uses_bgra("VERSION=3.28").is_err());
+        assert!(Screenshot::rm2_uses_bgra("IMG_VERSION=broken").is_err());
+    }
+
+    #[test]
+    fn bgra_capture_preserves_portrait_positions_and_gray_levels() {
+        let screenshot = Screenshot {
+            data: vec![],
+            native_data: vec![],
+            device_model: DeviceModel::Remarkable2,
+            rm2_bgra: true,
+        };
+        let mut raw = vec![255; 1404 * 1872 * 4];
+        raw[0] = 17;
+        raw[1404 * 4] = 128;
+        let png = screenshot.encode_png_rm2(&raw).unwrap();
+        let img = image::load_from_memory(&png).unwrap().to_luma8();
+        assert_eq!(img.dimensions(), (1404, 1872));
+        assert_eq!(img.get_pixel(0, 0).0, [17]);
+        assert_eq!(img.get_pixel(0, 1).0, [128]);
+        assert_eq!(img.get_pixel(1, 0).0, [255]);
+        assert!(screenshot.encode_png_rm2(&raw[..raw.len() - 1]).is_err());
+        let normalized = image::load_from_memory(&screenshot.process_image(raw).unwrap()).unwrap();
+        assert_eq!((normalized.width(), normalized.height()), (768, 1024));
+    }
+
+    #[test]
+    fn detail_tiles_preserve_native_pixels_and_overlap() {
+        let mut img = GrayImage::from_pixel(200, 300, image::Luma([255]));
+        img.put_pixel(0, 0, image::Luma([17]));
+        img.put_pixel(199, 299, image::Luma([23]));
+        img.put_pixel(100, 100, image::Luma([128]));
+        img.put_pixel(100, 200, image::Luma([64]));
+        let mut png = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let screenshot = Screenshot {
+            data: vec![],
+            native_data: png.into_inner(),
+            device_model: DeviceModel::Remarkable2,
+            rm2_bgra: true,
+        };
+        let tiles: Vec<_> = screenshot
+            .detail_images_base64()
+            .unwrap()
+            .iter()
+            .map(|tile| {
+                image::load_from_memory(&general_purpose::STANDARD.decode(tile).unwrap())
+                    .unwrap()
+                    .to_luma8()
+            })
+            .collect();
+        assert_eq!(tiles.len(), 3);
+        assert_eq!(tiles[0].get_pixel(0, 0).0, [17]);
+        assert_eq!(tiles[2].get_pixel(199, 119).0, [23]);
+        for tile in &tiles {
+            assert_eq!(tile.dimensions(), (200, 120));
+        }
+        assert_eq!(tiles[0].get_pixel(100, 100).0, [128]);
+        assert_eq!(tiles[1].get_pixel(100, 10).0, [128]);
+        assert_eq!(tiles[1].get_pixel(100, 110).0, [64]);
+        assert_eq!(tiles[2].get_pixel(100, 20).0, [64]);
     }
 }
