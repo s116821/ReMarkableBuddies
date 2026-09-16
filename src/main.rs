@@ -11,7 +11,7 @@ use std::time::Duration;
 #[command(author, version)]
 #[command(about = "ReMarkable Reader Buddy - AI-powered reading assistant for reMarkable tablets")]
 #[command(
-    long_about = "ReMarkable Reader Buddy watches for circled content and handwritten questions, \
+    long_about = "ReMarkable Reader Buddy watches for outlined or highlighted content and handwritten questions, \
                         then uses ChatGPT to provide answers directly on your reMarkable tablet."
 )]
 pub struct Args {

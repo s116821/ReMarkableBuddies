@@ -8,7 +8,9 @@ use crate::llm::{openai::OpenAI, LLMEngine};
 /// Shared by the live workflow and bounded vision-comparison helper.
 pub const ANALYSIS_PROMPT: &str =
     "Read the handwritten question annotation on this tablet page and answer it from \
-             the technical concept selected by the hand-drawn outline. Handwriting may be neat \
+             the technical concept selected by a hand-drawn closed outline or a deliberate \
+             highlighted passage. A highlight can select content without any surrounding \
+             outline and may appear gray on a grayscale tablet. Handwriting may be neat \
              uppercase block letters, connected cursive, or abbreviated shorthand. \
              Questions may appear in the margins or above the printed document title.\n\
              The first image is the full-page overview; \
@@ -17,7 +19,9 @@ pub const ANALYSIS_PROMPT: &str =
              Transcribe the ink question as written, retaining abbreviations. Distinguish \
              these annotations from the document's typeset prose, equations and headings. \
              Do not turn printed source text into a question. If there is no readable question \
-             annotation, no closed outline, or the question's meaning is ambiguous, return NONE. \
+             annotation, no clear user outline or highlight, or the question's meaning is \
+             ambiguous, return NONE. If several distinct topics are marked and the question's \
+             association is unclear, return NONE rather than choosing a topic arbitrarily. \
              Do not guess missing question words or confidently answer an uncertain reading. \
              Cross-check the question in the overview and full-width detail before answering. \
              Resolve shorthand only if its meaning is clear from the visible words and source. \
@@ -25,19 +29,22 @@ pub const ANALYSIS_PROMPT: &str =
              return NONE. A plausible transcription alone is not enough: you must understand \
              exactly what the annotation is asking. Never substitute a general summary of the \
              passage for an answer to an unclear question.\n\
-             The outline selects the topic, not a restriction on sources. You may use the \
+             The outline or highlight selects the topic, not a restriction on sources. You may use the \
              surrounding page and general knowledge to explain that topic and answer the \
              actual handwritten question. Distinguish general explanation from claims about \
              this paper. For paper-specific values, preserve visible numbers, uncertainties \
              and units rather than substituting remembered values or inventing measurements. \
              If a source detail is unreadable, say so rather than guessing.\n\
-             A question inside an outline is also valid. An X mark is not a closed outline.\n\
+             A question inside an outline is also valid. An X mark, printed gray figure or \
+             document shading is not a user selection. Do not infer a selection from these.\n\
              Reply in this exact format, with coordinates in the overview's 768x1024 space:\n\
              QUESTION: [question]\n\
              QUESTION_BOX: x,y,width,height\n\
              OUTLINE_BOX: x,y,width,height\n\
              ---\n\
              ANSWER: [concise answer about the selected concept]\n\
+             OUTLINE_BOX is the bounding box of the selected outlined OR highlighted region; \
+             retain that field name for either selection type.\n\
              Use plain ASCII notation: +/- for uncertainty, * for multiplication, ^ for powers, \
              spelled-out Greek letters. No LaTeX or Markdown.";
 
@@ -71,7 +78,7 @@ impl<M: LLMEngine> Orchestrator<M> {
     }
 
     /// Run one complete iteration of the reader buddy workflow
-    /// NOTE: v0.1 processes ONE outline-question pair per trigger
+    /// Processes one outlined/highlighted concept and question per trigger.
     pub fn run_iteration(&mut self) -> Result<()> {
         info!("=== Starting Reader Buddy Iteration ===");
 
@@ -86,14 +93,14 @@ impl<M: LLMEngine> Orchestrator<M> {
 
         // Step 3: Propose a question and answer, then independently verify
         // the question before navigating or writing:
-        // - Detect outlined region
+        // - Detect outlined or highlighted region
         // - Extract question text
         // - Generate answer
         let result = self.analyze_and_answer(&screenshot_base64, screenshot_png_data)?;
 
         match result {
             None => {
-                info!("No outlined regions or questions detected");
+                info!("No clear selected region or readable question detected");
                 // Draw failure X on current page (no text output)
                 self.workflow.draw_failure_x()?;
                 return Ok(());
@@ -122,12 +129,12 @@ impl<M: LLMEngine> Orchestrator<M> {
     }
 
     /// First pass:
-    /// 1. Detects outlined content
+    /// 1. Detects outlined or highlighted content
     /// 2. Extracts handwritten question
     /// 3. Generates answer
     /// 4. Provides bounding boxes
     ///
-    /// Returns None if no outline/question found, or Some((question, answer, question_box, outline_box))
+    /// Returns None if no clear selection/question is found.
     fn analyze_and_answer(
         &mut self,
         screenshot_base64: &str,

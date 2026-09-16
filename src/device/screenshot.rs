@@ -347,13 +347,19 @@ impl Screenshot {
             "Invalid RM2 framebuffer length"
         );
         if self.rm2_bgra {
-            // RM2 is monochrome: the blue channel carries the grayscale value.
-            // New firmware stores portrait BGRA with full-range gray values.
+            // The monochrome RM2 still stores colored highlights in portrait BGRA.
+            // Luminance preserves neutral gray exactly and keeps yellow marks light.
             let pixels: Vec<u8> = raw_data
                 .as_chunks::<4>()
                 .0
                 .iter()
-                .map(|pixel| pixel[0])
+                .map(|pixel| {
+                    ((77 * u32::from(pixel[2])
+                        + 150 * u32::from(pixel[1])
+                        + 29 * u32::from(pixel[0])
+                        + 128)
+                        >> 8) as u8
+                })
                 .collect();
             let mut png = Vec::new();
             image::codecs::png::PngEncoder::new(&mut png).write_image(
@@ -551,14 +557,28 @@ mod tests {
             rm2_bgra: true,
         };
         let mut raw = vec![255; 1404 * 1872 * 4];
-        raw[0] = 17;
-        raw[1404 * 4] = 128;
+        raw[..4].copy_from_slice(&[17, 17, 17, 255]);
+        raw[1404 * 4..1404 * 4 + 4].copy_from_slice(&[128, 128, 128, 255]);
+        for gray in 0u8..=255 {
+            let offset = (usize::from(gray) + 2) * 4;
+            raw[offset..offset + 4].copy_from_slice(&[gray, gray, gray, 255]);
+        }
+        // Actual native yellow highlight sample, then pure blue and red.
+        raw[300 * 4..301 * 4].copy_from_slice(&[125, 254, 254, 255]);
+        raw[301 * 4..302 * 4].copy_from_slice(&[255, 0, 0, 255]);
+        raw[302 * 4..303 * 4].copy_from_slice(&[0, 0, 255, 255]);
         let png = screenshot.encode_png_rm2(&raw).unwrap();
         let img = image::load_from_memory(&png).unwrap().to_luma8();
         assert_eq!(img.dimensions(), (1404, 1872));
         assert_eq!(img.get_pixel(0, 0).0, [17]);
         assert_eq!(img.get_pixel(0, 1).0, [128]);
         assert_eq!(img.get_pixel(1, 0).0, [255]);
+        for gray in 0u8..=255 {
+            assert_eq!(img.get_pixel(u32::from(gray) + 2, 0).0, [gray]);
+        }
+        assert_eq!(img.get_pixel(300, 0).0, [239]);
+        assert_eq!(img.get_pixel(301, 0).0, [29]);
+        assert_eq!(img.get_pixel(302, 0).0, [77]);
         assert!(screenshot.encode_png_rm2(&raw[..raw.len() - 1]).is_err());
         let normalized = image::load_from_memory(&screenshot.process_image(raw).unwrap()).unwrap();
         assert_eq!((normalized.width(), normalized.height()), (768, 1024));
