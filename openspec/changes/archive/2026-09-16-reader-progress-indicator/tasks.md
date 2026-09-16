@@ -6,8 +6,8 @@
 
 ## 2. Verification and delivery
 
-- [ ] 2.1 Extend deterministic simulator assertions/fault cases and explicit live checks; pass full appropriate tests, formatting, strict lint and ARM builds.
-- [ ] 2.2 Verify final build on disposable native document: visible recurring circle, blank answer/append, rejection/recovery/timeout cleanup, adjacent-ink preservation, and restore original document/cache/service.
-- [ ] 2.3 Update docs with actual behavior and limitations; verify requirements/design coverage, sync canonical specs and archive in this implementation PR.
+- [x] 2.1 Extend deterministic simulator assertions/fault cases and explicit live checks; pass full appropriate tests, formatting, strict lint and ARM builds.
+- [x] 2.2 Verify final build on disposable native document: visible recurring circle, blank answer/append, rejection/recovery/timeout cleanup, adjacent-ink preservation, and restore original document/cache/service.
+- [x] 2.3 Update docs with actual behavior and limitations; verify requirements/design coverage, sync canonical specs and archive in this implementation PR.
 
 Final independent review, latest-head CI and automated-review results remain merge gates after archival.

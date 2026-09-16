@@ -28,9 +28,9 @@ Non-goals: a framebuffer overlay compositor, new providers, human concurrent-inp
 
 Maintain old runtime rollback, use a disposable technical paper and isolated bounded runs, test blank/append/rejection/occupied recovery plus visible slow-response ticks and failure cleanup. Restore document/header/service. Complete all checks, sync specifications and archive in the same PR; independent exact-head review and green CI precede merge.
 
-## Open Questions
+## Native acceptance decisions
 
-Final geometry clearance and active-tool behavior must be confirmed in the native acceptance run. These are implementation validation gates, not claims of tested behavior.
+Final geometry and cleanup were confirmed on RM2 with black medium Fineliner and yellow Highlighter (snap-to-text enabled). Other styles and Paper Pro remain unvalidated. Full workflow acceptance preceded only the final geometry adjustment; the final build repeated both tool smoke checks and live rejection. All native screenshots were retrieved and inspected.
 
 Cleanup failure poisons the current orchestrator: after same-page best-effort cleanup it returns an error and requires reinitialization, rather than erasing an owned mark after a user might have navigated. Any text-output attempt invalidates corner eligibility because partial typing may change the region; failure display is suppressed until a fresh clean capture establishes safety.
 
@@ -40,4 +40,4 @@ The existing rectangular eraser also emits sparse, rapid endpoint strokes. For s
 
 Native rejection exposed a one-pixel pen footprint beyond endpoint coordinates. Inset failure-X endpoints three pixels inside the shared status box, leaving stroke clearance while preserving the same guarded 50x50 region. Repeat native rejection on the final build to verify rendered bounds.
 
-The selected yellow highlighter passed visibility, complete cleanup (zero changed ROI pixels) and neighboring Fineliner-ink preservation, but its wider footprint extended to694,929..749,985. Reduce the circle centerline radius from20 to14 pixels and inset X endpoints ten pixels, reserving stroke-width clearance within the same50x50 region. Repeat native highlighter and Fineliner rendering/cleanup after the geometry change; do not claim all tool styles are equivalent.
+The selected yellow highlighter passed visibility, complete cleanup (zero changed ROI pixels) and neighboring Fineliner-ink preservation, but its wider footprint extended to 694,929..749,985. Reduce the circle centerline radius from 20 to14 pixels and inset X endpoints ten pixels, reserving stroke-width clearance within the same 50x50 region. Repeat native highlighter and Fineliner rendering/cleanup after the geometry change; do not claim all tool styles are equivalent.
