@@ -1,10 +1,4 @@
-# reader-answer-pages
-
-## Purpose
-
-Describe the implemented reader answer pages contracts, initially baselined from v0.1.4. Known gaps are explicit and require a later change delta to alter.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Successor navigation and identity heuristic
 After agreement, the system SHALL recapture the source, swipe left toward its immediate successor, wait and compare masked screenshots. Similarity at least 0.999 SHALL mean no navigation occurred, causing an X on the source without a reverse swipe. Source: src/workflow/orchestrator.rs render_answer; src/workflow/navigation.rs; src/workflow/xochitl_integration.rs.
@@ -16,30 +10,6 @@ After agreement, the system SHALL recapture the source, swipe left toward its im
 #### Scenario: Fixed navigation timing
 - **WHEN** the answer workflow requests next or previous navigation
 - **THEN** the swipe uses 15 steps with 10 ms per step after a 50 ms initial contact, followed by 500 ms transition delay and an 800 ms settling wait.
-
-### Requirement: Blank and existing answer page classification
-The classifier SHALL compare the current screenshot to white using masked grayscale similarity and classify at least 0.998 as Blank. Otherwise it SHALL compare the top 150 pixels with the cached header at threshold 0.998, classifying a match as ExistingQA and other pages as Invalid. Source: src/workflow/mod.rs is_valid_answer_page/compute_image_similarity_masked.
-
-#### Scenario: Comparison masks
-- **WHEN** full-page similarity is measured
-- **THEN** left 298, right 125, top 70 and bottom 70 virtual pixels are excluded; header comparisons use bottom zero.
-- **AND** mean squared grayscale differences determine similarity, sampling every fifth pixel normally and every second pixel for blank detection.
-
-#### Scenario: Missing header cache
-- **WHEN** a nonblank page has no readable matching cached pattern
-- **THEN** it is Invalid; the app does not ask a model to classify its header.
-
-### Requirement: Header and Q&A rendering
-On Blank pages the system SHALL select body style, type === Reader Buddy Answers === with three newlines, wait 500 ms and attempt to cache the top-150-pixel header. On ExistingQA pages it SHALL omit the header and select body style. Both SHALL type Q: question, two newlines, A: answer, then a newline-delimited --- separator. Source: src/workflow/orchestrator.rs render_answer.
-
-#### Scenario: Append
-- **WHEN** the successor is recognized as ExistingQA
-- **THEN** only the new Q&A block is typed; no About entry, coordinate tag, undo transaction or follow-up session is added.
-
-#### Scenario: Cache persistence
-- **WHEN** the service restarts
-- **THEN** /var/cache/reader-buddy/header-pattern.png is preserved.
-- **AND** cache creation/save failures are logged and do not by themselves abort the workflow.
 
 ### Requirement: Invalid successor recovery
 An Invalid successor SHALL trigger a source-identity check before any reverse swipe. If already on the saved source at similarity 0.999, recovery SHALL not navigate. Otherwise it SHALL attempt at most one previous-page swipe and verify the result once, with no retry after failed verification or an input/capture error. The caller SHALL attempt the existing failure X on the current page after recovery or recovery failure. Source: src/workflow/navigation.rs; src/workflow/mod.rs return_to_original_page; src/workflow/orchestrator.rs render_answer.
@@ -60,14 +30,6 @@ An Invalid successor SHALL trigger a source-identity check before any reverse sw
 #### Scenario: Navigation or capture error
 - **WHEN** a source-identity check or the previous-page operation returns an error
 - **THEN** recovery propagates that error and performs no further navigation; the existing render-error handler attempts an X.
-
-### Requirement: Failure display and loop errors
-Expected declines SHALL draw a 75 by 75 virtual-pixel X with 20-pixel bottom/right margin. Render-answer errors SHALL be logged and attempt an X. Unhandled iteration errors in loop mode SHALL attempt body-mode Error: text on the current page before continuing; single-iteration errors SHALL propagate. Source: src/workflow/mod.rs draw_failure_x; src/workflow/orchestrator.rs run_iteration/run_loop.
-
-#### Scenario: Proposal transport error in loop mode
-- **WHEN** a proposal request returns an error
-- **THEN** the loop attempts error text on the currently active page, rather than guaranteeing an X-only failure.
-- **AND** this baseline does not invoke the unused progress indicator helpers.
 
 ### Requirement: Reusable page decisions and Q&A composition
 The workflow SHALL expose reusable source-page verification and pure answer-page classification/Q&A composition helpers, preserving existing thresholds, masks, formatting and delays. Recovery SHALL use the single-attempt policy in Invalid successor recovery. Source: src/workflow/mod.rs, src/workflow/navigation.rs and src/workflow/orchestrator.rs.

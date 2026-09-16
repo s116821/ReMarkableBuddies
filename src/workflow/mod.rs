@@ -1,6 +1,9 @@
+mod navigation;
 pub mod orchestrator;
 pub mod symbol_pool;
 pub mod xochitl_integration;
+
+pub use navigation::ReturnOutcome;
 
 use anyhow::Result;
 use log::{debug, info, warn};
@@ -412,6 +415,14 @@ impl Workflow {
     pub fn verify_navigation_to(&mut self, original: &image::DynamicImage) -> Result<bool> {
         let current = self.capture_page()?;
         Ok(Self::is_same_page(original, &current))
+    }
+
+    /// Check the source before moving, then attempt at most one verified return.
+    pub fn return_to_original_page(
+        &mut self,
+        original: &image::DynamicImage,
+    ) -> Result<ReturnOutcome> {
+        navigation::return_to_original_page(self, original)
     }
 
     pub fn is_same_page(original: &image::DynamicImage, current: &image::DynamicImage) -> bool {

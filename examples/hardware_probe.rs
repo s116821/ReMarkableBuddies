@@ -125,6 +125,16 @@ fn main() -> Result<()> {
             touch.touch_stop()?;
         }
         Some("erase") => Pen::new(false).erase_rectangle((240, 390), (510, 510))?,
+        Some("return-check") => {
+            let mut workflow =
+                remarkable_reader_buddy::Workflow::new(false, TriggerCorner::LowerLeft, false)?;
+            let original = workflow.capture_page()?;
+            workflow.navigate_to_next_page()?;
+            sleep(Duration::from_millis(800));
+            let outcome = workflow.return_to_original_page(&original)?;
+            workflow.draw_failure_x()?;
+            println!("Return outcome: {outcome:?}");
+        }
         Some("next") | Some("previous") => {
             use remarkable_reader_buddy::workflow::xochitl_integration::{
                 NavigationDirection, XochitlIntegration,
