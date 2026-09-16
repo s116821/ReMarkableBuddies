@@ -13,6 +13,47 @@ fn load(name: &str) -> Scenario {
 }
 
 #[test]
+fn invalid_successor_returns_without_attempting_an_activity_mark() {
+    let mut scenario = load("occupied-return");
+    // Keep printed content, but make its status corner eligible: the old ordering
+    // would draw here and a backend failure could skip the required return.
+    let mut page = image::open(root().join(scenario.pages[1].image.as_ref().unwrap()))
+        .unwrap()
+        .to_rgba8();
+    for y in 900..page.height() {
+        for x in 660..page.width() {
+            page.put_pixel(x, y, image::Rgba([255, 255, 255, 255]));
+        }
+    }
+    let path =
+        std::env::temp_dir().join(format!("reader-invalid-corner-{}.png", std::process::id()));
+    page.save(&path).unwrap();
+    scenario.pages[1].image = Some(path.clone());
+    let run = execute(&scenario, &root()).unwrap();
+    std::fs::remove_file(path).unwrap();
+    assert!(
+        run.report.assertion_failures.is_empty(),
+        "{:?}",
+        run.report.assertion_failures
+    );
+    assert!(!run
+        .report
+        .trace
+        .iter()
+        .any(|event| event.page == 1
+            && matches!(event.action.as_str(), "statuscircle" | "statusclear")));
+    assert_eq!(
+        run.report
+            .trace
+            .iter()
+            .filter(|event| event.action == "previous")
+            .count(),
+        1
+    );
+    assert!(run.report.pages[1].unchanged);
+    assert_eq!(run.report.pages[0].x_count, 1);
+}
+#[test]
 fn indicators_clear_before_navigation_and_successful_output() {
     let run = run("blank-answer");
     assert!(run.report.pages.iter().all(|page| !page.indicator_visible));

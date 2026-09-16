@@ -343,7 +343,6 @@ impl<M: LLMEngine> Orchestrator<M> {
 
         // Step 4: Check if the page we navigated to is valid (blank or QA)
         let page_type = self.workflow.is_valid_answer_page()?;
-        self.workflow.tick_indicator()?;
 
         match page_type {
             AnswerPageType::Invalid => {
@@ -358,6 +357,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                 return Ok(());
             }
             AnswerPageType::Blank => {
+                self.workflow.tick_indicator()?;
                 // Step 5a: Blank page - render header first, then Q&A
                 info!("Blank page found, rendering header and Q&A");
 
@@ -385,6 +385,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                 }
             }
             AnswerPageType::ExistingQA => {
+                self.workflow.tick_indicator()?;
                 // Step 5b: Existing QA page - just append Q&A content (no header)
                 info!("Existing QA page found, appending Q&A (no header needed)");
 

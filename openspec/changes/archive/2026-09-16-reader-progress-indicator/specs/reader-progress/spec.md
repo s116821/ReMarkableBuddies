@@ -33,3 +33,7 @@ Reader SHALL track whether it owns a temporary status mark and clear it before c
 #### Scenario: Uncertain page after cleanup or typing failure
 - **WHEN** cleanup fails or partial typing may have changed the corner
 - **THEN** failed cleanup prevents further iterations on the same orchestrator, and status eligibility after typing is unknown until another clean capture.
+
+#### Scenario: Invalid successor recovery takes priority
+- **WHEN** the clean successor capture classifies the page as invalid
+- **THEN** Reader attempts the verified return and source failure display without first drawing an activity circle on the invalid successor.
