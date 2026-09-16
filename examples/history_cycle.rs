@@ -13,8 +13,9 @@ fn main() -> anyhow::Result<()> {
     env_logger::init();
     let args: Vec<_> = std::env::args().collect();
     anyhow::ensure!(
-        args.len() == 3 || (args.len() == 4 && args[3] == "--gestures"),
-        "usage: history_cycle QA_FILE OUTPUT_DIRECTORY [--gestures]"
+        args.len() == 3
+            || (args.len() == 4 && matches!(args[3].as_str(), "--gestures" | "--reader-only")),
+        "usage: history_cycle QA_FILE OUTPUT_DIRECTORY [--gestures|--reader-only]"
     );
     let qa = std::fs::read_to_string(&args[1])?;
     anyhow::ensure!(
@@ -25,6 +26,12 @@ fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(directory)?;
     let mut workflow = Workflow::new(false, TriggerCorner::LowerLeft, false)?;
     sleep(Duration::from_secs(1));
+    if args.get(3).is_some_and(|mode| mode == "--reader-only") {
+        println!("Waiting for lower-left Reader hold without typing or a model call");
+        workflow.wait_for_reader_bounded(120)?;
+        println!("Reader trigger accepted");
+        return Ok(());
+    }
     workflow.set_body_text_mode()?;
     workflow.render_qa(&qa)?;
     anyhow::ensure!(

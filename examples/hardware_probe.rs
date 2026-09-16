@@ -236,12 +236,20 @@ fn main() -> Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("y required"))?
                 .parse()?;
             let mut touch = Touch::new(false, TriggerCorner::LowerLeft);
-            touch.touch_start((x, y))?;
-            sleep(Duration::from_millis(if args[1] == "press" {
-                2000
+            let duration = if args[1] == "press" {
+                args.get(4)
+                    .map(|s| s.parse::<u64>())
+                    .transpose()?
+                    .unwrap_or(2000)
             } else {
                 100
-            }));
+            };
+            anyhow::ensure!(
+                (1..=5000).contains(&duration),
+                "Press must be bounded to five seconds"
+            );
+            touch.touch_start((x, y))?;
+            sleep(Duration::from_millis(duration));
             touch.touch_stop()?;
         }
         Some("strokes") => {
