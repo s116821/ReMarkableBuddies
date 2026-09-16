@@ -1,5 +1,5 @@
 use super::LLMEngine;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use log::{debug, info};
 use serde_json::json;
 use serde_json::Value as JsonValue;
@@ -71,8 +71,11 @@ impl LLMEngine for OpenAI {
             "max_completion_tokens": 4000
         });
 
-        // print body for debugging
-        debug!("Request: {}", body);
+        debug!(
+            "Request: model={} content_parts={}",
+            self.model,
+            self.content.len()
+        );
         let raw_response = ureq::post(format!("{}/v1/chat/completions", self.base_url).as_str())
             .header("Authorization", &format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
@@ -87,17 +90,45 @@ impl LLMEngine for OpenAI {
         };
 
         // Read response body as string
-        let body_text = response.body_mut().read_to_string().unwrap();
-        let json: JsonValue = serde_json::from_str(&body_text).unwrap();
-        info!("API usage: model={} usage={}", json["model"], json["usage"]);
-        debug!("Response: {}", json);
+        let body_text = response
+            .body_mut()
+            .read_to_string()
+            .context("Read model response")?;
+        parse_response(&body_text)
+    }
+}
 
-        // Extract the response text
-        let response_text = json["choices"][0]["message"]["content"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("No response content found"))?
-            .to_string();
+fn parse_response(body_text: &str) -> Result<String> {
+    let json: JsonValue = serde_json::from_str(body_text).context("Decode model response JSON")?;
+    info!("API usage: model={} usage={}", json["model"], json["usage"]);
+    debug!("Response: {}", json);
 
-        Ok(response_text)
+    // Extract the response text
+    let response_text = json["choices"][0]["message"]["content"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("No response content found"))?
+        .to_string();
+
+    Ok(response_text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_response;
+
+    #[test]
+    fn response_errors_do_not_panic_or_echo_response_content() {
+        for body in [
+            "private invalid body",
+            "{}",
+            r#"{"choices":[{"message":{"content":null}}]}"#,
+        ] {
+            let error = parse_response(body).unwrap_err().to_string();
+            assert!(!error.contains("private invalid body"));
+        }
+        assert_eq!(
+            parse_response(r#"{"choices":[{"message":{"content":"NONE"}}]}"#).unwrap(),
+            "NONE"
+        );
     }
 }

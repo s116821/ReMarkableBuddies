@@ -4,13 +4,37 @@ use log::info;
 #[cfg(target_os = "linux")]
 use std::thread::sleep;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 use std::time::Duration;
 
 #[cfg(target_os = "linux")]
 use evdev::{Device, EventType as EvdevEventType, InputEvent};
 
 use super::DeviceModel;
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(Default)]
+struct HoldTimer {
+    start: Option<Duration>,
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl HoldTimer {
+    fn reset(&mut self) {
+        self.start = None;
+    }
+    fn contact(&mut self, active: bool, now: Duration) {
+        if active {
+            self.start.get_or_insert(now);
+        } else {
+            self.reset();
+        }
+    }
+    fn triggered(&self, now: Duration) -> bool {
+        self.start
+            .is_some_and(|start| now.saturating_sub(start) >= Duration::from_secs(2))
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum TriggerCorner {
@@ -107,7 +131,8 @@ impl Touch {
         let mut position = (0, 0);
         let mut slot = 0;
         let mut touching = false;
-        let mut hold_start: Option<Instant> = None;
+        let clock = Instant::now();
+        let mut hold = HoldTimer::default();
         info!("Waiting for 2s hold in trigger zone...");
         loop {
             let events: Vec<_> = match self.device.as_mut().unwrap().fetch_events() {
@@ -126,7 +151,7 @@ impl Touch {
                             ABS_MT_POSITION_Y => position.1 = event.value(),
                             ABS_MT_TRACKING_ID => {
                                 touching = event.value() >= 0;
-                                hold_start = None;
+                                hold.reset();
                             }
                             _ => {}
                         }
@@ -136,13 +161,13 @@ impl Touch {
                 if event.event_type() == EvdevEventType::SYNCHRONIZATION && event.code() == 0 {
                     let (x, y) = self.input_to_virtual(position);
                     if touching && self.is_in_trigger_zone(x, y) {
-                        hold_start.get_or_insert_with(Instant::now);
+                        hold.contact(true, clock.elapsed());
                     } else {
-                        hold_start = None;
+                        hold.reset();
                     }
                 }
             }
-            if hold_start.is_some_and(|start| start.elapsed() >= Duration::from_secs(2)) {
+            if hold.triggered(clock.elapsed()) {
                 info!("Trigger activated after 2s hold!");
                 return Ok(());
             }
@@ -301,5 +326,44 @@ impl Touch {
 
     pub fn tap_middle_bottom(&mut self) -> Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod hold_tests {
+    use super::{HoldTimer, TriggerCorner};
+    use std::time::Duration;
+
+    #[test]
+    fn stationary_contact_triggers_at_threshold_not_before() {
+        let mut hold = HoldTimer::default();
+        hold.contact(true, Duration::from_secs(1));
+        assert!(!hold.triggered(Duration::from_millis(2999)));
+        assert!(hold.triggered(Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn leaving_zone_release_and_new_tracking_id_reset_hold() {
+        let mut hold = HoldTimer::default();
+        hold.contact(true, Duration::ZERO);
+        hold.contact(false, Duration::from_millis(1999));
+        assert!(!hold.triggered(Duration::from_secs(5)));
+        hold.contact(true, Duration::from_secs(6));
+        assert!(!hold.triggered(Duration::from_secs(7)));
+        assert!(hold.triggered(Duration::from_secs(8)));
+        hold.reset();
+        assert!(!hold.triggered(Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn repeated_position_frames_do_not_restart_timer() {
+        let mut hold = HoldTimer::default();
+        hold.contact(true, Duration::ZERO);
+        hold.contact(true, Duration::from_secs(1));
+        assert!(hold.triggered(Duration::from_secs(2)));
+        for value in ["LL", "upper-right", "ul", "LOWER-RIGHT"] {
+            assert!(TriggerCorner::from_string(value).is_ok());
+        }
+        assert!(TriggerCorner::from_string("middle").is_err());
     }
 }

@@ -387,89 +387,82 @@ impl Workflow {
     ///
     /// Returns the page type: Blank, ExistingQA, or Invalid
     pub fn is_valid_answer_page(&mut self) -> Result<AnswerPageType> {
-        info!("Checking if current page is valid for answers (blank or QA page)");
-
-        // Take screenshot of current page
-        std::thread::sleep(std::time::Duration::from_millis(500)); // Let page settle
+        std::thread::sleep(std::time::Duration::from_millis(500));
         self.screenshot.take_screenshot()?;
-        let png_data = self.screenshot.get_image_data();
-
-        // Load image
-        let img = match image::load_from_memory(png_data) {
+        let img = match image::load_from_memory(self.screenshot.get_image_data()) {
             Ok(img) => img,
-            Err(e) => {
-                log::warn!("Failed to load screenshot for page check: {}", e);
+            Err(error) => {
+                log::warn!("Failed to load screenshot for page check: {}", error);
                 return Ok(AnswerPageType::Invalid);
             }
         };
+        let saved = std::fs::read(HEADER_PATTERN_PATH)
+            .ok()
+            .and_then(|data| image::load_from_memory(&data).ok());
+        let page_type = Self::classify_answer_page(&img, saved.as_ref());
+        info!("Answer page classification: {:?}", page_type);
+        Ok(page_type)
+    }
 
-        // Check 1: Is it a blank page?
-        // Compare against a synthetic blank (white) image using masked similarity
-        let blank_img = Self::create_blank_image();
-        let blank_similarity = Self::compute_image_similarity_masked(
-            &img,
-            &blank_img,
+    pub fn capture_page(&mut self) -> Result<image::DynamicImage> {
+        self.screenshot.take_screenshot()?;
+        Ok(image::load_from_memory(self.screenshot.get_image_data())?)
+    }
+
+    pub fn verify_navigation_to(&mut self, original: &image::DynamicImage) -> Result<bool> {
+        let current = self.capture_page()?;
+        Ok(Self::is_same_page(original, &current))
+    }
+
+    pub fn is_same_page(original: &image::DynamicImage, current: &image::DynamicImage) -> bool {
+        Self::compute_image_similarity_masked(
+            original,
+            current,
+            MASK_LEFT_OFFSET,
+            MASK_RIGHT_OFFSET,
+            MASK_TOP_OFFSET,
+            MASK_BOTTOM_OFFSET,
+            DEFAULT_SAMPLE_RATE,
+        ) >= 0.999
+    }
+
+    pub fn classify_answer_page(
+        img: &image::DynamicImage,
+        saved: Option<&image::DynamicImage>,
+    ) -> AnswerPageType {
+        let blank = Self::create_blank_image();
+        if Self::compute_image_similarity_masked(
+            img,
+            &blank,
             MASK_LEFT_OFFSET,
             MASK_RIGHT_OFFSET,
             MASK_TOP_OFFSET,
             MASK_BOTTOM_OFFSET,
             BLANK_PAGE_SAMPLE_RATE,
-        );
-
-        // Threshold for considering a page "blank" (99.8% similar to white)
-        const BLANK_THRESHOLD: f32 = 0.998;
-
-        info!(
-            "Blank page check: similarity to blank {:.2}% (threshold: {:.1}%)",
-            blank_similarity * 100.0,
-            BLANK_THRESHOLD * 100.0
-        );
-
-        if blank_similarity >= BLANK_THRESHOLD {
-            info!("Page is BLANK - VALID");
-            return Ok(AnswerPageType::Blank);
+        ) >= 0.998
+        {
+            return AnswerPageType::Blank;
         }
-
-        info!("Page is not blank, checking for QA header...");
-
-        // Check 2: Does it have our QA header pattern?
-        const HEADER_HEIGHT: u32 = 150; // Capture full header region from top
-        let header_img = img.crop_imm(0, 0, img.width(), HEADER_HEIGHT.min(img.height()));
-
-        // Try fast pattern matching (if we have a saved pattern)
-        if let Ok(saved_pattern_data) = std::fs::read(HEADER_PATTERN_PATH) {
-            if let Ok(saved_pattern) = image::load_from_memory(&saved_pattern_data) {
-                // Use masked similarity comparison
-                // Apply same masking as full-page comparisons to skip toolbar/UI elements
-                let similarity = Self::compute_image_similarity_masked(
-                    &header_img,
-                    &saved_pattern,
-                    MASK_LEFT_OFFSET,
-                    MASK_RIGHT_OFFSET,
-                    MASK_TOP_OFFSET,
-                    0,
-                    DEFAULT_SAMPLE_RATE,
-                );
-
-                const SIMILARITY_THRESHOLD: f32 = 0.998;
-                info!(
-                    "QA header check: similarity {:.2}% (threshold: {:.1}%)",
-                    similarity * 100.0,
-                    SIMILARITY_THRESHOLD * 100.0
-                );
-
-                if similarity >= SIMILARITY_THRESHOLD {
-                    info!("Page has QA header - VALID (existing QA page)");
-                    return Ok(AnswerPageType::ExistingQA);
-                }
+        if let Some(saved) = saved {
+            let header = img.crop_imm(0, 0, img.width(), 150.min(img.height()));
+            if Self::compute_image_similarity_masked(
+                &header,
+                saved,
+                MASK_LEFT_OFFSET,
+                MASK_RIGHT_OFFSET,
+                MASK_TOP_OFFSET,
+                0,
+                DEFAULT_SAMPLE_RATE,
+            ) >= 0.998
+            {
+                return AnswerPageType::ExistingQA;
             }
-        } else {
-            info!("QA header check: no saved pattern found (first run?)");
         }
+        AnswerPageType::Invalid
+    }
 
-        // Neither blank nor QA page
-        info!("Page is NOT valid: failed both blank and QA header checks");
-        Ok(AnswerPageType::Invalid)
+    pub fn compose_qa(question: &str, answer: &str) -> String {
+        format!("Q: {}\n\nA: {}\n---\n", question, answer)
     }
 
     /// Save the header pattern for future fast detection
@@ -501,13 +494,18 @@ impl Workflow {
         let gray1 = img1.to_luma8();
         let gray2 = img2.to_luma8();
 
-        if gray1.dimensions() != gray2.dimensions() {
+        if sample_rate == 0 || gray1.dimensions() != gray2.dimensions() {
             return 0.0;
         }
 
         // Get dimensions for offset calculations (needed for cropped images)
         let width = gray1.width();
         let height = gray1.height();
+        if left_offset.saturating_add(right_offset) >= width
+            || top_offset.saturating_add(bottom_offset) >= height
+        {
+            return 0.0;
+        }
         let mut total_diff: u64 = 0;
         let mut pixel_count: u64 = 0;
 
@@ -561,5 +559,79 @@ impl Workflow {
             image::Luma([255u8]),
         );
         image::DynamicImage::ImageLuma8(white_img)
+    }
+}
+
+#[cfg(test)]
+mod page_tests {
+    use super::*;
+    use image::{DynamicImage, GenericImage, Rgba};
+
+    fn ink(mut page: DynamicImage, left: u32, top: u32, width: u32, height: u32) -> DynamicImage {
+        for y in top..top + height {
+            for x in left..left + width {
+                page.put_pixel(x, y, Rgba([0, 0, 0, 255]));
+            }
+        }
+        page
+    }
+
+    #[test]
+    fn page_identity_ignores_toolbar_but_detects_changed_content() {
+        let blank = Workflow::create_blank_image();
+        let toolbar = ink(blank.clone(), 0, 100, 100, 500);
+        assert!(Workflow::is_same_page(&blank, &toolbar));
+        let content = ink(blank.clone(), 320, 200, 200, 300);
+        assert!(!Workflow::is_same_page(&blank, &content));
+        assert!(!Workflow::is_same_page(
+            &blank,
+            &DynamicImage::new_luma8(10, 10)
+        ));
+    }
+
+    #[test]
+    fn blank_header_and_occupied_pages_have_distinct_decisions() {
+        let blank = Workflow::create_blank_image();
+        assert_eq!(
+            Workflow::classify_answer_page(&blank, None),
+            AnswerPageType::Blank
+        );
+        let headed = ink(blank.clone(), 320, 90, 200, 30);
+        let pattern = headed.crop_imm(0, 0, 768, 150);
+        let answered = ink(headed, 320, 200, 200, 300);
+        assert_eq!(
+            Workflow::classify_answer_page(&answered, Some(&pattern)),
+            AnswerPageType::ExistingQA
+        );
+        assert_eq!(
+            Workflow::classify_answer_page(&answered, None),
+            AnswerPageType::Invalid
+        );
+        let different_header = ink(blank, 320, 70, 200, 70);
+        assert_eq!(
+            Workflow::classify_answer_page(&different_header, Some(&pattern)),
+            AnswerPageType::Invalid
+        );
+    }
+
+    #[test]
+    fn invalid_comparison_regions_never_panic_or_match() {
+        let tiny = DynamicImage::new_luma8(10, 10);
+        assert_eq!(
+            Workflow::compute_image_similarity_masked(&tiny, &tiny, 298, 125, 70, 70, 5),
+            0.0
+        );
+        assert_eq!(
+            Workflow::compute_image_similarity_masked(&tiny, &tiny, 0, 0, 0, 0, 0),
+            0.0
+        );
+    }
+
+    #[test]
+    fn qa_format_preserves_values_lines_and_separator() {
+        assert_eq!(
+            Workflow::compose_qa("G unc.?", "G = (6.674215 +/- 0.000092) * 10^-11\nunits"),
+            "Q: G unc.?\n\nA: G = (6.674215 +/- 0.000092) * 10^-11\nunits\n---\n"
+        );
     }
 }

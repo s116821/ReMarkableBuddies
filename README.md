@@ -161,17 +161,12 @@ export OPENAI_API_KEY=your-key-here
 reader-buddy [OPTIONS]
 
 Options:
-  --api-key <KEY>           OpenAI API key
+  --screenshot-only <FILE>  Capture and exit without AI or input devices
   --model <MODEL>           Model to use [default: gpt-5.6-terra]
   --base-url <URL>          Custom OpenAI endpoint
-  --no-draw                 Disable drawing (testing)
   --no-trigger              Skip waiting for trigger
   --once                    Run once instead of looping
-  --input-png <FILE>        Use image file instead of screenshot
-  --save-screenshot <FILE>  Save screenshot to file
   --trigger-corner <CORNER> Trigger corner: UR, UL, LR, LL [default: LL]
-  --log-level <LEVEL>       Log level [default: info]
-  --debug-dump              Save debug images to /tmp for troubleshooting
   -h, --help                Print help
   -V, --version             Print version
 ```
@@ -184,8 +179,8 @@ Options:
 # Run with default settings (requires OPENAI_API_KEY env var)
 ./reader-buddy
 
-# Run with explicit API key
-./reader-buddy --api-key sk-...
+# Keep OPENAI_API_KEY in the protected service environment file or local .env
+# rather than passing credentials in command arguments.
 
 # Use different model
 ./reader-buddy --model gpt-4o-mini
@@ -197,12 +192,18 @@ Options:
 ### Testing
 
 ```bash
-# Test with a sample image
-./reader-buddy --input-png test.png --no-trigger --once --save-screenshot output.png
+# Capture only (still requires tablet process-memory access)
+./reader-buddy --screenshot-only /tmp/page.png
 
-# Run without drawing to screen (logs only)
-./reader-buddy --no-draw --once
+# Run one real-device iteration without waiting for the hold gesture
+./reader-buddy --no-trigger --once
 ```
+
+The old `--input-png` and `--save-screenshot` flags were unused and are removed.
+`--no-draw` did not provide a working simulator and is also removed. Use bounded
+diagnostic probes for offline device actions; a maintained simulator is separate work.
+Use `OPENAI_API_KEY` instead of `--api-key`, `RUST_LOG` instead of `--log-level`,
+and `READER_BUDDY_DEBUG_DUMP=true` instead of `--debug-dump`.
 
 ### Background Execution
 
@@ -339,10 +340,10 @@ journalctl -u reader-buddy.service -f
 # Then trigger Reader Buddy from your tablet and watch the output
 ```
 
-**Tip**: If logs aren't appearing, ensure `StandardOutput=journal` and `StandardError=journal` are set in the service file. You can also add `--log-level debug` to the `ExecStart` line for more verbose output:
+**Tip**: If logs aren't appearing, ensure `StandardOutput=journal` and `StandardError=journal` are set in the service file. For more verbose output, set this in the service's environment file and restart the service during an authorized maintenance window:
 
 ```bash
-ExecStart=/opt/bin/reader-buddy --log-level debug
+RUST_LOG=remarkable_reader_buddy=debug
 ```
 
 ## Development
@@ -420,18 +421,23 @@ If you see an X drawn in the bottom-right corner of your question page, it means
 
 ### Answer not appearing on new page
 If the answer doesn't render and no X appears:
-- Enable debug logging: `--log-level debug` to see detailed execution flow
-- Check that the answer page was detected correctly (logs will show "Valid answer page found")
+- Enable debug logging with `RUST_LOG=remarkable_reader_buddy=debug`.
+- Check the logged answer-page classification (Blank, ExistingQA, or Invalid).
 
 ### Debug Mode
 Enable debug dumps to troubleshoot rendering issues:
 ```bash
-./reader-buddy --debug-dump --log-level debug
+READER_BUDDY_DEBUG_DUMP=true RUST_LOG=remarkable_reader_buddy=debug ./reader-buddy
 ```
 
 This will save to `/tmp/` on the reMarkable:
 - `reader-buddy-screenshot-*.png` - Original screenshots captured
-- `reader-buddy-erase-mask-*.png` - Visual overlay showing detected question regions (red box) and ink pixels to erase (yellow)
+- `reader-buddy-erase-mask-*.png` - Only produced when a diagnostic caller explicitly uses the smart-erase helper; the normal Q&A workflow does not erase questions
+
+Image dumps default off; accepted values are `true`, `false`, `1`, and `0`.
+Keep dumps local and sanitize logs before sharing: normal logs include question/answer
+text, and debug logs include parsed model responses. Request diagnostics do not dump
+base64 page images.
 
 **Copying debug files to your computer:**
 
@@ -492,7 +498,7 @@ scp -r RM2:/var/cache/reader-buddy ~/Downloads/
 scp RM2:/tmp/reader-buddy-* ~/Downloads/ && scp -r RM2:/var/cache/reader-buddy ~/Downloads/
 ```
 
-**Tip**: If you're debugging an issue, run with `--debug-dump --log-level debug` first to generate the temp files.
+**Tip**: Enable `READER_BUDDY_DEBUG_DUMP=true` with `RUST_LOG=debug` only when collecting local diagnostic files.
 
 ## Cleanup and Uninstall
 

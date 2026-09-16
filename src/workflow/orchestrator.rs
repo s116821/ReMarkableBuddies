@@ -1,10 +1,7 @@
 use anyhow::Result;
 use log::{debug, error, info};
 
-use super::{
-    AnswerPageType, Workflow, MASK_BOTTOM_OFFSET, MASK_LEFT_OFFSET, MASK_RIGHT_OFFSET,
-    MASK_TOP_OFFSET,
-};
+use super::{AnswerPageType, Workflow};
 use crate::analysis::BoundingBox;
 use crate::llm::{openai::OpenAI, LLMEngine};
 
@@ -299,54 +296,17 @@ impl Orchestrator {
         info!("Attempting to render Q&A on next page");
 
         // Step 1: Store original page screenshot for comparison
-        self.workflow.screenshot.take_screenshot()?;
-        let original_png = self.workflow.screenshot.get_image_data().to_vec();
-        let original_img = image::load_from_memory(&original_png)?;
-        debug!("Stored original page screenshot for comparison");
+        let original_img = self.workflow.capture_page()?;
 
         // Step 2: Attempt to navigate to next page
         self.workflow.navigate_to_next_page()?;
         std::thread::sleep(std::time::Duration::from_millis(800));
 
-        // Step 3: Take screenshot and compare to original
-        self.workflow.screenshot.take_screenshot()?;
-        let current_png = self.workflow.screenshot.get_image_data().to_vec();
-        let current_img = image::load_from_memory(&current_png)?;
-
-        let similarity_to_original = Workflow::compute_image_similarity_masked(
-            &original_img,
-            &current_img,
-            MASK_LEFT_OFFSET,
-            MASK_RIGHT_OFFSET,
-            MASK_TOP_OFFSET,
-            MASK_BOTTOM_OFFSET,
-            5, // Default sample rate
-        );
-        debug!(
-            "Similarity to original page: {:.2}%",
-            similarity_to_original * 100.0
-        );
-
-        // If we're still very similar to original (>99.9%), we didn't actually navigate
-        const SAME_PAGE_THRESHOLD: f32 = 0.999;
-        let did_navigate = similarity_to_original < SAME_PAGE_THRESHOLD;
-
-        if !did_navigate {
-            info!(
-                "No page exists to the right (similarity {:.1}% >= {:.1}%) - drawing X on original",
-                similarity_to_original * 100.0,
-                SAME_PAGE_THRESHOLD * 100.0
-            );
-            // We're confirmed still on original page, draw failure X
+        if self.workflow.verify_navigation_to(&original_img)? {
+            info!("No page movement detected; drawing X on original");
             self.workflow.draw_failure_x()?;
             return Ok(());
         }
-
-        info!(
-            "Navigation successful (similarity {:.1}% < {:.1}%)",
-            similarity_to_original * 100.0,
-            SAME_PAGE_THRESHOLD * 100.0
-        );
 
         // Step 4: Check if the page we navigated to is valid (blank or QA)
         let page_type = self.workflow.is_valid_answer_page()?;
@@ -401,7 +361,7 @@ impl Orchestrator {
         }
 
         // Render the Q&A
-        let formatted_output = format!("Q: {}\n\nA: {}\n---\n", result.question, result.answer);
+        let formatted_output = Workflow::compose_qa(&result.question, &result.answer);
 
         self.workflow.render_text(&formatted_output)?;
 
@@ -428,27 +388,14 @@ impl Orchestrator {
             self.workflow.navigate_to_previous_page()?;
             std::thread::sleep(std::time::Duration::from_millis(800));
 
-            // Check if we're back on original
-            self.workflow.screenshot.take_screenshot()?;
-            let current_png = self.workflow.screenshot.get_image_data();
-            let current_img = image::load_from_memory(current_png)?;
-
-            let similarity = Workflow::compute_image_similarity_masked(
-                original_img,
-                &current_img,
-                MASK_LEFT_OFFSET,
-                MASK_RIGHT_OFFSET,
-                MASK_TOP_OFFSET,
-                MASK_BOTTOM_OFFSET,
-                5, // Default sample rate
-            );
-
-            if similarity >= SAME_PAGE_THRESHOLD {
+            if self.workflow.verify_navigation_to(original_img)? {
                 info!("Confirmed back on original page");
                 return Ok(());
             } else {
-                info!("Return attempt {}/{}: Failed -> similarity to original = {:.2}% (need >= {:.1}%), retrying...", 
-                      attempt, MAX_ATTEMPTS,similarity * 100.0, SAME_PAGE_THRESHOLD * 100.0);
+                info!(
+                    "Return attempt {}/{}: source not confirmed, retrying",
+                    attempt, MAX_ATTEMPTS
+                );
             }
         }
 
