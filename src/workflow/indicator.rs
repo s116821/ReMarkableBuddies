@@ -7,7 +7,7 @@ pub const SIZE: i32 = 50;
 pub const RIGHT: i32 = LEFT + SIZE - 1;
 pub const BOTTOM: i32 = TOP + SIZE - 1;
 // Native pen strokes extend beyond their centerline endpoints.
-pub const X_INSET: i32 = 3;
+pub const X_INSET: i32 = 10;
 
 pub fn eligible(image: &DynamicImage) -> bool {
     if image.width() != 768 || image.height() != 1024 {
@@ -23,8 +23,8 @@ pub fn circle_points() -> Vec<(i32, i32)> {
         .map(|step| {
             let angle = step as f64 * std::f64::consts::TAU / 32.0;
             (
-                LEFT + 24 + (20.0 * angle.cos()).round() as i32,
-                TOP + 24 + (20.0 * angle.sin()).round() as i32,
+                LEFT + 24 + (14.0 * angle.cos()).round() as i32,
+                TOP + 24 + (14.0 * angle.sin()).round() as i32,
             )
         })
         .collect()
