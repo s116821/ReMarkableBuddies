@@ -629,3 +629,6 @@ See LICENSE file for details.
 - [MagDrago Rust Semver Action](https://github.com/s116821/MagDragoRustSemverAction) - Automated versioning
 - reMarkable community for documentation and tools
 - OpenAI for GPT vision capabilities
+
+For explicit provider-backed laptop runs, see [local development setup](docs/local-development.md). Normal simulator regression scenarios remain offline.
+

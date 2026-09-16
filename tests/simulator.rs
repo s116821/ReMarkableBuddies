@@ -109,10 +109,14 @@ fn wrong_expectations_cannot_pass() {
     let mut scenario = load("blank-answer");
     scenario.expect.active_page = Some(0);
     scenario.expect.text.insert(1, "wrong answer".into());
+    scenario
+        .expect
+        .text_contains
+        .insert(1, vec!["absent phrase".into()]);
     scenario.expect.operations.insert(Operation::Previous, 1);
     scenario.expect.unchanged_pages.push(1);
     let run = execute(&scenario, &root()).unwrap();
-    assert_eq!(run.report.assertion_failures.len(), 4);
+    assert_eq!(run.report.assertion_failures.len(), 5);
 }
 #[test]
 fn schema_rejects_unknown_fields_modes_and_invalid_faults() {

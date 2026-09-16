@@ -8,6 +8,8 @@ pub struct Scenario {
     pub name: String,
     #[serde(default = "reader")]
     pub mode: String,
+    #[serde(default)]
+    pub llm: ModelConfig,
     pub pages: Vec<PageSpec>,
     #[serde(default)]
     pub active_page: usize,
@@ -30,6 +32,26 @@ fn reader() -> String {
 }
 fn corner() -> String {
     "LL".into()
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ModelConfig {
+    #[default]
+    Scripted,
+    Live {
+        model: Option<String>,
+        #[serde(default = "max_calls")]
+        max_calls: usize,
+        #[serde(default = "timeout_seconds")]
+        timeout_seconds: u64,
+    },
+}
+fn max_calls() -> usize {
+    2
+}
+fn timeout_seconds() -> u64 {
+    90
 }
 
 #[derive(Clone, Deserialize)]
@@ -104,6 +126,8 @@ pub struct Expected {
     #[serde(default)]
     pub text: BTreeMap<usize, String>,
     #[serde(default)]
+    pub text_contains: BTreeMap<usize, Vec<String>>,
+    #[serde(default)]
     pub x_count: BTreeMap<usize, usize>,
     #[serde(default)]
     pub unchanged_pages: Vec<usize>,
@@ -115,6 +139,29 @@ pub struct Expected {
 
 impl Scenario {
     pub fn validate(&self) -> Result<()> {
+        if let ModelConfig::Live {
+            model,
+            max_calls,
+            timeout_seconds,
+        } = &self.llm
+        {
+            ensure!(
+                self.replies.is_empty(),
+                "Live scenarios cannot include scripted replies"
+            );
+            ensure!(
+                (1..=200).contains(max_calls),
+                "Live max_calls must be in 1..200"
+            );
+            ensure!(
+                (1..=300).contains(timeout_seconds),
+                "Live timeout_seconds must be in 1..300"
+            );
+            ensure!(
+                model.as_ref().is_none_or(|m| !m.trim().is_empty()),
+                "Live model is empty"
+            );
+        }
         ensure!(
             self.mode == "reader",
             "Unsupported simulator mode {:?}; Writer/combined require REM-23",
@@ -181,6 +228,7 @@ impl Scenario {
             .expect
             .text
             .keys()
+            .chain(self.expect.text_contains.keys())
             .chain(self.expect.x_count.keys())
             .chain(self.expect.unchanged_pages.iter())
         {

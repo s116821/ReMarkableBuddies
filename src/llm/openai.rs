@@ -7,6 +7,7 @@ use serde_json::Value as JsonValue;
 pub const DEFAULT_MODEL: &str = "gpt-5.6-terra";
 
 pub struct OpenAI {
+    agent: ureq::Agent,
     model: String,
     base_url: String,
     api_key: String,
@@ -18,6 +19,7 @@ impl OpenAI {
         let base_url = base_url.unwrap_or_else(|| "https://api.openai.com".to_string());
 
         Self {
+            agent: ureq::Agent::new_with_defaults(),
             model,
             base_url,
             api_key,
@@ -28,10 +30,20 @@ impl OpenAI {
     pub fn from_env(model: Option<String>) -> Result<Self> {
         let api_key = std::env::var("OPENAI_API_KEY")
             .map_err(|_| anyhow::anyhow!("OPENAI_API_KEY environment variable not set"))?;
+        anyhow::ensure!(!api_key.trim().is_empty(), "OPENAI_API_KEY is empty");
         let base_url = std::env::var("OPENAI_BASE_URL").ok();
         let model = model.unwrap_or_else(|| DEFAULT_MODEL.to_string());
 
         Ok(Self::new(model, api_key, base_url))
+    }
+
+    /// Bound explicitly requested development calls without changing tablet defaults.
+    pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.agent = ureq::Agent::config_builder()
+            .timeout_global(Some(timeout))
+            .build()
+            .into();
+        self
     }
 
     pub fn add_content(&mut self, content: JsonValue) {
@@ -76,7 +88,9 @@ impl LLMEngine for OpenAI {
             self.model,
             self.content.len()
         );
-        let raw_response = ureq::post(format!("{}/v1/chat/completions", self.base_url).as_str())
+        let raw_response = self
+            .agent
+            .post(format!("{}/v1/chat/completions", self.base_url).as_str())
             .header("Authorization", &format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
             .send_json(&body);
