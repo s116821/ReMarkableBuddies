@@ -1,0 +1,38 @@
+{
+  "name": "proposal-error",
+  "mode": "reader",
+  "expect": {
+    "unchanged_pages": [
+      0,
+      1
+    ],
+    "model_calls": 1,
+    "operations": {
+      "line": 0,
+      "previous": 0,
+      "capture": 1,
+      "next": 0,
+      "text": 0
+    },
+    "active_page": 0,
+    "errors": [
+      "Scripted model error: proposal unavailable"
+    ]
+  },
+  "replies": [
+    {
+      "error": "proposal unavailable"
+    }
+  ],
+  "active_page": 0,
+  "iterations": [
+    {}
+  ],
+  "output": "../../../target/simulator/proposal-error",
+  "pages": [
+    {
+      "image": "../../validation/images/rem13/final-input.png"
+    },
+    {}
+  ]
+}

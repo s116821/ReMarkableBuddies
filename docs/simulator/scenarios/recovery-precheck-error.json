@@ -1,0 +1,55 @@
+{
+  "name": "recovery-precheck-error",
+  "mode": "reader",
+  "expect": {
+    "errors": [],
+    "x_count": {
+      "1": 1,
+      "0": 0
+    },
+    "unchanged_pages": [
+      0
+    ],
+    "operations": {
+      "line": 2,
+      "previous": 0,
+      "text": 0,
+      "next": 1,
+      "capture": 5
+    },
+    "model_calls": 2,
+    "active_page": 1,
+    "text": {
+      "1": "",
+      "0": ""
+    }
+  },
+  "replies": [
+    {
+      "text": "QUESTION: G unc.?\nQUESTION_BOX: 130,35,200,50\nOUTLINE_BOX: 110,165,550,130\n---\nANSWER: G = (6.674215 +/- 0.000092) * 10^-11 m^3 kg^-1 s^-2."
+    },
+    {
+      "text": "TRANSCRIPTION: G unc.?"
+    }
+  ],
+  "faults": [
+    {
+      "call": 5,
+      "operation": "capture",
+      "effect": "error"
+    }
+  ],
+  "active_page": 0,
+  "iterations": [
+    {}
+  ],
+  "output": "../../../target/simulator/recovery-precheck-error",
+  "pages": [
+    {
+      "image": "../../validation/images/rem13/final-input.png"
+    },
+    {
+      "image": "../../validation/images/rem10/end-no-return.png"
+    }
+  ]
+}

@@ -1,0 +1,43 @@
+{
+  "name": "illegible-question",
+  "mode": "reader",
+  "expect": {
+    "unchanged_pages": [
+      1
+    ],
+    "text": {
+      "1": "",
+      "0": ""
+    },
+    "active_page": 0,
+    "operations": {
+      "line": 2,
+      "previous": 0,
+      "capture": 1,
+      "next": 0,
+      "text": 0
+    },
+    "x_count": {
+      "1": 0,
+      "0": 1
+    },
+    "errors": [],
+    "model_calls": 1
+  },
+  "replies": [
+    {
+      "text": "NONE"
+    }
+  ],
+  "active_page": 0,
+  "iterations": [
+    {}
+  ],
+  "output": "../../../target/simulator/illegible-question",
+  "pages": [
+    {
+      "image": "../../validation/images/rem13/illegible-rejected.png"
+    },
+    {}
+  ]
+}

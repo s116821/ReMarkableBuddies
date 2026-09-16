@@ -1,0 +1,41 @@
+{
+  "name": "capture-error",
+  "mode": "reader",
+  "expect": {
+    "unchanged_pages": [
+      0,
+      1
+    ],
+    "model_calls": 0,
+    "operations": {
+      "line": 0,
+      "previous": 0,
+      "capture": 1,
+      "next": 0,
+      "text": 0
+    },
+    "active_page": 0,
+    "errors": [
+      "Injected Capture error"
+    ]
+  },
+  "replies": [],
+  "faults": [
+    {
+      "call": 1,
+      "operation": "capture",
+      "effect": "error"
+    }
+  ],
+  "active_page": 0,
+  "iterations": [
+    {}
+  ],
+  "output": "../../../target/simulator/capture-error",
+  "pages": [
+    {
+      "image": "../../validation/images/rem13/final-input.png"
+    },
+    {}
+  ]
+}

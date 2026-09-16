@@ -15,6 +15,9 @@ use std::time::Duration;
                         then uses ChatGPT to provide answers directly on your reMarkable tablet."
 )]
 pub struct Args {
+    /// Run a bounded local scenario without tablet access or API credentials
+    #[arg(long, value_name = "SCENARIO", conflicts_with_all = ["screenshot_only", "model", "base_url", "no_trigger", "once", "trigger_corner"])]
+    simulate: Option<std::path::PathBuf>,
     /// Capture a PNG and exit without credentials, input devices, or an AI call
     #[arg(long, value_name = "FILE")]
     screenshot_only: Option<String>,
@@ -23,7 +26,7 @@ pub struct Args {
     model: String,
 
     /// OpenAI base URL (for custom endpoints)
-    #[arg(long, env = "OPENAI_BASE_URL")]
+    #[arg(long)]
     base_url: Option<String>,
 
     /// Disable trigger waiting (run immediately)
@@ -59,6 +62,10 @@ fn main() -> Result<()> {
         .init();
 
     info!("=== ReMarkable Reader Buddy Starting ===");
+    if let Some(path) = args.simulate {
+        remarkable_reader_buddy::simulator::run_file(&path)?;
+        return Ok(());
+    }
     if let Some(path) = args.screenshot_only {
         let mut screenshot = remarkable_reader_buddy::Screenshot::new()?;
         screenshot.take_screenshot()?;
@@ -76,7 +83,10 @@ fn main() -> Result<()> {
     let api_key = std::env::var("OPENAI_API_KEY")
         .map_err(|_| anyhow::anyhow!("OPENAI_API_KEY environment variable not set"))?;
     anyhow::ensure!(!api_key.trim().is_empty(), "OPENAI_API_KEY is empty");
-    let llm = OpenAI::new(args.model, api_key, args.base_url);
+    let base_url = args
+        .base_url
+        .or_else(|| std::env::var("OPENAI_BASE_URL").ok());
+    let llm = OpenAI::new(args.model, api_key, base_url);
 
     // Initialize workflow
     let workflow = Workflow::new(false, trigger_corner, debug_dump)?;
@@ -114,6 +124,29 @@ mod tests {
         assert_eq!(args.trigger_corner, "LL");
         let args = Args::try_parse_from(["reader-buddy", "--screenshot-only", "page.png"]).unwrap();
         assert_eq!(args.screenshot_only.as_deref(), Some("page.png"));
+    }
+
+    #[test]
+    fn simulator_has_one_explicit_selector_and_rejects_conflicting_modes() {
+        let args = Args::try_parse_from(["reader-buddy", "--simulate", "scenario.json"]).unwrap();
+        assert_eq!(
+            args.simulate.unwrap(),
+            std::path::PathBuf::from("scenario.json")
+        );
+        for extra in [
+            vec!["--once"],
+            vec!["--no-trigger"],
+            vec!["--model", "example"],
+            vec!["--trigger-corner", "UR"],
+            vec!["--screenshot-only", "out.png"],
+        ] {
+            assert!(Args::try_parse_from(
+                ["reader-buddy", "--simulate", "scenario.json"]
+                    .into_iter()
+                    .chain(extra)
+            )
+            .is_err());
+        }
     }
 
     #[test]

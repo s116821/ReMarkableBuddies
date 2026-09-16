@@ -189,8 +189,11 @@ Core crates:
 
 ### Local Testing
 
-The normal workflow requires reMarkable hardware. Desktop behavioral tests run with
-`cargo test --all-targets`. For bounded device checks, use:
+Default execution requires reMarkable hardware. The maintained simulator runs the
+same Reader orchestrator through `DeviceBackend` and `LLMEngine` interfaces:
+`cargo run -- --simulate docs/simulator/scenarios/blank-answer.json`.
+See [scenario format and fidelity](simulator.md). Desktop behavioral and simulator
+tests run with `cargo test --all-targets`. For bounded device checks, use:
 - `--screenshot-only FILE` to capture without credentials or input initialization
 - `--once --no-trigger` to run one real-device question without a held gesture
 - `READER_BUDDY_DEBUG_DUMP=true` to retain optional local capture diagnostics
@@ -223,9 +226,10 @@ Uses **MagDrago Rust Semver Action** for automated versioning:
 - Inspect service logs with `journalctl -u reader-buddy.service`; use `RUST_LOG=debug`
   in the protected service environment file for more verbose diagnostics.
 
-### Future Testing
-- Mock device interfaces for desktop testing
-- Full simulator scenarios with screenshot fixtures and model-response replay
+### Simulator extensions
+- REM-23 must add production Writer and combined-mode simulator regressions.
+- REM-25 must extend the backend/scenarios for native insertion and preservation.
+- REM-17 must cover final gesture arbitration and combined workflows before 1.0.
 
 ## Performance Considerations
 

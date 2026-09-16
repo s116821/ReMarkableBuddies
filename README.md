@@ -161,6 +161,7 @@ export OPENAI_API_KEY=your-key-here
 reader-buddy [OPTIONS]
 
 Options:
+  --simulate <SCENARIO>     Run a bounded offline simulator scenario
   --screenshot-only <FILE>  Capture and exit without AI or input devices
   --model <MODEL>           Model to use [default: gpt-5.6-terra]
   --base-url <URL>          Custom OpenAI endpoint
@@ -192,6 +193,9 @@ Options:
 ### Testing
 
 ```bash
+# Run the production Reader workflow locally with scripted model replies
+cargo run -- --simulate docs/simulator/scenarios/blank-answer.json
+
 # Capture only (still requires tablet process-memory access)
 ./reader-buddy --screenshot-only /tmp/page.png
 
@@ -200,8 +204,9 @@ Options:
 ```
 
 The old `--input-png` and `--save-screenshot` flags were unused and are removed.
-`--no-draw` did not provide a working simulator and is also removed. Use bounded
-diagnostic probes for offline device actions; a maintained simulator is separate work.
+`--no-draw` did not provide a working simulator and is also removed. Use
+`--simulate` for the maintained [local simulator](docs/simulator.md), or bounded
+diagnostic probes for offline device actions.
 Use `OPENAI_API_KEY` instead of `--api-key`, `RUST_LOG` instead of `--log-level`,
 and `READER_BUDDY_DEBUG_DUMP=true` instead of `--debug-dump`.
 

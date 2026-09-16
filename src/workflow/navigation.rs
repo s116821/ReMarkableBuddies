@@ -48,7 +48,7 @@ impl SourceNavigation for WorkflowNavigation<'_> {
 
     fn previous_page(&mut self) -> Result<()> {
         self.workflow.navigate_to_previous_page()?;
-        std::thread::sleep(std::time::Duration::from_millis(800));
+        self.workflow.delay(std::time::Duration::from_millis(800));
         Ok(())
     }
 }

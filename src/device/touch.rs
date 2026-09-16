@@ -4,7 +4,6 @@ use log::info;
 #[cfg(target_os = "linux")]
 use std::thread::sleep;
 
-#[cfg(any(target_os = "linux", test))]
 use std::time::Duration;
 
 #[cfg(target_os = "linux")]
@@ -12,27 +11,28 @@ use evdev::{Device, EventType as EvdevEventType, InputEvent};
 
 use super::DeviceModel;
 
-#[cfg(any(target_os = "linux", test))]
 #[derive(Default)]
-struct HoldTimer {
+pub(crate) struct HoldTimer {
     start: Option<Duration>,
 }
 
-#[cfg(any(target_os = "linux", test))]
 impl HoldTimer {
-    fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         self.start = None;
     }
-    fn contact(&mut self, active: bool, now: Duration) {
+    pub(crate) fn contact(&mut self, active: bool, now: Duration) {
         if active {
             self.start.get_or_insert(now);
         } else {
             self.reset();
         }
     }
-    fn triggered(&self, now: Duration) -> bool {
+    pub(crate) fn triggered(&self, now: Duration) -> bool {
         self.start
             .is_some_and(|start| now.saturating_sub(start) >= Duration::from_secs(2))
+    }
+    pub(crate) fn deadline(&self) -> Option<Duration> {
+        self.start.map(|start| start + Duration::from_secs(2))
     }
 }
 
@@ -45,6 +45,14 @@ pub enum TriggerCorner {
 }
 
 impl TriggerCorner {
+    pub(crate) fn contains(&self, x: i32, y: i32) -> bool {
+        match self {
+            Self::UpperRight => x > 768 - 68 && y < 68,
+            Self::UpperLeft => x < 68 && y < 68,
+            Self::LowerRight => x > 768 - 68 && y > 1024 - 68,
+            Self::LowerLeft => x < 68 && y > 1024 - 68,
+        }
+    }
     pub fn from_string(s: &str) -> Result<Self> {
         match s.to_lowercase().as_str() {
             "ur" | "upper-right" => Ok(TriggerCorner::UpperRight),
@@ -227,16 +235,7 @@ impl Touch {
     }
 
     fn is_in_trigger_zone(&self, x: i32, y: i32) -> bool {
-        const CORNER_SIZE: i32 = 68; // Size of the trigger zone (68x68 pixels)
-
-        match self.trigger_corner {
-            TriggerCorner::UpperRight => x > VIRTUAL_WIDTH as i32 - CORNER_SIZE && y < CORNER_SIZE,
-            TriggerCorner::UpperLeft => x < CORNER_SIZE && y < CORNER_SIZE,
-            TriggerCorner::LowerRight => {
-                x > VIRTUAL_WIDTH as i32 - CORNER_SIZE && y > VIRTUAL_HEIGHT as i32 - CORNER_SIZE
-            }
-            TriggerCorner::LowerLeft => x < CORNER_SIZE && y > VIRTUAL_HEIGHT as i32 - CORNER_SIZE,
-        }
+        self.trigger_corner.contains(x, y)
     }
 
     fn screen_width(&self) -> u32 {
