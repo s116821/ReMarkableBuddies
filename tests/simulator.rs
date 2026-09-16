@@ -38,6 +38,18 @@ macro_rules! scenario_test {
 }
 scenario_test!(blank_answer, "blank-answer");
 scenario_test!(
+    highlight_without_question_is_rejected,
+    "highlight-no-question"
+);
+scenario_test!(
+    highlighted_question_uses_existing_answer_workflow,
+    "highlighted-g"
+);
+scenario_test!(
+    question_without_selection_is_rejected,
+    "question-no-selection"
+);
+scenario_test!(
     classification_corrupt_returns_without_writing,
     "classification-corrupt"
 );
@@ -190,3 +202,8 @@ fn cli_is_offline_and_saves_report_before_assertion_failure() {
     assert!(temporary.join("result/page-1.png").exists());
     std::fs::remove_dir_all(&temporary).unwrap();
 }
+
+scenario_test!(
+    highlight_with_illegible_question_is_rejected,
+    "highlight-illegible"
+);

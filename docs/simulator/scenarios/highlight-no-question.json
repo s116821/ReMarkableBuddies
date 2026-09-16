@@ -1,0 +1,40 @@
+{
+  "name": "highlight-no-question",
+  "pages": [
+    {
+      "image": "../../validation/images/rem16/highlight-no-question.png"
+    },
+    {}
+  ],
+  "iterations": [
+    {}
+  ],
+  "output": "../../../target/simulator/highlight-no-question",
+  "expect": {
+    "active_page": 0,
+    "model_calls": 1,
+    "text": {
+      "0": "",
+      "1": ""
+    },
+    "x_count": {
+      "0": 1,
+      "1": 0
+    },
+    "unchanged_pages": [
+      1
+    ],
+    "operations": {
+      "next": 0,
+      "previous": 0,
+      "text": 0,
+      "body": 0,
+      "line": 2
+    }
+  },
+  "replies": [
+    {
+      "text": "NONE"
+    }
+  ]
+}

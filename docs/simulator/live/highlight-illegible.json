@@ -1,0 +1,40 @@
+{
+  "name": "live-highlight-illegible",
+  "llm": {
+    "mode": "live",
+    "max_calls": 2,
+    "timeout_seconds": 90
+  },
+  "pages": [
+    {
+      "image": "../../validation/images/rem16/highlight-illegible.png"
+    },
+    {}
+  ],
+  "iterations": [
+    {}
+  ],
+  "output": "../../../target/simulator/live-highlight-illegible",
+  "expect": {
+    "active_page": 0,
+    "model_calls": 1,
+    "text": {
+      "0": "",
+      "1": ""
+    },
+    "x_count": {
+      "0": 1,
+      "1": 0
+    },
+    "unchanged_pages": [
+      1
+    ],
+    "operations": {
+      "next": 0,
+      "previous": 0,
+      "text": 0,
+      "body": 0,
+      "line": 2
+    }
+  }
+}

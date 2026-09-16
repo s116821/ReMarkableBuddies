@@ -28,13 +28,18 @@ RM2 SHALL select four-byte BGRA for IMG_VERSION major/minor at least 3.24 and th
 
 #### Scenario: Native detail and overview
 - **WHEN** modern RM2 pixels are encoded
-- **THEN** the blue channel supplies full-range grayscale in portrait 1404 by 1872 without legacy rotation.
+- **THEN** neutral-preserving luminance from the BGR channels supplies full-range grayscale in portrait 1404 by 1872 without legacy rotation, retaining text contrast in colored highlights.
 - **AND** the API provides a 768 by 1024 overview plus three overlapping full-width native-detail strips.
 
 #### Scenario: Legacy and Paper Pro branches
 - **WHEN** another implemented capture branch is selected
 - **THEN** legacy RM2 uses its existing conversion/rotation/flip and Paper Pro uses its existing four-byte 1632 by 2154 path.
 - **AND** presence of these paths does not establish hardware compatibility for every firmware.
+
+
+#### Scenario: Colored highlighter pixels
+- **WHEN** modern RM2 native pixels contain a yellow highlight over printed text
+- **THEN** grayscale conversion uses (77R+150G+29B+128)>>8, preserving neutral values exactly and keeping yellow background lighter than black text.
 
 ### Requirement: Corner hold trigger
 The trigger SHALL use slot-zero touch coordinates evaluated at SYN_REPORT in a configured 68-pixel corner region of the virtual 768 by 1024 screen. It SHALL activate after a continuous two-second hold, including a stationary hold with no subsequent position events. Source: src/device/touch.rs wait_for_trigger/is_in_trigger_zone.
