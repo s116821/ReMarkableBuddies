@@ -1,10 +1,4 @@
-# platform-runtime
-
-## Purpose
-
-Describe the implemented platform runtime contracts, initially baselined from v0.1.4. Known gaps are explicit and require a later change delta to alter.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Runtime startup and configuration
 The executable SHALL load an optional .env file before argument parsing, default to model gpt-5.6-terra and trigger corner LL, and read the API key only from OPENAI_API_KEY, with OPENAI_BASE_URL or --base-url selecting the endpoint. Invalid corner values SHALL fail normal workflow startup; capture-only execution exits before workflow configuration. Source: src/main.rs Args/main; src/llm/openai.rs new/from_env.

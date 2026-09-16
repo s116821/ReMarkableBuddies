@@ -18,10 +18,6 @@ pub struct Args {
     /// Capture a PNG and exit without credentials, input devices, or an AI call
     #[arg(long, value_name = "FILE")]
     screenshot_only: Option<String>,
-    /// OpenAI API key (can also be set via OPENAI_API_KEY env var)
-    #[arg(long, env = "OPENAI_API_KEY")]
-    api_key: Option<String>,
-
     /// OpenAI model to use
     #[arg(long, short, default_value = DEFAULT_MODEL)]
     model: String,
@@ -29,10 +25,6 @@ pub struct Args {
     /// OpenAI base URL (for custom endpoints)
     #[arg(long, env = "OPENAI_BASE_URL")]
     base_url: Option<String>,
-
-    /// Disable drawing/output (testing mode)
-    #[arg(long)]
-    no_draw: bool,
 
     /// Disable trigger waiting (run immediately)
     #[arg(long)]
@@ -42,25 +34,17 @@ pub struct Args {
     #[arg(long)]
     once: bool,
 
-    /// Input PNG file for testing (instead of taking screenshot)
-    #[arg(long)]
-    input_png: Option<String>,
-
-    /// Save screenshot to file
-    #[arg(long)]
-    save_screenshot: Option<String>,
-
     /// Trigger corner (UR, UL, LR, LL)
     #[arg(long, default_value = "LL")]
     trigger_corner: String,
+}
 
-    /// Log level (error, warn, info, debug, trace)
-    #[arg(long, default_value = "info")]
-    log_level: String,
-
-    /// Enable debug dumps of screenshots and masks to /tmp for troubleshooting
-    #[arg(long)]
-    debug_dump: bool,
+fn debug_dump_enabled(value: Option<&str>) -> Result<bool> {
+    match value {
+        None | Some("0" | "false") => Ok(false),
+        Some("1" | "true") => Ok(true),
+        Some(_) => anyhow::bail!("READER_BUDDY_DEBUG_DUMP must be true, false, 1 or 0"),
+    }
 }
 
 fn main() -> Result<()> {
@@ -70,7 +54,7 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     // Initialize logger
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(&args.log_level))
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp_millis()
         .init();
 
@@ -88,18 +72,17 @@ fn main() -> Result<()> {
     // Parse trigger corner
     let trigger_corner = TriggerCorner::from_string(&args.trigger_corner)?;
 
+    let debug_dump = debug_dump_enabled(std::env::var("READER_BUDDY_DEBUG_DUMP").ok().as_deref())?;
+    let api_key = std::env::var("OPENAI_API_KEY")
+        .map_err(|_| anyhow::anyhow!("OPENAI_API_KEY environment variable not set"))?;
+    anyhow::ensure!(!api_key.trim().is_empty(), "OPENAI_API_KEY is empty");
+    let llm = OpenAI::new(args.model, api_key, args.base_url);
+
     // Initialize workflow
-    let workflow = Workflow::new(args.no_draw, trigger_corner, args.debug_dump)?;
+    let workflow = Workflow::new(false, trigger_corner, debug_dump)?;
 
     // Give time for the virtual devices to be initialized
     sleep(Duration::from_millis(1000));
-
-    // Initialize LLM
-    let llm = if let Some(api_key) = args.api_key {
-        OpenAI::new(args.model, api_key, args.base_url)
-    } else {
-        OpenAI::from_env(Some(args.model))?
-    };
 
     // Create orchestrator
     let mut orchestrator = Orchestrator::new(workflow, llm);
@@ -117,4 +100,50 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn supported_bounded_diagnostics_and_defaults() {
+        let args = Args::try_parse_from(["reader-buddy", "--once", "--no-trigger"]).unwrap();
+        assert!(args.once && args.no_trigger);
+        assert_eq!(args.model, DEFAULT_MODEL);
+        assert_eq!(args.trigger_corner, "LL");
+        let args = Args::try_parse_from(["reader-buddy", "--screenshot-only", "page.png"]).unwrap();
+        assert_eq!(args.screenshot_only.as_deref(), Some("page.png"));
+    }
+
+    #[test]
+    fn removed_modes_are_rejected_instead_of_silently_ignored() {
+        for removed_args in [
+            vec!["--input-png", "input.png"],
+            vec!["--save-screenshot", "output.png"],
+            vec!["--no-draw"],
+            vec!["--api-key", "not-a-real-key"],
+            vec!["--log-level", "debug"],
+            vec!["--debug-dump"],
+        ] {
+            assert!(
+                Args::try_parse_from(
+                    std::iter::once("reader-buddy").chain(removed_args.iter().copied())
+                )
+                .is_err(),
+                "{removed_args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn image_dumps_require_explicit_valid_configuration() {
+        for value in [None, Some("false"), Some("0")] {
+            assert!(!debug_dump_enabled(value).unwrap());
+        }
+        for value in [Some("true"), Some("1")] {
+            assert!(debug_dump_enabled(value).unwrap());
+        }
+        assert!(debug_dump_enabled(Some("tru")).is_err());
+    }
 }

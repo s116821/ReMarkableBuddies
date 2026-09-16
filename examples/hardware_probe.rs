@@ -1,8 +1,12 @@
 //! Explicit, offline hardware actions for a disposable test document.
+#[cfg(target_os = "linux")]
 use anyhow::{bail, Result};
+#[cfg(target_os = "linux")]
 use remarkable_reader_buddy::{Keyboard, Pen, Screenshot, Touch, TriggerCorner};
+#[cfg(target_os = "linux")]
 use std::{thread::sleep, time::Duration};
 
+#[cfg(target_os = "linux")]
 fn main() -> Result<()> {
     env_logger::init();
     let args: Vec<String> = std::env::args().collect();
@@ -191,4 +195,9 @@ fn main() -> Result<()> {
     screenshot.take_screenshot()?;
     screenshot.save_image("/tmp/reader-buddy-probe.png")?;
     Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn main() -> anyhow::Result<()> {
+    anyhow::bail!("hardware_probe requires Linux tablet input devices")
 }

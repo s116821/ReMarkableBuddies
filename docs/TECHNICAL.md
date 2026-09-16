@@ -189,10 +189,14 @@ Core crates:
 
 ### Local Testing
 
-Cannot run natively on Windows/Linux desktop (requires reMarkable hardware). Use:
-- `--input-png` for testing with sample images
-- `--no-draw` for testing without device output
-- `--save-screenshot` for debugging
+The normal workflow requires reMarkable hardware. Desktop behavioral tests run with
+`cargo test --all-targets`. For bounded device checks, use:
+- `--screenshot-only FILE` to capture without credentials or input initialization
+- `--once --no-trigger` to run one real-device question without a held gesture
+- `READER_BUDDY_DEBUG_DUMP=true` to retain optional local capture diagnostics
+
+The former `--input-png`, `--no-draw` and `--save-screenshot` switches are removed;
+they did not provide a working offline simulator.
 
 ## CI/CD Integration
 
@@ -213,14 +217,15 @@ Uses **MagDrago Rust Semver Action** for automated versioning:
 ## Testing Strategy
 
 ### Current Testing
-- Manual device testing required
-- Use `--input-png` for offline testing
-- Check logs with `--log-level debug`
+- Behavioral tests cover configuration, hold timing, page decisions, Q&A composition
+  and response parsing without a tablet.
+- Real-device smoke remains required for input, model, navigation and rendering changes.
+- Inspect service logs with `journalctl -u reader-buddy.service`; use `RUST_LOG=debug`
+  in the protected service environment file for more verbose diagnostics.
 
 ### Future Testing
-- Unit tests for analysis algorithms
-- Integration tests with sample screenshots
 - Mock device interfaces for desktop testing
+- Full simulator scenarios with screenshot fixtures and model-response replay
 
 ## Performance Considerations
 

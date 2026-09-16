@@ -47,4 +47,4 @@ The OpenAI implementation SHALL send one user message containing accumulated mul
 #### Scenario: API failure boundary
 - **WHEN** the proposal HTTP request fails
 - **THEN** the error propagates to the caller rather than becoming a normal NONE response.
-- **AND** malformed response reading/JSON decoding currently uses unwrap and can panic; structured retry/recovery is not implemented.
+- **AND** malformed, unreadable or missing-content responses return errors without panicking; automatic retries are not added.
