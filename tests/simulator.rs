@@ -11,6 +11,158 @@ fn root() -> PathBuf {
 fn load(name: &str) -> Scenario {
     serde_json::from_slice(&std::fs::read(root().join(format!("{name}.json"))).unwrap()).unwrap()
 }
+
+#[test]
+fn indicators_clear_before_navigation_and_successful_output() {
+    let run = run("blank-answer");
+    assert!(run.report.pages.iter().all(|page| !page.indicator_visible));
+    let trace = &run.report.trace;
+    let next = trace
+        .iter()
+        .position(|event| event.action == "next")
+        .unwrap();
+    assert!(trace[..next]
+        .iter()
+        .any(|event| event.action == "statuscircle" && event.page == 0));
+    assert!(trace[..next]
+        .iter()
+        .any(|event| event.action == "statusclear" && event.page == 0));
+    assert!(trace[next..]
+        .iter()
+        .any(|event| event.action == "statuscircle" && event.page == 1));
+    assert!(trace[next..]
+        .iter()
+        .any(|event| event.action == "statusclear" && event.page == 1));
+    assert!(run.report.pages[0].unchanged);
+}
+
+#[test]
+fn preexisting_corner_ink_suppresses_only_status_not_the_answer() {
+    let mut scenario = load("blank-answer");
+    let path = std::env::temp_dir().join(format!("reader-corner-{}.json", std::process::id()));
+    std::fs::write(&path, "[[[690,940],[690,960]]]").unwrap();
+    scenario.pages[0].strokes = Some(path.clone());
+    let run = execute(&scenario, &root()).unwrap();
+    std::fs::remove_file(path).unwrap();
+    assert!(
+        run.report.assertion_failures.is_empty(),
+        "{:?}",
+        run.report.assertion_failures
+    );
+    assert!(run.report.pages[0].unchanged);
+    assert!(!run.report.pages[1].text.is_empty());
+    assert!(run
+        .report
+        .trace
+        .iter()
+        .any(|event| event.page == 0 && event.action == "status_suppressed"));
+    assert!(!run
+        .report
+        .trace
+        .iter()
+        .any(|event| event.page == 0
+            && matches!(event.action.as_str(), "statuscircle" | "statusclear")));
+}
+
+#[test]
+fn failed_indicator_cleanup_prevents_navigation_and_answer() {
+    use remarkable_reader_buddy::simulator::scenario::{Effect, Fault};
+    let mut scenario = load("blank-answer");
+    scenario.faults.push(Fault {
+        operation: Operation::StatusClear,
+        call: 1,
+        effect: Effect::Error,
+    });
+    let run = execute(&scenario, &root()).unwrap();
+    assert!(run
+        .report
+        .errors
+        .iter()
+        .any(|error| error.contains("Clear owned activity circle")));
+    assert!(!run
+        .report
+        .trace
+        .iter()
+        .any(|event| matches!(event.action.as_str(), "next" | "previous" | "text")));
+    assert!(run
+        .report
+        .pages
+        .iter()
+        .all(|page| page.text.is_empty() && !page.indicator_visible));
+    assert!(run.report.pages[0].unchanged);
+}
+
+#[test]
+fn partial_circle_error_is_cleaned_without_a_model_request() {
+    use remarkable_reader_buddy::simulator::scenario::{Effect, Fault};
+    let mut scenario = load("blank-answer");
+    scenario.faults.push(Fault {
+        operation: Operation::StatusCircle,
+        call: 1,
+        effect: Effect::Error,
+    });
+    let run = execute(&scenario, &root()).unwrap();
+    assert_eq!(run.report.errors.len(), 1);
+    assert_eq!(run.report.model_calls, 0);
+    assert!(run
+        .report
+        .pages
+        .iter()
+        .all(|page| page.unchanged && !page.indicator_visible));
+}
+
+#[test]
+fn persistent_cleanup_failure_never_erases_a_later_page() {
+    use remarkable_reader_buddy::simulator::scenario::{Effect, Fault, Iteration};
+    let mut scenario = load("blank-answer");
+    for call in [1, 2] {
+        scenario.faults.push(Fault {
+            operation: Operation::StatusClear,
+            call,
+            effect: Effect::Error,
+        });
+    }
+    scenario.iterations.push(Iteration {
+        page: Some(1),
+        wait_for_trigger: false,
+    });
+    let run = execute(&scenario, &root()).unwrap();
+    assert_eq!(run.report.errors.len(), 2);
+    assert!(run.report.pages[0].indicator_visible);
+    assert!(run.report.pages[1].unchanged);
+    assert!(!run.report.trace.iter().any(|event| event.page == 1
+        && matches!(
+            event.action.as_str(),
+            "statusclear" | "text" | "next" | "previous"
+        )));
+}
+
+#[test]
+fn occupied_or_unknown_corner_failures_do_not_add_or_erase_marks() {
+    for name in [
+        "no-question",
+        "illegible-question",
+        "highlight-illegible",
+        "failed-return",
+        "recovery-precheck-error",
+        "return-capture-error",
+        "return-input-error",
+    ] {
+        let run = run(name);
+        assert!(run
+            .report
+            .pages
+            .iter()
+            .all(|page| page.x_count == 0 && !page.indicator_visible));
+        assert!(
+            run.report
+                .trace
+                .iter()
+                .any(|event| event.action == "status_suppressed"),
+            "{name}"
+        );
+    }
+}
 fn run(name: &str) -> Run {
     let run = execute(&load(name), &root()).unwrap();
     assert!(
@@ -77,7 +229,10 @@ scenario_test!(stale_forward_documents_heuristic_limit, "stale-forward");
 scenario_test!(initial_capture_error, "capture-error");
 scenario_test!(proposal_error, "proposal-error");
 scenario_test!(header_cache_error_still_writes_answer, "header-cache-error");
-scenario_test!(render_error_draws_x, "render-error");
+scenario_test!(
+    render_error_suppresses_x_after_possible_partial_typing,
+    "render-error"
+);
 scenario_test!(body_error_draws_x, "body-error");
 scenario_test!(short_tap_never_calls_model, "short-tap");
 

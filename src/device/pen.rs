@@ -57,6 +57,22 @@ impl Pen {
         self.draw_line(self.virtual_to_input(p1), self.virtual_to_input(p2))
     }
 
+    pub fn draw_path_screen(&mut self, points: &[(i32, i32)]) -> Result<()> {
+        if let Some(&first) = points.first() {
+            let result = (|| {
+                self.pen_up()?;
+                self.pen_down_at(self.virtual_to_input(first))?;
+                points
+                    .iter()
+                    .try_for_each(|&point| self.goto_xy_virtual(point))
+            })();
+            let release = self.pen_up();
+            result?;
+            release?;
+        }
+        Ok(())
+    }
+
     pub fn draw_line(&mut self, (x1, y1): (i32, i32), (x2, y2): (i32, i32)) -> Result<()> {
         let length = ((x2 as f32 - x1 as f32).powf(2.0) + (y2 as f32 - y1 as f32).powf(2.0)).sqrt();
         // 5.0 is the maximum distance between points
@@ -214,15 +230,18 @@ impl Pen {
         let (x2, y2) = bottom_right;
 
         // Erase by filling the rectangle with eraser strokes
-        for y in y1..=y2 {
-            self.eraser_up()?;
-            self.goto_xy_virtual((x1, y))?;
-            self.eraser_down()?;
-            self.goto_xy_virtual((x2, y))?;
-        }
-        self.eraser_up()?;
-
-        Ok(())
+        let result = (|| -> Result<()> {
+            for y in y1..=y2 {
+                self.eraser_up()?;
+                self.goto_xy_virtual((x1, y))?;
+                self.eraser_down()?;
+                self.goto_xy_virtual((x2, y))?;
+            }
+            Ok(())
+        })();
+        let release = self.eraser_up();
+        result?;
+        release
     }
 
     pub fn goto_xy_virtual(&mut self, point: (i32, i32)) -> Result<()> {
@@ -289,6 +308,10 @@ impl Pen {
     }
 
     pub fn draw_line_screen(&mut self, _p1: (i32, i32), _p2: (i32, i32)) -> Result<()> {
+        Ok(())
+    }
+
+    pub fn draw_path_screen(&mut self, _points: &[(i32, i32)]) -> Result<()> {
         Ok(())
     }
 

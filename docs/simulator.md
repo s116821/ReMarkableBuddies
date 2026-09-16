@@ -129,3 +129,11 @@ and can fail on a conservative decline; its expectations require the requested
 uncertainty, not an unrelated requirement to repeat the central G value.
 
 The highlighted illegible-question fixture also declines in separate live local and native checks; the deterministic case checks the corresponding no-navigation/no-answer route.
+
+## Progress lifecycle coverage
+
+The shared workflow now uses a guarded 50x50 status area. Simulator reports include `indicator_visible` per page and `statuscircle`, `statusclear` and `status_suppressed` trace events. Native pen input is serialized; the simulator rejects capture/navigation/typing while a temporary circle remains. This makes cleanup ordering observable rather than inferring it only from a final white corner.
+
+Tests cover accepted output on both pages, preexisting corner strokes with continued answering, partial circle failures, cleanup failure blocking output/navigation, persistent failure across a page change, real local-HTTP delay callbacks, timeout and callback-error completion. Scripted ticks are deterministic and do not establish real-time display behavior. Native cleanup/tool behavior needs the separate hardware acceptance run.
+
+Some older negative fixtures already contain corner marks. Their updated expectations preserve those marks and suppress a new X. Capture/navigation failures with unknown corner eligibility and possible partial typing also suppress the X. These fixtures still assert the original no-answer and bounded-navigation behavior; the preservation fallback is not recognition success. The live highlighted-illegible fixture likewise retains its preexisting X without adding a second one.

@@ -26,11 +26,22 @@ pub struct Page {
     pub background: RgbaImage,
     pub text: String,
     pub lines: Vec<((i32, i32), (i32, i32))>,
+    pub indicator_visible: bool,
 }
 impl Page {
     pub fn image(&self) -> RgbaImage {
         let mut image = self.background.clone();
         raster::text(&mut image, &self.text);
+        if self.indicator_visible {
+            for pair in crate::workflow::indicator::circle_points().windows(2) {
+                imageproc::drawing::draw_line_segment_mut(
+                    &mut image,
+                    (pair[0].0 as f32, pair[0].1 as f32),
+                    (pair[1].0 as f32, pair[1].1 as f32),
+                    Rgba([0, 0, 0, 255]),
+                );
+            }
+        }
         for &(from, to) in &self.lines {
             imageproc::drawing::draw_line_segment_mut(
                 &mut image,
@@ -45,7 +56,9 @@ impl Page {
         self.lines
             .windows(2)
             .filter(|pair| {
-                pair[0] == ((673, 929), (748, 1004)) && pair[1] == ((748, 929), (673, 1004))
+                use crate::workflow::indicator::{BOTTOM, LEFT, RIGHT, TOP};
+                pair[0] == ((LEFT, TOP), (RIGHT, BOTTOM))
+                    && pair[1] == ((RIGHT, TOP), (LEFT, BOTTOM))
             })
             .count()
     }
@@ -113,6 +126,7 @@ impl State {
                 background,
                 text: spec.text.clone(),
                 lines: Vec::new(),
+                indicator_visible: false,
             });
         }
         let initial = pages.iter().map(Page::image).collect();
@@ -146,6 +160,21 @@ impl State {
         });
     }
     fn operation(&mut self, operation: Operation) -> Result<Option<Effect>> {
+        if matches!(
+            operation,
+            Operation::Capture
+                | Operation::Next
+                | Operation::Previous
+                | Operation::Text
+                | Operation::Body
+                | Operation::HeaderSave
+                | Operation::Line
+        ) {
+            anyhow::ensure!(
+                !self.pages[self.active].indicator_visible,
+                "Temporary circle present before {operation:?}"
+            );
+        }
         let call = self.counts.entry(operation).or_default();
         *call += 1;
         let effect = self
@@ -296,6 +325,7 @@ impl DeviceBackend for SimDevice {
             background: image,
             text: String::new(),
             lines: Vec::new(),
+            indicator_visible: false,
         };
         Ok(())
     }
@@ -319,6 +349,26 @@ impl DeviceBackend for SimDevice {
     fn progress(&mut self, message: Option<&str>) -> Result<()> {
         self.0.borrow_mut().event("progress", message.unwrap_or(""));
         Ok(())
+    }
+    fn status_circle(&mut self) -> Result<()> {
+        let mut state = self.0.borrow_mut();
+        let page = state.active;
+        // A failed native draw may already have emitted part of a stroke.
+        state.pages[page].indicator_visible = true;
+        state.operation(Operation::StatusCircle)?;
+        Ok(())
+    }
+    fn status_clear(&mut self) -> Result<()> {
+        let mut state = self.0.borrow_mut();
+        state.operation(Operation::StatusClear)?;
+        let page = state.active;
+        state.pages[page].indicator_visible = false;
+        Ok(())
+    }
+    fn status_suppressed(&mut self) {
+        self.0
+            .borrow_mut()
+            .event("status_suppressed", "occupied or unknown region");
     }
     fn load_header(&self) -> Option<DynamicImage> {
         self.0.borrow().header.clone()

@@ -311,3 +311,9 @@ Native highlighter colors exist in the framebuffer even on the monochrome tablet
 using only blue darkened yellow highlights. The conversion preserves all neutral
 gray values and improves printed-text contrast under yellow marks. Legacy RM2,
 Paper Pro and framebuffer allocation discovery are unchanged.
+
+## REM-8 progress ownership
+
+`workflow::indicator` owns geometry/clearance eligibility; `Workflow` tracks eligibility and owned temporary native marks. Capture, navigation and keyboard wrappers clear owned marks first; typing/navigation invalidate stale eligibility. A cleanup error poisons the orchestrator, which cannot resume on an unknown later page. Status drawing failure attempts immediate cleanup before the HTTP wait finishes.
+
+`LLMEngine::execute_with_progress` has a deterministic default; OpenAI runs one bounded HTTP call in a scoped worker and polls its result every 750 ms on the caller thread. The worker never owns device input. Callback errors stop ticks, the worker is joined, and its answer is discarded. RealDevice adds 100 ms settling after native erasure; native visual checks remain necessary because event injection does not itself prove xochitl has removed the strokes. Simulator models a separate temporary circle and records lifecycle operations/faults.

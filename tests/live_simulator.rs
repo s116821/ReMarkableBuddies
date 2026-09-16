@@ -54,6 +54,14 @@ fn invoke(path: &Path, value: &Value, endpoint: &str, key: &str) -> std::process
 }
 
 fn server(replies: Vec<String>, stall: bool) -> (String, thread::JoinHandle<Vec<Value>>) {
+    server_with_delay(replies, stall, Duration::ZERO)
+}
+
+fn server_with_delay(
+    replies: Vec<String>,
+    stall: bool,
+    delay: Duration,
+) -> (String, thread::JoinHandle<Vec<Value>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -104,6 +112,7 @@ fn server(replies: Vec<String>, stall: bool) -> (String, thread::JoinHandle<Vec<
                 thread::sleep(Duration::from_secs(3));
                 continue;
             }
+            thread::sleep(delay);
             let body = json!({"model":"local-fixture","choices":[{"message":{"content":reply}}]})
                 .to_string();
             write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
@@ -111,6 +120,37 @@ fn server(replies: Vec<String>, stall: bool) -> (String, thread::JoinHandle<Vec<
         bodies
     });
     (endpoint, handle)
+}
+
+#[test]
+fn delayed_success_refreshes_circle_and_cleans_both_pages() {
+    let path = directory();
+    let (endpoint, handle) = server_with_delay(replies(), false, Duration::from_millis(1100));
+    let mut value = fixture();
+    value["llm"]["timeout_seconds"] = 5.into();
+    let output = invoke(&path, &value, &endpoint, "local-test-secret-not-real");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(handle.join().unwrap().len(), 2);
+    let report: Value =
+        serde_json::from_slice(&std::fs::read(path.join("result/report.json")).unwrap()).unwrap();
+    let source_ticks = report["trace"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["page"] == 0 && event["action"] == "statuscircle")
+        .count();
+    assert!(source_ticks >= 4);
+    assert!(report["pages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|page| page["indicator_visible"] == false));
+    assert_eq!(report["pages"][0]["unchanged"], true);
+    std::fs::remove_dir_all(path).unwrap();
 }
 
 fn replies() -> Vec<String> {
@@ -242,6 +282,12 @@ fn live_timeout_is_bounded_and_retains_failure_evidence() {
         serde_json::from_slice(&std::fs::read(path.join("result/report.json")).unwrap()).unwrap();
     assert_eq!(report["model_calls"], 1);
     assert_eq!(report["active_page"], 0);
+    assert_eq!(report["pages"][0]["indicator_visible"], false);
+    assert!(report["trace"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["action"] == "statusclear"));
     assert!(String::from_utf8_lossy(&output.stderr)
         .to_lowercase()
         .contains("timeout"));
@@ -251,4 +297,35 @@ fn live_timeout_is_bounded_and_retains_failure_evidence() {
         .iter()
         .any(|e| e["detail"] == "live error"));
     std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn pending_http_ticks_on_caller_thread_and_callback_failure_stops_ticks() {
+    use remarkable_reader_buddy::{LLMEngine, OpenAI};
+    let (endpoint, handle) = server(vec!["NONE".into()], true);
+    let mut model = OpenAI::new(
+        "local-fixture".into(),
+        "local-test-secret-not-real".into(),
+        Some(endpoint),
+    )
+    .with_timeout(Duration::from_millis(1200));
+    model.add_text_content("bounded progress test");
+    let caller = thread::current().id();
+    let mut ticks = 0;
+    let start = Instant::now();
+    let result = model.execute_with_progress(&mut || {
+        assert_eq!(thread::current().id(), caller);
+        ticks += 1;
+        if ticks == 2 {
+            anyhow::bail!("progress fixture failed");
+        }
+        Ok(())
+    });
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("progress fixture failed"));
+    assert_eq!(ticks, 2);
+    assert!(start.elapsed() < Duration::from_secs(3));
+    assert_eq!(handle.join().unwrap().len(), 1);
 }

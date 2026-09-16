@@ -14,13 +14,13 @@
       "body": 1,
       "capture": 5,
       "text": 2,
-      "line": 2,
+      "line": 0,
       "previous": 0,
       "next": 1
     },
     "x_count": {
       "0": 0,
-      "1": 1
+      "1": 0
     },
     "errors": [],
     "model_calls": 2

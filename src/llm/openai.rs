@@ -19,7 +19,10 @@ impl OpenAI {
         let base_url = base_url.unwrap_or_else(|| "https://api.openai.com".to_string());
 
         Self {
-            agent: ureq::Agent::new_with_defaults(),
+            agent: ureq::Agent::config_builder()
+                .timeout_global(Some(std::time::Duration::from_secs(90)))
+                .build()
+                .into(),
             model,
             base_url,
             api_key,
@@ -109,6 +112,36 @@ impl LLMEngine for OpenAI {
             .read_to_string()
             .context("Read model response")?;
         parse_response(&body_text)
+    }
+
+    fn execute_with_progress(
+        &mut self,
+        progress: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<String> {
+        progress()?;
+        std::thread::scope(|scope| {
+            let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+            let worker = scope.spawn(move || {
+                let _ = sender.send(self.execute());
+            });
+            let result = loop {
+                match receiver.recv_timeout(std::time::Duration::from_millis(750)) {
+                    Ok(result) => break result,
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        break Err(anyhow::anyhow!("Model worker disconnected"));
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        if let Err(error) = progress() {
+                            break Err(error);
+                        }
+                    }
+                }
+            };
+            worker
+                .join()
+                .map_err(|_| anyhow::anyhow!("Model worker panicked"))?;
+            result
+        })
     }
 }
 

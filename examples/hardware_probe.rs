@@ -125,6 +125,27 @@ fn main() -> Result<()> {
             touch.touch_stop()?;
         }
         Some("erase") => Pen::new(false).erase_rectangle((240, 390), (510, 510))?,
+        Some("indicator-smoke") => {
+            let mut workflow =
+                remarkable_reader_buddy::Workflow::new(false, TriggerCorner::LowerLeft, false)?;
+            std::fs::write(
+                "/tmp/reader-buddy-status-before.png",
+                workflow.capture_page_data()?,
+            )?;
+            let result = (|| -> Result<()> {
+                workflow.tick_indicator()?;
+                sleep(Duration::from_millis(800));
+                workflow.tick_indicator()?;
+                sleep(Duration::from_millis(800));
+                let mut active = Screenshot::new()?;
+                active.take_screenshot()?;
+                active.save_image("/tmp/reader-buddy-status-active.png")?;
+                Ok(())
+            })();
+            let cleanup = workflow.clear_indicator();
+            result?;
+            cleanup?;
+        }
         Some("return-check") => {
             let mut workflow =
                 remarkable_reader_buddy::Workflow::new(false, TriggerCorner::LowerLeft, false)?;

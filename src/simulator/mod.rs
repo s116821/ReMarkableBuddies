@@ -39,6 +39,12 @@ impl<M: LLMEngine> LLMEngine for LiveModel<M> {
         self.inner.clear_content();
     }
     fn execute(&mut self) -> Result<String> {
+        self.execute_with_progress(&mut || Ok(()))
+    }
+    fn execute_with_progress(
+        &mut self,
+        progress: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<String> {
         {
             let mut state = self.state.borrow_mut();
             if state.model_calls >= self.max_calls {
@@ -48,7 +54,7 @@ impl<M: LLMEngine> LLMEngine for LiveModel<M> {
             state.model_calls += 1;
             state.event("model_request", "live provider");
         }
-        let result = self.inner.execute();
+        let result = self.inner.execute_with_progress(progress);
         self.state.borrow_mut().event(
             "model_response",
             if result.is_ok() {
@@ -106,6 +112,7 @@ pub struct PageResult {
     pub index: usize,
     pub text: String,
     pub x_count: usize,
+    pub indicator_visible: bool,
     pub unchanged: bool,
     pub png: String,
 }
@@ -190,11 +197,15 @@ fn execute_with_model<M: LLMEngine>(
             index,
             text: page.text.clone(),
             x_count: page.x_count(),
+            indicator_visible: page.indicator_visible,
             unchanged: images[index] == state.initial[index],
             png: format!("page-{index}.png"),
         })
         .collect();
     let mut failures = Vec::new();
+    if errors.is_empty() && pages.iter().any(|page| page.indicator_visible) {
+        failures.push("Successful iteration left a temporary circle".into());
+    }
     if let Some(expected) = scenario.expect.active_page {
         if expected != state.active {
             failures.push(format!(
