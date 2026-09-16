@@ -1,3 +1,4 @@
+pub mod indicator;
 mod navigation;
 pub mod orchestrator;
 pub mod symbol_pool;
@@ -44,6 +45,9 @@ pub struct Workflow {
     frame: Frame,
     debug_dump: bool,
     iteration_count: u32,
+    indicator_eligible: bool,
+    indicator_owned: bool,
+    indicator_cleanup_failed: bool,
 }
 
 impl Workflow {
@@ -64,11 +68,65 @@ impl Workflow {
             frame: Frame::default(),
             debug_dump,
             iteration_count: 0,
+            indicator_eligible: false,
+            indicator_owned: false,
+            indicator_cleanup_failed: false,
         }
     }
 
     pub fn delay(&mut self, duration: std::time::Duration) {
         self.device.delay(duration);
+    }
+
+    pub fn tick_indicator(&mut self) -> Result<()> {
+        if self.indicator_cleanup_failed {
+            anyhow::bail!("Status cleanup failed; further activity is stopped");
+        }
+        if self.indicator_eligible {
+            // Even a failed draw may have left a partial native stroke.
+            self.indicator_owned = true;
+            if let Err(error) = self.device.status_circle() {
+                self.clear_indicator()?;
+                return Err(error);
+            }
+        } else {
+            self.device.status_suppressed();
+        }
+        Ok(())
+    }
+
+    pub fn clear_indicator(&mut self) -> Result<()> {
+        if self.indicator_owned {
+            if let Err(error) = self.device.status_clear() {
+                self.indicator_cleanup_failed = true;
+                return Err(error.context("Clear owned activity circle"));
+            }
+            self.indicator_owned = false;
+        }
+        Ok(())
+    }
+
+    pub fn cleanup_failed(&self) -> bool {
+        self.indicator_cleanup_failed
+    }
+
+    pub fn begin_iteration(&mut self) -> Result<()> {
+        anyhow::ensure!(
+            !self.indicator_cleanup_failed,
+            "Status cleanup failed; restart before another iteration"
+        );
+        self.clear_indicator()?;
+        self.indicator_eligible = false;
+        Ok(())
+    }
+
+    fn capture_clean(&mut self) -> Result<()> {
+        self.clear_indicator()?;
+        self.indicator_eligible = false;
+        self.frame = self.device.capture()?;
+        self.indicator_eligible =
+            image::load_from_memory(&self.frame.png).is_ok_and(|image| indicator::eligible(&image));
+        Ok(())
     }
 
     pub fn detail_images_base64(&self) -> Result<Vec<String>> {
@@ -90,14 +148,14 @@ impl Workflow {
     /// Take a screenshot and return the base64-encoded image
     pub fn capture_screenshot(&mut self) -> Result<String> {
         info!("Capturing screenshot...");
-        self.frame = self.device.capture()?;
+        self.capture_clean()?;
         Ok(self.frame.base64())
     }
 
     /// Take a screenshot and return both base64 and raw PNG data
     pub fn capture_screenshot_with_data(&mut self) -> Result<(String, Vec<u8>)> {
         info!("Capturing screenshot...");
-        self.frame = self.device.capture()?;
+        self.capture_clean()?;
         let base64 = self.frame.base64();
         let png_data = self.frame.png.clone();
 
@@ -287,6 +345,9 @@ impl Workflow {
     /// Render text on the screen using the keyboard
     /// Note: The caller is responsible for including any desired newlines in the text
     pub fn render_text(&mut self, text: &str) -> Result<()> {
+        self.clear_indicator()?;
+        // Typing can change the status region, including on a partial failure.
+        self.indicator_eligible = false;
         info!("Rendering text: {}", text);
         self.device.render_text(text)?;
         Ok(())
@@ -294,12 +355,15 @@ impl Workflow {
 
     /// Switch keyboard to body text mode (should be called once before rendering)
     pub fn set_body_text_mode(&mut self) -> Result<()> {
+        self.clear_indicator()?;
         self.device.body_mode()?;
         Ok(())
     }
 
     /// Navigate to the next page (swipe left)
     pub fn navigate_to_next_page(&mut self) -> Result<()> {
+        self.clear_indicator()?;
+        self.indicator_eligible = false;
         self.device
             .navigate(xochitl_integration::NavigationDirection::Next)?;
         Ok(())
@@ -307,25 +371,30 @@ impl Workflow {
 
     /// Navigate back to the previous page (swipe right)
     pub fn navigate_to_previous_page(&mut self) -> Result<()> {
+        self.clear_indicator()?;
+        self.indicator_eligible = false;
         self.device
             .navigate(xochitl_integration::NavigationDirection::Previous)?;
         Ok(())
     }
 
-    /// Draw a failure X in the bottom-right corner (~75x75 px)
+    /// Draw a guarded failure X in the same 50x50 status area.
     /// Used to indicate that no valid answer page was found
     pub fn draw_failure_x(&mut self) -> Result<()> {
         info!("Drawing failure X in bottom-right corner");
 
-        // Position: bottom-right corner with some margin
-        // Screen is 768x1024, X should be ~75x75
-        const X_SIZE: i32 = 75;
-        const MARGIN: i32 = 20;
-
-        let x_start = 768 - MARGIN - X_SIZE;
-        let y_start = 1024 - MARGIN - X_SIZE;
-        let x_end = 768 - MARGIN;
-        let y_end = 1024 - MARGIN;
+        self.clear_indicator()?;
+        if !self.indicator_eligible || self.indicator_cleanup_failed {
+            self.device.status_suppressed();
+            return Ok(());
+        }
+        self.indicator_eligible = false;
+        let (x_start, y_start, x_end, y_end) = (
+            indicator::LEFT + indicator::X_INSET,
+            indicator::TOP + indicator::X_INSET,
+            indicator::RIGHT - indicator::X_INSET,
+            indicator::BOTTOM - indicator::X_INSET,
+        );
 
         // Draw two diagonal lines to form an X (using screen coordinates)
         // Line 1: top-left to bottom-right
@@ -349,7 +418,7 @@ impl Workflow {
     /// Returns the page type: Blank, ExistingQA, or Invalid
     pub fn is_valid_answer_page(&mut self) -> Result<AnswerPageType> {
         self.delay(std::time::Duration::from_millis(500));
-        self.frame = self.device.capture()?;
+        self.capture_clean()?;
         let img = match image::load_from_memory(&self.frame.png) {
             Ok(img) => img,
             Err(error) => {
@@ -368,7 +437,7 @@ impl Workflow {
     }
 
     pub fn capture_page_data(&mut self) -> Result<Vec<u8>> {
-        self.frame = self.device.capture()?;
+        self.capture_clean()?;
         Ok(self.frame.png.clone())
     }
 

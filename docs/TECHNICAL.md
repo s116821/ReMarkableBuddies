@@ -311,3 +311,13 @@ Native highlighter colors exist in the framebuffer even on the monochrome tablet
 using only blue darkened yellow highlights. The conversion preserves all neutral
 gray values and improves printed-text contrast under yellow marks. Legacy RM2,
 Paper Pro and framebuffer allocation discovery are unchanged.
+
+## REM-8 progress ownership
+
+`workflow::indicator` owns geometry/clearance eligibility; `Workflow` tracks eligibility and owned temporary native marks. Capture, navigation and keyboard wrappers clear owned marks first; typing/navigation invalidate stale eligibility. A cleanup error poisons the orchestrator, which cannot resume on an unknown later page. Status drawing failure attempts immediate cleanup before the HTTP wait finishes.
+
+`LLMEngine::execute_with_progress` has a deterministic default; OpenAI runs one bounded HTTP call in a scoped worker and waits up to 750 ms for its result between callbacks on the caller thread (drawing time adds to the visible refresh interval). The worker never owns device input. Callback errors stop ticks, the worker is joined, and its answer is discarded. RealDevice retraces the owned circle with the rubber tool and adds 100 ms settling after native erasure; native visual checks remain necessary because event injection does not itself prove xochitl has removed the strokes. Simulator models a separate temporary circle and records lifecycle operations/faults.
+
+The 50x50 box is (698,934)..(747,983), with 12 pixels of blank clearance. The circle centerline has radius 14 around (722,958); X centerline endpoints are inset 10 pixels. Native highlighter strokes extend beyond these paths, which is why endpoint coordinates alone are not a bounds check. Final RM2 highlighter smoke measured active bounds 700,936..743,979 and zero ROI differences after erasing; neighboring Fineliner ink survived. Tick drawing took 476-491ms and clearing 576ms, so the 750 ms wait is added to drawing time rather than defining the whole refresh cadence.
+
+The independent transcription pass still treats provider errors as conservative declines, but propagates device progress/cleanup errors. Answer-page classification uses the shared clean-capture path, refreshing status eligibility from the settled classification frame rather than the earlier navigation screenshot.

@@ -99,6 +99,8 @@ pub enum Operation {
     Line,
     Trigger,
     HeaderSave,
+    StatusCircle,
+    StatusClear,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]

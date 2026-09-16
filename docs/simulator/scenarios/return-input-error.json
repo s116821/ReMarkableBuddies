@@ -4,14 +4,14 @@
   "expect": {
     "errors": [],
     "x_count": {
-      "1": 1,
+      "1": 0,
       "0": 0
     },
     "unchanged_pages": [
       0
     ],
     "operations": {
-      "line": 2,
+      "line": 0,
       "previous": 1,
       "text": 0,
       "next": 1,

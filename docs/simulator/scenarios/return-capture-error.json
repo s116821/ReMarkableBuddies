@@ -11,7 +11,7 @@
     },
     "active_page": 0,
     "operations": {
-      "line": 2,
+      "line": 0,
       "previous": 1,
       "capture": 6,
       "next": 1,
@@ -19,7 +19,7 @@
     },
     "x_count": {
       "1": 0,
-      "0": 1
+      "0": 0
     },
     "errors": [],
     "model_calls": 2

@@ -36,6 +36,9 @@ pub trait DeviceBackend {
     fn erase(&mut self, from: (i32, i32), to: (i32, i32)) -> Result<()>;
     fn bitmap(&mut self, bitmap: &[Vec<bool>]) -> Result<()>;
     fn progress(&mut self, message: Option<&str>) -> Result<()>;
+    fn status_circle(&mut self) -> Result<()>;
+    fn status_clear(&mut self) -> Result<()>;
+    fn status_suppressed(&mut self) {}
     fn load_header(&self) -> Option<DynamicImage>;
     fn save_header(&mut self, image: &DynamicImage) -> Result<()>;
     fn delay(&mut self, duration: Duration);
@@ -104,6 +107,21 @@ impl DeviceBackend for RealDevice {
             Some(text) => self.keyboard.progress(text),
             None => self.keyboard.progress_end(),
         }
+    }
+    fn status_circle(&mut self) -> Result<()> {
+        log::debug!("Refreshing activity circle");
+        self.pen
+            .draw_path_screen(&crate::workflow::indicator::circle_points())
+    }
+    fn status_clear(&mut self) -> Result<()> {
+        log::debug!("Clearing owned activity circle");
+        self.pen
+            .erase_path_screen(&crate::workflow::indicator::circle_points())?;
+        std::thread::sleep(Duration::from_millis(100));
+        Ok(())
+    }
+    fn status_suppressed(&mut self) {
+        log::debug!("Status mark suppressed: occupied or unknown corner");
     }
     fn load_header(&self) -> Option<DynamicImage> {
         std::fs::read(HEADER_PATH)

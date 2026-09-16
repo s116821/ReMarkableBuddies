@@ -57,6 +57,52 @@ impl Pen {
         self.draw_line(self.virtual_to_input(p1), self.virtual_to_input(p2))
     }
 
+    pub fn draw_path_screen(&mut self, points: &[(i32, i32)]) -> Result<()> {
+        if let Some(&first) = points.first() {
+            let result = (|| -> Result<()> {
+                self.pen_up()?;
+                self.pen_down_at(self.virtual_to_input(first))?;
+                self.follow_path_screen(points)
+            })();
+            let release = self.pen_up();
+            result?;
+            release?;
+        }
+        Ok(())
+    }
+
+    pub fn erase_path_screen(&mut self, points: &[(i32, i32)]) -> Result<()> {
+        if let Some(&first) = points.first() {
+            let result = (|| -> Result<()> {
+                self.eraser_up()?;
+                self.goto_xy_virtual(first)?;
+                self.eraser_down()?;
+                sleep(Duration::from_millis(10));
+                self.follow_path_screen(points)
+            })();
+            let release = self.eraser_up();
+            result?;
+            release?;
+        }
+        Ok(())
+    }
+
+    fn follow_path_screen(&mut self, points: &[(i32, i32)]) -> Result<()> {
+        for pair in points.windows(2) {
+            let previous = self.virtual_to_input(pair[0]);
+            let next = self.virtual_to_input(pair[1]);
+            let length = ((next.0 - previous.0) as f64).hypot((next.1 - previous.1) as f64);
+            let steps = (length / 5.0).ceil().max(1.0) as i32;
+            for step in 1..=steps {
+                self.goto_xy((
+                    previous.0 + (next.0 - previous.0) * step / steps,
+                    previous.1 + (next.1 - previous.1) * step / steps,
+                ))?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn draw_line(&mut self, (x1, y1): (i32, i32), (x2, y2): (i32, i32)) -> Result<()> {
         let length = ((x2 as f32 - x1 as f32).powf(2.0) + (y2 as f32 - y1 as f32).powf(2.0)).sqrt();
         // 5.0 is the maximum distance between points
@@ -214,15 +260,18 @@ impl Pen {
         let (x2, y2) = bottom_right;
 
         // Erase by filling the rectangle with eraser strokes
-        for y in y1..=y2 {
-            self.eraser_up()?;
-            self.goto_xy_virtual((x1, y))?;
-            self.eraser_down()?;
-            self.goto_xy_virtual((x2, y))?;
-        }
-        self.eraser_up()?;
-
-        Ok(())
+        let result = (|| -> Result<()> {
+            for y in y1..=y2 {
+                self.eraser_up()?;
+                self.goto_xy_virtual((x1, y))?;
+                self.eraser_down()?;
+                self.goto_xy_virtual((x2, y))?;
+            }
+            Ok(())
+        })();
+        let release = self.eraser_up();
+        result?;
+        release
     }
 
     pub fn goto_xy_virtual(&mut self, point: (i32, i32)) -> Result<()> {
@@ -289,6 +338,14 @@ impl Pen {
     }
 
     pub fn draw_line_screen(&mut self, _p1: (i32, i32), _p2: (i32, i32)) -> Result<()> {
+        Ok(())
+    }
+
+    pub fn draw_path_screen(&mut self, _points: &[(i32, i32)]) -> Result<()> {
+        Ok(())
+    }
+
+    pub fn erase_path_screen(&mut self, _points: &[(i32, i32)]) -> Result<()> {
         Ok(())
     }
 

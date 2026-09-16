@@ -80,6 +80,19 @@ impl<M: LLMEngine> Orchestrator<M> {
     /// Run one complete iteration of the reader buddy workflow
     /// Processes one outlined/highlighted concept and question per trigger.
     pub fn run_iteration(&mut self) -> Result<()> {
+        self.workflow.begin_iteration()?;
+        let result = self.run_iteration_inner();
+        let cleanup = self.workflow.clear_indicator();
+        if let Err(error) = cleanup {
+            if let Err(original) = &result {
+                error!("Iteration failed before cleanup: {original}");
+            }
+            return Err(error);
+        }
+        result
+    }
+
+    fn run_iteration_inner(&mut self) -> Result<()> {
         info!("=== Starting Reader Buddy Iteration ===");
 
         // Step 1: Wait for trigger
@@ -118,6 +131,9 @@ impl<M: LLMEngine> Orchestrator<M> {
 
                 if let Err(e) = self.render_answer(&result) {
                     error!("Error rendering answer: {}", e);
+                    if self.workflow.cleanup_failed() {
+                        return Err(e);
+                    }
                     // On error, draw failure X (no text output)
                     self.workflow.draw_failure_x()?;
                 }
@@ -149,7 +165,9 @@ impl<M: LLMEngine> Orchestrator<M> {
             self.llm.add_image_content(&detail);
         }
 
-        let response = self.llm.execute()?;
+        let response = self
+            .llm
+            .execute_with_progress(&mut || self.workflow.tick_indicator())?;
         info!("LLM Response: {}", response);
         Ok(Self::parse_analysis_response(
             &response,
@@ -220,8 +238,16 @@ impl<M: LLMEngine> Orchestrator<M> {
         for detail in self.workflow.detail_images_base64()? {
             self.llm.add_image_content(&detail);
         }
-        let reading = match self.llm.execute() {
+        let mut progress_failed = false;
+        let reading = match self.llm.execute_with_progress(&mut || {
+            let result = self.workflow.tick_indicator();
+            progress_failed |= result.is_err();
+            result
+        }) {
             Ok(reading) => reading,
+            Err(err) if progress_failed => {
+                return Err(err.context("Question verification progress failed"));
+            }
             Err(err) => {
                 log::warn!("Question verification unavailable: {}", err);
                 return Ok(false);
@@ -331,6 +357,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                 return Ok(());
             }
             AnswerPageType::Blank => {
+                self.workflow.tick_indicator()?;
                 // Step 5a: Blank page - render header first, then Q&A
                 info!("Blank page found, rendering header and Q&A");
 
@@ -358,6 +385,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                 }
             }
             AnswerPageType::ExistingQA => {
+                self.workflow.tick_indicator()?;
                 // Step 5b: Existing QA page - just append Q&A content (no header)
                 info!("Existing QA page found, appending Q&A (no header needed)");
 
@@ -384,6 +412,9 @@ impl<M: LLMEngine> Orchestrator<M> {
                 Ok(_) => info!("Iteration completed successfully"),
                 Err(e) => {
                     error!("Error in iteration: {}", e);
+                    if self.workflow.cleanup_failed() {
+                        return Err(e);
+                    }
                     // Try to show error to user
                     let _ = self.workflow.set_body_text_mode();
                     let _ = self.workflow.render_text(&format!("Error: {}\n", e));

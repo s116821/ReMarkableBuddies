@@ -39,6 +39,12 @@ impl<M: LLMEngine> LLMEngine for LiveModel<M> {
         self.inner.clear_content();
     }
     fn execute(&mut self) -> Result<String> {
+        self.execute_with_progress(&mut || Ok(()))
+    }
+    fn execute_with_progress(
+        &mut self,
+        progress: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<String> {
         {
             let mut state = self.state.borrow_mut();
             if state.model_calls >= self.max_calls {
@@ -48,7 +54,7 @@ impl<M: LLMEngine> LLMEngine for LiveModel<M> {
             state.model_calls += 1;
             state.event("model_request", "live provider");
         }
-        let result = self.inner.execute();
+        let result = self.inner.execute_with_progress(progress);
         self.state.borrow_mut().event(
             "model_response",
             if result.is_ok() {
@@ -106,6 +112,7 @@ pub struct PageResult {
     pub index: usize,
     pub text: String,
     pub x_count: usize,
+    pub indicator_visible: bool,
     pub unchanged: bool,
     pub png: String,
 }
@@ -190,11 +197,15 @@ fn execute_with_model<M: LLMEngine>(
             index,
             text: page.text.clone(),
             x_count: page.x_count(),
+            indicator_visible: page.indicator_visible,
             unchanged: images[index] == state.initial[index],
             png: format!("page-{index}.png"),
         })
         .collect();
     let mut failures = Vec::new();
+    if errors.is_empty() && pages.iter().any(|page| page.indicator_visible) {
+        failures.push("Successful iteration left a temporary circle".into());
+    }
     if let Some(expected) = scenario.expect.active_page {
         if expected != state.active {
             failures.push(format!(
@@ -303,4 +314,67 @@ pub fn run_file(path: &Path) -> Result<Report> {
         run.report.assertion_failures.join("; ")
     );
     Ok(run.report)
+}
+
+#[cfg(test)]
+mod indicator_capture_tests {
+    use super::*;
+    use crate::workflow::{indicator, AnswerPageType};
+    use image::Rgba;
+
+    fn blank_successor() -> (Shared, Workflow) {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/simulator/scenarios");
+        let scenario: Scenario =
+            serde_json::from_slice(&std::fs::read(root.join("blank-answer.json")).unwrap())
+                .unwrap();
+        let state = Rc::new(RefCell::new(State::new(&scenario, &root).unwrap()));
+        state.borrow_mut().active = 1;
+        let workflow = Workflow::with_device(Box::new(SimDevice(state.clone())), false);
+        (state, workflow)
+    }
+
+    #[test]
+    fn classification_clears_owned_circle_before_capture() {
+        let (state, mut workflow) = blank_successor();
+        workflow.capture_page_data().unwrap();
+        workflow.tick_indicator().unwrap();
+        assert!(state.borrow().pages[1].indicator_visible);
+        assert_eq!(
+            workflow.is_valid_answer_page().unwrap(),
+            AnswerPageType::Blank
+        );
+        let state = state.borrow();
+        assert!(!state.pages[1].indicator_visible);
+        assert_eq!(state.counts.get(&Operation::StatusClear), Some(&1));
+    }
+
+    #[test]
+    fn classification_refreshes_eligibility_from_settled_frame() {
+        let (state, mut workflow) = blank_successor();
+        workflow.capture_page_data().unwrap();
+        state.borrow_mut().pages[1].background.put_pixel(
+            indicator::LEFT as u32,
+            indicator::TOP as u32,
+            Rgba([0, 0, 0, 255]),
+        );
+        assert_eq!(
+            workflow.is_valid_answer_page().unwrap(),
+            AnswerPageType::Blank
+        );
+        workflow.tick_indicator().unwrap();
+        let state = state.borrow();
+        assert!(!state.pages[1].indicator_visible);
+        assert!(!state.counts.contains_key(&Operation::StatusCircle));
+        assert!(!state.counts.contains_key(&Operation::StatusClear));
+        assert!(state
+            .events
+            .iter()
+            .any(|event| event.action == "status_suppressed"));
+        assert_eq!(
+            state.pages[1]
+                .background
+                .get_pixel(indicator::LEFT as u32, indicator::TOP as u32,),
+            &Rgba([0, 0, 0, 255])
+        );
+    }
 }

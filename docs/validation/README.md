@@ -35,3 +35,15 @@ On a page with a successor, expect `Returned` and the X on the captured source.
 At the document end, expect `AlreadySource`, no reverse swipe and the X on the last
 page. Inspect before/after images. Failed swipe and capture cases are exercised with
 scripted navigation doubles in unit tests; do not report those as physical failures.
+
+## Activity indicator check
+
+With exclusive authorized dev-tablet access and the normal service stopped,
+`hardware_probe indicator-smoke` captures the clean page, draws two timed circle
+ticks, captures the active mark, clears it and captures the result. It writes
+`/tmp/reader-buddy-status-before.png`, `/tmp/reader-buddy-status-active.png` and
+`/tmp/reader-buddy-probe.png`. Retrieve and inspect all three; compare the status
+region and neighboring native ink. A selected tool can widen native strokes beyond
+path endpoints. Exercise Fineliner and Highlighter; an occupied clearance region
+should suppress drawing without erasing it. This offline probe does not validate
+model latency, answer placement or every tool style.
