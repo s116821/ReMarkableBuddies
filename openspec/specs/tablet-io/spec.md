@@ -19,7 +19,12 @@ RM2 SHALL select four-byte BGRA for IMG_VERSION major/minor at least 3.24 and th
 
 #### Scenario: Modern RM2 allocation
 - **WHEN** modern RM2 capture searches anonymous writable mappings
-- **THEN** it requires exactly one matching 32-bit mmap allocation header for 1404 by 1872 by four bytes and reads pixels after the eight-byte header.
+- **THEN** it searches page-aligned addresses where the complete allocation fits, requires exactly one matching 32-bit mmap allocation header for 1404 by 1872 by four bytes, and reads pixels after the eight-byte header.
+
+#### Scenario: Merged memory mappings after restart
+- **WHEN** a valid framebuffer allocation is inside a merged anonymous mapping rather than at its start
+- **THEN** discovery finds its validated header without a fixed address or historical-offset fallback.
+- **AND** missing, malformed, truncated and multiple matching allocations are not accepted as a unique framebuffer.
 
 #### Scenario: Native detail and overview
 - **WHEN** modern RM2 pixels are encoded

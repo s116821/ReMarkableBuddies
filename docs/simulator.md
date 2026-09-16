@@ -81,6 +81,15 @@ The real adapter retains existing Screenshot/Touch/Pen/Keyboard operations and
 normal Linux cache behavior. Targeted hardware checks remain required for those
 areas, especially after changing the shared boundary.
 
+The REM-22 hardware check exposed a restart-dependent allocation case: Linux can
+merge adjacent anonymous mappings, placing the BGRA allocation header inside a VMA.
+Real capture now checks page-aligned headers whose entire expected allocation fits
+within eligible writable anonymous mappings. It still requires exactly one valid
+32-bit mmap header and refuses missing or ambiguous matches. No live address or
+historical fixed-offset fallback is used. Pure tests cover bounds, permissions,
+alignment, merged maps, invalid headers and ambiguity; retrieved screenshots after
+fresh UI restarts are the separate evidence for actual image correctness.
+
 Screenshot identity remains heuristic: `stale-forward` intentionally shows how a
 stale source capture can leave the X on the successor. The simulator records this
 limitation; it does not pretend page identity became native or reliable.

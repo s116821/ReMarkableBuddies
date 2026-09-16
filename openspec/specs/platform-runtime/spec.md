@@ -18,7 +18,7 @@ The executable SHALL load an optional .env file before argument parsing, default
 - **THEN** initialization fails before workflow/device initialization.
 
 ### Requirement: Existing diagnostic flags
-The CLI SHALL expose only --screenshot-only FILE, --model/-m, --base-url, --no-trigger, --once and --trigger-corner plus help/version. Removed --input-png, --save-screenshot, --no-draw, --api-key, --log-level and --debug-dump switches SHALL be rejected. Source: src/main.rs Args/main.
+The CLI SHALL expose only --simulate SCENARIO, --screenshot-only FILE, --model/-m, --base-url, --no-trigger, --once and --trigger-corner plus help/version. Removed --input-png, --save-screenshot, --no-draw, --api-key, --log-level and --debug-dump switches SHALL be rejected. Simulation SHALL be mutually exclusive with capture-only and normal workflow overrides. Source: src/main.rs Args/main.
 
 #### Scenario: Capture-only execution
 - **WHEN** --screenshot-only FILE is supplied
@@ -31,6 +31,10 @@ The CLI SHALL expose only --screenshot-only FILE, --model/-m, --base-url, --no-t
 #### Scenario: Trigger bypass
 - **WHEN** --no-trigger and --once are supplied
 - **THEN** the single iteration starts capture immediately without waiting for a gesture.
+
+#### Scenario: Local scenario
+- **WHEN** --simulate SCENARIO is supplied
+- **THEN** the structured bounded scenario executes without initializing real devices or requiring an API key.
 
 ### Requirement: Logging and service lifecycle
 The runtime SHALL use env_logger with millisecond timestamps, RUST_LOG filtering and fallback info. The supplied service SHALL run /opt/bin/reader-buddy from /home/root, require the configured environment file, write stdout/stderr to the journal and restart on failure after five seconds. Source: src/main.rs; deploy/reader-buddy.service.
@@ -45,7 +49,7 @@ The runtime SHALL use env_logger with millisecond timestamps, RUST_LOG filtering
 - **AND** explicit request diagnostics do not include API authorization headers.
 
 ### Requirement: Implemented product boundary
-The normal application SHALL process independent Reader Buddy iterations only. It SHALL NOT implement Writer Buddy, follow-up conversation history, document retrieval, external search tools, persistent subject memory, handwriting personalization, cloud sync, native answer-page creation, or a maintained simulator in this baseline. Source: src/main.rs; src/workflow/orchestrator.rs; src/llm/openai.rs.
+The application SHALL process independent Reader Buddy iterations on real devices or the maintained simulator. It SHALL NOT yet implement Writer Buddy, follow-up conversation history, document retrieval, external search tools, persistent subject memory, handwriting personalization, cloud sync or native answer-page creation. Source: src/main.rs; src/workflow/orchestrator.rs; src/llm/openai.rs; src/simulator.
 
 #### Scenario: New question after previous answer
 - **WHEN** another iteration starts
