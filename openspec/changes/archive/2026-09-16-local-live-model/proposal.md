@@ -15,6 +15,7 @@ REM-22 established deterministic local Reader execution, but the laptop has no c
 
 ### Modified Capabilities
 - `local-simulator`: share execution/reporting between scripted and live model adapters and distinguish evidence fidelity.
+- `platform-runtime`: clarify credential requirements for explicit live scenarios.
 
 ## Impact
 

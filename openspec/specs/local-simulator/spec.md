@@ -7,7 +7,7 @@ Define maintained local Reader execution, deterministic scenarios and explicit h
 ## Requirements
 
 ### Requirement: Shared workflow execution
-The simulator SHALL implement the same device-facing interface as the real tablet and run the production Reader orchestrator, model content/parsing/verification, image classification and recovery policies. Deterministic scenarios SHALL use scripted LLMEngine replies with no credentials or network calls. Source: src/device/backend.rs; src/simulator; src/workflow/orchestrator.rs.
+The simulator SHALL implement the same device-facing interface as the real tablet and run the production Reader orchestrator, model content/parsing/verification, image classification and recovery policies. Deterministic scenarios SHALL use scripted LLMEngine replies with no credentials or network calls. Explicit live scenarios SHALL use the configured provider through the same orchestration and result path. Source: src/device/backend.rs; src/simulator; src/workflow/orchestrator.rs.
 
 #### Scenario: Accepted question
 - **WHEN** proposal and independent transcription agree and the successor is blank
@@ -44,7 +44,7 @@ The simulator SHALL retain ordered pages and page-local text/marks, model end bo
 - **THEN** the workflow stays on the source and draws an X without reverse navigation or insertion.
 
 ### Requirement: Inspectable results and meaningful assertions
-Every executed scenario SHALL export page PNGs and a JSON report of exact rendered text, marks, active page, model calls, errors and ordered timestamped operations. Expected-result mismatches SHALL fail the command after output is saved. Source: src/simulator/mod.rs; tests/simulator.rs.
+Every executed scenario SHALL export page PNGs and a JSON report of exact rendered text, marks, active page, model calls, errors and ordered timestamped operations. Expected-result mismatches SHALL fail the command after output is saved. Optional text_contains assertions SHALL check stable substrings while exact text assertions remain supported. Reports SHALL label scripted-offline or live-provider execution. Source: src/simulator/mod.rs; tests/simulator.rs.
 
 #### Scenario: Failed assertion
 - **WHEN** expected text, page, operation counts or error behavior differs

@@ -34,7 +34,7 @@ The CLI SHALL expose only --simulate SCENARIO, --screenshot-only FILE, --model/-
 
 #### Scenario: Local scenario
 - **WHEN** --simulate SCENARIO is supplied
-- **THEN** the structured bounded scenario executes without initializing real devices or requiring an API key.
+- **THEN** the structured bounded scenario executes without initializing real devices; scripted mode requires no API key, while explicit live mode requires provider credentials.
 
 ### Requirement: Logging and service lifecycle
 The runtime SHALL use env_logger with millisecond timestamps, RUST_LOG filtering and fallback info. The supplied service SHALL run /opt/bin/reader-buddy from /home/root, require the configured environment file, write stdout/stderr to the journal and restart on failure after five seconds. Source: src/main.rs; deploy/reader-buddy.service.

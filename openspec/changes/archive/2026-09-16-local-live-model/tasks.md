@@ -6,11 +6,9 @@
 
 ## 2. Verification and delivery
 
-- [ ] 2.1 Add meaningful offline checks for configuration, request bounds, timeout and provider delegation; pass existing regressions, formatting, strict lint and ARM builds.
+- [x] 2.1 Add meaningful offline checks for configuration, request bounds, timeout and provider delegation; pass existing regressions, formatting, strict lint and ARM builds.
 - [x] 2.2 Configure restricted ignored credentials on the authorized laptop without exposing or committing values.
 - [x] 2.3 Complete representative live-model local Reader acceptance and inspect PNG/JSON evidence.
-- [ ] 2.4 Verify requirements/design, synchronize canonical specifications and archive the completed change in this implementation PR.
+- [x] 2.4 Verify requirements/design, synchronize canonical specifications and archive the completed change in this implementation PR.
 
 Latest-head CI, final independent review and normal merge are post-archive delivery gates.
-
-
