@@ -419,6 +419,12 @@ If you see an X drawn in the bottom-right corner of your question page, it means
 
 **Solution**: Navigate to the page with your question, add a new blank page to the right using the reMarkable's page menu, then trigger Reader Buddy again.
 
+If an occupied successor is rejected, Reader Buddy checks whether the source is
+already visible before swiping back. It attempts at most one return swipe. A failed
+return draws the X on the current page without repeated swipes; navigate manually
+if the source was not restored. At the end of the document, an unchanged page gets
+the X without a reverse swipe.
+
 ### Answer not appearing on new page
 If the answer doesn't render and no X appears:
 - Enable debug logging with `RUST_LOG=remarkable_reader_buddy=debug`.

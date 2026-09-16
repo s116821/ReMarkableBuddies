@@ -22,3 +22,16 @@ Only the seven images embedded there remain tracked as a fallback for unavailabl
 GitHub attachment uploading. Their comment URLs use an immutable commit. One-off
 logs, superseded screenshots, and run reports belong in local evidence storage,
 not the source tree; reusable fixtures and diagnostic probes remain here.
+
+## Bounded return-navigation check
+
+With the normal service stopped and exclusive authorized dev-tablet access,
+`hardware_probe return-check` captures the current page, attempts one forward swipe,
+then invokes the same single-attempt recovery used by Reader Buddy. It draws the
+failure X and saves the resulting screenshot. This is an offline input/capture check;
+it does not make a model call or test answer classification.
+
+On a page with a successor, expect `Returned` and the X on the captured source.
+At the document end, expect `AlreadySource`, no reverse swipe and the X on the last
+page. Inspect before/after images. Failed swipe and capture cases are exercised with
+scripted navigation doubles in unit tests; do not report those as physical failures.

@@ -319,7 +319,7 @@ impl Orchestrator {
                 );
 
                 // Navigate back and verify we're on original
-                self.return_to_original_page(&original_img)?;
+                self.workflow.return_to_original_page(&original_img)?;
                 self.workflow.draw_failure_x()?;
                 return Ok(());
             }
@@ -366,44 +366,6 @@ impl Orchestrator {
         self.workflow.render_text(&formatted_output)?;
 
         info!("Q&A rendered successfully");
-        Ok(())
-    }
-
-    /// Navigate back to the original page and verify we arrived
-    fn return_to_original_page(&mut self, original_img: &image::DynamicImage) -> Result<()> {
-        const MAX_ATTEMPTS: u32 = 3;
-        const SAME_PAGE_THRESHOLD: f32 = 0.999;
-
-        info!(
-            "Attempting to return to original page (threshold: {:.1}%)",
-            SAME_PAGE_THRESHOLD * 100.0
-        );
-
-        for attempt in 1..=MAX_ATTEMPTS {
-            info!(
-                "Return attempt {}/{}: navigating to previous page...",
-                attempt, MAX_ATTEMPTS
-            );
-
-            self.workflow.navigate_to_previous_page()?;
-            std::thread::sleep(std::time::Duration::from_millis(800));
-
-            if self.workflow.verify_navigation_to(original_img)? {
-                info!("Confirmed back on original page");
-                return Ok(());
-            } else {
-                info!(
-                    "Return attempt {}/{}: source not confirmed, retrying",
-                    attempt, MAX_ATTEMPTS
-                );
-            }
-        }
-
-        // If we couldn't get back, log warning but continue
-        log::warn!(
-            "Could not confirm return to original page after {} attempts - proceeding anyway",
-            MAX_ATTEMPTS
-        );
         Ok(())
     }
 
