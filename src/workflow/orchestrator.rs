@@ -238,11 +238,16 @@ impl<M: LLMEngine> Orchestrator<M> {
         for detail in self.workflow.detail_images_base64()? {
             self.llm.add_image_content(&detail);
         }
-        let reading = match self
-            .llm
-            .execute_with_progress(&mut || self.workflow.tick_indicator())
-        {
+        let mut progress_failed = false;
+        let reading = match self.llm.execute_with_progress(&mut || {
+            let result = self.workflow.tick_indicator();
+            progress_failed |= result.is_err();
+            result
+        }) {
             Ok(reading) => reading,
+            Err(err) if progress_failed => {
+                return Err(err.context("Question verification progress failed"));
+            }
             Err(err) => {
                 log::warn!("Question verification unavailable: {}", err);
                 return Ok(false);

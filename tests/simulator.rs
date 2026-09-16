@@ -112,6 +112,40 @@ fn partial_circle_error_is_cleaned_without_a_model_request() {
 }
 
 #[test]
+fn verification_progress_errors_are_not_successful_question_declines() {
+    use remarkable_reader_buddy::simulator::scenario::{Effect, Fault};
+    for cleanup_fails in [false, true] {
+        let mut scenario = load("blank-answer");
+        scenario.faults.push(Fault {
+            operation: Operation::StatusCircle,
+            call: 2,
+            effect: Effect::Error,
+        });
+        if cleanup_fails {
+            scenario.faults.push(Fault {
+                operation: Operation::StatusClear,
+                call: 1,
+                effect: Effect::Error,
+            });
+        }
+        let run = execute(&scenario, &root()).unwrap();
+        assert_eq!(run.report.model_calls, 1);
+        assert_eq!(run.report.errors.len(), 1);
+        assert!(run.report.errors[0].contains("Question verification progress failed"));
+        assert!(!run
+            .report
+            .trace
+            .iter()
+            .any(|event| matches!(event.action.as_str(), "next" | "previous" | "text" | "line")));
+        assert!(run
+            .report
+            .pages
+            .iter()
+            .all(|page| page.unchanged && !page.indicator_visible));
+    }
+}
+
+#[test]
 fn persistent_cleanup_failure_never_erases_a_later_page() {
     use remarkable_reader_buddy::simulator::scenario::{Effect, Fault, Iteration};
     let mut scenario = load("blank-answer");

@@ -42,7 +42,7 @@ The parser SHALL require a first --- separator, an ANSWER: body prefix and nonem
 - **AND** X/width and outline bounds are not additional validation gates in this baseline.
 
 ### Requirement: Independent transcription agreement
-Before navigation or answer output, the system SHALL clear model content and request transcription from the same overview/detail images without the proposed question or answer. It SHALL require a nonempty TRANSCRIPTION: value that agrees after normalization; verification request errors SHALL decline the proposal. Source: src/workflow/orchestrator.rs verify_question/transcriptions_agree.
+Before navigation or answer output, the system SHALL clear model content and request transcription from the same overview/detail images without the proposed question or answer. It SHALL require a nonempty TRANSCRIPTION: value that agrees after normalization; verification provider errors SHALL decline the proposal, while device progress or cleanup errors SHALL propagate and prevent answer output. Source: src/workflow/orchestrator.rs verify_question/transcriptions_agree.
 
 #### Scenario: Harmless variation
 - **WHEN** case, question punctuation or spacing around operators differs
@@ -52,6 +52,10 @@ Before navigation or answer output, the system SHALL clear model content and req
 - **WHEN** operators, numeric separators, grouping or word boundaries differ, or transcription is NONE/missing
 - **THEN** verification fails and an X is drawn without writing the proposed answer.
 - **AND** agreement remains a comparison check rather than proof of semantic correctness.
+
+#### Scenario: Device failure during verification
+- **WHEN** an indicator callback fails during the independent verification wait
+- **THEN** the iteration reports that error after cleanup rather than treating it as a successful question decline.
 
 ### Requirement: Model request contract
 

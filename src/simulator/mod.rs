@@ -315,3 +315,66 @@ pub fn run_file(path: &Path) -> Result<Report> {
     );
     Ok(run.report)
 }
+
+#[cfg(test)]
+mod indicator_capture_tests {
+    use super::*;
+    use crate::workflow::{indicator, AnswerPageType};
+    use image::Rgba;
+
+    fn blank_successor() -> (Shared, Workflow) {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/simulator/scenarios");
+        let scenario: Scenario =
+            serde_json::from_slice(&std::fs::read(root.join("blank-answer.json")).unwrap())
+                .unwrap();
+        let state = Rc::new(RefCell::new(State::new(&scenario, &root).unwrap()));
+        state.borrow_mut().active = 1;
+        let workflow = Workflow::with_device(Box::new(SimDevice(state.clone())), false);
+        (state, workflow)
+    }
+
+    #[test]
+    fn classification_clears_owned_circle_before_capture() {
+        let (state, mut workflow) = blank_successor();
+        workflow.capture_page_data().unwrap();
+        workflow.tick_indicator().unwrap();
+        assert!(state.borrow().pages[1].indicator_visible);
+        assert_eq!(
+            workflow.is_valid_answer_page().unwrap(),
+            AnswerPageType::Blank
+        );
+        let state = state.borrow();
+        assert!(!state.pages[1].indicator_visible);
+        assert_eq!(state.counts.get(&Operation::StatusClear), Some(&1));
+    }
+
+    #[test]
+    fn classification_refreshes_eligibility_from_settled_frame() {
+        let (state, mut workflow) = blank_successor();
+        workflow.capture_page_data().unwrap();
+        state.borrow_mut().pages[1].background.put_pixel(
+            indicator::LEFT as u32,
+            indicator::TOP as u32,
+            Rgba([0, 0, 0, 255]),
+        );
+        assert_eq!(
+            workflow.is_valid_answer_page().unwrap(),
+            AnswerPageType::Blank
+        );
+        workflow.tick_indicator().unwrap();
+        let state = state.borrow();
+        assert!(!state.pages[1].indicator_visible);
+        assert!(!state.counts.contains_key(&Operation::StatusCircle));
+        assert!(!state.counts.contains_key(&Operation::StatusClear));
+        assert!(state
+            .events
+            .iter()
+            .any(|event| event.action == "status_suppressed"));
+        assert_eq!(
+            state.pages[1]
+                .background
+                .get_pixel(indicator::LEFT as u32, indicator::TOP as u32,),
+            &Rgba([0, 0, 0, 255])
+        );
+    }
+}

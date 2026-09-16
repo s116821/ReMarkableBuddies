@@ -418,7 +418,7 @@ impl Workflow {
     /// Returns the page type: Blank, ExistingQA, or Invalid
     pub fn is_valid_answer_page(&mut self) -> Result<AnswerPageType> {
         self.delay(std::time::Duration::from_millis(500));
-        self.frame = self.device.capture()?;
+        self.capture_clean()?;
         let img = match image::load_from_memory(&self.frame.png) {
             Ok(img) => img,
             Err(error) => {
