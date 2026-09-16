@@ -15,11 +15,17 @@ fn history_keys(action: &str, count: usize) -> Result<()> {
         "diagnostic selection exceeds 8000 characters"
     );
     let mut keys = AttributeSet::<K>::new();
+    // Advertise a full keyboard so udev/xochitl recognize editing input.
+    for code in 1..=57 {
+        keys.insert(K::new(code));
+    }
     for key in [
         K::KEY_LEFTCTRL,
         K::KEY_LEFTSHIFT,
         K::KEY_END,
         K::KEY_LEFT,
+        K::KEY_DOWN,
+        K::KEY_RIGHT,
         K::KEY_BACKSPACE,
         K::KEY_Z,
         K::KEY_Y,
@@ -38,6 +44,20 @@ fn history_keys(action: &str, count: usize) -> Result<()> {
     };
     let result = (|| -> Result<()> {
         match action {
+            "end-down" | "down" | "right" => {
+                if action == "end-down" {
+                    emit(K::KEY_LEFTCTRL, 1)?;
+                }
+                let key = if action == "right" {
+                    K::KEY_RIGHT
+                } else {
+                    K::KEY_DOWN
+                };
+                for _ in 0..count {
+                    emit(key, 1)?;
+                    emit(key, 0)?;
+                }
+            }
             "select-tail" | "select-left" | "end" => {
                 if action != "select-left" {
                     emit(K::KEY_LEFTCTRL, 1)?;
@@ -73,12 +93,26 @@ fn history_keys(action: &str, count: usize) -> Result<()> {
         }
         Ok(())
     })();
-    // Always release modifiers, including on a partially emitted sequence.
-    let shift_release = emit(K::KEY_LEFTSHIFT, 0);
-    let ctrl_release = emit(K::KEY_LEFTCTRL, 0);
+    // A key-down can succeed even when the following write fails. Release all
+    // keys this diagnostic can press, trying every release after an error.
+    let mut cleanup = Ok(());
+    for key in [
+        K::KEY_END,
+        K::KEY_LEFT,
+        K::KEY_DOWN,
+        K::KEY_RIGHT,
+        K::KEY_BACKSPACE,
+        K::KEY_Z,
+        K::KEY_Y,
+        K::KEY_LEFTSHIFT,
+        K::KEY_LEFTCTRL,
+    ] {
+        if let Err(error) = emit(key, 0) {
+            cleanup = Err(error);
+        }
+    }
     result?;
-    shift_release?;
-    ctrl_release
+    cleanup
 }
 
 #[cfg(target_os = "linux")]
@@ -86,11 +120,93 @@ fn main() -> Result<()> {
     env_logger::init();
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
+        Some("multi-hold") => {
+            use evdev::{Device, EventType, InputEvent};
+            anyhow::ensure!(
+                matches!(
+                    remarkable_reader_buddy::device::DeviceModel::detect(),
+                    remarkable_reader_buddy::device::DeviceModel::Remarkable2
+                ),
+                "multi-hold diagnostic currently supports RM2 only"
+            );
+            let contacts: i32 = args
+                .get(2)
+                .ok_or_else(|| anyhow::anyhow!("contact count required"))?
+                .parse()?;
+            let millis: u64 = args
+                .get(3)
+                .ok_or_else(|| anyhow::anyhow!("duration required"))?
+                .parse()?;
+            let stagger: u64 = args.get(4).map(|s| s.parse()).transpose()?.unwrap_or(0);
+            anyhow::ensure!(
+                matches!(contacts, 2 | 4) && millis <= 5000 && stagger <= 500,
+                "expected 2/4 contacts, at most 5000ms hold and 500ms stagger"
+            );
+            let mut device = Device::open("/dev/input/event2")?;
+            let abs = |code, value| InputEvent::new(EventType::ABSOLUTE.0, code, value);
+            let syn = InputEvent::new(EventType::SYNCHRONIZATION.0, 0, 0);
+            let mut start = Vec::new();
+            for slot in 0..contacts {
+                start.extend([
+                    abs(47, slot),
+                    abs(57, 100 + slot),
+                    abs(53, (260 + 80 * slot) * 1404 / 768),
+                    abs(54, (1024 - 600) * 1872 / 1024),
+                    abs(58, 100),
+                    abs(48, 17),
+                    abs(49, 17),
+                    abs(52, 4),
+                ]);
+            }
+            let result = if stagger == 0 {
+                start.push(syn);
+                device.send_events(&start)
+            } else {
+                let mut result = Ok(());
+                for chunk in start.chunks_exact(8) {
+                    let mut frame = chunk.to_vec();
+                    frame.push(syn);
+                    result = device.send_events(&frame);
+                    if result.is_err() {
+                        break;
+                    }
+                    sleep(Duration::from_millis(stagger));
+                }
+                result
+            };
+            if result.is_ok() {
+                sleep(Duration::from_millis(millis));
+            }
+            let mut release = Vec::new();
+            for slot in 0..contacts {
+                release.extend([abs(47, slot), abs(57, -1)]);
+            }
+            let released = if stagger == 0 {
+                release.push(syn);
+                device.send_events(&release)
+            } else {
+                let mut result = Ok(());
+                for chunk in release.chunks_exact(2) {
+                    let mut frame = chunk.to_vec();
+                    frame.push(syn);
+                    if let Err(error) = device.send_events(&frame) {
+                        result = Err(error);
+                    }
+                    sleep(Duration::from_millis(stagger));
+                }
+                result
+            };
+            result?;
+            released?;
+        }
         Some(
-            action @ ("select-tail" | "select-left" | "end" | "delete-selection" | "native-undo"
-            | "native-redo"),
+            action @ ("select-tail" | "select-left" | "end" | "end-down" | "down" | "right"
+            | "delete-selection" | "native-undo" | "native-redo"),
         ) => {
-            let count = if matches!(action, "select-tail" | "select-left") {
+            let count = if matches!(
+                action,
+                "select-tail" | "select-left" | "end-down" | "down" | "right"
+            ) {
                 args.get(2)
                     .ok_or_else(|| anyhow::anyhow!("character count required"))?
                     .parse()?
@@ -260,6 +376,20 @@ fn main() -> Result<()> {
             let outcome = workflow.return_to_original_page(&original)?;
             workflow.draw_failure_x()?;
             println!("Return outcome: {outcome:?}");
+        }
+        Some("round-trip") => {
+            use remarkable_reader_buddy::workflow::xochitl_integration::{
+                NavigationDirection, XochitlIntegration,
+            };
+            let millis: u64 = args
+                .get(2)
+                .ok_or_else(|| anyhow::anyhow!("gap milliseconds required"))?
+                .parse()?;
+            anyhow::ensure!(millis <= 2000, "round-trip gap exceeds 2000ms");
+            let mut touch = Touch::new(false, TriggerCorner::LowerLeft);
+            XochitlIntegration::navigate_to_page(&mut touch, NavigationDirection::Previous)?;
+            sleep(Duration::from_millis(millis));
+            XochitlIntegration::navigate_to_page(&mut touch, NavigationDirection::Next)?;
         }
         Some("next") | Some("previous") => {
             use remarkable_reader_buddy::workflow::xochitl_integration::{

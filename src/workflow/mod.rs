@@ -1,3 +1,4 @@
+pub mod history;
 pub mod indicator;
 mod navigation;
 pub mod orchestrator;

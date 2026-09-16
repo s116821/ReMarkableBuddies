@@ -1,0 +1,4 @@
+Q: Why does a flat plate reduce uncertainty?
+
+A: In the thin-plate limit, the ratio q22/I is independent of the plate's mass distribution. This reduces sensitivity to density variations. Finite thickness can be corrected analytically; this does not remove every experimental uncertainty. Check x^2, a+b=c, and +/- 0.000092.
+---

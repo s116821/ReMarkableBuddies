@@ -5,7 +5,7 @@
 
 ## 2. Shared implementation
 
-- [ ] 2.1 Implement pure last-Q&A history state and invalidation/failure policy with focused preservation tests.
+- [x] 2.1 Implement pure last-Q&A history state and invalidation/failure policy with focused preservation tests.
 - [ ] 2.2 Implement multi-contact event reduction, hold timing/rearm and idle interaction events without changing ordinary Reader triggering.
 - [ ] 2.3 Integrate verified native block editing, ownership checks and orchestrator transaction registration/invalidation; keep all device input serialized.
 - [ ] 2.4 Extend simulator session actions, text/history reports and faults; cover repeated toggles, blank/append preservation, departure/return, new iteration, edits and partial failures.

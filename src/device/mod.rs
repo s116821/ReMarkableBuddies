@@ -1,5 +1,8 @@
 pub mod backend;
+pub mod contact_frames;
+pub mod interaction;
 pub mod keyboard;
+pub mod native_text;
 pub mod pen;
 pub mod screenshot;
 pub mod touch;
