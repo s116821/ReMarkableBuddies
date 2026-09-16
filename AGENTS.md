@@ -24,6 +24,15 @@ prerequisite planning-only PR. REM-27 is the deliberate baseline-only exception.
 Current Linear scope and source behavior outrank historical plans. Record actual
 test evidence in PR comments, and complete the issue's acceptance gates before merge.
 
+## Simulator learning
+
+For each device/workflow change or native finding, check its simulator impact.
+Update the shared model, fixtures, faults or assertions as applicable in the same
+implementation PR, including OpenSpec simulator deltas when behavior changes.
+Preserve discovered failure cases as regressions. Distinguish modeled behavior
+from hardware or vision proof; document specific limitations when a finding
+cannot be faithfully simulated. Unrelated changes need no artificial simulation.
+
 ## Tablet access
 
 For tablet compatibility, integration, or end-to-end Reader Buddy testing, when

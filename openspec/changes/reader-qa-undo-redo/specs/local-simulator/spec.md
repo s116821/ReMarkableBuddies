@@ -14,3 +14,15 @@ The simulator SHALL drive the shared last-Q&A history state using declared undo/
 #### Scenario: Partial operation
 - **WHEN** a history mutation fault occurs
 - **THEN** the report retains the actual failure state and history is discarded without an automatic retry.
+
+#### Scenario: Persisted page lags visible typing
+- **WHEN** the visible Q&A has completed but the persisted snapshot still contains the prior text
+- **THEN** history remains unavailable until the complete expected content is observed; a timeout never arms stale history.
+
+#### Scenario: Gesture cancellation and interrupted input
+- **WHEN** contacts move, change identity, drop out, remain partly released too long, or input events are lost
+- **THEN** the shared contact policy invalidates history without executing a mutation; valid stationary two-/four-contact holds execute at most once after full release.
+
+#### Scenario: Native preservation evidence
+- **WHEN** recorded native snapshots are replayed through the history policy
+- **THEN** previous visible paragraphs, native ink and opaque records must be preserved, and restored Q&A text/styles must equal the applied state; reports distinguish this replay from live keyboard, physical gesture or vision validation.

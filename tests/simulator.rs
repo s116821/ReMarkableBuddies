@@ -200,6 +200,7 @@ fn persistent_cleanup_failure_never_erases_a_later_page() {
     scenario.iterations.push(Iteration {
         page: Some(1),
         wait_for_trigger: false,
+        actions: Vec::new(),
     });
     let run = execute(&scenario, &root()).unwrap();
     assert_eq!(run.report.errors.len(), 2);

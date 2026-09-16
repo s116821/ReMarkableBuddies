@@ -25,6 +25,22 @@ impl Frame {
 }
 
 pub trait DeviceBackend {
+    /// Optional editing contract. Unsupported backends retain normal Reader
+    /// behavior and cannot arm history. Expected text must be fully persisted.
+    fn history_snapshot(
+        &mut self,
+        _expected: Option<&str>,
+    ) -> Result<Option<crate::workflow::history::PageState>> {
+        Ok(None)
+    }
+    fn history_mutate(
+        &mut self,
+        _command: crate::workflow::history::Command,
+        _expected: &str,
+    ) -> Result<crate::workflow::history::PageState> {
+        anyhow::bail!("Native Q&A history is unavailable")
+    }
+    fn history_discard(&mut self) {}
     fn capture(&mut self) -> Result<Frame>;
     fn detail_images(&self) -> Result<Vec<String>>;
     fn wait_for_trigger(&mut self) -> Result<()>;

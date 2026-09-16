@@ -1,5 +1,7 @@
 pub mod backend;
 pub mod contact_frames;
+#[cfg(target_os = "linux")]
+pub mod input_observer;
 pub mod interaction;
 pub mod keyboard;
 pub mod native_text;

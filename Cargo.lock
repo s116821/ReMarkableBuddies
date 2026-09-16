@@ -1902,6 +1902,7 @@ dependencies = [
  "image",
  "imageproc",
  "log",
+ "nix",
  "resvg",
  "serde",
  "serde_json",

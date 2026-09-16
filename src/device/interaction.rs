@@ -7,7 +7,8 @@ const FORMATION: Duration = Duration::from_millis(250);
 const RELEASE: Duration = Duration::from_millis(500);
 const JITTER: i32 = 8;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Contact {
     pub slot: u8,
     pub tracking: i32,
@@ -101,7 +102,9 @@ impl ContactReducer {
                 })
         });
         let duplicates = contacts.windows(2).any(|pair| pair[0].slot == pair[1].slot)
-            || contacts.iter().any(|c| c.tracking < 0 || c.slot >= 16);
+            || contacts
+                .iter()
+                .any(|c| c.tracking < 0 || usize::from(c.slot) >= super::contact_frames::MAX_SLOTS);
         let same = contacts.len() == session.current.len()
             && contacts
                 .iter()

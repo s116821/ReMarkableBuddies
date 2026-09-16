@@ -6,6 +6,7 @@ devices or an API key:
 ```sh
 cargo run -- --simulate docs/simulator/scenarios/blank-answer.json
 cargo run -- --simulate docs/simulator/scenarios/failed-return.json
+cargo run -- --simulate docs/simulator/scenarios/history-undo-redo.json
 cargo test --test simulator
 ```
 
@@ -76,13 +77,42 @@ technical PDF and handwriting inputs; existing pen-path fixtures can be overlaid
 | Failures | Explicit deterministic faults; they do not establish physical input failure rates or framebuffer reliability. |
 
 Virtual time records requested waits, not CPU runtime, API latency or physical
-display latency. The simulator does not emulate evdev slots/raw device scaling,
+display latency. History sessions feed complete virtual contact frames to the
+shared multi-contact reducer; separate decoder tests cover raw slot framing.
+The simulator does not emulate kernel device discovery/raw coordinate scaling,
 kernel input injection, xochitl typography/cursor state, native file serialization,
 paper orientation, reboot, framebuffer allocations or human handwriting quality.
 It cannot prove hardware compatibility or catch every native output/layout defect.
 The real adapter retains existing Screenshot/Touch/Pen/Keyboard operations and
 normal Linux cache behavior. Targeted hardware checks remain required for those
 areas, especially after changing the shared boundary.
+
+## Q&A history sessions
+
+Each iteration may include `actions` after its Q&A completes. A `hold` action has
+`frames`, each with increasing `at_ms` and a `contacts` array of `slot`, `tracking`,
+`x`, `y`. Empty contacts release all fingers. Virtual timer ticks qualify stationary
+two-/four-contact holds; the shared policy executes only after full release.
+`page` selects a page, `edit` appends manual text, and `input_lost` or `restart`
+invalidate ownership. A new iteration always forgets the previous transaction.
+The report includes `history` state, exact page text and ordered history events;
+`expect.history` can assert `empty`, `applied` or `undone`.
+
+Faults `history_snapshot: stale` retain an old stable snapshot and prevent arming;
+`history_snapshot: lag` models a200ms delay followed by the complete expected text.
+That delay is a deterministic test value, not a measured persistence bound.
+`history_mutation: partial` retains the actual partial operation and reports an
+error; subsequent undo/redo cannot compensate. `error` and `corrupt` also exercise
+observation/mutation failure. All declared faults must be reached.
+
+The simulator uses the production ownership state and Q&A registration boundary.
+Its native-edit substitute selects a suffix from an assumed valid insertion
+cursor and retains one deletion entry. It does not prove real cursor positioning,
+xochitl's arbitrary Undo grouping, short-tap native Undo, native typography,
+input-device attribution or file persistence. Captured RMv6 fixtures separately
+replay exact text/styles, visible-ink records and opaque metadata preservation.
+Neither replay nor scripted contact frames prove physical-finger or model-vision
+behavior. Keep corresponding native tests and discovered failures in the same PR.
 
 The REM-22 hardware check exposed a restart-dependent allocation case: Linux can
 merge adjacent anonymous mappings, placing the BGRA allocation header inside a VMA.

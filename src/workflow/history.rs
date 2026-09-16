@@ -38,7 +38,8 @@ pub enum Command {
     RepeatDeletion,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum State {
     #[default]
     Empty,
@@ -80,6 +81,14 @@ fn preserves_prior(before: &NativeText, after: &NativeText) -> bool {
 }
 
 impl History {
+    pub fn pending_text(&self) -> Option<String> {
+        self.pending
+            .as_ref()
+            .map(|(record, command)| match command {
+                Command::RestoreDeletion => record.applied.text(),
+                _ => record.before.text(),
+            })
+    }
     pub fn state(&self) -> State {
         if self.pending.is_some() {
             State::Busy
@@ -299,15 +308,21 @@ mod tests {
     }
     #[test]
     fn failed_partial_or_interrupted_mutations_have_no_compensation_or_stale_record() {
-        for failure in 0..3 {
+        for failure in 0..4 {
             let (mut history, before, applied) = armed();
             history.begin(Action::Undo, &applied).unwrap();
             let result = match failure {
                 0 => history.finish(Err(anyhow::anyhow!("input failed"))),
                 1 => history.finish(Ok(applied.clone())),
-                _ => {
+                2 => {
                     history.discard();
                     history.finish(Ok(before))
+                }
+                _ => {
+                    let mut changed = before;
+                    changed.content.scene_records.push(vec![222, 1, 1, 42]);
+                    changed.seal.push(99);
+                    history.finish(Ok(changed))
                 }
             };
             assert!(result.is_err());

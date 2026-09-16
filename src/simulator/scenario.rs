@@ -69,6 +69,25 @@ pub struct Iteration {
     pub page: Option<usize>,
     #[serde(default)]
     pub wait_for_trigger: bool,
+    #[serde(default)]
+    pub actions: Vec<HistoryAction>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HistoryAction {
+    Hold { frames: Vec<ContactFrame> },
+    Page { page: usize },
+    Edit { text: String },
+    InputLost,
+    Restart,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContactFrame {
+    pub at_ms: u64,
+    pub contacts: Vec<crate::device::interaction::Contact>,
 }
 
 /// Complete slot-zero frames in virtual coordinates, relative to this wait.
@@ -101,6 +120,8 @@ pub enum Operation {
     HeaderSave,
     StatusCircle,
     StatusClear,
+    HistorySnapshot,
+    HistoryMutation,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -110,6 +131,8 @@ pub enum Effect {
     NoMove,
     Stale,
     Corrupt,
+    Lag,
+    Partial,
 }
 
 #[derive(Clone, Deserialize)]
@@ -137,6 +160,7 @@ pub struct Expected {
     pub operations: BTreeMap<Operation, usize>,
     #[serde(default)]
     pub errors: Vec<String>,
+    pub history: Option<String>,
 }
 
 impl Scenario {
@@ -189,6 +213,36 @@ impl Scenario {
                 iteration.page.is_none_or(|p| p < self.pages.len()),
                 "Invalid iteration page"
             );
+            ensure!(iteration.actions.len() <= 100, "Too many history actions");
+            for action in &iteration.actions {
+                match action {
+                    HistoryAction::Page { page } => {
+                        ensure!(*page < self.pages.len(), "Invalid history page")
+                    }
+                    HistoryAction::Edit { text } => {
+                        ensure!(text.len() <= 16000, "History edit too long")
+                    }
+                    HistoryAction::Hold { frames } => {
+                        ensure!(
+                            !frames.is_empty() && frames.len() <= 1000,
+                            "Invalid contact frame count"
+                        );
+                        let mut previous = None;
+                        for frame in frames {
+                            ensure!(
+                                frame.at_ms <= 60000 && previous.is_none_or(|t| frame.at_ms > t),
+                                "Invalid contact frame time"
+                            );
+                            ensure!(
+                                frame.contacts.len() <= crate::device::contact_frames::MAX_SLOTS,
+                                "Too many contacts"
+                            );
+                            previous = Some(frame.at_ms);
+                        }
+                    }
+                    _ => {}
+                }
+            }
         }
         for reply in &self.replies {
             ensure!(
@@ -221,7 +275,16 @@ impl Scenario {
                     Effect::Error => true,
                     Effect::NoMove =>
                         matches!(fault.operation, Operation::Next | Operation::Previous),
-                    Effect::Stale | Effect::Corrupt => fault.operation == Operation::Capture,
+                    Effect::Stale => matches!(
+                        fault.operation,
+                        Operation::Capture | Operation::HistorySnapshot
+                    ),
+                    Effect::Corrupt => matches!(
+                        fault.operation,
+                        Operation::Capture | Operation::HistoryMutation
+                    ),
+                    Effect::Lag => fault.operation == Operation::HistorySnapshot,
+                    Effect::Partial => fault.operation == Operation::HistoryMutation,
                 },
                 "Fault effect does not apply to operation"
             );

@@ -118,6 +118,7 @@ pub struct PageResult {
 }
 #[derive(Serialize)]
 pub struct Report {
+    pub history: crate::workflow::history::State,
     pub name: String,
     pub model_mode: &'static str,
     pub active_page: usize,
@@ -179,6 +180,7 @@ fn execute_with_model<M: LLMEngine>(
         if let Some(page) = iteration.page {
             let mut state = state.borrow_mut();
             state.active = page;
+            state.visit += 1;
             state.event("scenario_page_selected", page.to_string());
         }
         state.borrow_mut().event("iteration", index.to_string());
@@ -186,7 +188,9 @@ fn execute_with_model<M: LLMEngine>(
         if let Err(error) = orchestrator.run_iteration() {
             errors.push(format!("{error:#}"));
         }
+        history_actions(&iteration.actions, &state, &mut orchestrator, &mut errors)?;
     }
+    let history = orchestrator.history_state();
     let state = state.borrow();
     let images: Vec<_> = state.pages.iter().map(device::Page::image).collect();
     let pages: Vec<_> = state
@@ -203,6 +207,12 @@ fn execute_with_model<M: LLMEngine>(
         })
         .collect();
     let mut failures = Vec::new();
+    if let Some(expected) = &scenario.expect.history {
+        let actual = serde_json::to_value(history)?.as_str().unwrap().to_owned();
+        if expected != &actual {
+            failures.push(format!("history expected {expected}, got {actual}"));
+        }
+    }
     if errors.is_empty() && pages.iter().any(|page| page.indicator_visible) {
         failures.push("Successful iteration left a temporary circle".into());
     }
@@ -277,6 +287,7 @@ fn execute_with_model<M: LLMEngine>(
     }
     Ok(Run {
         report: Report {
+            history,
             name: scenario.name.clone(),
             model_mode,
             active_page: state.active,
@@ -290,6 +301,113 @@ fn execute_with_model<M: LLMEngine>(
         },
         images,
     })
+}
+
+fn history_actions<M: LLMEngine>(
+    actions: &[scenario::HistoryAction],
+    state: &Shared,
+    orchestrator: &mut Orchestrator<M>,
+    errors: &mut Vec<String>,
+) -> Result<()> {
+    use crate::{
+        device::interaction::{ContactReducer, Interaction},
+        workflow::history::Action,
+    };
+    use scenario::HistoryAction;
+    use std::time::Duration;
+    let deliver =
+        |events: Vec<Interaction>, orchestrator: &mut Orchestrator<M>, errors: &mut Vec<String>| {
+            if events.contains(&Interaction::Invalidated) {
+                orchestrator.invalidate_history();
+            }
+            for event in events {
+                state
+                    .borrow_mut()
+                    .event("history_interaction", format!("{event:?}"));
+                let action = match event {
+                    Interaction::Undo => Some(Action::Undo),
+                    Interaction::Redo => Some(Action::Redo),
+                    _ => {
+                        orchestrator.invalidate_history();
+                        None
+                    }
+                };
+                if let Some(action) = action {
+                    match orchestrator.history_action(action) {
+                        Ok(changed) => state
+                            .borrow_mut()
+                            .event("history_result", format!("changed={changed}")),
+                        Err(error) => errors.push(format!("{error:#}")),
+                    }
+                }
+            }
+        };
+    for action in actions {
+        match action {
+            HistoryAction::Hold { frames } => {
+                let mut reducer = ContactReducer::new(state.borrow().corner.clone());
+                let start = state.borrow().clock;
+                let mut previous = Vec::new();
+                let mut timer = 0;
+                for frame in frames {
+                    while timer < frame.at_ms {
+                        state.borrow_mut().clock = start + timer;
+                        deliver(
+                            reducer.frame(&previous, Duration::from_millis(timer)),
+                            orchestrator,
+                            errors,
+                        );
+                        timer += 10;
+                    }
+                    state.borrow_mut().clock = start + frame.at_ms;
+                    deliver(
+                        reducer.frame(&frame.contacts, Duration::from_millis(frame.at_ms)),
+                        orchestrator,
+                        errors,
+                    );
+                    previous = frame.contacts.clone();
+                    timer = frame.at_ms + 10;
+                }
+                if !previous.is_empty() {
+                    deliver(vec![reducer.cancel()], orchestrator, errors);
+                }
+            }
+            HistoryAction::Page { page } => {
+                orchestrator.invalidate_history();
+                let mut state = state.borrow_mut();
+                state.active = *page;
+                state.visit += 1;
+                state.event(
+                    "history_departure",
+                    "visit advanced; returning cannot revive ownership",
+                );
+            }
+            HistoryAction::Edit { text } => {
+                orchestrator.invalidate_history();
+                let mut state = state.borrow_mut();
+                let page = state.active;
+                state.pages[page].text.push_str(text);
+                state.event("history_external_edit", "manual text retained");
+            }
+            HistoryAction::InputLost => {
+                orchestrator.invalidate_history();
+                state
+                    .borrow_mut()
+                    .event("history_input_lost", "observation discontinuity");
+            }
+            HistoryAction::Restart => {
+                orchestrator.invalidate_history();
+                let mut state = state.borrow_mut();
+                state.session += 1;
+                state.event("history_restart", "native session changed");
+            }
+        }
+        state.borrow_mut().event(
+            "history_state",
+            format!("{:?}", orchestrator.history_state()),
+        );
+    }
+    Ok(())
 }
 
 pub fn run_file(path: &Path) -> Result<Report> {

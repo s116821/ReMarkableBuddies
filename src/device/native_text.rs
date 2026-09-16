@@ -30,7 +30,9 @@ pub struct NativeText {
     pub paragraphs: Vec<Paragraph>,
     /// Includes position/width and unrecognized trailing fields, byte-for-byte.
     pub root_layout: Vec<u8>,
-    /// Native groups, anchors and ink records. Never rewritten by this module.
+    /// Every non-text block, including opaque metadata, in original order.
+    /// Only validated PageInfo text/line counters are normalized for comparison.
+    /// Native bytes are never rewritten by this module.
     pub scene_records: Vec<Vec<u8>>,
 }
 
@@ -215,8 +217,18 @@ fn order(items: &[Item]) -> Result<Vec<usize>> {
     let mut degree = vec![0; end + 1];
     for (i, item) in items.iter().enumerate() {
         let node = i + 1;
-        let left = ids.get(&item.left).copied().unwrap_or(0);
-        let right = ids.get(&item.right).copied().unwrap_or(end);
+        let left = if item.left == (0, 0) {
+            0
+        } else {
+            *ids.get(&item.left)
+                .context("Unresolved native left text anchor")?
+        };
+        let right = if item.right == (0, 0) {
+            end
+        } else {
+            *ids.get(&item.right)
+                .context("Unresolved native right text anchor")?
+        };
         edges[left].push(node);
         degree[node] += 1;
         edges[node].push(right);
@@ -347,6 +359,7 @@ pub fn read(bytes: &[u8]) -> Result<NativeText> {
     );
     let mut text = None;
     let mut scene_records = Vec::new();
+    let mut page_counts = None;
     let mut count = 0;
     while !reader.0.is_empty() {
         count += 1;
@@ -364,13 +377,39 @@ pub fn read(bytes: &[u8]) -> Result<NativeText> {
                 "Unsupported/multiple native text roots"
             );
             text = Some(root(Reader(data))?);
-        } else if (1..=6).contains(&kind) || kind == 8 {
+        } else {
             let mut record = vec![kind, minimum, version];
             record.extend_from_slice(data);
+            if kind == 10 {
+                ensure!(
+                    minimum == 0 && version == 1 && page_counts.is_none(),
+                    "Unsupported/multiple PageInfo blocks"
+                );
+                let mut info = Reader(data);
+                let mut values = Vec::new();
+                for index in 1..=5 {
+                    info.tag(index, 4)?;
+                    values.push(info.u32()?);
+                }
+                info.done()?;
+                page_counts = Some((values[2], values[3]));
+                // PageInfo's known text/line counters change with the text.
+                // Validate them below before excluding those fields from
+                // preservation equality. All other bytes remain exact.
+                record[14..18].fill(0);
+                record[19..23].fill(0);
+            }
             scene_records.push(record);
         }
     }
     let mut text = text.context("No native text root")?;
+    if let Some((characters, lines)) = page_counts {
+        ensure!(
+            characters as usize == text.text().chars().count() + 1
+                && lines as usize == text.paragraphs.len(),
+            "PageInfo counters disagree with complete native text"
+        );
+    }
     text.scene_records = scene_records;
     Ok(text)
 }
@@ -453,5 +492,40 @@ mod tests {
         };
         assert!(order(&[a.clone(), b]).is_err());
         assert!(order(&[a.clone(), a]).is_err());
+    }
+
+    #[test]
+    fn dangling_nonzero_anchors_are_not_guessed_as_boundaries() {
+        for (left, right) in [((9, 9), (0, 0)), ((0, 0), (9, 9))] {
+            assert!(order(&[Item {
+                id: (1, 1),
+                left,
+                right,
+                value: Value::Char('a')
+            }])
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn opaque_blocks_are_preserved_and_bad_metadata_counts_are_rejected() {
+        let original = read(APPLIED).unwrap();
+        let mut extended = APPLIED.to_vec();
+        extended.extend_from_slice(&[1, 0, 0, 0, 0, 1, 1, 222, 42]);
+        let extra = read(&extended).unwrap();
+        assert_ne!(original.scene_records, extra.scene_records);
+        assert_eq!(extra.scene_records.last().unwrap(), &[222, 1, 1, 42]);
+        let mut altered = APPLIED.to_vec();
+        let mut offset = HEADER.len();
+        while offset < altered.len() {
+            let size = u32::from_le_bytes(altered[offset..offset + 4].try_into().unwrap()) as usize;
+            if altered[offset + 7] == 10 {
+                altered[offset + 8 + 11] ^= 1;
+                assert!(read(&altered).is_err());
+                return;
+            }
+            offset += 8 + size;
+        }
+        panic!("fixture requires PageInfo");
     }
 }

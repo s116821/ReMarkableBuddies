@@ -2,7 +2,7 @@
 //! reconstructed events after SYN_DROPPED cannot preserve edit ownership.
 use super::interaction::Contact;
 
-const SLOTS: usize = 16;
+pub const MAX_SLOTS: usize = 64;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Slot {
@@ -26,12 +26,14 @@ pub struct ContactFrames {
     selected: usize,
     lost: bool,
     committed: Vec<Contact>,
+    pending: bool,
+    reported_count: Option<usize>,
 }
 
 impl ContactFrames {
     pub fn seeded(slots: Vec<Slot>, selected: usize) -> Option<Self> {
         if slots.is_empty()
-            || slots.len() > SLOTS
+            || slots.len() > MAX_SLOTS
             || selected >= slots.len()
             || slots.iter().any(|s| {
                 s.tracking.is_some_and(|id| id < 0)
@@ -49,6 +51,8 @@ impl ContactFrames {
             selected,
             lost: false,
             committed: Vec::new(),
+            pending: false,
+            reported_count: None,
         };
         result.committed = result.snapshot()?;
         Some(result)
@@ -56,6 +60,10 @@ impl ContactFrames {
 
     pub fn contacts(&self) -> Option<Vec<Contact>> {
         (!self.lost).then(|| self.committed.clone())
+    }
+
+    pub fn ready_for_timer(&self) -> bool {
+        !self.lost && !self.pending
     }
 
     fn snapshot(&self) -> Option<Vec<Contact>> {
@@ -85,7 +93,24 @@ impl ContactFrames {
         if self.lost {
             return Observation::Lost;
         }
+        if kind != 0 {
+            self.pending = true;
+        }
         match (kind, code) {
+            (1, 333 | 334 | 335 | 328) => {
+                let count = match code {
+                    333 => 2,
+                    334 => 3,
+                    335 => 4,
+                    _ => 5,
+                };
+                match value {
+                    1 => self.reported_count = Some(count),
+                    0 if self.reported_count == Some(count) => self.reported_count = None,
+                    0 => {}
+                    _ => self.lost = true,
+                }
+            }
             (0, 3) => self.lost = true, // SYN_DROPPED
             (3, 47) => {
                 if value < 0 || value as usize >= self.slots.len() {
@@ -105,7 +130,15 @@ impl ContactFrames {
             (3, 54) => self.slots[self.selected].y = Some(value),
             (0, 0) => {
                 if let Some(contacts) = self.snapshot() {
+                    if self
+                        .reported_count
+                        .is_some_and(|count| count != contacts.len())
+                    {
+                        self.lost = true;
+                        return Observation::Lost;
+                    }
                     self.committed = contacts.clone();
+                    self.pending = false;
                     return Observation::Frame(contacts);
                 }
                 self.lost = true;
@@ -144,10 +177,12 @@ mod tests {
         // A timer must continue to see the previous complete frame while a
         // partial release frame is arriving.
         assert_eq!(decoder.contacts().unwrap().len(), 4);
+        assert!(!decoder.ready_for_timer());
         let Observation::Frame(contacts) = decoder.feed(0, 0, 0) else {
             panic!()
         };
         assert_eq!(contacts.len(), 3);
+        assert!(decoder.ready_for_timer());
     }
 
     #[test]
@@ -198,5 +233,29 @@ mod tests {
                 y: 19
             }]
         );
+    }
+
+    #[test]
+    fn finger_count_hint_must_agree_with_reported_slots() {
+        let active = Slot {
+            tracking: Some(1),
+            x: Some(200),
+            y: Some(300),
+        };
+        let mut decoder = ContactFrames::seeded(
+            vec![
+                active,
+                Slot {
+                    tracking: Some(2),
+                    ..active
+                },
+            ],
+            0,
+        )
+        .unwrap();
+        decoder.feed(1, 333, 1);
+        assert!(matches!(decoder.feed(0, 0, 0), Observation::Frame(_)));
+        decoder.feed(1, 335, 1);
+        assert_eq!(decoder.feed(0, 0, 0), Observation::Lost);
     }
 }

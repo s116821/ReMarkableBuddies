@@ -77,6 +77,16 @@ impl<M: LLMEngine> Orchestrator<M> {
         self.trigger_enabled = enabled;
     }
 
+    pub fn invalidate_history(&mut self) {
+        self.workflow.invalidate_history();
+    }
+    pub fn history_state(&self) -> super::history::State {
+        self.workflow.history_state()
+    }
+    pub fn history_action(&mut self, action: super::history::Action) -> Result<bool> {
+        self.workflow.history_action(action)
+    }
+
     /// Run one complete iteration of the reader buddy workflow
     /// Processes one outlined/highlighted concept and question per trigger.
     pub fn run_iteration(&mut self) -> Result<()> {
@@ -397,7 +407,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         // Render the Q&A
         let formatted_output = Workflow::compose_qa(&result.question, &result.answer);
 
-        self.workflow.render_text(&formatted_output)?;
+        self.workflow.render_qa(&formatted_output)?;
 
         info!("Q&A rendered successfully");
         Ok(())
