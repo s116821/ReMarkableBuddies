@@ -133,16 +133,22 @@ fn main() -> Result<()> {
                 workflow.capture_page_data()?,
             )?;
             let result = (|| -> Result<()> {
+                let started = std::time::Instant::now();
                 workflow.tick_indicator()?;
+                println!("First circle tick: {} ms", started.elapsed().as_millis());
                 sleep(Duration::from_millis(800));
+                let started = std::time::Instant::now();
                 workflow.tick_indicator()?;
+                println!("Second circle tick: {} ms", started.elapsed().as_millis());
                 sleep(Duration::from_millis(800));
                 let mut active = Screenshot::new()?;
                 active.take_screenshot()?;
                 active.save_image("/tmp/reader-buddy-status-active.png")?;
                 Ok(())
             })();
+            let started = std::time::Instant::now();
             let cleanup = workflow.clear_indicator();
+            println!("Circle cleanup: {} ms", started.elapsed().as_millis());
             result?;
             cleanup?;
         }
