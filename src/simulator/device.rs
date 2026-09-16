@@ -56,9 +56,15 @@ impl Page {
         self.lines
             .windows(2)
             .filter(|pair| {
-                use crate::workflow::indicator::{BOTTOM, LEFT, RIGHT, TOP};
-                pair[0] == ((LEFT, TOP), (RIGHT, BOTTOM))
-                    && pair[1] == ((RIGHT, TOP), (LEFT, BOTTOM))
+                use crate::workflow::indicator::{BOTTOM, LEFT, RIGHT, TOP, X_INSET};
+                let (left, top, right, bottom) = (
+                    LEFT + X_INSET,
+                    TOP + X_INSET,
+                    RIGHT - X_INSET,
+                    BOTTOM - X_INSET,
+                );
+                pair[0] == ((left, top), (right, bottom))
+                    && pair[1] == ((right, top), (left, bottom))
             })
             .count()
     }

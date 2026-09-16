@@ -6,6 +6,8 @@ pub const TOP: i32 = 934;
 pub const SIZE: i32 = 50;
 pub const RIGHT: i32 = LEFT + SIZE - 1;
 pub const BOTTOM: i32 = TOP + SIZE - 1;
+// Native pen strokes extend beyond their centerline endpoints.
+pub const X_INSET: i32 = 3;
 
 pub fn eligible(image: &DynamicImage) -> bool {
     if image.width() != 768 || image.height() != 1024 {

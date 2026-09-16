@@ -37,3 +37,5 @@ Cleanup failure poisons the current orchestrator: after same-page best-effort cl
 Native acceptance exposed overshoot from sparse fast pen points: the rendered circle exceeded its intended bounds and left a residual arc after clearing. Pace/interpolate the native continuous path at the existing line-drawing resolution, then repeat actual before/active/after and sentinel checks before acceptance. Keep this failed capture as evidence; simulator geometry does not prove native path fidelity.
 
 The existing rectangular eraser also emits sparse, rapid endpoint strokes. For status cleanup, retrace the owned circle with the same paced continuous native path using the rubber tool, rather than sweeping arbitrary blank rectangle rows. This bounds erasure to owned geometry and avoids rapid tool toggles; native clearance and residual-mark checks still decide acceptance.
+
+Native rejection exposed a one-pixel pen footprint beyond endpoint coordinates. Inset failure-X endpoints three pixels inside the shared status box, leaving stroke clearance while preserving the same guarded 50x50 region. Repeat native rejection on the final build to verify rendered bounds.

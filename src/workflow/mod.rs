@@ -390,10 +390,10 @@ impl Workflow {
         }
         self.indicator_eligible = false;
         let (x_start, y_start, x_end, y_end) = (
-            indicator::LEFT,
-            indicator::TOP,
-            indicator::RIGHT,
-            indicator::BOTTOM,
+            indicator::LEFT + indicator::X_INSET,
+            indicator::TOP + indicator::X_INSET,
+            indicator::RIGHT - indicator::X_INSET,
+            indicator::BOTTOM - indicator::X_INSET,
         );
 
         // Draw two diagonal lines to form an X (using screen coordinates)
