@@ -15,7 +15,7 @@ use std::time::Duration;
                         then uses ChatGPT to provide answers directly on your reMarkable tablet."
 )]
 pub struct Args {
-    /// Run a bounded local scenario without tablet access or API credentials
+    /// Run a bounded local scenario (offline unless its model mode is explicitly live)
     #[arg(long, value_name = "SCENARIO", conflicts_with_all = ["screenshot_only", "model", "base_url", "no_trigger", "once", "trigger_corner"])]
     simulate: Option<std::path::PathBuf>,
     /// Capture a PNG and exit without credentials, input devices, or an AI call

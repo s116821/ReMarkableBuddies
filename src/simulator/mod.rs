@@ -3,11 +3,11 @@ mod device;
 mod raster;
 pub mod scenario;
 
-use crate::{LLMEngine, Orchestrator, Workflow};
+use crate::{LLMEngine, OpenAI, Orchestrator, Workflow};
 use anyhow::{ensure, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use device::{Event, Shared, SimDevice, State};
-use scenario::{Operation, Reply, Scenario};
+use scenario::{ModelConfig, Operation, Reply, Scenario};
 use serde::Serialize;
 use std::{
     cell::RefCell,
@@ -21,6 +21,44 @@ struct ScriptedModel {
     replies: VecDeque<Reply>,
     text_count: usize,
     images: Vec<String>,
+}
+
+struct LiveModel<M> {
+    inner: M,
+    state: Shared,
+    max_calls: usize,
+}
+impl<M: LLMEngine> LLMEngine for LiveModel<M> {
+    fn add_text_content(&mut self, text: &str) {
+        self.inner.add_text_content(text);
+    }
+    fn add_image_content(&mut self, image: &str) {
+        self.inner.add_image_content(image);
+    }
+    fn clear_content(&mut self) {
+        self.inner.clear_content();
+    }
+    fn execute(&mut self) -> Result<String> {
+        {
+            let mut state = self.state.borrow_mut();
+            if state.model_calls >= self.max_calls {
+                state.event("model_limit", "live request allowance exhausted");
+                anyhow::bail!("Live model request allowance exhausted");
+            }
+            state.model_calls += 1;
+            state.event("model_request", "live provider");
+        }
+        let result = self.inner.execute();
+        self.state.borrow_mut().event(
+            "model_response",
+            if result.is_ok() {
+                "live reply"
+            } else {
+                "live error"
+            },
+        );
+        result
+    }
 }
 impl LLMEngine for ScriptedModel {
     fn add_text_content(&mut self, _text: &str) {
@@ -91,14 +129,43 @@ pub struct Run {
 
 pub fn execute(scenario: &Scenario, root: &Path) -> Result<Run> {
     scenario.validate()?;
+    // Read live configuration before initializing even the simulated device.
+    let live = match &scenario.llm {
+        ModelConfig::Scripted => None,
+        ModelConfig::Live {
+            model,
+            timeout_seconds,
+            ..
+        } => Some(
+            OpenAI::from_env(model.clone())?
+                .with_timeout(std::time::Duration::from_secs(*timeout_seconds)),
+        ),
+    };
     let state = Rc::new(RefCell::new(State::new(scenario, root)?));
-    let workflow = Workflow::with_device(Box::new(SimDevice(state.clone())), false);
+    if let (ModelConfig::Live { max_calls, .. }, Some(inner)) = (&scenario.llm, live) {
+        let model = LiveModel {
+            inner,
+            state: state.clone(),
+            max_calls: *max_calls,
+        };
+        return execute_with_model(scenario, state, model, "live-provider");
+    }
     let model = ScriptedModel {
         state: state.clone(),
         replies: scenario.replies.clone().into(),
         text_count: 0,
         images: Vec::new(),
     };
+    execute_with_model(scenario, state, model, "scripted-offline")
+}
+
+fn execute_with_model<M: LLMEngine>(
+    scenario: &Scenario,
+    state: Shared,
+    model: M,
+    model_mode: &'static str,
+) -> Result<Run> {
+    let workflow = Workflow::with_device(Box::new(SimDevice(state.clone())), false);
     let mut orchestrator = Orchestrator::new(workflow, model);
     let mut errors = Vec::new();
     for (index, iteration) in scenario.iterations.iter().enumerate() {
@@ -149,6 +216,13 @@ pub fn execute(scenario: &Scenario, root: &Path) -> Result<Run> {
             failures.push(format!("page {page} text differs from expected"));
         }
     }
+    for (&page, expected) in &scenario.expect.text_contains {
+        for substring in expected {
+            if !pages[page].text.contains(substring) {
+                failures.push(format!("page {page} missing expected text substring"));
+            }
+        }
+    }
     for (&page, &expected) in &scenario.expect.x_count {
         if pages[page].x_count != expected {
             failures.push(format!(
@@ -179,7 +253,8 @@ pub fn execute(scenario: &Scenario, root: &Path) -> Result<Run> {
             scenario.expect.errors
         ));
     }
-    if state.model_calls != scenario.replies.len() {
+    if matches!(scenario.llm, ModelConfig::Scripted) && state.model_calls != scenario.replies.len()
+    {
         failures.push(format!(
             "{} scripted replies but {} calls",
             scenario.replies.len(),
@@ -192,7 +267,7 @@ pub fn execute(scenario: &Scenario, root: &Path) -> Result<Run> {
     Ok(Run {
         report: Report {
             name: scenario.name.clone(),
-            model_mode: "scripted-offline",
+            model_mode,
             active_page: state.active,
             virtual_ms: state.clock,
             model_calls: state.model_calls,

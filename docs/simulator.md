@@ -16,12 +16,14 @@ active page, virtual elapsed milliseconds, model-call counts and ordered actions
 Expected-result mismatches exit nonzero **after** saving results. Expected injected
 failures can pass when the recorded behavior matches the assertions.
 
-All model replies are **scripted and offline**. The application still builds its
+The scenarios above use **scripted and offline** replies by default. The application still builds its
 real prompts and images, parses proposals, independently compares transcriptions,
 classifies screenshots and executes its real recovery/rendering decisions. This
 tests application behavior, not whether a model can read the handwriting. The
 scripted engine validates that image content is decodable and traces content counts.
 It does not connect to OpenAI even when credentials exist in the environment.
+
+Explicit live provider execution is available through the [local development setup](local-development.md). It requires a live scenario and credentials; the deterministic defaults below remain offline.
 
 ## Scenario format
 
@@ -31,6 +33,7 @@ based; operation call numbers are one based and span the whole scenario.
 
 | Field | Meaning |
 |---|---|
+| `llm` | Defaults to scripted/offline. Explicit live configuration is documented in local development setup. |
 | `name`, `mode` | Nonempty name; currently only `reader` executes. |
 | `pages` | Ordered pages. `{}` is blank. `image` loads a 768x1024 PNG; optional `text` and `strokes` add deterministic text or existing JSON pen paths. |
 | `active_page` | Starting page, default zero. |
@@ -41,7 +44,7 @@ based; operation call numbers are one based and span the whole scenario.
 | `faults` | Objects with `operation`, `call`, `effect`. Every fault must be reached. |
 | `header_image` | Optional initial cached header image, useful for a preexisting answer page. Normal blank-page rendering updates the in-memory cache. |
 | `output` | Directory for results. Asset and output paths resolve relative to the scenario file, independently of the launch directory. |
-| `expect` | Optional `active_page`, `model_calls`, exact `text` by page, `x_count` by page, `unchanged_pages`, exact operation counts and ordered error substrings. Errors default to none. |
+| `expect` | Optional `active_page`, `model_calls`, exact `text` and `text_contains` substring lists by page, `x_count` by page, `unchanged_pages`, exact operation counts and ordered error substrings. Errors default to none. |
 
 Fault operations are `capture`, `next`, `previous`, `text`, `body`, `line`, `trigger`
 and `header_save`. `error` injects an operation error; `no_move` applies only to
@@ -103,3 +106,4 @@ and combined scenarios through these interfaces; REM-25 must add insertion and
 native-document preservation cases; REM-17 must validate final gesture routing,
 combined workflows and remaining 1.0 acceptance on simulator and real hardware.
 REM-28 provisions local credentials for later explicitly selected live-model work.
+
