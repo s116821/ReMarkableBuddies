@@ -79,6 +79,8 @@ pub struct Event {
 }
 
 pub struct State {
+    #[cfg(test)]
+    pub idle_events: VecDeque<Vec<crate::device::interaction::Interaction>>,
     pub pages: Vec<Page>,
     pub initial: Vec<RgbaImage>,
     pub active: usize,
@@ -186,6 +188,8 @@ impl State {
             .map(|p| image::open(root.join(p)))
             .transpose()?;
         Ok(Self {
+            #[cfg(test)]
+            idle_events: VecDeque::new(),
             pages,
             initial,
             active: scenario.active_page,
@@ -259,6 +263,17 @@ fn png(image: &DynamicImage) -> Result<Vec<u8>> {
 }
 
 impl DeviceBackend for SimDevice {
+    #[cfg(test)]
+    fn wait_for_interactions(
+        &mut self,
+        _timeout: Option<Duration>,
+    ) -> Result<Vec<crate::device::interaction::Interaction>> {
+        self.0
+            .borrow_mut()
+            .idle_events
+            .pop_front()
+            .context("Idle test has no remaining input")
+    }
     fn history_snapshot(
         &mut self,
         expected: Option<&str>,
@@ -287,7 +302,8 @@ impl DeviceBackend for SimDevice {
                 "history_persistence_lag",
                 "visible text precedes persisted text; wait for expected content",
             );
-            state.clock += 200;
+            // Native RM2 3.28 measurements were about 10.6-10.8 seconds.
+            state.clock += 11_000;
         }
         let current = state.history_page()?;
         anyhow::ensure!(

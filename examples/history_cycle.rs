@@ -13,8 +13,8 @@ fn main() -> anyhow::Result<()> {
     env_logger::init();
     let args: Vec<_> = std::env::args().collect();
     anyhow::ensure!(
-        args.len() == 3,
-        "usage: history_cycle QA_FILE OUTPUT_DIRECTORY"
+        args.len() == 3 || (args.len() == 4 && args[3] == "--gestures"),
+        "usage: history_cycle QA_FILE OUTPUT_DIRECTORY [--gestures]"
     );
     let qa = std::fs::read_to_string(&args[1])?;
     anyhow::ensure!(
@@ -31,6 +31,15 @@ fn main() -> anyhow::Result<()> {
         workflow.history_state() == State::Applied,
         "History did not arm after native append"
     );
+    if args.len() == 4 {
+        println!("History armed; waiting for gestures, then a lower-left Reader hold to finish without a model call");
+        workflow.wait_for_reader_bounded(120)?;
+        println!(
+            "Reader trigger accepted; history {:?}",
+            workflow.history_state()
+        );
+        return Ok(());
+    }
     for (index, action) in [
         None,
         Some(Action::Undo),

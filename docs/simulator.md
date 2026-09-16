@@ -101,7 +101,8 @@ The report includes `history` state, exact page text and ordered history events;
 Faults `history_snapshot: stale` retain an old stable snapshot and prevent arming;
 `history_snapshot: wrong_page` models the observed case where stable last-opened
 metadata refers to a different document than the visible one and cannot arm history.
-`history_snapshot: lag` models a200ms delay followed by the complete expected text.
+`history_snapshot: lag` models an11-second delay followed by the complete expected text,
+matching the order of observed RM2 persistence delays. This remains modeled time.
 That delay is a deterministic test value, not a measured persistence bound.
 `history_mutation: partial` retains the actual partial operation and reports an
 error; subsequent undo/redo cannot compensate. `error` and `corrupt` also exercise

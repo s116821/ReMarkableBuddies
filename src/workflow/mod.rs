@@ -154,9 +154,23 @@ impl Workflow {
     /// Stay idle without clearing the last Q&A. Cross-device event order is
     /// unknown, so any loss of ownership wins over history gestures in a batch.
     pub fn wait_for_reader(&mut self) -> Result<()> {
+        self.wait_for_reader_until(None)
+    }
+
+    /// Bounded offline diagnostics use the exact production idle dispatcher.
+    pub fn wait_for_reader_bounded(&mut self, seconds: u64) -> Result<()> {
+        anyhow::ensure!((1..=120).contains(&seconds), "Invalid observation duration");
+        self.wait_for_reader_until(Some(
+            std::time::Instant::now() + std::time::Duration::from_secs(seconds),
+        ))
+    }
+
+    fn wait_for_reader_until(&mut self, deadline: Option<std::time::Instant>) -> Result<()> {
         use crate::device::interaction::Interaction;
         loop {
-            let events = self.device.wait_for_interactions()?;
+            let timeout =
+                deadline.map(|limit| limit.saturating_duration_since(std::time::Instant::now()));
+            let events = self.device.wait_for_interactions(timeout)?;
             let invalidated = events.contains(&Interaction::Invalidated);
             if invalidated {
                 self.invalidate_history();
@@ -173,8 +187,10 @@ impl Workflow {
                         Interaction::Redo => history::Action::Redo,
                         _ => continue,
                     };
-                    if let Err(error) = self.history_action(action) {
-                        log::warn!("Q&A history stopped: {error}");
+                    match self.history_action(action) {
+                        Ok(true) => info!("Q&A history {:?}: {:?}", action, self.history.state()),
+                        Ok(false) => debug!("Q&A history {:?}: unavailable or redundant", action),
+                        Err(error) => log::warn!("Q&A history stopped: {error}"),
                     }
                 }
             }

@@ -452,6 +452,38 @@ mod indicator_capture_tests {
     }
 
     #[test]
+    fn idle_loop_preserves_history_until_reader_and_prioritizes_input_loss() {
+        use crate::{device::interaction::Interaction as I, workflow::history::State as H};
+        for (events, mutations) in [
+            (vec![vec![I::Undo], vec![I::Redo], vec![I::Reader]], 2),
+            (vec![vec![I::Undo, I::Invalidated], vec![I::Reader]], 0),
+            // Observer initialization fallback must retain the Reader event
+            // while invalidating its former history in the very same batch.
+            (vec![vec![I::Invalidated, I::Reader]], 0),
+        ] {
+            let (state, mut workflow) = blank_successor();
+            workflow.render_text("Header\n").unwrap();
+            workflow.render_qa("Q: new?\nA: yes.\n---\n").unwrap();
+            assert_eq!(workflow.history_state(), H::Applied);
+            state.borrow_mut().idle_events = events.into();
+            workflow.wait_for_reader().unwrap();
+            assert_eq!(workflow.history_state(), H::Empty);
+            let state = state.borrow();
+            assert!(state.idle_events.is_empty());
+            assert_eq!(
+                state
+                    .counts
+                    .get(&Operation::HistoryMutation)
+                    .copied()
+                    .unwrap_or(0),
+                mutations
+            );
+            assert_eq!(state.model_calls, 0);
+            assert_eq!(state.pages[1].text, "Header\nQ: new?\nA: yes.\n---\n");
+        }
+    }
+
+    #[test]
     fn classification_clears_owned_circle_before_capture() {
         let (state, mut workflow) = blank_successor();
         workflow.capture_page_data().unwrap();

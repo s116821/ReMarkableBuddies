@@ -41,7 +41,11 @@ pub trait DeviceBackend {
         anyhow::bail!("Native Q&A history is unavailable")
     }
     fn history_discard(&mut self) {}
-    fn wait_for_interactions(&mut self) -> Result<Vec<super::interaction::Interaction>> {
+    fn wait_for_interactions(
+        &mut self,
+        timeout: Option<Duration>,
+    ) -> Result<Vec<super::interaction::Interaction>> {
+        anyhow::ensure!(timeout.is_none(), "Bounded input observation unavailable");
         self.wait_for_trigger()?;
         Ok(vec![super::interaction::Interaction::Reader])
     }
@@ -112,8 +116,12 @@ impl DeviceBackend for RealDevice {
         self.history.discard();
     }
     #[cfg(target_os = "linux")]
-    fn wait_for_interactions(&mut self) -> Result<Vec<super::interaction::Interaction>> {
-        self.history.wait(&mut self.keyboard, &mut self.touch)
+    fn wait_for_interactions(
+        &mut self,
+        timeout: Option<Duration>,
+    ) -> Result<Vec<super::interaction::Interaction>> {
+        self.history
+            .wait(&mut self.keyboard, &mut self.touch, timeout)
     }
     fn capture(&mut self) -> Result<Frame> {
         self.screenshot.take_screenshot()?;

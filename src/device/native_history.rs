@@ -101,7 +101,8 @@ impl NativeHistory {
         expected: Option<&str>,
         required_owner: Option<&Owner>,
     ) -> Result<PageState> {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let started = Instant::now();
+        let deadline = started + Duration::from_secs(30);
         let mut previous = None;
         let mut repeats = 0;
         let mut last_error = "Native state did not settle".to_owned();
@@ -141,6 +142,10 @@ impl NativeHistory {
                     }
                     if repeats >= 2 {
                         page.supported = true;
+                        log::debug!(
+                            "Native history content settled after {}ms",
+                            started.elapsed().as_millis()
+                        );
                         return Ok(page);
                     }
                     previous = Some(page);
@@ -204,15 +209,36 @@ impl NativeHistory {
         result
     }
 
-    pub fn wait(&mut self, keyboard: &mut Keyboard, touch: &mut Touch) -> Result<Vec<Interaction>> {
+    pub fn wait(
+        &mut self,
+        keyboard: &mut Keyboard,
+        touch: &mut Touch,
+        timeout: Option<Duration>,
+    ) -> Result<Vec<Interaction>> {
+        let deadline = timeout.map(|duration| Instant::now() + duration);
         if !self.supported {
+            ensure!(timeout.is_none(), "Bounded input observation unavailable");
             touch.wait_for_trigger()?;
             return Ok(vec![Interaction::Reader]);
         }
         if self.input.is_none() {
-            self.input = Some(self.new_input(keyboard)?);
+            match self.new_input(keyboard) {
+                Ok(input) => self.input = Some(input),
+                Err(error) => {
+                    log::warn!("History observer unavailable; retaining Reader trigger: {error}");
+                    self.discard();
+                    self.supported = false;
+                    ensure!(timeout.is_none(), "Bounded input observation unavailable");
+                    touch.wait_for_trigger()?;
+                    return Ok(vec![Interaction::Invalidated, Interaction::Reader]);
+                }
+            }
         }
         loop {
+            ensure!(
+                deadline.is_none_or(|limit| Instant::now() < limit),
+                "Input observation deadline reached"
+            );
             match self.input.as_mut().unwrap().poll() {
                 Ok(events) if !events.is_empty() => return Ok(events),
                 Ok(_) => sleep(Duration::from_millis(10)),

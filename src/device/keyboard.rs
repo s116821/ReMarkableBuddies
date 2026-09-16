@@ -366,19 +366,24 @@ impl Keyboard {
         anyhow::ensure!(self.device.is_some(), "Native history keyboard disabled");
         if let Command::DeleteSuffix { characters } = command {
             anyhow::ensure!(
-                (1..=8000).contains(&characters),
+                (1..=crate::workflow::history::MAX_CHARACTERS).contains(&characters),
                 "Invalid history selection size"
             );
         }
+        let deadline = time::Instant::now() + time::Duration::from_secs(60);
         let result = (|| -> Result<()> {
             let mut emit = |key, down| -> Result<()> {
+                anyhow::ensure!(
+                    time::Instant::now() < deadline,
+                    "Native history key deadline exceeded"
+                );
                 guard()?;
                 if down {
                     self.key_down(key)?;
                 } else {
                     self.key_up(key)?;
                 }
-                thread::sleep(time::Duration::from_millis(50));
+                thread::sleep(time::Duration::from_millis(5));
                 guard()
             };
             match command {

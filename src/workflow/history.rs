@@ -2,6 +2,9 @@
 use crate::device::native_text::NativeText;
 use anyhow::{ensure, Context, Result};
 
+/// Bound selection latency; longer answers still render but do not own history.
+pub const MAX_CHARACTERS: usize = 2000;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Owner {
     pub document: String,
@@ -110,7 +113,7 @@ impl History {
             || !applied.supported
             || before.owner != applied.owner
             || block.is_empty()
-            || block.len() > 8000
+            || block.len() > MAX_CHARACTERS
             || !block.ends_with('\n')
             || !block.bytes().all(|c| c == b'\n' || (32..=126).contains(&c))
             || applied.content.text() != format!("{}{block}", before.content.text())
@@ -304,6 +307,17 @@ mod tests {
         let mut changed = page(&format!("{BEFORE}{BLOCK}"), 2);
         changed.content.paragraphs[0].style = 3;
         assert!(!history.arm(before, changed, BLOCK));
+        assert_eq!(history.state(), State::Empty);
+    }
+
+    #[test]
+    fn oversized_answers_never_start_an_unbounded_native_selection() {
+        let before = page(BEFORE, 1);
+        let limit = format!("{}\n", "a".repeat(MAX_CHARACTERS - 1));
+        let mut history = History::default();
+        assert!(history.arm(before.clone(), page(&format!("{BEFORE}{limit}"), 2), &limit));
+        let oversized = format!("a{limit}");
+        assert!(!history.arm(before, page(&format!("{BEFORE}{oversized}"), 3), &oversized));
         assert_eq!(history.state(), State::Empty);
     }
     #[test]
