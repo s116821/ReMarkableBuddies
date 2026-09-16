@@ -14,7 +14,17 @@
 - Follow the scoped semantic-title convention in README; include verified related
   ticket IDs when applicable and do not imply incomplete tickets are fully resolved.
 
-## Tablet testing
+## OpenSpec workflow
+
+Use the official repo-local skills in `.codex/skills/openspec-*` for planned work:
+propose the full change (proposal, design, delta specs, tasks), apply, verify,
+sync canonical specs, and archive in the same implementation PR. See
+[the workflow guide](openspec/README.md). Do not split feature planning into a
+prerequisite planning-only PR. REM-27 is the deliberate baseline-only exception.
+Current Linear scope and source behavior outrank historical plans. Record actual
+test evidence in PR comments, and complete the issue's acceptance gates before merge.
+
+## Tablet access
 
 For tablet compatibility, integration, or end-to-end Reader Buddy testing, when
 full unattended SSH is available to an authorized development tablet the user is
