@@ -32,3 +32,7 @@ Use the REM-8 restored build as rollback. Draft all artifacts before diagnostic/
 ## Open Questions
 
 Native gate must settle exact block key semantics, timely current-page identity/departure events, and native long-hold coexistence. These are investigation tasks with recorded pass/fail evidence, not assumptions that the candidate mechanism already works.
+
+## Native investigation notes
+
+First bounded diagnostic on RM2 3.28:5ms input did not visibly select the complete appended36-byte Q&A.50ms input selected across paragraphs, but deleting the range also removed the preceding separator; native undo restored the range on the disposable clone. This rejects naive raw-string-length selection as a verified mechanism. Separate cursor/end and selection probes must determine the cause before production adoption. Read-only xochitl D-Bus introspection was denied; no usable page event API established by that probe.

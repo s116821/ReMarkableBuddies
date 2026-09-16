@@ -33,17 +33,22 @@ fn history_keys(action: &str, count: usize) -> Result<()> {
     sleep(Duration::from_secs(1));
     let mut emit = |key: K, value: i32| -> Result<()> {
         device.emit(&[InputEvent::new(EventType::KEY.0, key.code(), value)])?;
-        sleep(Duration::from_millis(5));
+        sleep(Duration::from_millis(50));
         Ok(())
     };
     let result = (|| -> Result<()> {
         match action {
-            "select-tail" => {
-                emit(K::KEY_LEFTCTRL, 1)?;
-                emit(K::KEY_END, 1)?;
-                emit(K::KEY_END, 0)?;
-                emit(K::KEY_LEFTCTRL, 0)?;
-                sleep(Duration::from_millis(100));
+            "select-tail" | "select-left" | "end" => {
+                if action != "select-left" {
+                    emit(K::KEY_LEFTCTRL, 1)?;
+                    emit(K::KEY_END, 1)?;
+                    emit(K::KEY_END, 0)?;
+                    emit(K::KEY_LEFTCTRL, 0)?;
+                    sleep(Duration::from_millis(100));
+                }
+                if action == "end" {
+                    return Ok(());
+                }
                 emit(K::KEY_LEFTSHIFT, 1)?;
                 for _ in 0..count {
                     emit(K::KEY_LEFT, 1)?;
@@ -81,8 +86,11 @@ fn main() -> Result<()> {
     env_logger::init();
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
-        Some(action @ ("select-tail" | "delete-selection" | "native-undo" | "native-redo")) => {
-            let count = if action == "select-tail" {
+        Some(
+            action @ ("select-tail" | "select-left" | "end" | "delete-selection" | "native-undo"
+            | "native-redo"),
+        ) => {
+            let count = if matches!(action, "select-tail" | "select-left") {
                 args.get(2)
                     .ok_or_else(|| anyhow::anyhow!("character count required"))?
                     .parse()?
