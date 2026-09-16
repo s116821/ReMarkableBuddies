@@ -29,7 +29,6 @@ struct Session {
     since: Duration,
     invalidated: bool,
     blocked: bool,
-    reader_sent: bool,
     qualified: Option<Interaction>,
     releasing: Option<Duration>,
 }
@@ -62,6 +61,18 @@ impl ContactReducer {
         let mut events = Vec::new();
         if contacts.is_empty() {
             if let Some(session) = self.session.take() {
+                // Native corner menus act on release. Dispatching earlier lets
+                // the release reopen a menu after Reader has dismissed it.
+                if !session.blocked
+                    && session.reference.len() == 1
+                    && session.current.len() == 1
+                    && self
+                        .corner
+                        .contains(session.current[0].x, session.current[0].y)
+                    && now.saturating_sub(session.since) >= HOLD
+                {
+                    return vec![Interaction::Reader];
+                }
                 if !session.blocked
                     && !session.invalidated
                     && session
@@ -70,7 +81,7 @@ impl ContactReducer {
                 {
                     if let Some(action) = session.qualified {
                         events.push(action);
-                    } else if !session.reader_sent {
+                    } else {
                         events.push(Interaction::Invalidated);
                     }
                 } else if !session.invalidated {
@@ -85,7 +96,6 @@ impl ContactReducer {
             since: now,
             invalidated: false,
             blocked: false,
-            reader_sent: false,
             qualified: None,
             releasing: None,
         });
@@ -136,15 +146,6 @@ impl ContactReducer {
             session.blocked = true;
         }
         let elapsed = now.saturating_sub(session.since);
-        if !session.blocked
-            && !session.reader_sent
-            && contacts.len() == 1
-            && self.corner.contains(contacts[0].x, contacts[0].y)
-            && elapsed >= HOLD
-        {
-            session.reader_sent = true;
-            events.push(Interaction::Reader);
-        }
         if session.qualified.is_none()
             && !session.blocked
             && !session.invalidated
@@ -264,9 +265,16 @@ mod tests {
             reducer.frame(&corner, ms(250)),
             vec![Interaction::Invalidated]
         );
-        assert_eq!(reducer.frame(&corner, ms(2000)), vec![Interaction::Reader]);
+        assert!(reducer.frame(&corner, ms(2000)).is_empty());
         assert!(reducer.frame(&corner, ms(6000)).is_empty());
-        assert!(reducer.frame(&[], ms(6001)).is_empty());
+        assert_eq!(reducer.frame(&[], ms(6001)), vec![Interaction::Reader]);
+        assert!(reducer.frame(&[], ms(7000)).is_empty());
+        reducer.frame(&corner, ms(8000));
+        reducer.frame(&corner, ms(9999));
+        assert_eq!(reducer.frame(&[], ms(10000)), vec![Interaction::Reader]);
+        reducer.frame(&corner, ms(11000));
+        reducer.cancel();
+        assert!(reducer.frame(&[], ms(14000)).is_empty());
     }
     #[test]
     fn prolonged_partial_release_and_event_loss_never_mutate() {

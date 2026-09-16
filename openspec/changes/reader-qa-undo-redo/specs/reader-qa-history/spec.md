@@ -15,6 +15,10 @@ Reader SHALL retain only the most recent completely rendered Q&A block and its a
 - **WHEN** rendering or undo/redo fails or its resulting state is uncertain
 - **THEN** the history record is unavailable, the failure is reported and no automatic compensating edit is attempted.
 
+#### Scenario: Unsupported or oversized native transaction
+- **WHEN** firmware/native text is unsupported, the Q&A exceeds2000ASCII characters, or complete expected persistence is not observed within30seconds
+- **THEN** normal Q&A rendering remains available but no history transaction is armed; native history key injection is limited to60seconds and releases owned modifiers on failure.
+
 ### Requirement: Page-scoped history ownership
 Reader SHALL invalidate the saved record when the user departs the answer page or a new Reader iteration starts. Leaving and returning SHALL NOT revive it. Every mutation SHALL check current ownership; intervening edits or uncertain identity SHALL disable it rather than delete unrelated content. Source: planned workflow history policy and device event/identity backend.
 

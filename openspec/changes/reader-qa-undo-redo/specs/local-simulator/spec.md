@@ -30,3 +30,7 @@ The simulator SHALL drive the shared last-Q&A history state using declared undo/
 #### Scenario: Stable metadata describes another view
 - **WHEN** saved last-opened metadata refers to the wrong page, or the user opens the overview without changing the saved page ID
 - **THEN** history cannot arm from the wrong observation, and the overview input invalidates existing ownership even when the saved ID stays unchanged.
+
+#### Scenario: Reader release ordering
+- **WHEN** a corner hold reaches two seconds while still touching the screen
+- **THEN** the shared reducer waits for release before dispatching Reader, preventing the observed native menu from reopening after dismissal; canceled or moved holds cannot trigger Reader.

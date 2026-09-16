@@ -22,3 +22,11 @@ While awaiting the next Reader action, tablet input SHALL recognize stationary f
 #### Scenario: No history
 - **WHEN** an undo/redo gesture occurs without a valid corresponding history state
 - **THEN** Reader performs no text mutation and no model request.
+
+#### Scenario: Corner release opens native menu
+- **WHEN** a single contact qualifies for Reader and is subsequently released
+- **THEN** the shared input path emits Reader once after release, so menu dismissal follows the native release action; no capture begins while the trigger is still held.
+
+#### Scenario: History observer unavailable
+- **WHEN** the native history observer cannot initialize
+- **THEN** history is discarded and disabled for the process, while the ordinary Reader trigger remains available without a restart loop.
