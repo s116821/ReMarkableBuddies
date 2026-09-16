@@ -6,11 +6,102 @@ use remarkable_reader_buddy::{Keyboard, Pen, Screenshot, Touch, TriggerCorner};
 #[cfg(target_os = "linux")]
 use std::{thread::sleep, time::Duration};
 
+/// Diagnostic only: select a bounded suffix without deleting it, or press one key.
+#[cfg(target_os = "linux")]
+fn history_keys(action: &str, count: usize) -> Result<()> {
+    use evdev::{uinput::VirtualDevice, AttributeSet, EventType, InputEvent, KeyCode as K};
+    anyhow::ensure!(
+        count <= 8000,
+        "diagnostic selection exceeds 8000 characters"
+    );
+    let mut keys = AttributeSet::<K>::new();
+    for key in [
+        K::KEY_LEFTCTRL,
+        K::KEY_LEFTSHIFT,
+        K::KEY_END,
+        K::KEY_LEFT,
+        K::KEY_BACKSPACE,
+        K::KEY_Z,
+        K::KEY_Y,
+    ] {
+        keys.insert(key);
+    }
+    let mut device = VirtualDevice::builder()?
+        .name("Reader Buddy history diagnostic")
+        .with_keys(&keys)?
+        .build()?;
+    sleep(Duration::from_secs(1));
+    let mut emit = |key: K, value: i32| -> Result<()> {
+        device.emit(&[InputEvent::new(EventType::KEY.0, key.code(), value)])?;
+        sleep(Duration::from_millis(5));
+        Ok(())
+    };
+    let result = (|| -> Result<()> {
+        match action {
+            "select-tail" => {
+                emit(K::KEY_LEFTCTRL, 1)?;
+                emit(K::KEY_END, 1)?;
+                emit(K::KEY_END, 0)?;
+                emit(K::KEY_LEFTCTRL, 0)?;
+                sleep(Duration::from_millis(100));
+                emit(K::KEY_LEFTSHIFT, 1)?;
+                for _ in 0..count {
+                    emit(K::KEY_LEFT, 1)?;
+                    emit(K::KEY_LEFT, 0)?;
+                }
+            }
+            "delete-selection" => {
+                emit(K::KEY_BACKSPACE, 1)?;
+                emit(K::KEY_BACKSPACE, 0)?;
+            }
+            "native-undo" | "native-redo" => {
+                let key = if action == "native-undo" {
+                    K::KEY_Z
+                } else {
+                    K::KEY_Y
+                };
+                emit(K::KEY_LEFTCTRL, 1)?;
+                emit(key, 1)?;
+                emit(key, 0)?;
+            }
+            _ => bail!("Unknown history diagnostic"),
+        }
+        Ok(())
+    })();
+    // Always release modifiers, including on a partially emitted sequence.
+    let shift_release = emit(K::KEY_LEFTSHIFT, 0);
+    let ctrl_release = emit(K::KEY_LEFTCTRL, 0);
+    result?;
+    shift_release?;
+    ctrl_release
+}
+
 #[cfg(target_os = "linux")]
 fn main() -> Result<()> {
     env_logger::init();
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
+        Some(action @ ("select-tail" | "delete-selection" | "native-undo" | "native-redo")) => {
+            let count = if action == "select-tail" {
+                args.get(2)
+                    .ok_or_else(|| anyhow::anyhow!("character count required"))?
+                    .parse()?
+            } else {
+                0
+            };
+            history_keys(action, count)?;
+        }
+        Some("text-file") => {
+            let path = args
+                .get(2)
+                .ok_or_else(|| anyhow::anyhow!("text file required"))?;
+            let text = std::fs::read_to_string(path)?;
+            anyhow::ensure!(text.len() <= 8000, "diagnostic text exceeds 8000 bytes");
+            let mut keyboard = Keyboard::new(false, true);
+            sleep(Duration::from_secs(1));
+            keyboard.key_cmd_body()?;
+            keyboard.string_to_keypresses(&text)?;
+        }
         Some("tap") | Some("press") => {
             let x = args
                 .get(2)
