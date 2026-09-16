@@ -59,16 +59,46 @@ impl Pen {
 
     pub fn draw_path_screen(&mut self, points: &[(i32, i32)]) -> Result<()> {
         if let Some(&first) = points.first() {
-            let result = (|| {
+            let result = (|| -> Result<()> {
                 self.pen_up()?;
                 self.pen_down_at(self.virtual_to_input(first))?;
-                points
-                    .iter()
-                    .try_for_each(|&point| self.goto_xy_virtual(point))
+                self.follow_path_screen(points)
             })();
             let release = self.pen_up();
             result?;
             release?;
+        }
+        Ok(())
+    }
+
+    pub fn erase_path_screen(&mut self, points: &[(i32, i32)]) -> Result<()> {
+        if let Some(&first) = points.first() {
+            let result = (|| -> Result<()> {
+                self.eraser_up()?;
+                self.goto_xy_virtual(first)?;
+                self.eraser_down()?;
+                sleep(Duration::from_millis(10));
+                self.follow_path_screen(points)
+            })();
+            let release = self.eraser_up();
+            result?;
+            release?;
+        }
+        Ok(())
+    }
+
+    fn follow_path_screen(&mut self, points: &[(i32, i32)]) -> Result<()> {
+        for pair in points.windows(2) {
+            let previous = self.virtual_to_input(pair[0]);
+            let next = self.virtual_to_input(pair[1]);
+            let length = ((next.0 - previous.0) as f64).hypot((next.1 - previous.1) as f64);
+            let steps = (length / 5.0).ceil().max(1.0) as i32;
+            for step in 1..=steps {
+                self.goto_xy((
+                    previous.0 + (next.0 - previous.0) * step / steps,
+                    previous.1 + (next.1 - previous.1) * step / steps,
+                ))?;
+            }
         }
         Ok(())
     }
@@ -312,6 +342,10 @@ impl Pen {
     }
 
     pub fn draw_path_screen(&mut self, _points: &[(i32, i32)]) -> Result<()> {
+        Ok(())
+    }
+
+    pub fn erase_path_screen(&mut self, _points: &[(i32, i32)]) -> Result<()> {
         Ok(())
     }
 

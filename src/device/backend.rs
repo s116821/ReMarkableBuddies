@@ -115,8 +115,8 @@ impl DeviceBackend for RealDevice {
     }
     fn status_clear(&mut self) -> Result<()> {
         log::debug!("Clearing owned activity circle");
-        use crate::workflow::indicator::{BOTTOM, LEFT, RIGHT, TOP};
-        self.pen.erase_rectangle((LEFT, TOP), (RIGHT, BOTTOM))?;
+        self.pen
+            .erase_path_screen(&crate::workflow::indicator::circle_points())?;
         std::thread::sleep(Duration::from_millis(100));
         Ok(())
     }

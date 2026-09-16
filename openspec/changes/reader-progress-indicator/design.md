@@ -33,3 +33,7 @@ Maintain old runtime rollback, use a disposable technical paper and isolated bou
 Final geometry clearance and active-tool behavior must be confirmed in the native acceptance run. These are implementation validation gates, not claims of tested behavior.
 
 Cleanup failure poisons the current orchestrator: after same-page best-effort cleanup it returns an error and requires reinitialization, rather than erasing an owned mark after a user might have navigated. Any text-output attempt invalidates corner eligibility because partial typing may change the region; failure display is suppressed until a fresh clean capture establishes safety.
+
+Native acceptance exposed overshoot from sparse fast pen points: the rendered circle exceeded its intended bounds and left a residual arc after clearing. Pace/interpolate the native continuous path at the existing line-drawing resolution, then repeat actual before/active/after and sentinel checks before acceptance. Keep this failed capture as evidence; simulator geometry does not prove native path fidelity.
+
+The existing rectangular eraser also emits sparse, rapid endpoint strokes. For status cleanup, retrace the owned circle with the same paced continuous native path using the rubber tool, rather than sweeping arbitrary blank rectangle rows. This bounds erasure to owned geometry and avoids rapid tool toggles; native clearance and residual-mark checks still decide acceptance.
