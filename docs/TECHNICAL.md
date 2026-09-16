@@ -293,3 +293,21 @@ Implement in `src/analysis/circle_detector.rs`:
 **Version**: 0.1.0  
 **Last Updated**: 2025-11-01
 
+## Highlighted selections
+
+Reader accepts a deliberate highlighted passage as well as a closed hand-drawn
+outline. A highlight needs no enclosing circle. The handwritten question must
+still be readable and clearly associated with the selected topic, and an independent
+transcription must agree before output. Printed gray figures, shading or an X do
+not constitute a user selection. Missing or ambiguous question/selection cases
+request NONE instead of a general passage summary.
+
+The existing OUTLINE_BOX response field denotes the overview-space bounding box
+of either the outlined or highlighted region. Recognition remains model-based;
+it does not establish perfect highlight or handwriting detection.
+
+Modern RM2 framebuffer capture uses neutral-preserving luminance from BGRA pixels.
+Native highlighter colors exist in the framebuffer even on the monochrome tablet;
+using only blue darkened yellow highlights. The conversion preserves all neutral
+gray values and improves printed-text contrast under yellow marks. Legacy RM2,
+Paper Pro and framebuffer allocation discovery are unchanged.

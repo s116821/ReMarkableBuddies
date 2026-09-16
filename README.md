@@ -3,21 +3,21 @@
 This repository currently contains Reader Buddy. The Rust package, `reader-buddy`
 executable, service, and release archive names retain their existing names.
 
-An AI-powered reading assistant for the reMarkable tablet that watches for circled content and handwritten questions, then provides answers directly on your device using ChatGPT.
+An AI-powered reading assistant for the reMarkable tablet that watches for outlined or highlighted content and handwritten questions, then provides answers directly on your device using ChatGPT.
 
 ## Features
 
-- **Content Outline Detection**: Automatically detects content you've outlined on your reMarkable (circles, rectangles, or any closed shape)
-- **Question Extraction**: Uses vision AI to read your handwritten question near the outline
-- **Intelligent Answers**: Queries ChatGPT with the outlined content and your question
+- **Selected Content Detection**: Recognizes deliberate highlights or closed outlines (circles, rectangles, or other closed shapes)
+- **Question Extraction**: Uses vision AI to read your handwritten question near the selected content
+- **Intelligent Answers**: Queries ChatGPT with the selected content and your question
 - **On-Device Rendering**: Displays question and answer directly on your reMarkable tablet
 - **Answer Page Detection**: Recognizes blank pages or existing answer pages for seamless Q&A flow
 
 ## How It Works
 
 1. **Prepare Answer Page**: Before triggering, create a blank page to the **right** of your question page
-2. **Outline Content**: Draw any closed shape (circle, rectangle, etc.) around content you want to ask about
-3. **Write Question**: Write your question near the outlined content
+2. **Select Content**: Highlight the passage or draw a closed shape (circle, rectangle, etc.) around the concept you want to ask about
+3. **Write Question**: Write your question near the selected content
 4. **Trigger**: Touch and **hold for 3 seconds** in the **lower-left corner** of your reMarkable screen
 5. **Capture**: The app takes a screenshot of your current page
 6. **Read and Verify**: A vision request identifies the selected concept, reads the question, and proposes an answer. An independent transcription pass over the page, without seeing the proposed question or answer, must agree before anything is written. Unreadable or conflicting readings produce an X instead.
@@ -631,4 +631,3 @@ See LICENSE file for details.
 - OpenAI for GPT vision capabilities
 
 For explicit provider-backed laptop runs, see [local development setup](docs/local-development.md). Normal simulator regression scenarios remain offline.
-

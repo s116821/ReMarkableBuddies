@@ -107,3 +107,25 @@ native-document preservation cases; REM-17 must validate final gesture routing,
 combined workflows and remaining 1.0 acceptance on simulator and real hardware.
 REM-28 provisions local credentials for later explicitly selected live-model work.
 
+
+## Highlight recognition checks
+
+REM-16 fixtures contain native RM2 highlighter marks, rather than drawn circle
+substitutes. `highlighted-g`, `question-no-selection` and `highlight-no-question`
+are deterministic routing cases; their scripted replies do not prove vision.
+The corresponding files in `simulator/live/`, plus `highlighted-cursive.json`,
+make explicit provider calls. Existing `live/reader.json` remains the circled
+compatibility case.
+
+A narrow yellow-highlighted G shorthand fixture was conservatively declined in
+the local overview-based run; the same concept succeeded on hardware with native
+detail strips. The local cursive highlighted fixture succeeded. A hardware cursive
+attempt read "flat" in the proposal but "that" independently and correctly refused
+output; one unchanged repeat agreed and appended successfully. These outcomes
+are retained as evidence of model variability and image-fidelity limits, not
+universal recognition guarantees. Do not loosen independent agreement to force
+an ambiguous question through. The live G scenario states the intended acceptance
+and can fail on a conservative decline; its expectations require the requested
+uncertainty, not an unrelated requirement to repeat the central G value.
+
+The highlighted illegible-question fixture also declines in separate live local and native checks; the deterministic case checks the corresponding no-navigation/no-answer route.

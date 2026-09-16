@@ -1,0 +1,45 @@
+{
+  "name": "live-highlighted-g",
+  "llm": {
+    "mode": "live",
+    "max_calls": 2,
+    "timeout_seconds": 90
+  },
+  "pages": [
+    {
+      "image": "../../validation/images/rem16/highlighted-g.png"
+    },
+    {}
+  ],
+  "iterations": [
+    {}
+  ],
+  "output": "../../../target/simulator/live-highlighted-g",
+  "expect": {
+    "active_page": 1,
+    "model_calls": 2,
+    "unchanged_pages": [
+      0
+    ],
+    "text": {
+      "0": ""
+    },
+    "text_contains": {
+      "1": [
+        "0.000092",
+        "10^-11",
+        "A:"
+      ]
+    },
+    "x_count": {
+      "0": 0,
+      "1": 0
+    },
+    "operations": {
+      "next": 1,
+      "previous": 0,
+      "text": 2,
+      "body": 1
+    }
+  }
+}
