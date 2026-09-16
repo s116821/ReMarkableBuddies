@@ -118,6 +118,18 @@ pub struct InputObserver {
 }
 
 impl InputObserver {
+    /// Mutation guards cannot wait for a gesture to qualify or be released.
+    /// Even an unfinished contact frame means the cursor is no longer owned.
+    pub fn quiescent(&self) -> bool {
+        !self.lost
+            && !self.initial_input
+            && self.frames.ready_for_timer()
+            && self
+                .frames
+                .contacts()
+                .is_some_and(|contacts| contacts.is_empty())
+    }
+
     pub fn new(corner: TriggerCorner, owned_sysfs: Option<&Path>) -> Result<Self> {
         let model = DeviceModel::detect();
         let touch_path = match model {

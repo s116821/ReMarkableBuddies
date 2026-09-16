@@ -41,6 +41,10 @@ pub trait DeviceBackend {
         anyhow::bail!("Native Q&A history is unavailable")
     }
     fn history_discard(&mut self) {}
+    fn wait_for_interactions(&mut self) -> Result<Vec<super::interaction::Interaction>> {
+        self.wait_for_trigger()?;
+        Ok(vec![super::interaction::Interaction::Reader])
+    }
     fn capture(&mut self) -> Result<Frame>;
     fn detail_images(&self) -> Result<Vec<String>>;
     fn wait_for_trigger(&mut self) -> Result<()>;
@@ -61,6 +65,8 @@ pub trait DeviceBackend {
 }
 
 pub struct RealDevice {
+    #[cfg(target_os = "linux")]
+    history: super::native_history::NativeHistory,
     screenshot: Screenshot,
     pen: Pen,
     keyboard: Keyboard,
@@ -75,6 +81,8 @@ impl RealDevice {
             log::warn!("Failed to create cache directory: {error}");
         }
         Ok(Self {
+            #[cfg(target_os = "linux")]
+            history: super::native_history::NativeHistory::new(corner.clone()),
             screenshot: Screenshot::new()?,
             pen: Pen::new(no_draw),
             keyboard: Keyboard::new(no_draw, false),
@@ -84,6 +92,29 @@ impl RealDevice {
 }
 
 impl DeviceBackend for RealDevice {
+    #[cfg(target_os = "linux")]
+    fn history_snapshot(
+        &mut self,
+        expected: Option<&str>,
+    ) -> Result<Option<crate::workflow::history::PageState>> {
+        self.history.snapshot(&mut self.keyboard, expected)
+    }
+    #[cfg(target_os = "linux")]
+    fn history_mutate(
+        &mut self,
+        command: crate::workflow::history::Command,
+        expected: &str,
+    ) -> Result<crate::workflow::history::PageState> {
+        self.history.mutate(&mut self.keyboard, command, expected)
+    }
+    #[cfg(target_os = "linux")]
+    fn history_discard(&mut self) {
+        self.history.discard();
+    }
+    #[cfg(target_os = "linux")]
+    fn wait_for_interactions(&mut self) -> Result<Vec<super::interaction::Interaction>> {
+        self.history.wait(&mut self.keyboard, &mut self.touch)
+    }
     fn capture(&mut self) -> Result<Frame> {
         self.screenshot.take_screenshot()?;
         Ok(Frame {
@@ -101,12 +132,18 @@ impl DeviceBackend for RealDevice {
         self.touch.tap_middle_bottom()
     }
     fn navigate(&mut self, direction: NavigationDirection) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        self.history.other_edit();
         XochitlIntegration::navigate_to_page(&mut self.touch, direction)
     }
     fn render_text(&mut self, text: &str) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        self.history.note_render(text);
         self.keyboard.string_to_keypresses(text)
     }
     fn body_mode(&mut self) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        self.history.other_edit();
         self.keyboard.key_cmd_body()
     }
     fn line(&mut self, from: (i32, i32), to: (i32, i32)) -> Result<()> {

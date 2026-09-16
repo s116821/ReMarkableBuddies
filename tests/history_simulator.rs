@@ -232,3 +232,51 @@ fn declined_new_iteration_forgets_the_previous_answer_before_analysis() {
     scenario.expect.history = Some("empty".into());
     checked(&scenario);
 }
+
+#[test]
+fn stable_wrong_page_metadata_cannot_arm_history() {
+    let mut scenario = scenario("blank-answer");
+    scenario.faults.push(Fault {
+        operation: Operation::HistorySnapshot,
+        call: 1,
+        effect: Effect::WrongPage,
+    });
+    scenario.iterations[0].actions = vec![hold(4)];
+    scenario.expect.history = Some("empty".into());
+    scenario
+        .expect
+        .operations
+        .insert(Operation::HistoryMutation, 0);
+    checked(&scenario);
+}
+
+#[test]
+fn overview_tap_invalidates_even_when_page_identity_does_not_change() {
+    let mut scenario = scenario("blank-answer");
+    scenario.iterations[0].actions = vec![
+        HistoryAction::Hold {
+            frames: vec![
+                ContactFrame {
+                    at_ms: 0,
+                    contacts: vec![Contact {
+                        slot: 0,
+                        tracking: 71,
+                        x: 30,
+                        y: 807,
+                    }],
+                },
+                ContactFrame {
+                    at_ms: 100,
+                    contacts: Vec::new(),
+                },
+            ],
+        },
+        hold(4),
+    ];
+    scenario.expect.history = Some("empty".into());
+    scenario
+        .expect
+        .operations
+        .insert(Operation::HistoryMutation, 0);
+    checked(&scenario);
+}

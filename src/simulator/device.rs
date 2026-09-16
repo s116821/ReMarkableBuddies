@@ -100,15 +100,18 @@ pub struct State {
 
 impl State {
     fn history_page(&self) -> Result<crate::workflow::history::PageState> {
+        self.history_page_at(self.active)
+    }
+    fn history_page_at(&self, index: usize) -> Result<crate::workflow::history::PageState> {
         use crate::{
             device::native_text::{Character, NativeText, Paragraph},
             workflow::history::{Owner, PageState},
         };
-        let page = &self.pages[self.active];
+        let page = &self.pages[index];
         Ok(PageState {
             owner: Owner {
                 document: "simulated-document".into(),
-                page: self.active.to_string(),
+                page: index.to_string(),
                 visit: self.visit.to_string(),
                 session: self.session.to_string(),
             },
@@ -262,6 +265,16 @@ impl DeviceBackend for SimDevice {
     ) -> Result<Option<crate::workflow::history::PageState>> {
         let mut state = self.0.borrow_mut();
         let effect = state.operation(Operation::HistorySnapshot)?;
+        if effect == Some(Effect::WrongPage) {
+            anyhow::ensure!(state.pages.len() > 1, "Wrong-page fault needs another page");
+            state.event(
+                "history_wrong_page",
+                "stable last-opened metadata refers to another document/page",
+            );
+            return Ok(Some(
+                state.history_page_at((state.active + 1) % state.pages.len())?,
+            ));
+        }
         if effect == Some(Effect::Stale) {
             state.event(
                 "history_persistence_timeout",

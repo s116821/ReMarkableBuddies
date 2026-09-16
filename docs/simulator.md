@@ -99,6 +99,8 @@ The report includes `history` state, exact page text and ordered history events;
 `expect.history` can assert `empty`, `applied` or `undone`.
 
 Faults `history_snapshot: stale` retain an old stable snapshot and prevent arming;
+`history_snapshot: wrong_page` models the observed case where stable last-opened
+metadata refers to a different document than the visible one and cannot arm history.
 `history_snapshot: lag` models a200ms delay followed by the complete expected text.
 That delay is a deterministic test value, not a measured persistence bound.
 `history_mutation: partial` retains the actual partial operation and reports an
@@ -113,6 +115,9 @@ input-device attribution or file persistence. Captured RMv6 fixtures separately
 replay exact text/styles, visible-ink records and opaque metadata preservation.
 Neither replay nor scripted contact frames prove physical-finger or model-vision
 behavior. Keep corresponding native tests and discovered failures in the same PR.
+The overview-tap regression preserves another distinction: `LastOpen` can remain
+set while the page overview is shown, so a page-UUID comparison cannot replace
+continuous input invalidation.
 
 The REM-22 hardware check exposed a restart-dependent allocation case: Linux can
 merge adjacent anonymous mappings, placing the BGRA allocation header inside a VMA.

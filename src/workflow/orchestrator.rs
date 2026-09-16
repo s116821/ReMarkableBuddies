@@ -90,8 +90,12 @@ impl<M: LLMEngine> Orchestrator<M> {
     /// Run one complete iteration of the reader buddy workflow
     /// Processes one outlined/highlighted concept and question per trigger.
     pub fn run_iteration(&mut self) -> Result<()> {
+        self.run_iteration_with_trigger(self.trigger_enabled)
+    }
+
+    fn run_iteration_with_trigger(&mut self, wait_for_trigger: bool) -> Result<()> {
         self.workflow.begin_iteration()?;
-        let result = self.run_iteration_inner();
+        let result = self.run_iteration_inner(wait_for_trigger);
         let cleanup = self.workflow.clear_indicator();
         if let Err(error) = cleanup {
             if let Err(original) = &result {
@@ -102,11 +106,11 @@ impl<M: LLMEngine> Orchestrator<M> {
         result
     }
 
-    fn run_iteration_inner(&mut self) -> Result<()> {
+    fn run_iteration_inner(&mut self, wait_for_trigger: bool) -> Result<()> {
         info!("=== Starting Reader Buddy Iteration ===");
 
         // Step 1: Wait for trigger
-        if self.trigger_enabled {
+        if wait_for_trigger {
             self.workflow.wait_for_trigger()?;
         }
 
@@ -418,7 +422,12 @@ impl<M: LLMEngine> Orchestrator<M> {
         info!("Starting Reader Buddy main loop");
 
         loop {
-            match self.run_iteration() {
+            if self.trigger_enabled {
+                // History remains owned until another Reader trigger or an
+                // invalidating input. Do not begin an iteration while idle.
+                self.workflow.wait_for_reader()?;
+            }
+            match self.run_iteration_with_trigger(false) {
                 Ok(_) => info!("Iteration completed successfully"),
                 Err(e) => {
                     error!("Error in iteration: {}", e);

@@ -26,3 +26,7 @@ The simulator SHALL drive the shared last-Q&A history state using declared undo/
 #### Scenario: Native preservation evidence
 - **WHEN** recorded native snapshots are replayed through the history policy
 - **THEN** previous visible paragraphs, native ink and opaque records must be preserved, and restored Q&A text/styles must equal the applied state; reports distinguish this replay from live keyboard, physical gesture or vision validation.
+
+#### Scenario: Stable metadata describes another view
+- **WHEN** saved last-opened metadata refers to the wrong page, or the user opens the overview without changing the saved page ID
+- **THEN** history cannot arm from the wrong observation, and the overview input invalidates existing ownership even when the saved ID stays unchanged.

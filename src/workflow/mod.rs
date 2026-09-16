@@ -151,6 +151,36 @@ impl Workflow {
         Ok(())
     }
 
+    /// Stay idle without clearing the last Q&A. Cross-device event order is
+    /// unknown, so any loss of ownership wins over history gestures in a batch.
+    pub fn wait_for_reader(&mut self) -> Result<()> {
+        use crate::device::interaction::Interaction;
+        loop {
+            let events = self.device.wait_for_interactions()?;
+            let invalidated = events.contains(&Interaction::Invalidated);
+            if invalidated {
+                self.invalidate_history();
+            }
+            if events.contains(&Interaction::Reader) {
+                self.invalidate_history();
+                self.device.dismiss_trigger()?;
+                return Ok(());
+            }
+            if !invalidated {
+                for event in events {
+                    let action = match event {
+                        Interaction::Undo => history::Action::Undo,
+                        Interaction::Redo => history::Action::Redo,
+                        _ => continue,
+                    };
+                    if let Err(error) = self.history_action(action) {
+                        log::warn!("Q&A history stopped: {error}");
+                    }
+                }
+            }
+        }
+    }
+
     /// Take a screenshot and return the base64-encoded image
     pub fn capture_screenshot(&mut self) -> Result<String> {
         info!("Capturing screenshot...");
