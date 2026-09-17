@@ -320,6 +320,44 @@ mod tests {
         assert!(!history.arm(before, page(&format!("{BEFORE}{oversized}"), 3), &oversized));
         assert_eq!(history.state(), State::Empty);
     }
+
+    #[test]
+    fn observed_inline_partial_deletion_is_a_failure_not_a_successful_undo() {
+        let mut applied = page("", 2);
+        applied.content = crate::device::native_text::read(include_bytes!(
+            "../../tests/fixtures/native-history/inline-applied.rm"
+        ))
+        .unwrap();
+        let mut before = applied.clone();
+        before.seal = vec![1];
+        before.content.paragraphs.truncate(4);
+        before
+            .content
+            .paragraphs
+            .last_mut()
+            .unwrap()
+            .characters
+            .clear();
+        let block = applied
+            .content
+            .text()
+            .strip_prefix(&before.content.text())
+            .unwrap()
+            .to_owned();
+        let mut history = History::default();
+        assert!(history.arm(before, applied.clone(), &block));
+        assert!(history.begin(Action::Undo, &applied).is_some());
+        let mut partial = applied;
+        partial.content = crate::device::native_text::read(include_bytes!(
+            "../../tests/fixtures/native-history/inline-partial.rm"
+        ))
+        .unwrap();
+        partial.seal = vec![3];
+        assert!(partial.content.text().ends_with("A: G"));
+        assert!(history.finish(Ok(partial.clone())).is_err());
+        assert_eq!(history.state(), State::Empty);
+        assert_eq!(history.begin(Action::Redo, &partial), None);
+    }
     #[test]
     fn failed_partial_or_interrupted_mutations_have_no_compensation_or_stale_record() {
         for failure in 0..4 {

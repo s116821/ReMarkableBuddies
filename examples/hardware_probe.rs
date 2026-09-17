@@ -25,6 +25,7 @@ fn history_keys(action: &str, count: usize) -> Result<()> {
         K::KEY_END,
         K::KEY_LEFT,
         K::KEY_DOWN,
+        K::KEY_UP,
         K::KEY_RIGHT,
         K::KEY_BACKSPACE,
         K::KEY_Z,
@@ -44,6 +45,15 @@ fn history_keys(action: &str, count: usize) -> Result<()> {
     };
     let result = (|| -> Result<()> {
         match action {
+            "select-paragraphs" => {
+                anyhow::ensure!((1..=128).contains(&count), "Paragraph count must be1..128");
+                emit(K::KEY_LEFTCTRL, 1)?;
+                emit(K::KEY_LEFTSHIFT, 1)?;
+                for _ in 0..count {
+                    emit(K::KEY_UP, 1)?;
+                    emit(K::KEY_UP, 0)?;
+                }
+            }
             "end-down" | "down" | "right" => {
                 if action == "end-down" {
                     emit(K::KEY_LEFTCTRL, 1)?;
@@ -100,6 +110,7 @@ fn history_keys(action: &str, count: usize) -> Result<()> {
         K::KEY_END,
         K::KEY_LEFT,
         K::KEY_DOWN,
+        K::KEY_UP,
         K::KEY_RIGHT,
         K::KEY_BACKSPACE,
         K::KEY_Z,
@@ -200,12 +211,12 @@ fn main() -> Result<()> {
             released?;
         }
         Some(
-            action @ ("select-tail" | "select-left" | "end" | "end-down" | "down" | "right"
-            | "delete-selection" | "native-undo" | "native-redo"),
+            action @ ("select-tail" | "select-left" | "select-paragraphs" | "end" | "end-down"
+            | "down" | "right" | "delete-selection" | "native-undo" | "native-redo"),
         ) => {
             let count = if matches!(
                 action,
-                "select-tail" | "select-left" | "end-down" | "down" | "right"
+                "select-tail" | "select-left" | "select-paragraphs" | "end-down" | "down" | "right"
             ) {
                 args.get(2)
                     .ok_or_else(|| anyhow::anyhow!("character count required"))?
