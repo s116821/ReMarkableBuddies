@@ -1,7 +1,13 @@
-## ADDED Requirements
+# reader-qa-history
+
+## Purpose
+
+Define the bounded, page-scoped last-Q&A history contract and its ownership requirements.
+
+## Requirements
 
 ### Requirement: Last successful Q&A transaction
-Reader SHALL retain only the most recent completely rendered Q&A block and its answer-page identity in process memory. The record SHALL exclude the header, older answers and unrelated ink. Undo SHALL remove exactly that block; redo SHALL restore exactly that block without a model call. Source: planned src/workflow/history.rs; src/workflow/orchestrator.rs; src/device/backend.rs.
+Reader SHALL retain only the most recent completely rendered Q&A block and its answer-page identity in process memory. The record SHALL exclude the header, older answers and unrelated ink. Undo SHALL remove exactly that block; redo SHALL restore exactly that block without a model call. Source: src/workflow/history.rs; src/workflow/orchestrator.rs; src/device/backend.rs.
 
 #### Scenario: Blank answer page
 - **WHEN** the first Q&A is undone after successful rendering
@@ -16,11 +22,11 @@ Reader SHALL retain only the most recent completely rendered Q&A block and its a
 - **THEN** the history record is unavailable, the failure is reported and no automatic compensating edit is attempted.
 
 #### Scenario: Unsupported or oversized native transaction
-- **WHEN** firmware/native text is unsupported, the Q&A exceeds2000ASCII characters, or complete expected persistence is not observed within30seconds
-- **THEN** normal Q&A rendering remains available but no history transaction is armed; native history key injection is limited to60seconds and releases owned modifiers on failure.
+- **WHEN** firmware/native text is unsupported, the Q&A exceeds 2000 ASCII characters or 32 paragraphs, or complete expected persistence is not observed within 30 seconds
+- **THEN** normal Q&A rendering remains available but no history transaction is armed; native history key injection is limited to 60 seconds and releases owned modifiers on failure.
 
 ### Requirement: Page-scoped history ownership
-Reader SHALL invalidate the saved record when the user departs the answer page or a new Reader iteration starts. Leaving and returning SHALL NOT revive it. Every mutation SHALL check current ownership; intervening edits or uncertain identity SHALL disable it rather than delete unrelated content. Source: planned workflow history policy and device event/identity backend.
+Reader SHALL invalidate the saved record when the user departs the answer page or a new Reader iteration starts. Leaving and returning SHALL NOT revive it. Every mutation SHALL check current ownership; intervening edits or uncertain identity SHALL disable it rather than delete unrelated content. Source: workflow history policy and device event/identity backend.
 
 #### Scenario: Departure and return
 - **WHEN** the user leaves the answer page and later returns

@@ -19,7 +19,9 @@ fn main() -> anyhow::Result<()> {
     );
     let qa = std::fs::read_to_string(&args[1])?;
     anyhow::ensure!(
-        qa.is_ascii() && qa.len() <= 500 && qa.ends_with('\n'),
+        qa.is_ascii()
+            && qa.len() <= remarkable_reader_buddy::workflow::history::MAX_CHARACTERS
+            && qa.ends_with('\n'),
         "Diagnostic requires a bounded ASCII Q&A"
     );
     let directory = std::path::Path::new(&args[2]);

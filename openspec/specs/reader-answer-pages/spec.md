@@ -34,12 +34,16 @@ On Blank pages the system SHALL select body style, type === Reader Buddy Answers
 
 #### Scenario: Append
 - **WHEN** the successor is recognized as ExistingQA
-- **THEN** only the new Q&A block is typed; no About entry, coordinate tag, undo transaction or follow-up session is added.
+- **THEN** only the new Q&A block is typed; no About entry, coordinate tag or follow-up conversation is added. The successfully rendered block becomes the page-scoped last-Q&A transaction; existing content is excluded.
 
 #### Scenario: Cache persistence
 - **WHEN** the service restarts
 - **THEN** /var/cache/reader-buddy/header-pattern.png is preserved.
 - **AND** cache creation/save failures are logged and do not by themselves abort the workflow.
+
+#### Scenario: Complete output boundary
+- **WHEN** Q&A typing completes successfully
+- **THEN** the exact composed block is eligible for the shared undo/redo session, while a partial typing failure creates no usable history.
 
 ### Requirement: Invalid successor recovery
 An Invalid successor SHALL trigger a source-identity check before any reverse swipe. If already on the saved source at similarity 0.999, recovery SHALL not navigate. Otherwise it SHALL attempt at most one previous-page swipe and verify the result once, with no retry after failed verification or an input/capture error. The caller SHALL attempt the existing failure X on the current page after recovery or recovery failure. Source: src/workflow/navigation.rs; src/workflow/mod.rs return_to_original_page; src/workflow/orchestrator.rs render_answer.

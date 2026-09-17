@@ -426,10 +426,11 @@ mod tests {
             "../../tests/fixtures/native-history/operators-reordered.rm"
         ))
         .unwrap();
-        let expected = include_str!("../../tests/fixtures/native-history/operators-expected.txt");
+        let expected = include_str!("../../tests/fixtures/native-history/operators-expected.txt")
+            .replace("\r\n", "\n");
         assert!(applied.content.text().contains("4:^x2"));
         let mut history = History::default();
-        assert!(!history.arm(before, applied.clone(), expected));
+        assert!(!history.arm(before, applied.clone(), &expected));
         assert_eq!(history.begin(Action::Undo, &applied), None);
     }
     #[test]
