@@ -413,6 +413,25 @@ mod tests {
         assert!(!history.arm(before, after.clone(), &block));
         assert_eq!(history.begin(Action::Undo, &after), None);
     }
+
+    #[test]
+    fn native_reordered_operator_typing_never_arms_history() {
+        let mut before = page("", 1);
+        before.content = crate::device::native_text::read(include_bytes!(
+            "../../tests/fixtures/native-history/paragraph-restored.rm"
+        ))
+        .unwrap();
+        let mut applied = page("", 2);
+        applied.content = crate::device::native_text::read(include_bytes!(
+            "../../tests/fixtures/native-history/operators-reordered.rm"
+        ))
+        .unwrap();
+        let expected = include_str!("../../tests/fixtures/native-history/operators-expected.txt");
+        assert!(applied.content.text().contains("4:^x2"));
+        let mut history = History::default();
+        assert!(!history.arm(before, applied.clone(), expected));
+        assert_eq!(history.begin(Action::Undo, &applied), None);
+    }
     #[test]
     fn failed_partial_or_interrupted_mutations_have_no_compensation_or_stale_record() {
         for failure in 0..4 {

@@ -263,6 +263,12 @@ impl Keyboard {
 
             for c in input.chars() {
                 if let Some(&(key, shift)) = self.key_map.get(&c) {
+                    if self.rm2_keyboard && c == '^' {
+                        // Inline xochitl composition can anchor the dead key
+                        // before a still-pending preceding character. Let that
+                        // character commit before starting caret composition.
+                        thread::sleep(time::Duration::from_millis(50));
+                    }
                     // Firmware 3.28 maps the equals sign through Alt+Shift.
                     if self.rm2_keyboard && c == '=' {
                         device.emit(&[InputEvent::new(
@@ -321,6 +327,7 @@ impl Keyboard {
                             EvdevKey::KEY_SPACE.code(),
                             0,
                         )])?;
+                        thread::sleep(time::Duration::from_millis(50));
                     }
                     // Sync event
                     device.emit(&[InputEvent::new(EvdevEventType::SYNCHRONIZATION.0, 0, 0)])?;
