@@ -115,6 +115,7 @@ impl Keyboard {
         keys.insert(EvdevKey::KEY_BACKSPACE);
         keys.insert(EvdevKey::KEY_ESC);
         keys.insert(EvdevKey::KEY_LEFT);
+        keys.insert(EvdevKey::KEY_UP);
 
         keys.insert(EvdevKey::KEY_LEFTCTRL);
         keys.insert(EvdevKey::KEY_LEFTALT);
@@ -364,10 +365,18 @@ impl Keyboard {
     ) -> Result<()> {
         use crate::workflow::history::Command;
         anyhow::ensure!(self.device.is_some(), "Native history keyboard disabled");
-        if let Command::DeleteSuffix { characters } = command {
+        if let Command::DeleteSuffix {
+            characters,
+            paragraphs,
+        } = command
+        {
             anyhow::ensure!(
                 (1..=crate::workflow::history::MAX_CHARACTERS).contains(&characters),
                 "Invalid history selection size"
+            );
+            anyhow::ensure!(
+                (1..=crate::workflow::history::MAX_PARAGRAPHS).contains(&paragraphs),
+                "Invalid history paragraph count"
             );
         }
         let deadline = time::Instant::now() + time::Duration::from_secs(60);
@@ -383,17 +392,19 @@ impl Keyboard {
                 } else {
                     self.key_up(key)?;
                 }
-                thread::sleep(time::Duration::from_millis(5));
+                thread::sleep(time::Duration::from_millis(50));
                 guard()
             };
             match command {
-                Command::DeleteSuffix { characters } => {
+                Command::DeleteSuffix { paragraphs, .. } => {
+                    emit(EvdevKey::KEY_LEFTCTRL, true)?;
                     emit(EvdevKey::KEY_LEFTSHIFT, true)?;
-                    for _ in 0..characters {
-                        emit(EvdevKey::KEY_LEFT, true)?;
-                        emit(EvdevKey::KEY_LEFT, false)?;
+                    for _ in 0..paragraphs {
+                        emit(EvdevKey::KEY_UP, true)?;
+                        emit(EvdevKey::KEY_UP, false)?;
                     }
                     emit(EvdevKey::KEY_LEFTSHIFT, false)?;
+                    emit(EvdevKey::KEY_LEFTCTRL, false)?;
                     emit(EvdevKey::KEY_BACKSPACE, true)?;
                     emit(EvdevKey::KEY_BACKSPACE, false)?;
                 }
@@ -414,6 +425,7 @@ impl Keyboard {
         let mut cleanup = Ok(());
         for key in [
             EvdevKey::KEY_LEFT,
+            EvdevKey::KEY_UP,
             EvdevKey::KEY_BACKSPACE,
             EvdevKey::KEY_Z,
             EvdevKey::KEY_Y,

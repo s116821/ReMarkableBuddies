@@ -336,9 +336,17 @@ impl DeviceBackend for SimDevice {
         let active = state.active;
         let applied = state.pages[active].text.clone();
         let next = match command {
-            Command::DeleteSuffix { characters } => {
+            Command::DeleteSuffix {
+                characters,
+                paragraphs,
+            } => {
                 let length = applied.chars().count();
                 anyhow::ensure!(characters <= length, "Simulated selection exceeds text");
+                let suffix: String = applied.chars().skip(length - characters).collect();
+                anyhow::ensure!(
+                    suffix.bytes().filter(|value| *value == b'\n').count() == paragraphs,
+                    "Simulated paragraph range differs from owned suffix"
+                );
                 let count = if effect == Some(Effect::Partial) {
                     characters / 2
                 } else {

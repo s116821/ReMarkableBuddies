@@ -4,6 +4,7 @@ use anyhow::{ensure, Context, Result};
 
 /// Bound selection latency; longer answers still render but do not own history.
 pub const MAX_CHARACTERS: usize = 2000;
+pub const MAX_PARAGRAPHS: usize = 32;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Owner {
@@ -34,7 +35,10 @@ pub enum Action {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
     /// Select from the verified insertion cursor; includes all typed newlines.
-    DeleteSuffix { characters: usize },
+    DeleteSuffix {
+        characters: usize,
+        paragraphs: usize,
+    },
     /// Undo only the previously verified, exclusively owned range deletion.
     RestoreDeletion,
     /// Redo that same owned range deletion.
@@ -58,6 +62,7 @@ struct Record {
     removed: Option<NativeText>,
     observed: PageState,
     characters: usize,
+    paragraphs: usize,
     state: State,
 }
 
@@ -109,11 +114,13 @@ impl History {
 
     pub fn arm(&mut self, before: PageState, applied: PageState, block: &str) -> bool {
         self.discard();
+        let paragraphs = block.bytes().filter(|value| *value == b'\n').count();
         if !before.supported
             || !applied.supported
             || before.owner != applied.owner
             || block.is_empty()
             || block.len() > MAX_CHARACTERS
+            || !(1..=MAX_PARAGRAPHS).contains(&paragraphs)
             || !block.ends_with('\n')
             || !block.bytes().all(|c| c == b'\n' || (32..=126).contains(&c))
             || applied.content.text() != format!("{}{block}", before.content.text())
@@ -127,6 +134,7 @@ impl History {
             removed: None,
             observed: applied,
             characters: block.len(),
+            paragraphs,
             state: State::Applied,
         });
         true
@@ -146,6 +154,7 @@ impl History {
         let command = match (record.state, action, record.removed.is_some()) {
             (State::Applied, Action::Undo, false) => Command::DeleteSuffix {
                 characters: record.characters,
+                paragraphs: record.paragraphs,
             },
             (State::Applied, Action::Undo, true) => Command::RepeatDeletion,
             (State::Undone, Action::Redo, true) => Command::RestoreDeletion,
@@ -251,7 +260,8 @@ mod tests {
         assert_eq!(
             history.begin(Action::Undo, &applied),
             Some(Command::DeleteSuffix {
-                characters: BLOCK.len()
+                characters: BLOCK.len(),
+                paragraphs: 4,
             })
         );
         assert_eq!(history.state(), State::Busy);
@@ -358,6 +368,51 @@ mod tests {
         assert_eq!(history.state(), State::Empty);
         assert_eq!(history.begin(Action::Redo, &partial), None);
     }
+
+    #[test]
+    fn native_paragraph_range_preserves_first_answer_header_and_restores_styles() {
+        let mut states = [page("", 1), page("", 2), page("", 3)];
+        for (state, bytes) in states.iter_mut().zip([
+            include_bytes!("../../tests/fixtures/native-history/paragraph-deleted.rm").as_slice(),
+            include_bytes!("../../tests/fixtures/native-history/paragraph-applied.rm").as_slice(),
+            include_bytes!("../../tests/fixtures/native-history/paragraph-restored.rm").as_slice(),
+        ]) {
+            state.content = crate::device::native_text::read(bytes).unwrap();
+        }
+        assert_eq!(
+            states[0].content.text(),
+            "=== Reader Buddy Answers ===\n\n\n"
+        );
+        let block = states[1]
+            .content
+            .text()
+            .strip_prefix(&states[0].content.text())
+            .unwrap()
+            .to_owned();
+        let mut history = History::default();
+        assert!(history.arm(states[0].clone(), states[1].clone(), &block));
+        assert!(matches!(
+            history.begin(Action::Undo, &states[1]),
+            Some(Command::DeleteSuffix { paragraphs: 4, .. })
+        ));
+        history.finish(Ok(states[0].clone())).unwrap();
+        assert_eq!(
+            history.begin(Action::Redo, &states[0]),
+            Some(Command::RestoreDeletion)
+        );
+        history.finish(Ok(states[2].clone())).unwrap();
+        assert_eq!(history.state(), State::Applied);
+    }
+
+    #[test]
+    fn paragraph_cap_refuses_before_any_selection() {
+        let before = page(BEFORE, 1);
+        let block = "\n".repeat(MAX_PARAGRAPHS + 1);
+        let after = page(&format!("{BEFORE}{block}"), 2);
+        let mut history = History::default();
+        assert!(!history.arm(before, after.clone(), &block));
+        assert_eq!(history.begin(Action::Undo, &after), None);
+    }
     #[test]
     fn failed_partial_or_interrupted_mutations_have_no_compensation_or_stale_record() {
         for failure in 0..4 {
@@ -409,7 +464,10 @@ mod tests {
         ));
         assert_eq!(
             history.begin(Action::Undo, &states[1]),
-            Some(Command::DeleteSuffix { characters: 36 })
+            Some(Command::DeleteSuffix {
+                characters: 36,
+                paragraphs: 4
+            })
         );
         history.finish(Ok(states[2].clone())).unwrap();
         assert_eq!(
