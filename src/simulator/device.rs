@@ -280,6 +280,13 @@ impl DeviceBackend for SimDevice {
     ) -> Result<Option<crate::workflow::history::PageState>> {
         let mut state = self.0.borrow_mut();
         let effect = state.operation(Operation::HistorySnapshot)?;
+        if effect == Some(Effect::Unavailable) {
+            state.event(
+                "history_identity_unavailable",
+                "native current-document identity absent despite visible document",
+            );
+            return Ok(None);
+        }
         if effect == Some(Effect::WrongPage) {
             anyhow::ensure!(state.pages.len() > 1, "Wrong-page fault needs another page");
             state.event(

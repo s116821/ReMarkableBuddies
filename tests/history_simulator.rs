@@ -251,6 +251,28 @@ fn stable_wrong_page_metadata_cannot_arm_history() {
 }
 
 #[test]
+fn missing_native_identity_keeps_rendered_answer_but_never_revives_its_history() {
+    let mut scenario = scenario("blank-answer");
+    scenario.faults.push(Fault {
+        operation: Operation::HistorySnapshot,
+        call: 1,
+        effect: Effect::Unavailable,
+    });
+    scenario.iterations[0].actions = vec![hold(4), hold(2), hold(4)];
+    scenario.expect.history = Some("empty".into());
+    scenario
+        .expect
+        .operations
+        .insert(Operation::HistoryMutation, 0);
+    let run = checked(&scenario);
+    assert!(run
+        .report
+        .trace
+        .iter()
+        .any(|event| event.action == "history_identity_unavailable"));
+}
+
+#[test]
 fn overview_tap_invalidates_even_when_page_identity_does_not_change() {
     let mut scenario = scenario("blank-answer");
     scenario.iterations[0].actions = vec![

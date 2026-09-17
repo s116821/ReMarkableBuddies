@@ -34,3 +34,7 @@ The simulator SHALL drive the shared last-Q&A history state using declared undo/
 #### Scenario: Reader release ordering
 - **WHEN** a corner hold reaches two seconds while still touching the screen
 - **THEN** the shared reducer waits for release before dispatching Reader, preventing the observed native menu from reopening after dismissal; canceled or moved holds cannot trigger Reader.
+
+#### Scenario: Current identity absent after native restart
+- **WHEN** the document is visible but native current-document identity is unavailable
+- **THEN** the answer can render normally, but subsequent undo/redo does not gain ownership retroactively.

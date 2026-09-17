@@ -134,6 +134,7 @@ pub enum Effect {
     Lag,
     Partial,
     WrongPage,
+    Unavailable,
 }
 
 #[derive(Clone, Deserialize)]
@@ -286,7 +287,8 @@ impl Scenario {
                     ),
                     Effect::Lag => fault.operation == Operation::HistorySnapshot,
                     Effect::Partial => fault.operation == Operation::HistoryMutation,
-                    Effect::WrongPage => fault.operation == Operation::HistorySnapshot,
+                    Effect::WrongPage | Effect::Unavailable =>
+                        fault.operation == Operation::HistorySnapshot,
                 },
                 "Fault effect does not apply to operation"
             );
