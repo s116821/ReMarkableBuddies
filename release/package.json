@@ -2,5 +2,5 @@
   "name": "reader-buddy-release-tools",
   "private": true,
   "engines": { "node": ">=22" },
-  "devDependencies": { "release-it": "19.0.6" }
+  "devDependencies": { "release-it": "21.1.0" }
 }
