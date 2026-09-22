@@ -1,0 +1,11 @@
+## ADDED Requirements
+### Requirement: Responsiveness state and timing regressions
+The simulator SHALL model changed operation timing and reachable delayed/stale/changed-state outcomes in the same implementation PR, preserving exact output, forbidden writes/navigation, history ownership and bounded failure behavior. Simulated time SHALL be labeled modeled time rather than native latency. Source: REM9.
+
+#### Scenario: Faster path with delayed observation
+- **WHEN** a changed workflow sees delayed convergence or a changed page
+- **THEN** it either verifies a fresh eligible state within its bound or refuses safely without stale input, preserving existing negative assertions.
+
+#### Scenario: History remains free of status switching
+- **WHEN** undo or redo is exercised after a complete answer
+- **THEN** its exact content and ownership rules remain unchanged and no new status tool acquisition or indicator loop occurs.
