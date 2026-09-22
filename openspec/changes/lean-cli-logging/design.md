@@ -18,3 +18,6 @@ CLI key compatibility has shell-history/process-list exposure; prefer protected 
 
 ## Migration and completion
 Replace public invocation examples and stale defaults, inspect service/build/fixtures for old flags, retain unchanged service command if already compliant. Publish chronology and evidence, independent exact-head review and green CI; Bugbot capped fallback disclosed. Sync modified requirements in place (unique headings, no delta markers), archive in same PR. Re-read comments before closure. Stop project work at any Codex window >=90% used, preserving unfinished state and safe tablet first; never claim completion from plan-only work.
+
+### Rejected status-frame dump integration
+Independent plan review found status_style::Lease directly reading the dump environment. Carry the already-resolved boolean through Workflow -> RealDevice -> Lease and remove that ambient lookup, so CLI true also enables rejected status frames when env is false/invalid. No process-global environment mutation, status policy change or new CLI flag. Existing lease safety regressions must still pass.
