@@ -96,3 +96,22 @@ known state, and remove or stop only test processes created for this work. Repor
 what passed, what failed or remains untested, the installed build, and the next
 concrete step. Firmware changes, pairing/sync, extra providers and new features
 remain outside a compatibility test unless separately authorized.
+
+## Bounded service diagnostics
+
+For local simulation use the separate [simulator testing skill](../reader-simulator-testing/SKILL.md).
+For an already authorized native run, see [journal and RUST_LOG guidance](../../../README.md#viewing-logs-with-journalctl).
+Prefer a bounded relevant capture such as:
+
+```sh
+journalctl -u reader-buddy.service --since "10 minutes ago" -n 200 --no-pager -o short-precise
+```
+
+`-f` follows continuously; end that observer when the test finishes. `RUST_LOG`
+controls application log emission; journal priority filtering is not guaranteed
+to reflect env_logger's Rust levels. For extra detail, set the documented scoped
+filter for the authorized test process or service, preserving the prior environment
+and restoring agreed service state afterward. Do not dump the entire environment
+or credential-bearing configuration. Inspect logs/debug images before publishing;
+they may contain document text even when secrets are omitted. These instructions
+do not broaden the idle development-tablet authorization or change runtime defaults.

@@ -166,3 +166,14 @@ The local test suite SHALL model status-style acquisition, unavailability and re
 - **THEN** the model observes restored original style before erasure and a separate successful finish before releasing its lease.
 - **AND** faults at restoration, pending-cleanup checkpoint, erasure and final verification retain unresolved state and prohibit later input, including a second cleanup attempt.
 - **AND** native frame fixtures exercise erase-induced PDF redraw, unchanged invariant page regions and rejected viewport, owner, session and tool changes without weakening the pre-restoration guard.
+
+### Requirement: Development fixture and acceptance practice
+The simulator testing skill SHALL choose maintained fixtures by changed behavior, assert exact text/forbidden operations and preserve negative cases and failed artifacts. Applicable model-facing checks SHALL include representative connected cursive/shorthand and ambiguous or absent questions, with scientific values and actual input/output inspected. Native findings SHALL extend the shared model, faults, fixtures or assertions in the same implementation PR where representable; remaining fidelity gaps SHALL be explicit. Source: REM33; .agents/skills/reader-simulator-testing/SKILL.md; docs/simulator.md; docs/validation/README.md.
+
+#### Scenario: Expected rejection
+- **WHEN** a no-question, transcription-disagreement or invalid-successor fixture runs
+- **THEN** its assertions check the intended refusal, no forbidden navigation/output and preserved unrelated content rather than equating successful exit with a successful answer.
+
+#### Scenario: Native-only behavior discovered
+- **WHEN** device observation reveals behavior the current simulator omits
+- **THEN** the implementation PR adds meaningful model/regression coverage when possible and retains native evidence or an explicit unsupported limit without claiming emulation of unmodeled typography, persistence or physical input.

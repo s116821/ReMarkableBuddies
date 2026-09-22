@@ -18,7 +18,7 @@ maintainers copy relevant private decisions into public acceptance criteria.
 3. `openspec-verify-change`: compare tasks, requirements and scenarios with code
    and tests. Resolve findings; report hardware/model limitations honestly.
 4. `openspec-sync-specs`: apply the named delta to `specs/`, preserving unrelated
-   requirements. Verify canonical specs match the final implementation.
+   requirements. Verify canonical specs match the final implementation: replace modified blocks in place, preserve unaffected requirements, and check for unique requirement headings and no delta-only markers.
 5. `openspec-archive-change`: archive that completed, synced change in the same
    implementation PR. The CLI equivalent after explicit sync is
    `openspec archive <name> --skip-specs --yes`; never use this to skip required sync.
@@ -53,6 +53,8 @@ official package's `dist/core/templates/skill-templates.js`, with the same MIT
 skill metadata wrapper. This adds the required workflows without modifying global
 OpenSpec settings. On upgrade, regenerate these two from the official package
 alongside core skills and review the diff; do not replace them with invented steps.
+
+Each bundled skill now carries a clearly separated Repository portability note and optional-CLI compatibility metadata. These project additions qualify unavailable-tool and private-access assumptions; the upstream workflow body remains attributable to the generator. Preserve the note when regenerating and review regenerated instructions against the public manual workflow.
 
 Project rules live in `config.yaml`. No runtime secrets belong in spec artifacts.
 Writer Buddy and other planned capabilities get their own specs when implemented;

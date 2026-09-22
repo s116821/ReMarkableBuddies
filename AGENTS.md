@@ -66,3 +66,14 @@ authorized hardware should run local checks and identify unverified native cases
 a maintainer performs required hardware gates before merge. Never claim unavailable
 hardware evidence was verified. Skills should offer equivalent public CLI/file
 steps where feasible rather than require a particular assistant or connector.
+
+## Local development testing
+
+Use [.agents/skills/reader-simulator-testing/SKILL.md](.agents/skills/reader-simulator-testing/SKILL.md)
+for local scenario selection, deterministic regressions and authorized live-model
+checks. It is also a manual checklist. Offline development requires no private
+board, assistant integration, API credential or tablet. Model-facing changes still
+need representative live evidence before merge; contributors without access report
+the missing gate and a maintainer supplies it. Native-only evidence follows the
+separate unattended tablet scope above. Existing authorization does not need to be
+requested again merely because a skill is used.
