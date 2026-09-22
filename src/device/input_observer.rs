@@ -115,6 +115,8 @@ pub struct InputObserver {
     clock: Instant,
     lost: bool,
     initial_input: bool,
+    #[cfg(test)]
+    scripted_polls: Option<std::collections::VecDeque<Result<Vec<Interaction>>>>,
 }
 
 impl InputObserver {
@@ -175,6 +177,8 @@ impl InputObserver {
             clock: Instant::now(),
             lost: false,
             initial_input,
+            #[cfg(test)]
+            scripted_polls: None,
         })
     }
 
@@ -199,7 +203,7 @@ impl InputObserver {
     /// in the same batch: separate input devices have no shared event order.
     pub fn poll(&mut self) -> Result<Vec<Interaction>> {
         if self.lost {
-            return Ok(vec![Interaction::Invalidated]);
+            anyhow::bail!("Native input observer permanently lost; recreate before waiting");
         }
         let result = self.poll_inner();
         if result.is_err() {
@@ -210,6 +214,10 @@ impl InputObserver {
     }
 
     fn poll_inner(&mut self) -> Result<Vec<Interaction>> {
+        #[cfg(test)]
+        if let Some(polls) = self.scripted_polls.as_mut() {
+            return polls.pop_front().expect("unexpected diagnostic poll");
+        }
         ensure!(self.inventory == inventory()?, "Input device set changed");
         let mut output = Vec::new();
         if self.initial_input {
@@ -261,5 +269,20 @@ impl InputObserver {
             );
         }
         Ok(output)
+    }
+
+    #[cfg(test)]
+    pub(super) fn scripted(polls: Vec<Result<Vec<Interaction>>>) -> Self {
+        Self {
+            sources: Vec::new(),
+            inventory: BTreeMap::new(),
+            frames: ContactFrames::seeded(vec![Slot::default()], 0).unwrap(),
+            reducer: ContactReducer::new(TriggerCorner::LowerLeft),
+            model: DeviceModel::Remarkable2,
+            clock: Instant::now(),
+            lost: false,
+            initial_input: false,
+            scripted_polls: Some(polls.into()),
+        }
     }
 }

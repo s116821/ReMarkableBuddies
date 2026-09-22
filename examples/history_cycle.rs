@@ -14,8 +14,12 @@ fn main() -> anyhow::Result<()> {
     let args: Vec<_> = std::env::args().collect();
     anyhow::ensure!(
         args.len() == 3
-            || (args.len() == 4 && matches!(args[3].as_str(), "--gestures" | "--reader-only")),
-        "usage: history_cycle QA_FILE OUTPUT_DIRECTORY [--gestures|--reader-only]"
+            || (args.len() == 4
+                && matches!(
+                    args[3].as_str(),
+                    "--gestures" | "--reader-only" | "--loss-recovery"
+                )),
+        "usage: history_cycle QA_FILE OUTPUT_DIRECTORY [--gestures|--reader-only|--loss-recovery]"
     );
     let qa = std::fs::read_to_string(&args[1])?;
     anyhow::ensure!(
@@ -36,6 +40,18 @@ fn main() -> anyhow::Result<()> {
     }
     workflow.set_body_text_mode()?;
     workflow.render_qa(&qa)?;
+    if args.get(3).is_some_and(|mode| mode == "--loss-recovery") {
+        anyhow::ensure!(
+            workflow.history_state() == State::Empty,
+            "Expected externally interrupted history preparation"
+        );
+        println!(
+            "History unavailable after external interruption; waiting for a fresh Reader hold"
+        );
+        workflow.wait_for_reader_bounded(120)?;
+        println!("Reader trigger accepted after observer recovery");
+        return Ok(());
+    }
     anyhow::ensure!(
         workflow.history_state() == State::Applied,
         "History did not arm after native append"

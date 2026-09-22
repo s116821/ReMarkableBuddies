@@ -111,3 +111,7 @@ The simulator SHALL drive the shared last-Q&A history state using declared undo/
 #### Scenario: Current identity absent after native restart
 - **WHEN** the document is visible but native current-document identity is unavailable
 - **THEN** the answer can render normally, but subsequent undo/redo does not gain ownership retroactively.
+
+#### Scenario: Terminal observation failure during a guard
+- **WHEN** native observation fails during persistence or mutation and that first error is consumed before the idle wait
+- **THEN** subsequent polling still reports terminal failure, the idle path retires the observer and a fresh observer or legacy fallback can accept the next Reader gesture without reviving history.

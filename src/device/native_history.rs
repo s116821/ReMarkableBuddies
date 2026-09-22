@@ -252,3 +252,54 @@ impl NativeHistory {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::device::interaction::{Contact, ContactReducer};
+
+    #[test]
+    fn guard_failure_then_discard_retires_observer_and_reader_can_resume() {
+        let mut history = NativeHistory::new(TriggerCorner::LowerLeft);
+        history.supported = true;
+        history.input = Some(InputObserver::scripted(vec![Err(anyhow::anyhow!(
+            "Lost native contact frame"
+        ))]));
+        // The first error occurs in persistence/mutation, outside the idle wait.
+        assert!(history.input_guard().is_err());
+        history.discard();
+        assert!(history.input.is_some());
+        let mut keyboard = Keyboard::new(true, true);
+        let mut touch = Touch::new(true, TriggerCorner::LowerLeft);
+        assert_eq!(
+            history
+                .wait(&mut keyboard, &mut touch, Some(Duration::from_secs(1)))
+                .unwrap(),
+            vec![Interaction::Invalidated]
+        );
+        // Previously poll returned Ok(Invalidated) forever, keeping this Some.
+        assert!(history.input.is_none());
+        assert!(history.owner.is_none());
+        assert!(!history.entry);
+
+        // A recreated observer can deliver a new complete Reader gesture.
+        let mut reducer = ContactReducer::new(TriggerCorner::LowerLeft);
+        let contact = Contact {
+            slot: 0,
+            tracking: 1,
+            x: 30,
+            y: 980,
+        };
+        reducer.frame(&[contact], Duration::ZERO);
+        reducer.frame(&[contact], Duration::from_secs(2));
+        let released = reducer.frame(&[], Duration::from_millis(2100));
+        assert!(released.contains(&Interaction::Reader));
+        history.input = Some(InputObserver::scripted(vec![Ok(released.clone())]));
+        assert_eq!(
+            history
+                .wait(&mut keyboard, &mut touch, Some(Duration::from_secs(1)))
+                .unwrap(),
+            released
+        );
+    }
+}
