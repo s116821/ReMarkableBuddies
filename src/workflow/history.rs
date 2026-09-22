@@ -452,6 +452,56 @@ mod tests {
     }
 
     #[test]
+    fn native_delimited_append_removes_five_paragraphs_and_preserves_prior_block() {
+        let mut states = [page("", 1), page("", 2), page("", 3), page("", 4)];
+        for (state, bytes) in states.iter_mut().zip([
+            include_bytes!("../../tests/fixtures/native-history/delimited-before.rm").as_slice(),
+            include_bytes!("../../tests/fixtures/native-history/delimited-applied.rm").as_slice(),
+            include_bytes!("../../tests/fixtures/native-history/delimited-deleted.rm").as_slice(),
+            include_bytes!("../../tests/fixtures/native-history/delimited-restored.rm").as_slice(),
+        ]) {
+            state.content = crate::device::native_text::read(bytes).unwrap();
+        }
+        let expected = super::super::Workflow::compose_qa(
+            "Keep both delimiters?",
+            "Both boundaries belong to this block.",
+            crate::analysis::SelectionCenter::from_pixels(192.0, 768.0, 768, 1024).unwrap(),
+        );
+        assert_eq!(
+            states[1].content.text(),
+            format!("{}{expected}", states[0].content.text())
+        );
+        assert_eq!(states[0].content.text(), states[2].content.text());
+        assert_eq!(states[1].content, states[3].content);
+        let preserved = states[0].content.paragraphs.len() - 1;
+        assert_eq!(
+            states[0].content.paragraphs[..preserved],
+            states[2].content.paragraphs[..preserved]
+        );
+        assert_eq!(states[0].content.root_layout, states[2].content.root_layout);
+        assert_eq!(
+            states[0].content.scene_records,
+            states[2].content.scene_records
+        );
+        let mut history = History::default();
+        assert!(history.arm(states[0].clone(), states[1].clone(), &expected));
+        assert_eq!(
+            history.begin(Action::Undo, &states[1]),
+            Some(Command::DeleteSuffix {
+                characters: expected.len(),
+                paragraphs: 5,
+            })
+        );
+        history.finish(Ok(states[2].clone())).unwrap();
+        assert_eq!(
+            history.begin(Action::Redo, &states[2]),
+            Some(Command::RestoreDeletion)
+        );
+        history.finish(Ok(states[3].clone())).unwrap();
+        assert_eq!(history.state(), State::Applied);
+    }
+
+    #[test]
     fn tagged_append_with_changed_native_scene_cannot_claim_prior_ownership() {
         let mut before = page("", 1);
         before.content = crate::device::native_text::read(include_bytes!(
