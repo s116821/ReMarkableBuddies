@@ -39,11 +39,31 @@ scripted navigation doubles in unit tests; do not report those as physical failu
 ## Activity indicator check
 
 With exclusive authorized dev-tablet access and the normal service stopped,
-`hardware_probe indicator-smoke` captures the clean page, draws two timed circle
-ticks, captures the active mark, clears it and captures the result. It writes
-`/tmp/reader-buddy-status-before.png`, `/tmp/reader-buddy-status-active.png` and
-`/tmp/reader-buddy-probe.png`. Retrieve and inspect all three; compare the status
-region and neighboring native ink. A selected tool can widen native strokes beyond
-path endpoints. Exercise Fineliner and Highlighter; an occupied clearance region
-should suppress drawing without erasing it. This offline probe does not validate
-model latency, answer placement or every tool style.
+`hardware_probe indicator-smoke` captures the clean page, draws Preparing,
+AnswerPending and AnswerReady nested triangles plus the auxiliary circle, then
+clears its owned paths. It writes `/tmp/reader-buddy-status-before.png`, one
+`/tmp/reader-buddy-status-<stage>.png` per stage,
+`/tmp/reader-buddy-status-active.png` and `/tmp/reader-buddy-probe.png` after cleanup.
+Retrieve and inspect these images; compare the status region and neighboring ink.
+The uninterrupted stroke cadence is 333 ms; diagnostic screenshots between stages
+add delay and are not runtime scheduling evidence. Native tool acquisition and
+restoration add separate overhead that must be measured, not hidden by cadence.
+
+Exercise primary and secondary Highlighter with nondefault Fineliner color/width.
+Capture actual menus before and after: persisted document preferences can be stale
+and file equality does not prove current UI restoration. Status temporarily uses
+black medium Fineliner, restores only potentially changed settings from captured
+UI values, and verifies the original tool and slot. Open menus, unsupported layouts
+and occupied clearance regions suppress drawing. A failed durable checkpoint or
+unverified restoration stops further input and retains the private recovery journal
+at `/var/cache/reader-buddy/status-style-recovery.json`. Do not blindly delete a
+journal or restore preferences from stale document metadata; inspect its recorded
+phase and actual controls before deliberate recovery.
+
+`hardware_probe failure-code <code>` draws a persistent guarded X plus one distinct
+segment. Supported codes are `selection`, `transcription`, `provider`,
+`no-successor`, `invalid-successor` and `device`. This checks geometry and style
+restoration, not six induced production failures. Explicit test-only
+`erase-strokes <json>` may remove known owned diagnostic paths; visually verify a
+clean corner before the next case. These offline probes do not validate model
+recognition, answer placement, history availability or every native tool layout.
