@@ -18,7 +18,7 @@ An AI-powered reading assistant for the reMarkable tablet that watches for outli
 1. **Prepare Answer Page**: Before triggering, create a blank page to the **right** of your question page
 2. **Select Content**: Highlight the passage or draw a closed shape (circle, rectangle, etc.) around the concept you want to ask about
 3. **Write Question**: Write your question near the selected content
-4. **Trigger**: Touch and **hold for 3 seconds** in the **lower-left corner** of your reMarkable screen
+4. **Trigger**: Touch and **hold for at least 2 seconds** in the **lower-left corner**, then release
 5. **Capture**: The app takes a screenshot of your current page
 6. **Read and Verify**: A vision request identifies the selected concept, reads the question, and proposes an answer. An independent transcription pass over the page, without seeing the proposed question or answer, must agree before anything is written. Unreadable or conflicting readings produce an X instead.
 7. **Page Check**: App navigates right and checks for a valid answer page:
@@ -35,6 +35,27 @@ check adds an API request for recognized questions. It reduces confident misread
 but can reject valid handwriting when the readings differ; agreement is not a
 guarantee of correctness. See the [hardware evidence comments](https://github.com/s116821/ReMarkableBuddies/pull/10#issuecomment-5687876142)
 for results and limitations, and the [build and cost details](https://github.com/s116821/ReMarkableBuddies/pull/10#issuecomment-5687876514).
+
+## Undo and redo the latest answer
+
+On a supported native editing contract, hold four stationary fingers for two
+seconds and release all fingers to undo the last Q&A. Hold two fingers the same
+way to redo it. The header, older answers and unrelated ink remain. Repeated
+toggles make no model requests.
+
+History becomes available only after the complete answer is saved by the native
+app; observed RM2 saves take about 10–11 seconds after typing ends. Input during
+that confirmation can cancel ownership. Leaving the page, scrolling, editing,
+using other controls, starting another Reader iteration or restarting the process
+forgets the record. Returning to the page does not revive it.
+
+The initial contract is RM2 firmware 3.28.0.172, ASCII Q&As of at most 2000 characters
+and 32 paragraphs. Other devices/firmware and larger answers keep ordinary Reader
+rendering without undo ownership. Missing current-document identity, unexpected
+text or a native operation failure also disables history; there is no automatic
+repair or retry. A native restart can leave identity unavailable until the
+document is reopened; only a new successful Reader iteration can create history.
+Synthetic native tests do not establish physical-finger or Paper Pro acceptance.
 
 ## Installation
 

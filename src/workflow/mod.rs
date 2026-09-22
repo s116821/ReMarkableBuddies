@@ -1,3 +1,4 @@
+pub mod history;
 pub mod indicator;
 mod navigation;
 pub mod orchestrator;
@@ -48,6 +49,7 @@ pub struct Workflow {
     indicator_eligible: bool,
     indicator_owned: bool,
     indicator_cleanup_failed: bool,
+    history: history::History,
 }
 
 impl Workflow {
@@ -71,6 +73,7 @@ impl Workflow {
             indicator_eligible: false,
             indicator_owned: false,
             indicator_cleanup_failed: false,
+            history: history::History::default(),
         }
     }
 
@@ -79,6 +82,7 @@ impl Workflow {
     }
 
     pub fn tick_indicator(&mut self) -> Result<()> {
+        self.invalidate_history();
         if self.indicator_cleanup_failed {
             anyhow::bail!("Status cleanup failed; further activity is stopped");
         }
@@ -97,6 +101,7 @@ impl Workflow {
 
     pub fn clear_indicator(&mut self) -> Result<()> {
         if self.indicator_owned {
+            self.invalidate_history();
             if let Err(error) = self.device.status_clear() {
                 self.indicator_cleanup_failed = true;
                 return Err(error.context("Clear owned activity circle"));
@@ -111,6 +116,7 @@ impl Workflow {
     }
 
     pub fn begin_iteration(&mut self) -> Result<()> {
+        self.invalidate_history();
         anyhow::ensure!(
             !self.indicator_cleanup_failed,
             "Status cleanup failed; restart before another iteration"
@@ -143,6 +149,52 @@ impl Workflow {
         self.device.wait_for_trigger()?;
         self.device.dismiss_trigger()?;
         Ok(())
+    }
+
+    /// Stay idle without clearing the last Q&A. Cross-device event order is
+    /// unknown, so any loss of ownership wins over history gestures in a batch.
+    pub fn wait_for_reader(&mut self) -> Result<()> {
+        self.wait_for_reader_until(None)
+    }
+
+    /// Bounded offline diagnostics use the exact production idle dispatcher.
+    pub fn wait_for_reader_bounded(&mut self, seconds: u64) -> Result<()> {
+        anyhow::ensure!((1..=120).contains(&seconds), "Invalid observation duration");
+        self.wait_for_reader_until(Some(
+            std::time::Instant::now() + std::time::Duration::from_secs(seconds),
+        ))
+    }
+
+    fn wait_for_reader_until(&mut self, deadline: Option<std::time::Instant>) -> Result<()> {
+        use crate::device::interaction::Interaction;
+        loop {
+            let timeout =
+                deadline.map(|limit| limit.saturating_duration_since(std::time::Instant::now()));
+            let events = self.device.wait_for_interactions(timeout)?;
+            let invalidated = events.contains(&Interaction::Invalidated);
+            if invalidated {
+                self.invalidate_history();
+            }
+            if events.contains(&Interaction::Reader) {
+                self.invalidate_history();
+                self.device.dismiss_trigger()?;
+                return Ok(());
+            }
+            if !invalidated {
+                for event in events {
+                    let action = match event {
+                        Interaction::Undo => history::Action::Undo,
+                        Interaction::Redo => history::Action::Redo,
+                        _ => continue,
+                    };
+                    match self.history_action(action) {
+                        Ok(true) => info!("Q&A history {:?}: {:?}", action, self.history.state()),
+                        Ok(false) => debug!("Q&A history {:?}: unavailable or redundant", action),
+                        Err(error) => log::warn!("Q&A history stopped: {error}"),
+                    }
+                }
+            }
+        }
     }
 
     /// Take a screenshot and return the base64-encoded image
@@ -178,18 +230,21 @@ impl Workflow {
 
     /// Show progress indicator to user
     pub fn show_progress(&mut self, message: &str) -> Result<()> {
+        self.invalidate_history();
         self.device.progress(Some(message))?;
         Ok(())
     }
 
     /// Clear progress indicator
     pub fn clear_progress(&mut self) -> Result<()> {
+        self.invalidate_history();
         self.device.progress(None)?;
         Ok(())
     }
 
     /// Erase a region on the screen using the eraser tool
     pub fn erase_region(&mut self, region: &crate::analysis::BoundingBox) -> Result<()> {
+        self.invalidate_history();
         info!(
             "Erasing region at ({}, {}) size {}x{}",
             region.x, region.y, region.width, region.height
@@ -210,6 +265,7 @@ impl Workflow {
         region: &crate::analysis::BoundingBox,
         screenshot_data: &[u8],
     ) -> Result<()> {
+        self.invalidate_history();
         use image::Rgba;
 
         info!(
@@ -312,6 +368,7 @@ impl Workflow {
 
     /// Draw a reference symbol at a location using bitmap rendering
     pub fn draw_symbol(&mut self, x: i32, y: i32, symbol: &str) -> Result<()> {
+        self.invalidate_history();
         info!("Drawing reference symbol '{}' at ({}, {})", symbol, x, y);
 
         // Convert symbol to bitmap - larger size for better visibility
@@ -342,9 +399,88 @@ impl Workflow {
         Ok(())
     }
 
+    pub fn invalidate_history(&mut self) {
+        self.history.discard();
+        self.device.history_discard();
+    }
+
+    pub fn history_state(&self) -> history::State {
+        self.history.state()
+    }
+
+    /// Registers only a completely persisted Q&A after all status/header/body
+    /// operations. Observation failure does not retroactively fail rendered text.
+    pub fn render_qa(&mut self, text: &str) -> Result<()> {
+        self.invalidate_history();
+        self.clear_indicator()?;
+        let before = self.device.history_snapshot(None).unwrap_or_else(|error| {
+            log::warn!("Q&A history preparation unavailable: {error}");
+            None
+        });
+        self.indicator_eligible = false;
+        if let Err(error) = self.device.render_text(text) {
+            self.invalidate_history();
+            return Err(error);
+        }
+        if let Some(before) = before {
+            let expected = format!("{}{text}", before.content.text());
+            match self.device.history_snapshot(Some(&expected)) {
+                Ok(Some(applied)) => {
+                    if !self.history.arm(before, applied, text) {
+                        self.invalidate_history();
+                    }
+                }
+                result => {
+                    if let Err(error) = result {
+                        log::warn!("Q&A history persistence unavailable: {error}");
+                    }
+                    self.invalidate_history();
+                }
+            }
+        } else {
+            self.device.history_discard();
+        }
+        Ok(())
+    }
+
+    /// History failures never type error text, draw an X or retry a native edit.
+    pub fn history_action(&mut self, action: history::Action) -> Result<bool> {
+        if self.history.state() == history::State::Empty {
+            return Ok(false);
+        }
+        let current = match self.device.history_snapshot(None) {
+            Ok(Some(state)) => state,
+            Ok(None) => {
+                self.invalidate_history();
+                return Ok(false);
+            }
+            Err(error) => {
+                self.invalidate_history();
+                return Err(error);
+            }
+        };
+        let Some(command) = self.history.begin(action, &current) else {
+            if self.history.state() == history::State::Empty {
+                self.device.history_discard();
+            }
+            return Ok(false);
+        };
+        let expected = self
+            .history
+            .pending_text()
+            .expect("begin returned a pending command");
+        let result = self.device.history_mutate(command, &expected);
+        if let Err(error) = self.history.finish(result) {
+            self.invalidate_history();
+            return Err(error);
+        }
+        Ok(true)
+    }
+
     /// Render text on the screen using the keyboard
     /// Note: The caller is responsible for including any desired newlines in the text
     pub fn render_text(&mut self, text: &str) -> Result<()> {
+        self.invalidate_history();
         self.clear_indicator()?;
         // Typing can change the status region, including on a partial failure.
         self.indicator_eligible = false;
@@ -355,6 +491,7 @@ impl Workflow {
 
     /// Switch keyboard to body text mode (should be called once before rendering)
     pub fn set_body_text_mode(&mut self) -> Result<()> {
+        self.invalidate_history();
         self.clear_indicator()?;
         self.device.body_mode()?;
         Ok(())
@@ -362,6 +499,7 @@ impl Workflow {
 
     /// Navigate to the next page (swipe left)
     pub fn navigate_to_next_page(&mut self) -> Result<()> {
+        self.invalidate_history();
         self.clear_indicator()?;
         self.indicator_eligible = false;
         self.device
@@ -371,6 +509,7 @@ impl Workflow {
 
     /// Navigate back to the previous page (swipe right)
     pub fn navigate_to_previous_page(&mut self) -> Result<()> {
+        self.invalidate_history();
         self.clear_indicator()?;
         self.indicator_eligible = false;
         self.device
@@ -381,6 +520,7 @@ impl Workflow {
     /// Draw a guarded failure X in the same 50x50 status area.
     /// Used to indicate that no valid answer page was found
     pub fn draw_failure_x(&mut self) -> Result<()> {
+        self.invalidate_history();
         info!("Drawing failure X in bottom-right corner");
 
         self.clear_indicator()?;

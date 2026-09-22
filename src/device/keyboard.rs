@@ -114,6 +114,8 @@ impl Keyboard {
 
         keys.insert(EvdevKey::KEY_BACKSPACE);
         keys.insert(EvdevKey::KEY_ESC);
+        keys.insert(EvdevKey::KEY_LEFT);
+        keys.insert(EvdevKey::KEY_UP);
 
         keys.insert(EvdevKey::KEY_LEFTCTRL);
         keys.insert(EvdevKey::KEY_LEFTALT);
@@ -261,6 +263,12 @@ impl Keyboard {
 
             for c in input.chars() {
                 if let Some(&(key, shift)) = self.key_map.get(&c) {
+                    if self.rm2_keyboard && c == '^' {
+                        // Inline xochitl composition can anchor the dead key
+                        // before a still-pending preceding character. Let that
+                        // character commit before starting caret composition.
+                        thread::sleep(time::Duration::from_millis(50));
+                    }
                     // Firmware 3.28 maps the equals sign through Alt+Shift.
                     if self.rm2_keyboard && c == '=' {
                         device.emit(&[InputEvent::new(
@@ -319,6 +327,7 @@ impl Keyboard {
                             EvdevKey::KEY_SPACE.code(),
                             0,
                         )])?;
+                        thread::sleep(time::Duration::from_millis(50));
                     }
                     // Sync event
                     device.emit(&[InputEvent::new(EvdevEventType::SYNCHRONIZATION.0, 0, 0)])?;
@@ -345,6 +354,97 @@ impl Keyboard {
     pub fn key_cmd_body(&mut self) -> Result<()> {
         self.key_cmd("3", false)?;
         Ok(())
+    }
+
+    pub fn owned_sysfs(&mut self) -> Result<Option<std::path::PathBuf>> {
+        self.device
+            .as_mut()
+            .map(|device| device.get_syspath().map_err(Into::into))
+            .transpose()
+    }
+
+    /// Only the guarded history backend may call this after proving ownership.
+    /// A failed guard or write always releases keys, never compensates an edit.
+    pub fn history_command(
+        &mut self,
+        command: crate::workflow::history::Command,
+        guard: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        use crate::workflow::history::Command;
+        anyhow::ensure!(self.device.is_some(), "Native history keyboard disabled");
+        if let Command::DeleteSuffix {
+            characters,
+            paragraphs,
+        } = command
+        {
+            anyhow::ensure!(
+                (1..=crate::workflow::history::MAX_CHARACTERS).contains(&characters),
+                "Invalid history selection size"
+            );
+            anyhow::ensure!(
+                (1..=crate::workflow::history::MAX_PARAGRAPHS).contains(&paragraphs),
+                "Invalid history paragraph count"
+            );
+        }
+        let deadline = time::Instant::now() + time::Duration::from_secs(60);
+        let result = (|| -> Result<()> {
+            let mut emit = |key, down| -> Result<()> {
+                anyhow::ensure!(
+                    time::Instant::now() < deadline,
+                    "Native history key deadline exceeded"
+                );
+                guard()?;
+                if down {
+                    self.key_down(key)?;
+                } else {
+                    self.key_up(key)?;
+                }
+                thread::sleep(time::Duration::from_millis(50));
+                guard()
+            };
+            match command {
+                Command::DeleteSuffix { paragraphs, .. } => {
+                    emit(EvdevKey::KEY_LEFTCTRL, true)?;
+                    emit(EvdevKey::KEY_LEFTSHIFT, true)?;
+                    for _ in 0..paragraphs {
+                        emit(EvdevKey::KEY_UP, true)?;
+                        emit(EvdevKey::KEY_UP, false)?;
+                    }
+                    emit(EvdevKey::KEY_LEFTSHIFT, false)?;
+                    emit(EvdevKey::KEY_LEFTCTRL, false)?;
+                    emit(EvdevKey::KEY_BACKSPACE, true)?;
+                    emit(EvdevKey::KEY_BACKSPACE, false)?;
+                }
+                Command::RestoreDeletion | Command::RepeatDeletion => {
+                    let key = if command == Command::RestoreDeletion {
+                        EvdevKey::KEY_Z
+                    } else {
+                        EvdevKey::KEY_Y
+                    };
+                    emit(EvdevKey::KEY_LEFTCTRL, true)?;
+                    emit(key, true)?;
+                    emit(key, false)?;
+                    emit(EvdevKey::KEY_LEFTCTRL, false)?;
+                }
+            }
+            Ok(())
+        })();
+        let mut cleanup = Ok(());
+        for key in [
+            EvdevKey::KEY_LEFT,
+            EvdevKey::KEY_UP,
+            EvdevKey::KEY_BACKSPACE,
+            EvdevKey::KEY_Z,
+            EvdevKey::KEY_Y,
+            EvdevKey::KEY_LEFTSHIFT,
+            EvdevKey::KEY_LEFTCTRL,
+        ] {
+            if let Err(error) = self.key_up(key) {
+                cleanup = Err(error);
+            }
+        }
+        result?;
+        cleanup
     }
 
     pub fn key_down(&mut self, key: EvdevKey) -> Result<()> {

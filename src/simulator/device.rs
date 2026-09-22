@@ -79,6 +79,8 @@ pub struct Event {
 }
 
 pub struct State {
+    #[cfg(test)]
+    pub idle_events: VecDeque<Vec<crate::device::interaction::Interaction>>,
     pub pages: Vec<Page>,
     pub initial: Vec<RgbaImage>,
     pub active: usize,
@@ -92,9 +94,53 @@ pub struct State {
     pub gestures: VecDeque<Vec<GestureFrame>>,
     pub corner: TriggerCorner,
     pub last: Frame,
+    pub visit: u64,
+    pub session: u64,
+    pub persisted: Option<crate::workflow::history::PageState>,
+    pub deletion: Option<(usize, String, String)>,
 }
 
 impl State {
+    fn history_page(&self) -> Result<crate::workflow::history::PageState> {
+        self.history_page_at(self.active)
+    }
+    fn history_page_at(&self, index: usize) -> Result<crate::workflow::history::PageState> {
+        use crate::{
+            device::native_text::{Character, NativeText, Paragraph},
+            workflow::history::{Owner, PageState},
+        };
+        let page = &self.pages[index];
+        Ok(PageState {
+            owner: Owner {
+                document: "simulated-document".into(),
+                page: index.to_string(),
+                visit: self.visit.to_string(),
+                session: self.session.to_string(),
+            },
+            content: NativeText {
+                paragraphs: page
+                    .text
+                    .split('\n')
+                    .map(|line| Paragraph {
+                        style: 1,
+                        characters: line
+                            .chars()
+                            .map(|value| Character {
+                                value,
+                                bold: false,
+                                italic: false,
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+                root_layout: vec![1],
+                scene_records: vec![serde_json::to_vec(&page.lines)?],
+            },
+            seal: serde_json::to_vec(&(&page.text, &page.lines, page.indicator_visible))?,
+            supported: !page.indicator_visible,
+        })
+    }
+
     pub fn new(scenario: &Scenario, root: &Path) -> Result<Self> {
         let mut pages = Vec::new();
         for spec in &scenario.pages {
@@ -142,6 +188,8 @@ impl State {
             .map(|p| image::open(root.join(p)))
             .transpose()?;
         Ok(Self {
+            #[cfg(test)]
+            idle_events: VecDeque::new(),
             pages,
             initial,
             active: scenario.active_page,
@@ -155,6 +203,10 @@ impl State {
             gestures: scenario.gestures.clone().into(),
             corner: TriggerCorner::from_string(&scenario.trigger_corner)?,
             last: Frame::default(),
+            visit: 0,
+            session: 0,
+            persisted: None,
+            deletion: None,
         })
     }
     pub fn event(&mut self, action: &str, detail: impl Into<String>) {
@@ -211,6 +263,127 @@ fn png(image: &DynamicImage) -> Result<Vec<u8>> {
 }
 
 impl DeviceBackend for SimDevice {
+    #[cfg(test)]
+    fn wait_for_interactions(
+        &mut self,
+        _timeout: Option<Duration>,
+    ) -> Result<Vec<crate::device::interaction::Interaction>> {
+        self.0
+            .borrow_mut()
+            .idle_events
+            .pop_front()
+            .context("Idle test has no remaining input")
+    }
+    fn history_snapshot(
+        &mut self,
+        expected: Option<&str>,
+    ) -> Result<Option<crate::workflow::history::PageState>> {
+        let mut state = self.0.borrow_mut();
+        let effect = state.operation(Operation::HistorySnapshot)?;
+        if effect == Some(Effect::Unavailable) {
+            state.event(
+                "history_identity_unavailable",
+                "native current-document identity absent despite visible document",
+            );
+            return Ok(None);
+        }
+        if effect == Some(Effect::WrongPage) {
+            anyhow::ensure!(state.pages.len() > 1, "Wrong-page fault needs another page");
+            state.event(
+                "history_wrong_page",
+                "stable last-opened metadata refers to another document/page",
+            );
+            return Ok(Some(
+                state.history_page_at((state.active + 1) % state.pages.len())?,
+            ));
+        }
+        if effect == Some(Effect::Stale) {
+            state.event(
+                "history_persistence_timeout",
+                "old snapshot remains stable; no ownership",
+            );
+            return Ok(state.persisted.clone());
+        }
+        if effect == Some(Effect::Lag) {
+            state.event(
+                "history_persistence_lag",
+                "visible text precedes persisted text; wait for expected content",
+            );
+            // Native RM2 3.28 measurements were about 10.6-10.8 seconds.
+            state.clock += 11_000;
+        }
+        let current = state.history_page()?;
+        anyhow::ensure!(
+            expected.is_none_or(|text| current.content.text() == text),
+            "Simulated persisted text did not reach expected content"
+        );
+        state.persisted = Some(current.clone());
+        Ok(Some(current))
+    }
+
+    fn history_discard(&mut self) {
+        self.0.borrow_mut().deletion = None;
+    }
+
+    fn history_mutate(
+        &mut self,
+        command: crate::workflow::history::Command,
+        _expected: &str,
+    ) -> Result<crate::workflow::history::PageState> {
+        use crate::workflow::history::Command;
+        let mut state = self.0.borrow_mut();
+        let effect = state.operation(Operation::HistoryMutation)?;
+        let active = state.active;
+        let applied = state.pages[active].text.clone();
+        let next = match command {
+            Command::DeleteSuffix {
+                characters,
+                paragraphs,
+            } => {
+                let length = applied.chars().count();
+                anyhow::ensure!(characters <= length, "Simulated selection exceeds text");
+                let suffix: String = applied.chars().skip(length - characters).collect();
+                anyhow::ensure!(
+                    suffix.bytes().filter(|value| *value == b'\n').count() == paragraphs,
+                    "Simulated paragraph range differs from owned suffix"
+                );
+                let count = if effect == Some(Effect::Partial) {
+                    characters / 2
+                } else {
+                    characters
+                };
+                let removed: String = applied.chars().take(length - count).collect();
+                state.deletion = Some((active, applied, removed.clone()));
+                removed
+            }
+            Command::RestoreDeletion | Command::RepeatDeletion => {
+                let (page, applied, removed) = state
+                    .deletion
+                    .as_ref()
+                    .context("Missing owned simulated deletion")?;
+                anyhow::ensure!(
+                    *page == active,
+                    "Simulated native entry belongs to another page"
+                );
+                if command == Command::RestoreDeletion {
+                    applied.clone()
+                } else {
+                    removed.clone()
+                }
+            }
+        };
+        state.pages[active].text = next;
+        if effect == Some(Effect::Partial) {
+            bail!("Injected partial history mutation");
+        }
+        if effect == Some(Effect::Corrupt) {
+            state.pages[active].text.push_str("[unexpected]");
+        }
+        let result = state.history_page()?;
+        state.persisted = Some(result.clone());
+        Ok(result)
+    }
+
     fn capture(&mut self) -> Result<Frame> {
         let mut state = self.0.borrow_mut();
         let effect = state.operation(Operation::Capture)?;
@@ -290,6 +463,7 @@ impl DeviceBackend for SimDevice {
         };
         let effect = state.operation(operation)?;
         if effect != Some(Effect::NoMove) {
+            state.visit += 1;
             state.active = match direction {
                 NavigationDirection::Next => (state.active + 1).min(state.pages.len() - 1),
                 NavigationDirection::Previous => state.active.saturating_sub(1),
