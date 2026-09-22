@@ -103,3 +103,11 @@ Reader SHALL use a verified narrow black status style independently of the user'
 #### Scenario: Failure while inspecting Fineliner
 - **WHEN** selecting Fineliner for inspection fails or its style cannot be read before color/width input
 - **THEN** rollback restores the original primary grid/active slot without changing Fineliner color or width, or stops with its phase-specific recovery evidence if safe UI restoration cannot be verified.
+
+#### Scenario: Restore before eraser redraw
+- **WHEN** temporary activity paths need cleanup
+- **THEN** Reader verifies and restores actual original tools with its strict page guard before eraser input, durably records pending cleanup and retains the recovery journal.
+- **AND** after erasure it verifies fresh owner/session identity, original closed pen controls, the clean corner and the unchanged invariant page region outside the documented lower-right redraw region before removing the journal.
+- **AND** failed restoration causes no erasure, while failed erasure or final verification retains recovery evidence and stops all further input without retry.
+
+The post-erase invariant image guard excludes only x>=512,y>=768 and the left toolbar; it is viewport evidence, not a claim that every pixel in the native redraw region survived. Native sentinel-ink checks in that region SHALL remain a required acceptance gate. The pre-restoration full-page guard SHALL remain unchanged.

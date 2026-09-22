@@ -44,3 +44,9 @@ Exact-head independent review, required CI, normal merge and release verificatio
 - [ ] 7.1 Replace persisted-preference authority with staged actual-UI snapshots and dimension-specific rollback, with immutable durable recovery checkpoints before input.
 - [ ] 7.2 Test stale Black/Medium metadata versus actual Red/Thick UI and failures around every probe/setting/restoration input, journal ownership/crash bounds and both original slots.
 - [ ] 7.3 Verify native nondefault primary/secondary restoration on success/failure, retain earlier safe suppression/stale equality evidence, and update public docs/evidence claims.
+
+## 8. Restore before native eraser redraw
+
+- [ ] 8.1 Implement strict restoration before cleanup, durable PendingCleanup and post-erase owner/session/toolbar/corner/invariant-region verification with no retry or early journal removal.
+- [ ] 8.2 Model ordering and every failure boundary; preserve exact native baseline/rejection fixtures and viewport/content/tool/session negative cases.
+- [ ] 8.3 Revalidate PDF cleanup and primary/secondary Highlighter with nondefault Fine and neighbor ink under the revised ordering; document the post-erase invariant-region limits.

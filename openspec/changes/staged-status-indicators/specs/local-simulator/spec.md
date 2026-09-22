@@ -48,3 +48,9 @@ The local test suite SHALL model status-style acquisition, unavailability and re
 #### Scenario: Stale preference file during style probing
 - **WHEN** actual UI settings differ from advisory persisted preferences and an input fails during probing, setting or restoration
 - **THEN** modeled rollback uses durably captured UI values only, restores only potentially changed dimensions, and stops after unverified restoration instead of copying the stale file's values.
+
+#### Scenario: Temporary cleanup transaction ordering
+- **WHEN** temporary paths are cleared
+- **THEN** the model observes restored original style before erasure and a separate successful finish before releasing its lease.
+- **AND** faults at restoration, pending-cleanup checkpoint, erasure and final verification retain unresolved state and prohibit later input, including a second cleanup attempt.
+- **AND** native frame fixtures exercise erase-induced PDF redraw, unchanged invariant page regions and rejected viewport, owner, session and tool changes without weakening the pre-restoration guard.
