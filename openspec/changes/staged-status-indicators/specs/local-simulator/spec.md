@@ -43,3 +43,8 @@ The local test suite SHALL model status-style acquisition, unavailability and re
 #### Scenario: Unsupported controls
 - **WHEN** style acquisition reports an unsupported layout
 - **THEN** status is suppressed without repeatedly toggling controls or preventing model analysis.
+
+
+#### Scenario: Stale preference file during style probing
+- **WHEN** actual UI settings differ from advisory persisted preferences and an input fails during probing, setting or restoration
+- **THEN** modeled rollback uses durably captured UI values only, restores only potentially changed dimensions, and stops after unverified restoration instead of copying the stale file's values.

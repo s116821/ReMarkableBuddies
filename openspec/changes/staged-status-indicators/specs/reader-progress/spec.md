@@ -73,7 +73,7 @@ Reader SHALL record each unique owned path before drawing, including possible pa
 
 ### Requirement: Scoped readable native status style
 
-Reader SHALL use a verified narrow black status style independently of the user's selected broad pen, without permanently changing the active slot or stored tool/color/width preferences. A bounded style lease SHALL snapshot document/page and exact preferences before mutation, verify supported toolbar/menu state, and restore them after temporary cleanup or persistent failure drawing before further capture/navigation/typing. Repeated333ms strokes SHALL perform no toolbar toggles. Hidden toolbar, already-open menu, active non-pen tool, unsupported layout or ambiguous identity SHALL suppress status without mutation. Partial acquisition SHALL attempt bounded verified rollback; failed restoration SHALL halt further input. A recovery record SHALL retain original preferences across a crash without pretending finally ran or automatically overwriting later user choices. Source: planned src/device/status_style.rs; src/device/backend.rs; src/workflow/mod.rs.
+Reader SHALL use a verified narrow black status style independently of the user's selected broad pen, without permanently changing the active slot or current tool/color/width preferences. The supported visible UI SHALL be authoritative for actual active slot, primary tool grid and Fineliner color/width; persisted tool preferences SHALL be advisory because they can be stale. A bounded staged lease SHALL durably record each rollback target before the corresponding mutation, restore from captured UI values after temporary cleanup or persistent failure drawing, and verify actual controls before further capture/navigation/typing. If probing fails before color/width changes, rollback SHALL restore the original tool/slot without modifying those unmodified dimensions. Repeated333ms strokes SHALL perform no toolbar toggles. Hidden toolbar, already-open menu, active non-pen tool, unsupported layout or ambiguous identity SHALL suppress status without mutation; a safely rolled-back probe failure SHALL suppress status. Failed restoration SHALL halt further input. A bounded, versioned, exclusive owner-private recovery journal SHALL describe probe phase, captured values and may-have-mutated dimensions across a crash; later runs SHALL refuse automatic mutation rather than applying stale settings. Source: src/device/status_style.rs; src/device/backend.rs; src/workflow/mod.rs.
 
 #### Scenario: Highlighter selected
 - **WHEN** a verified supported page has Highlighter selected and a clear corner
@@ -94,3 +94,12 @@ Reader SHALL use a verified narrow black status style independently of the user'
 #### Scenario: Interrupted process
 - **WHEN** a process terminates before restoration
 - **THEN** the recovery record remains and later runs refuse automatic status mutation until deliberate recovery, without claiming the user's preferences were restored.
+
+
+#### Scenario: Persisted preferences lag the UI
+- **WHEN** the visible original slot/tool or Fineliner Red/Thick settings differ from the document file's old Black/Medium values
+- **THEN** Reader captures and restores the visible values, treats the file as advisory, and never claims current preference restoration from file equality alone.
+
+#### Scenario: Failure while inspecting Fineliner
+- **WHEN** selecting Fineliner for inspection fails or its style cannot be read before color/width input
+- **THEN** rollback restores the original primary grid/active slot without changing Fineliner color or width, or stops with its phase-specific recovery evidence if safe UI restoration cannot be verified.

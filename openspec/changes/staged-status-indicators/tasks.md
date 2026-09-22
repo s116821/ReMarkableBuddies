@@ -37,3 +37,10 @@ Exact-head independent review, required CI, normal merge and release verificatio
 - [ ] 6.1 Implement verified bounded native style acquisition/rollback/restoration and crash recovery record without config-file writes or repeated-tick UI changes.
 - [ ] 6.2 Model tool/slot/preferences, partial acquisition/restore faults, changed page and unsupported-layout refusal; preserve no-history-activity assertions.
 - [ ] 6.3 Validate Highlighter-start narrow geometry and all six readable error marks, exact nondefault preference restoration on success/error, and record native style-switch overhead.
+
+
+## 7. Correct stale native preference assumptions
+
+- [ ] 7.1 Replace persisted-preference authority with staged actual-UI snapshots and dimension-specific rollback, with immutable durable recovery checkpoints before input.
+- [ ] 7.2 Test stale Black/Medium metadata versus actual Red/Thick UI and failures around every probe/setting/restoration input, journal ownership/crash bounds and both original slots.
+- [ ] 7.3 Verify native nondefault primary/secondary restoration on success/failure, retain earlier safe suppression/stale equality evidence, and update public docs/evidence claims.
