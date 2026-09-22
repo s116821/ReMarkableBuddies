@@ -1,5 +1,7 @@
 # Local Reader simulator
 
+For fixture selection and evidence gates, use the [local testing checklist](../.agents/skills/reader-simulator-testing/SKILL.md). It also works without an agent integration.
+
 Run the real Reader workflow on Windows, Linux or macOS without SSH, tablet input
 devices or an API key:
 

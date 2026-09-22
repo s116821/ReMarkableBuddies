@@ -350,7 +350,7 @@ journalctl -u reader-buddy.service --since "1 hour ago"
 # View logs with timestamps
 journalctl -u reader-buddy.service -o short-precise
 
-# View only error-level logs
+# Filter journal priority (may not match Rust application log levels)
 journalctl -u reader-buddy.service -p err
 ```
 

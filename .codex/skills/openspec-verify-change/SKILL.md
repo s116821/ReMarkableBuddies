@@ -2,12 +2,26 @@
 name: openspec-verify-change
 description: Verify implementation matches change artifacts. Use when the user wants to validate that implementation is complete, correct, and coherent before archiving.
 license: MIT
-compatibility: Requires openspec CLI.
+compatibility: OpenSpec CLI optional; manual file workflow supported.
 metadata:
   author: openspec
   version: "1.0"
   generatedBy: "1.2.0"
 ---
+
+## Repository portability
+
+This workflow also supports the [manual file/CLI equivalent](../../../openspec/README.md#manual-equivalent).
+Named agent tools are optional integration examples: use ordinary conversation for
+necessary questions, a checklist for tracking, and direct work for task delegation
+when those tools are unavailable. Use the change already specified by the task;
+clarify only genuine ambiguity or a still-required decision. Existing authorization
+remains effective. The OpenSpec CLI is useful but not a prerequisite for editing
+artifacts; retain the same proposal, verification, sync and archive outcomes.
+Read public requirements and complete timestamped private comments only when
+already accessible, publish relevant decisions, and do not block contributors on
+private credentials or integrations. This project note qualifies tool-specific
+wording in the upstream instructions below.
 
 Verify that an implementation matches the change artifacts (specs, tasks, design).
 
