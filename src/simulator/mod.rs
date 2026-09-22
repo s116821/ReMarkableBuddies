@@ -612,6 +612,43 @@ mod indicator_capture_tests {
     }
 
     #[test]
+    fn status_style_restoration_failure_stops_future_input() {
+        use scenario::{Effect, Fault};
+        let (state, mut workflow) = blank_successor();
+        workflow.capture_page_data().unwrap();
+        workflow.tick_indicator().unwrap();
+        state.borrow_mut().faults.push(Fault {
+            operation: Operation::StatusStyleEnd,
+            call: 1,
+            effect: Effect::Error,
+        });
+        assert!(workflow.clear_indicator().is_err());
+        assert!(workflow.cleanup_failed());
+        assert!(workflow.begin_iteration().is_err());
+        assert!(!state.borrow().pages[1].indicator_visible);
+        assert!(state.borrow().status_style_active);
+    }
+
+    #[test]
+    fn unsupported_style_suppresses_without_finish_loop_or_strokes() {
+        use scenario::{Effect, Fault};
+        let (state, mut workflow) = blank_successor();
+        workflow.capture_page_data().unwrap();
+        state.borrow_mut().faults.push(Fault {
+            operation: Operation::StatusStyleBegin,
+            call: 1,
+            effect: Effect::Unavailable,
+        });
+        workflow.set_indicator_stage(indicator::Stage::AnswerReady);
+        workflow.finish_indicator_stage().unwrap();
+        workflow.tick_indicator().unwrap();
+        let state = state.borrow();
+        assert_eq!(state.counts.get(&Operation::StatusStyleBegin), Some(&1));
+        assert!(!state.counts.contains_key(&Operation::StatusStroke));
+        assert!(!state.status_style_active);
+    }
+
+    #[test]
     fn classification_refreshes_eligibility_from_settled_frame() {
         let (state, mut workflow) = blank_successor();
         workflow.capture_page_data().unwrap();

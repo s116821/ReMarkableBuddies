@@ -28,3 +28,18 @@ The simulator SHALL exercise production indicator eligibility and cleanup, recor
 #### Scenario: Native erase has no visible effect
 - **WHEN** StatusClear receives a no_move fault representing accepted input without visible cleanup
 - **THEN** marks remain and the workflow stops before navigation or typing.
+
+
+## ADDED Requirements
+
+### Requirement: Status style lifecycle and rollback model
+
+The local test suite SHALL model status-style acquisition, unavailability and restoration faults, and reject capture/navigation/typing/history while a style lease remains active. A deterministic toolbar state model SHALL exercise exact primary/secondary preference restoration, partial acquisition actions, page changes and pre-mutation layout refusal. Native screenshot fixtures SHALL check the supported layout classifier. These models SHALL NOT claim native UI timing, persistence convergence or legibility proof.
+
+#### Scenario: Restoration fails
+- **WHEN** the native style restoration is modeled to fail after status cleanup
+- **THEN** further page input and later iterations stop rather than treating cleared ink as restored user preferences.
+
+#### Scenario: Unsupported controls
+- **WHEN** style acquisition reports an unsupported layout
+- **THEN** status is suppressed without repeatedly toggling controls or preventing model analysis.

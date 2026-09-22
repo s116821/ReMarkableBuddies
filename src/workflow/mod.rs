@@ -55,6 +55,7 @@ pub struct Workflow {
     indicator_deadline: Option<std::time::Duration>,
     failure_attempted: bool,
     indicator_cleanup_failed: bool,
+    indicator_style_active: bool,
     history: history::History,
 }
 
@@ -85,6 +86,7 @@ impl Workflow {
             indicator_deadline: None,
             failure_attempted: false,
             indicator_cleanup_failed: false,
+            indicator_style_active: false,
             history: history::History::default(),
         }
     }
@@ -102,7 +104,9 @@ impl Workflow {
         if !self.indicator_eligible {
             return Ok(());
         }
-        while self.indicator_stage < self.indicator_target || self.indicator_edges < 3 {
+        while self.indicator_eligible
+            && (self.indicator_stage < self.indicator_target || self.indicator_edges < 3)
+        {
             self.tick_indicator()?;
         }
         Ok(())
@@ -122,6 +126,9 @@ impl Workflow {
         );
         if !self.indicator_eligible {
             self.device.status_suppressed();
+            return Ok(());
+        }
+        if !self.begin_indicator_style()? {
             return Ok(());
         }
         if let Some(deadline) = self.indicator_deadline {
@@ -162,14 +169,48 @@ impl Workflow {
             self.invalidate_history();
             if let Err(error) = self.device.status_clear(&self.indicator_paths) {
                 self.indicator_cleanup_failed = true;
+                self.end_indicator_style()?;
                 return Err(error.context("Clear owned activity paths"));
             }
             self.indicator_paths.clear();
         }
+        self.end_indicator_style()?;
         self.indicator_deadline = None;
         self.indicator_edges = 0;
         self.indicator_stage = self.indicator_target;
         self.indicator_auxiliary = false;
+        Ok(())
+    }
+
+    fn begin_indicator_style(&mut self) -> Result<bool> {
+        if self.indicator_style_active {
+            return Ok(true);
+        }
+        match self.device.status_style_begin() {
+            Ok(true) => {
+                self.indicator_style_active = true;
+                Ok(true)
+            }
+            Ok(false) => {
+                self.indicator_eligible = false;
+                self.device.status_suppressed();
+                Ok(false)
+            }
+            Err(error) => {
+                self.indicator_cleanup_failed = true;
+                Err(error)
+            }
+        }
+    }
+
+    fn end_indicator_style(&mut self) -> Result<()> {
+        if self.indicator_style_active {
+            if let Err(error) = self.device.status_style_end() {
+                self.indicator_cleanup_failed = true;
+                return Err(error);
+            }
+            self.indicator_style_active = false;
+        }
         Ok(())
     }
 
@@ -599,6 +640,9 @@ impl Workflow {
             self.device.status_suppressed();
             return Ok(());
         }
+        if !self.begin_indicator_style()? {
+            return Ok(());
+        }
         self.indicator_eligible = false;
         let (x_start, y_start, x_end, y_end) = (
             indicator::LEFT + indicator::X_INSET,
@@ -609,12 +653,17 @@ impl Workflow {
 
         // Draw two diagonal lines to form an X (using screen coordinates)
         // Line 1: top-left to bottom-right
-        self.device.line((x_start, y_start), (x_end, y_end))?;
+        let result = (|| -> Result<()> {
+            self.device.line((x_start, y_start), (x_end, y_end))?;
 
-        // Line 2: top-right to bottom-left
-        self.device.line((x_end, y_start), (x_start, y_end))?;
-        let (from, to) = failure.segment();
-        self.device.line(from, to)?;
+            // Line 2: top-right to bottom-left
+            self.device.line((x_end, y_start), (x_start, y_end))?;
+            let (from, to) = failure.segment();
+            self.device.line(from, to)?;
+            Ok(())
+        })();
+        self.end_indicator_style()?;
+        result?;
 
         debug!(
             "Failure X drawn at ({}, {}) to ({}, {})",

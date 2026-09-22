@@ -111,6 +111,7 @@ pub struct Event {
 }
 
 pub struct State {
+    pub status_style_active: bool,
     #[cfg(test)]
     pub idle_events: VecDeque<Vec<crate::device::interaction::Interaction>>,
     pub pages: Vec<Page>,
@@ -226,6 +227,7 @@ impl State {
             pages,
             initial,
             active: scenario.active_page,
+            status_style_active: false,
             clock: 0,
             events: Vec::new(),
             counts: BTreeMap::new(),
@@ -251,6 +253,22 @@ impl State {
         });
     }
     fn operation(&mut self, operation: Operation) -> Result<Option<Effect>> {
+        if matches!(
+            operation,
+            Operation::Capture
+                | Operation::Next
+                | Operation::Previous
+                | Operation::Text
+                | Operation::Body
+                | Operation::HeaderSave
+                | Operation::HistorySnapshot
+                | Operation::HistoryMutation
+        ) {
+            anyhow::ensure!(
+                !self.status_style_active,
+                "Status preferences not restored before {operation:?}"
+            );
+        }
         if matches!(
             operation,
             Operation::Capture
@@ -566,6 +584,10 @@ impl DeviceBackend for SimDevice {
     }
     fn status_stroke(&mut self, stroke: crate::workflow::indicator::Stroke) -> Result<()> {
         let mut state = self.0.borrow_mut();
+        anyhow::ensure!(
+            state.status_style_active,
+            "Status stroke without style lease"
+        );
         let page = state.active;
         // A failed native draw may already have emitted part of a stroke.
         state.pages[page].indicator_visible = true;
@@ -598,6 +620,21 @@ impl DeviceBackend for SimDevice {
     }
     fn monotonic(&self) -> Duration {
         Duration::from_millis(self.0.borrow().clock)
+    }
+    fn status_style_begin(&mut self) -> Result<bool> {
+        let mut state = self.0.borrow_mut();
+        anyhow::ensure!(!state.status_style_active, "Duplicate style acquisition");
+        if state.operation(Operation::StatusStyleBegin)? == Some(Effect::Unavailable) {
+            return Ok(false);
+        }
+        state.status_style_active = true;
+        Ok(true)
+    }
+    fn status_style_end(&mut self) -> Result<()> {
+        let mut state = self.0.borrow_mut();
+        state.operation(Operation::StatusStyleEnd)?;
+        state.status_style_active = false;
+        Ok(())
     }
     fn status_suppressed(&mut self) {
         self.0

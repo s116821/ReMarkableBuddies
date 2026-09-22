@@ -10,6 +10,7 @@ pub mod native_page;
 pub mod native_text;
 pub mod pen;
 pub mod screenshot;
+pub mod status_style;
 pub mod touch;
 
 use std::path::Path;

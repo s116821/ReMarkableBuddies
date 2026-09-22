@@ -120,6 +120,8 @@ pub enum Operation {
     HeaderSave,
     StatusStroke,
     StatusClear,
+    StatusStyleBegin,
+    StatusStyleEnd,
     HistorySnapshot,
     HistoryMutation,
 }
@@ -291,8 +293,11 @@ impl Scenario {
                     ),
                     Effect::Lag => fault.operation == Operation::HistorySnapshot,
                     Effect::Partial => fault.operation == Operation::HistoryMutation,
-                    Effect::WrongPage | Effect::Unavailable =>
-                        fault.operation == Operation::HistorySnapshot,
+                    Effect::WrongPage => fault.operation == Operation::HistorySnapshot,
+                    Effect::Unavailable => matches!(
+                        fault.operation,
+                        Operation::HistorySnapshot | Operation::StatusStyleBegin
+                    ),
                 },
                 "Fault effect does not apply to operation"
             );
