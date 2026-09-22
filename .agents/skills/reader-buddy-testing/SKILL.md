@@ -5,6 +5,13 @@ description: Test Reader Buddy compatibility and end-to-end Q&A only with full u
 
 # Reader Buddy tablet testing
 
+This document is also a manual checklist for contributors using ordinary Git,
+Cargo, SSH/SCP and a screenshot viewer; it does not require Codex, connectors or
+private Linear access. Use available public acceptance criteria and discussions.
+Without an authorized idle tablet, run the documented local simulator/tests,
+record native cases as unverified and let a maintainer complete hardware gates
+before merge. Do not request private credentials or imply hardware was tested.
+
 Apply this workflow only when full unattended SSH is available to a development
 tablet the user is not actively using, and the task authorizes the proposed tests.
 Access alone is not authorization. This workflow does not apply to a personal or

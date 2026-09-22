@@ -203,19 +203,24 @@ they did not provide a working offline simulator.
 
 ## CI/CD Integration
 
-Uses **MagDrago Rust Semver Action** for automated versioning:
+Uses pinned **git-cliff** for semantic versions and **vergen-gitcl** for runtime metadata:
 
 **Version Bump Rules**:
-1. **Major** (X.0.0): Commit with `!` before `:`
-2. **Minor** (0.X.0): Merge from `feature/` branch
-3. **Patch** (0.0.X): Any source file change
-4. **None**: Docs-only changes
+1. **Major**: Scoped `!` syntax or `BREAKING CHANGE:` footer, including 0.x to 1.0.
+2. **Minor**: Scoped `feat` squash commit, including 0.x.
+3. **Patch**: Scoped fix/perf/refactor/build/ci/chore/test/revert application changes.
+4. **None**: Only explicit documentation paths changed; no main application compilation.
 
-**Source Files**: Defined in `.versioning/source_globs.txt`
+**Path policy**: `release/cliff.toml` excludes explicit documentation paths; other
+paths are relevant, including build/dependency changes. Misclassified application
+messages fail visibly. Mixed and multi-commit history is evaluated in full.
 
 **Workflows**:
-- `.github/workflows/ci.yml` - Format, lint, check on PRs
-- `.github/workflows/release.yml` - Version, build, release on main
+- `.github/workflows/ci.yml` - Required checks with docs-only application build gates.
+- `.github/workflows/release.yml` - Serialized immutable tag, exact-source builds,
+  runtime/checksum verification and recoverable draft publication. No version commit.
+- `build.rs` - Tag-derived CLI version; strict official source checks, explicit dev fallback.
+- [Release tests and recovery](../release/README.md) - Public, isolated fixtures and retry commands.
 
 ## Testing Strategy
 
@@ -284,7 +289,7 @@ Implement in `src/analysis/circle_detector.rs`:
 ## References
 
 - **ghostwriter**: Core device interaction code source
-- **MagDrago Rust Semver Action**: Automated versioning
+- **git-cliff / vergen-gitcl**: Semantic releases and Git-derived application versions
 - **reMarkable Community**: Device documentation
 - **OpenAI**: Vision API capabilities
 

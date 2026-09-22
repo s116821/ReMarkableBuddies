@@ -1,0 +1,37 @@
+# Git tags are the only application version authority. Keep path policy here:
+# everything outside these explicit documentation paths is application-relevant.
+[git]
+conventional_commits = true
+require_conventional = true
+filter_unconventional = false
+filter_commits = false
+fail_on_unmatched_commit = true
+protect_breaking_commits = true
+tag_pattern = '^v[0-9]+\.[0-9]+\.[0-9]+$'
+topo_order = true
+sort_commits = "oldest"
+exclude_paths = [
+  "README.md", "AGENTS.md", "CHANGELOG.md", "LICENSE", "LICENSE-*",
+  "docs/*.md", "docs/**/*.md", "docs/licenses/**", "docs/images/**", "docs/validation/images/**",
+  "openspec/**", ".agents/**/*.md", ".codex/**/*.md",
+  ".github/pull_request_template.md",
+]
+commit_parsers = [
+  { message = '^feat\(', group = "Features" },
+  { message = '^fix\(', group = "Fixes" },
+  { message = '^(perf|refactor|build|ci|chore|test|revert)\(', group = "Maintenance" },
+]
+
+[bump]
+features_always_bump_minor = true
+breaking_always_bump_major = true
+
+[changelog]
+body = """
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group }}
+{% for commit in commits %}
+- {{ commit.message }} ({{ commit.id | truncate(length=7, end="") }})
+{% endfor %}
+{% endfor %}
+"""

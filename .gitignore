@@ -23,4 +23,6 @@ Thumbs.db
 # Test outputs
 tmp/
 test_output/
+__pycache__/
+node_modules/
 

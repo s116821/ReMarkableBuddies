@@ -1,0 +1,16 @@
+{
+  "git": {
+    "requireCleanWorkingDir": true,
+    "requireBranch": false,
+    "requireUpstream": false,
+    "requireCommits": true,
+    "commit": false,
+    "tag": true,
+    "tagName": "v${version}",
+    "tagAnnotation": "ReMarkableBuddies release-v1",
+    "push": false
+  },
+  "npm": false,
+  "github": { "release": false },
+  "gitlab": { "release": false }
+}

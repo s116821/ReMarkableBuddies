@@ -4,9 +4,12 @@ Canonical contracts live in `specs/`; completed changes live in `changes/archive
 The REM-27 baseline describes v0.1.4 source behavior, including known defects.
 It is not a promise that every code path has been tested on every device.
 
-Use the official Codex skills in `.codex/skills/` in this order:
+Use the optional Codex skills in `.codex/skills/` in this order, or perform the
+equivalent file/CLI workflow below. Neither Codex nor private Linear access is
+required to contribute. Read the public issue/PR discussion and task requirements;
+maintainers copy relevant private decisions into public acceptance criteria.
 
-1. `openspec-propose`: name the change for the current Linear issue, inspect source
+1. `openspec-propose`: name the change for the current issue, inspect source
    and canonical specs, and create proposal, design, delta specs and tasks before
    implementation. `openspec instructions <artifact> --change <name> --json`
    supplies the schema and project rules.
@@ -26,6 +29,19 @@ Use one feature PR, not a planning-only prerequisite PR. REM-27 is intentionally
 documentation-only because establishing the baseline is its actual deliverable.
 Do a fresh final review and required CI/issue acceptance checks before merging.
 Follow AGENTS.md: concise Summary-only PR body; results/screenshots in comments.
+
+## Manual equivalent
+
+Create `changes/<name>/proposal.md` (why/scope), `design.md` (decisions/risks),
+`specs/<capability>/spec.md` (added/modified requirements with WHEN/THEN scenarios),
+and `tasks.md` (acceptance checklist) before implementation. Read all accessible
+issue comments chronologically and map each applicable request to acceptance.
+Implement, run public local tests and compare every requirement to evidence.
+Update canonical `specs/` with the final requirements, then move the completed
+change to `changes/archive/YYYY-MM-DD-<name>/` in the same PR. The optional
+OpenSpec CLI validates the artifacts; unavailable integrations are not a reason
+to block ordinary contributions. Clearly mark hardware or live-model cases that
+could not be run and have a maintainer complete required gates before merge.
 
 ## Official skill provenance
 

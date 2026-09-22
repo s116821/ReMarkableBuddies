@@ -1,0 +1,24 @@
+name: Pinned release tools
+description: Install the maintained version tool without compiling the application
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '24'
+    - shell: bash
+      run: npm ci --prefix release --ignore-scripts --no-audit --no-fund
+    - shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        version=2.14.2
+        archive="git-cliff-${version}-x86_64-unknown-linux-gnu.tar.gz"
+        directory="${RUNNER_TEMP}/git-cliff-${version}"
+        mkdir -p "$directory"
+        gh release download "v${version}" --repo orhun/git-cliff --pattern "$archive" --pattern "${archive}.sha512" --dir "$directory"
+        cd "$directory"
+        sha512sum --check "${archive}.sha512"
+        tar xzf "$archive"
+        echo "$directory/git-cliff-${version}" >> "$GITHUB_PATH"
