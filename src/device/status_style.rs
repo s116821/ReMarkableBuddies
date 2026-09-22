@@ -609,6 +609,33 @@ mod tests {
     }
 
     #[test]
+    fn changed_native_frame_refuses_before_any_tool_mutation() {
+        let mut io = Model::new();
+        io.canvas = Some(fixture(include_bytes!(
+            "../../tests/fixtures/status-style/native-page-overlay.png"
+        )));
+        let lease = Lease::prepare(io.observe().unwrap(), false)
+            .unwrap()
+            .unwrap();
+        io.canvas = Some(fixture(include_bytes!(
+            "../../tests/fixtures/status-style/native-page-overlay-settled.png"
+        )));
+        let error = lease.observe(&mut io).err().unwrap().to_string();
+        assert!(
+            error.contains("Status page image changed at (586, 824)"),
+            "{error}"
+        );
+        assert_eq!(io.count, 0);
+        assert!(io.checkpoints.is_empty());
+        assert_eq!(lease.recovery.phase, Phase::Prepared);
+        // A newly observed settled frame is stable; do not weaken the old lease.
+        let settled = Lease::prepare(io.observe().unwrap(), false)
+            .unwrap()
+            .unwrap();
+        assert!(settled.observe(&mut io).is_ok());
+    }
+
+    #[test]
     fn changed_page_refuses_rollback_input() {
         let mut io = Model::new();
         let mut lease = Lease::prepare(io.observe().unwrap(), false)

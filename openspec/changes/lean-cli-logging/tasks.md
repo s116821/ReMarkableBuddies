@@ -7,6 +7,6 @@
 - [ ] 2.2 Run parser/config/logging and spawned offline simulator regressions, positive and negative maintained scenarios; preserve failures.
 - [ ] 2.3 Run fmt, strict clippy, full host tests and both architecture builds.
 ## 3. Native and delivery
-- [ ] 3.1 Verify exact native capture, service/default logging, bounded real Reader Q&A and safe original state restoration.
+- [ ] 3.1 Verify exact native CLI/capture and service/default logging; bounded example reaches real proposal/independent reading and propagates guarded refusal without answer output; verify safe restoration. Record successful Q&A as unpassed and carry availability investigation to REM9.
 - [ ] 3.2 Publish grouped actual evidence; re-read issue chronology and obtain independent exact-head review plus required green CI with capped Bugbot disclosed.
 - [ ] 3.3 Sync canonical requirements in place, check duplicates/markers, archive in same PR and verify normal merge/release before Done.

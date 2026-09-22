@@ -182,7 +182,7 @@ export OPENAI_API_KEY=your-key-here
 reader-buddy [OPTIONS]
 
 Options:
-  --simulate <SCENARIO>     Run a bounded offline simulator scenario
+  --simulate <SCENARIO>     Run a bounded scenario (offline or explicit live)
   --api-key <API_KEY>       Optional key override (prefer environment)
   --model <MODEL>           Model to use [default: gpt-5.6-terra]
   --base-url <URL>          Custom OpenAI endpoint

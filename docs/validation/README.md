@@ -97,3 +97,20 @@ immediate-before/later-applied records showed a load counter and line-to-tombsto
 change, without capturing the internal settled comparison. Pre-REM32 also had
 clean-append refusals, but identical cause or unchanged workflow timing is not
 proven. Keep strict guards and report unavailable history; do not force a pass.
+
+### REM34 CLI and native capture fixtures
+
+`tests/fixtures/status-style/native-page-overlay.png` and
+`native-page-overlay-settled.png` are RM2 firmware3.28.0.172 captures from the
+6e685cc CLI correction validation. The first is preattempt, the second a later
+settled source view. Their names describe visible bottom navigation chrome;
+they are NOT the exact internal rejected-lease before/after pair. They also
+contain PDF redraw differences (first strict comparison difference586,824).
+The regression proves strict pre-mutation refusal on changed native frames,
+not the isolated cause of live refusal143,991. Two bounded live attempts reached
+correct independent question reading but wrote no answer; preserve that limitation
+for REM9 availability work and REM35 integrated acceptance. No guard was relaxed.
+The connected cursive input is a previously constructed synthetic native fixture,
+not a new human-handwriting sample. `docs/validation/images/rem34` contains a
+scripted simulator answer (approximate bitmap glyphs) and restored original tablet
+view for public evidence; these are separate evidence categories.
