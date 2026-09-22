@@ -30,18 +30,6 @@ fn semantic_tag(tag: &str) -> bool {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    // cross bind mounts can change the apparent owner of this already executing
-    // source. Trust only this package directory for this build-script process;
-    // do not modify global Git configuration or trust arbitrary repositories.
-    // Use Git's -c propagation format: cross images include Git 2.25, which
-    // predates GIT_CONFIG_COUNT. Shell quoting here is Git's config parser
-    // format; no shell command is constructed or executed.
-    let directory = env::var("CARGO_MANIFEST_DIR")?.replace('\'', "'\\''");
-    let inherited = env::var("GIT_CONFIG_PARAMETERS").unwrap_or_default();
-    env::set_var(
-        "GIT_CONFIG_PARAMETERS",
-        format!("{inherited} 'safe.directory={directory}'").trim(),
-    );
     println!("cargo:rerun-if-env-changed=READER_BUDDY_RELEASE_TAG");
     println!("cargo:rerun-if-env-changed=READER_BUDDY_RELEASE_SHA");
     let tag = env::var("READER_BUDDY_RELEASE_TAG").ok();

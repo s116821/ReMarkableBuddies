@@ -192,7 +192,7 @@ def build(repo, release, directory):
     # .git file can point outside the mounted source (especially on Windows).
     with tempfile.TemporaryDirectory(prefix="reader-release-source-") as temp:
         source = Path(temp) / "source"
-        git(repo, "clone", "--no-local", "--no-checkout", str(repo), str(source))
+        git(repo, "clone", "--config", "core.autocrlf=false", "--no-local", "--no-checkout", str(repo), str(source))
         build_checkout(source, release, directory)
 
 

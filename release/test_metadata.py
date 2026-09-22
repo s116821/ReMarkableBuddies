@@ -78,7 +78,11 @@ vergen-gitcl = { version = "=10.0.3", features = ["emit_and_set"] }
         self.assertEqual(restored.returncode, 0, restored.stderr)
         self.assertEqual(restored.stdout.strip(), "9.8.7")
         shallow = Path(self.temp.name) / "shallow"
-        git(self.repo, "clone", "--depth", "1", self.repo.as_uri(), str(shallow))
+        # Git for Windows' file transport mishandles quoted repository URLs;
+        # quoted build paths were exercised above, independently of transport.
+        shallow_origin = Path(self.temp.name) / "shallow-origin"
+        shutil.copytree(self.repo, shallow_origin)
+        git(self.repo, "clone", "--depth", "1", shallow_origin.as_uri(), str(shallow))
         self.assertNotEqual(self.run_metadata(shallow, **official).returncode, 0)
         missing = Path(self.temp.name) / "missing"
         shutil.copytree(self.repo, missing, ignore=shutil.ignore_patterns(".git", "target"))
