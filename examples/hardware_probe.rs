@@ -174,7 +174,7 @@ fn main() -> Result<()> {
                 device.send_events(&start)
             } else {
                 let mut result = Ok(());
-                for chunk in start.chunks_exact(8) {
+                for chunk in start.as_chunks::<8>().0 {
                     let mut frame = chunk.to_vec();
                     frame.push(syn);
                     result = device.send_events(&frame);
@@ -197,7 +197,7 @@ fn main() -> Result<()> {
                 device.send_events(&release)
             } else {
                 let mut result = Ok(());
-                for chunk in release.chunks_exact(2) {
+                for chunk in release.as_chunks::<2>().0 {
                     let mut frame = chunk.to_vec();
                     frame.push(syn);
                     if let Err(error) = device.send_events(&frame) {
