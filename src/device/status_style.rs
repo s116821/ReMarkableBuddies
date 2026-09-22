@@ -163,6 +163,21 @@ mod tests {
 
     #[test]
     fn native_fixture_controls_and_refusal() {
+        for (bytes, slot) in [
+            (
+                include_bytes!("../../tests/fixtures/status-style/closed-highlighter.png")
+                    .as_slice(),
+                "primary",
+            ),
+            (
+                include_bytes!("../../tests/fixtures/status-style/closed-secondary.png").as_slice(),
+                "secondary",
+            ),
+        ] {
+            let ui = controls(&fixture(bytes)).expect("Known closed native pen layout");
+            assert_eq!(ui.slot, slot);
+            assert!(!ui.menu);
+        }
         assert_eq!(
             controls(&closed()).unwrap(),
             Controls {
@@ -226,6 +241,49 @@ mod tests {
         let count = io.count;
         assert!(lease.restore(&mut io).is_err());
         assert_eq!(io.count, count);
+    }
+
+    #[test]
+    fn partial_and_unrecognized_popovers_refuse_before_input() {
+        let mut io = Model::new();
+        let mut state = io.observe().unwrap();
+        state.image = fixture(include_bytes!(
+            "../../tests/fixtures/status-style/open-fineliner.png"
+        ));
+        state
+            .preferences
+            .insert("LastActiveTool".into(), "primary".into());
+        // A damaged/partly painted supported border previously looked closed.
+        state.image.put_pixel(279, 100, Luma([255]));
+        assert!(Lease::prepare(state).unwrap().is_none());
+        let mut state = io.observe().unwrap();
+        // A docked popover elsewhere on the seam has no pen-menu grid at all.
+        for y in 700..850 {
+            state.image.put_pixel(61, y, Luma([0]));
+        }
+        assert!(Lease::prepare(state).unwrap().is_none());
+        assert_eq!(io.count, 0);
+    }
+
+    #[test]
+    fn unchanged_primary_style_restores_without_reopening_menu() {
+        let mut io = Model::new();
+        for (k, v) in [
+            ("LastActiveTool", "primary"),
+            ("LastPen", "Finelinerv2"),
+            ("LastFinelinerv2Color", "Black"),
+            ("LastFinelinerv2Size", "2"),
+        ] {
+            io.prefs.insert(k.into(), v.into());
+        }
+        let original = io.prefs.clone();
+        let mut lease = Lease::prepare(io.observe().unwrap()).unwrap().unwrap();
+        lease.acquire(&mut io).unwrap();
+        let count = io.count;
+        lease.restore(&mut io).unwrap();
+        assert_eq!(count, io.count);
+        assert_eq!(io.prefs, original);
+        assert!(!io.menu);
     }
 
     #[test]
@@ -424,7 +482,14 @@ pub fn controls(image: &GrayImage) -> Option<Controls> {
     if image.dimensions() != (768, 1024) {
         return None;
     }
-    let slot = match (selected(image, 30, 91), selected(image, 30, 153)) {
+    // Avoid the upper-right color dot: Yellow/White remain light inside a
+    // selected black tile and do not mean the slot is unselected.
+    let selected_slot = |y: u32| {
+        [(5, y - 10), (55, y + 10), (5, y + 20), (55, y + 23)]
+            .into_iter()
+            .all(|(x, y)| dark(image, x, y))
+    };
+    let slot = match (selected_slot(91), selected_slot(153)) {
         (true, false) => "primary",
         (false, true) => "secondary",
         _ => return None,
@@ -435,6 +500,17 @@ pub fn controls(image: &GrayImage) -> Option<Controls> {
     let grid = border.then(|| unique_selection(image, &GRID)).flatten();
     if border && grid.is_none() {
         return None;
+    }
+    if !border {
+        // Require the exposed page-side toolbar seam to be clear. Other or
+        // partially rendered docked popovers may retain the selected pen tile
+        // while lacking this menu's complete top/right border. Nearby page ink
+        // can conservatively suppress status; it is never removed for this probe.
+        if !(62..1000).all(|y| (61..65).all(|x| image.get_pixel(x, y).0[0] >= 248))
+            || GRID.iter().any(|&(x, y)| selected(image, x, y))
+        {
+            return None;
+        }
     }
     let fine = if grid == Some(1) && (70..270).all(|x| dark(image, x, 430)) {
         unique_selection(image, &PALETTE).zip(unique_selection(image, &WIDTHS))
@@ -625,7 +701,19 @@ impl Lease {
         if !self.mutation_intended {
             return Ok(());
         }
-        let (state, _) = self.observe(io)?;
+        let (state, ui) = self.observe(io)?;
+        // Acquisition only opened/closed our menu when the original primary
+        // Fineliner was already black medium. A fresh full observation verifies
+        // the unchanged settings without opening the menu a second time.
+        if self.original_grid == Some(1)
+            && self.recovery.preferences["LastActiveTool"] == "primary"
+            && fine_style(&self.recovery.preferences)? == (0, 1)
+            && !ui.menu
+            && ui.slot == "primary"
+            && state.preferences == self.recovery.preferences
+        {
+            return Ok(());
+        }
         if let Some(original) = self.original_grid {
             self.primary_menu(io)?;
             let ui = self.observe(io)?.1;

@@ -214,3 +214,6 @@ Failure codes use the shared persistent X and one centered half-box segment:
 | Device | Vertical midpoint | Device, rendering or unconfirmed recovery failure |
 
 Scenario `expect.failure_codes` maps page indices to ordered code names. Occupied or unknown corners suppress these marks. Loop diagnostics stay in logs; single-iteration provider/device errors still propagate. Simulator rasterization models geometry and relative retracing darkness, not native brush width, e-ink refresh or persistence.
+
+
+Status-style tests also enforce acquisition/restoration around native marks. `status_style_begin` supports `unavailable` and error faults; `status_style_end` supports error faults. Capture, navigation, output and history reject an active lease. A separate deterministic toolbar model exercises every partial acquisition action, exact secondary/primary preferences and page-change refusal, with native image fixtures checking layout recognition. These tests do not prove physical menu timing, metadata persistence or visual legibility; those remain native acceptance gates.
