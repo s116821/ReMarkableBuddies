@@ -9,3 +9,7 @@ The simulator SHALL model changed operation timing and reachable delayed/stale/c
 #### Scenario: History remains free of status switching
 - **WHEN** undo or redo is exercised after a complete answer
 - **THEN** its exact content and ownership rules remain unchanged and no new status tool acquisition or indicator loop occurs.
+
+#### Scenario: Completion signal ordering and cancellation
+- **WHEN** production sequencing receives immediate, delayed, missing, duplicate, out-of-order, stale or wrong-owner signals, or cancellation
+- **THEN** modeled checks assert fresh correlated completion or bounded safe failure, no duplicate mutations and no late revival of cancelled work; timed simulation is not proof of native event availability.
