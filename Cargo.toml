@@ -1,8 +1,14 @@
 [package]
 name = "remarkable-reader-buddy"
-version = "0.1.12"
+# Cargo requires a package version; application versions come only from Git tags.
+version = "0.0.0"
+publish = false
 edition = "2021"
+rust-version = "1.96"
 repository = "https://github.com/s116821/ReMarkableBuddies"
+
+[build-dependencies]
+vergen-gitcl = { version = "=10.0.3", features = ["emit_and_set"] }
 
 [dependencies]
 tokio = { version = "1.28", features = ["full"] }

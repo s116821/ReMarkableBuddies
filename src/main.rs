@@ -8,7 +8,7 @@ use std::thread::sleep;
 use std::time::Duration;
 
 #[derive(Parser)]
-#[command(author, version)]
+#[command(author, version = env!("READER_BUDDY_VERSION"))]
 #[command(about = "ReMarkable Reader Buddy - AI-powered reading assistant for reMarkable tablets")]
 #[command(
     long_about = "ReMarkable Reader Buddy watches for outlined or highlighted content and handwritten questions, \

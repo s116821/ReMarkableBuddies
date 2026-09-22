@@ -1,230 +1,68 @@
-# CI/CD Workflow Diagram
+# CI/CD workflow
 
-## Complete Workflow Overview
+The scoped PR title becomes the squash commit message. See
+[release policy](../release/cliff.toml) and [public release tests](../release/README.md).
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         DEVELOPER WORKFLOW                               │
-└─────────────────────────────────────────────────────────────────────────┘
+## Pull requests and main CI
 
-   Developer                      GitHub                      Automation
-      │                              │                              │
-      │  1. Create Branch            │                              │
-      ├─────────────────────────────>│                              │
-      │                              │                              │
-      │  2. Make Changes             │                              │
-      │  feat/fix/docs commits       │                              │
-      │                              │                              │
-      │  3. Push + Create PR         │                              │
-      ├─────────────────────────────>│                              │
-      │                              │                              │
-      │                              │  4. Trigger CI Workflow      │
-      │                              ├────────────────────────────> │
-      │                              │                              │
-      │                              │  5. Run Checks               │
-      │                              │     • cargo fmt              │
-      │                              │     • cargo clippy           │
-      │                              │     • cargo check (armv7)    │
-      │                              │     • cargo check (aarch64)  │
-      │                              │     • cargo test             │
-      │                              │ <──────────────────────────┤ │
-      │                              │     ✅ CI Passed            │
-      │                              │                              │
-      │  6. Review & Approve         │                              │
-      ├────────────────────────────> │                              │
-      │                              │                              │
-      │  7. Merge to main/master     │                              │
-      ├─────────────────────────────>│                              │
-      │                              │                              │
-      │                              │  8. Trigger Release Workflow │
-      │                              ├────────────────────────────> │
-      │                              │                              │
-      │                              │                              │
-      v                              v                              v
+```mermaid
+flowchart TD
+  Event[PR or main push] --> Policy[Inspect complete changed-path history]
+  Policy --> Docs{Only documented docs paths?}
+  Docs -->|Yes| Success[Required checks finish without application compilation]
+  Docs -->|No| Title[Validate scoped application semantic type on PR]
+  Title --> Checks[Format, lint, release fixtures, Rust tests and both ARM builds]
 ```
 
-## Release Workflow Detail
+Unknown paths are relevant by default. A mixed code/docs change remains relevant;
+application edits followed by reverts in the same push are not hidden by a net diff.
+PR title edits rerun classification. A failed policy check fails the named required
+checks; a documentation-only change finishes those checks successfully.
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         RELEASE WORKFLOW                                 │
-└─────────────────────────────────────────────────────────────────────────┘
+## Release ordering and retries
 
-Push to main
-     │
-     v
-┌────────────────────────────────────┐
-│  JOB 1: Semantic Versioning        │
-│  (MagDrago Rust Semver Action)     │
-└────────────────────────────────────┘
-     │
-     │ Analyze Commits
-     ├─> feat: commits found? ───> Minor bump (0.1.0 → 0.2.0)
-     ├─> fix: commits found?  ───> Patch bump (0.1.0 → 0.1.1)
-     ├─> BREAKING CHANGE?     ───> Major bump (0.1.0 → 1.0.0)
-     └─> docs:/chore: only?   ───> No version change, STOP
-     │
-     v
-Update Cargo.toml version
-     │
-     v
-Commit + Create Tag (v0.2.0)
-     │
-     v
-Output: version_changed=true, new_version=0.2.0
-     │
-     v
-┌────────────────────────────────────┐
-│  JOB 2: Build Release Binaries     │
-│  (Only if version_changed=true)    │
-└────────────────────────────────────┘
-     │
-     ├─────────────────┬─────────────────┐
-     v                 v                 v
-┌─────────────┐  ┌─────────────┐  ┌──────────────┐
-│ Build       │  │ Build       │  │   Package    │
-│ armv7       │  │ aarch64     │  │   Binaries   │
-│ (RM2)       │  │ (RMPP)      │  │   as .tar.gz │
-└─────────────┘  └─────────────┘  └──────────────┘
-     │                 │                 │
-     └─────────────────┴─────────────────┘
-                       │
-                       v
-            Upload as Artifacts
-                       │
-                       v
-┌────────────────────────────────────┐
-│  JOB 3: Create GitHub Release      │
-│  (Only if version_changed=true)    │
-└────────────────────────────────────┘
-     │
-     v
-Download All Artifacts
-     │
-     v
-Create Release v0.2.0
-     │
-     ├─> Release Notes
-     ├─> Installation Instructions  
-     ├─> Attach: reader-buddy-armv7-*.tar.gz
-     └─> Attach: reader-buddy-aarch64-*.tar.gz
-     │
-     v
-✅ Release Published!
+```mermaid
+flowchart TD
+  Push[Application main push or explicit retry] --> Lock[Enter serialized release job]
+  Lock --> Fetch[Refresh main and all tags]
+  Fetch --> Recover[Recover incomplete managed tags from their exact SHAs]
+  Recover --> Analyze[git-cliff analyzes all relevant unreleased commits]
+  Analyze --> Tag[Tag actual latest application squash SHA]
+  Tag --> Confirm[Push and verify immutable remote tag]
+  Confirm --> Clone[Clean full clone at exact tag]
+  Clone --> RM2[Build and run ARMv7 version under emulation]
+  RM2 --> Pro[Build and run aarch64 version under emulation]
+  Pro --> Draft[Upload both packages and provenance to draft]
+  Draft --> Verify[Verify uploaded checksums and source identity]
+  Verify --> Publish[Publish release and exit lock]
 ```
 
-## Commit Message Impact
+Documentation-only pushes never enter the release lock or compile the application.
+A later documentation HEAD is not used as the release SHA. Queued application events
+can coalesce into one release; each admitted job refreshes all unreleased history.
+No Cargo version commit is created. The tag precedes both release builds.
 
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│                    COMMIT → VERSION MAPPING                           │
-└──────────────────────────────────────────────────────────────────────┘
+A failure retains the immutable tag and any draft for retry. Use the Release
+workflow's Run workflow button on main or `gh workflow run release.yml --ref main`.
+The next application push also recovers pending releases. A docs push remains
+build-free even after a failed release. Published complete releases are verified
+and skipped; their assets are not overwritten.
 
-Commit Type              Version Bump              Example
-────────────────────────────────────────────────────────────────────────
-feat: new feature        Minor (0.1.0 → 0.2.0)    feat: add page nav
-fix: bug fix             Patch (0.1.0 → 0.1.1)    fix: keyboard timing
-BREAKING CHANGE          Major (0.1.0 → 1.0.0)    feat: redesign API
-docs: documentation      None                     docs: update README
-chore: maintenance       None                     chore: update deps
-style: formatting        None                     style: fix spacing
-refactor: code reorg     None                     refactor: extract fn
-test: add tests          None                     test: add unit tests
-perf: performance        Patch (0.1.0 → 0.1.1)    perf: optimize algo
-────────────────────────────────────────────────────────────────────────
-```
+## Semantic mapping
 
-## Multi-Commit Scenarios
+| Relevant squash message | Version change |
+| --- | --- |
+| `feat(scope): ...` | Minor, including 0.x |
+| `fix(scope): ...` | Patch |
+| `perf`, `refactor`, `build`, `ci`, `chore`, `test`, `revert` with a scope | Patch |
+| Scoped `!` or `BREAKING CHANGE:` footer | Major, including 0.x to 1.0 |
+| Only documentation paths changed | None, regardless of type |
+| Application paths with `docs` or unsupported/unscoped message | Visible validation failure |
 
-```
-Scenario 1: Mixed Commits
-───────────────────────────────────────────────────────
-Commits:
-  • docs: update README
-  • fix: resolve bug
-  • feat: add feature
-  • chore: update deps
-
-Result: 0.1.0 → 0.2.0 (highest = feat = minor bump)
-
-
-Scenario 2: Fixes Only
-───────────────────────────────────────────────────────
-Commits:
-  • fix: bug 1
-  • fix: bug 2
-  • docs: update
-
-Result: 0.1.0 → 0.1.1 (highest = fix = patch bump)
-
-
-Scenario 3: No Version Bumps
-───────────────────────────────────────────────────────
-Commits:
-  • docs: improve docs
-  • chore: update CI
-  • style: format code
-
-Result: 0.1.0 (no change, no release created)
-
-
-Scenario 4: Breaking Change
-───────────────────────────────────────────────────────
-Commits:
-  • feat: add feature
-  • fix: small bug
-  • feat: redesign API
-    
-    BREAKING CHANGE: API restructured
-
-Result: 0.1.0 → 1.0.0 (BREAKING CHANGE = major bump)
-```
-
-## CI Workflow Detail
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                            CI WORKFLOW                                   │
-│                   (Runs on PRs and Pushes)                               │
-└─────────────────────────────────────────────────────────────────────────┘
-
-PR Created/Updated
-     │
-     v
-┌────────────────────────────────────┐
-│  JOB: Check & Lint                 │
-└────────────────────────────────────┘
-     │
-     ├─> cargo fmt --check
-     │   └─> ✅ Formatted correctly
-     │        or ❌ Formatting issues found
-     │
-     ├─> cargo clippy --all-targets
-     │   └─> ✅ No linting warnings
-     │        or ❌ Clippy warnings found
-     │
-     ├─> cargo check --target=armv7-unknown-linux-gnueabihf
-     │   └─> ✅ Compiles for reMarkable 2
-     │        or ❌ Compilation failed
-     │
-     ├─> cargo check --target=aarch64-unknown-linux-gnu
-     │   └─> ✅ Compiles for reMarkable Paper Pro
-     │        or ❌ Compilation failed
-     │
-     v
-┌────────────────────────────────────┐
-│  JOB: Test                         │
-└────────────────────────────────────┘
-     │
-     ├─> cargo test --all-features
-     │   └─> ✅ All tests passed
-     │        or ❌ Tests failed
-     │
-     v
-✅ CI Complete - Ready for Merge
-or
-❌ CI Failed - Fix Issues Before Merge
-```
+A feature followed by a fix since the last tag yields a minor release. Pure docs
+commits in that range are excluded. Both packaged binaries report the semantic
+version from the same tag; provenance records its full source SHA and checksums.
+Cargo's fixed package placeholder is never a release version source.
 
 ## User Experience Flow
 
@@ -259,68 +97,4 @@ Run ./reader-buddy
      v
 ✅ Using Reader Buddy!
 ```
-
-## File Changes Through Workflow
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                    FILE CHANGES IN RELEASE                               │
-└─────────────────────────────────────────────────────────────────────────┘
-
-Before Release               After MagDrago Action          After Build
-─────────────────────────────────────────────────────────────────────────
-Cargo.toml                   Cargo.toml                     + Binaries
-version = "0.1.0"            version = "0.2.0"              + Release
-                             ↓                              
-                             Committed to repo              
-                             ↓                              
-                             Git tag: v0.2.0                
-                             ↓                              
-                             GitHub Release: v0.2.0         
-                                                            with artifacts
-```
-
-## Summary Diagram
-
-```
-                             ┌──────────────┐
-                             │  Developer   │
-                             └──────┬───────┘
-                                    │
-                           Commits with conventional format
-                                    │
-                                    v
-                      ┌─────────────────────────────┐
-                      │      GitHub Actions         │
-                      └─────────────────────────────┘
-                                    │
-                    ┌───────────────┴───────────────┐
-                    │                               │
-                    v                               v
-           ┌────────────────┐            ┌──────────────────┐
-           │   CI Workflow  │            │ Release Workflow │
-           │   • Format     │            │  • MagDrago      │
-           │   • Lint       │            │  • Build         │
-           │   • Check      │            │  • Release       │
-           │   • Test       │            └──────────────────┘
-           └────────────────┘                     │
-                                                  v
-                                    ┌──────────────────────────┐
-                                    │   GitHub Release         │
-                                    │   • Binaries attached    │
-                                    │   • Version tagged       │
-                                    │   • Notes included       │
-                                    └──────────────────────────┘
-                                                  │
-                                                  v
-                                          ┌───────────────┐
-                                          │   End Users   │
-                                          │  Download &   │
-                                          │     Use       │
-                                          └───────────────┘
-```
-
----
-
-**Note**: All diagrams are text-based for easy viewing in any environment.
 

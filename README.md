@@ -64,7 +64,7 @@ Synthetic native tests do not establish physical-finger or Paper Pro acceptance.
 - reMarkable 2 or reMarkable Paper Pro in developer mode
 - SSH access to your reMarkable
 - OpenAI API key
-- Rust toolchain and `cross` for cross-compilation
+- Rust 1.96 or newer and `cross` for cross-compilation
 
 ### SSH Host Configuration
 
@@ -607,15 +607,39 @@ acceptance criteria.
 
 ## Automated Releases
 
-This project uses **[MagDrago Rust Semver Action](https://github.com/s116821/MagDragoRustSemverAction)** for automated versioning and releases.
+This project uses [git-cliff](https://git-cliff.org/) for semantic releases and
+[vergen-gitcl](https://docs.rs/vergen-gitcl/) for Git-derived binary versions.
+Git tags are the only application version authority; Cargo's fixed `0.0.0`
+package version is non-authoritative and the package is not published to a registry.
 
 **Version Bump Rules**:
-- **Major** (X.0.0): Commit with `!` (e.g., `feat!: breaking change`)
-- **Minor** (0.X.0): Merge from `feature/` branch
-- **Patch** (0.0.X): Any source file change
-- **None**: Docs-only changes
+- **Major**: scoped `!` syntax or a `BREAKING CHANGE:` footer, including 0.x to 1.0.0.
+- **Minor**: `feat(scope): ...`, including 0.x.
+- **Patch**: `fix`, `perf`, `refactor`, `build`, `ci`, `chore`, `test` or `revert` application changes, with a scope.
+- **None**: changes confined to the documentation paths in [release/cliff.toml](release/cliff.toml).
 
-Releases are automatically created with pre-built binaries for both reMarkable devices.
+The scoped PR title becomes the squash commit message. Application changes labeled
+`docs` or with unsupported types fail validation. Mixed code/docs and dependency or
+build changes are relevant. Documentation-only main pushes neither create tags nor
+compile the application, and their required PR checks still finish.
+
+The release job serializes publication, refreshes all unreleased main history and
+tags the latest relevant merged application commit before building it. Queued changes
+can share a release; a newer documentation commit does not change its source SHA.
+Both tablet packages execute `--version` under target emulation before publication.
+`provenance.json` records their tag, SHA, version and archive checksums. Existing
+published tags remain intact; historical releases predate this verification contract.
+
+For recovery, rerun the failed Release job or use its **Run workflow** button on
+main (CLI: `gh workflow run release.yml --ref main`). It recovers incomplete managed
+tags from their exact source, without new version commits or tag replacement.
+Documentation pushes do not retry builds; the next application push also recovers
+pending work. Complete published releases are verified and skipped.
+
+Local/PR binaries report `dev.<git-description>` or `dev.unknown` if Git metadata is
+unavailable. Official builds reject missing/shallow history, dirty source, conflicting
+metadata overrides and tag/SHA mismatches. See [release testing](release/README.md)
+for the public, isolated validation commands.
 
 ## Contributing
 
@@ -631,7 +655,9 @@ Contributions welcome! Areas for enhancement:
 - ✅ Debug dump mode for troubleshooting
 - ✅ Answer page reuse - multiple questions from same page share one answer page
 
-**Version Bumps**: Use `!` for major, `feature/` branches for minor, any code change for patch.
+**Version bumps** follow semantic squash messages as described above; branch names
+do not determine the version. Public issue/PR discussions and repository specs carry
+acceptance criteria. Private Linear access, Codex and a tablet are not prerequisites.
 
 See [docs/TECHNICAL.md](docs/TECHNICAL.md) for implementation details and TODOs.
 
@@ -647,7 +673,7 @@ See LICENSE file for details.
 ## Acknowledgments
 
 - [awwaiid/ghostwriter](https://github.com/awwaiid/ghostwriter) - Core device interaction code
-- [MagDrago Rust Semver Action](https://github.com/s116821/MagDragoRustSemverAction) - Automated versioning
+- [git-cliff](https://git-cliff.org/) and [vergen](https://github.com/rustyhorde/vergen) - Semantic releases and Git build metadata
 - reMarkable community for documentation and tools
 - OpenAI for GPT vision capabilities
 

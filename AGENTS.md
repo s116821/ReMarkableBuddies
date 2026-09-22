@@ -16,12 +16,31 @@
 
 ## OpenSpec workflow
 
-Use the official repo-local skills in `.codex/skills/openspec-*` for planned work:
+Before planning or implementing an issue, read its available description and every
+page of accessible timestamped comments, including inline comments and linked
+clarifications. Use public GitHub discussions, repo specs/docs and task-provided
+requirements; also review private Linear chronology when already accessible.
+Private boards, Codex/connectors and a development tablet are not contributor
+prerequisites. Maintainers must copy relevant acceptance criteria and decisions
+into public issues, PRs or specs. Note genuinely unavailable context once, proceed
+with available requirements, and ask a focused clarification only when necessary;
+do not repeatedly request integrations, installation or private credentials.
+Reconcile additions and superseded requests in chronological order;
+do not assume the description contains the full scope. Map each applicable request
+to a task and acceptance check. Re-read new comments before review and closure.
+Reviewers must check this coverage as well as code/spec agreement. Track confirmed
+omissions as actionable work; documenting an omission does not complete it.
+
+Use the repo-local skills in `.codex/skills/openspec-*` when available for planned work:
 propose the full change (proposal, design, delta specs, tasks), apply, verify,
 sync canonical specs, and archive in the same implementation PR. See
 [the workflow guide](openspec/README.md). Do not split feature planning into a
 prerequisite planning-only PR. REM-27 is the deliberate baseline-only exception.
-Current Linear scope and source behavior outrank historical plans. Record actual
+The equivalent public/manual workflow is to create proposal.md, design.md, delta
+specs and tasks.md under openspec/changes, implement and verify the requirements,
+sync openspec/specs, then move the completed change into changes/archive in the
+same PR. The OpenSpec CLI can validate these files but Codex is not required.
+Current available issue scope and source behavior outrank historical plans. Record actual
 test evidence in PR comments, and complete the issue's acceptance gates before merge.
 
 ## Simulator learning
@@ -42,3 +61,8 @@ not actively using, use
 device coordination, realistic test inputs and evidence. Unrelated source or
 documentation edits do not require the tablet workflow. The unattended workflow
 does not apply to actively used/personal tablets or without full unattended SSH.
+Local simulator tests require neither SSH nor a tablet. Contributors without
+authorized hardware should run local checks and identify unverified native cases;
+a maintainer performs required hardware gates before merge. Never claim unavailable
+hardware evidence was verified. Skills should offer equivalent public CLI/file
+steps where feasible rather than require a particular assistant or connector.

@@ -14,7 +14,7 @@ REM-30's description, timestamped comment list (empty at planning), and the user
 
 ### Maintained semantic computation
 
-Pin git-cliff 2.14.0 and configure conventional commits, mandatory recognized commit types, semantic release tags and path exclusions. `feat` always bumps minor, including 0.x; `fix` and other accepted application maintenance types bump patch. `!` and `BREAKING CHANGE:` always bump major, including 0.x to 1.0. Version arithmetic belongs entirely to git-cliff. The wrapper selects source, checks invariants and publishes; it does not implement a replacement bump algorithm.
+Pin git-cliff 2.14.2 (verified published release; the documentation banner still advertises 2.14.0) and configure conventional commits, mandatory recognized commit types, semantic release tags and path exclusions. `feat` always bumps minor, including 0.x; `fix` and other accepted application maintenance types bump patch. `!` and `BREAKING CHANGE:` always bump major, including 0.x to 1.0. Version arithmetic belongs entirely to git-cliff. The wrapper selects source, checks invariants and publishes; it does not implement a replacement bump algorithm.
 
 semantic-release was considered but its branch-head validation complicates releasing the last application commit when newer docs-only commits exist. Cocogitto's default bump flow creates an unwanted version commit. git-cliff exposes a version-only computation at an explicitly selected revision without that commit. Official references: https://git-cliff.org/docs/configuration/bump/ and https://git-cliff.org/docs/configuration/git/.
 

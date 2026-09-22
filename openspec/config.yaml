@@ -3,7 +3,7 @@ schema: spec-driven
 context: |
   ReMarkableBuddies is a Rust monorepo. The implemented product is Reader Buddy,
   a Linux tablet service using framebuffer capture, evdev/uinput and OpenAI.
-  Preserve runtime behavior unless the current Linear issue schedules a change.
+  Preserve runtime behavior unless current available issue/task requirements schedule a change.
   Current implementation outranks historical plans and README approximations.
   Use full proposal, design, delta specs and tasks before implementation; verify,
   sync canonical specs and archive in the same PR. Keep actual evidence in PR
