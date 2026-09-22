@@ -37,8 +37,8 @@ The simulator SHALL exercise production indicator eligibility and cleanup, recor
 The local test suite SHALL model status-style acquisition, unavailability and restoration faults, and reject capture/navigation/typing/history while a style lease remains active. A deterministic toolbar state model SHALL exercise exact primary/secondary preference restoration, partial acquisition actions, page changes and pre-mutation layout refusal. Native screenshot fixtures SHALL check the supported layout classifier. These models SHALL NOT claim native UI timing, persistence convergence or legibility proof.
 
 #### Scenario: Restoration fails
-- **WHEN** the native style restoration is modeled to fail after status cleanup
-- **THEN** further page input and later iterations stop rather than treating cleared ink as restored user preferences.
+- **WHEN** native style restoration or the final cleanup verification is modeled to fail
+- **THEN** further page input and later iterations stop while unresolved style/cleanup state remains.
 
 #### Scenario: Unsupported controls
 - **WHEN** style acquisition reports an unsupported layout

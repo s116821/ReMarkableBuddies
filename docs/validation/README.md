@@ -83,3 +83,17 @@ With explicit `READER_BUDDY_DEBUG_DUMP=1`, a refused page comparison writes fixe
 `/tmp/reader-buddy-status-lease-rejected.png`. These are exact virtual frames for
 the latest rejected observation, not guaranteed first-failure or native-resolution
 captures. Preserve each pair and its journal/log before another diagnostic run.
+
+REM-32 evidence in PR23 distinguishes e237 staged/native cleanup and live Q&A from
+47b six-code geometry diagnostics. On the tested RM2, both Highlighter slots
+preserved actual Red/Thick Fineliner settings and neighboring sentinel ink.
+Acquisition plus cleanup took 44.170s (primary) and 49.753s (secondary), excluding
+provider work: responsiveness remains REM-9/REM-35 work, not a claimed improvement.
+
+History is conservative: the occupied-corner offline production-path control
+passed repeated undo/redo with native text, styles, layout and opaque records
+preserved. A corrected clean-page replay rendered the answer but refused arming;
+immediate-before/later-applied records showed a load counter and line-to-tombstone
+change, without capturing the internal settled comparison. Pre-REM32 also had
+clean-append refusals, but identical cause or unchanged workflow timing is not
+proven. Keep strict guards and report unavailable history; do not force a pass.
