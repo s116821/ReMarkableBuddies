@@ -32,6 +32,8 @@ Follow AGENTS.md: concise Summary-only PR body; results/screenshots in comments.
 
 ## Manual equivalent
 
+Paths in this section are relative to the repository's "openspec/" directory.
+
 Create `changes/<name>/proposal.md` (why/scope), `design.md` (decisions/risks),
 `specs/<capability>/spec.md` (added/modified requirements with WHEN/THEN scenarios),
 and `tasks.md` (acceptance checklist) before implementation. Read all accessible

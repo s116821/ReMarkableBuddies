@@ -9,8 +9,8 @@
 
 ## 3. Verification and delivery
 - [x] 3.1 Validate skill frontmatter/relative links; exercise no-key offline positive/negative runs and inspect exact reports/images.
-- [ ] 3.2 Review realistic offline/live/native request routing without unauthorized network/device actions; check docs-only release classification.
-- [ ] 3.3 Recheck issue comments, sync unique canonical requirements with no delta markers, validate and archive in this implementation PR.
-- [ ] 3.4 Publish grouped actual evidence, distinguishing current offline/documentation checks from prior live/native proof.
+- [x] 3.2 Review realistic offline/live/native request routing without unauthorized network/device actions; check docs-only release classification.
+- [x] 3.3 Recheck issue comments, sync unique canonical requirements with no delta markers, validate and archive in this implementation PR.
+- [x] 3.4 Publish grouped actual evidence, distinguishing current offline/documentation checks from prior live/native proof.
 
 Independent exact-head review and green required CI precede normal merge; confirm pure docs merge creates no release/tag/application build.
