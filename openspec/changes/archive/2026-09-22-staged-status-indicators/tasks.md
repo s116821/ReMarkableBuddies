@@ -27,8 +27,8 @@
 ## 5. Completion
 
 - [x] 5.1 Recheck new issue comments and reconcile final implementation/spec/test coverage, including REM-4 future spokes.
-- [ ] 5.2 Sync canonical specs, validate strictly and archive in this implementation PR.
-- [ ] 5.3 Publish grouped actual test/native evidence and verify inline images; retain reusable fixtures only.
+- [x] 5.2 Sync canonical specs, validate strictly and archive in this implementation PR.
+- [x] 5.3 Publish grouped actual test/native evidence and verify inline images; retain reusable fixtures only.
 
 Exact-head independent review, required CI, normal merge and release verification remain external delivery gates after the final implementation commit.
 
