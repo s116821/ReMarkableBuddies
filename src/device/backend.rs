@@ -77,6 +77,7 @@ pub trait DeviceBackend {
 
 pub struct RealDevice {
     status_style: Option<super::status_style::Lease>,
+    status_journal: Option<super::status_style::Journal>,
     status_style_supported: bool,
     clock: std::time::Instant,
     #[cfg(target_os = "linux")]
@@ -92,11 +93,17 @@ const HEADER_PATH: &str = "/var/cache/reader-buddy/header-pattern.png";
 
 impl RealDevice {
     pub fn new(no_draw: bool, corner: TriggerCorner) -> Result<Self> {
+        anyhow::ensure!(
+            !std::path::Path::new("/var/cache/reader-buddy/status-style-recovery.json")
+                .try_exists()?,
+            "Unresolved status style recovery; deliberate recovery is required before Reader input"
+        );
         if let Err(error) = std::fs::create_dir_all("/var/cache/reader-buddy") {
             log::warn!("Failed to create cache directory: {error}");
         }
         Ok(Self {
             status_style: None,
+            status_journal: None,
             status_style_supported: !no_draw
                 && std::fs::read_to_string("/etc/os-release").is_ok_and(|release| {
                     super::native_page::verified_contract(super::DeviceModel::detect(), &release)
@@ -192,21 +199,21 @@ impl DeviceBackend for RealDevice {
         self.pen.draw_path_screen(&stroke.points())
     }
     fn status_style_begin(&mut self) -> Result<bool> {
-        use super::status_style::{Lease, Recovery, StyleIo};
+        use super::status_style::{Journal, Lease, Recovery, StyleIo};
         use std::path::Path;
         const RECORD: &str = "/var/cache/reader-buddy/status-style-recovery.json";
         if self.status_style.is_some() {
             return Ok(true);
         }
-        if !self.status_style_supported {
-            return Ok(false);
-        }
         if Path::new(RECORD).try_exists()? {
             match Recovery::read(Path::new(RECORD)) {
-                Ok(record) => log::error!("Unresolved status style recovery for document {}; original tool {:?}, active slot {:?}; deliberate recovery required", record.identity.document, record.preferences.get("LastPen"), record.preferences.get("LastActiveTool")),
+                Ok(record) => log::error!("Unresolved status style recovery for document {}; phase {:?}, original slot {}, grid {:?}, Fineliner {:?}; deliberate recovery required", record.identity.document, record.phase, record.original_slot, record.original_grid, record.original_fine.map(|(color,width)| (super::status_style::COLORS[color],width+1))),
                 Err(error) => log::error!("Invalid or incomplete status style recovery record: {error}; deliberate recovery required"),
             }
             anyhow::bail!("Unresolved status style recovery; further tablet input stopped");
+        }
+        if !self.status_style_supported {
+            return Ok(false);
         }
         let observed = match self.observe() {
             Ok(state) => state,
@@ -218,15 +225,19 @@ impl DeviceBackend for RealDevice {
         let Some(mut lease) = Lease::prepare(observed)? else {
             return Ok(false);
         };
-        lease.recovery.create(Path::new(RECORD))?;
+        self.status_journal = Some(Journal::create(Path::new(RECORD), &lease.recovery)?);
         let started = std::time::Instant::now();
         if let Err(error) = lease.acquire(self) {
             let restored = lease.restore(self);
             self.status_style = Some(lease);
             restored.context("Status acquisition failed and restoration could not be verified")?;
             self.status_style = None;
-            std::fs::remove_file(RECORD)?;
-            return Err(error.context("Status acquisition failed; original preferences restored"));
+            self.status_journal
+                .take()
+                .context("Missing owned recovery journal")?
+                .finish()?;
+            log::warn!("Status probe declined after verified UI rollback: {error}");
+            return Ok(false);
         }
         log::info!("Status style acquired in {:?}", started.elapsed());
         self.status_style = Some(lease);
@@ -243,7 +254,10 @@ impl DeviceBackend for RealDevice {
                 error.context("Status preference restoration failed; further input stopped")
             );
         }
-        std::fs::remove_file("/var/cache/reader-buddy/status-style-recovery.json")?;
+        self.status_journal
+            .take()
+            .context("Missing owned recovery journal")?
+            .finish()?;
         log::info!("Status style restored in {:?}", started.elapsed());
         Ok(())
     }
@@ -265,7 +279,7 @@ impl DeviceBackend for RealDevice {
         self.clock.elapsed()
     }
     fn status_suppressed(&mut self) {
-        log::debug!("Status mark suppressed: occupied or unknown corner");
+        log::debug!("Status mark suppressed: occupied, unsupported, or unknown state");
     }
     fn load_header(&self) -> Option<DynamicImage> {
         std::fs::read(HEADER_PATH)
@@ -281,6 +295,12 @@ impl DeviceBackend for RealDevice {
 }
 
 impl super::status_style::StyleIo for RealDevice {
+    fn checkpoint(&mut self, record: &super::status_style::Recovery) -> Result<()> {
+        self.status_journal
+            .as_mut()
+            .context("Missing owned recovery journal")?
+            .append(record)
+    }
     fn observe(&mut self) -> Result<super::status_style::Observation> {
         use super::{
             native_page,

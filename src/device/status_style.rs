@@ -11,7 +11,7 @@ use std::{
 };
 
 pub type Preferences = BTreeMap<String, String>;
-const COLORS: [&str; 9] = [
+pub(crate) const COLORS: [&str; 9] = [
     "Black", "Gray", "White", "Blue", "Red", "Green", "Yellow", "Cyan", "Magenta",
 ];
 
@@ -68,6 +68,10 @@ mod tests {
     }
     struct Model {
         prefs: Preferences,
+        persisted: Preferences,
+        checkpoints: Vec<Recovery>,
+        fail_checkpoint: Option<usize>,
+        fail_before: bool,
         menu: bool,
         count: usize,
         fail: Option<usize>,
@@ -75,8 +79,21 @@ mod tests {
     }
     impl Model {
         fn new() -> Self {
+            let mut persisted = prefs();
+            for (k, v) in [
+                ("LastActiveTool", "primary"),
+                ("LastPen", "Finelinerv2"),
+                ("LastFinelinerv2Color", "Black"),
+                ("LastFinelinerv2Size", "2"),
+            ] {
+                persisted.insert(k.into(), v.into());
+            }
             Self {
                 prefs: prefs(),
+                persisted,
+                checkpoints: Vec::new(),
+                fail_checkpoint: None,
+                fail_before: false,
                 menu: false,
                 count: 0,
                 fail: None,
@@ -85,6 +102,20 @@ mod tests {
         }
     }
     impl StyleIo for Model {
+        fn checkpoint(&mut self, record: &Recovery) -> Result<()> {
+            ensure!(
+                self.fail_checkpoint != Some(record.sequence),
+                "Injected journal failure"
+            );
+            let initial = Recovery::new(
+                self.identity.clone(),
+                self.persisted.clone(),
+                record.original_slot.clone(),
+            )?;
+            record.follows(self.checkpoints.last().unwrap_or(&initial))?;
+            self.checkpoints.push(record.clone());
+            Ok(())
+        }
         fn observe(&mut self) -> Result<Observation> {
             let mut image = closed();
             replace(
@@ -114,19 +145,29 @@ mod tests {
                     for x in 61..280 {
                         image.put_pixel(x, 430, Luma([0]));
                     }
-                    let (color, width) = fine_style(&self.prefs)?;
-                    box_at(&mut image, PALETTE[color]);
-                    box_at(&mut image, WIDTHS[width]);
+                    if let Ok((color, width)) = fine_style(&self.prefs) {
+                        box_at(&mut image, PALETTE[color]);
+                        box_at(&mut image, WIDTHS[width]);
+                    }
                 }
             }
             Ok(Observation {
                 identity: self.identity.clone(),
-                preferences: self.prefs.clone(),
+                preferences: self.persisted.clone(),
                 image,
             })
         }
         fn press(&mut self, p: (u32, u32)) -> Result<()> {
             self.count += 1;
+            assert_eq!(
+                self.checkpoints.len(),
+                self.count,
+                "Input must have a durable intent checkpoint"
+            );
+            ensure!(
+                !(self.fail_before && self.fail == Some(self.count)),
+                "Input failed before effect"
+            );
             match p {
                 (30, 90) if self.prefs["LastActiveTool"] != "primary" => {
                     self.prefs.insert("LastActiveTool".into(), "primary".into());
@@ -163,6 +204,18 @@ mod tests {
 
     #[test]
     fn native_fixture_controls_and_refusal() {
+        assert!(controls(&fixture(include_bytes!(
+            "../../tests/fixtures/status-style/open-secondary-highlighter.png"
+        )))
+        .is_none());
+        assert_eq!(
+            controls(&fixture(include_bytes!(
+                "../../tests/fixtures/status-style/closed-secondary-highlighter.png"
+            )))
+            .unwrap()
+            .slot,
+            "secondary"
+        );
         for (bytes, slot) in [
             (
                 include_bytes!("../../tests/fixtures/status-style/closed-highlighter.png")
@@ -208,6 +261,9 @@ mod tests {
         assert_eq!(fine_style(&io.prefs).unwrap(), (0, 1));
         assert_eq!(io.prefs["LastPen"], "Finelinerv2");
         assert!(!io.menu);
+        // An asynchronous native save can change advisory values mid-lease;
+        // it must not replace the earlier actual Red/Thick UI snapshot.
+        io.persisted = io.prefs.clone();
         let count = io.count;
         // Holding/rechecking the lease performs no toolbar input.
         for _ in 0..20 {
@@ -221,15 +277,115 @@ mod tests {
 
     #[test]
     fn every_partial_acquisition_action_rolls_back() {
+        for slot in ["primary", "secondary"] {
+            for before in [false, true] {
+                for failure in 1..=if slot == "primary" { 5 } else { 6 } {
+                    let mut io = Model::new();
+                    io.prefs.insert("LastActiveTool".into(), slot.into());
+                    let original = io.prefs.clone();
+                    io.fail = Some(failure);
+                    io.fail_before = before;
+                    let mut lease = Lease::prepare(io.observe().unwrap()).unwrap().unwrap();
+                    assert!(lease.acquire(&mut io).is_err(), "failure {failure}");
+                    lease.restore(&mut io).unwrap();
+                    assert_eq!(io.prefs, original, "failure {failure}");
+                    assert!(!io.menu);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_restoration_input_failure_stops_immediately() {
+        for slot in ["primary", "secondary"] {
+            let mut healthy = Model::new();
+            healthy.prefs.insert("LastActiveTool".into(), slot.into());
+            let mut lease = Lease::prepare(healthy.observe().unwrap()).unwrap().unwrap();
+            lease.acquire(&mut healthy).unwrap();
+            let first = healthy.count + 1;
+            lease.restore(&mut healthy).unwrap();
+            let last = healthy.count;
+            for before in [false, true] {
+                for failure in first..=last {
+                    let mut io = Model::new();
+                    io.prefs.insert("LastActiveTool".into(), slot.into());
+                    let mut lease = Lease::prepare(io.observe().unwrap()).unwrap().unwrap();
+                    lease.acquire(&mut io).unwrap();
+                    io.fail = Some(failure);
+                    io.fail_before = before;
+                    assert!(lease.restore(&mut io).is_err());
+                    assert_eq!(io.count, failure);
+                    assert!(io.checkpoints.last().unwrap().phase.restoring());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unsupported_fine_probe_restores_tool_without_touching_style() {
+        let mut io = Model::new();
+        io.prefs
+            .insert("LastFinelinerv2Color".into(), "ArgbCode".into());
+        let original = io.prefs.clone();
+        let mut lease = Lease::prepare(io.observe().unwrap()).unwrap().unwrap();
+        assert!(lease.acquire(&mut io).is_err());
+        lease.restore(&mut io).unwrap();
+        assert_eq!(io.prefs, original);
+        assert!(io
+            .checkpoints
+            .iter()
+            .all(|r| !r.mutations.color && !r.mutations.width));
+    }
+
+    #[test]
+    fn journal_failure_prevents_unrecorded_input_and_rollback_guessing() {
         for failure in 1..=6 {
             let mut io = Model::new();
-            io.fail = Some(failure);
+            io.fail_checkpoint = Some(failure);
             let mut lease = Lease::prepare(io.observe().unwrap()).unwrap().unwrap();
-            assert!(lease.acquire(&mut io).is_err(), "failure {failure}");
-            lease.restore(&mut io).unwrap();
-            assert_eq!(io.prefs, prefs(), "failure {failure}");
-            assert!(!io.menu);
+            assert!(lease.acquire(&mut io).is_err());
+            assert_eq!(io.count, failure - 1);
+            let count = io.count;
+            let _ = lease.restore(&mut io);
+            assert_eq!(io.count, count, "No input after journal failure");
         }
+    }
+
+    #[test]
+    fn journal_reserves_capacity_and_rejects_incomplete_crash_tail() {
+        let path = std::env::temp_dir().join(format!(
+            "reader-status-capacity-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut record = Recovery::new(identity(), prefs(), "primary".into()).unwrap();
+        let mut journal = Journal::create(&path, &record).unwrap();
+        for sequence in 1..RECORD_COUNT - ROLLBACK_RESERVE {
+            record.sequence = sequence;
+            record.phase = Phase::OpenPrimary;
+            record.mutations.menu = true;
+            journal.append(&record).unwrap();
+        }
+        record.sequence += 1;
+        assert!(journal.append(&record).is_err());
+        for sequence in record.sequence..RECORD_COUNT {
+            record.sequence = sequence;
+            record.phase = Phase::RestoreClose;
+            journal.append(&record).unwrap();
+        }
+        assert_eq!(Recovery::read(&path).unwrap().sequence, RECORD_COUNT - 1);
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"{\"partial\":")
+            .unwrap();
+        assert!(Recovery::read(&path).is_err());
+        assert!(journal.finish().is_err());
+        fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -296,38 +452,108 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let record = Recovery::new(identity(), prefs()).unwrap();
-        record.create(&path).unwrap();
-        assert!(record.create(&path).is_err());
-        assert_eq!(Recovery::read(&path).unwrap().preferences, prefs());
+        let record = Recovery::new(identity(), prefs(), "secondary".into()).unwrap();
+        let mut journal = Journal::create(&path, &record).unwrap();
+        let initial = fs::read(&path).unwrap();
+        assert!(Journal::create(&path, &record).is_err());
+        assert_eq!(Recovery::read(&path).unwrap().advisory, prefs());
         fs::write(&path, b"{\"version\":9}").unwrap();
         assert!(Recovery::read(&path).is_err());
-        assert!(record.create(&path).is_err());
+        assert!(Journal::create(&path, &record).is_err());
+        let mut next = record.clone();
+        next.sequence = 1;
+        next.phase = Phase::OpenPrimary;
+        next.mutations.menu = true;
+        assert!(journal.append(&next).is_err());
+        fs::write(&path, initial).unwrap();
+        assert!(journal.finish().is_err());
         fs::remove_file(path).unwrap();
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Phase {
+    Prepared,
+    SelectPrimary,
+    OpenPrimary,
+    SelectFine,
+    SetColor,
+    SetWidth,
+    CloseForDrawing,
+    RestoreSelectPrimary,
+    RestoreOpen,
+    RestoreColor,
+    RestoreWidth,
+    RestorePrimary,
+    RestoreClose,
+    RestoreSlot,
+}
+impl Phase {
+    fn restoring(self) -> bool {
+        matches!(
+            self,
+            Self::RestoreSelectPrimary
+                | Self::RestoreOpen
+                | Self::RestoreColor
+                | Self::RestoreWidth
+                | Self::RestorePrimary
+                | Self::RestoreClose
+                | Self::RestoreSlot
+        )
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Mutations {
+    pub slot: bool,
+    pub menu: bool,
+    pub primary: bool,
+    pub color: bool,
+    pub width: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Recovery {
     version: u32,
+    sequence: usize,
     pub identity: Identity,
-    pub preferences: Preferences,
+    /// Persisted settings can lag the UI. Never use these as restoration targets.
+    pub advisory: Preferences,
+    pub original_slot: String,
+    pub original_grid: Option<usize>,
+    pub original_fine: Option<(usize, usize)>,
+    pub phase: Phase,
+    pub mutations: Mutations,
 }
+const RECORD_LIMIT: usize = 32768;
+const RECORD_COUNT: usize = 32;
+const ROLLBACK_RESERVE: usize = 12;
+const JOURNAL_LIMIT: usize = RECORD_LIMIT * RECORD_COUNT;
 
 impl Recovery {
-    pub fn new(identity: Identity, preferences: Preferences) -> Result<Self> {
+    pub fn new(identity: Identity, advisory: Preferences, original_slot: String) -> Result<Self> {
         let record = Self {
-            version: 1,
+            version: 2,
+            sequence: 0,
             identity,
-            preferences,
+            advisory,
+            original_slot,
+            original_grid: None,
+            original_fine: None,
+            phase: Phase::Prepared,
+            mutations: Mutations::default(),
         };
         record.validate()?;
         Ok(record)
     }
-
     fn validate(&self) -> Result<()> {
-        ensure!(self.version == 1, "Unsupported status recovery version");
+        ensure!(
+            self.version == 2 && self.sequence < RECORD_COUNT,
+            "Unsupported status recovery version/sequence"
+        );
         for id in [&self.identity.document, &self.identity.page] {
             ensure!(
                 id.len() == 36
@@ -350,38 +576,138 @@ impl Recovery {
             "Invalid status recovery revision"
         );
         ensure!(
-            self.preferences.len() <= 128
+            self.advisory.len() <= 128
                 && self
-                    .preferences
+                    .advisory
                     .iter()
                     .all(|(k, v)| k.len() <= 80 && v.len() <= 80),
-            "Status preferences exceed bounds"
+            "Status advisory snapshot exceeds bounds"
         );
         ensure!(
-            matches!(
-                self.preferences.get("LastActiveTool").map(String::as_str),
-                Some("primary" | "secondary")
-            ),
-            "Unsupported active tool"
+            matches!(self.original_slot.as_str(), "primary" | "secondary"),
+            "Unsupported actual active slot"
         );
         ensure!(
-            self.preferences
-                .get("LastPen")
-                .is_some_and(|v| !v.is_empty()),
-            "Missing primary tool"
+            self.original_grid.is_none_or(|i| i < 9),
+            "Invalid original UI grid"
         );
-        fine_style(&self.preferences)?;
+        ensure!(
+            self.original_fine.is_none_or(|(c, w)| c < 9 && w < 3),
+            "Invalid original UI Fineliner style"
+        );
+        ensure!(
+            self.original_fine.is_none() || self.original_grid.is_some(),
+            "Style snapshot lacks its tool probe"
+        );
+        ensure!(
+            !self.mutations.primary || self.original_grid.is_some(),
+            "Missing tool rollback target"
+        );
+        ensure!(
+            !(self.mutations.color || self.mutations.width) || self.original_fine.is_some(),
+            "Missing style rollback target"
+        );
+        let intended = match self.phase {
+            Phase::Prepared => self.sequence == 0 && self.mutations == Mutations::default(),
+            Phase::SelectPrimary | Phase::RestoreSelectPrimary | Phase::RestoreSlot => {
+                self.mutations.slot
+            }
+            Phase::OpenPrimary
+            | Phase::RestoreOpen
+            | Phase::CloseForDrawing
+            | Phase::RestoreClose => self.mutations.menu,
+            Phase::SelectFine | Phase::RestorePrimary => self.mutations.primary,
+            Phase::SetColor | Phase::RestoreColor => self.mutations.color,
+            Phase::SetWidth | Phase::RestoreWidth => self.mutations.width,
+        };
+        ensure!(intended, "Recovery phase lacks mutation intent");
         Ok(())
     }
-
-    /// create_new provides the exclusive claim. A crash/partial write leaves an
-    /// unresolved file, which is a refusal, never permission to overwrite it.
-    pub fn create(&self, path: &Path) -> Result<()> {
+    fn follows(&self, old: &Self) -> Result<()> {
         self.validate()?;
-        let bytes = serde_json::to_vec(self)?;
-        ensure!(bytes.len() <= 32768, "Status recovery exceeds bounds");
+        ensure!(
+            self.sequence == old.sequence + 1
+                && self.identity == old.identity
+                && self.advisory == old.advisory
+                && self.original_slot == old.original_slot,
+            "Recovery identity/sequence changed"
+        );
+        ensure!(
+            old.original_grid.is_none() || self.original_grid == old.original_grid,
+            "Original tool snapshot changed"
+        );
+        ensure!(
+            old.original_fine.is_none() || self.original_fine == old.original_fine,
+            "Original style snapshot changed"
+        );
+        for (before, after) in [
+            (old.mutations.slot, self.mutations.slot),
+            (old.mutations.menu, self.mutations.menu),
+            (old.mutations.primary, self.mutations.primary),
+            (old.mutations.color, self.mutations.color),
+            (old.mutations.width, self.mutations.width),
+        ] {
+            ensure!(!before || after, "Recovery mutation flag regressed");
+        }
+        Ok(())
+    }
+    pub fn read(path: &Path) -> Result<Self> {
+        let mut bytes = Vec::new();
+        fs::File::open(path)?
+            .take(JOURNAL_LIMIT as u64 + 1)
+            .read_to_end(&mut bytes)?;
+        ensure!(
+            bytes.len() <= JOURNAL_LIMIT && bytes.last() == Some(&b'\n'),
+            "Incomplete/oversized status recovery journal"
+        );
+        let mut last: Option<Self> = None;
+        let mut count = 0;
+        for line in bytes[..bytes.len() - 1].split(|b| *b == b'\n') {
+            count += 1;
+            ensure!(
+                count <= RECORD_COUNT && line.len() <= RECORD_LIMIT,
+                "Status recovery bounds exceeded"
+            );
+            let record: Self = serde_json::from_slice(line)?;
+            record.validate()?;
+            if let Some(previous) = &last {
+                record.follows(previous)?;
+            } else {
+                ensure!(
+                    record.sequence == 0
+                        && record.phase == Phase::Prepared
+                        && record.mutations == Mutations::default()
+                        && record.original_grid.is_none()
+                        && record.original_fine.is_none(),
+                    "Invalid initial recovery checkpoint"
+                );
+            }
+            last = Some(record);
+        }
+        last.context("Empty status recovery journal")
+    }
+}
+
+pub struct Journal {
+    file: fs::File,
+    path: std::path::PathBuf,
+    last: Recovery,
+    bytes: u64,
+    failed: bool,
+}
+impl Journal {
+    pub fn create(path: &Path, record: &Recovery) -> Result<Self> {
+        record.validate()?;
+        ensure!(
+            record.sequence == 0
+                && record.phase == Phase::Prepared
+                && record.original_grid.is_none()
+                && record.original_fine.is_none()
+                && record.mutations == Mutations::default(),
+            "Invalid initial recovery phase"
+        );
         let mut options = fs::OpenOptions::new();
-        options.write(true).create_new(true);
+        options.read(true).append(true).create_new(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
@@ -390,21 +716,110 @@ impl Recovery {
         let mut file = options
             .open(path)
             .context("Unresolved status recovery record or unavailable cache")?;
+        let mut bytes = serde_json::to_vec(record)?;
+        ensure!(
+            bytes.len() <= RECORD_LIMIT,
+            "Recovery checkpoint exceeds bounds"
+        );
+        bytes.push(b'\n');
         file.write_all(&bytes)?;
         file.sync_all()?;
+        // The directory entry must survive a crash before the first UI input.
+        #[cfg(unix)]
+        fs::File::open(path.parent().context("Missing recovery parent")?)?.sync_all()?;
+        Ok(Self {
+            file,
+            path: path.to_owned(),
+            last: record.clone(),
+            bytes: bytes.len() as u64,
+            failed: false,
+        })
+    }
+    fn verify_owned(&self) -> Result<()> {
+        let current = fs::symlink_metadata(&self.path)?;
+        ensure!(
+            current.is_file()
+                && current.len() == self.bytes
+                && self.file.metadata()?.len() == self.bytes,
+            "Recovery journal ownership/length changed"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let opened = self.file.metadata()?;
+            ensure!(
+                current.dev() == opened.dev()
+                    && current.ino() == opened.ino()
+                    && current.mode() & 0o077 == 0,
+                "Recovery journal ownership/permissions changed"
+            );
+        }
+        ensure!(
+            Recovery::read(&self.path)? == self.last,
+            "Recovery journal changed outside this lease"
+        );
         Ok(())
     }
-
-    pub fn read(path: &Path) -> Result<Self> {
-        let mut bytes = Vec::new();
-        fs::File::open(path)?.take(32769).read_to_end(&mut bytes)?;
-        ensure!(bytes.len() <= 32768, "Status recovery exceeds bounds");
-        let record: Self = serde_json::from_slice(&bytes)?;
-        record.validate()?;
-        Ok(record)
+    pub fn append(&mut self, record: &Recovery) -> Result<()> {
+        ensure!(!self.failed, "Recovery journal I/O already failed");
+        record.follows(&self.last)?;
+        let mut bytes = serde_json::to_vec(record)?;
+        ensure!(
+            bytes.len() <= RECORD_LIMIT,
+            "Recovery checkpoint exceeds bounds"
+        );
+        bytes.push(b'\n');
+        let count = record.sequence + 1;
+        let limit = if record.phase.restoring() {
+            RECORD_COUNT
+        } else {
+            RECORD_COUNT - ROLLBACK_RESERVE
+        };
+        let byte_limit = if record.phase.restoring() {
+            JOURNAL_LIMIT
+        } else {
+            JOURNAL_LIMIT - ROLLBACK_RESERVE * (RECORD_LIMIT + 1)
+        };
+        ensure!(
+            count <= limit && self.bytes + bytes.len() as u64 <= byte_limit as u64,
+            "Status journal capacity reserved for rollback"
+        );
+        let written = (|| -> Result<()> {
+            self.verify_owned()?;
+            self.file.write_all(&bytes)?;
+            self.file.sync_all()?;
+            Ok(())
+        })();
+        if let Err(error) = written {
+            self.failed = true;
+            return Err(error);
+        }
+        self.bytes += bytes.len() as u64;
+        self.last = record.clone();
+        Ok(())
+    }
+    pub fn finish(self) -> Result<()> {
+        ensure!(
+            !self.failed,
+            "Recovery journal I/O failed; retain evidence for deliberate recovery"
+        );
+        self.verify_owned()?;
+        let parent = self
+            .path
+            .parent()
+            .context("Missing recovery parent")?
+            .to_owned();
+        drop(self.file);
+        fs::remove_file(&self.path)?;
+        #[cfg(unix)]
+        fs::File::open(parent)?.sync_all()?;
+        #[cfg(not(unix))]
+        let _ = parent;
+        Ok(())
     }
 }
 
+#[cfg(test)]
 fn fine_style(prefs: &Preferences) -> Result<(usize, usize)> {
     let color = prefs
         .get("LastFinelinerv2Color")
@@ -534,41 +949,28 @@ pub struct Observation {
 
 pub trait StyleIo {
     fn observe(&mut self) -> Result<Observation>;
+    fn checkpoint(&mut self, record: &Recovery) -> Result<()>;
     fn press(&mut self, point: (u32, u32)) -> Result<()>;
 }
 
 pub struct Lease {
     pub recovery: Recovery,
     baseline: GrayImage,
-    original_grid: Option<usize>,
-    mutation_intended: bool,
 }
-
 impl Lease {
     pub fn prepare(observed: Observation) -> Result<Option<Self>> {
         let Some(ui) = controls(&observed.image) else {
             return Ok(None);
         };
-        if ui.menu
-            || observed
-                .preferences
-                .get("LastActiveTool")
-                .map(String::as_str)
-                != Some(ui.slot)
-        {
+        if ui.menu {
             return Ok(None);
         }
-        let Ok(recovery) = Recovery::new(observed.identity, observed.preferences) else {
-            return Ok(None);
-        };
+        let recovery = Recovery::new(observed.identity, observed.preferences, ui.slot.to_owned())?;
         Ok(Some(Self {
             recovery,
             baseline: observed.image,
-            original_grid: None,
-            mutation_intended: false,
         }))
     }
-
     fn observe(&self, io: &mut impl StyleIo) -> Result<(Observation, Controls)> {
         let state = io.observe()?;
         ensure!(
@@ -579,27 +981,6 @@ impl Lease {
             state.image.dimensions() == self.baseline.dimensions(),
             "Status image dimensions changed"
         );
-        let unchanged = |prefs: &Preferences| {
-            prefs
-                .iter()
-                .filter(|(key, _)| {
-                    !matches!(
-                        key.as_str(),
-                        "LastPen"
-                            | "LastActiveTool"
-                            | "LastFinelinerv2Color"
-                            | "LastFinelinerv2Size"
-                    )
-                })
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect::<Preferences>()
-        };
-        ensure!(
-            unchanged(&state.preferences) == unchanged(&self.recovery.preferences),
-            "Other tool preferences changed; status input stopped"
-        );
-        // Exclude only toolbar/menu and owned status area. Compare all remaining
-        // page pixels, including the left margin below the menu.
         ensure!(
             (0..1024).all(|y| (0..768).all(|x| {
                 x < 61
@@ -613,146 +994,218 @@ impl Lease {
         let ui = controls(&state.image).context("Status toolbar layout changed")?;
         Ok((state, ui))
     }
-
     fn transition(
         &mut self,
         io: &mut impl StyleIo,
+        phase: Phase,
         point: (u32, u32),
-        expected: impl Fn(&Observation, &Controls) -> bool,
+        expected: impl Fn(&Controls) -> bool,
     ) -> Result<()> {
         self.observe(io)?;
-        // A failed input call may already have changed xochitl.
-        self.mutation_intended = true;
+        let m = &mut self.recovery.mutations;
+        match phase {
+            Phase::SelectPrimary | Phase::RestoreSelectPrimary | Phase::RestoreSlot => {
+                m.slot = true
+            }
+            Phase::OpenPrimary
+            | Phase::RestoreOpen
+            | Phase::CloseForDrawing
+            | Phase::RestoreClose => m.menu = true,
+            Phase::SelectFine | Phase::RestorePrimary => m.primary = true,
+            Phase::SetColor | Phase::RestoreColor => m.color = true,
+            Phase::SetWidth | Phase::RestoreWidth => m.width = true,
+            Phase::Prepared => anyhow::bail!("Prepared phase cannot send input"),
+        }
+        self.recovery.phase = phase;
+        self.recovery.sequence += 1;
+        // Record intent durably BEFORE input: a failed press may have acted.
+        io.checkpoint(&self.recovery)?;
         io.press(point)?;
         for _ in 0..5 {
-            let (state, ui) = self.observe(io)?;
-            if expected(&state, &ui) {
+            let (_, ui) = self.observe(io)?;
+            if expected(&ui) {
                 return Ok(());
             }
         }
-        anyhow::bail!("Status controls/preferences did not converge after input")
+        anyhow::bail!("Status controls did not converge after input")
     }
-
-    fn primary_menu(&mut self, io: &mut impl StyleIo) -> Result<()> {
+    fn primary_menu(&mut self, io: &mut impl StyleIo, restoring: bool) -> Result<()> {
         let (_, ui) = self.observe(io)?;
         if ui.slot != "primary" {
             ensure!(!ui.menu, "Unexpected secondary menu");
-            self.transition(io, (30, 90), |s, u| {
-                u.slot == "primary"
-                    && !u.menu
-                    && s.preferences
-                        .get("LastActiveTool")
-                        .is_some_and(|s| s == "primary")
-            })?;
+            self.transition(
+                io,
+                if restoring {
+                    Phase::RestoreSelectPrimary
+                } else {
+                    Phase::SelectPrimary
+                },
+                (30, 90),
+                |u| u.slot == "primary" && !u.menu,
+            )?;
         }
         if !self.observe(io)?.1.menu {
-            self.transition(io, (30, 90), |_, u| u.slot == "primary" && u.menu)?;
+            self.transition(
+                io,
+                if restoring {
+                    Phase::RestoreOpen
+                } else {
+                    Phase::OpenPrimary
+                },
+                (30, 90),
+                |u| u.slot == "primary" && u.menu,
+            )?;
         }
         Ok(())
     }
-
-    fn set_fine(&mut self, io: &mut impl StyleIo, desired: (usize, usize)) -> Result<()> {
-        let (state, ui) = self.observe(io)?;
+    fn fine(&self, io: &mut impl StyleIo) -> Result<(usize, usize)> {
+        let (_, ui) = self.observe(io)?;
         ensure!(
-            ui.slot == "primary"
-                && ui.grid == Some(1)
-                && ui.fine == Some(fine_style(&state.preferences)?),
-            "Fineliner menu/preferences disagree"
+            ui.slot == "primary" && ui.grid == Some(1),
+            "Fineliner menu not selected"
         );
-        if ui.fine.unwrap().0 != desired.0 {
-            self.transition(io, PALETTE[desired.0], |s, u| {
-                u.fine.is_some_and(|f| f.0 == desired.0)
-                    && fine_style(&s.preferences).is_ok_and(|f| f.0 == desired.0)
-            })?;
-        }
-        if self.observe(io)?.1.fine.context("Fineliner menu lost")?.1 != desired.1 {
-            self.transition(io, WIDTHS[desired.1], |s, u| {
-                u.fine.is_some_and(|f| f.1 == desired.1)
-                    && fine_style(&s.preferences).is_ok_and(|f| f.1 == desired.1)
-            })?;
-        }
-        Ok(())
+        ui.fine.context("Unsupported actual Fineliner color/width")
     }
-
+    fn known_fine(&self, io: &mut impl StyleIo) -> Result<(usize, usize)> {
+        let current = self.fine(io)?;
+        let original = self
+            .recovery
+            .original_fine
+            .context("Missing actual Fineliner snapshot")?;
+        ensure!(
+            (current.0 == original.0 || current.0 == 0)
+                && (current.1 == original.1 || current.1 == 1),
+            "Unexpected style change during lease"
+        );
+        Ok(current)
+    }
     pub fn acquire(&mut self, io: &mut impl StyleIo) -> Result<()> {
-        self.primary_menu(io)?;
-        let (state, ui) = self.observe(io)?;
-        ensure!(
-            state.preferences.get("LastPen") == self.recovery.preferences.get("LastPen"),
-            "Primary tool changed during acquisition"
-        );
-        self.original_grid = ui.grid;
+        self.primary_menu(io, false)?;
+        let (_, ui) = self.observe(io)?;
+        self.recovery.original_grid = Some(ui.grid.context("Missing actual primary tool grid")?);
         if ui.grid != Some(1) {
-            self.transition(io, GRID[1], |s, u| {
-                u.grid == Some(1)
-                    && u.fine.is_some()
-                    && s.preferences
-                        .get("LastPen")
-                        .is_some_and(|s| s == "Finelinerv2")
+            self.transition(io, Phase::SelectFine, GRID[1], |u| u.grid == Some(1))?;
+        }
+        self.recovery.original_fine = Some(self.fine(io)?);
+        if self.known_fine(io)?.0 != 0 {
+            self.transition(io, Phase::SetColor, PALETTE[0], |u| {
+                u.fine.is_some_and(|f| f.0 == 0)
             })?;
         }
-        // Medium Fineliner produced distinct native geometry in4105ff3. This is
-        // a narrow footprint relative to Highlighter, not a claim about all pens.
-        self.set_fine(io, (0, 1))?;
-        self.transition(io, (30, 90), |_, u| !u.menu && u.slot == "primary")
+        if self.known_fine(io)?.1 != 1 {
+            self.transition(io, Phase::SetWidth, WIDTHS[1], |u| {
+                u.fine.is_some_and(|f| f.1 == 1)
+            })?;
+        }
+        ensure!(self.fine(io)? == (0, 1), "Temporary style not verified");
+        self.transition(io, Phase::CloseForDrawing, (30, 90), |u| {
+            !u.menu && u.slot == "primary"
+        })
     }
-
     pub fn restore(&mut self, io: &mut impl StyleIo) -> Result<()> {
-        if !self.mutation_intended {
+        let (state, ui) = self.observe(io)?;
+        let m = self.recovery.mutations.clone();
+        if !m.slot && !m.menu && !m.primary && !m.color && !m.width {
+            ensure!(
+                !ui.menu
+                    && ui.slot == self.recovery.original_slot
+                    && self.original_controls(&state.image),
+                "Unmodified original slot not verified"
+            );
             return Ok(());
         }
-        let (state, ui) = self.observe(io)?;
-        // Acquisition only opened/closed our menu when the original primary
-        // Fineliner was already black medium. A fresh full observation verifies
-        // the unchanged settings without opening the menu a second time.
-        if self.original_grid == Some(1)
-            && self.recovery.preferences["LastActiveTool"] == "primary"
-            && fine_style(&self.recovery.preferences)? == (0, 1)
+        // This fast path uses captured actual UI values and a fresh original
+        // closed slot, never equality with a potentially stale document file.
+        if self.recovery.original_grid == Some(1)
+            && self.recovery.original_fine == Some((0, 1))
+            && self.recovery.original_slot == "primary"
+            && !m.color
+            && !m.width
+            && !m.primary
             && !ui.menu
             && ui.slot == "primary"
-            && state.preferences == self.recovery.preferences
+            && self.original_controls(&state.image)
         {
             return Ok(());
         }
-        if let Some(original) = self.original_grid {
-            self.primary_menu(io)?;
-            let ui = self.observe(io)?.1;
-            if ui.grid == Some(1) {
-                self.set_fine(io, fine_style(&self.recovery.preferences)?)?;
-            } else {
+        if let Some(original) = self.recovery.original_grid {
+            self.primary_menu(io, true)?;
+            let (_, ui) = self.observe(io)?;
+            ensure!(
+                ui.grid == Some(1) || ui.grid == Some(original),
+                "Unexpected primary tool during rollback"
+            );
+            if m.color || m.width {
+                ensure!(ui.grid == Some(1), "Modified Fineliner no longer selected");
+                let desired = self
+                    .recovery
+                    .original_fine
+                    .context("Missing captured style for rollback")?;
+                if m.color && self.known_fine(io)?.0 != desired.0 {
+                    self.transition(io, Phase::RestoreColor, PALETTE[desired.0], |u| {
+                        u.fine.is_some_and(|f| f.0 == desired.0)
+                    })?;
+                }
+                if m.width && self.known_fine(io)?.1 != desired.1 {
+                    self.transition(io, Phase::RestoreWidth, WIDTHS[desired.1], |u| {
+                        u.fine.is_some_and(|f| f.1 == desired.1)
+                    })?;
+                }
                 ensure!(
-                    fine_style(&state.preferences)? == fine_style(&self.recovery.preferences)?,
-                    "Cannot restore changed Fineliner from an unexpected tool"
+                    self.fine(io)? == desired,
+                    "Actual Fineliner preferences not restored"
                 );
+            } else if ui.grid == Some(1) {
+                if let Some(desired) = self.recovery.original_fine {
+                    ensure!(
+                        self.fine(io)? == desired,
+                        "Unmodified Fineliner preferences changed"
+                    );
+                }
+                // No color/width input was attempted. An unsupported style or
+                // failed probe must not write any dimension from advisory data.
             }
             if self.observe(io)?.1.grid != Some(original) {
-                let tool = self.recovery.preferences["LastPen"].clone();
-                self.transition(io, GRID[original], |s, u| {
-                    u.grid == Some(original) && s.preferences.get("LastPen") == Some(&tool)
+                self.transition(io, Phase::RestorePrimary, GRID[original], |u| {
+                    u.grid == Some(original)
                 })?;
             }
+            ensure!(
+                self.observe(io)?.1.grid == Some(original),
+                "Original primary grid not restored"
+            );
         }
-        let ui = self.observe(io)?.1;
+        // Before a grid was captured, only our positively identified primary
+        // menu and the original active slot can be restored; never guess a tool.
+        let (_, ui) = self.observe(io)?;
         if ui.menu {
-            ensure!(ui.slot == "primary", "Refuse to close unowned menu");
-            self.transition(io, (30, 90), |_, u| !u.menu)?;
+            ensure!(
+                m.menu && ui.slot == "primary",
+                "Refuse to close unowned menu"
+            );
+            self.transition(io, Phase::RestoreClose, (30, 90), |u| {
+                !u.menu && u.slot == "primary"
+            })?;
         }
-        if self.recovery.preferences["LastActiveTool"] == "secondary"
-            && self.observe(io)?.1.slot != "secondary"
-        {
-            self.transition(io, (30, 150), |s, u| {
-                u.slot == "secondary"
-                    && !u.menu
-                    && s.preferences
-                        .get("LastActiveTool")
-                        .is_some_and(|s| s == "secondary")
+        if self.recovery.original_slot == "secondary" && self.observe(io)?.1.slot != "secondary" {
+            self.transition(io, Phase::RestoreSlot, (30, 150), |u| {
+                u.slot == "secondary" && !u.menu
             })?;
         }
         let (state, ui) = self.observe(io)?;
         ensure!(
-            !ui.menu && state.preferences == self.recovery.preferences,
-            "Exact status tool preferences were not restored"
+            !ui.menu
+                && ui.slot == self.recovery.original_slot
+                && self.original_controls(&state.image),
+            "Original active slot not restored"
         );
         Ok(())
+    }
+    fn original_controls(&self, image: &GrayImage) -> bool {
+        (61..184).all(|y| {
+            (0..61).all(|x| {
+                image.get_pixel(x, y).0[0].abs_diff(self.baseline.get_pixel(x, y).0[0]) <= 8
+            })
+        })
     }
 }

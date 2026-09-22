@@ -624,6 +624,20 @@ mod indicator_capture_tests {
         });
         assert!(workflow.clear_indicator().is_err());
         assert!(workflow.cleanup_failed());
+        let attempts = state
+            .borrow()
+            .counts
+            .get(&Operation::StatusStyleEnd)
+            .copied();
+        assert!(workflow.clear_indicator().is_err());
+        assert_eq!(
+            state
+                .borrow()
+                .counts
+                .get(&Operation::StatusStyleEnd)
+                .copied(),
+            attempts
+        );
         assert!(workflow.begin_iteration().is_err());
         assert!(!state.borrow().pages[1].indicator_visible);
         assert!(state.borrow().status_style_active);

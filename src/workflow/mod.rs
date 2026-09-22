@@ -165,6 +165,10 @@ impl Workflow {
     }
 
     pub fn clear_indicator(&mut self) -> Result<()> {
+        anyhow::ensure!(
+            !self.indicator_cleanup_failed,
+            "Status cleanup/restoration already failed; no further input permitted"
+        );
         if !self.indicator_paths.is_empty() {
             self.invalidate_history();
             if let Err(error) = self.device.status_clear(&self.indicator_paths) {

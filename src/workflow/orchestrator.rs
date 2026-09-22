@@ -100,6 +100,16 @@ impl<M: LLMEngine> Orchestrator<M> {
     fn run_iteration_with_trigger(&mut self, wait_for_trigger: bool) -> Result<()> {
         self.workflow.begin_iteration()?;
         let result = self.run_iteration_inner(wait_for_trigger);
+        // Preserve the original diagnostic without retrying input after a
+        // poisoned cleanup/restoration. A second cleanup must not hide its cause.
+        if self.workflow.cleanup_failed() {
+            return match result {
+                Err(error) => Err(error),
+                Ok(()) => Err(anyhow::anyhow!(
+                    "Status cleanup/restoration failed; further input stopped"
+                )),
+            };
+        }
         let cleanup = self.workflow.clear_indicator();
         if let Err(error) = cleanup {
             if let Err(original) = &result {

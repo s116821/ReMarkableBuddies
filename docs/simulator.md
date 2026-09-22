@@ -217,3 +217,6 @@ Scenario `expect.failure_codes` maps page indices to ordered code names. Occupie
 
 
 Status-style tests also enforce acquisition/restoration around native marks. `status_style_begin` supports `unavailable` and error faults; `status_style_end` supports error faults. Capture, navigation, output and history reject an active lease. A separate deterministic toolbar model exercises every partial acquisition action, exact secondary/primary preferences and page-change refusal, with native image fixtures checking layout recognition. These tests do not prove physical menu timing, metadata persistence or visual legibility; those remain native acceptance gates.
+
+
+The toolbar model separates actual UI preferences from stale advisory document values (including actual Red/Thick while the file reports Black/Medium). Failure tests cover each acquisition/restoration input before and after its possible effect, both original slots, unknown Fineliner styles, and journal failure before input. Recovery tests enforce exclusive creation, immutable captured values, reserved rollback capacity, incomplete-tail refusal and retained evidence after I/O failure. Model results establish those control-flow invariants, not physical persistence timing; native menu screenshots remain necessary for current-preference restoration evidence.
