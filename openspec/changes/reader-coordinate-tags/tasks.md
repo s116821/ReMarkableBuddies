@@ -1,8 +1,8 @@
 ## 1. Shared coordinate contract
 
-- [ ] 1.1 Add validated pixel-to-normalized selected-center representation and compact formatting with finite/bounds/resolution tests.
-- [ ] 1.2 Update prompt and parsing for exactly one valid SELECTION_CENTER while retaining independent question-box/transcription gates.
-- [ ] 1.3 Render the tag in shared Q&A composition and preserve the entire tagged history boundary.
+- [x] 1.1 Add validated pixel-to-normalized selected-center representation and compact formatting with finite/bounds/resolution tests.
+- [x] 1.2 Update prompt and parsing for exactly one valid SELECTION_CENTER while retaining independent question-box/transcription gates.
+- [x] 1.3 Render the tag in shared Q&A composition and preserve the entire tagged history boundary.
 
 ## 2. Regressions and acceptance
 

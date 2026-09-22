@@ -245,7 +245,7 @@ mod tests {
         }
     }
     const BEFORE: &str = "Header\n\nQ: old?\nA: old.\n---\n";
-    const BLOCK: &str = "Q: new?\n\nA: x^2 +/- 1.\n---\n";
+    const BLOCK: &str = "Q @ (0.5, 0.22): new?\n\nA: x^2 +/- 1.\n---\n";
     fn armed() -> (History, PageState, PageState) {
         let before = page(BEFORE, 1);
         let after = page(&format!("{BEFORE}{BLOCK}"), 2);

@@ -457,7 +457,8 @@ mod tests {
             "../../tests/fixtures/native-history/long-restored.rm"
         ))
         .unwrap();
-        let qa = include_str!("../../tests/fixtures/native-history/long-qa.txt");
+        let qa =
+            include_str!("../../tests/fixtures/native-history/long-qa.txt").replace("\r\n", "\n");
         assert_eq!(qa.len(), 328);
         assert_eq!(applied.text(), format!("{}{qa}", removed.text()));
         assert_eq!(applied.paragraphs[..19], removed.paragraphs[..19]);

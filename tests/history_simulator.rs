@@ -174,7 +174,7 @@ fn partial_mutation_keeps_actual_partial_text_and_discards_redo() {
     scenario.iterations[0].actions = vec![hold(4), hold(2), hold(4)];
     let run = checked(&scenario);
     let text = &run.report.pages[1].text;
-    assert!(text.starts_with("=== Reader Buddy Answers ===\n\n\nQ:"));
+    assert!(text.starts_with("=== Reader Buddy Answers ===\n\n\nQ @ (0.5, 0.22):"));
     assert!(text.len() < applied.len());
     assert_eq!(run.report.pages[1].x_count, 0);
 }
