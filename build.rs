@@ -40,7 +40,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let inherited = env::var("GIT_CONFIG_PARAMETERS").unwrap_or_default();
     env::set_var(
         "GIT_CONFIG_PARAMETERS",
-        format!("{inherited} 'safe.directory={directory}'"),
+        format!("{inherited} 'safe.directory={directory}'").trim(),
     );
     println!("cargo:rerun-if-env-changed=READER_BUDDY_RELEASE_TAG");
     println!("cargo:rerun-if-env-changed=READER_BUDDY_RELEASE_SHA");
