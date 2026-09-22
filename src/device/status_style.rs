@@ -70,6 +70,7 @@ mod tests {
         prefs: Preferences,
         persisted: Preferences,
         checkpoints: Vec<Recovery>,
+        journal: Option<Journal>,
         fail_checkpoint: Option<usize>,
         fail_before: bool,
         menu: bool,
@@ -92,6 +93,7 @@ mod tests {
                 prefs: prefs(),
                 persisted,
                 checkpoints: Vec::new(),
+                journal: None,
                 fail_checkpoint: None,
                 fail_before: false,
                 menu: false,
@@ -113,6 +115,9 @@ mod tests {
                 record.original_slot.clone(),
             )?;
             record.follows(self.checkpoints.last().unwrap_or(&initial))?;
+            if let Some(journal) = self.journal.as_mut() {
+                journal.append(record)?;
+            }
             self.checkpoints.push(record.clone());
             Ok(())
         }
@@ -349,6 +354,42 @@ mod tests {
             let _ = lease.restore(&mut io);
             assert_eq!(io.count, count, "No input after journal failure");
         }
+    }
+
+    #[test]
+    fn failed_close_checkpoint_cannot_take_no_change_fast_path() {
+        let mut io = Model::new();
+        for (k, v) in [
+            ("LastActiveTool", "primary"),
+            ("LastPen", "Finelinerv2"),
+            ("LastFinelinerv2Color", "Black"),
+            ("LastFinelinerv2Size", "2"),
+        ] {
+            io.prefs.insert(k.into(), v.into());
+        }
+        let mut lease = Lease::prepare(io.observe().unwrap()).unwrap().unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "reader-status-close-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        io.journal = Some(Journal::create(&path, &lease.recovery).unwrap());
+        io.fail_checkpoint = Some(2);
+        assert!(lease.acquire(&mut io).is_err());
+        assert_eq!(lease.recovery.phase, Phase::CloseForDrawing);
+        assert_eq!(io.count, 1);
+        // Even a later closed-looking original toolbar cannot make the failed
+        // checkpoint disappear through the unchanged-style fast path.
+        io.menu = false;
+        assert!(lease.restore(&mut io).is_err());
+        assert_eq!(io.count, 1);
+        assert!(path.exists());
+        assert_eq!(Recovery::read(&path).unwrap().phase, Phase::OpenPrimary);
+        drop(io.journal.take());
+        fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -956,6 +997,7 @@ pub trait StyleIo {
 pub struct Lease {
     pub recovery: Recovery,
     baseline: GrayImage,
+    checkpoint_failed: bool,
 }
 impl Lease {
     pub fn prepare(observed: Observation) -> Result<Option<Self>> {
@@ -969,6 +1011,7 @@ impl Lease {
         Ok(Some(Self {
             recovery,
             baseline: observed.image,
+            checkpoint_failed: false,
         }))
     }
     fn observe(&self, io: &mut impl StyleIo) -> Result<(Observation, Controls)> {
@@ -1019,7 +1062,10 @@ impl Lease {
         self.recovery.phase = phase;
         self.recovery.sequence += 1;
         // Record intent durably BEFORE input: a failed press may have acted.
-        io.checkpoint(&self.recovery)?;
+        if let Err(error) = io.checkpoint(&self.recovery) {
+            self.checkpoint_failed = true;
+            return Err(error);
+        }
         io.press(point)?;
         for _ in 0..5 {
             let (_, ui) = self.observe(io)?;
@@ -1103,6 +1149,10 @@ impl Lease {
         })
     }
     pub fn restore(&mut self, io: &mut impl StyleIo) -> Result<()> {
+        ensure!(
+            !self.checkpoint_failed,
+            "Recovery checkpoint failed; retain evidence and stop input"
+        );
         let (state, ui) = self.observe(io)?;
         let m = self.recovery.mutations.clone();
         if !m.slot && !m.menu && !m.primary && !m.color && !m.width {

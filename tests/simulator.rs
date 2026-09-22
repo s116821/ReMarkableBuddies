@@ -186,12 +186,19 @@ fn failed_indicator_cleanup_prevents_navigation_and_answer() {
         .trace
         .iter()
         .any(|event| matches!(event.action.as_str(), "next" | "previous" | "text")));
-    assert!(run
-        .report
-        .pages
-        .iter()
-        .all(|page| page.text.is_empty() && !page.indicator_visible));
-    assert!(run.report.pages[0].unchanged);
+    assert!(run.report.pages.iter().all(|page| page.text.is_empty()));
+    // The first failed erase can leave owned ink. Never perform a second erase
+    // merely to make the final image look clean after ownership is uncertain.
+    assert!(run.report.pages[0].indicator_visible);
+    assert!(!run.report.pages[0].unchanged);
+    assert_eq!(
+        run.report
+            .trace
+            .iter()
+            .filter(|event| event.action == "statusclear")
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -248,11 +255,21 @@ fn verification_progress_errors_are_not_successful_question_declines() {
             .trace
             .iter()
             .any(|event| matches!(event.action.as_str(), "next" | "previous" | "text")));
-        assert!(run
-            .report
-            .pages
+        assert!(run.report.pages.iter().all(|page| page.text.is_empty()));
+        assert_eq!(run.report.pages[0].indicator_visible, cleanup_fails);
+        assert!(run.report.pages[1..]
             .iter()
-            .all(|page| page.text.is_empty() && !page.indicator_visible));
+            .all(|page| !page.indicator_visible));
+        if cleanup_fails {
+            assert_eq!(
+                run.report
+                    .trace
+                    .iter()
+                    .filter(|event| event.action == "statusclear")
+                    .count(),
+                1
+            );
+        }
     }
 }
 
