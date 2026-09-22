@@ -106,6 +106,19 @@ fn indicators_clear_before_navigation_and_successful_output() {
     let run = run("blank-answer");
     assert!(run.report.pages.iter().all(|page| !page.indicator_visible));
     let trace = &run.report.trace;
+    let successor_paths: Vec<_> = trace
+        .iter()
+        .filter(|e| e.page == 1 && e.action == "status_path")
+        .map(|e| e.detail.as_str())
+        .collect();
+    assert_eq!(
+        successor_paths,
+        [
+            "Edge(AnswerReady, 0)",
+            "Edge(AnswerReady, 1)",
+            "Edge(AnswerReady, 2)"
+        ]
+    );
     let next = trace
         .iter()
         .position(|event| event.action == "next")
@@ -382,7 +395,7 @@ fn stationary_hold_uses_virtual_deadline() {
         .find(|e| e.action == "hold_triggered")
         .unwrap();
     assert_eq!(trigger.at_ms, 2000);
-    assert_eq!(run.report.virtual_ms, 4600 + 9 * 333); // Workflow delays plus staged strokes.
+    assert_eq!(run.report.virtual_ms, 4600 + 11 * 333); // Workflow delays plus staged strokes.
 }
 #[test]
 fn interrupted_hold_discards_elapsed_time() {

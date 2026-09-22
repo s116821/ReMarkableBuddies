@@ -58,3 +58,8 @@ Reader SHALL record each unique owned path before drawing, including possible pa
 #### Scenario: Long-running retracing
 - **WHEN** a pending request repeats the same paths many times
 - **THEN** cleanup erases each unique owned path with bounded work rather than replaying every tick.
+
+
+#### Scenario: Ready state on a valid successor
+- **WHEN** navigation reaches an eligible valid answer page
+- **THEN** the current AnswerReady triangle completes all three edges at the same cadence before cleanup and body-mode output; preceding source-page stages are not restarted.
