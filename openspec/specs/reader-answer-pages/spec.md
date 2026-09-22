@@ -4,6 +4,7 @@
 
 Describe the implemented reader answer pages contracts, initially baselined from v0.1.4. Known gaps are explicit and require a later change delta to alter.
 ## Requirements
+
 ### Requirement: Successor navigation and identity heuristic
 After agreement, the system SHALL recapture the source, swipe left toward its immediate successor, wait and compare masked screenshots. Similarity at least 0.999 SHALL mean no navigation occurred, causing an X on the source without a reverse swipe. Source: src/workflow/orchestrator.rs render_answer; src/workflow/navigation.rs; src/workflow/xochitl_integration.rs.
 
@@ -73,33 +74,6 @@ An Invalid successor SHALL trigger a source-identity check before any reverse sw
 
 ### Requirement: Failure display and loop errors
 
-Every failure-X outcome, including analysis rejection, navigation no-motion and recovery, SHALL obey this guarded display policy. Expected declines SHALL attempt an X within the same 50 by 50 virtual-pixel bottom-right status region used by the activity circle, after clearing any owned circle. If preexisting content makes status drawing unsafe, the failure mark SHALL be suppressed without erasing that content. Render-answer errors SHALL be logged and attempt an X after cleanup. Unhandled iteration errors in loop mode SHALL attempt body-mode Error: text on the current page after cleanup before continuing; single-iteration errors SHALL propagate. Source: src/workflow/mod.rs draw_failure_x; src/workflow/indicator.rs; src/workflow/orchestrator.rs run_iteration/run_loop.
-
-#### Scenario: Proposal transport error in loop mode
-- **WHEN** a proposal request returns an error
-- **THEN** the loop attempts error text on the currently active page after indicator cleanup, rather than guaranteeing an X-only failure.
-
-#### Scenario: Failure after visible progress
-- **WHEN** an eligible page has a circle and the question is declined
-- **THEN** the circle is erased before the two failure-X diagonals are drawn within the 50 by 50 region.
-
-#### Scenario: Existing corner handwriting
-- **WHEN** the corner is occupied before the iteration draws status marks
-- **THEN** the failure mark is suppressed rather than erasing preexisting handwriting.
-
-### Requirement: Reusable page decisions and Q&A composition
-The workflow SHALL expose reusable source-page verification and pure answer-page classification/Q&A composition helpers, preserving existing thresholds, masks, formatting and delays. Recovery SHALL use the single-attempt policy in Invalid successor recovery. Source: src/workflow/mod.rs, src/workflow/navigation.rs and src/workflow/orchestrator.rs.
-
-#### Scenario: Equivalent navigation comparison
-- **WHEN** forward movement or return-to-source is verified
-- **THEN** both use the same masked source-page identity helper at threshold 0.999.
-
-#### Scenario: Regression coverage
-- **WHEN** rendering and classification regression tests run without device access
-- **THEN** they cover blank/occupied/header-match decisions, UI-mask changes, different image sizes and exact Q&A separators/line breaks.
-
-### Requirement: Failure display and loop errors
-
 Every failure outcome SHALL obey guarded display policy: clear all temporary owned marks, then draw the constant X plus exactly one of six segments in a centered half-size box within the existing status region. The top edge SHALL mean unreadable/missing/ambiguous selection or malformed proposal; right edge transcription disagreement/invalid transcription; bottom edge provider unavailable/timeout/transport failure; left edge no successor movement; horizontal midpoint line unsuitable successor after confirmed recovery; vertical midpoint line device/render/recovery failure. Existing/unknown corner content SHALL suppress drawing and erasure. Cleanup failure SHALL stop further input. Failure marks SHALL persist, never enter the temporary ledger, and be attempted at most once per iteration. Render errors SHALL be logged and attempt the device code. Single-iteration provider/device errors SHALL propagate after guarded display; loop mode SHALL log them without typing arbitrary Error text into the document. Source: src/workflow/indicator.rs; src/workflow/mod.rs; src/workflow/orchestrator.rs.
 
 #### Scenario: Proposal transport error
@@ -121,3 +95,14 @@ Every failure outcome SHALL obey guarded display policy: clear all temporary own
 #### Scenario: Existing corner handwriting
 - **WHEN** the corner is occupied before the iteration draws status marks
 - **THEN** the failure mark is suppressed without erasing existing handwriting.
+
+### Requirement: Reusable page decisions and Q&A composition
+The workflow SHALL expose reusable source-page verification and pure answer-page classification/Q&A composition helpers, preserving existing thresholds, masks, formatting and delays. Recovery SHALL use the single-attempt policy in Invalid successor recovery. Source: src/workflow/mod.rs, src/workflow/navigation.rs and src/workflow/orchestrator.rs.
+
+#### Scenario: Equivalent navigation comparison
+- **WHEN** forward movement or return-to-source is verified
+- **THEN** both use the same masked source-page identity helper at threshold 0.999.
+
+#### Scenario: Regression coverage
+- **WHEN** rendering and classification regression tests run without device access
+- **THEN** they cover blank/occupied/header-match decisions, UI-mask changes, different image sizes and exact Q&A separators/line breaks.
