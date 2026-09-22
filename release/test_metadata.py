@@ -16,7 +16,7 @@ class MetadataTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
-        cls.repo = Path(cls.temp.name) / "metadata"
+        cls.repo = Path(cls.temp.name) / "metadata with 'quote'"
         (cls.repo / "src").mkdir(parents=True)
         shutil.copyfile(ROOT / "build.rs", cls.repo / "build.rs")
         (cls.repo / "Cargo.toml").write_text('''[package]
