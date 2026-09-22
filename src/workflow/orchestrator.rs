@@ -1,7 +1,10 @@
 use anyhow::Result;
 use log::{debug, error, info};
 
-use super::{AnswerPageType, Workflow};
+use super::{
+    indicator::{Failure, Stage},
+    AnswerPageType, ReturnOutcome, Workflow,
+};
 use crate::analysis::{BoundingBox, SelectionCenter};
 use crate::device::screenshot::{SCREENSHOT_VIRTUAL_HEIGHT, SCREENSHOT_VIRTUAL_WIDTH};
 use crate::llm::{openai::OpenAI, LLMEngine};
@@ -104,6 +107,9 @@ impl<M: LLMEngine> Orchestrator<M> {
             }
             return Err(error);
         }
+        if result.is_err() && !self.workflow.cleanup_failed() {
+            self.workflow.draw_failure(Failure::Device)?;
+        }
         result
     }
 
@@ -119,6 +125,8 @@ impl<M: LLMEngine> Orchestrator<M> {
         let (screenshot_base64, screenshot_png_data) =
             self.workflow.capture_screenshot_with_data()?;
 
+        self.workflow.tick_indicator()?;
+
         // Step 3: Propose a question and answer, then independently verify
         // the question before navigating or writing:
         // - Detect outlined or highlighted region
@@ -130,13 +138,13 @@ impl<M: LLMEngine> Orchestrator<M> {
             None => {
                 info!("No clear selected region or readable question detected");
                 // Draw failure X on current page (no text output)
-                self.workflow.draw_failure_x()?;
+                self.workflow.draw_failure(Failure::Selection)?;
                 return Ok(());
             }
             Some(result) => {
-                if !self.verify_question(&result)? {
+                if let Some(failure) = self.verify_question(&result)? {
                     info!("Independent question reading disagreed or was uncertain; no answer written");
-                    self.workflow.draw_failure_x()?;
+                    self.workflow.draw_failure(failure)?;
                     return Ok(());
                 }
                 info!(
@@ -150,7 +158,8 @@ impl<M: LLMEngine> Orchestrator<M> {
                         return Err(e);
                     }
                     // On error, draw failure X (no text output)
-                    self.workflow.draw_failure_x()?;
+                    self.workflow.draw_failure(Failure::Device)?;
+                    return Err(e);
                 }
             }
         }
@@ -180,9 +189,23 @@ impl<M: LLMEngine> Orchestrator<M> {
             self.llm.add_image_content(&detail);
         }
 
-        let response = self
-            .llm
-            .execute_with_progress(&mut || self.workflow.tick_indicator())?;
+        self.workflow.set_indicator_stage(Stage::AnswerPending);
+        let mut progress_failed = false;
+        let response = match self.llm.execute_with_progress(&mut || {
+            let result = self.workflow.tick_indicator();
+            progress_failed |= result.is_err();
+            result
+        }) {
+            Ok(response) => response,
+            Err(error) => {
+                if !progress_failed {
+                    self.workflow.draw_failure(Failure::Provider)?;
+                }
+                return Err(error);
+            }
+        };
+        self.workflow.set_indicator_stage(Stage::AnswerReady);
+        self.workflow.finish_indicator_stage()?;
         info!("LLM Response: {}", response);
         Ok(Self::parse_analysis_response(
             &response,
@@ -246,12 +269,12 @@ impl<M: LLMEngine> Orchestrator<M> {
         })
     }
 
-    fn verify_question(&mut self, result: &AnalysisResult) -> Result<bool> {
+    fn verify_question(&mut self, result: &AnalysisResult) -> Result<Option<Failure>> {
         let Some(bounds) = &result._question_box else {
-            return Ok(false);
+            return Ok(Some(Failure::Transcription));
         };
         if !(0..1024).contains(&bounds.y) || bounds.height <= 0 {
-            return Ok(false);
+            return Ok(Some(Failure::Transcription));
         }
         self.llm.clear_content();
         self.llm.add_text_content(
@@ -269,6 +292,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         for detail in self.workflow.detail_images_base64()? {
             self.llm.add_image_content(&detail);
         }
+        self.workflow.auxiliary_indicator()?;
         let mut progress_failed = false;
         let reading = match self.llm.execute_with_progress(&mut || {
             let result = self.workflow.tick_indicator();
@@ -281,11 +305,12 @@ impl<M: LLMEngine> Orchestrator<M> {
             }
             Err(err) => {
                 log::warn!("Question verification unavailable: {}", err);
-                return Ok(false);
+                return Ok(Some(Failure::Provider));
             }
         };
         info!("Independent question reading: {}", reading);
-        Ok(Self::transcriptions_agree(&result.question, &reading))
+        Ok((!Self::transcriptions_agree(&result.question, &reading))
+            .then_some(Failure::Transcription))
     }
 
     fn transcriptions_agree(question: &str, reading: &str) -> bool {
@@ -368,7 +393,7 @@ impl<M: LLMEngine> Orchestrator<M> {
 
         if self.workflow.verify_navigation_to(&original_img)? {
             info!("No page movement detected; drawing X on original");
-            self.workflow.draw_failure_x()?;
+            self.workflow.draw_failure(Failure::NoSuccessor)?;
             return Ok(());
         }
 
@@ -383,8 +408,13 @@ impl<M: LLMEngine> Orchestrator<M> {
                 );
 
                 // Navigate back and verify we're on original
-                self.workflow.return_to_original_page(&original_img)?;
-                self.workflow.draw_failure_x()?;
+                let returned = self.workflow.return_to_original_page(&original_img)?;
+                self.workflow
+                    .draw_failure(if returned == ReturnOutcome::Unconfirmed {
+                        Failure::Device
+                    } else {
+                        Failure::InvalidSuccessor
+                    })?;
                 return Ok(());
             }
             AnswerPageType::Blank => {
@@ -452,9 +482,8 @@ impl<M: LLMEngine> Orchestrator<M> {
                     if self.workflow.cleanup_failed() {
                         return Err(e);
                     }
-                    // Try to show error to user
-                    let _ = self.workflow.set_body_text_mode();
-                    let _ = self.workflow.render_text(&format!("Error: {}\n", e));
+                    // The iteration already attempted the guarded failure code.
+                    // Diagnostics belong in logs, never in the user document.
                 }
             }
         }

@@ -2,7 +2,9 @@
   "name": "return-input-error",
   "mode": "reader",
   "expect": {
-    "errors": [],
+    "errors": [
+      "Return swipe: Injected Previous error"
+    ],
     "x_count": {
       "1": 0,
       "0": 0

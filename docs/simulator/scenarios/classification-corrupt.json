@@ -11,7 +11,7 @@
     },
     "active_page": 0,
     "operations": {
-      "line": 2,
+      "line": 3,
       "next": 1,
       "previous": 1,
       "capture": 6,
@@ -22,7 +22,12 @@
       "0": 1
     },
     "errors": [],
-    "model_calls": 2
+    "model_calls": 2,
+    "failure_codes": {
+      "0": [
+        "InvalidSuccessor"
+      ]
+    }
   },
   "replies": [
     {

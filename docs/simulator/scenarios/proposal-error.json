@@ -3,12 +3,11 @@
   "mode": "reader",
   "expect": {
     "unchanged_pages": [
-      0,
       1
     ],
     "model_calls": 1,
     "operations": {
-      "line": 0,
+      "line": 3,
       "previous": 0,
       "capture": 1,
       "next": 0,
@@ -17,7 +16,16 @@
     "active_page": 0,
     "errors": [
       "Scripted model error: proposal unavailable"
-    ]
+    ],
+    "x_count": {
+      "0": 1,
+      "1": 0
+    },
+    "failure_codes": {
+      "0": [
+        "Provider"
+      ]
+    }
   },
   "replies": [
     {

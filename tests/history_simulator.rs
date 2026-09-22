@@ -68,7 +68,7 @@ fn repeated_toggles_preserve_header_and_prior_answer_without_model_calls() {
         .unwrap();
     assert!(!run.report.trace[first..]
         .iter()
-        .any(|e| matches!(e.action.as_str(), "statuscircle" | "statusclear" | "text")));
+        .any(|e| matches!(e.action.as_str(), "statusstroke" | "statusclear" | "text")));
 }
 
 #[test]

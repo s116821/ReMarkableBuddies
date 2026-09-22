@@ -112,6 +112,7 @@ pub struct PageResult {
     pub index: usize,
     pub text: String,
     pub x_count: usize,
+    pub failure_codes: Vec<String>,
     pub indicator_visible: bool,
     pub unchanged: bool,
     pub png: String,
@@ -201,6 +202,7 @@ fn execute_with_model<M: LLMEngine>(
             index,
             text: page.text.clone(),
             x_count: page.x_count(),
+            failure_codes: page.failure_codes(),
             indicator_visible: page.indicator_visible,
             unchanged: images[index] == state.initial[index],
             png: format!("page-{index}.png"),
@@ -249,6 +251,14 @@ fn execute_with_model<M: LLMEngine>(
             failures.push(format!(
                 "page {page} x_count expected {expected}, got {}",
                 pages[page].x_count
+            ));
+        }
+    }
+    for (&page, expected) in &scenario.expect.failure_codes {
+        if &pages[page].failure_codes != expected {
+            failures.push(format!(
+                "page {page} failure codes expected {expected:?}, got {:?}",
+                pages[page].failure_codes
             ));
         }
     }
@@ -452,6 +462,109 @@ mod indicator_capture_tests {
     }
 
     #[test]
+    fn all_stages_have_three_edges_at_333_ms_with_bounded_retracing_cleanup() {
+        use indicator::{Stage, Stroke};
+        let (state, mut workflow) = blank_successor();
+        workflow.capture_page_data().unwrap();
+        workflow.tick_indicator().unwrap();
+        workflow.set_indicator_stage(Stage::AnswerPending);
+        workflow.tick_indicator().unwrap();
+        workflow.set_indicator_stage(Stage::AnswerReady);
+        workflow.finish_indicator_stage().unwrap();
+        workflow.auxiliary_indicator().unwrap();
+        for _ in 0..30 {
+            workflow.tick_indicator().unwrap();
+        }
+        {
+            let state = state.borrow();
+            let paths: Vec<_> = state
+                .events
+                .iter()
+                .filter(|e| e.action == "status_path")
+                .collect();
+            assert_eq!(paths.len(), 39);
+            assert!(paths.windows(2).all(|p| p[1].at_ms - p[0].at_ms == 333));
+            assert_eq!(paths[0].detail, "Edge(Preparing, 0)");
+            assert_eq!(paths[3].detail, "Edge(AnswerPending, 0)");
+            assert_eq!(paths[6].detail, "Edge(AnswerReady, 0)");
+            assert_eq!(paths[9].detail, "Auxiliary(AnswerReady)");
+            assert_eq!(state.pages[1].indicator_paths.len(), 10);
+            assert_eq!(
+                state.pages[1].indicator_paths.last(),
+                Some(&(Stroke::Auxiliary(Stage::AnswerReady), 30))
+            );
+        }
+        workflow.clear_indicator().unwrap();
+        assert!(state.borrow().pages[1].indicator_paths.is_empty());
+        assert!(state.borrow().pages[1].lines.is_empty());
+    }
+
+    #[test]
+    fn repeated_loop_failures_never_type_diagnostics_or_retry_failed_markers() {
+        use crate::device::interaction::Interaction;
+        use scenario::{Effect, Fault};
+        for failure in ["provider", "capture", "marker"] {
+            let (state, workflow) = blank_successor();
+            state.borrow_mut().idle_events = vec![vec![Interaction::Reader]; 2].into();
+            if failure == "capture" {
+                state.borrow_mut().faults = (1..=2)
+                    .map(|call| Fault {
+                        operation: Operation::Capture,
+                        call,
+                        effect: Effect::Error,
+                    })
+                    .collect();
+            } else if failure == "marker" {
+                state.borrow_mut().faults.push(Fault {
+                    operation: Operation::Line,
+                    call: 1,
+                    effect: Effect::Error,
+                });
+            }
+            let model = ScriptedModel {
+                state: state.clone(),
+                replies: vec![
+                    Reply {
+                        text: None,
+                        error: Some("network unavailable".into())
+                    };
+                    2
+                ]
+                .into(),
+                text_count: 0,
+                images: Vec::new(),
+            };
+            let mut orchestrator = Orchestrator::new(workflow, model);
+            assert!(orchestrator
+                .run_loop()
+                .unwrap_err()
+                .to_string()
+                .contains("no remaining input"));
+            let state = state.borrow();
+            assert_eq!(state.model_calls, if failure == "capture" { 0 } else { 2 });
+            assert!(state
+                .pages
+                .iter()
+                .all(|p| p.text.is_empty() && !p.indicator_visible));
+            assert!(!state
+                .events
+                .iter()
+                .any(|e| matches!(e.action.as_str(), "text" | "body")));
+            if failure == "provider" {
+                // First error mark makes the corner occupied on the next trigger.
+                assert_eq!(state.pages[1].failure_codes(), ["Provider"]);
+                assert_eq!(state.counts.get(&Operation::Line), Some(&3));
+            } else if failure == "capture" {
+                assert!(state.pages[1].lines.is_empty());
+            } else {
+                // One failed first attempt, then one normal marker next iteration.
+                assert_eq!(state.counts.get(&Operation::Line), Some(&4));
+                assert_eq!(state.pages[1].failure_codes(), ["Provider"]);
+            }
+        }
+    }
+
+    #[test]
     fn idle_loop_preserves_history_until_reader_and_prioritizes_input_loss() {
         use crate::{device::interaction::Interaction as I, workflow::history::State as H};
         for (events, mutations) in [
@@ -484,7 +597,7 @@ mod indicator_capture_tests {
     }
 
     #[test]
-    fn classification_clears_owned_circle_before_capture() {
+    fn classification_clears_owned_paths_before_capture() {
         let (state, mut workflow) = blank_successor();
         workflow.capture_page_data().unwrap();
         workflow.tick_indicator().unwrap();
@@ -514,7 +627,7 @@ mod indicator_capture_tests {
         workflow.tick_indicator().unwrap();
         let state = state.borrow();
         assert!(!state.pages[1].indicator_visible);
-        assert!(!state.counts.contains_key(&Operation::StatusCircle));
+        assert!(!state.counts.contains_key(&Operation::StatusStroke));
         assert!(!state.counts.contains_key(&Operation::StatusClear));
         assert!(state
             .events

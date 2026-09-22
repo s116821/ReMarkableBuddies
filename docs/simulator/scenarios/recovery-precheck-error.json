@@ -2,7 +2,9 @@
   "name": "recovery-precheck-error",
   "mode": "reader",
   "expect": {
-    "errors": [],
+    "errors": [
+      "Check source before return: Injected Capture error"
+    ],
     "x_count": {
       "1": 0,
       "0": 0

@@ -60,8 +60,9 @@ pub trait DeviceBackend {
     fn erase(&mut self, from: (i32, i32), to: (i32, i32)) -> Result<()>;
     fn bitmap(&mut self, bitmap: &[Vec<bool>]) -> Result<()>;
     fn progress(&mut self, message: Option<&str>) -> Result<()>;
-    fn status_circle(&mut self) -> Result<()>;
-    fn status_clear(&mut self) -> Result<()>;
+    fn status_stroke(&mut self, stroke: crate::workflow::indicator::Stroke) -> Result<()>;
+    fn status_clear(&mut self, strokes: &[crate::workflow::indicator::Stroke]) -> Result<()>;
+    fn monotonic(&self) -> Duration;
     fn status_suppressed(&mut self) {}
     fn load_header(&self) -> Option<DynamicImage>;
     fn save_header(&mut self, image: &DynamicImage) -> Result<()>;
@@ -69,6 +70,7 @@ pub trait DeviceBackend {
 }
 
 pub struct RealDevice {
+    clock: std::time::Instant,
     #[cfg(target_os = "linux")]
     history: super::native_history::NativeHistory,
     screenshot: Screenshot,
@@ -85,6 +87,7 @@ impl RealDevice {
             log::warn!("Failed to create cache directory: {error}");
         }
         Ok(Self {
+            clock: std::time::Instant::now(),
             #[cfg(target_os = "linux")]
             history: super::native_history::NativeHistory::new(corner.clone()),
             screenshot: Screenshot::new()?,
@@ -155,7 +158,7 @@ impl DeviceBackend for RealDevice {
         self.keyboard.key_cmd_body()
     }
     fn line(&mut self, from: (i32, i32), to: (i32, i32)) -> Result<()> {
-        self.pen.draw_line_screen(from, to)
+        self.pen.draw_path_screen(&[from, to])
     }
     fn erase(&mut self, from: (i32, i32), to: (i32, i32)) -> Result<()> {
         self.pen.erase_rectangle(from, to)
@@ -169,17 +172,20 @@ impl DeviceBackend for RealDevice {
             None => self.keyboard.progress_end(),
         }
     }
-    fn status_circle(&mut self) -> Result<()> {
-        log::debug!("Refreshing activity circle");
-        self.pen
-            .draw_path_screen(&crate::workflow::indicator::circle_points())
+    fn status_stroke(&mut self, stroke: crate::workflow::indicator::Stroke) -> Result<()> {
+        log::debug!("Status stroke {stroke:?} at {:?}", self.clock.elapsed());
+        self.pen.draw_path_screen(&stroke.points())
     }
-    fn status_clear(&mut self) -> Result<()> {
-        log::debug!("Clearing owned activity circle");
-        self.pen
-            .erase_path_screen(&crate::workflow::indicator::circle_points())?;
+    fn status_clear(&mut self, strokes: &[crate::workflow::indicator::Stroke]) -> Result<()> {
+        log::debug!("Clearing {} owned status paths", strokes.len());
+        for stroke in strokes {
+            self.pen.erase_path_screen(&stroke.points())?;
+        }
         std::thread::sleep(Duration::from_millis(100));
         Ok(())
+    }
+    fn monotonic(&self) -> Duration {
+        self.clock.elapsed()
     }
     fn status_suppressed(&mut self) {
         log::debug!("Status mark suppressed: occupied or unknown corner");

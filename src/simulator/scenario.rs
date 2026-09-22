@@ -118,7 +118,7 @@ pub enum Operation {
     Line,
     Trigger,
     HeaderSave,
-    StatusCircle,
+    StatusStroke,
     StatusClear,
     HistorySnapshot,
     HistoryMutation,
@@ -156,6 +156,8 @@ pub struct Expected {
     pub text_contains: BTreeMap<usize, Vec<String>>,
     #[serde(default)]
     pub x_count: BTreeMap<usize, usize>,
+    #[serde(default)]
+    pub failure_codes: BTreeMap<usize, Vec<String>>,
     #[serde(default)]
     pub unchanged_pages: Vec<usize>,
     #[serde(default)]
@@ -299,6 +301,7 @@ impl Scenario {
             .keys()
             .chain(self.expect.text_contains.keys())
             .chain(self.expect.x_count.keys())
+            .chain(self.expect.failure_codes.keys())
             .chain(self.expect.unchanged_pages.iter())
         {
             ensure!(
