@@ -84,6 +84,29 @@ fn first_qa_undo_retains_header() {
 }
 
 #[test]
+fn deleting_new_block_preserves_complete_legacy_blocks_and_earlier_delimiters() {
+    let legacy = "Q: old question?\n\nA: old answer.\n---\nQ @ (0.2, 0.8): later?\n\nA: also retained.\n---\n";
+    let first = scenario("blank-answer").expect.text[&1].clone();
+    let mut scenario = scenario("append");
+    scenario.iterations[0].actions = vec![HistoryAction::Edit {
+        text: legacy.into(),
+    }];
+    scenario.iterations[1].actions = vec![hold(4), hold(2), hold(4)];
+    scenario.expect.text.insert(1, format!("{first}{legacy}"));
+    scenario.expect.history = Some("undone".into());
+    scenario
+        .expect
+        .operations
+        .insert(Operation::HistoryMutation, 3);
+    let run = checked(&scenario);
+    assert_eq!(run.report.model_calls, 4);
+    let text = &run.report.pages[1].text;
+    assert_eq!(text.matches("<Start of Q-A block").count(), 1);
+    assert_eq!(text.matches("<End of Q-A block").count(), 1);
+    assert!(text.ends_with(legacy));
+}
+
+#[test]
 fn returning_restarting_or_losing_input_never_revives_old_history() {
     for actions in [
         vec![
@@ -174,7 +197,8 @@ fn partial_mutation_keeps_actual_partial_text_and_discards_redo() {
     scenario.iterations[0].actions = vec![hold(4), hold(2), hold(4)];
     let run = checked(&scenario);
     let text = &run.report.pages[1].text;
-    assert!(text.starts_with("=== Reader Buddy Answers ===\n\n\nQ @ (0.5, 0.22):"));
+    assert!(text
+        .starts_with("=== Reader Buddy Answers ===\n\n\n<Start of Q-A block for Q @ (0.5, 0.22)>"));
     assert!(text.len() < applied.len());
     assert_eq!(run.report.pages[1].x_count, 0);
 }

@@ -53,9 +53,10 @@ fn circle_and_highlight_tags_follow_the_selection_not_the_question() {
     ] {
         let run = run(name);
         let text = &run.report.pages[1].text;
-        assert!(text.contains(&format!("Q @ {tag}: G unc.?")));
+        assert!(text.contains(&format!("<Start of Q-A block for Q @ {tag}>\nQ: G unc.?")));
+        assert!(text.ends_with(&format!("<End of Q-A block for Q @ {tag}>\n")));
         // Both fixtures put the question at (230, 60), far above the selection.
-        assert!(!text.contains("Q @ (0.3, 0.06):"));
+        assert!(!text.contains("Q @ (0.3, 0.06)"));
     }
 }
 

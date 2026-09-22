@@ -1,13 +1,13 @@
 ## 1. Composition and public contract
 
-- [ ] 1.1 Implement exact matching opening/closing delimiters with ordinary Q: and unchanged normalized coordinates.
-- [ ] 1.2 Document chronology, old-format preservation and future follow-up consumer scope.
-- [ ] 1.3 Add exact formatting, multiline, endpoint, circle/highlight and multiple-block assertions.
+- [x] 1.1 Implement exact matching opening/closing delimiters with ordinary Q: and unchanged normalized coordinates.
+- [x] 1.2 Document chronology, old-format preservation and future follow-up consumer scope.
+- [x] 1.3 Add exact formatting, multiline, endpoint, circle/highlight and multiple-block assertions.
 
 ## 2. History and regression verification
 
-- [ ] 2.1 Verify complete delimiter/paragraph/character ownership, repeated undo/redo, prior-answer preservation and bounds.
-- [ ] 2.2 Update simulator expectations and preserve historical native fixtures unchanged.
+- [x] 2.1 Verify complete delimiter/paragraph/character ownership, repeated undo/redo, prior-answer preservation and bounds.
+- [x] 2.2 Update simulator expectations and preserve historical native fixtures unchanged.
 - [ ] 2.3 Run formatting, strict clippy, host/simulator tests and both architecture builds.
 
 ## 3. Authorized native acceptance

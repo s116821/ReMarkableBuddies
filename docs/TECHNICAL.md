@@ -311,9 +311,13 @@ The required SELECTION_CENTER response field denotes the center of either the
 outlined or highlighted content in the full 768 x 1024 overview, independently
 of the question box or detail crop. Exactly one finite, in-bounds pair is required;
 missing, ambiguous or invalid coordinates stop processing before verification or
-navigation. Rust normalizes the pair to [0, 1] and writes `Q @ (x, y): question`,
-rounded to two decimal places with trailing zeros omitted. The tag stays with its
-answer through undo/redo; earlier untagged answers remain unchanged. Recognition
+navigation. Rust normalizes the pair to [0, 1], rounded to two decimal places with
+trailing zeros omitted, and writes matching `<Start of Q-A block for Q @ (x, y)>`
+and `<End of Q-A block for Q @ (x, y)>` delimiter lines around ordinary `Q:` and
+`A:` content. Both delimiters stay with the complete block through undo/redo.
+Earlier plain-Q or coordinate-Q answers remain unchanged; there is no migration.
+Future follow-up extraction and scrolled-page recognition are separate work and
+must handle legacy text explicitly. Recognition
 and approximate center placement remain model-based, not precise region detection.
 
 Modern RM2 framebuffer capture uses neutral-preserving luminance from BGRA pixels.

@@ -79,7 +79,7 @@ fn preserves_prior(before: &NativeText, after: &NativeText) -> bool {
     if !last.characters.is_empty() {
         return false;
     }
-    // The empty insertion paragraph becomes the owned Q line. Its old style is
+    // The empty insertion paragraph becomes the owned opening delimiter. Its old style is
     // not unrelated visible content; every preceding paragraph remains exact.
     let prefix = before.paragraphs.len() - 1;
     after.paragraphs.len() >= prefix
@@ -244,8 +244,9 @@ mod tests {
             supported: true,
         }
     }
-    const BEFORE: &str = "Header\n\nQ: old?\nA: old.\n---\n";
-    const BLOCK: &str = "Q @ (0.5, 0.22): new?\n\nA: x^2 +/- 1.\n---\n";
+    const BEFORE: &str =
+        "Header\n\nQ: old?\nA: old.\n---\nQ @ (0.25, 0.75): later?\n\nA: preserved.\n---\n";
+    const BLOCK: &str = "<Start of Q-A block for Q @ (0.5, 0.22)>\nQ: new?\n\nA: x^2 +/- 1.\n<End of Q-A block for Q @ (0.5, 0.22)>\n";
     fn armed() -> (History, PageState, PageState) {
         let before = page(BEFORE, 1);
         let after = page(&format!("{BEFORE}{BLOCK}"), 2);
@@ -261,7 +262,7 @@ mod tests {
             history.begin(Action::Undo, &applied),
             Some(Command::DeleteSuffix {
                 characters: BLOCK.len(),
-                paragraphs: 4,
+                paragraphs: 5,
             })
         );
         assert_eq!(history.state(), State::Busy);
@@ -323,10 +324,19 @@ mod tests {
     #[test]
     fn oversized_answers_never_start_an_unbounded_native_selection() {
         let before = page(BEFORE, 1);
-        let limit = format!("{}\n", "a".repeat(MAX_CHARACTERS - 1));
+        let compose = |answer: &str| {
+            super::super::Workflow::compose_qa(
+                "Why?",
+                answer,
+                crate::analysis::SelectionCenter::from_pixels(384.0, 512.0, 768, 1024).unwrap(),
+            )
+        };
+        let answer = "a".repeat(MAX_CHARACTERS - compose("").len());
+        let limit = compose(&answer);
+        assert_eq!(limit.len(), MAX_CHARACTERS);
         let mut history = History::default();
         assert!(history.arm(before.clone(), page(&format!("{BEFORE}{limit}"), 2), &limit));
-        let oversized = format!("a{limit}");
+        let oversized = compose(&format!("a{answer}"));
         assert!(!history.arm(before, page(&format!("{BEFORE}{oversized}"), 3), &oversized));
         assert_eq!(history.state(), State::Empty);
     }
@@ -469,9 +479,22 @@ mod tests {
     #[test]
     fn paragraph_cap_refuses_before_any_selection() {
         let before = page(BEFORE, 1);
-        let block = "\n".repeat(MAX_PARAGRAPHS + 1);
-        let after = page(&format!("{BEFORE}{block}"), 2);
+        let compose = |lines: usize| {
+            super::super::Workflow::compose_qa(
+                "Why?",
+                &"answer\n".repeat(lines),
+                crate::analysis::SelectionCenter::from_pixels(384.0, 512.0, 768, 1024).unwrap(),
+            )
+        };
+        let limit = compose(MAX_PARAGRAPHS - 5);
+        assert_eq!(
+            limit.bytes().filter(|b| *b == b'\n').count(),
+            MAX_PARAGRAPHS
+        );
         let mut history = History::default();
+        assert!(history.arm(before.clone(), page(&format!("{BEFORE}{limit}"), 2), &limit));
+        let block = compose(MAX_PARAGRAPHS - 4);
+        let after = page(&format!("{BEFORE}{block}"), 3);
         assert!(!history.arm(before, after.clone(), &block));
         assert_eq!(history.begin(Action::Undo, &after), None);
     }

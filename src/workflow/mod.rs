@@ -646,7 +646,7 @@ impl Workflow {
         answer: &str,
         center: crate::analysis::SelectionCenter,
     ) -> String {
-        format!("Q @ {center}: {question}\n\nA: {answer}\n---\n")
+        format!("<Start of Q-A block for Q @ {center}>\nQ: {question}\n\nA: {answer}\n<End of Q-A block for Q @ {center}>\n")
     }
 
     /// Save the header pattern for future fast detection
@@ -812,14 +812,27 @@ mod page_tests {
     }
 
     #[test]
-    fn qa_format_preserves_values_lines_and_separator() {
+    fn qa_format_preserves_values_lines_and_matching_delimiters() {
         assert_eq!(
             Workflow::compose_qa(
                 "G unc.?",
                 "G = (6.674215 +/- 0.000092) * 10^-11\nunits",
                 crate::analysis::SelectionCenter::from_pixels(384.0, 512.0, 768, 1024).unwrap()
             ),
-            "Q @ (0.5, 0.5): G unc.?\n\nA: G = (6.674215 +/- 0.000092) * 10^-11\nunits\n---\n"
+            "<Start of Q-A block for Q @ (0.5, 0.5)>\nQ: G unc.?\n\nA: G = (6.674215 +/- 0.000092) * 10^-11\nunits\n<End of Q-A block for Q @ (0.5, 0.5)>\n"
         );
+    }
+
+    #[test]
+    fn qa_delimiters_share_normalized_endpoint_coordinates() {
+        for (x, y, expected) in [(0.0, 1024.0, "(0, 1)"), (768.0, 0.0, "(1, 0)")] {
+            let block = Workflow::compose_qa(
+                "Why?",
+                "Because.",
+                crate::analysis::SelectionCenter::from_pixels(x, y, 768, 1024).unwrap(),
+            );
+            assert_eq!(block, format!("<Start of Q-A block for Q @ {expected}>\nQ: Why?\n\nA: Because.\n<End of Q-A block for Q @ {expected}>\n"));
+            assert_eq!(block.bytes().filter(|b| *b == b'\n').count(), 5);
+        }
     }
 }
