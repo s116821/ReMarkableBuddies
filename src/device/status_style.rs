@@ -1024,16 +1024,33 @@ impl Lease {
             state.image.dimensions() == self.baseline.dimensions(),
             "Status image dimensions changed"
         );
-        ensure!(
-            (0..1024).all(|y| (0..768).all(|x| {
-                x < 61
+        let changed = (0..1024).find_map(|y| {
+            (0..768).find_map(|x| {
+                let unchanged = x < 61
                     || (x < 280 && (61..651).contains(&y))
                     || (x >= 686 && y >= 922)
-                    || state.image.get_pixel(x, y).0[0].abs_diff(self.baseline.get_pixel(x, y).0[0])
-                        <= 8
-            })),
-            "Status page image changed; restoration stopped"
-        );
+                    || state.image.get_pixel(x, y).0[0]
+                        .abs_diff(self.baseline.get_pixel(x, y).0[0])
+                        <= 8;
+                (!unchanged).then_some((x, y))
+            })
+        });
+        if let Some((x, y)) = changed {
+            if matches!(
+                std::env::var("READER_BUDDY_DEBUG_DUMP").as_deref(),
+                Ok("1" | "true")
+            ) {
+                // Fixed, bounded opt-in evidence; never replace the model capture.
+                for (name, image) in [("before", &self.baseline), ("rejected", &state.image)] {
+                    if let Err(error) =
+                        image.save(format!("/tmp/reader-buddy-status-lease-{name}.png"))
+                    {
+                        log::warn!("Could not save status diagnostic: {error}");
+                    }
+                }
+            }
+            anyhow::bail!("Status page image changed at ({x}, {y}); restoration stopped");
+        }
         let ui = controls(&state.image).context("Status toolbar layout changed")?;
         Ok((state, ui))
     }
