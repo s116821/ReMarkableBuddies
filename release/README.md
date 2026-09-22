@@ -1,7 +1,7 @@
 # Release tooling and verification
 
-Requirements are public in `openspec/specs/release-versioning` (after canonical sync)
-and the corresponding change proposal. The implementation uses git-cliff **2.14.2**
+Requirements are public in `openspec/specs/release-versioning` and the archived
+`2026-09-22-tag-derived-releases` change proposal. The implementation uses git-cliff **2.14.2**
 for semantic version computation, release-it **19.0.6** for actual tag creation
 and vergen-gitcl **10.0.3** for Rust metadata.
 No private board, account connector, API key or development tablet is needed.

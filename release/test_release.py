@@ -143,6 +143,19 @@ class ReleaseTests(unittest.TestCase):
         self.fixture.commit("test(REM-22): refine scenario", "docs/simulator/scenarios/blank-answer.json")
         self.assertEqual(self.fixture.plan().tag, "v0.1.13")
 
+    def test_nested_skill_documentation_and_scripts_match_git_cliff(self):
+        for root in [".agents", ".codex"]:
+            with self.subTest(root=root), tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
+                fixture = Fixture(Path(temp))
+                markdown = f"{root}/skills/tool/references/guide.md"
+                self.assertTrue(documentation(markdown))
+                fixture.commit("docs(REM-30): explain skill", markdown)
+                self.assertIsNone(fixture.plan())
+                script = f"{root}/skills/tool/scripts/check.py"
+                self.assertFalse(documentation(script))
+                sha = fixture.commit("test(REM-30): check skill", script)
+                self.assertEqual(fixture.plan(), release.Release("v0.1.13", sha))
+
     def test_retry_after_tag_and_partial_upload_preserves_sha(self):
         sha = self.fixture.commit("feat(REM-9): feature", "src/main.rs")
         self.fixture.push()
