@@ -7,46 +7,45 @@ Describe the implemented platform runtime contracts, initially baselined from v0
 ## Requirements
 
 ### Requirement: Runtime startup and configuration
-The executable SHALL load an optional .env file before argument parsing, default to model gpt-5.6-terra and trigger corner LL, and read the API key only from OPENAI_API_KEY, with OPENAI_BASE_URL or --base-url selecting the endpoint. Invalid corner values SHALL fail normal workflow startup; capture-only execution exits before workflow configuration. Source: src/main.rs Args/main; src/llm/openai.rs new/from_env.
+The executable SHALL load an optional .env before argument parsing, default to model gpt-5.6-terra and corner LL, and support --api-key with OPENAI_API_KEY fallback and --base-url with OPENAI_BASE_URL fallback. Explicit CLI values SHALL take precedence. Normal configuration SHALL be validated before device initialization; absent or blank selected credentials SHALL fail without printing their values. Source: REM6/REM28/REM34; src/main.rs.
 
 #### Scenario: Normal initialization
-- **WHEN** normal execution starts with usable credentials and device access
-- **THEN** it validates credentials/configuration before device initialization, initializes cache/capture/input, waits 1000 ms for devices, and loops unless --once selects a single iteration.
+- **WHEN** usable normal configuration and device access are available
+- **THEN** the runtime initializes cache/capture/input, waits 1000 ms for devices, then waits for triggers in its continuous loop.
 
-#### Scenario: Missing credentials
-- **WHEN** no API key is supplied for normal execution
-- **THEN** initialization fails before workflow/device initialization.
+#### Scenario: Missing or blank credentials
+- **WHEN** no usable selected credential is supplied
+- **THEN** startup fails before device initialization with a value-free error.
 
 ### Requirement: Existing diagnostic flags
-The CLI SHALL expose only --simulate SCENARIO, --screenshot-only FILE, --model/-m, --base-url, --no-trigger, --once and --trigger-corner plus help/version. Removed --input-png, --save-screenshot, --no-draw, --api-key, --log-level and --debug-dump switches SHALL be rejected. Simulation SHALL be mutually exclusive with capture-only and normal workflow overrides. Source: src/main.rs Args/main.
+The production CLI SHALL expose only --api-key, --model/-m, --base-url, --trigger-corner, --log-level, --debug-dump and --simulate plus help/version. Other production flags SHALL be rejected. Simulation SHALL reject explicit normal key/model/endpoint/corner/dump overrides, while allowing logging control. Screenshot-only and one immediate native iteration SHALL remain available as explicitly built diagnostic examples using production components, outside the production CLI and distributed archives. Source: REM6/REM22/REM34.
 
-#### Scenario: Capture-only execution
-- **WHEN** --screenshot-only FILE is supplied
-- **THEN** capture is saved and the process exits before credential validation or input device initialization.
+#### Scenario: Image dump configuration
+- **WHEN** --debug-dump is present
+- **THEN** image dumps are enabled; otherwise READER_BUDDY_DEBUG_DUMP true/1 enables, absent/false/0 disables, and invalid values fail before device initialization.
 
-#### Scenario: Explicit diagnostic capture configuration
-- **WHEN** normal workflow startup reads READER_BUDDY_DEBUG_DUMP set to true or 1
-- **THEN** optional local image dumps are enabled; absent, false or 0 disables them, and other values fail configuration validation before device access.
+#### Scenario: Offline scenario
+- **WHEN** --simulate selects a scripted scenario
+- **THEN** it executes without real devices or credentials and preserves exact declared workflow assertions; scenario live mode remains explicit.
 
-#### Scenario: Trigger bypass
-- **WHEN** --no-trigger and --once are supplied
-- **THEN** the single iteration starts capture immediately without waiting for a gesture.
-
-#### Scenario: Local scenario
-- **WHEN** --simulate SCENARIO is supplied
-- **THEN** the structured bounded scenario executes without initializing real devices; scripted mode requires no API key, while explicit live mode requires provider credentials.
+#### Scenario: Bounded development tools
+- **WHEN** the screenshot example is invoked with its output path
+- **THEN** it captures without input initialization or credentials; the separate reader_once example runs one immediate production iteration using environment credentials and default model/corner.
 
 ### Requirement: Logging and service lifecycle
-The runtime SHALL use env_logger with millisecond timestamps, RUST_LOG filtering and fallback info. The supplied service SHALL run /opt/bin/reader-buddy from /home/root, require the configured environment file, write stdout/stderr to the journal and restart on failure after five seconds. Source: src/main.rs; deploy/reader-buddy.service.
+The runtime SHALL use env_logger with millisecond timestamps. --log-level SHALL validate off/error/warn/info/debug/trace and override RUST_LOG; absent explicit control SHALL use RUST_LOG, otherwise info globally and debug for Reader Buddy application targets. No dedicated debug enable toggle SHALL be required. The supplied service SHALL retain /opt/bin/reader-buddy from /home/root, its protected environment file, journal output and five-second restart-on-failure policy. Source: REM14/REM34; src/main.rs; deploy/reader-buddy.service.
+
+#### Scenario: Useful diagnostics by default
+- **WHEN** no explicit logging override is set
+- **THEN** Reader Buddy debug messages are enabled while dependency debug messages are disabled, and image dumps remain independently opt-in.
 
 #### Scenario: Service configuration
-- **WHEN** the supplied systemd unit is used
+- **WHEN** the supplied unit is used
 - **THEN** it reads /home/root/.config/reader-buddy/environment and orders after home.mount, xochitl.service and network-online.target.
 
 #### Scenario: Debug data exposure
-- **WHEN** verbose logging or debug dumps are enabled
-- **THEN** normal logs include question/answer text, debug logs include parsed model responses, and page images appear in explicitly enabled /tmp dumps; request diagnostics do not log the entire image-bearing request body.
-- **AND** explicit request diagnostics do not include API authorization headers.
+- **WHEN** default debug diagnostics are emitted
+- **THEN** logs may include question/answer and parsed model text but explicit request diagnostics exclude authorization headers and entire image-bearing request bodies; page images are saved only with dump opt-in.
 
 ### Requirement: Implemented product boundary
 The application SHALL process independent Reader Buddy iterations on real devices or the maintained simulator. It SHALL NOT yet implement Writer Buddy, follow-up conversation history, document retrieval, external search tools, persistent subject memory, handwriting personalization, cloud sync or native answer-page creation. Source: src/main.rs; src/workflow/orchestrator.rs; src/llm/openai.rs; src/simulator.
