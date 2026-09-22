@@ -79,7 +79,7 @@ fn preserves_prior(before: &NativeText, after: &NativeText) -> bool {
     if !last.characters.is_empty() {
         return false;
     }
-    // The empty insertion paragraph becomes the owned Q line. Its old style is
+    // The empty insertion paragraph becomes the owned opening delimiter. Its old style is
     // not unrelated visible content; every preceding paragraph remains exact.
     let prefix = before.paragraphs.len() - 1;
     after.paragraphs.len() >= prefix
@@ -244,8 +244,9 @@ mod tests {
             supported: true,
         }
     }
-    const BEFORE: &str = "Header\n\nQ: old?\nA: old.\n---\n";
-    const BLOCK: &str = "Q @ (0.5, 0.22): new?\n\nA: x^2 +/- 1.\n---\n";
+    const BEFORE: &str =
+        "Header\n\nQ: old?\nA: old.\n---\nQ @ (0.25, 0.75): later?\n\nA: preserved.\n---\n";
+    const BLOCK: &str = "<Start of Q-A block for Q @ (0.5, 0.22)>\nQ: new?\n\nA: x^2 +/- 1.\n<End of Q-A block for Q @ (0.5, 0.22)>\n";
     fn armed() -> (History, PageState, PageState) {
         let before = page(BEFORE, 1);
         let after = page(&format!("{BEFORE}{BLOCK}"), 2);
@@ -261,7 +262,7 @@ mod tests {
             history.begin(Action::Undo, &applied),
             Some(Command::DeleteSuffix {
                 characters: BLOCK.len(),
-                paragraphs: 4,
+                paragraphs: 5,
             })
         );
         assert_eq!(history.state(), State::Busy);
@@ -323,10 +324,19 @@ mod tests {
     #[test]
     fn oversized_answers_never_start_an_unbounded_native_selection() {
         let before = page(BEFORE, 1);
-        let limit = format!("{}\n", "a".repeat(MAX_CHARACTERS - 1));
+        let compose = |answer: &str| {
+            super::super::Workflow::compose_qa(
+                "Why?",
+                answer,
+                crate::analysis::SelectionCenter::from_pixels(384.0, 512.0, 768, 1024).unwrap(),
+            )
+        };
+        let answer = "a".repeat(MAX_CHARACTERS - compose("").len());
+        let limit = compose(&answer);
+        assert_eq!(limit.len(), MAX_CHARACTERS);
         let mut history = History::default();
         assert!(history.arm(before.clone(), page(&format!("{BEFORE}{limit}"), 2), &limit));
-        let oversized = format!("a{limit}");
+        let oversized = compose(&format!("a{answer}"));
         assert!(!history.arm(before, page(&format!("{BEFORE}{oversized}"), 3), &oversized));
         assert_eq!(history.state(), State::Empty);
     }
@@ -442,6 +452,56 @@ mod tests {
     }
 
     #[test]
+    fn native_delimited_append_removes_five_paragraphs_and_preserves_prior_block() {
+        let mut states = [page("", 1), page("", 2), page("", 3), page("", 4)];
+        for (state, bytes) in states.iter_mut().zip([
+            include_bytes!("../../tests/fixtures/native-history/delimited-before.rm").as_slice(),
+            include_bytes!("../../tests/fixtures/native-history/delimited-applied.rm").as_slice(),
+            include_bytes!("../../tests/fixtures/native-history/delimited-deleted.rm").as_slice(),
+            include_bytes!("../../tests/fixtures/native-history/delimited-restored.rm").as_slice(),
+        ]) {
+            state.content = crate::device::native_text::read(bytes).unwrap();
+        }
+        let expected = super::super::Workflow::compose_qa(
+            "Keep both delimiters?",
+            "Both boundaries belong to this block.",
+            crate::analysis::SelectionCenter::from_pixels(192.0, 768.0, 768, 1024).unwrap(),
+        );
+        assert_eq!(
+            states[1].content.text(),
+            format!("{}{expected}", states[0].content.text())
+        );
+        assert_eq!(states[0].content.text(), states[2].content.text());
+        assert_eq!(states[1].content, states[3].content);
+        let preserved = states[0].content.paragraphs.len() - 1;
+        assert_eq!(
+            states[0].content.paragraphs[..preserved],
+            states[2].content.paragraphs[..preserved]
+        );
+        assert_eq!(states[0].content.root_layout, states[2].content.root_layout);
+        assert_eq!(
+            states[0].content.scene_records,
+            states[2].content.scene_records
+        );
+        let mut history = History::default();
+        assert!(history.arm(states[0].clone(), states[1].clone(), &expected));
+        assert_eq!(
+            history.begin(Action::Undo, &states[1]),
+            Some(Command::DeleteSuffix {
+                characters: expected.len(),
+                paragraphs: 5,
+            })
+        );
+        history.finish(Ok(states[2].clone())).unwrap();
+        assert_eq!(
+            history.begin(Action::Redo, &states[2]),
+            Some(Command::RestoreDeletion)
+        );
+        history.finish(Ok(states[3].clone())).unwrap();
+        assert_eq!(history.state(), State::Applied);
+    }
+
+    #[test]
     fn tagged_append_with_changed_native_scene_cannot_claim_prior_ownership() {
         let mut before = page("", 1);
         before.content = crate::device::native_text::read(include_bytes!(
@@ -469,9 +529,22 @@ mod tests {
     #[test]
     fn paragraph_cap_refuses_before_any_selection() {
         let before = page(BEFORE, 1);
-        let block = "\n".repeat(MAX_PARAGRAPHS + 1);
-        let after = page(&format!("{BEFORE}{block}"), 2);
+        let compose = |lines: usize| {
+            super::super::Workflow::compose_qa(
+                "Why?",
+                &"answer\n".repeat(lines),
+                crate::analysis::SelectionCenter::from_pixels(384.0, 512.0, 768, 1024).unwrap(),
+            )
+        };
+        let limit = compose(MAX_PARAGRAPHS - 5);
+        assert_eq!(
+            limit.bytes().filter(|b| *b == b'\n').count(),
+            MAX_PARAGRAPHS
+        );
         let mut history = History::default();
+        assert!(history.arm(before.clone(), page(&format!("{BEFORE}{limit}"), 2), &limit));
+        let block = compose(MAX_PARAGRAPHS - 4);
+        let after = page(&format!("{BEFORE}{block}"), 3);
         assert!(!history.arm(before, after.clone(), &block));
         assert_eq!(history.begin(Action::Undo, &after), None);
     }

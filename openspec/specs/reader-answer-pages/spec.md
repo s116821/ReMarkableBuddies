@@ -3,9 +3,7 @@
 ## Purpose
 
 Describe the implemented reader answer pages contracts, initially baselined from v0.1.4. Known gaps are explicit and require a later change delta to alter.
-
 ## Requirements
-
 ### Requirement: Successor navigation and identity heuristic
 After agreement, the system SHALL recapture the source, swipe left toward its immediate successor, wait and compare masked screenshots. Similarity at least 0.999 SHALL mean no navigation occurred, causing an X on the source without a reverse swipe. Source: src/workflow/orchestrator.rs render_answer; src/workflow/navigation.rs; src/workflow/xochitl_integration.rs.
 
@@ -30,11 +28,11 @@ The classifier SHALL compare the current screenshot to white using masked graysc
 - **THEN** it is Invalid; the app does not ask a model to classify its header.
 
 ### Requirement: Header and Q&A rendering
-On Blank pages the system SHALL select body style, type === Reader Buddy Answers === with three newlines, wait 500 ms and attempt to cache the top-150-pixel header. On ExistingQA pages it SHALL omit the header and select body style. Both SHALL type Q @ (x, y): question with normalized selected-content coordinates formatted to at most two decimal places without redundant trailing zeroes, two newlines, A: answer, then a newline-delimited --- separator. Source: src/workflow/orchestrator.rs render_answer.
+On Blank pages the system SHALL select body style, type === Reader Buddy Answers === with three newlines, wait 500 ms and attempt to cache the top-150-pixel header. On ExistingQA pages it SHALL omit the header and select body style. Both SHALL enclose each new block in `<Start of Q-A block for Q @ (x, y)>` and `<End of Q-A block for Q @ (x, y)>`, using identical normalized selected-content coordinates formatted to at most two decimal places without redundant trailing zeroes. Between these delimiter lines the system SHALL type Q: question, two newlines and A: answer; a newline SHALL precede the closing delimiter and terminate it. The former --- footer SHALL NOT be emitted for new blocks. Source: REM-31; REM-11 comments55ffdaa9/fedb3b45/71501e9a; src/workflow/mod.rs compose_qa and orchestrator.rs render_answer.
 
 #### Scenario: Append
 - **WHEN** the successor is recognized as ExistingQA
-- **THEN** only the new Q&A block is typed; the coordinate tag belongs to the new Q&A, and no About entry or follow-up conversation is added. The successfully rendered block becomes the page-scoped last-Q&A transaction; existing content is excluded.
+- **THEN** only the new delimited Q&A block is typed; its coordinate association belongs to its initial question, and no About entry or follow-up conversation is added. The successfully rendered block becomes the page-scoped last-Q&A transaction; existing content is excluded.
 
 #### Scenario: Cache persistence
 - **WHEN** the service restarts
@@ -43,7 +41,15 @@ On Blank pages the system SHALL select body style, type === Reader Buddy Answers
 
 #### Scenario: Complete output boundary
 - **WHEN** Q&A typing completes successfully
-- **THEN** the exact composed block is eligible for the shared undo/redo session, while a partial typing failure creates no usable history.
+- **THEN** the exact composed block, including both delimiters and its final newline, is eligible for the shared undo/redo session, while a partial typing failure creates no usable history.
+
+#### Scenario: Highlight and outline coordinates
+- **WHEN** a highlighted or outlined selection has normalized center (0.5, 0.5)
+- **THEN** both boundary lines contain Q @ (0.5, 0.5), while the question inside begins with ordinary Q:.
+
+#### Scenario: Historical answers
+- **WHEN** an existing page contains plain-Q/--- or Q-@/--- answers
+- **THEN** appending a new delimited block preserves those existing answers exactly without migration, and does not claim to provide follow-up extraction or scrolled-page recognition.
 
 ### Requirement: Invalid successor recovery
 An Invalid successor SHALL trigger a source-identity check before any reverse swipe. If already on the saved source at similarity 0.999, recovery SHALL not navigate. Otherwise it SHALL attempt at most one previous-page swipe and verify the result once, with no retry after failed verification or an input/capture error. The caller SHALL attempt the existing failure X on the current page after recovery or recovery failure. Source: src/workflow/navigation.rs; src/workflow/mod.rs return_to_original_page; src/workflow/orchestrator.rs render_answer.

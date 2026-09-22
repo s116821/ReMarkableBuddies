@@ -17,3 +17,15 @@ operators-reordered.rm plusoperators-expected.txt preserve a32paragraphinline st
 tagged-applied/deleted/restored.rm record the REM-11 live highlighted-question cycle on RM2 firmware3.28.0.172, runtime9bf7757. Four simultaneous synthetic contacts held2200ms removed the complete Q @ (0.55, 0.24) block; two contacts restored it. The read-only production-parser regression checks exact header-only removal and restored text/styles, scene records and root layout. These snapshots do not establish physical-finger or model-localization accuracy.
 
 tagged-append-scene-change.rm preserves a later installed-service append whose history did not act. Compared with the prior completed tagged-restored snapshot, it adds native scene records. The replay verifies that this changed scene cannot claim ownership using the older snapshot. It does not prove the precise live pre-typing snapshot or attribute those records to a particular UI action; activity-drawing persistence is a hypothesis investigated separately.
+
+delimited-before/applied/deleted/restored.rm preserve the REM-31 offline native
+append cycle on RM2 firmware3.28.0.172, source89f72b8. A prior live-model answer
+with matching Start/End delimiters remains intact while a second deterministic
+block is appended, deleted and restored twice. The before snapshot is immediately
+before the diagnostic; later files were collected only after the production
+history adapter reported settled Applied/Undone states. The replay verifies exact
+production composition, five owned newline paragraphs, header/prior text/styles,
+scene records and root layout. Separate early gesture snapshots lagged the visible
+screen because persistence had not settled; they remain local evidence and are
+not presented here as settled native transaction fixtures. These captures do not
+establish physical-finger performance or resolve unrelated indicator/scene changes.
