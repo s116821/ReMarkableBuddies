@@ -196,21 +196,23 @@ def build(repo, release, directory):
         build_checkout(source, release, directory)
 
 
-def build_checkout(repo, release, directory):
+def build_checkout(repo, release, directory, target_dir=None):
     git(repo, "checkout", "--detach", release.tag)
     if git(repo, "rev-parse", "HEAD") != release.sha:
         raise ValueError("Checkout does not match release SHA")
     env = dict(os.environ, READER_BUDDY_RELEASE_TAG=release.tag, READER_BUDDY_RELEASE_SHA=release.sha)
+    target_dir = Path(target_dir or repo / "target").resolve()
     packages = {}
     for target in TARGETS:
         # cross run builds first, then executes --version under target emulation.
         output = subprocess.check_output(
-            ["cross", "run", "--locked", "--release", "--target", target, "--bin", "reader-buddy", "--", "--version"],
+            ["cross", "run", "--locked", "--release", "--target", target, "--target-dir", str(target_dir),
+             "--bin", "reader-buddy", "--", "--version"],
             cwd=repo, env=env, text=True).strip()
         if output.split()[-1:] != [release.tag[1:]]:
             raise ValueError(f"{target} reports {output!r}, expected {release.tag[1:]}")
         package = directory / f"reader-buddy-{target}.tar.gz"
-        binary = repo / "target" / target / "release" / "reader-buddy"
+        binary = target_dir / target / "release" / "reader-buddy"
         with tarfile.open(package, "w:gz") as archive:
             archive.add(binary, arcname="reader-buddy")
         packages[package.name] = sha256(package)

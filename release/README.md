@@ -46,6 +46,23 @@ The coordinator runs each target's binary with `cross run ... -- --version` befo
 packaging. This is emulator verification, not proof of tablet hardware behavior.
 Native feature verification follows the separate authorized-tablet checklist.
 
+To exercise the actual two-target builder before a release, commit the source and run:
+
+```sh
+python release/verify_tagged_build.py --output /tmp/reader-fixture-packages --target-dir target
+```
+
+This creates a temporary full clone, removes its remote, gives it a fixture tag,
+then runs the production build/package checks for both targets. Tags in the source
+repository remain untouched. The resulting packages are test artifacts, not releases.
+Use a suitable output path on Windows. On the tested Windows Docker Desktop setup,
+bind-mounted files appear owned by UID/GID 0; setting `CROSS_CONTAINER_UID=0` and
+`CROSS_CONTAINER_GID=0` for this trusted fixture matches that ownership. Other
+container setups should use their actual mount owner. Git's ownership checks remain
+enabled; no global or wildcard safe-directory exception is added. Clean clones use
+`core.autocrlf=false` so Linux sees the committed bytes. See cross's public
+[environment settings](https://github.com/cross-rs/cross/blob/main/docs/environment_variables.md).
+
 Cargo's version is a fixed unpublished package placeholder. Do not bump it for a
 release. Future registry packaging would need its own tag-derived manifest step;
 it is not a second application version source and is outside this binary workflow.
