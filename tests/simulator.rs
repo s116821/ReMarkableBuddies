@@ -89,7 +89,7 @@ fn invalid_successor_returns_without_attempting_an_activity_mark() {
         .trace
         .iter()
         .any(|event| event.page == 1
-            && matches!(event.action.as_str(), "statuscircle" | "statusclear")));
+            && matches!(event.action.as_str(), "statusstroke" | "statusclear")));
     assert_eq!(
         run.report
             .trace
@@ -106,19 +106,32 @@ fn indicators_clear_before_navigation_and_successful_output() {
     let run = run("blank-answer");
     assert!(run.report.pages.iter().all(|page| !page.indicator_visible));
     let trace = &run.report.trace;
+    let successor_paths: Vec<_> = trace
+        .iter()
+        .filter(|e| e.page == 1 && e.action == "status_path")
+        .map(|e| e.detail.as_str())
+        .collect();
+    assert_eq!(
+        successor_paths,
+        [
+            "Edge(AnswerReady, 0)",
+            "Edge(AnswerReady, 1)",
+            "Edge(AnswerReady, 2)"
+        ]
+    );
     let next = trace
         .iter()
         .position(|event| event.action == "next")
         .unwrap();
     assert!(trace[..next]
         .iter()
-        .any(|event| event.action == "statuscircle" && event.page == 0));
+        .any(|event| event.action == "statusstroke" && event.page == 0));
     assert!(trace[..next]
         .iter()
         .any(|event| event.action == "statusclear" && event.page == 0));
     assert!(trace[next..]
         .iter()
-        .any(|event| event.action == "statuscircle" && event.page == 1));
+        .any(|event| event.action == "statusstroke" && event.page == 1));
     assert!(trace[next..]
         .iter()
         .any(|event| event.action == "statusclear" && event.page == 1));
@@ -150,7 +163,7 @@ fn preexisting_corner_ink_suppresses_only_status_not_the_answer() {
         .trace
         .iter()
         .any(|event| event.page == 0
-            && matches!(event.action.as_str(), "statuscircle" | "statusclear")));
+            && matches!(event.action.as_str(), "statusstroke" | "statusclear")));
 }
 
 #[test]
@@ -167,37 +180,45 @@ fn failed_indicator_cleanup_prevents_navigation_and_answer() {
         .report
         .errors
         .iter()
-        .any(|error| error.contains("Clear owned activity circle")));
+        .any(|error| error.contains("Clear owned activity paths")));
     assert!(!run
         .report
         .trace
         .iter()
         .any(|event| matches!(event.action.as_str(), "next" | "previous" | "text")));
-    assert!(run
-        .report
-        .pages
-        .iter()
-        .all(|page| page.text.is_empty() && !page.indicator_visible));
-    assert!(run.report.pages[0].unchanged);
+    assert!(run.report.pages.iter().all(|page| page.text.is_empty()));
+    // The first failed erase can leave owned ink. Never perform a second erase
+    // merely to make the final image look clean after ownership is uncertain.
+    assert!(run.report.pages[0].indicator_visible);
+    assert!(!run.report.pages[0].unchanged);
+    assert_eq!(
+        run.report
+            .trace
+            .iter()
+            .filter(|event| event.action == "statusclear")
+            .count(),
+        1
+    );
 }
 
 #[test]
-fn partial_circle_error_is_cleaned_without_a_model_request() {
+fn partial_stroke_error_is_cleaned_without_a_model_request() {
     use remarkable_reader_buddy::simulator::scenario::{Effect, Fault};
     let mut scenario = load("blank-answer");
     scenario.faults.push(Fault {
-        operation: Operation::StatusCircle,
+        operation: Operation::StatusStroke,
         call: 1,
         effect: Effect::Error,
     });
     let run = execute(&scenario, &root()).unwrap();
     assert_eq!(run.report.errors.len(), 1);
     assert_eq!(run.report.model_calls, 0);
+    assert_eq!(run.report.pages[0].failure_codes, ["Device"]);
     assert!(run
         .report
         .pages
         .iter()
-        .all(|page| page.unchanged && !page.indicator_visible));
+        .all(|page| page.text.is_empty() && !page.indicator_visible));
 }
 
 #[test]
@@ -206,8 +227,8 @@ fn verification_progress_errors_are_not_successful_question_declines() {
     for cleanup_fails in [false, true] {
         let mut scenario = load("blank-answer");
         scenario.faults.push(Fault {
-            operation: Operation::StatusCircle,
-            call: 2,
+            operation: Operation::StatusStroke,
+            call: 10,
             effect: Effect::Error,
         });
         if cleanup_fails {
@@ -220,18 +241,58 @@ fn verification_progress_errors_are_not_successful_question_declines() {
         let run = execute(&scenario, &root()).unwrap();
         assert_eq!(run.report.model_calls, 1);
         assert_eq!(run.report.errors.len(), 1);
+        assert_eq!(
+            run.report.pages[0].failure_codes,
+            if cleanup_fails {
+                vec![]
+            } else {
+                vec!["Device".to_string()]
+            }
+        );
         assert!(run.report.errors[0].contains("Question verification progress failed"));
         assert!(!run
             .report
             .trace
             .iter()
-            .any(|event| matches!(event.action.as_str(), "next" | "previous" | "text" | "line")));
-        assert!(run
-            .report
-            .pages
+            .any(|event| matches!(event.action.as_str(), "next" | "previous" | "text")));
+        assert!(run.report.pages.iter().all(|page| page.text.is_empty()));
+        assert_eq!(run.report.pages[0].indicator_visible, cleanup_fails);
+        assert!(run.report.pages[1..]
             .iter()
-            .all(|page| page.unchanged && !page.indicator_visible));
+            .all(|page| !page.indicator_visible));
+        if cleanup_fails {
+            assert_eq!(
+                run.report
+                    .trace
+                    .iter()
+                    .filter(|event| event.action == "statusclear")
+                    .count(),
+                1
+            );
+        }
     }
+}
+
+#[test]
+fn successful_input_without_visible_erasure_halts_before_navigation() {
+    use remarkable_reader_buddy::simulator::scenario::{Effect, Fault};
+    let mut scenario = load("blank-answer");
+    // Repeated input can be accepted without changing the native scene.
+    for call in [1, 2] {
+        scenario.faults.push(Fault {
+            operation: Operation::StatusClear,
+            call,
+            effect: Effect::NoMove,
+        });
+    }
+    let run = execute(&scenario, &root()).unwrap();
+    assert_eq!(run.report.errors.len(), 1);
+    assert!(run.report.errors[0].contains("cleanup left marks"));
+    assert!(run.report.pages[0].indicator_visible);
+    assert!(!run.report.trace.iter().any(|e| matches!(
+        e.action.as_str(),
+        "next" | "previous" | "body" | "text" | "line"
+    )));
 }
 
 #[test]
@@ -357,7 +418,10 @@ scenario_test!(
     render_error_suppresses_x_after_possible_partial_typing,
     "render-error"
 );
-scenario_test!(body_error_draws_x, "body-error");
+scenario_test!(
+    body_error_suppresses_marks_after_uncertain_viewport,
+    "body-error"
+);
 scenario_test!(short_tap_never_calls_model, "short-tap");
 
 #[test]
@@ -370,7 +434,7 @@ fn stationary_hold_uses_virtual_deadline() {
         .find(|e| e.action == "hold_triggered")
         .unwrap();
     assert_eq!(trigger.at_ms, 2000);
-    assert_eq!(run.report.virtual_ms, 4600); // hold + tap + navigation + settle + classify + header.
+    assert_eq!(run.report.virtual_ms, 4600 + 11 * 333); // Workflow delays plus staged strokes.
 }
 #[test]
 fn interrupted_hold_discards_elapsed_time() {

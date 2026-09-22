@@ -2,19 +2,22 @@
   "name": "body-error",
   "mode": "reader",
   "expect": {
-    "errors": [],
+    "errors": [
+      "Injected Body error"
+    ],
     "x_count": {
       "0": 0,
-      "1": 1
+      "1": 0
     },
     "unchanged_pages": [
-      0
+      0,
+      1
     ],
     "operations": {
       "body": 1,
       "capture": 4,
       "text": 0,
-      "line": 2,
+      "line": 0,
       "previous": 0,
       "next": 1
     },
@@ -23,7 +26,8 @@
     "text": {
       "0": "",
       "1": ""
-    }
+    },
+    "failure_codes": {}
   },
   "replies": [
     {

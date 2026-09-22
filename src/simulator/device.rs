@@ -27,18 +27,20 @@ pub struct Page {
     pub text: String,
     pub lines: Vec<((i32, i32), (i32, i32))>,
     pub indicator_visible: bool,
+    pub indicator_paths: Vec<(crate::workflow::indicator::Stroke, u8)>,
 }
 impl Page {
     pub fn image(&self) -> RgbaImage {
         let mut image = self.background.clone();
         raster::text(&mut image, &self.text);
-        if self.indicator_visible {
-            for pair in crate::workflow::indicator::circle_points().windows(2) {
+        for (stroke, passes) in &self.indicator_paths {
+            let shade = 180u8.saturating_sub(passes.saturating_mul(40));
+            for pair in stroke.points().windows(2) {
                 imageproc::drawing::draw_line_segment_mut(
                     &mut image,
                     (pair[0].0 as f32, pair[0].1 as f32),
                     (pair[1].0 as f32, pair[1].1 as f32),
-                    Rgba([0, 0, 0, 255]),
+                    Rgba([shade, shade, shade, 255]),
                 );
             }
         }
@@ -51,6 +53,36 @@ impl Page {
             );
         }
         image
+    }
+    pub fn failure_codes(&self) -> Vec<String> {
+        use crate::workflow::indicator::Failure;
+        let codes = [
+            Failure::Selection,
+            Failure::Transcription,
+            Failure::Provider,
+            Failure::NoSuccessor,
+            Failure::InvalidSuccessor,
+            Failure::Device,
+        ];
+        self.lines
+            .windows(3)
+            .filter_map(|lines| {
+                use crate::workflow::indicator::{BOTTOM, LEFT, RIGHT, TOP, X_INSET};
+                let (l, t, r, b) = (
+                    LEFT + X_INSET,
+                    TOP + X_INSET,
+                    RIGHT - X_INSET,
+                    BOTTOM - X_INSET,
+                );
+                if lines[0] != ((l, t), (r, b)) || lines[1] != ((r, t), (l, b)) {
+                    return None;
+                }
+                codes
+                    .iter()
+                    .find(|code| code.segment() == lines[2])
+                    .map(|code| format!("{code:?}"))
+            })
+            .collect()
     }
     pub fn x_count(&self) -> usize {
         self.lines
@@ -79,6 +111,8 @@ pub struct Event {
 }
 
 pub struct State {
+    pub status_style_active: bool,
+    pub status_style_restored: bool,
     #[cfg(test)]
     pub idle_events: VecDeque<Vec<crate::device::interaction::Interaction>>,
     pub pages: Vec<Page>,
@@ -179,6 +213,7 @@ impl State {
                 text: spec.text.clone(),
                 lines: Vec::new(),
                 indicator_visible: false,
+                indicator_paths: Vec::new(),
             });
         }
         let initial = pages.iter().map(Page::image).collect();
@@ -193,6 +228,8 @@ impl State {
             pages,
             initial,
             active: scenario.active_page,
+            status_style_active: false,
+            status_style_restored: false,
             clock: 0,
             events: Vec::new(),
             counts: BTreeMap::new(),
@@ -218,6 +255,22 @@ impl State {
         });
     }
     fn operation(&mut self, operation: Operation) -> Result<Option<Effect>> {
+        if matches!(
+            operation,
+            Operation::Capture
+                | Operation::Next
+                | Operation::Previous
+                | Operation::Text
+                | Operation::Body
+                | Operation::HeaderSave
+                | Operation::HistorySnapshot
+                | Operation::HistoryMutation
+        ) {
+            anyhow::ensure!(
+                !self.status_style_active,
+                "Status preferences not restored before {operation:?}"
+            );
+        }
         if matches!(
             operation,
             Operation::Capture
@@ -506,6 +559,7 @@ impl DeviceBackend for SimDevice {
             text: String::new(),
             lines: Vec::new(),
             indicator_visible: false,
+            indicator_paths: Vec::new(),
         };
         Ok(())
     }
@@ -530,19 +584,71 @@ impl DeviceBackend for SimDevice {
         self.0.borrow_mut().event("progress", message.unwrap_or(""));
         Ok(())
     }
-    fn status_circle(&mut self) -> Result<()> {
+    fn status_stroke(&mut self, stroke: crate::workflow::indicator::Stroke) -> Result<()> {
         let mut state = self.0.borrow_mut();
+        anyhow::ensure!(
+            state.status_style_active && !state.status_style_restored,
+            "Status stroke without style lease"
+        );
         let page = state.active;
         // A failed native draw may already have emitted part of a stroke.
         state.pages[page].indicator_visible = true;
-        state.operation(Operation::StatusCircle)?;
+        if let Some((_, count)) = state.pages[page]
+            .indicator_paths
+            .iter_mut()
+            .find(|(s, _)| *s == stroke)
+        {
+            *count = count.saturating_add(1);
+        } else {
+            state.pages[page].indicator_paths.push((stroke, 1));
+        }
+        state.event("status_path", format!("{stroke:?}"));
+        state.operation(Operation::StatusStroke)?;
         Ok(())
     }
-    fn status_clear(&mut self) -> Result<()> {
+    fn status_clear(&mut self, strokes: &[crate::workflow::indicator::Stroke]) -> Result<()> {
         let mut state = self.0.borrow_mut();
-        state.operation(Operation::StatusClear)?;
+        anyhow::ensure!(
+            state.status_style_active && !state.status_style_restored,
+            "Cleanup requires unrestored owned lease"
+        );
+        state.operation(Operation::StatusStyleRestore)?;
+        state.status_style_restored = true;
+        state.operation(Operation::StatusCleanupCheckpoint)?;
+        let effect = state.operation(Operation::StatusClear)?;
+        anyhow::ensure!(
+            effect != Some(Effect::NoMove),
+            "Native status cleanup left marks or the corner changed; further input stopped"
+        );
         let page = state.active;
-        state.pages[page].indicator_visible = false;
+        state.pages[page]
+            .indicator_paths
+            .retain(|(stroke, _)| !strokes.contains(stroke));
+        state.pages[page].indicator_visible = !state.pages[page].indicator_paths.is_empty();
+        Ok(())
+    }
+    fn monotonic(&self) -> Duration {
+        Duration::from_millis(self.0.borrow().clock)
+    }
+    fn status_style_begin(&mut self) -> Result<bool> {
+        let mut state = self.0.borrow_mut();
+        anyhow::ensure!(!state.status_style_active, "Duplicate style acquisition");
+        if state.operation(Operation::StatusStyleBegin)? == Some(Effect::Unavailable) {
+            return Ok(false);
+        }
+        state.status_style_active = true;
+        state.status_style_restored = false;
+        Ok(true)
+    }
+    fn status_style_end(&mut self) -> Result<()> {
+        let mut state = self.0.borrow_mut();
+        if !state.status_style_restored {
+            state.operation(Operation::StatusStyleRestore)?;
+            state.status_style_restored = true;
+        }
+        state.operation(Operation::StatusStyleEnd)?;
+        state.status_style_active = false;
+        state.status_style_restored = false;
         Ok(())
     }
     fn status_suppressed(&mut self) {

@@ -263,13 +263,21 @@ fn main() -> Result<()> {
             sleep(Duration::from_millis(duration));
             touch.touch_stop()?;
         }
-        Some("strokes") => {
+        Some("strokes") | Some("erase-strokes") => {
             let path = args
                 .get(2)
                 .ok_or_else(|| anyhow::anyhow!("stroke JSON path required"))?;
             let strokes: Vec<Vec<(i32, i32)>> = serde_json::from_slice(&std::fs::read(path)?)?;
             let mut pen = Pen::new(false);
+            anyhow::ensure!(
+                strokes.len() <= 100 && strokes.iter().all(|s| s.len() <= 256),
+                "Stroke diagnostic exceeds bounded path allowance"
+            );
             for stroke in strokes {
+                if args[1] == "erase-strokes" {
+                    pen.erase_path_screen(&stroke)?;
+                    continue;
+                }
                 for segment in stroke.windows(2) {
                     pen.draw_line_screen(segment[0], segment[1])?;
                 }
@@ -317,7 +325,15 @@ fn main() -> Result<()> {
                 vec![(438, 413), (439, 415)],
                 vec![(260, 355), (475, 355), (475, 440), (260, 440), (260, 355)],
             ];
+            anyhow::ensure!(
+                strokes.len() <= 100 && strokes.iter().all(|s| s.len() <= 256),
+                "Stroke diagnostic exceeds bounded path allowance"
+            );
             for stroke in strokes {
+                if args[1] == "erase-strokes" {
+                    pen.erase_path_screen(&stroke)?;
+                    continue;
+                }
                 for segment in stroke.windows(2) {
                     pen.draw_line_screen(
                         (
@@ -367,24 +383,43 @@ fn main() -> Result<()> {
                 workflow.capture_page_data()?,
             )?;
             let result = (|| -> Result<()> {
-                let started = std::time::Instant::now();
-                workflow.tick_indicator()?;
-                println!("First circle tick: {} ms", started.elapsed().as_millis());
-                sleep(Duration::from_millis(800));
-                let started = std::time::Instant::now();
-                workflow.tick_indicator()?;
-                println!("Second circle tick: {} ms", started.elapsed().as_millis());
-                sleep(Duration::from_millis(800));
+                use remarkable_reader_buddy::workflow::indicator::Stage;
                 let mut active = Screenshot::new()?;
+                for stage in [Stage::Preparing, Stage::AnswerPending, Stage::AnswerReady] {
+                    workflow.set_indicator_stage(stage);
+                    workflow.finish_indicator_stage()?;
+                    active.take_screenshot()?;
+                    active.save_image(&format!("/tmp/reader-buddy-status-{stage:?}.png"))?;
+                }
+                workflow.auxiliary_indicator()?;
+                for _ in 0..6 {
+                    workflow.tick_indicator()?;
+                }
                 active.take_screenshot()?;
                 active.save_image("/tmp/reader-buddy-status-active.png")?;
                 Ok(())
             })();
             let started = std::time::Instant::now();
             let cleanup = workflow.clear_indicator();
-            println!("Circle cleanup: {} ms", started.elapsed().as_millis());
+            println!("Owned-path cleanup: {} ms", started.elapsed().as_millis());
             result?;
             cleanup?;
+        }
+        Some("failure-code") => {
+            use remarkable_reader_buddy::workflow::indicator::Failure;
+            let code = match args.get(2).map(String::as_str) {
+                Some("selection") => Failure::Selection,
+                Some("transcription") => Failure::Transcription,
+                Some("provider") => Failure::Provider,
+                Some("no-successor") => Failure::NoSuccessor,
+                Some("invalid-successor") => Failure::InvalidSuccessor,
+                Some("device") => Failure::Device,
+                _ => bail!("failure-code requires selection/transcription/provider/no-successor/invalid-successor/device"),
+            };
+            let mut workflow =
+                remarkable_reader_buddy::Workflow::new(false, TriggerCorner::LowerLeft, false)?;
+            workflow.capture_page_data()?;
+            workflow.draw_failure(code)?;
         }
         Some("return-check") => {
             let mut workflow =
@@ -393,7 +428,13 @@ fn main() -> Result<()> {
             workflow.navigate_to_next_page()?;
             sleep(Duration::from_millis(800));
             let outcome = workflow.return_to_original_page(&original)?;
-            workflow.draw_failure_x()?;
+            workflow.draw_failure(
+                if outcome == remarkable_reader_buddy::workflow::ReturnOutcome::Unconfirmed {
+                    remarkable_reader_buddy::workflow::indicator::Failure::Device
+                } else {
+                    remarkable_reader_buddy::workflow::indicator::Failure::InvalidSuccessor
+                },
+            )?;
             println!("Return outcome: {outcome:?}");
         }
         Some("round-trip") => {

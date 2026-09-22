@@ -118,22 +118,30 @@ impl LLMEngine for OpenAI {
         &mut self,
         progress: &mut dyn FnMut() -> Result<()>,
     ) -> Result<String> {
-        progress()?;
         std::thread::scope(|scope| {
             let (sender, receiver) = std::sync::mpsc::sync_channel(1);
             let worker = scope.spawn(move || {
                 let _ = sender.send(self.execute());
             });
+            let mut due = std::time::Instant::now();
             let result = loop {
-                match receiver.recv_timeout(std::time::Duration::from_millis(750)) {
+                match receiver
+                    .recv_timeout(due.saturating_duration_since(std::time::Instant::now()))
+                {
                     Ok(result) => break result,
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                         break Err(anyhow::anyhow!("Model worker disconnected"));
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        let started = std::time::Instant::now();
                         if let Err(error) = progress() {
                             break Err(error);
                         }
+                        due = started
+                            + crate::workflow::indicator::next_deadline(
+                                std::time::Duration::ZERO,
+                                started.elapsed(),
+                            );
                     }
                 }
             };

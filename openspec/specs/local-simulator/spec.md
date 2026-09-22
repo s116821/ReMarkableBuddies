@@ -59,11 +59,11 @@ Documentation SHALL attribute modeled dimensions, holds, delays, masks and recov
 
 ### Requirement: Observable indicator lifecycle
 
-The simulator SHALL exercise production indicator eligibility and cleanup, record temporary circle state and ordered progress events, and support indicator faults. Temporary marks SHALL be distinct from persistent Q&A/line state. Captures, navigation and typing SHALL be asserted free of temporary circles, with deterministic scripted timing and separate explicit live wait tests. Source: src/simulator/device.rs; src/simulator/mod.rs; src/simulator/scenario.rs; tests/simulator.rs; tests/live_simulator.rs.
+The simulator SHALL exercise production indicator eligibility and cleanup, record shared triangle/circle path state, repeated-stroke darkness, stage transitions, stroke times and ordered progress events, and support indicator faults. Temporary marks SHALL be distinct from persistent Q&A/line state. Captures, navigation and typing SHALL be asserted free of temporary marks, with deterministic scripted timing and separate explicit live wait tests. Source: src/simulator/device.rs; src/simulator/mod.rs; src/simulator/scenario.rs; tests/simulator.rs; tests/live_simulator.rs.
 
 #### Scenario: Completion and failure
 - **WHEN** scripted success, rejection, provider failure or recovery scenarios execute
-- **THEN** reports expose ticks and cleanup ordering and no completed successful page retains a temporary circle.
+- **THEN** reports expose ticks and cleanup ordering and no completed successful page retains a temporary mark.
 
 #### Scenario: Existing content
 - **WHEN** the corner contains an input sentinel
@@ -72,6 +72,19 @@ The simulator SHALL exercise production indicator eligibility and cleanup, recor
 #### Scenario: Faulted cleanup
 - **WHEN** a declared cleanup operation fails
 - **THEN** assertions can detect the error, remaining mark state and absence of subsequent navigation/output.
+
+#### Scenario: Geometry and cadence
+- **WHEN** scripted stages and repeated pending ticks execute
+- **THEN** the raster uses production geometry and virtual timestamps verify 333 ms stroke scheduling, stage completion and auxiliary-circle distinction.
+
+#### Scenario: Failure code and partial stroke
+- **WHEN** a classified failure or partial status-draw fault is injected
+- **THEN** reports expose the appropriate persistent segment or bounded owned-path cleanup, and cleanup failure prevents navigation/output.
+
+
+#### Scenario: Native erase has no visible effect
+- **WHEN** StatusClear receives a no_move fault representing accepted input without visible cleanup
+- **THEN** marks remain and the workflow stops before navigation or typing.
 
 ### Requirement: Reproducible history sessions
 The simulator SHALL drive the shared last-Q&A history state using declared undo/redo holds, departures/returns, new iterations and intervening edits. Reports SHALL expose transaction state, ordered events and exact page text. Faults SHALL exercise uncertain/partial mutation without silently claiming rollback. Source: src/simulator/scenario.rs; src/simulator/device.rs; tests/simulator.rs.
@@ -130,3 +143,26 @@ The simulator SHALL exercise production center parsing, normalization and Q&A fo
 #### Scenario: Tagged history
 - **WHEN** a tagged Q&A is undone and redone
 - **THEN** its tag and full text toggle together, preserving the header and earlier untagged answers with no extra model calls.
+
+### Requirement: Status style lifecycle and rollback model
+
+The local test suite SHALL model status-style acquisition, unavailability and restoration faults, and reject capture/navigation/typing/history while a style lease remains active. A deterministic toolbar state model SHALL exercise exact primary/secondary preference restoration, partial acquisition actions, page changes and pre-mutation layout refusal. Native screenshot fixtures SHALL check the supported layout classifier. These models SHALL NOT claim native UI timing, persistence convergence or legibility proof.
+
+#### Scenario: Restoration fails
+- **WHEN** native style restoration or the final cleanup verification is modeled to fail
+- **THEN** further page input and later iterations stop while unresolved style/cleanup state remains.
+
+#### Scenario: Unsupported controls
+- **WHEN** style acquisition reports an unsupported layout
+- **THEN** status is suppressed without repeatedly toggling controls or preventing model analysis.
+
+
+#### Scenario: Stale preference file during style probing
+- **WHEN** actual UI settings differ from advisory persisted preferences and an input fails during probing, setting or restoration
+- **THEN** modeled rollback uses durably captured UI values only, restores only potentially changed dimensions, and stops after unverified restoration instead of copying the stale file's values.
+
+#### Scenario: Temporary cleanup transaction ordering
+- **WHEN** temporary paths are cleared
+- **THEN** the model observes restored original style before erasure and a separate successful finish before releasing its lease.
+- **AND** faults at restoration, pending-cleanup checkpoint, erasure and final verification retain unresolved state and prohibit later input, including a second cleanup attempt.
+- **AND** native frame fixtures exercise erase-induced PDF redraw, unchanged invariant page regions and rejected viewport, owner, session and tool changes without weakening the pre-restoration guard.

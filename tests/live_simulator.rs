@@ -123,7 +123,7 @@ fn server_with_delay(
 }
 
 #[test]
-fn delayed_success_refreshes_circle_and_cleans_both_pages() {
+fn delayed_success_refreshes_staged_paths_and_cleans_both_pages() {
     let path = directory();
     let (endpoint, handle) = server_with_delay(replies(), false, Duration::from_millis(1100));
     let mut value = fixture();
@@ -141,7 +141,7 @@ fn delayed_success_refreshes_circle_and_cleans_both_pages() {
         .as_array()
         .unwrap()
         .iter()
-        .filter(|event| event["page"] == 0 && event["action"] == "statuscircle")
+        .filter(|event| event["page"] == 0 && event["action"] == "statusstroke")
         .count();
     assert!(source_ticks >= 4);
     assert!(report["pages"]

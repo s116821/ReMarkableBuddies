@@ -168,7 +168,7 @@ The highlighted illegible-question fixture also declines in separate live local 
 
 ## Progress lifecycle coverage
 
-The shared workflow now uses a guarded 50x50 status area. Simulator reports include `indicator_visible` per page and `statuscircle`, `statusclear` and `status_suppressed` trace events. Native pen input is serialized; the simulator rejects capture/navigation/typing while a temporary circle remains. This makes cleanup ordering observable rather than inferring it only from a final white corner.
+The shared workflow now uses a guarded 50x50 status area. Simulator reports include `indicator_visible` and `failure_codes` per page, `status_path` events identifying triangle stage/edge or auxiliary circle, and `statusstroke`, `statusclear` and `status_suppressed` operation events. Stage strokes target 333 ms starts; virtual delays let scripted tests exercise complete fast-stage transitions. Unique paths retain repeat counts for deterministic darkening and bounded cleanup. Native pen input is serialized; the simulator rejects capture/navigation/typing while a temporary status path remains. This makes cleanup ordering observable rather than inferring it only from a final white corner.
 
 Tests cover accepted output on both pages, preexisting corner strokes with continued answering, partial circle failures, cleanup failure blocking output/navigation, persistent failure across a page change, real local-HTTP delay callbacks, timeout and callback-error completion. Scripted ticks are deterministic and do not establish real-time display behavior. Native cleanup/tool behavior needs the separate hardware acceptance run.
 
@@ -200,3 +200,23 @@ Model locations are approximate. Repeated native readings of the same narrow
 highlight varied by several hundredths of a normalized axis; bounds checks do not
 prove that a predicted center lies inside the mark. Simulator replies establish
 routing and normalization, not visual accuracy or physical gesture recognition.
+
+
+Failure codes use the shared persistent X and one centered half-box segment:
+
+| Code | Segment | Condition |
+| --- | --- | --- |
+| Selection | Top | Missing, unreadable or ambiguous selection/question; malformed proposal |
+| Transcription | Right | Independent reading invalid or disagrees |
+| Provider | Bottom | Model/network unavailable or timeout |
+| NoSuccessor | Left | Forward navigation makes no movement |
+| InvalidSuccessor | Horizontal midpoint | Unsuitable page with confirmed source recovery |
+| Device | Vertical midpoint | Device, rendering or unconfirmed recovery failure |
+
+Scenario `expect.failure_codes` maps page indices to ordered code names. Occupied or unknown corners suppress these marks. Loop diagnostics stay in logs; single-iteration provider/device errors still propagate. Simulator rasterization models geometry and relative retracing darkness, not native brush width, e-ink refresh or persistence.
+
+
+Status-style tests also enforce acquisition/restoration around native marks. `status_style_begin` supports `unavailable` and error faults; `status_style_end` supports error faults. Capture, navigation, output and history reject an active lease. A separate deterministic toolbar model exercises every partial acquisition action, exact secondary/primary preferences and page-change refusal, with native image fixtures checking layout recognition. These tests do not prove physical menu timing, metadata persistence or visual legibility; those remain native acceptance gates.
+
+
+The toolbar model separates actual UI preferences from stale advisory document values (including actual Red/Thick while the file reports Black/Medium). Failure tests cover each acquisition/restoration input before and after its possible effect, both original slots, unknown Fineliner styles, and journal failure before input. Recovery tests enforce exclusive creation, immutable captured values, reserved rollback capacity, incomplete-tail refusal and retained evidence after I/O failure. Model results establish those control-flow invariants, not physical persistence timing; native menu screenshots remain necessary for current-preference restoration evidence.

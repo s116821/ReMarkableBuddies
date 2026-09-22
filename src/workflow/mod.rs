@@ -47,8 +47,15 @@ pub struct Workflow {
     debug_dump: bool,
     iteration_count: u32,
     indicator_eligible: bool,
-    indicator_owned: bool,
+    indicator_paths: Vec<indicator::Stroke>,
+    indicator_stage: indicator::Stage,
+    indicator_target: indicator::Stage,
+    indicator_edges: u8,
+    indicator_auxiliary: bool,
+    indicator_deadline: Option<std::time::Duration>,
+    failure_attempted: bool,
     indicator_cleanup_failed: bool,
+    indicator_style_active: bool,
     history: history::History,
 }
 
@@ -71,8 +78,15 @@ impl Workflow {
             debug_dump,
             iteration_count: 0,
             indicator_eligible: false,
-            indicator_owned: false,
+            indicator_paths: Vec::new(),
+            indicator_stage: indicator::Stage::Preparing,
+            indicator_target: indicator::Stage::Preparing,
+            indicator_edges: 0,
+            indicator_auxiliary: false,
+            indicator_deadline: None,
+            failure_attempted: false,
             indicator_cleanup_failed: false,
+            indicator_style_active: false,
             history: history::History::default(),
         }
     }
@@ -81,32 +95,124 @@ impl Workflow {
         self.device.delay(duration);
     }
 
+    pub fn set_indicator_stage(&mut self, stage: indicator::Stage) {
+        self.indicator_target = stage;
+        self.indicator_auxiliary = false;
+    }
+
+    pub fn finish_indicator_stage(&mut self) -> Result<()> {
+        if !self.indicator_eligible {
+            return Ok(());
+        }
+        while self.indicator_eligible
+            && (self.indicator_stage < self.indicator_target || self.indicator_edges < 3)
+        {
+            self.tick_indicator()?;
+        }
+        Ok(())
+    }
+
+    pub fn auxiliary_indicator(&mut self) -> Result<()> {
+        self.finish_indicator_stage()?;
+        self.indicator_auxiliary = true;
+        Ok(())
+    }
+
     pub fn tick_indicator(&mut self) -> Result<()> {
         self.invalidate_history();
-        if self.indicator_cleanup_failed {
-            anyhow::bail!("Status cleanup failed; further activity is stopped");
-        }
-        if self.indicator_eligible {
-            // Even a failed draw may have left a partial native stroke.
-            self.indicator_owned = true;
-            if let Err(error) = self.device.status_circle() {
-                self.clear_indicator()?;
-                return Err(error);
-            }
-        } else {
+        anyhow::ensure!(
+            !self.indicator_cleanup_failed,
+            "Status cleanup failed; further activity is stopped"
+        );
+        if !self.indicator_eligible {
             self.device.status_suppressed();
+            return Ok(());
+        }
+        if !self.begin_indicator_style()? {
+            return Ok(());
+        }
+        if let Some(deadline) = self.indicator_deadline {
+            self.device
+                .delay(deadline.saturating_sub(self.device.monotonic()));
+        }
+        if self.indicator_edges >= 3 && self.indicator_stage < self.indicator_target {
+            self.indicator_stage = self.indicator_stage.next();
+            self.indicator_edges = 0;
+        }
+        let stroke = if self.indicator_auxiliary {
+            indicator::Stroke::Auxiliary(self.indicator_stage)
+        } else {
+            indicator::Stroke::Edge(self.indicator_stage, self.indicator_edges % 3)
+        };
+        // Record ownership before input: even a failed draw can leave ink.
+        if !self.indicator_paths.contains(&stroke) {
+            self.indicator_paths.push(stroke);
+        }
+        let started = self.device.monotonic();
+        if let Err(error) = self.device.status_stroke(stroke) {
+            self.clear_indicator()?;
+            return Err(error);
+        }
+        self.indicator_deadline = Some(indicator::next_deadline(started, self.device.monotonic()));
+        if !self.indicator_auxiliary {
+            self.indicator_edges = if self.indicator_edges < 3 {
+                self.indicator_edges + 1
+            } else {
+                3 + (self.indicator_edges + 1) % 3
+            };
         }
         Ok(())
     }
 
     pub fn clear_indicator(&mut self) -> Result<()> {
-        if self.indicator_owned {
+        anyhow::ensure!(
+            !self.indicator_cleanup_failed,
+            "Status cleanup/restoration already failed; no further input permitted"
+        );
+        if !self.indicator_paths.is_empty() {
             self.invalidate_history();
-            if let Err(error) = self.device.status_clear() {
+            if let Err(error) = self.device.status_clear(&self.indicator_paths) {
                 self.indicator_cleanup_failed = true;
-                return Err(error.context("Clear owned activity circle"));
+                return Err(error.context("Clear owned activity paths"));
             }
-            self.indicator_owned = false;
+            self.indicator_paths.clear();
+        }
+        self.end_indicator_style()?;
+        self.indicator_deadline = None;
+        self.indicator_edges = 0;
+        self.indicator_stage = self.indicator_target;
+        self.indicator_auxiliary = false;
+        Ok(())
+    }
+
+    fn begin_indicator_style(&mut self) -> Result<bool> {
+        if self.indicator_style_active {
+            return Ok(true);
+        }
+        match self.device.status_style_begin() {
+            Ok(true) => {
+                self.indicator_style_active = true;
+                Ok(true)
+            }
+            Ok(false) => {
+                self.indicator_eligible = false;
+                self.device.status_suppressed();
+                Ok(false)
+            }
+            Err(error) => {
+                self.indicator_cleanup_failed = true;
+                Err(error)
+            }
+        }
+    }
+
+    fn end_indicator_style(&mut self) -> Result<()> {
+        if self.indicator_style_active {
+            if let Err(error) = self.device.status_style_end() {
+                self.indicator_cleanup_failed = true;
+                return Err(error);
+            }
+            self.indicator_style_active = false;
         }
         Ok(())
     }
@@ -123,6 +229,9 @@ impl Workflow {
         );
         self.clear_indicator()?;
         self.indicator_eligible = false;
+        self.indicator_stage = indicator::Stage::Preparing;
+        self.indicator_target = indicator::Stage::Preparing;
+        self.failure_attempted = false;
         Ok(())
     }
 
@@ -493,6 +602,8 @@ impl Workflow {
     pub fn set_body_text_mode(&mut self) -> Result<()> {
         self.invalidate_history();
         self.clear_indicator()?;
+        // Even a partial mode change can alter the viewport.
+        self.indicator_eligible = false;
         self.device.body_mode()?;
         Ok(())
     }
@@ -519,13 +630,20 @@ impl Workflow {
 
     /// Draw a guarded failure X in the same 50x50 status area.
     /// Used to indicate that no valid answer page was found
-    pub fn draw_failure_x(&mut self) -> Result<()> {
+    pub fn draw_failure(&mut self, failure: indicator::Failure) -> Result<()> {
+        if self.failure_attempted {
+            return Ok(());
+        }
+        self.failure_attempted = true;
         self.invalidate_history();
         info!("Drawing failure X in bottom-right corner");
 
         self.clear_indicator()?;
         if !self.indicator_eligible || self.indicator_cleanup_failed {
             self.device.status_suppressed();
+            return Ok(());
+        }
+        if !self.begin_indicator_style()? {
             return Ok(());
         }
         self.indicator_eligible = false;
@@ -538,10 +656,17 @@ impl Workflow {
 
         // Draw two diagonal lines to form an X (using screen coordinates)
         // Line 1: top-left to bottom-right
-        self.device.line((x_start, y_start), (x_end, y_end))?;
+        let result = (|| -> Result<()> {
+            self.device.line((x_start, y_start), (x_end, y_end))?;
 
-        // Line 2: top-right to bottom-left
-        self.device.line((x_end, y_start), (x_start, y_end))?;
+            // Line 2: top-right to bottom-left
+            self.device.line((x_end, y_start), (x_start, y_end))?;
+            let (from, to) = failure.segment();
+            self.device.line(from, to)?;
+            Ok(())
+        })();
+        self.end_indicator_style()?;
+        result?;
 
         debug!(
             "Failure X drawn at ({}, {}) to ({}, {})",

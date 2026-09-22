@@ -10,7 +10,7 @@
     },
     "active_page": 1,
     "operations": {
-      "line": 2,
+      "line": 3,
       "previous": 0,
       "capture": 3,
       "next": 1,
@@ -21,7 +21,12 @@
       "0": 0
     },
     "errors": [],
-    "model_calls": 2
+    "model_calls": 2,
+    "failure_codes": {
+      "1": [
+        "NoSuccessor"
+      ]
+    }
   },
   "replies": [
     {

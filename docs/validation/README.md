@@ -39,11 +39,61 @@ scripted navigation doubles in unit tests; do not report those as physical failu
 ## Activity indicator check
 
 With exclusive authorized dev-tablet access and the normal service stopped,
-`hardware_probe indicator-smoke` captures the clean page, draws two timed circle
-ticks, captures the active mark, clears it and captures the result. It writes
-`/tmp/reader-buddy-status-before.png`, `/tmp/reader-buddy-status-active.png` and
-`/tmp/reader-buddy-probe.png`. Retrieve and inspect all three; compare the status
-region and neighboring native ink. A selected tool can widen native strokes beyond
-path endpoints. Exercise Fineliner and Highlighter; an occupied clearance region
-should suppress drawing without erasing it. This offline probe does not validate
-model latency, answer placement or every tool style.
+`hardware_probe indicator-smoke` captures the clean page, draws Preparing,
+AnswerPending and AnswerReady nested triangles plus the auxiliary circle, then
+clears its owned paths. It writes `/tmp/reader-buddy-status-before.png`, one
+`/tmp/reader-buddy-status-<stage>.png` per stage,
+`/tmp/reader-buddy-status-active.png` and `/tmp/reader-buddy-probe.png` after cleanup.
+Retrieve and inspect these images; compare the status region and neighboring ink.
+The uninterrupted stroke cadence is 333 ms; diagnostic screenshots between stages
+add delay and are not runtime scheduling evidence. Native tool acquisition and
+restoration add separate overhead that must be measured, not hidden by cadence.
+
+Exercise primary and secondary Highlighter with nondefault Fineliner color/width.
+Capture actual menus before and after: persisted document preferences can be stale
+and file equality does not prove current UI restoration. Status temporarily uses
+black medium Fineliner, restores only potentially changed settings from captured
+UI values, and verifies the original tool and slot. Open menus, unsupported layouts
+and occupied clearance regions suppress drawing. A failed durable checkpoint or
+unverified restoration stops further input and retains the private recovery journal
+at `/var/cache/reader-buddy/status-style-recovery.json`. Do not blindly delete a
+journal or restore preferences from stale document metadata; inspect its recorded
+phase and actual controls before deliberate recovery.
+
+`hardware_probe failure-code <code>` draws a persistent guarded X plus one distinct
+segment. Supported codes are `selection`, `transcription`, `provider`,
+`no-successor`, `invalid-successor` and `device`. This checks geometry and style
+restoration, not six induced production failures. Explicit test-only
+`erase-strokes <json>` may remove known owned diagnostic paths; visually verify a
+clean corner before the next case. These offline probes do not validate model
+recognition, answer placement, history availability or every native tool layout.
+
+Temporary cleanup restores and verifies the original tools before eraser input.
+The journal remains pending until cleanup, fresh session/page identity, original
+closed controls and viewport checks pass. Native PDF erasure can redraw printed
+glyph pixels beyond the status box. The post-erase viewport check permits that
+empirical lower-right region only on pages with distributed landmarks elsewhere;
+blank pages keep strict comparison. Sparse nonblank pages suppress status before
+changing tools. This is not proof that all annotation ink survived the redraw
+region: validate neighboring sentinel ink explicitly. Do not expand the region
+or relax the strict pre-restoration comparison to make a failed test pass.
+
+With explicit `READER_BUDDY_DEBUG_DUMP=1`, a refused page comparison writes fixed
+`/tmp/reader-buddy-status-lease-before.png` and
+`/tmp/reader-buddy-status-lease-rejected.png`. These are exact virtual frames for
+the latest rejected observation, not guaranteed first-failure or native-resolution
+captures. Preserve each pair and its journal/log before another diagnostic run.
+
+REM-32 evidence in PR23 distinguishes e237 staged/native cleanup and live Q&A from
+47b six-code geometry diagnostics. On the tested RM2, both Highlighter slots
+preserved actual Red/Thick Fineliner settings and neighboring sentinel ink.
+Acquisition plus cleanup took 44.170s (primary) and 49.753s (secondary), excluding
+provider work: responsiveness remains REM-9/REM-35 work, not a claimed improvement.
+
+History is conservative: the occupied-corner offline production-path control
+passed repeated undo/redo with native text, styles, layout and opaque records
+preserved. A corrected clean-page replay rendered the answer but refused arming;
+immediate-before/later-applied records showed a load counter and line-to-tombstone
+change, without capturing the internal settled comparison. Pre-REM32 also had
+clean-append refusals, but identical cause or unchanged workflow timing is not
+proven. Keep strict guards and report unavailable history; do not force a pass.

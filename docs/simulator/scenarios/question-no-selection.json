@@ -29,7 +29,12 @@
       "previous": 0,
       "text": 0,
       "body": 0,
-      "line": 2
+      "line": 3
+    },
+    "failure_codes": {
+      "0": [
+        "Selection"
+      ]
     }
   },
   "replies": [

@@ -21,7 +21,9 @@
       "1": 0,
       "0": 0
     },
-    "errors": [],
+    "errors": [
+      "Verify return to source: Injected Capture error"
+    ],
     "model_calls": 2
   },
   "replies": [

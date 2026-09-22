@@ -22,7 +22,9 @@
       "0": 0,
       "1": 0
     },
-    "errors": [],
+    "errors": [
+      "Injected Text error"
+    ],
     "model_calls": 2
   },
   "replies": [

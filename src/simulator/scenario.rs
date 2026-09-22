@@ -118,8 +118,12 @@ pub enum Operation {
     Line,
     Trigger,
     HeaderSave,
-    StatusCircle,
+    StatusStroke,
     StatusClear,
+    StatusStyleBegin,
+    StatusStyleRestore,
+    StatusCleanupCheckpoint,
+    StatusStyleEnd,
     HistorySnapshot,
     HistoryMutation,
 }
@@ -156,6 +160,8 @@ pub struct Expected {
     pub text_contains: BTreeMap<usize, Vec<String>>,
     #[serde(default)]
     pub x_count: BTreeMap<usize, usize>,
+    #[serde(default)]
+    pub failure_codes: BTreeMap<usize, Vec<String>>,
     #[serde(default)]
     pub unchanged_pages: Vec<usize>,
     #[serde(default)]
@@ -275,8 +281,10 @@ impl Scenario {
             ensure!(
                 match fault.effect {
                     Effect::Error => true,
-                    Effect::NoMove =>
-                        matches!(fault.operation, Operation::Next | Operation::Previous),
+                    Effect::NoMove => matches!(
+                        fault.operation,
+                        Operation::Next | Operation::Previous | Operation::StatusClear
+                    ),
                     Effect::Stale => matches!(
                         fault.operation,
                         Operation::Capture | Operation::HistorySnapshot
@@ -287,8 +295,11 @@ impl Scenario {
                     ),
                     Effect::Lag => fault.operation == Operation::HistorySnapshot,
                     Effect::Partial => fault.operation == Operation::HistoryMutation,
-                    Effect::WrongPage | Effect::Unavailable =>
-                        fault.operation == Operation::HistorySnapshot,
+                    Effect::WrongPage => fault.operation == Operation::HistorySnapshot,
+                    Effect::Unavailable => matches!(
+                        fault.operation,
+                        Operation::HistorySnapshot | Operation::StatusStyleBegin
+                    ),
                 },
                 "Fault effect does not apply to operation"
             );
@@ -299,6 +310,7 @@ impl Scenario {
             .keys()
             .chain(self.expect.text_contains.keys())
             .chain(self.expect.x_count.keys())
+            .chain(self.expect.failure_codes.keys())
             .chain(self.expect.unchanged_pages.iter())
         {
             ensure!(
