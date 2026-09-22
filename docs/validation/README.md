@@ -67,3 +67,19 @@ restoration, not six induced production failures. Explicit test-only
 `erase-strokes <json>` may remove known owned diagnostic paths; visually verify a
 clean corner before the next case. These offline probes do not validate model
 recognition, answer placement, history availability or every native tool layout.
+
+Temporary cleanup restores and verifies the original tools before eraser input.
+The journal remains pending until cleanup, fresh session/page identity, original
+closed controls and viewport checks pass. Native PDF erasure can redraw printed
+glyph pixels beyond the status box. The post-erase viewport check permits that
+empirical lower-right region only on pages with distributed landmarks elsewhere;
+blank pages keep strict comparison. Sparse nonblank pages suppress status before
+changing tools. This is not proof that all annotation ink survived the redraw
+region: validate neighboring sentinel ink explicitly. Do not expand the region
+or relax the strict pre-restoration comparison to make a failed test pass.
+
+With explicit `READER_BUDDY_DEBUG_DUMP=1`, a refused page comparison writes fixed
+`/tmp/reader-buddy-status-lease-before.png` and
+`/tmp/reader-buddy-status-lease-rejected.png`. These are exact virtual frames for
+the latest rejected observation, not guaranteed first-failure or native-resolution
+captures. Preserve each pair and its journal/log before another diagnostic run.

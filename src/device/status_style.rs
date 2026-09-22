@@ -77,6 +77,8 @@ mod tests {
         count: usize,
         fail: Option<usize>,
         identity: Identity,
+        canvas: Option<GrayImage>,
+        fail_cleanup_checkpoint: bool,
     }
     impl Model {
         fn new() -> Self {
@@ -100,11 +102,17 @@ mod tests {
                 count: 0,
                 fail: None,
                 identity: identity(),
+                canvas: None,
+                fail_cleanup_checkpoint: false,
             }
         }
     }
     impl StyleIo for Model {
         fn checkpoint(&mut self, record: &Recovery) -> Result<()> {
+            ensure!(
+                !(self.fail_cleanup_checkpoint && record.phase == Phase::PendingCleanup),
+                "Injected cleanup checkpoint failure"
+            );
             ensure!(
                 self.fail_checkpoint != Some(record.sequence),
                 "Injected journal failure"
@@ -122,7 +130,7 @@ mod tests {
             Ok(())
         }
         fn observe(&mut self) -> Result<Observation> {
-            let mut image = closed();
+            let mut image = self.canvas.clone().unwrap_or_else(closed);
             replace(
                 &mut image,
                 &GrayImage::from_pixel(61, 123, Luma([255])),
@@ -256,6 +264,155 @@ mod tests {
         state.image = GrayImage::from_pixel(768, 1024, Luma([255]));
         assert!(Lease::prepare(state).unwrap().is_none());
         assert_eq!(io.count, 0);
+    }
+
+    #[test]
+    fn native_redraw_requires_landmarks_and_preserves_strict_viewport_checks() {
+        let before = fixture(include_bytes!(
+            "../../tests/fixtures/status-style/paper-before.png"
+        ));
+        let after = fixture(include_bytes!(
+            "../../tests/fixtures/status-style/paper-after-erase.png"
+        ));
+        assert_eq!(
+            CleanupViewport::classify(&before),
+            Some(CleanupViewport::Landmarks)
+        );
+        assert!(CleanupViewport::Landmarks.unchanged(&before, &after));
+        assert!(!CleanupViewport::Blank.unchanged(&before, &after));
+        for (dx, dy) in [(1, 0), (0, 1)] {
+            let mut shifted = GrayImage::from_pixel(768, 1024, Luma([255]));
+            replace(&mut shifted, &before, dx, dy);
+            assert!(!CleanupViewport::Landmarks.unchanged(&before, &shifted));
+        }
+        let zoom =
+            image::imageops::resize(&before, 776, 1034, image::imageops::FilterType::Nearest);
+        let zoom = image::imageops::crop_imm(&zoom, 4, 5, 768, 1024).to_image();
+        assert!(!CleanupViewport::Landmarks.unchanged(&before, &zoom));
+        let mut changed = after.clone();
+        changed.put_pixel(500, 900, Luma([0]));
+        assert!(!CleanupViewport::Landmarks.unchanged(&before, &changed));
+        for (x, y) in [(96, 128), (416, 128), (96, 576)] {
+            let mut missing = before.clone();
+            replace(
+                &mut missing,
+                &GrayImage::from_pixel(256, 256, Luma([255])),
+                x,
+                y,
+            );
+            assert_eq!(CleanupViewport::classify(&missing), None);
+        }
+    }
+
+    #[test]
+    fn sparse_or_confined_content_declines_before_tool_input() {
+        for (x, y, w, h) in [
+            (600, 840, 20, 20),
+            (200, 200, 1, 1),
+            (100, 100, 1, 700),
+            (100, 100, 500, 1),
+            (720, 950, 10, 10),
+        ] {
+            let mut io = Model::new();
+            let mut state = io.observe().unwrap();
+            replace(
+                &mut state.image,
+                &GrayImage::from_pixel(w, h, Luma([0])),
+                x,
+                y,
+            );
+            assert!(Lease::prepare(state).unwrap().is_none());
+            assert_eq!(io.count, 0);
+        }
+        let blank = closed();
+        assert_eq!(
+            CleanupViewport::classify(&blank),
+            Some(CleanupViewport::Blank)
+        );
+        let mut changed = blank.clone();
+        changed.put_pixel(600, 900, Luma([0]));
+        assert!(!CleanupViewport::Blank.unchanged(&blank, &changed));
+    }
+
+    #[test]
+    fn paper_changes_still_refuse_before_restoration_input() {
+        let mut io = Model::new();
+        io.canvas = Some(fixture(include_bytes!(
+            "../../tests/fixtures/status-style/paper-before.png"
+        )));
+        let mut lease = Lease::prepare(io.observe().unwrap()).unwrap().unwrap();
+        lease.acquire(&mut io).unwrap();
+        io.canvas = Some(fixture(include_bytes!(
+            "../../tests/fixtures/status-style/paper-after-erase.png"
+        )));
+        let presses = io.count;
+        assert!(lease.prepare_cleanup(&mut io).is_err());
+        assert_eq!(presses, io.count);
+        assert!(!lease.cleanup_pending());
+    }
+
+    #[test]
+    fn pending_cleanup_verifies_original_tools_without_later_input() {
+        let mut io = Model::new();
+        let original = io.prefs.clone();
+        let mut lease = Lease::prepare(io.observe().unwrap()).unwrap().unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "reader-pending-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        io.journal = Some(Journal::create(&path, &lease.recovery).unwrap());
+        lease.acquire(&mut io).unwrap();
+        lease.prepare_cleanup(&mut io).unwrap();
+        assert_eq!(io.prefs, original);
+        assert_eq!(io.checkpoints.last().unwrap().phase, Phase::PendingCleanup);
+        assert_eq!(Recovery::read(&path).unwrap().phase, Phase::PendingCleanup);
+        assert!(Journal::create(&path, &lease.recovery).is_err());
+        let presses = io.count;
+        lease.finish_cleanup(&mut io).unwrap();
+        assert!(lease.restore(&mut io).is_err());
+        assert_eq!(presses, io.count);
+        io.identity.session = "changed".into();
+        assert!(lease.finish_cleanup(&mut io).is_err());
+        io.identity = identity();
+        io.menu = true;
+        assert!(lease.finish_cleanup(&mut io).is_err());
+        io.menu = false;
+        io.prefs.insert("LastActiveTool".into(), "primary".into());
+        assert!(lease.finish_cleanup(&mut io).is_err());
+        assert_eq!(presses, io.count);
+        assert!(path.exists());
+        drop(io.journal.take());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn failed_pending_cleanup_checkpoint_retains_journal_and_forbids_finish() {
+        let mut io = Model::new();
+        let mut lease = Lease::prepare(io.observe().unwrap()).unwrap().unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "reader-cleanup-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        io.journal = Some(Journal::create(&path, &lease.recovery).unwrap());
+        lease.acquire(&mut io).unwrap();
+        io.fail_cleanup_checkpoint = true;
+        assert!(lease.prepare_cleanup(&mut io).is_err());
+        let presses = io.count;
+        assert!(lease.finish_cleanup(&mut io).is_err());
+        assert!(lease.restore(&mut io).is_err());
+        assert_eq!(presses, io.count);
+        assert!(path.exists());
+        assert_ne!(Recovery::read(&path).unwrap().phase, Phase::PendingCleanup);
+        drop(io.journal.take());
+        fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -529,6 +686,7 @@ pub enum Phase {
     RestorePrimary,
     RestoreClose,
     RestoreSlot,
+    PendingCleanup,
 }
 impl Phase {
     fn restoring(self) -> bool {
@@ -541,6 +699,7 @@ impl Phase {
                 | Self::RestorePrimary
                 | Self::RestoreClose
                 | Self::RestoreSlot
+                | Self::PendingCleanup
         )
     }
 }
@@ -660,12 +819,17 @@ impl Recovery {
             Phase::SelectFine | Phase::RestorePrimary => self.mutations.primary,
             Phase::SetColor | Phase::RestoreColor => self.mutations.color,
             Phase::SetWidth | Phase::RestoreWidth => self.mutations.width,
+            Phase::PendingCleanup => self.original_grid.is_some() && self.original_fine.is_some(),
         };
         ensure!(intended, "Recovery phase lacks mutation intent");
         Ok(())
     }
     fn follows(&self, old: &Self) -> Result<()> {
         self.validate()?;
+        ensure!(
+            old.phase != Phase::PendingCleanup,
+            "Cleanup checkpoint is terminal"
+        );
         ensure!(
             self.sequence == old.sequence + 1
                 && self.identity == old.identity
@@ -998,6 +1162,61 @@ pub struct Lease {
     pub recovery: Recovery,
     baseline: GrayImage,
     checkpoint_failed: bool,
+    viewport: CleanupViewport,
+    before_cleanup: Option<GrayImage>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CleanupViewport {
+    Blank,
+    Landmarks,
+}
+impl CleanupViewport {
+    fn classify(image: &GrayImage) -> Option<Self> {
+        if (61..1024).all(|y| (61..768).all(|x| image.get_pixel(x, y).0[0] >= 248)) {
+            return Some(Self::Blank);
+        }
+        let landmarks = [(96, 128), (416, 128), (96, 576)]
+            .into_iter()
+            .all(|(x, y)| {
+                let mut rows = [false; 4];
+                let mut cols = [false; 4];
+                let mut cells = 0;
+                for row in 0..4 {
+                    for col in 0..4 {
+                        let mut dark = 0;
+                        let mut light = 0;
+                        for yy in y + row * 64..y + (row + 1) * 64 {
+                            for xx in x + col * 64..x + (col + 1) * 64 {
+                                let value = image.get_pixel(xx, yy).0[0];
+                                dark += usize::from(value < 200);
+                                light += usize::from(value >= 248);
+                            }
+                        }
+                        if dark >= 16 && light >= 128 {
+                            cells += 1;
+                            rows[row as usize] = true;
+                            cols[col as usize] = true;
+                        }
+                    }
+                }
+                cells >= 6
+                    && rows.into_iter().filter(|v| *v).count() >= 3
+                    && cols.into_iter().filter(|v| *v).count() >= 3
+            });
+        landmarks.then_some(Self::Landmarks)
+    }
+    fn unchanged(self, before: &GrayImage, after: &GrayImage) -> bool {
+        before.dimensions() == after.dimensions()
+            && (0..1024).all(|y| {
+                (61..768).all(|x| {
+                    // Only landmark-qualified pages can tolerate the empirically observed
+                    // native redraw region. This is viewport evidence, not ink proof.
+                    (self == Self::Landmarks && x >= 576 && y >= 800)
+                        || before.get_pixel(x, y).0[0].abs_diff(after.get_pixel(x, y).0[0]) <= 8
+                })
+            })
+    }
 }
 impl Lease {
     pub fn prepare(observed: Observation) -> Result<Option<Self>> {
@@ -1007,11 +1226,16 @@ impl Lease {
         if ui.menu {
             return Ok(None);
         }
+        let Some(viewport) = CleanupViewport::classify(&observed.image) else {
+            return Ok(None);
+        };
         let recovery = Recovery::new(observed.identity, observed.preferences, ui.slot.to_owned())?;
         Ok(Some(Self {
             recovery,
             baseline: observed.image,
             checkpoint_failed: false,
+            viewport,
+            before_cleanup: None,
         }))
     }
     fn observe(&self, io: &mut impl StyleIo) -> Result<(Observation, Controls)> {
@@ -1074,7 +1298,9 @@ impl Lease {
             Phase::SelectFine | Phase::RestorePrimary => m.primary = true,
             Phase::SetColor | Phase::RestoreColor => m.color = true,
             Phase::SetWidth | Phase::RestoreWidth => m.width = true,
-            Phase::Prepared => anyhow::bail!("Prepared phase cannot send input"),
+            Phase::Prepared | Phase::PendingCleanup => {
+                anyhow::bail!("Phase cannot send toolbar input")
+            }
         }
         self.recovery.phase = phase;
         self.recovery.sequence += 1;
@@ -1166,6 +1392,10 @@ impl Lease {
         })
     }
     pub fn restore(&mut self, io: &mut impl StyleIo) -> Result<()> {
+        ensure!(
+            !self.cleanup_pending(),
+            "Cleanup pending; toolbar input forbidden"
+        );
         ensure!(
             !self.checkpoint_failed,
             "Recovery checkpoint failed; retain evidence and stop input"
@@ -1265,6 +1495,76 @@ impl Lease {
                 && ui.slot == self.recovery.original_slot
                 && self.original_controls(&state.image),
             "Original active slot not restored"
+        );
+        Ok(())
+    }
+    pub fn cleanup_pending(&self) -> bool {
+        self.recovery.phase == Phase::PendingCleanup
+    }
+    pub fn prepare_cleanup(&mut self, io: &mut impl StyleIo) -> Result<()> {
+        self.restore(io)?;
+        let (state, ui) = self.observe(io)?;
+        ensure!(
+            !ui.menu
+                && ui.slot == self.recovery.original_slot
+                && self.original_controls(&state.image),
+            "Original controls changed before cleanup"
+        );
+        self.recovery.phase = Phase::PendingCleanup;
+        self.recovery.sequence += 1;
+        if let Err(error) = io.checkpoint(&self.recovery) {
+            self.checkpoint_failed = true;
+            return Err(error);
+        }
+        // Bracket the durable checkpoint with fresh strict observations. No
+        // erasure is permitted if page, controls, session or viewport changed.
+        let (state, ui) = self.observe(io)?;
+        ensure!(
+            !ui.menu
+                && ui.slot == self.recovery.original_slot
+                && self.original_controls(&state.image),
+            "Original controls changed before erasure"
+        );
+        self.before_cleanup = Some(state.image);
+        Ok(())
+    }
+    pub fn finish_cleanup(&self, io: &mut impl StyleIo) -> Result<()> {
+        ensure!(
+            self.cleanup_pending() && !self.checkpoint_failed,
+            "No valid pending cleanup checkpoint"
+        );
+        let before = self
+            .before_cleanup
+            .as_ref()
+            .context("Cleanup was not prepared")?;
+        let state = io.observe()?;
+        ensure!(
+            state.identity == self.recovery.identity,
+            "Cleanup page/session changed"
+        );
+        ensure!(
+            state.image.dimensions() == self.baseline.dimensions(),
+            "Cleanup dimensions changed"
+        );
+        let ui = controls(&state.image).context("Cleanup toolbar layout changed")?;
+        ensure!(
+            !ui.menu
+                && ui.slot == self.recovery.original_slot
+                && self.original_controls(&state.image),
+            "Cleanup original controls changed"
+        );
+        let reference = if self.viewport == CleanupViewport::Blank {
+            &self.baseline
+        } else {
+            before
+        };
+        ensure!(
+            self.viewport.unchanged(reference, &state.image),
+            "Cleanup viewport changed"
+        );
+        ensure!(
+            crate::workflow::indicator::eligible(&image::DynamicImage::ImageLuma8(state.image)),
+            "Cleanup corner is not clear"
         );
         Ok(())
     }

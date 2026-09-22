@@ -112,6 +112,7 @@ pub struct Event {
 
 pub struct State {
     pub status_style_active: bool,
+    pub status_style_restored: bool,
     #[cfg(test)]
     pub idle_events: VecDeque<Vec<crate::device::interaction::Interaction>>,
     pub pages: Vec<Page>,
@@ -228,6 +229,7 @@ impl State {
             initial,
             active: scenario.active_page,
             status_style_active: false,
+            status_style_restored: false,
             clock: 0,
             events: Vec::new(),
             counts: BTreeMap::new(),
@@ -585,7 +587,7 @@ impl DeviceBackend for SimDevice {
     fn status_stroke(&mut self, stroke: crate::workflow::indicator::Stroke) -> Result<()> {
         let mut state = self.0.borrow_mut();
         anyhow::ensure!(
-            state.status_style_active,
+            state.status_style_active && !state.status_style_restored,
             "Status stroke without style lease"
         );
         let page = state.active;
@@ -606,6 +608,13 @@ impl DeviceBackend for SimDevice {
     }
     fn status_clear(&mut self, strokes: &[crate::workflow::indicator::Stroke]) -> Result<()> {
         let mut state = self.0.borrow_mut();
+        anyhow::ensure!(
+            state.status_style_active && !state.status_style_restored,
+            "Cleanup requires unrestored owned lease"
+        );
+        state.operation(Operation::StatusStyleRestore)?;
+        state.status_style_restored = true;
+        state.operation(Operation::StatusCleanupCheckpoint)?;
         let effect = state.operation(Operation::StatusClear)?;
         anyhow::ensure!(
             effect != Some(Effect::NoMove),
@@ -628,12 +637,18 @@ impl DeviceBackend for SimDevice {
             return Ok(false);
         }
         state.status_style_active = true;
+        state.status_style_restored = false;
         Ok(true)
     }
     fn status_style_end(&mut self) -> Result<()> {
         let mut state = self.0.borrow_mut();
+        if !state.status_style_restored {
+            state.operation(Operation::StatusStyleRestore)?;
+            state.status_style_restored = true;
+        }
         state.operation(Operation::StatusStyleEnd)?;
         state.status_style_active = false;
+        state.status_style_restored = false;
         Ok(())
     }
     fn status_suppressed(&mut self) {

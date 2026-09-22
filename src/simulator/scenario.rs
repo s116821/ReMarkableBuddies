@@ -121,6 +121,8 @@ pub enum Operation {
     StatusStroke,
     StatusClear,
     StatusStyleBegin,
+    StatusStyleRestore,
+    StatusCleanupCheckpoint,
     StatusStyleEnd,
     HistorySnapshot,
     HistoryMutation,

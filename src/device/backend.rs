@@ -248,7 +248,12 @@ impl DeviceBackend for RealDevice {
             return Ok(());
         };
         let started = std::time::Instant::now();
-        if let Err(error) = lease.restore(self) {
+        let restored = if lease.cleanup_pending() {
+            lease.finish_cleanup(self)
+        } else {
+            lease.restore(self)
+        };
+        if let Err(error) = restored {
             self.status_style = Some(lease);
             return Err(
                 error.context("Status preference restoration failed; further input stopped")
@@ -262,6 +267,18 @@ impl DeviceBackend for RealDevice {
         Ok(())
     }
     fn status_clear(&mut self, strokes: &[crate::workflow::indicator::Stroke]) -> Result<()> {
+        let mut lease = self
+            .status_style
+            .take()
+            .context("Cleanup requires owned style lease")?;
+        let started = std::time::Instant::now();
+        let restored = lease.prepare_cleanup(self);
+        self.status_style = Some(lease);
+        restored.context("Restore original tools before status cleanup")?;
+        log::info!(
+            "Status tools restored before erasure in {:?}",
+            started.elapsed()
+        );
         log::debug!("Clearing {} owned status paths", strokes.len());
         for stroke in strokes {
             self.pen.erase_path_screen(&stroke.points())?;
@@ -323,8 +340,10 @@ impl super::status_style::StyleIo for RealDevice {
         );
         let content: serde_json::Value = serde_json::from_slice(&bytes)?;
         let preferences = serde_json::from_value(content["extraMetadata"].clone())?;
+        let after_session = native_page::xochitl_session(Path::new("/proc"))?;
         anyhow::ensure!(
-            native_page::observed_owner(root, settings, session)? == owner,
+            after_session == session
+                && native_page::observed_owner(root, settings, after_session)? == owner,
             "Page changed during status observation"
         );
         Ok(Observation {

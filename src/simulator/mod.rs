@@ -644,6 +644,51 @@ mod indicator_capture_tests {
     }
 
     #[test]
+    fn cleanup_orders_restore_checkpoint_erase_finish_and_stops_at_each_failure() {
+        use scenario::{Effect, Fault};
+        let order = [
+            Operation::StatusStyleRestore,
+            Operation::StatusCleanupCheckpoint,
+            Operation::StatusClear,
+            Operation::StatusStyleEnd,
+        ];
+        for failed in 0..=order.len() {
+            let (state, mut workflow) = blank_successor();
+            workflow.capture_page_data().unwrap();
+            workflow.tick_indicator().unwrap();
+            if failed < order.len() {
+                state.borrow_mut().faults.push(Fault {
+                    operation: order[failed],
+                    call: 1,
+                    effect: Effect::Error,
+                });
+            }
+            let result = workflow.clear_indicator();
+            assert_eq!(result.is_err(), failed < order.len());
+            let observed: Vec<_> = state
+                .borrow()
+                .events
+                .iter()
+                .filter_map(|event| {
+                    order
+                        .iter()
+                        .position(|op| event.action == format!("{op:?}").to_lowercase())
+                })
+                .collect();
+            let expected: Vec<_> = (0..=failed.min(order.len() - 1)).collect();
+            assert_eq!(observed, expected);
+            assert_eq!(state.borrow().pages[1].indicator_visible, failed <= 2);
+            assert_eq!(state.borrow().status_style_active, failed < order.len());
+            if failed < order.len() {
+                let events = state.borrow().events.len();
+                assert!(workflow.clear_indicator().is_err());
+                assert!(workflow.begin_iteration().is_err());
+                assert_eq!(state.borrow().events.len(), events);
+            }
+        }
+    }
+
+    #[test]
     fn unsupported_style_suppresses_without_finish_loop_or_strokes() {
         use scenario::{Effect, Fault};
         let (state, mut workflow) = blank_successor();

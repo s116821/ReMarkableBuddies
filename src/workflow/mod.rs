@@ -173,7 +173,6 @@ impl Workflow {
             self.invalidate_history();
             if let Err(error) = self.device.status_clear(&self.indicator_paths) {
                 self.indicator_cleanup_failed = true;
-                self.end_indicator_style()?;
                 return Err(error.context("Clear owned activity paths"));
             }
             self.indicator_paths.clear();
