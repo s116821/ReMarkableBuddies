@@ -584,7 +584,11 @@ impl DeviceBackend for SimDevice {
     }
     fn status_clear(&mut self, strokes: &[crate::workflow::indicator::Stroke]) -> Result<()> {
         let mut state = self.0.borrow_mut();
-        state.operation(Operation::StatusClear)?;
+        let effect = state.operation(Operation::StatusClear)?;
+        anyhow::ensure!(
+            effect != Some(Effect::NoMove),
+            "Native status cleanup left marks or the corner changed; further input stopped"
+        );
         let page = state.active;
         state.pages[page]
             .indicator_paths

@@ -63,3 +63,8 @@ Reader SHALL record each unique owned path before drawing, including possible pa
 #### Scenario: Ready state on a valid successor
 - **WHEN** navigation reaches an eligible valid answer page
 - **THEN** the current AnswerReady triangle completes all three edges at the same cadence before cleanup and body-mode output; preceding source-page stages are not restarted.
+
+
+#### Scenario: Accepted input without visible erasure
+- **WHEN** native erase input returns success but a fresh screenshot still contains status marks or changed corner content
+- **THEN** cleanup fails and further input stops rather than declaring the region clean from command success alone.

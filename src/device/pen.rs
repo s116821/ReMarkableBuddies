@@ -74,10 +74,9 @@ impl Pen {
     pub fn erase_path_screen(&mut self, points: &[(i32, i32)]) -> Result<()> {
         if let Some(&first) = points.first() {
             let result = (|| -> Result<()> {
+                self.pen_up()?;
                 self.eraser_up()?;
-                self.goto_xy_virtual(first)?;
-                self.eraser_down()?;
-                sleep(Duration::from_millis(10));
+                self.eraser_down_at(first)?;
                 self.follow_path_screen(points)
             })();
             let release = self.eraser_up();
@@ -214,6 +213,27 @@ impl Pen {
             ])?;
             sleep(Duration::from_millis(10));
         }
+        Ok(())
+    }
+
+    /// Establish rubber proximity before contact, just like the pen hover frame.
+    fn eraser_down_at(&mut self, point: (i32, i32)) -> Result<()> {
+        let (x, y) = self.virtual_to_input(point);
+        if let Some(device) = &mut self.device {
+            device.send_events(&[
+                InputEvent::new(EvdevEventType::ABSOLUTE.0, 0, x),
+                InputEvent::new(EvdevEventType::ABSOLUTE.0, 1, y),
+                InputEvent::new(EvdevEventType::KEY.0, 320, 0),
+                InputEvent::new(EvdevEventType::KEY.0, 321, 1),
+                InputEvent::new(EvdevEventType::KEY.0, 330, 0),
+                InputEvent::new(EvdevEventType::ABSOLUTE.0, 24, 0),
+                InputEvent::new(EvdevEventType::ABSOLUTE.0, 25, 100),
+                InputEvent::new(EvdevEventType::SYNCHRONIZATION.0, 0, 0),
+            ])?;
+            sleep(Duration::from_millis(10));
+        }
+        self.eraser_down()?;
+        sleep(Duration::from_millis(10));
         Ok(())
     }
 

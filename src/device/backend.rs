@@ -182,6 +182,12 @@ impl DeviceBackend for RealDevice {
             self.pen.erase_path_screen(&stroke.points())?;
         }
         std::thread::sleep(Duration::from_millis(100));
+        self.screenshot.take_screenshot()?;
+        let clean = image::load_from_memory(self.screenshot.get_image_data())?;
+        anyhow::ensure!(
+            crate::workflow::indicator::eligible(&clean),
+            "Native status cleanup left marks or the corner changed; further input stopped"
+        );
         Ok(())
     }
     fn monotonic(&self) -> Duration {

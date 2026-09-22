@@ -257,6 +257,28 @@ fn verification_progress_errors_are_not_successful_question_declines() {
 }
 
 #[test]
+fn successful_input_without_visible_erasure_halts_before_navigation() {
+    use remarkable_reader_buddy::simulator::scenario::{Effect, Fault};
+    let mut scenario = load("blank-answer");
+    // Repeated input can be accepted without changing the native scene.
+    for call in [1, 2] {
+        scenario.faults.push(Fault {
+            operation: Operation::StatusClear,
+            call,
+            effect: Effect::NoMove,
+        });
+    }
+    let run = execute(&scenario, &root()).unwrap();
+    assert_eq!(run.report.errors.len(), 1);
+    assert!(run.report.errors[0].contains("cleanup left marks"));
+    assert!(run.report.pages[0].indicator_visible);
+    assert!(!run.report.trace.iter().any(|e| matches!(
+        e.action.as_str(),
+        "next" | "previous" | "body" | "text" | "line"
+    )));
+}
+
+#[test]
 fn persistent_cleanup_failure_never_erases_a_later_page() {
     use remarkable_reader_buddy::simulator::scenario::{Effect, Fault, Iteration};
     let mut scenario = load("blank-answer");

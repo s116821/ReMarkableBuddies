@@ -277,8 +277,10 @@ impl Scenario {
             ensure!(
                 match fault.effect {
                     Effect::Error => true,
-                    Effect::NoMove =>
-                        matches!(fault.operation, Operation::Next | Operation::Previous),
+                    Effect::NoMove => matches!(
+                        fault.operation,
+                        Operation::Next | Operation::Previous | Operation::StatusClear
+                    ),
                     Effect::Stale => matches!(
                         fault.operation,
                         Operation::Capture | Operation::HistorySnapshot

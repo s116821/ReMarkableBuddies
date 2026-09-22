@@ -23,3 +23,8 @@ The simulator SHALL exercise production indicator eligibility and cleanup, recor
 #### Scenario: Failure code and partial stroke
 - **WHEN** a classified failure or partial status-draw fault is injected
 - **THEN** reports expose the appropriate persistent segment or bounded owned-path cleanup, and cleanup failure prevents navigation/output.
+
+
+#### Scenario: Native erase has no visible effect
+- **WHEN** StatusClear receives a no_move fault representing accepted input without visible cleanup
+- **THEN** marks remain and the workflow stops before navigation or typing.

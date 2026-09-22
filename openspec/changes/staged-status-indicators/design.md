@@ -41,3 +41,8 @@ No stored content migration. Existing old marks remain user document content and
 ## Open Questions
 
 Native legibility and the existing append-history availability interaction require empirical validation before closure. The six error categories are the concrete implementation mapping because the original request specifies geometry/count but not named conditions.
+
+
+## Native finding during implementation
+
+Runtime1ebb3b0 rendered all stages at about333 ms per uninterrupted stroke, but short eraser paths returned success while triangles remained after a settled recapture. The earlier circle-only native evidence did not prove short-edge erasure. Retain that failed run. Add explicit rubber proximity before contact, then validate cleanup by fresh native screenshot; residual/changed corner pixels latch failure before navigation or typing. Simulator StatusClear/no_move preserves this failure. Tool response and eraser fixes require new native proof before closure.
