@@ -641,8 +641,12 @@ impl Workflow {
         AnswerPageType::Invalid
     }
 
-    pub fn compose_qa(question: &str, answer: &str) -> String {
-        format!("Q: {}\n\nA: {}\n---\n", question, answer)
+    pub fn compose_qa(
+        question: &str,
+        answer: &str,
+        center: crate::analysis::SelectionCenter,
+    ) -> String {
+        format!("Q @ {center}: {question}\n\nA: {answer}\n---\n")
     }
 
     /// Save the header pattern for future fast detection
@@ -810,8 +814,12 @@ mod page_tests {
     #[test]
     fn qa_format_preserves_values_lines_and_separator() {
         assert_eq!(
-            Workflow::compose_qa("G unc.?", "G = (6.674215 +/- 0.000092) * 10^-11\nunits"),
-            "Q: G unc.?\n\nA: G = (6.674215 +/- 0.000092) * 10^-11\nunits\n---\n"
+            Workflow::compose_qa(
+                "G unc.?",
+                "G = (6.674215 +/- 0.000092) * 10^-11\nunits",
+                crate::analysis::SelectionCenter::from_pixels(384.0, 512.0, 768, 1024).unwrap()
+            ),
+            "Q @ (0.5, 0.5): G unc.?\n\nA: G = (6.674215 +/- 0.000092) * 10^-11\nunits\n---\n"
         );
     }
 }

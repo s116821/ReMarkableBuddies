@@ -2,7 +2,8 @@ use anyhow::Result;
 use log::{debug, error, info};
 
 use super::{AnswerPageType, Workflow};
-use crate::analysis::BoundingBox;
+use crate::analysis::{BoundingBox, SelectionCenter};
+use crate::device::screenshot::{SCREENSHOT_VIRTUAL_HEIGHT, SCREENSHOT_VIRTUAL_WIDTH};
 use crate::llm::{openai::OpenAI, LLMEngine};
 
 /// Shared by the live workflow and bounded vision-comparison helper.
@@ -40,20 +41,20 @@ pub const ANALYSIS_PROMPT: &str =
              Reply in this exact format, with coordinates in the overview's 768x1024 space:\n\
              QUESTION: [question]\n\
              QUESTION_BOX: x,y,width,height\n\
-             OUTLINE_BOX: x,y,width,height\n\
+             SELECTION_CENTER: x,y\n\
              ---\n\
              ANSWER: [concise answer about the selected concept]\n\
-             OUTLINE_BOX is the bounding box of the selected outlined OR highlighted region; \
-             retain that field name for either selection type.\n\
+             SELECTION_CENTER is the approximate center of the selected outlined OR highlighted content; \
+             use the full-page overview pixel frame, not the question location or detail-strip coordinates.\n\
              Use plain ASCII notation: +/- for uncertainty, * for multiplication, ^ for powers, \
              spelled-out Greek letters. No LaTeX or Markdown.";
 
-/// Result from LLM analysis containing question, answer, and bounding boxes
+/// Result from LLM analysis containing question, answer, question bounds and selected-content center
 struct AnalysisResult {
     question: String,
     answer: String,
     _question_box: Option<BoundingBox>,
-    _outline_box: Option<BoundingBox>,
+    selection_center: SelectionCenter,
     _screenshot_data: Vec<u8>, // PNG data for downstream processing (reserved for future use)
 }
 
@@ -214,17 +215,33 @@ impl<M: LLMEngine> Orchestrator<M> {
 
         // Extract bounding boxes
         let question_box = Self::parse_bounding_box(&Self::extract_field(header, "QUESTION_BOX:"));
-        let outline_box = Self::parse_bounding_box(&Self::extract_field(header, "OUTLINE_BOX:"));
+        let mut centers = header
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("SELECTION_CENTER:"));
+        let raw_center = centers.next()?;
+        if centers.next().is_some() {
+            return None;
+        }
+        let parts: Vec<_> = raw_center.split(',').map(str::trim).collect();
+        if parts.len() != 2 {
+            return None;
+        }
+        let selection_center = SelectionCenter::from_pixels(
+            parts[0].parse().ok()?,
+            parts[1].parse().ok()?,
+            SCREENSHOT_VIRTUAL_WIDTH,
+            SCREENSHOT_VIRTUAL_HEIGHT,
+        )?;
 
         debug!("Parsed - Question: {}", question_text);
         debug!("Question box: {:?}", question_box);
-        debug!("Outline box: {:?}", outline_box);
+        debug!("Selected-content center: {}", selection_center);
 
         Some(AnalysisResult {
             question: question_text,
             answer: answer_text.to_string(),
             _question_box: question_box,
-            _outline_box: outline_box,
+            selection_center,
             _screenshot_data: screenshot_png_data,
         })
     }
@@ -409,7 +426,8 @@ impl<M: LLMEngine> Orchestrator<M> {
         }
 
         // Render the Q&A
-        let formatted_output = Workflow::compose_qa(&result.question, &result.answer);
+        let formatted_output =
+            Workflow::compose_qa(&result.question, &result.answer, result.selection_center);
 
         self.workflow.render_qa(&formatted_output)?;
 
@@ -507,10 +525,33 @@ mod tests {
 
     #[test]
     fn valid_indented_response_preserves_question_and_complete_answer() {
-        let response = "  QUESTION: G unc.?\n  QUESTION_BOX: 1,2,3,4\n  OUTLINE_BOX: 5,6,7,8\n---\n  ANSWER: G = (6.674215 +/- 0.000092) * 10^-11 m^3 kg^-1 s^-2.\n---\nExtra answer line.";
+        let response = "  QUESTION: G unc.?\n  QUESTION_BOX: 1,2,3,4\n  SELECTION_CENTER: 384,512\n---\n  ANSWER: G = (6.674215 +/- 0.000092) * 10^-11 m^3 kg^-1 s^-2.\n---\nExtra answer line.";
         let result = Orchestrator::<OpenAI>::parse_analysis_response(response, vec![]).unwrap();
         assert_eq!(result.question, "G unc.?");
         assert!(result.answer.ends_with("---\nExtra answer line."));
         assert!(result._question_box.is_some());
+        assert_eq!(result.selection_center.to_string(), "(0.5, 0.5)");
+    }
+
+    #[test]
+    fn missing_ambiguous_or_invalid_selection_centers_decline() {
+        for center in [
+            "",
+            "SELECTION_CENTER: 1",
+            "SELECTION_CENTER: 1,2,3",
+            "SELECTION_CENTER: NaN,2",
+            "SELECTION_CENTER: 1,inf",
+            "SELECTION_CENTER: -1,2",
+            "SELECTION_CENTER: 769,2",
+            "SELECTION_CENTER: 1,1025",
+            "SELECTION_CENTER: 384,512\nSELECTION_CENTER: 1,2",
+            "OUTLINE_BOX: 1,2,3,4",
+        ] {
+            let response = format!("QUESTION: G unc.?\nQUESTION_BOX: 130,35,200,50\n{center}\n---\nANSWER: About 14 ppm.");
+            assert!(
+                Orchestrator::<OpenAI>::parse_analysis_response(&response, vec![]).is_none(),
+                "{center}"
+            );
+        }
     }
 }

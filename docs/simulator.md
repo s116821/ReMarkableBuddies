@@ -177,3 +177,26 @@ Some older negative fixtures already contain corner marks. Their updated expecta
 REM-8 native acceptance used a disposable copy of the Gundlach technical paper: blank Q&A, cursive append, absent/illegible declines, occupied-successor single return, and a real 90-second timeout with a loopback endpoint/dummy key. The final geometry build repeated Fineliner/Highlighter circle cleanup and live rejection; both active circles fit the 50x50 box, cleanup had zero changed ROI pixels and neighboring native ink survived. The prior sparse-path and highlighter-bound failures were retained in PR evidence. Model tests use synthetic pen input and do not establish universal human-handwriting recognition.
 
 The history_snapshot unavailable fault preserves the observed post-restart case where a document is visible but LastOpen is empty. Normal rendering continues, while that transaction never gains undo ownership even if identity later becomes available. Reopening and a new successful iteration may establish a new transaction.
+
+## Coordinate tags and native history limits
+
+REM-11 scripted circle/highlight responses pass a selected-content center in the
+full 768 by 1024 overview. Production parsing rejects invalid centers before the
+independent model call or navigation. Exact expectations cover compact normalized
+tags, and shared history tests preserve earlier untagged content. Native tagged
+first-Q&A applied/deleted/restored snapshots additionally replay complete text,
+styles, root layout and scene-record preservation through the production parser.
+
+The live RM2 check also found an ordinary append where a qualifying undo did not
+act. The same symptom occurred with the prior merged REM-15 runtime; a comparison
+with answer-page activity suppressed by existing corner ink allowed tagged append
+undo/redo. This is an observed availability limitation, not a relaxation of native
+preservation. Later scene records differed from an earlier completed snapshot, but
+the exact live pre-typing snapshot was not captured, so activity persistence is
+only a hypothesis. The changed-scene fixture asserts conservative refusal across
+those snapshots; it does not reproduce or establish the live failure's cause.
+
+Model locations are approximate. Repeated native readings of the same narrow
+highlight varied by several hundredths of a normalized axis; bounds checks do not
+prove that a predicted center lies inside the mark. Simulator replies establish
+routing and normalization, not visual accuracy or physical gesture recognition.

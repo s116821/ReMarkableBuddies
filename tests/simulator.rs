@@ -13,6 +13,53 @@ fn load(name: &str) -> Scenario {
 }
 
 #[test]
+fn invalid_selection_centers_stop_before_verification_or_navigation() {
+    for center in [
+        "",
+        "SELECTION_CENTER: NaN,230",
+        "SELECTION_CENTER: 769,230",
+        "SELECTION_CENTER: 385,230\nSELECTION_CENTER: 384,230",
+    ] {
+        let mut scenario = load("blank-answer");
+        scenario.replies[0].text = Some(
+            scenario.replies[0]
+                .text
+                .as_ref()
+                .unwrap()
+                .replace("SELECTION_CENTER: 385,230", center),
+        );
+        scenario.expect = Default::default();
+        scenario.replies.truncate(1);
+        scenario.expect.active_page = Some(0);
+        scenario.expect.model_calls = Some(1);
+        scenario.expect.operations.insert(Operation::Next, 0);
+        scenario.expect.operations.insert(Operation::Text, 0);
+        scenario.expect.unchanged_pages.push(1);
+        scenario.expect.history = Some("empty".into());
+        let run = execute(&scenario, &root()).unwrap();
+        assert!(
+            run.report.assertion_failures.is_empty(),
+            "{center}: {:?}",
+            run.report.assertion_failures
+        );
+    }
+}
+
+#[test]
+fn circle_and_highlight_tags_follow_the_selection_not_the_question() {
+    for (name, tag) in [
+        ("blank-answer", "(0.5, 0.22)"),
+        ("highlighted-g", "(0.52, 0.24)"),
+    ] {
+        let run = run(name);
+        let text = &run.report.pages[1].text;
+        assert!(text.contains(&format!("Q @ {tag}: G unc.?")));
+        // Both fixtures put the question at (230, 60), far above the selection.
+        assert!(!text.contains("Q @ (0.3, 0.06):"));
+    }
+}
+
+#[test]
 fn invalid_successor_returns_without_attempting_an_activity_mark() {
     let mut scenario = load("occupied-return");
     // Keep printed content, but make its status corner eligible: the old ordering

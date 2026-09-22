@@ -102,7 +102,7 @@ Reads `/etc/hwrevision` to determine:
 
 **Implementation**: LLM returns separate bounding boxes
 - `QUESTION_BOX`: Location of question text (erased)
-- `OUTLINE_BOX`: Location of outline shape (preserved)
+- `SELECTION_CENTER`: Center of circled or highlighted content in the 768 x 1024 overview
 - Only the question region is erased, outline remains visible
 - **File**: `src/workflow/orchestrator.rs` (parse_bounding_box)
 
@@ -302,9 +302,14 @@ transcription must agree before output. Printed gray figures, shading or an X do
 not constitute a user selection. Missing or ambiguous question/selection cases
 request NONE instead of a general passage summary.
 
-The existing OUTLINE_BOX response field denotes the overview-space bounding box
-of either the outlined or highlighted region. Recognition remains model-based;
-it does not establish perfect highlight or handwriting detection.
+The required SELECTION_CENTER response field denotes the center of either the
+outlined or highlighted content in the full 768 x 1024 overview, independently
+of the question box or detail crop. Exactly one finite, in-bounds pair is required;
+missing, ambiguous or invalid coordinates stop processing before verification or
+navigation. Rust normalizes the pair to [0, 1] and writes `Q @ (x, y): question`,
+rounded to two decimal places with trailing zeros omitted. The tag stays with its
+answer through undo/redo; earlier untagged answers remain unchanged. Recognition
+and approximate center placement remain model-based, not precise region detection.
 
 Modern RM2 framebuffer capture uses neutral-preserving luminance from BGRA pixels.
 Native highlighter colors exist in the framebuffer even on the monochrome tablet;
