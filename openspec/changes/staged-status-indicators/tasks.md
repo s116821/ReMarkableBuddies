@@ -31,3 +31,9 @@
 - [ ] 5.3 Publish grouped actual test/native evidence and verify inline images; retain reusable fixtures only.
 
 Exact-head independent review, required CI, normal merge and release verification remain external delivery gates after the final implementation commit.
+
+## 6. Readable status with broad tools
+
+- [ ] 6.1 Implement verified bounded native style acquisition/rollback/restoration and crash recovery record without config-file writes or repeated-tick UI changes.
+- [ ] 6.2 Model tool/slot/preferences, partial acquisition/restore faults, changed page and unsupported-layout refusal; preserve no-history-activity assertions.
+- [ ] 6.3 Validate Highlighter-start narrow geometry and all six readable error marks, exact nondefault preference restoration on success/error, and record native style-switch overhead.

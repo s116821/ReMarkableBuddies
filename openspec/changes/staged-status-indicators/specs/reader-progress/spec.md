@@ -68,3 +68,29 @@ Reader SHALL record each unique owned path before drawing, including possible pa
 #### Scenario: Accepted input without visible erasure
 - **WHEN** native erase input returns success but a fresh screenshot still contains status marks or changed corner content
 - **THEN** cleanup fails and further input stops rather than declaring the region clean from command success alone.
+
+## ADDED Requirements
+
+### Requirement: Scoped readable native status style
+
+Reader SHALL use a verified narrow black status style independently of the user's selected broad pen, without permanently changing the active slot or stored tool/color/width preferences. A bounded style lease SHALL snapshot document/page and exact preferences before mutation, verify supported toolbar/menu state, and restore them after temporary cleanup or persistent failure drawing before further capture/navigation/typing. Repeated333ms strokes SHALL perform no toolbar toggles. Hidden toolbar, already-open menu, active non-pen tool, unsupported layout or ambiguous identity SHALL suppress status without mutation. Partial acquisition SHALL attempt bounded verified rollback; failed restoration SHALL halt further input. A recovery record SHALL retain original preferences across a crash without pretending finally ran or automatically overwriting later user choices. Source: planned src/device/status_style.rs; src/device/backend.rs; src/workflow/mod.rs.
+
+#### Scenario: Highlighter selected
+- **WHEN** a verified supported page has Highlighter selected and a clear corner
+- **THEN** triangles, auxiliary circle and failure-code segments use narrow black strokes, and exact original tool/preferences return before continuation.
+
+#### Scenario: Partial acquisition or error mark failure
+- **WHEN** a status-style action or persistent marker fails after possibly mutating state
+- **THEN** bounded rollback verifies restored preferences or stops further document input with its recovery record retained, without recursively drawing another error.
+
+#### Scenario: Unsupported or already-open controls
+- **WHEN** the toolbar/menu or page identity cannot be safely matched before acquisition
+- **THEN** Reader does not toggle controls, write preferences or draw status in the selected user style.
+
+#### Scenario: Native history and status cadence
+- **WHEN** undo/redo owns the previous Q&A or a pending stage repeats
+- **THEN** no toolbar manipulation occurs during history, and a pending stage reuses its lease rather than selecting a tool every333ms.
+
+#### Scenario: Interrupted process
+- **WHEN** a process terminates before restoration
+- **THEN** the recovery record remains and later runs refuse automatic status mutation until deliberate recovery, without claiming the user's preferences were restored.
