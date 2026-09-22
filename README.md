@@ -607,7 +607,8 @@ acceptance criteria.
 
 ## Automated Releases
 
-This project uses [git-cliff](https://git-cliff.org/) for semantic releases and
+This project uses [git-cliff](https://git-cliff.org/) for semantic calculation,
+[release-it](https://github.com/release-it/release-it) for tag creation, and
 [vergen-gitcl](https://docs.rs/vergen-gitcl/) for Git-derived binary versions.
 Git tags are the only application version authority; Cargo's fixed `0.0.0`
 package version is non-authoritative and the package is not published to a registry.
@@ -624,8 +625,8 @@ build changes are relevant. Documentation-only main pushes neither create tags n
 compile the application, and their required PR checks still finish.
 
 The release job serializes publication, refreshes all unreleased main history and
-tags the latest relevant merged application commit before building it. Queued changes
-can share a release; a newer documentation commit does not change its source SHA.
+tags each relevant merged application commit in order before building it. Each
+application merge gets its own tag; a newer documentation commit does not change its source SHA.
 Both tablet packages execute `--version` under target emulation before publication.
 `provenance.json` records their tag, SHA, version and archive checksums. Existing
 published tags remain intact; historical releases predate this verification contract.

@@ -14,7 +14,7 @@
 ## 3. Acceptance verification
 
 - [ ] 3.1 Test real git-cliff version decisions, wrong semantic types, complete unreleased ranges and tag/SHA invariants in isolated repositories.
-- [ ] 3.2 Test stale/concurrent requests, queue coalescing, tag conflicts, post-tag failure, partial upload and completed-release retries without production tags.
+- [ ] 3.2 Test stale/concurrent requests, per-commit queue draining, tag conflicts, post-tag failure, partial upload and completed-release retries without production tags.
 - [ ] 3.3 Test actual workflow build gates and official metadata rejection, including missing/shallow/dirty source and cached metadata refresh.
 - [ ] 3.4 Run host checks and both ARM builds; execute exact-tag fixture binaries under both target emulators to verify runtime/package agreement.
 - [ ] 3.5 Re-read timestamped issue comments, reconcile every acceptance item and preserve relevant failures as fixtures.

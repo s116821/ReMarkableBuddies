@@ -37,25 +37,25 @@ jobs:
           POLICY_RESULT: ${{ needs.policy.result }}
         run: test "$POLICY_RESULT" = success
       - uses: actions/checkout@v4
-        if: needs.policy.outputs.application == 'true'
+        if: github.event_name == 'pull_request' && needs.policy.outputs.application == 'true'
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
-        if: needs.policy.outputs.application == 'true'
+        if: github.event_name == 'pull_request' && needs.policy.outputs.application == 'true'
         with:
           components: rustfmt, clippy
           targets: armv7-unknown-linux-gnueabihf,aarch64-unknown-linux-gnu
       - name: Check formatting
-        if: needs.policy.outputs.application == 'true'
+        if: github.event_name == 'pull_request' && needs.policy.outputs.application == 'true'
         run: cargo fmt --all -- --check
       - name: Run clippy
-        if: needs.policy.outputs.application == 'true'
+        if: github.event_name == 'pull_request' && needs.policy.outputs.application == 'true'
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: Install cross
-        if: needs.policy.outputs.application == 'true'
+        if: github.event_name == 'pull_request' && needs.policy.outputs.application == 'true'
         run: cargo install cross --git https://github.com/cross-rs/cross --rev 8c1a8aa4b661711f4b7b6ac07c2e8929ce2f7d27 --locked
       - name: Build for both tablets
-        if: needs.policy.outputs.application == 'true'
+        if: github.event_name == 'pull_request' && needs.policy.outputs.application == 'true'
         run: |
           cross build --locked --release --target armv7-unknown-linux-gnueabihf
           cross build --locked --release --target aarch64-unknown-linux-gnu
@@ -71,20 +71,20 @@ jobs:
           POLICY_RESULT: ${{ needs.policy.result }}
         run: test "$POLICY_RESULT" = success
       - uses: actions/checkout@v4
-        if: needs.policy.outputs.application == 'true'
+        if: github.event_name == 'pull_request' && needs.policy.outputs.application == 'true'
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
-        if: needs.policy.outputs.application == 'true'
+        if: github.event_name == 'pull_request' && needs.policy.outputs.application == 'true'
       - uses: actions/setup-python@v5
-        if: needs.policy.outputs.application == 'true'
+        if: github.event_name == 'pull_request' && needs.policy.outputs.application == 'true'
         with:
           python-version: '3.12'
       - uses: ./.github/actions/release-tools
-        if: needs.policy.outputs.application == 'true'
+        if: github.event_name == 'pull_request' && needs.policy.outputs.application == 'true'
       - name: Release regression repositories
-        if: needs.policy.outputs.application == 'true'
+        if: github.event_name == 'pull_request' && needs.policy.outputs.application == 'true'
         run: python -m unittest discover -s release -v
       - name: Run tests
-        if: needs.policy.outputs.application == 'true'
+        if: github.event_name == 'pull_request' && needs.policy.outputs.application == 'true'
         run: cargo test --locked --all-features

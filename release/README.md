@@ -2,13 +2,15 @@
 
 Requirements are public in `openspec/specs/release-versioning` (after canonical sync)
 and the corresponding change proposal. The implementation uses git-cliff **2.14.2**
-for semantic version computation and vergen-gitcl **10.0.3** for Rust metadata.
+for semantic version computation, release-it **19.0.6** for actual tag creation
+and vergen-gitcl **10.0.3** for Rust metadata.
 No private board, account connector, API key or development tablet is needed.
 
-Install Git, Python 3.11+, Rust 1.96+ and the pinned git-cliff binary from its public
+Install Git, Node.js 22+, Python 3.11+, Rust 1.96+ and the pinned git-cliff binary from its public
 GitHub release (or `cargo install git-cliff --version 2.14.2 --locked`). Then run:
 
 ```sh
+npm ci --prefix release --ignore-scripts
 cargo fetch --locked
 python -m unittest discover -s release -v
 cargo test --locked --all-features
@@ -31,9 +33,10 @@ against the production remote.
 
 The production workflow uses GITHUB_TOKEN with contents:write and explicit ordered
 steps. No PAT or tag-triggered second workflow is required. Its job-level lock
-includes both architecture builds and final publication. Pending GitHub jobs may
-coalesce; each admitted job refreshes main, recovers managed tags and analyzes the
-entire relevant unreleased range. A failed run is visible and retryable from Actions
+includes both architecture builds and final publication. Pending GitHub jobs may replace one another; each admitted job refreshes main,
+recovers managed tags and processes every relevant unreleased squash commit in
+order, creating one semantic tag per application merge. Main CI never compiles;
+all main application builds occur after their tag is pushed. A failed run is visible and retryable from Actions
 or `gh workflow run release.yml --ref main`. A documentation push remains build-free
 even when a previous application release failed.
 

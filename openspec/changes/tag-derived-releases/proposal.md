@@ -8,7 +8,7 @@ REM-30 replaces a release action that detects feature branches instead of semant
 - Tag the actual merged application commit before compiling its exact source; preserve published tags and remove generated version commits.
 - Derive runtime versions from Git through vergen-gitcl, with clearly non-authoritative Cargo metadata and strict official-build verification.
 - Share conservative documentation/application classification across main CI and release handling; reject application changes mislabeled as docs.
-- Serialize release publication, coalesce queued application changes, and recover incomplete tagged releases on retry.
+- Serialize release publication, process queued application merges in order, and recover incomplete tagged releases on retry.
 - Require full timestamped Linear comment review and acceptance mapping before implementation and closure.
 
 ## Capabilities

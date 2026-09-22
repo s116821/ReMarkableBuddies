@@ -99,9 +99,9 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(self.fixture.plan(), release.Release("v0.2.0", app))
 
     def test_unreleased_feature_not_lost_by_later_fix(self):
-        self.fixture.commit("feat(REM-9): feature", "src/main.rs")
-        last = self.fixture.commit("fix(REM-9): repair", "src/main.rs")
-        self.assertEqual(self.fixture.plan(), release.Release("v0.2.0", last))
+        first = self.fixture.commit("feat(REM-9): feature", "src/main.rs")
+        self.fixture.commit("fix(REM-9): repair", "src/main.rs")
+        self.assertEqual(self.fixture.plan(), release.Release("v0.2.0", first))
 
     def test_misclassified_and_unknown_types_fail_closed(self):
         for message in ["docs(REM-9): disguised application", "unknown(REM-9): change", "not conventional"]:
@@ -164,8 +164,8 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(len(built), 2)  # completed retry does not compile
         self.assertEqual(git(self.fixture.repo, "tag").splitlines(), ["v0.1.12", "v0.2.0"])
 
-    def test_stale_queued_requests_coalesce_and_sequential_release(self):
-        self.fixture.commit("feat(REM-9): first queued", "src/main.rs")
+    def test_stale_queued_requests_release_every_merge_in_order(self):
+        first = self.fixture.commit("feat(REM-9): first queued", "src/main.rs")
         last = self.fixture.commit("fix(REM-9): second queued", "src/main.rs")
         self.fixture.push()
         publisher = Publisher()
@@ -173,11 +173,11 @@ class ReleaseTests(unittest.TestCase):
         builder = lambda repo, candidate, directory: built.append(candidate)
         release.publish_all(self.fixture.repo, publisher, builder, CLIFF)
         release.publish_all(self.fixture.repo, publisher, builder, CLIFF)
-        self.assertEqual(built, [release.Release("v0.2.0", last)])
+        self.assertEqual(built, [release.Release("v0.2.0", first), release.Release("v0.2.1", last)])
         next_sha = self.fixture.commit("fix(REM-9): next merge", "src/main.rs")
         self.fixture.push()
         release.publish_all(self.fixture.repo, publisher, builder, CLIFF)
-        self.assertEqual(built[-1], release.Release("v0.2.1", next_sha))
+        self.assertEqual(built[-1], release.Release("v0.2.2", next_sha))
 
     def test_conflicting_remote_tag_never_builds(self):
         sha = self.fixture.commit("fix(REM-9): repair", "src/main.rs")
@@ -187,6 +187,55 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaises(subprocess.CalledProcessError):
             release.create_tag(self.fixture.repo, release.Release("v0.1.13", sha))
         self.assertEqual(git(self.fixture.remote, "rev-parse", "v0.1.13"), baseline)
+
+    def test_failed_build_recovers_before_new_application_release(self):
+        first = self.fixture.commit("feat(REM-9): first", "src/main.rs")
+        self.fixture.push()
+        publisher = Publisher()
+        def failure(repo, candidate, directory):
+            raise RuntimeError("build failed after tag")
+        with self.assertRaisesRegex(RuntimeError, "build failed"):
+            release.publish_all(self.fixture.repo, publisher, failure, CLIFF)
+        second = self.fixture.commit("fix(REM-9): second", "src/main.rs")
+        self.fixture.push()
+        built = []
+        release.publish_all(self.fixture.repo, publisher,
+                            lambda repo, candidate, directory: built.append(candidate), CLIFF)
+        self.assertEqual(built, [release.Release("v0.2.0", first), release.Release("v0.2.1", second)])
+        self.assertEqual(publisher.calls, built)
+
+    def test_unpushed_local_tag_cannot_authorize_recovery_build(self):
+        sha = self.fixture.commit("fix(REM-9): repair", "src/main.rs")
+        self.fixture.push()
+        git(self.fixture.repo, "tag", "-a", "v0.1.13", "-m", release.MARKER)
+        built = []
+        with self.assertRaisesRegex(ValueError, "Remote tag identity mismatch"):
+            release.publish_all(self.fixture.repo, Publisher(),
+                                lambda repo, candidate, directory: built.append(candidate), CLIFF)
+        self.assertEqual(built, [])
+
+    def test_checksum_and_source_provenance_reject_partial_or_wrong_assets(self):
+        candidate = release.Release("v9.8.7", "a" * 40)
+        directory = Path(self.temp.name) / "assets"
+        directory.mkdir()
+        packages = {}
+        for target in release.TARGETS:
+            path = directory / f"reader-buddy-{target}.tar.gz"
+            path.write_bytes(target.encode())
+            packages[path.name] = release.sha256(path)
+        manifest = dict(tag=candidate.tag, sha=candidate.sha, version="9.8.7", packages=packages)
+        provenance = directory / "provenance.json"
+        provenance.write_text(json.dumps(manifest))
+        release.verify_packages(directory, candidate)
+        manifest["sha"] = "b" * 40
+        provenance.write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(ValueError, "provenance"):
+            release.verify_packages(directory, candidate)
+        manifest["sha"] = candidate.sha
+        provenance.write_text(json.dumps(manifest))
+        (directory / next(iter(packages))).write_bytes(b"partial")
+        with self.assertRaisesRegex(ValueError, "checksum"):
+            release.verify_packages(directory, candidate)
 
     def test_shallow_plan_rejected(self):
         clone = Path(self.temp.name) / "shallow"

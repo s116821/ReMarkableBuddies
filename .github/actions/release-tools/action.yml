@@ -3,6 +3,11 @@ description: Install the maintained version tool without compiling the applicati
 runs:
   using: composite
   steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '24'
+    - shell: bash
+      run: npm ci --prefix release --ignore-scripts --no-audit --no-fund
     - shell: bash
       env:
         GH_TOKEN: ${{ github.token }}

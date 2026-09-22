@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tarfile
 import tempfile
@@ -57,7 +58,7 @@ def plan(repo, main="origin/main", cliff="git-cliff"):
             application.append(sha)
     if not application:
         return None
-    sha = application[-1]
+    sha = application[0]
     actual = subprocess.check_output([cliff, "--version"], text=True).strip()
     if actual != f"git-cliff {CLIFF_VERSION}":
         raise ValueError(f"Expected git-cliff {CLIFF_VERSION}, got {actual}")
@@ -83,8 +84,24 @@ def managed_tags(repo, main):
 
 
 def create_tag(repo, release):
-    git(repo, "-c", "user.name=github-actions[bot]", "-c", "user.email=41898282+github-actions[bot]@users.noreply.github.com",
-        "tag", "-a", release.tag, release.sha, "-m", MARKER)
+    runner = CONFIG.parent / "node_modules/release-it/bin/release-it.js"
+    if not runner.is_file():
+        raise ValueError("Install pinned release tools with npm ci --prefix release")
+    with tempfile.TemporaryDirectory(prefix="reader-release-tag-") as temp:
+        checkout = Path(temp) / "source"
+        git(repo, "worktree", "add", "--detach", str(checkout), release.sha)
+        try:
+            env = dict(os.environ,
+                       GIT_COMMITTER_NAME="github-actions[bot]",
+                       GIT_COMMITTER_EMAIL="41898282+github-actions[bot]@users.noreply.github.com")
+            subprocess.run(["node", str(runner), release.tag[1:], "--ci", "--config", str(CONFIG.with_name("release-it.json"))],
+                           cwd=checkout, env=env, check=True)
+            if git(checkout, "rev-parse", "HEAD") != release.sha:
+                raise ValueError("Release runner created an unexpected source commit")
+            if git(checkout, "rev-parse", f"refs/tags/{release.tag}^{{commit}}") != release.sha:
+                raise ValueError("Release runner tagged the wrong source")
+        finally:
+            git(repo, "worktree", "remove", str(checkout))
     git(repo, "push", "origin", f"refs/tags/{release.tag}")
     verify_remote_tag(repo, release)
 
@@ -120,11 +137,18 @@ class GitHub:
         state = self.view(release)
         if not state or state["draft"]:
             return False
-        # A published release is immutable here. Verify existing assets instead
-        # of overwriting them or trusting only their names on a retry.
-        with tempfile.TemporaryDirectory(prefix="reader-release-check-") as temp:
-            self.run("release", "download", release.tag, "--dir", temp)
-            verify_packages(Path(temp), release)
+        # The verified draft's completion record is published with the release.
+        # Compare GitHub's server-side asset digests, not every historical binary
+        # download on every run. Missing/damaged published records fail closed.
+        match = re.search(r"<!-- reader-buddy-complete:(.*?) -->", state.get("body") or "")
+        if not match:
+            raise ValueError(f"Published release lacks completion provenance: {release.tag}")
+        record = json.loads(match[1])
+        verify_identity(record, release)
+        expected = dict(record["packages"], **{"provenance.json": record["provenance_sha256"]})
+        assets = {asset["name"]: asset.get("digest") for asset in state["assets"]}
+        if assets != {name: f"sha256:{digest}" for name, digest in expected.items()}:
+            raise ValueError(f"Published asset digests disagree with completion record: {release.tag}")
         return True
 
     def publish(self, release, directory):
@@ -139,19 +163,26 @@ class GitHub:
         with tempfile.TemporaryDirectory(prefix="reader-release-upload-") as temp:
             self.run("release", "download", release.tag, "--dir", temp)
             verify_packages(Path(temp), release)
-        self.run("release", "edit", release.tag, "--draft=false", "--latest")
+        record = json.loads((directory / "provenance.json").read_text())
+        record["provenance_sha256"] = sha256(directory / "provenance.json")
+        notes = f"Reader Buddy {release.tag}\n\nSource: {release.sha}\n\n<!-- reader-buddy-complete:{json.dumps(record, separators=(',', ':'))} -->"
+        self.run("release", "edit", release.tag, "--draft=false", "--latest", "--notes", notes)
 
 
 def verify_packages(directory, release):
     manifest = json.loads((directory / "provenance.json").read_text())
+    verify_identity(manifest, release)
+    for name, digest in manifest["packages"].items():
+        if sha256(directory / name) != digest:
+            raise ValueError(f"Package checksum mismatch: {name}")
+
+
+def verify_identity(manifest, release):
     if (manifest["tag"], manifest["sha"], manifest["version"]) != (release.tag, release.sha, release.tag[1:]):
         raise ValueError("Release provenance does not match tag and source")
     expected = {f"reader-buddy-{target}.tar.gz" for target in TARGETS}
     if set(manifest["packages"]) != expected:
         raise ValueError("Release must contain both architecture packages")
-    for name, digest in manifest["packages"].items():
-        if sha256(directory / name) != digest:
-            raise ValueError(f"Package checksum mismatch: {name}")
 
 
 def build(repo, release, directory):
@@ -197,13 +228,14 @@ def publish_all(repo, publisher, builder=build, cliff="git-cliff", branch="main"
             with tempfile.TemporaryDirectory(prefix="reader-release-assets-") as temp:
                 builder(repo, release, Path(temp))
                 publisher.publish(release, Path(temp))
-    release = plan(repo, main, cliff)
-    if release:
+    completed = []
+    while release := plan(repo, main, cliff):
         create_tag(repo, release)
         with tempfile.TemporaryDirectory(prefix="reader-release-assets-") as temp:
             builder(repo, release, Path(temp))
             publisher.publish(release, Path(temp))
-    return release
+        completed.append(release)
+    return completed
 
 
 def main():

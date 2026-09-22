@@ -17,7 +17,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertIn('test "$POLICY_RESULT" = success', block)
             steps = block.split("\n      - ")[1:]
             for step in steps[1:]:
-                self.assertIn("if: needs.policy.outputs.application == 'true'", step)
+                self.assertIn("if: github.event_name == 'pull_request' && needs.policy.outputs.application == 'true'", step)
 
     def test_docs_never_enter_release_lock_and_tag_events_are_not_required(self):
         source = (ROOT / ".github/workflows/release.yml").read_text()

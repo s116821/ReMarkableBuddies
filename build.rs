@@ -6,7 +6,12 @@ use vergen_gitcl::{Emitter, Gitcl};
 fn git(args: &[&str]) -> Result<String, Box<dyn Error>> {
     let result = Command::new("git").args(args).output()?;
     if !result.status.success() {
-        return Err(format!("git {} failed", args.join(" ")).into());
+        return Err(format!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&result.stderr).trim()
+        )
+        .into());
     }
     Ok(String::from_utf8(result.stdout)?.trim().to_owned())
 }
