@@ -20,7 +20,7 @@ semantic-release was considered but its branch-head validation complicates relea
 
 ### Conservative shared path and semantic policy
 
-Use a short explicit list of documentation paths (README/AGENTS/changelog/license, docs, OpenSpec and agent skill documentation). Everything else is relevant by default, including Rust, dependencies, tests, deployment, build scripts and workflows. Share the exclusion configuration with git-cliff and the workflow classifier. Renames/deletions and multi-commit pushes inspect all touched paths, not only the final net diff. Mixed commits remain relevant.
+Use a short explicit list of documentation paths (README/AGENTS/changelog/license, Markdown and image/license directories within docs, OpenSpec and Markdown agent skills). Executable simulator JSON and validation scripts under docs remain relevant. Everything else is relevant by default, including Rust, dependencies, tests, deployment, build scripts and workflows. Share the exclusion configuration with git-cliff and the workflow classifier. Renames/deletions and multi-commit pushes inspect all touched paths, not only the final net diff. Mixed commits remain relevant.
 
 Application commits must have a scoped conventional title using feat, fix, perf, refactor, build, ci, chore, test or revert. Application changes labeled docs or with unknown/nonconventional messages fail visibly before tagging. PR CI checks the prospective squash title and path set, and refreshed title events revalidate it. Pure documentation commits are excluded regardless of their type and never cause a tag. Required PR job names remain present; their application steps are conditional, so documentation PRs conclude successfully rather than waiting forever.
 

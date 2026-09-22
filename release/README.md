@@ -6,6 +6,10 @@ for semantic version computation, release-it **19.0.6** for actual tag creation
 and vergen-gitcl **10.0.3** for Rust metadata.
 No private board, account connector, API key or development tablet is needed.
 
+Documentation exclusions cover Markdown, OpenSpec, licenses and the evidence-image
+directory. Executable simulator JSON and validation scripts under `docs/` remain
+application-relevant: their changes must still run tests and receive release handling.
+
 Install Git, Node.js 22+, Python 3.11+, Rust 1.96+ and the pinned git-cliff binary from its public
 GitHub release (or `cargo install git-cliff --version 2.14.2 --locked`). Then run:
 

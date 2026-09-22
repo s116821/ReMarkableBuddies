@@ -12,7 +12,8 @@ topo_order = true
 sort_commits = "oldest"
 exclude_paths = [
   "README.md", "AGENTS.md", "CHANGELOG.md", "LICENSE", "LICENSE-*",
-  "docs/**", "openspec/**", ".agents/**", ".codex/**",
+  "docs/*.md", "docs/**/*.md", "docs/licenses/**", "docs/images/**", "docs/validation/images/**",
+  "openspec/**", ".agents/**/*.md", ".codex/**/*.md",
   ".github/pull_request_template.md",
 ]
 commit_parsers = [

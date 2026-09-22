@@ -26,6 +26,10 @@ The workflows SHALL share conservative path classification with semantic release
 - **WHEN** a push includes application and documentation changes, including application changes reverted by a later commit in the same push
 - **THEN** classification considers the complete touched-path history and does not discard the application commits because of the net diff.
 
+#### Scenario: Executable fixtures within documentation directories
+- **WHEN** simulator JSON or validation scripts under docs change
+- **THEN** those paths remain application-relevant and receive tests/release handling rather than being mistaken for documentation-only edits.
+
 ### Requirement: Immutable tag before exact-source build
 Release tags SHALL identify actual merged main application commits without generated version commits. Successful remote tag creation/identity verification SHALL precede every official application build. Both distributed targets SHALL build that exact tagged SHA, report its version and include matching source/checksum provenance. Source: REM-30; release coordinator and build metadata.
 

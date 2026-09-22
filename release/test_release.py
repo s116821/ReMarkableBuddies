@@ -88,7 +88,7 @@ class ReleaseTests(unittest.TestCase):
 
     def test_docs_only_no_tag_and_no_build_gate(self):
         before = git(self.fixture.repo, "rev-parse", "HEAD")
-        after = self.fixture.commit("docs(REM-30): explain", "README.md", "openspec/specs/test/spec.md", "docs/diagram.png")
+        after = self.fixture.commit("docs(REM-30): explain", "README.md", "openspec/specs/test/spec.md", "docs/validation/images/diagram.png")
         self.assertIsNone(self.fixture.plan())
         self.assertFalse(classify_event(self.fixture.repo, {"before": before, "after": after}, "push"))
         self.assertEqual(git(self.fixture.repo, "tag"), "v0.1.12")
@@ -136,8 +136,12 @@ class ReleaseTests(unittest.TestCase):
         self.assertTrue(classify_event(self.fixture.repo, event, "pull_request"))
 
     def test_unknown_paths_and_build_dependencies_are_relevant(self):
-        for path in ["build.sh", "build.rs", "Cargo.toml", "Cargo.lock", "Cross.toml", ".github/workflows/ci.yml", "release/policy.py", "new-component/file"]:
+        for path in ["build.sh", "build.rs", "Cargo.toml", "Cargo.lock", "Cross.toml", ".github/workflows/ci.yml", "release/policy.py", "new-component/file", "docs/simulator/scenarios/blank-answer.json", "docs/validation/fixtures/generate_strokes.py", ".agents/skills/tool/scripts/check.py"]:
             self.assertFalse(documentation(path), path)
+
+    def test_executable_fixture_under_docs_is_application_relevant(self):
+        self.fixture.commit("test(REM-22): refine scenario", "docs/simulator/scenarios/blank-answer.json")
+        self.assertEqual(self.fixture.plan().tag, "v0.1.13")
 
     def test_retry_after_tag_and_partial_upload_preserves_sha(self):
         sha = self.fixture.commit("feat(REM-9): feature", "src/main.rs")
