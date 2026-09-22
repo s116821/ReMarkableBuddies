@@ -84,7 +84,9 @@ jobs:
         if: github.event_name == 'pull_request' && needs.policy.outputs.application == 'true'
       - name: Release regression repositories
         if: github.event_name == 'pull_request' && needs.policy.outputs.application == 'true'
-        run: python -m unittest discover -s release -v
+        run: |
+          cargo fetch --locked
+          python -m unittest discover -s release -v
       - name: Run tests
         if: github.event_name == 'pull_request' && needs.policy.outputs.application == 'true'
         run: cargo test --locked --all-features

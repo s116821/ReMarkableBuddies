@@ -163,6 +163,8 @@ class GitHub:
         with tempfile.TemporaryDirectory(prefix="reader-release-upload-") as temp:
             self.run("release", "download", release.tag, "--dir", temp)
             verify_packages(Path(temp), release)
+            if sha256(Path(temp) / "provenance.json") != sha256(directory / "provenance.json"):
+                raise ValueError("Uploaded provenance differs from the verified local build")
         record = json.loads((directory / "provenance.json").read_text())
         record["provenance_sha256"] = sha256(directory / "provenance.json")
         notes = f"Reader Buddy {release.tag}\n\nSource: {release.sha}\n\n<!-- reader-buddy-complete:{json.dumps(record, separators=(',', ':'))} -->"

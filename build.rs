@@ -30,6 +30,18 @@ fn semantic_tag(tag: &str) -> bool {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    // cross bind mounts can change the apparent owner of this already executing
+    // source. Trust only this package directory for this build-script process;
+    // do not modify global Git configuration or trust arbitrary repositories.
+    let config_count: usize = env::var("GIT_CONFIG_COUNT")
+        .unwrap_or_else(|_| "0".to_owned())
+        .parse()?;
+    env::set_var("GIT_CONFIG_COUNT", (config_count + 1).to_string());
+    env::set_var(format!("GIT_CONFIG_KEY_{config_count}"), "safe.directory");
+    env::set_var(
+        format!("GIT_CONFIG_VALUE_{config_count}"),
+        env::var("CARGO_MANIFEST_DIR")?,
+    );
     println!("cargo:rerun-if-env-changed=READER_BUDDY_RELEASE_TAG");
     println!("cargo:rerun-if-env-changed=READER_BUDDY_RELEASE_SHA");
     let tag = env::var("READER_BUDDY_RELEASE_TAG").ok();

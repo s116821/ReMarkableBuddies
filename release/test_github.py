@@ -29,6 +29,7 @@ class AdapterTests(unittest.TestCase):
         self.state = None
         self.fail_upload = False
         self.corrupt_download = False
+        self.replace_consistently = False
         self.calls = []
 
     def fake_run(self, *args):
@@ -47,6 +48,12 @@ class AdapterTests(unittest.TestCase):
                 shutil.copyfile(path, target / path.name)
             if self.corrupt_download:
                 (target / "provenance.json").unlink()
+            if self.replace_consistently:
+                manifest = json.loads((target / "provenance.json").read_text())
+                name = next(iter(manifest["packages"]))
+                (target / name).write_bytes(b"different internally consistent build")
+                manifest["packages"][name] = sha256(target / name)
+                (target / "provenance.json").write_text(json.dumps(manifest))
         elif operation == "edit":
             self.state["draft"] = False
             self.state["body"] = args[args.index("--notes") + 1]
@@ -101,6 +108,14 @@ class AdapterTests(unittest.TestCase):
             self.state["body"] = f"<!-- reader-buddy-complete:{json.dumps(record)} -->"
             with self.assertRaisesRegex(ValueError, "provenance"):
                 self.adapter.complete(self.release)
+
+    def test_internally_consistent_wrong_upload_is_not_published(self):
+        self.replace_consistently = True
+        with patch.object(self.adapter, "view", side_effect=lambda _: self.state), patch.object(self.adapter, "run", side_effect=self.fake_run):
+            with self.assertRaisesRegex(ValueError, "differs from the verified local build"):
+                self.adapter.publish(self.release, self.directory)
+        self.assertTrue(self.state["draft"])
+        self.assertFalse(any(args[1] == "edit" for args in self.calls))
 
 
 if __name__ == "__main__":
