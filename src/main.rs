@@ -10,173 +10,219 @@ use std::time::Duration;
 #[derive(Parser)]
 #[command(author, version = env!("READER_BUDDY_VERSION"))]
 #[command(about = "ReMarkable Reader Buddy - AI-powered reading assistant for reMarkable tablets")]
-#[command(
-    long_about = "ReMarkable Reader Buddy watches for outlined or highlighted content and handwritten questions, \
-                        then uses ChatGPT to provide answers directly on your reMarkable tablet."
-)]
 pub struct Args {
-    /// Run a bounded local scenario (offline unless its model mode is explicitly live)
-    #[arg(long, value_name = "SCENARIO", conflicts_with_all = ["screenshot_only", "model", "base_url", "no_trigger", "once", "trigger_corner"])]
+    /// Run a bounded local scenario (offline unless explicitly live)
+    #[arg(long, value_name = "SCENARIO", conflicts_with_all = ["api_key", "model", "base_url", "trigger_corner", "debug_dump"])]
     simulate: Option<std::path::PathBuf>,
-    /// Capture a PNG and exit without credentials, input devices, or an AI call
-    #[arg(long, value_name = "FILE")]
-    screenshot_only: Option<String>,
+    /// API key (prefer OPENAI_API_KEY to avoid shell history/process-list exposure)
+    #[arg(long)]
+    api_key: Option<String>,
     /// OpenAI model to use
     #[arg(long, short, default_value = DEFAULT_MODEL)]
     model: String,
-
-    /// OpenAI base URL (for custom endpoints)
+    /// OpenAI endpoint (overrides OPENAI_BASE_URL)
     #[arg(long)]
     base_url: Option<String>,
-
-    /// Disable trigger waiting (run immediately)
-    #[arg(long)]
-    no_trigger: bool,
-
-    /// Run only once instead of looping
-    #[arg(long)]
-    once: bool,
-
     /// Trigger corner (UR, UL, LR, LL)
     #[arg(long, default_value = "LL")]
     trigger_corner: String,
+    /// Global log level, overriding RUST_LOG: off, error, warn, info, debug, trace
+    #[arg(long)]
+    log_level: Option<log::LevelFilter>,
+    /// Save local page-image diagnostics (independent of logging)
+    #[arg(long)]
+    debug_dump: bool,
 }
 
-fn debug_dump_enabled(value: Option<&str>) -> Result<bool> {
-    match value {
+fn api_key(cli: Option<String>, environment: Option<String>) -> Result<String> {
+    let key = cli
+        .or(environment)
+        .ok_or_else(|| anyhow::anyhow!("Set OPENAI_API_KEY or supply --api-key"))?;
+    anyhow::ensure!(!key.trim().is_empty(), "Selected API key is empty");
+    Ok(key)
+}
+
+fn debug_dump_enabled(explicit: bool, environment: Option<&str>) -> Result<bool> {
+    if explicit {
+        return Ok(true);
+    }
+    match environment {
         None | Some("0" | "false") => Ok(false),
         Some("1" | "true") => Ok(true),
         Some(_) => anyhow::bail!("READER_BUDDY_DEBUG_DUMP must be true, false, 1 or 0"),
     }
 }
 
+fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_logger::Builder {
+    let mut builder = env_logger::Builder::new();
+    if let Some(level) = level {
+        builder.filter_level(level);
+    } else if let Some(filter) = environment {
+        builder.parse_filters(filter);
+    } else {
+        builder
+            .filter_level(log::LevelFilter::Info)
+            .filter_module("reader_buddy", log::LevelFilter::Debug)
+            .filter_module("remarkable_reader_buddy", log::LevelFilter::Debug);
+    }
+    builder.format_timestamp_millis();
+    builder
+}
+
 fn main() -> Result<()> {
-    // Load .env file if it exists
     dotenv().ok();
-
     let args = Args::parse();
-
-    // Initialize logger
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .format_timestamp_millis()
-        .init();
-
+    logging(args.log_level, std::env::var("RUST_LOG").ok().as_deref()).init();
     info!("=== ReMarkable Reader Buddy Starting ===");
     if let Some(path) = args.simulate {
         remarkable_reader_buddy::simulator::run_file(&path)?;
         return Ok(());
     }
-    if let Some(path) = args.screenshot_only {
-        let mut screenshot = remarkable_reader_buddy::Screenshot::new()?;
-        screenshot.take_screenshot()?;
-        screenshot.save_image(&path)?;
-        info!("Screenshot saved to {}", path);
-        return Ok(());
-    }
-    info!("Model: {}", args.model);
-    info!("Trigger Corner: {}", args.trigger_corner);
-
-    // Parse trigger corner
     let trigger_corner = TriggerCorner::from_string(&args.trigger_corner)?;
-
-    let debug_dump = debug_dump_enabled(std::env::var("READER_BUDDY_DEBUG_DUMP").ok().as_deref())?;
-    let api_key = std::env::var("OPENAI_API_KEY")
-        .map_err(|_| anyhow::anyhow!("OPENAI_API_KEY environment variable not set"))?;
-    anyhow::ensure!(!api_key.trim().is_empty(), "OPENAI_API_KEY is empty");
+    let debug_dump = debug_dump_enabled(
+        args.debug_dump,
+        std::env::var("READER_BUDDY_DEBUG_DUMP").ok().as_deref(),
+    )?;
+    let key = api_key(args.api_key, std::env::var("OPENAI_API_KEY").ok())?;
     let base_url = args
         .base_url
         .or_else(|| std::env::var("OPENAI_BASE_URL").ok());
-    let llm = OpenAI::new(args.model, api_key, base_url);
-
-    // Initialize workflow
+    info!("Model: {}", args.model);
+    info!("Trigger Corner: {}", args.trigger_corner);
+    let llm = OpenAI::new(args.model, key, base_url);
     let workflow = Workflow::new(false, trigger_corner, debug_dump)?;
-
-    // Give time for the virtual devices to be initialized
     sleep(Duration::from_millis(1000));
-
-    // Create orchestrator
     let mut orchestrator = Orchestrator::new(workflow, llm);
-    orchestrator.set_trigger_enabled(!args.no_trigger);
-
-    info!("Initialization complete");
-
-    // Run the workflow
-    if args.once {
-        info!("Running single iteration");
-        orchestrator.run_iteration()?;
-    } else {
-        info!("Starting main loop");
-        orchestrator.run_loop()?;
-    }
-
-    Ok(())
+    info!("Initialization complete; starting main loop");
+    orchestrator.run_loop()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
+    use log::{Level, LevelFilter, Log, Metadata};
 
     #[test]
-    fn supported_bounded_diagnostics_and_defaults() {
-        let args = Args::try_parse_from(["reader-buddy", "--once", "--no-trigger"]).unwrap();
-        assert!(args.once && args.no_trigger);
+    fn exact_requested_interface_and_defaults() {
+        let mut names: Vec<_> = Args::command()
+            .get_arguments()
+            .filter_map(|a| a.get_long().map(str::to_owned))
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "api-key",
+                "base-url",
+                "debug-dump",
+                "log-level",
+                "model",
+                "simulate",
+                "trigger-corner"
+            ]
+        );
+        let args = Args::try_parse_from(["reader-buddy"]).unwrap();
         assert_eq!(args.model, DEFAULT_MODEL);
         assert_eq!(args.trigger_corner, "LL");
-        let args = Args::try_parse_from(["reader-buddy", "--screenshot-only", "page.png"]).unwrap();
-        assert_eq!(args.screenshot_only.as_deref(), Some("page.png"));
-    }
-
-    #[test]
-    fn simulator_has_one_explicit_selector_and_rejects_conflicting_modes() {
-        let args = Args::try_parse_from(["reader-buddy", "--simulate", "scenario.json"]).unwrap();
-        assert_eq!(
-            args.simulate.unwrap(),
-            std::path::PathBuf::from("scenario.json")
-        );
-        for extra in [
-            vec!["--once"],
-            vec!["--no-trigger"],
-            vec!["--model", "example"],
-            vec!["--trigger-corner", "UR"],
-            vec!["--screenshot-only", "out.png"],
-        ] {
-            assert!(Args::try_parse_from(
-                ["reader-buddy", "--simulate", "scenario.json"]
-                    .into_iter()
-                    .chain(extra)
-            )
-            .is_err());
-        }
-    }
-
-    #[test]
-    fn removed_modes_are_rejected_instead_of_silently_ignored() {
-        for removed_args in [
-            vec!["--input-png", "input.png"],
-            vec!["--save-screenshot", "output.png"],
-            vec!["--no-draw"],
-            vec!["--api-key", "not-a-real-key"],
-            vec!["--log-level", "debug"],
-            vec!["--debug-dump"],
+        assert!(!args.debug_dump);
+        for flag in [
+            "--once",
+            "--no-trigger",
+            "--screenshot-only",
+            "--input-png",
+            "--save-screenshot",
+            "--no-draw",
+            "--debug",
         ] {
             assert!(
-                Args::try_parse_from(
-                    std::iter::once("reader-buddy").chain(removed_args.iter().copied())
-                )
-                .is_err(),
-                "{removed_args:?}"
+                Args::try_parse_from(["reader-buddy", flag]).is_err(),
+                "{flag}"
             );
         }
     }
 
     #[test]
-    fn image_dumps_require_explicit_valid_configuration() {
+    fn simulation_rejects_ignored_overrides_but_accepts_logging() {
+        assert!(Args::try_parse_from([
+            "reader-buddy",
+            "--simulate",
+            "scenario.json",
+            "--log-level",
+            "warn"
+        ])
+        .is_ok());
+        for extra in [
+            vec!["--api-key", "fixture-secret"],
+            vec!["--model", "m"],
+            vec!["--base-url", "url"],
+            vec!["--trigger-corner", "UR"],
+            vec!["--debug-dump"],
+        ] {
+            let error = Args::try_parse_from(
+                ["reader-buddy", "--simulate", "scenario.json"]
+                    .into_iter()
+                    .chain(extra),
+            )
+            .err()
+            .unwrap()
+            .to_string();
+            assert!(!error.contains("fixture-secret"));
+        }
+    }
+
+    #[test]
+    fn credentials_resolve_without_value_bearing_errors() {
+        assert_eq!(
+            api_key(Some("cli-fixture".into()), Some("env-fixture".into())).unwrap(),
+            "cli-fixture"
+        );
+        assert_eq!(
+            api_key(None, Some("env-fixture".into())).unwrap(),
+            "env-fixture"
+        );
+        assert!(api_key(None, None).is_err());
+        assert!(api_key(Some("  ".into()), Some("env-fixture".into())).is_err());
+        assert!(api_key(None, Some("\t".into())).is_err());
+        let help = Args::command().render_long_help().to_string();
+        assert!(!help.contains("env-fixture"));
+    }
+
+    #[test]
+    fn dumps_are_independent_and_explicit_flag_wins() {
         for value in [None, Some("false"), Some("0")] {
-            assert!(!debug_dump_enabled(value).unwrap());
+            assert!(!debug_dump_enabled(false, value).unwrap());
         }
         for value in [Some("true"), Some("1")] {
-            assert!(debug_dump_enabled(value).unwrap());
+            assert!(debug_dump_enabled(false, value).unwrap());
         }
-        assert!(debug_dump_enabled(Some("tru")).is_err());
+        assert!(debug_dump_enabled(false, Some("invalid")).is_err());
+        assert!(debug_dump_enabled(true, Some("invalid")).unwrap());
+        assert!(debug_dump_enabled(true, Some("false")).unwrap());
+    }
+
+    fn enabled(logger: &env_logger::Logger, target: &str, level: Level) -> bool {
+        logger.enabled(&Metadata::builder().target(target).level(level).build())
+    }
+
+    #[test]
+    fn logging_default_and_override_precedence() {
+        let default = logging(None, None).build();
+        for target in ["reader_buddy", "remarkable_reader_buddy::workflow"] {
+            assert!(enabled(&default, target, Level::Debug));
+            assert!(!enabled(&default, target, Level::Trace));
+        }
+        assert!(!enabled(&default, "ureq", Level::Debug));
+        assert!(enabled(&default, "ureq", Level::Info));
+        let env = logging(None, Some("error,remarkable_reader_buddy=trace")).build();
+        assert!(enabled(&env, "remarkable_reader_buddy", Level::Trace));
+        assert!(!enabled(&env, "reader_buddy", Level::Info));
+        let cli = logging(Some(LevelFilter::Warn), Some("trace")).build();
+        assert!(!enabled(&cli, "remarkable_reader_buddy", Level::Info));
+        assert!(enabled(&cli, "ureq", Level::Warn));
+        for level in ["off", "error", "warn", "info", "debug", "trace"] {
+            assert!(Args::try_parse_from(["reader-buddy", "--log-level", level]).is_ok());
+        }
+        assert!(Args::try_parse_from(["reader-buddy", "--log-level", "verbose"]).is_err());
     }
 }

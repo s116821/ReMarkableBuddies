@@ -79,6 +79,7 @@ pub struct RealDevice {
     status_style: Option<super::status_style::Lease>,
     status_journal: Option<super::status_style::Journal>,
     status_style_supported: bool,
+    debug_dump: bool,
     clock: std::time::Instant,
     #[cfg(target_os = "linux")]
     history: super::native_history::NativeHistory,
@@ -92,7 +93,7 @@ pub struct RealDevice {
 const HEADER_PATH: &str = "/var/cache/reader-buddy/header-pattern.png";
 
 impl RealDevice {
-    pub fn new(no_draw: bool, corner: TriggerCorner) -> Result<Self> {
+    pub fn new(no_draw: bool, corner: TriggerCorner, debug_dump: bool) -> Result<Self> {
         anyhow::ensure!(
             !std::path::Path::new("/var/cache/reader-buddy/status-style-recovery.json")
                 .try_exists()?,
@@ -103,6 +104,7 @@ impl RealDevice {
         }
         Ok(Self {
             status_style: None,
+            debug_dump,
             status_journal: None,
             status_style_supported: !no_draw
                 && std::fs::read_to_string("/etc/os-release").is_ok_and(|release| {
@@ -222,7 +224,7 @@ impl DeviceBackend for RealDevice {
                 return Ok(false);
             }
         };
-        let Some(mut lease) = Lease::prepare(observed)? else {
+        let Some(mut lease) = Lease::prepare(observed, self.debug_dump)? else {
             return Ok(false);
         };
         self.status_journal = Some(Journal::create(Path::new(RECORD), &lease.recovery)?);

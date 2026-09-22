@@ -193,9 +193,11 @@ Default execution requires reMarkable hardware. The maintained simulator runs th
 same Reader orchestrator through `DeviceBackend` and `LLMEngine` interfaces:
 `cargo run -- --simulate docs/simulator/scenarios/blank-answer.json`.
 See [scenario format and fidelity](simulator.md). Desktop behavioral and simulator
-tests run with `cargo test --all-targets`. For bounded device checks, use:
-- `--screenshot-only FILE` to capture without credentials or input initialization
-- `--once --no-trigger` to run one real-device question without a held gesture
+tests run with `cargo test --all-targets`. For bounded device checks, explicitly build/copy the examples described in
+[README testing](../README.md#testing) and use:
+- the `screenshot FILE` example to capture without credentials or input initialization
+- the `reader_once` example to run one real-device question without a held gesture
+  (environment credentials/endpoint, default model and LL; stop/restore normal service)
 - `READER_BUDDY_DEBUG_DUMP=true` to retain optional local capture diagnostics
 
 The former `--input-png`, `--no-draw` and `--save-screenshot` switches are removed;
@@ -228,8 +230,9 @@ messages fail visibly. Mixed and multi-commit history is evaluated in full.
 - Behavioral tests cover configuration, hold timing, page decisions, Q&A composition
   and response parsing without a tablet.
 - Real-device smoke remains required for input, model, navigation and rendering changes.
-- Inspect service logs with `journalctl -u reader-buddy.service`; use `RUST_LOG=debug`
-  in the protected service environment file for more verbose diagnostics.
+- Inspect service logs with `journalctl -u reader-buddy.service`; Reader Buddy debug
+  diagnostics are enabled by default. `--log-level` overrides `RUST_LOG`; absent
+  either, dependency logging stays at info. Image dumps remain opt-in.
 
 ### Simulator extensions
 - REM-23 must add production Writer and combined-mode simulator regressions.
