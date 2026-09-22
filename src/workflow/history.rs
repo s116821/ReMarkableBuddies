@@ -405,6 +405,68 @@ mod tests {
     }
 
     #[test]
+    fn native_coordinate_tag_toggles_with_its_complete_answer() {
+        let mut states = [page("", 1), page("", 2), page("", 3)];
+        for (state, bytes) in states.iter_mut().zip([
+            include_bytes!("../../tests/fixtures/native-history/tagged-deleted.rm").as_slice(),
+            include_bytes!("../../tests/fixtures/native-history/tagged-applied.rm").as_slice(),
+            include_bytes!("../../tests/fixtures/native-history/tagged-restored.rm").as_slice(),
+        ]) {
+            state.content = crate::device::native_text::read(bytes).unwrap();
+        }
+        assert_eq!(
+            states[0].content.text(),
+            "=== Reader Buddy Answers ===\n\n\n"
+        );
+        let block = states[1]
+            .content
+            .text()
+            .strip_prefix(&states[0].content.text())
+            .unwrap()
+            .to_owned();
+        assert!(block.starts_with("Q @ (0.55, 0.24): G unc.?\n\nA:"));
+        assert_eq!(states[1].content, states[2].content);
+        let mut history = History::default();
+        assert!(history.arm(states[0].clone(), states[1].clone(), &block));
+        assert!(matches!(
+            history.begin(Action::Undo, &states[1]),
+            Some(Command::DeleteSuffix { paragraphs: 4, .. })
+        ));
+        history.finish(Ok(states[0].clone())).unwrap();
+        assert_eq!(
+            history.begin(Action::Redo, &states[0]),
+            Some(Command::RestoreDeletion)
+        );
+        history.finish(Ok(states[2].clone())).unwrap();
+        assert_eq!(history.state(), State::Applied);
+    }
+
+    #[test]
+    fn tagged_append_with_changed_native_scene_cannot_claim_prior_ownership() {
+        let mut before = page("", 1);
+        before.content = crate::device::native_text::read(include_bytes!(
+            "../../tests/fixtures/native-history/tagged-restored.rm"
+        ))
+        .unwrap();
+        let mut applied = page("", 2);
+        applied.content = crate::device::native_text::read(include_bytes!(
+            "../../tests/fixtures/native-history/tagged-append-scene-change.rm"
+        ))
+        .unwrap();
+        let block = applied
+            .content
+            .text()
+            .strip_prefix(&before.content.text())
+            .unwrap()
+            .to_owned();
+        assert!(block.starts_with("Q @ (0.55, 0.22):"));
+        assert_ne!(before.content.scene_records, applied.content.scene_records);
+        let mut history = History::default();
+        assert!(!history.arm(before, applied.clone(), &block));
+        assert_eq!(history.begin(Action::Undo, &applied), None);
+    }
+
+    #[test]
     fn paragraph_cap_refuses_before_any_selection() {
         let before = page(BEFORE, 1);
         let block = "\n".repeat(MAX_PARAGRAPHS + 1);

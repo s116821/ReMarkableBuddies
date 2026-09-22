@@ -7,7 +7,7 @@ Describe the implemented reader analysis contracts, initially baselined from v0.
 ## Requirements
 
 ### Requirement: Current-page answer proposal
-Each iteration SHALL capture the current page and send an overview plus three detail strips with ANALYSIS_PROMPT. The prompt SHALL ask for one readable handwritten question associated with a closed outline or deliberate highlighted passage, distinguish handwriting from typeset text and user selection from printed shading, allow surrounding context/general knowledge, preserve paper-specific values, and request plain ASCII output. Highlights SHALL NOT require a surrounding closed outline. Missing selections or ambiguous question-to-selection association SHALL request abstention. OUTLINE_BOX SHALL remain the response field for the selected outlined/highlighted region's overview bounding box. Selection interpretation remains model-based rather than independently proven from pixels. Source: src/workflow/orchestrator.rs analyze_and_answer/ANALYSIS_PROMPT.
+Each iteration SHALL capture the current page and send an overview plus three detail strips with ANALYSIS_PROMPT. The prompt SHALL ask for one readable handwritten question associated with a closed outline or deliberate highlighted passage, distinguish handwriting from typeset text and user selection from printed shading, allow surrounding context/general knowledge, preserve paper-specific values, and request plain ASCII output. Highlights SHALL NOT require a surrounding closed outline. Missing selections or ambiguous question-to-selection association SHALL request abstention. SELECTION_CENTER SHALL replace OUTLINE_BOX and identify the approximate center of the selected outlined/highlighted content in the full-page overview's 768 by 1024 pixel coordinate frame, excluding question and detail-strip coordinates. Selection interpretation remains model-based rather than independently proven from pixels. Source: src/workflow/orchestrator.rs analyze_and_answer/ANALYSIS_PROMPT.
 
 #### Scenario: No readable question
 - **WHEN** the response begins with NONE ignoring case and outer whitespace
@@ -30,7 +30,7 @@ Each iteration SHALL capture the current page and send an overview plus three de
 - **THEN** the prompt requests NONE and does not substitute a passage summary for the missing question.
 
 ### Requirement: Structured proposal parsing
-The parser SHALL require a first --- separator, an ANSWER: body prefix and nonempty, non-NONE question/answer values. It SHALL parse optional four-integer boxes, preserve the complete answer after the first separator, and not independently prove an outline exists from pixels. Source: src/workflow/orchestrator.rs parse_analysis_response/parse_bounding_box.
+The parser SHALL require a first --- separator, an ANSWER: body prefix and nonempty, non-NONE question/answer values. It SHALL retain the question-box parsing gate and require exactly one SELECTION_CENTER field with two finite numbers inside the inclusive overview canvas. It SHALL normalize x by overview width and y by overview height, preserve the complete answer after the first separator, and not independently prove a selection exists from pixels. Source: src/workflow/orchestrator.rs parse_analysis_response/parse_bounding_box.
 
 #### Scenario: Malformed response
 - **WHEN** required fields are absent, empty or explicitly NONE
@@ -39,7 +39,15 @@ The parser SHALL require a first --- separator, an ANSWER: body prefix and nonem
 #### Scenario: Question bounds gate
 - **WHEN** a proposal lacks a parsed question box, has Y outside 0..1024 or nonpositive height
 - **THEN** independent verification declines it.
-- **AND** X/width and outline bounds are not additional validation gates in this baseline.
+- **AND** question X/width remain outside the existing transcription gate; selected-content center validation is independently required before output.
+
+#### Scenario: Invalid selection center
+- **WHEN** SELECTION_CENTER is missing, duplicated, malformed, non-finite or outside the overview canvas
+- **THEN** the proposal is declined before verification/navigation with no guessed, clamped or untagged answer.
+
+#### Scenario: Device-independent center
+- **WHEN** the selected-content center is (384, 512) in the full-page overview
+- **THEN** its normalized center is (0.5, 0.5) regardless of native screen resolution.
 
 ### Requirement: Independent transcription agreement
 Before navigation or answer output, the system SHALL clear model content and request transcription from the same overview/detail images without the proposed question or answer. It SHALL require a nonempty TRANSCRIPTION: value that agrees after normalization; verification provider errors SHALL decline the proposal, while device progress or cleanup errors SHALL propagate and prevent answer output. Source: src/workflow/orchestrator.rs verify_question/transcriptions_agree.
