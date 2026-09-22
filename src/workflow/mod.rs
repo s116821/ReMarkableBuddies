@@ -66,7 +66,7 @@ impl Workflow {
         debug_dump: bool,
     ) -> Result<Self> {
         Ok(Self::with_device(
-            Box::new(RealDevice::new(no_draw, trigger_corner)?),
+            Box::new(RealDevice::new(no_draw, trigger_corner, debug_dump)?),
             debug_dump,
         ))
     }

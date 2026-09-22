@@ -28,7 +28,10 @@ for each hardware test batch; distinguish earlier results from the current build
   tablet does not extend to a paired personal tablet. Announce device changes and
   honor the user's existing scope; this skill grants no new mutation permission.
 - Isolate test runs from the installed service so two instances cannot inject input.
-  Use bounded single-iteration runs and verify startup before injecting the trigger.
+  Use the explicitly built `reader_once` example for an immediate bounded iteration
+  (environment credentials, default model/LL, no dump), or bound the normal loop
+  externally and verify startup before injecting the trigger. Production no-trigger/once
+  switches are removed; see [build/invocation steps](../../../README.md#testing).
   Finish or stop a test process before replacing its binary or manipulating its page.
 - Check storage before installation. Stage on a suitable writable partition, retain
   a verified rollback, set executable permissions, then replace atomically. Reload

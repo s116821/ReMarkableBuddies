@@ -259,10 +259,12 @@ mod tests {
         assert_eq!(controls(&image).unwrap().fine, Some((0, 1)));
         let mut io = Model::new();
         io.menu = true;
-        assert!(Lease::prepare(io.observe().unwrap()).unwrap().is_none());
+        assert!(Lease::prepare(io.observe().unwrap(), false)
+            .unwrap()
+            .is_none());
         let mut state = io.observe().unwrap();
         state.image = GrayImage::from_pixel(768, 1024, Luma([255]));
-        assert!(Lease::prepare(state).unwrap().is_none());
+        assert!(Lease::prepare(state, false).unwrap().is_none());
         assert_eq!(io.count, 0);
     }
 
@@ -321,7 +323,7 @@ mod tests {
                 x,
                 y,
             );
-            assert!(Lease::prepare(state).unwrap().is_none());
+            assert!(Lease::prepare(state, false).unwrap().is_none());
             assert_eq!(io.count, 0);
         }
         let blank = closed();
@@ -340,7 +342,9 @@ mod tests {
         io.canvas = Some(fixture(include_bytes!(
             "../../tests/fixtures/status-style/paper-before.png"
         )));
-        let mut lease = Lease::prepare(io.observe().unwrap()).unwrap().unwrap();
+        let mut lease = Lease::prepare(io.observe().unwrap(), false)
+            .unwrap()
+            .unwrap();
         lease.acquire(&mut io).unwrap();
         io.canvas = Some(fixture(include_bytes!(
             "../../tests/fixtures/status-style/paper-after-erase.png"
@@ -355,7 +359,9 @@ mod tests {
     fn pending_cleanup_verifies_original_tools_without_later_input() {
         let mut io = Model::new();
         let original = io.prefs.clone();
-        let mut lease = Lease::prepare(io.observe().unwrap()).unwrap().unwrap();
+        let mut lease = Lease::prepare(io.observe().unwrap(), false)
+            .unwrap()
+            .unwrap();
         let path = std::env::temp_dir().join(format!(
             "reader-pending-{}-{}.json",
             std::process::id(),
@@ -392,7 +398,9 @@ mod tests {
     #[test]
     fn failed_pending_cleanup_checkpoint_retains_journal_and_forbids_finish() {
         let mut io = Model::new();
-        let mut lease = Lease::prepare(io.observe().unwrap()).unwrap().unwrap();
+        let mut lease = Lease::prepare(io.observe().unwrap(), false)
+            .unwrap()
+            .unwrap();
         let path = std::env::temp_dir().join(format!(
             "reader-cleanup-{}-{}.json",
             std::process::id(),
@@ -418,7 +426,9 @@ mod tests {
     #[test]
     fn highlighter_secondary_and_nondefault_fine_restore_exactly() {
         let mut io = Model::new();
-        let mut lease = Lease::prepare(io.observe().unwrap()).unwrap().unwrap();
+        let mut lease = Lease::prepare(io.observe().unwrap(), false)
+            .unwrap()
+            .unwrap();
         lease.acquire(&mut io).unwrap();
         assert_eq!(fine_style(&io.prefs).unwrap(), (0, 1));
         assert_eq!(io.prefs["LastPen"], "Finelinerv2");
@@ -447,7 +457,9 @@ mod tests {
                     let original = io.prefs.clone();
                     io.fail = Some(failure);
                     io.fail_before = before;
-                    let mut lease = Lease::prepare(io.observe().unwrap()).unwrap().unwrap();
+                    let mut lease = Lease::prepare(io.observe().unwrap(), false)
+                        .unwrap()
+                        .unwrap();
                     assert!(lease.acquire(&mut io).is_err(), "failure {failure}");
                     lease.restore(&mut io).unwrap();
                     assert_eq!(io.prefs, original, "failure {failure}");
@@ -462,7 +474,9 @@ mod tests {
         for slot in ["primary", "secondary"] {
             let mut healthy = Model::new();
             healthy.prefs.insert("LastActiveTool".into(), slot.into());
-            let mut lease = Lease::prepare(healthy.observe().unwrap()).unwrap().unwrap();
+            let mut lease = Lease::prepare(healthy.observe().unwrap(), false)
+                .unwrap()
+                .unwrap();
             lease.acquire(&mut healthy).unwrap();
             let first = healthy.count + 1;
             lease.restore(&mut healthy).unwrap();
@@ -471,7 +485,9 @@ mod tests {
                 for failure in first..=last {
                     let mut io = Model::new();
                     io.prefs.insert("LastActiveTool".into(), slot.into());
-                    let mut lease = Lease::prepare(io.observe().unwrap()).unwrap().unwrap();
+                    let mut lease = Lease::prepare(io.observe().unwrap(), false)
+                        .unwrap()
+                        .unwrap();
                     lease.acquire(&mut io).unwrap();
                     io.fail = Some(failure);
                     io.fail_before = before;
@@ -489,7 +505,9 @@ mod tests {
         io.prefs
             .insert("LastFinelinerv2Color".into(), "ArgbCode".into());
         let original = io.prefs.clone();
-        let mut lease = Lease::prepare(io.observe().unwrap()).unwrap().unwrap();
+        let mut lease = Lease::prepare(io.observe().unwrap(), false)
+            .unwrap()
+            .unwrap();
         assert!(lease.acquire(&mut io).is_err());
         lease.restore(&mut io).unwrap();
         assert_eq!(io.prefs, original);
@@ -504,7 +522,9 @@ mod tests {
         for failure in 1..=6 {
             let mut io = Model::new();
             io.fail_checkpoint = Some(failure);
-            let mut lease = Lease::prepare(io.observe().unwrap()).unwrap().unwrap();
+            let mut lease = Lease::prepare(io.observe().unwrap(), false)
+                .unwrap()
+                .unwrap();
             assert!(lease.acquire(&mut io).is_err());
             assert_eq!(io.count, failure - 1);
             let count = io.count;
@@ -524,7 +544,9 @@ mod tests {
         ] {
             io.prefs.insert(k.into(), v.into());
         }
-        let mut lease = Lease::prepare(io.observe().unwrap()).unwrap().unwrap();
+        let mut lease = Lease::prepare(io.observe().unwrap(), false)
+            .unwrap()
+            .unwrap();
         let path = std::env::temp_dir().join(format!(
             "reader-status-close-{}-{}.json",
             std::process::id(),
@@ -589,7 +611,9 @@ mod tests {
     #[test]
     fn changed_page_refuses_rollback_input() {
         let mut io = Model::new();
-        let mut lease = Lease::prepare(io.observe().unwrap()).unwrap().unwrap();
+        let mut lease = Lease::prepare(io.observe().unwrap(), false)
+            .unwrap()
+            .unwrap();
         lease.acquire(&mut io).unwrap();
         io.identity.visit = "1:91".into();
         let count = io.count;
@@ -609,13 +633,13 @@ mod tests {
             .insert("LastActiveTool".into(), "primary".into());
         // A damaged/partly painted supported border previously looked closed.
         state.image.put_pixel(279, 100, Luma([255]));
-        assert!(Lease::prepare(state).unwrap().is_none());
+        assert!(Lease::prepare(state, false).unwrap().is_none());
         let mut state = io.observe().unwrap();
         // A docked popover elsewhere on the seam has no pen-menu grid at all.
         for y in 700..850 {
             state.image.put_pixel(61, y, Luma([0]));
         }
-        assert!(Lease::prepare(state).unwrap().is_none());
+        assert!(Lease::prepare(state, false).unwrap().is_none());
         assert_eq!(io.count, 0);
     }
 
@@ -631,7 +655,9 @@ mod tests {
             io.prefs.insert(k.into(), v.into());
         }
         let original = io.prefs.clone();
-        let mut lease = Lease::prepare(io.observe().unwrap()).unwrap().unwrap();
+        let mut lease = Lease::prepare(io.observe().unwrap(), false)
+            .unwrap()
+            .unwrap();
         lease.acquire(&mut io).unwrap();
         let count = io.count;
         lease.restore(&mut io).unwrap();
@@ -1159,6 +1185,7 @@ pub trait StyleIo {
 }
 
 pub struct Lease {
+    debug_dump: bool,
     pub recovery: Recovery,
     baseline: GrayImage,
     checkpoint_failed: bool,
@@ -1219,7 +1246,7 @@ impl CleanupViewport {
     }
 }
 impl Lease {
-    pub fn prepare(observed: Observation) -> Result<Option<Self>> {
+    pub fn prepare(observed: Observation, debug_dump: bool) -> Result<Option<Self>> {
         let Some(ui) = controls(&observed.image) else {
             return Ok(None);
         };
@@ -1232,6 +1259,7 @@ impl Lease {
         let recovery = Recovery::new(observed.identity, observed.preferences, ui.slot.to_owned())?;
         Ok(Some(Self {
             recovery,
+            debug_dump,
             baseline: observed.image,
             checkpoint_failed: false,
             viewport,
@@ -1260,10 +1288,7 @@ impl Lease {
             })
         });
         if let Some((x, y)) = changed {
-            if matches!(
-                std::env::var("READER_BUDDY_DEBUG_DUMP").as_deref(),
-                Ok("1" | "true")
-            ) {
+            if self.debug_dump {
                 // Fixed, bounded opt-in evidence; never replace the model capture.
                 for (name, image) in [("before", &self.baseline), ("rejected", &state.image)] {
                     if let Err(error) =

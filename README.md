@@ -183,11 +183,11 @@ reader-buddy [OPTIONS]
 
 Options:
   --simulate <SCENARIO>     Run a bounded offline simulator scenario
-  --screenshot-only <FILE>  Capture and exit without AI or input devices
+  --api-key <API_KEY>       Optional key override (prefer environment)
   --model <MODEL>           Model to use [default: gpt-5.6-terra]
   --base-url <URL>          Custom OpenAI endpoint
-  --no-trigger              Skip waiting for trigger
-  --once                    Run once instead of looping
+  --log-level <LEVEL>       off/error/warn/info/debug/trace; overrides RUST_LOG
+  --debug-dump              Save local page-image diagnostics
   --trigger-corner <CORNER> Trigger corner: UR, UL, LR, LL [default: LL]
   -h, --help                Print help
   -V, --version             Print version
@@ -217,19 +217,34 @@ Options:
 # Run the production Reader workflow locally with scripted model replies
 cargo run -- --simulate docs/simulator/scenarios/blank-answer.json
 
-# Capture only (still requires tablet process-memory access)
-./reader-buddy --screenshot-only /tmp/page.png
-
-# Run one real-device iteration without waiting for the hold gesture
-./reader-buddy --no-trigger --once
+# Build explicit development examples for an authorized RM2 (not release assets)
+cross build --release --target armv7-unknown-linux-gnueabihf --example screenshot --example reader_once
+# Copy target/armv7-unknown-linux-gnueabihf/release/examples/{screenshot,reader_once}
+# to the authorized tablet, then run there:
+./screenshot /tmp/page.png
+# Stop the normal service first; this immediately runs a real, potentially paid Q&A:
+./reader_once
 ```
 
 The old `--input-png` and `--save-screenshot` flags were unused and are removed.
 `--no-draw` did not provide a working simulator and is also removed. Use
 `--simulate` for the maintained [local simulator](docs/simulator.md), or bounded
 diagnostic probes for offline device actions.
-Use `OPENAI_API_KEY` instead of `--api-key`, `RUST_LOG` instead of `--log-level`,
-and `READER_BUDDY_DEBUG_DUMP=true` instead of `--debug-dump`.
+Production `--once`, `--no-trigger` and `--screenshot-only` are removed; use the
+explicit examples above. `reader_once` uses environment credentials/endpoint, the
+default model and LL corner, with image dumps disabled. Restore the normal service
+after the bounded diagnostic. Paper Pro examples use the aarch64 target.
+
+`--api-key` overrides `OPENAI_API_KEY`; prefer the protected environment because
+command arguments may appear in shell history or process listings. No real key is
+needed for offline simulation. `--base-url` overrides `OPENAI_BASE_URL`.
+`--log-level` overrides `RUST_LOG`; otherwise Reader Buddy emits debug messages by
+default while dependencies emit info and above. No debug enable flag is needed.
+`--debug-dump` enables all optional workflow and rejected-status page dumps; absent
+the flag, `READER_BUDDY_DEBUG_DUMP=true` or `1` enables them (default false). Explicit
+CLI values win over environment values. Simulation rejects explicit normal
+key/model/endpoint/corner/dump overrides; use scenario fields, with `--log-level`
+available for simulator logging.
 
 ### Background Execution
 
@@ -453,7 +468,7 @@ the X without a reverse swipe.
 
 ### Answer not appearing on new page
 If the answer doesn't render and no X appears:
-- Enable debug logging with `RUST_LOG=remarkable_reader_buddy=debug`.
+- Reader Buddy debug logging is enabled by default; use `--log-level info` or `RUST_LOG=info` to reduce it.
 - Check the logged answer-page classification (Blank, ExistingQA, or Invalid).
 
 ### Debug Mode
@@ -530,7 +545,7 @@ scp -r RM2:/var/cache/reader-buddy ~/Downloads/
 scp RM2:/tmp/reader-buddy-* ~/Downloads/ && scp -r RM2:/var/cache/reader-buddy ~/Downloads/
 ```
 
-**Tip**: Enable `READER_BUDDY_DEBUG_DUMP=true` with `RUST_LOG=debug` only when collecting local diagnostic files.
+**Tip**: Enable `READER_BUDDY_DEBUG_DUMP=true` only when collecting local diagnostic images. Default debug logs can include document/model text; review logs before sharing.
 
 ## Cleanup and Uninstall
 
