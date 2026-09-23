@@ -57,6 +57,17 @@ native timing evidence is available.
 
 ## Measurement events
 
+### First capture cost change
+The nearest resize now copies the exact selected eight-bit channels directly,
+using the same f32 center/floor/clamp sampling as image0.25.10's zero-support
+Nearest kernel. Pixel-for-pixel comparison against the library covers normalized
+native RM2 dimensions (modern and rotated legacy), Paper Pro dimensions, gray
+levels, RGBA/alpha, upscaling and equal dimensions; invalid formats/empty images
+refuse. Raw conversion/orientation, both PNG encodes, allocation discovery and
+owner guards remain unchanged in this incremental step. No native speedup is
+claimed before repeated captures on the new build. Full direct-image status and
+serialization elimination remain future work in this change.
+
 Debug logs emit fixed `timing` fields: process ID, run ID, operation ID, phase,
 begin/end, monotonic microseconds and elapsed microseconds. An iteration gets a
 new run; the existing provider worker explicitly inherits it. Run zero denotes

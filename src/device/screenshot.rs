@@ -302,11 +302,7 @@ impl Screenshot {
         let img = image::load_from_memory(&png_data)?;
         drop(decode);
         let resize = crate::measurement::Span::new("capture.resize");
-        let resized_img = img.resize_exact(
-            SCREENSHOT_VIRTUAL_WIDTH,
-            SCREENSHOT_VIRTUAL_HEIGHT,
-            image::imageops::FilterType::Nearest,
-        );
+        let resized_img = Self::normalize_native(&img)?;
 
         // Encode the resized image back to PNG
         drop(resize);
@@ -349,6 +345,46 @@ impl Screenshot {
                 // RM2 uses 16-bit grayscale
                 self.encode_png_rm2(raw_data)
             }
+        }
+    }
+
+    /// Exact image0.25 Nearest sampling for the two native eight-bit formats.
+    /// Its zero-support kernel selects floor((out+0.5)*ratio), using f32.
+    /// Keep that arithmetic (not an integer approximation) and copy channels
+    /// directly instead of constructing an intermediate RGBA float image.
+    fn normalize_native(img: &image::DynamicImage) -> Result<image::DynamicImage> {
+        let (width, height) = (img.width(), img.height());
+        anyhow::ensure!(width > 0 && height > 0, "Empty native capture");
+        let xs: Vec<_> = (0..SCREENSHOT_VIRTUAL_WIDTH)
+            .map(|x| {
+                (((x as f32 + 0.5) * (width as f32 / SCREENSHOT_VIRTUAL_WIDTH as f32)).floor()
+                    as u32)
+                    .min(width - 1)
+            })
+            .collect();
+        let ys: Vec<_> = (0..SCREENSHOT_VIRTUAL_HEIGHT)
+            .map(|y| {
+                (((y as f32 + 0.5) * (height as f32 / SCREENSHOT_VIRTUAL_HEIGHT as f32)).floor()
+                    as u32)
+                    .min(height - 1)
+            })
+            .collect();
+        match img {
+            image::DynamicImage::ImageLuma8(source) => {
+                Ok(image::DynamicImage::ImageLuma8(image::GrayImage::from_fn(
+                    SCREENSHOT_VIRTUAL_WIDTH,
+                    SCREENSHOT_VIRTUAL_HEIGHT,
+                    |x, y| *source.get_pixel(xs[x as usize], ys[y as usize]),
+                )))
+            }
+            image::DynamicImage::ImageRgba8(source) => {
+                Ok(image::DynamicImage::ImageRgba8(image::RgbaImage::from_fn(
+                    SCREENSHOT_VIRTUAL_WIDTH,
+                    SCREENSHOT_VIRTUAL_HEIGHT,
+                    |x, y| *source.get_pixel(xs[x as usize], ys[y as usize]),
+                )))
+            }
+            _ => anyhow::bail!("Unexpected native capture pixel format"),
         }
     }
 
@@ -477,6 +513,39 @@ impl Screenshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direct_nearest_matches_library_pixels_and_alpha() {
+        // Actual normalized-native dimensions for modern/rotated legacy RM2 and
+        // Paper Pro, plus small/upscaled and equal-size boundaries. Varied alpha
+        // must remain a copied channel, never premultiplied or discarded.
+        for (width, height) in [(1404, 1872), (1632, 2154), (3, 7), (768, 1024)] {
+            let rgba = image::RgbaImage::from_fn(width, height, |x, y| {
+                let n = x
+                    .wrapping_mul(1664525)
+                    .wrapping_add(y.wrapping_mul(1013904223));
+                image::Rgba([(n >> 24) as u8, (n >> 16) as u8, (n >> 8) as u8, n as u8])
+            });
+            let gray = image::GrayImage::from_fn(width, height, |x, y| {
+                image::Luma([(x.wrapping_mul(31).wrapping_add(y.wrapping_mul(17))) as u8])
+            });
+            for native in [
+                image::DynamicImage::ImageLuma8(gray),
+                image::DynamicImage::ImageRgba8(rgba),
+            ] {
+                let oracle = native.resize_exact(
+                    SCREENSHOT_VIRTUAL_WIDTH,
+                    SCREENSHOT_VIRTUAL_HEIGHT,
+                    image::imageops::FilterType::Nearest,
+                );
+                let actual = Screenshot::normalize_native(&native).unwrap();
+                assert_eq!(actual.color(), oracle.color());
+                assert_eq!(actual.as_bytes(), oracle.as_bytes(), "{width}x{height}");
+            }
+        }
+        assert!(Screenshot::normalize_native(&image::DynamicImage::new_luma8(0, 0)).is_err());
+        assert!(Screenshot::normalize_native(&image::DynamicImage::new_rgb8(5, 5)).is_err());
+    }
 
     fn mmap_header(previous: u32, size: u32) -> [u8; 8] {
         let mut header = [0; 8];
