@@ -31,6 +31,15 @@ pub struct Pen {
 
 #[cfg(target_os = "linux")]
 impl Pen {
+    pub(super) fn input_identity(&self) -> Result<super::input_observer::DescriptorIdentity> {
+        use std::os::fd::AsFd;
+        super::input_observer::descriptor_identity(
+            self.device
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Pen writer unavailable"))?
+                .as_fd(),
+        )
+    }
     pub fn new(no_draw: bool) -> Self {
         let device_model = DeviceModel::detect();
         info!("Pen using device model: {}", device_model.name());

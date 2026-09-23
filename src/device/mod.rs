@@ -14,6 +14,8 @@ pub mod native_page;
 pub mod native_text;
 #[cfg(any(target_os = "linux", test))]
 mod navigation_completion;
+#[cfg(any(target_os = "linux", test))]
+mod owned_pen_window;
 pub mod pen;
 pub mod screenshot;
 #[cfg(any(target_os = "linux", test))]

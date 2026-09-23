@@ -434,3 +434,28 @@ journal checks. Native delivery of injected events to retained descriptors must 
 verified, not assumed. If the observer cannot establish the contracted window,
 fail closed without falling back to a blind drain/retry. This targets the measured
 teardown interval rather than weakening fresh guards.
+
+Retained-descriptor candidate implementation: duplicate each live writer/reader
+fd only for File::metadata/fstat, match character-device inode/rdev and unchanged
+inventory; do not identify ownership by a mutable path alone. The existing guard
+is immediately followed by begin_owned_pen, which processes pending input before
+marking the window. Ordinary poll refuses while that window is open. After the
+release attempt, finish drains only the exact source with an8192-event total cap,
+50ms drain deadline and one-second total contact-window bound. Only injected
+coordinate/pressure/distance and pen/rubber/touch-key codes/values are accepted,
+with complete SYN frames, mutually exclusive tools, pressure/contact consistency
+and a final released state. Dropped, malformed or unexpected events fail closed.
+Fresh kernel touch/key snapshots and repeated inventory/fd checks precede ordinary
+polling of every source. Buffered other-source gestures (including completed taps)
+and late pen events invalidate ownership rather than being discarded. No observer
+clock/contact reducer/cancellation reset. The shared input-failure wrapper always
+attempts finish after write/release failure and prevents later input/journal finish.
+
+Four shared-policy regressions cover valid split frames, identity/snapshot/external
+input refusal, malformed/dropped/partial/held events, count/deadline limits, and
+combined write/rearm failure with preserved OS chain and no later mutation. The
+native adapter's actual kernel queue and fd behavior still require exact source
+review, ARM compilation and bounded hardware validation. These tests do not claim
+to inject real kernel hotplug, held contacts or persistence failure. Earlier real
+journal failure regressions remain required. No automatic fallback to descriptor
+replacement, generic drains or broader erasure is present.

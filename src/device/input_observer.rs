@@ -12,11 +12,11 @@ use std::{
     collections::BTreeMap,
     fs::{self, OpenOptions},
     os::{
-        fd::AsRawFd,
-        unix::fs::{MetadataExt, OpenOptionsExt},
+        fd::{AsFd, AsRawFd, BorrowedFd},
+        unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt},
     },
     path::{Path, PathBuf},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 // Linux input.h EVIOCGMTSLOTS(len): first i32 is the requested MT axis,
@@ -28,6 +28,33 @@ struct Identity {
     inode: u64,
     device: u64,
     sysfs: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct DescriptorIdentity {
+    inode: u64,
+    device: u64,
+}
+
+pub(super) fn descriptor_identity(fd: BorrowedFd<'_>) -> Result<DescriptorIdentity> {
+    // A duplicate of the live descriptor gives File::metadata (fstat), not a
+    // pathname lookup. Closing this duplicate does not close the original reader.
+    let metadata = fs::File::from(fd.try_clone_to_owned()?).metadata()?;
+    ensure!(
+        metadata.file_type().is_char_device(),
+        "Input descriptor is not a character device"
+    );
+    Ok(DescriptorIdentity {
+        inode: metadata.ino(),
+        device: metadata.rdev(),
+    })
+}
+
+#[derive(Clone, Copy)]
+struct OwnedPen {
+    index: usize,
+    writer: DescriptorIdentity,
+    started: Duration,
 }
 
 fn inventory() -> Result<BTreeMap<PathBuf, Identity>> {
@@ -104,6 +131,7 @@ fn seed(device: &RawDevice) -> Result<ContactFrames> {
 struct Source {
     device: RawDevice,
     touch: bool,
+    identity: Identity,
 }
 
 pub struct InputObserver {
@@ -115,6 +143,7 @@ pub struct InputObserver {
     clock: Instant,
     lost: bool,
     initial_input: bool,
+    owned_pen: Option<OwnedPen>,
     #[cfg(test)]
     scripted_polls: Option<std::collections::VecDeque<Result<Vec<Interaction>>>>,
 }
@@ -123,6 +152,10 @@ impl InputObserver {
     /// Mutation guards cannot wait for a gesture to qualify or be released.
     /// Even an unfinished contact frame means the cursor is no longer owned.
     pub fn quiescent(&self) -> bool {
+        self.owned_pen.is_none() && self.quiescent_state()
+    }
+
+    fn quiescent_state(&self) -> bool {
         !self.lost
             && !self.initial_input
             && self.frames.ready_for_timer()
@@ -162,7 +195,16 @@ impl InputObserver {
             } else {
                 initial_input |= device.get_key_state()?.iter().next().is_some();
             }
-            sources.push(Source { device, touch });
+            let opened = descriptor_identity(device.as_fd())?;
+            ensure!(
+                opened.inode == identity.inode && opened.device == identity.device,
+                "Opened input descriptor changed"
+            );
+            sources.push(Source {
+                device,
+                touch,
+                identity: identity.clone(),
+            });
         }
         ensure!(
             inventory_before == inventory()?,
@@ -177,6 +219,7 @@ impl InputObserver {
             clock: Instant::now(),
             lost: false,
             initial_input,
+            owned_pen: None,
             #[cfg(test)]
             scripted_polls: None,
         })
@@ -205,7 +248,72 @@ impl InputObserver {
         if self.lost {
             anyhow::bail!("Native input observer permanently lost; recreate before waiting");
         }
-        let result = self.poll_inner();
+        let result = if self.owned_pen.is_some() {
+            Err(anyhow::anyhow!("Input observer is inside owned pen window"))
+        } else {
+            self.poll_inner()
+        };
+        if result.is_err() {
+            self.lost = true;
+            self.reducer.cancel();
+        }
+        result
+    }
+
+    pub(super) fn begin_owned_pen(&mut self, writer: DescriptorIdentity) -> Result<()> {
+        let result = (|| {
+            ensure!(
+                self.poll()?.is_empty() && self.quiescent(),
+                "Input before owned pen window"
+            );
+            let indices: Vec<_> = self
+                .sources
+                .iter()
+                .enumerate()
+                .filter_map(|(index, source)| {
+                    (!source.touch
+                        && source.identity.inode == writer.inode
+                        && source.identity.device == writer.device)
+                        .then_some(index)
+                })
+                .collect();
+            ensure!(
+                indices.len() == 1,
+                "Pen writer does not identify one observed source"
+            );
+            let index = indices[0];
+            ensure!(
+                descriptor_identity(self.sources[index].device.as_fd())? == writer,
+                "Pen reader/writer descriptor mismatch"
+            );
+            self.owned_pen = Some(OwnedPen {
+                index,
+                writer,
+                started: self.clock.elapsed(),
+            });
+            Ok(())
+        })();
+        if result.is_err() {
+            self.lost = true;
+            self.reducer.cancel();
+        }
+        result
+    }
+
+    pub(super) fn has_owned_pen(&self) -> bool {
+        self.owned_pen.is_some()
+    }
+
+    pub(super) fn finish_owned_pen(&mut self) -> Result<()> {
+        let window = self.owned_pen.context("No owned pen window")?;
+        let result = super::owned_pen_window::finish(
+            &mut WindowAdapter {
+                observer: self,
+                window,
+            },
+            window.started,
+        );
+        self.owned_pen = None;
         if result.is_err() {
             self.lost = true;
             self.reducer.cancel();
@@ -282,7 +390,74 @@ impl InputObserver {
             clock: Instant::now(),
             lost: false,
             initial_input: false,
+            owned_pen: None,
             scripted_polls: Some(polls.into()),
         }
+    }
+}
+
+struct WindowAdapter<'a> {
+    observer: &'a mut InputObserver,
+    window: OwnedPen,
+}
+impl super::owned_pen_window::WindowIo for WindowAdapter<'_> {
+    fn now(&self) -> Duration {
+        self.observer.clock.elapsed()
+    }
+    fn validate_source(&mut self) -> Result<()> {
+        ensure!(!self.observer.lost, "Owned input observer was lost");
+        ensure!(
+            self.observer.inventory == inventory()?,
+            "Input inventory changed during owned pen window"
+        );
+        let source = self
+            .observer
+            .sources
+            .get(self.window.index)
+            .context("Owned pen source missing")?;
+        ensure!(
+            !source.touch && descriptor_identity(source.device.as_fd())? == self.window.writer,
+            "Owned pen descriptor identity changed"
+        );
+        Ok(())
+    }
+    fn next_events(&mut self) -> Result<Option<Vec<super::owned_pen_window::Event>>> {
+        let source = &mut self.observer.sources[self.window.index];
+        match source.device.fetch_events() {
+            Ok(events) => Ok(Some(
+                events
+                    .take(super::owned_pen_window::MAX_EVENTS + 1)
+                    .map(|event| (event.event_type().0, event.code(), event.value()))
+                    .collect(),
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+    fn released_snapshot(&mut self) -> Result<()> {
+        for source in &self.observer.sources {
+            if source.touch {
+                ensure!(
+                    seed(&source.device)?
+                        .contacts()
+                        .context("Unknown current touch state")?
+                        .is_empty(),
+                    "Touch held across owned pen window"
+                );
+            } else {
+                ensure!(
+                    source.device.get_key_state()?.iter().next().is_none(),
+                    "Input key held after owned pen release"
+                );
+            }
+        }
+        Ok(())
+    }
+    fn check_other_input(&mut self) -> Result<()> {
+        ensure!(
+            self.observer.poll_inner()?.is_empty() && self.observer.quiescent_state(),
+            "External or delayed input during owned pen window"
+        );
+        Ok(())
     }
 }

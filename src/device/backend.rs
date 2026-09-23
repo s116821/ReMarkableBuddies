@@ -276,11 +276,19 @@ impl RealDevice {
         })();
         self.status_style = Some(lease);
         self.status_wait_cancellation.record(result)?;
-        // Injection shares the physical source. Only this owned input interval
-        // lacks attribution; immediately rearm after release, even on failure.
+        // Retain descriptors, but authorize a narrowly identified owned source
+        // only for the immediate injection/release interval. Other sources keep
+        // every pending event; the same physical pen remains unattributable here.
         #[cfg(target_os = "linux")]
         {
-            self.status_wait_input = None;
+            let result = (|| {
+                let writer = self.pen.input_identity()?;
+                self.status_wait_input
+                    .as_mut()
+                    .context("Status observer missing before injection")?
+                    .begin_owned_pen(writer)
+            })();
+            self.status_wait_cancellation.record(result)?;
         }
         Ok(())
     }
@@ -288,6 +296,13 @@ impl RealDevice {
         let _timing = crate::measurement::Span::new("status.path.rearm");
         if self.current_tool_probe {
             use super::status_style::StyleIo;
+            #[cfg(target_os = "linux")]
+            if let Some(observer) = self.status_wait_input.as_mut() {
+                if observer.has_owned_pen() {
+                    let result = observer.finish_owned_pen();
+                    self.status_wait_cancellation.record(result)?;
+                }
+            }
             self.begin_wait()?;
             self.check_wait()?;
         }
