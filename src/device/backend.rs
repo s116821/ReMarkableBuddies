@@ -93,6 +93,37 @@ pub struct RealDevice {
 const HEADER_PATH: &str = "/var/cache/reader-buddy/header-pattern.png";
 
 impl RealDevice {
+    fn ready_status_observation(&mut self) -> Result<Option<super::status_style::Observation>> {
+        #[cfg(target_os = "linux")]
+        {
+            use super::{input_observer::InputObserver, status_style::StyleIo};
+            // No device mutation occurs in this scope. Observe every input source,
+            // including our devices; any activity invalidates the pending baseline.
+            let mut input = match InputObserver::new(TriggerCorner::LowerLeft, None) {
+                Ok(input) => input,
+                Err(_) => {
+                    log::debug!("Status readiness input observer unavailable; suppressing status");
+                    return Ok(None);
+                }
+            };
+            let started = std::time::Instant::now();
+            super::status_readiness::wait_ready(
+                || self.observe(),
+                || {
+                    anyhow::ensure!(
+                        input.poll()?.is_empty() && input.quiescent(),
+                        "Input cancelled status readiness"
+                    );
+                    Ok(())
+                },
+                || started.elapsed(),
+                std::thread::sleep,
+            )
+        }
+        #[cfg(not(target_os = "linux"))]
+        Ok(None)
+    }
+
     pub fn new(no_draw: bool, corner: TriggerCorner, debug_dump: bool) -> Result<Self> {
         anyhow::ensure!(
             !std::path::Path::new("/var/cache/reader-buddy/status-style-recovery.json")
@@ -210,7 +241,7 @@ impl DeviceBackend for RealDevice {
         self.pen.draw_path_screen(&stroke.points())
     }
     fn status_style_begin(&mut self) -> Result<bool> {
-        use super::status_style::{Journal, Lease, Recovery, StyleIo};
+        use super::status_style::{Journal, Lease, Recovery};
         let _timing = crate::measurement::Span::new("status.acquire");
         use std::path::Path;
         const RECORD: &str = "/var/cache/reader-buddy/status-style-recovery.json";
@@ -227,12 +258,9 @@ impl DeviceBackend for RealDevice {
         if !self.status_style_supported {
             return Ok(false);
         }
-        let observed = match self.observe() {
-            Ok(state) => state,
-            Err(error) => {
-                log::debug!("Status style unavailable: {error}");
-                return Ok(false);
-            }
+        let Some(observed) = self.ready_status_observation()? else {
+            log::debug!("Status readiness unavailable; no lease or input");
+            return Ok(false);
         };
         let Some(mut lease) = Lease::prepare(observed, self.debug_dump)? else {
             return Ok(false);

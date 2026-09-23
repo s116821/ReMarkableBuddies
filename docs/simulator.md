@@ -222,3 +222,16 @@ Status-style tests also enforce acquisition/restoration around native marks. `st
 
 
 The toolbar model separates actual UI preferences from stale advisory document values (including actual Red/Thick while the file reports Black/Medium). Failure tests cover each acquisition/restoration input before and after its possible effect, both original slots, unknown Fineliner styles, and journal failure before input. Recovery tests enforce exclusive creation, immutable captured values, reserved rollback capacity, incomplete-tail refusal and retained evidence after I/O failure. Model results establish those control-flow invariants, not physical persistence timing; native menu screenshots remain necessary for current-preference restoration evidence.
+
+### Native footer readiness model
+
+The shared production pre-lease wait has deterministic virtual-clock tests in
+`device::status_readiness`: exact native footer frames cover immediate readiness,
+delayed disappearance, repeated/persistent overlays, unknown footer ink, late
+observations, wrong document/page/visit/session, other content changes and input
+cancellation. No mutation interface is available during this wait. The existing
+active-lease test still refuses the exact before/after pair at143,991; the wait
+establishes a new baseline only before a lease exists. These tests model sequencing,
+not physical display timing or the Linux input observer. The scenario backend does
+not yet render native page-navigation chrome; broader timing/state integration and
+native successful Q&A/performance acceptance remain required.

@@ -18,6 +18,31 @@ Initial target budgets to evaluate before closure: ordinary Fineliner first feed
 4. Address the repeated refusal from exact evidence. Add the actual pair and reachable fault/convergence case to regression coverage; preserve adversarial page/edit/slot/mutation failures. No repeated paid retries without new evidence. If evidence cannot safely distinguish redraw and user edits, retain conservative refusal and keep availability acceptance open instead of claiming fixed.
 5. Replace navigation/settling/rendering sleep assumptions with supported completion events and verified postconditions, otherwise bounded fresh-state polling. Retain fixed waits only as documented protocol/physical/observability exceptions. Keep independent recognition and complete Q&A/history semantics. Avoid switching status tools during undo/redo.
 
+## Pre-lease readiness decision from the exact native pair
+The f38748d attempt in baseline.md isolates disappearing navigation chrome at
+y991–1011. Before creating a lease/journal, establish positive inactive-footer
+pixels in a fresh768x1024 observation: the bottom40 rows outside the left toolbar
+must be white, except the observed single horizontal rule at y1009 which may be
+uniformly black or white. This conservative predicate can decline status on pages
+with real content in that margin; it never permits ignoring such content in an
+active lease. The ordinary Reader fallback for unavailable status is retained.
+
+Use a scoped existing Linux input observer to cancel on external input/device loss,
+not to claim UI completion. Poll fresh status observations with a5s monotonic
+deadline and50ms pacing, checking cancellation and deadline before and after each
+observation. Require unchanged identity and all pixels above the footer during
+the wait; a changed owner/page/session or other content is fatal, not a new baseline.
+No input is emitted while waiting. Timeout suppresses unavailable status before
+any journal/input, rather than treating elapsed time as readiness. Only the final
+positively ready observation establishes the immutable lease baseline. Unknown
+firmware/layout retains the existing unsupported-style fallback. Native availability,
+observer cost and the precise predicate remain to be validated before acceptance.
+
+Exercise immediate readiness, delayed disappearance, persistent overlay, unknown
+footer ink, stale/wrong-owner observations, cancellation and slow observations
+through this shared production wait. Repeated identical overlay frames are not
+ready. Keep the exact old-pair strict active-lease refusal regression.
+
 ## Safety, regression and native gates
 Pure conversion tests compare the old codec pipeline and direct pixels across modern RM2BGRA (all neutral values, colored samples, random patterns, exact dimensions), legacy RM2 curves/rotation/flip and Paper ProRGBA including alpha. Keep malformed/truncated/ambiguous allocation failures. Runtime model/overview/detail images must decode to identical pixels; byte-level compression differences are not image differences. Test any failure leaves no stale usable capture. Existing native-frame fixtures remain strict; do not relabel synthesized input as human handwriting.
 

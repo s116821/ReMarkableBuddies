@@ -10,6 +10,8 @@ pub mod native_page;
 pub mod native_text;
 pub mod pen;
 pub mod screenshot;
+#[cfg(any(target_os = "linux", test))]
+mod status_readiness;
 pub mod status_style;
 pub mod touch;
 
