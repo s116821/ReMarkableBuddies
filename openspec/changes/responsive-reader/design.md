@@ -300,3 +300,12 @@ future context. Continue current-selected-pen/no-menu work with proven safe
 eligibility and core Q&A available. Writer scope remains notes/notebooks to full
 notes in the chosen backend, with optional refinement using the same plain Reader
 Q&A interaction; no tablet rich-formatting requirement is introduced.
+
+Current-tool candidate review follow-up: before/active and before/final toolbar
+comparison in the thick calibration has exactly46 changed pixels bounded by
+x20..40,y391..405 (PDF undo icon enabling). Only this small known region may be
+excluded from the candidate active-toolbar comparison; no blanket outside-pen
+chrome exemption. Notes-page undo position/state still needs separate evidence
+before product admission. Current-tool cleanup additionally preserves a12-pixel
+outer neighbor ring beyond the existing12-pixel blank clearance. This adds a
+check; it does not establish the maximum eraser footprint or validate all widths.

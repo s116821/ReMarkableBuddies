@@ -148,6 +148,7 @@ mod tests {
         let mut lease = Lease::prepare_current(io.state.clone(), false)
             .unwrap()
             .unwrap();
+        assert!(lease.verify_current(&mut io).is_err());
         let path =
             std::env::temp_dir().join(format!("rb-current-tool-{}.jsonl", std::process::id()));
         io.journal = Some(Journal::create(&path, &lease.recovery).unwrap());
@@ -158,6 +159,7 @@ mod tests {
             .is_err());
         lease.verify_current(&mut io).unwrap();
         lease.prepare_cleanup(&mut io).unwrap();
+        assert!(lease.verify_current(&mut io).is_err());
         assert_eq!(Recovery::read(&path).unwrap().phase, Phase::PendingCleanup);
         lease.finish_cleanup(&mut io).unwrap();
         io.journal.take().unwrap().finish().unwrap();
@@ -217,6 +219,42 @@ mod tests {
         let mut changed_version = lease.recovery.clone();
         changed_version.version = 2;
         assert!(changed_version.validate().is_err());
+        // Exercise the landmark redraw allowance without allowing it to hide
+        // changed neighbors immediately outside the blank erasure footprint.
+        io.state.image = closed();
+        lease.viewport = CleanupViewport::Landmarks;
+        io.state.image.put_pixel(685, 960, Luma([0]));
+        assert!(lease.finish_cleanup(&mut io).is_err());
+        io.state.image = closed();
+        io.state.image.put_pixel(30, 350, Luma([0]));
+        assert!(lease.finish_cleanup(&mut io).is_err());
+    }
+    #[test]
+    fn current_tool_only_allows_observed_undo_chrome() {
+        let before = image::load_from_memory(include_bytes!(
+            "../../tests/fixtures/status-style/current-toolbar-before.png"
+        ))
+        .unwrap()
+        .to_luma8();
+        let active = image::load_from_memory(include_bytes!(
+            "../../tests/fixtures/status-style/current-toolbar-active.png"
+        ))
+        .unwrap()
+        .to_luma8();
+        let mut io = current_io();
+        replace(&mut io.state.image, &before, 0, 0);
+        let mut lease = Lease::prepare_current(io.state.clone(), false)
+            .unwrap()
+            .unwrap();
+        lease.acquire(&mut io).unwrap();
+        replace(&mut io.state.image, &active, 0, 0);
+        lease.verify_current(&mut io).unwrap();
+        for (x, y) in [(30, 210), (30, 350), (49, 73), (760, 960), (720, 1000)] {
+            let old = *io.state.image.get_pixel(x, y);
+            io.state.image.put_pixel(x, y, Luma([255 - old.0[0]]));
+            assert!(lease.verify_current(&mut io).is_err(), "changed {x},{y}");
+            io.state.image.put_pixel(x, y, old);
+        }
     }
 
     fn fixture(bytes: &[u8]) -> GrayImage {
@@ -1619,11 +1657,9 @@ pub struct Controls {
 /// width or an eraser envelope. Preferences are deliberately not an input.
 fn closed_black_fineliner(image: &GrayImage) -> Option<&'static str> {
     static REFERENCE: std::sync::LazyLock<GrayImage> = std::sync::LazyLock::new(|| {
-        image::load_from_memory(include_bytes!(
-            "../../tests/fixtures/status-style/closed-fineliner.png"
-        ))
-        .expect("checked native Fineliner fixture")
-        .to_luma8()
+        image::load_from_memory(include_bytes!("fixtures/current-black-fineliner.png"))
+            .expect("checked native Fineliner fixture")
+            .to_luma8()
     });
     let ui = controls(image)?;
     if ui.menu {
@@ -1633,7 +1669,8 @@ fn closed_black_fineliner(image: &GrayImage) -> Option<&'static str> {
     (61..123)
         .all(|y| {
             (0..61).all(|x| {
-                image.get_pixel(x, y + offset).0[0].abs_diff(REFERENCE.get_pixel(x, y).0[0]) <= 8
+                image.get_pixel(x, y + offset).0[0].abs_diff(REFERENCE.get_pixel(x, y - 61).0[0])
+                    <= 8
             })
         })
         .then_some(ui.slot)
@@ -1815,9 +1852,15 @@ impl Lease {
         );
         let changed = (0..1024).find_map(|y| {
             (0..768).find_map(|x| {
-                let unchanged = (self.recovery.version == 2
-                    && (x < 61 || (x < 280 && (61..651).contains(&y))))
-                    || (x >= 686 && y >= 922)
+                // Native PDF calibration: only the undo icon enabled here.
+                let unchanged = (x < 61 && self.recovery.version == 2)
+                    || (self.recovery.version == 3
+                        && (20..=40).contains(&x)
+                        && (391..=405).contains(&y))
+                    || (self.recovery.version == 2 && x < 280 && (61..651).contains(&y))
+                    || (x >= 686
+                        && y >= 922
+                        && (self.recovery.version == 2 || (x <= 759 && y <= 995)))
                     || state.image.get_pixel(x, y).0[0]
                         .abs_diff(self.baseline.get_pixel(x, y).0[0])
                         <= 8;
@@ -2051,14 +2094,14 @@ impl Lease {
             io.begin_wait()?;
             let result = (|| {
                 io.check_wait()?;
-                self.verify_current(io)?;
+                self.observe_current(io)?;
                 self.recovery.phase = Phase::CurrentInk;
                 self.recovery.sequence = 1;
                 if let Err(error) = io.checkpoint(&self.recovery) {
                     self.checkpoint_failed = true;
                     return Err(error);
                 }
-                self.verify_current(io)?;
+                self.observe_current(io)?;
                 io.check_wait()
             })();
             io.end_wait();
@@ -2202,6 +2245,13 @@ impl Lease {
     /// Fresh ownership/content/tool proof; does not mutate or infer saved width.
     pub fn verify_current(&self, io: &mut impl StyleIo) -> Result<()> {
         ensure!(
+            self.recovery.phase == Phase::CurrentInk,
+            "No active owned ink intent"
+        );
+        self.observe_current(io)
+    }
+    fn observe_current(&self, io: &mut impl StyleIo) -> Result<()> {
+        ensure!(
             self.recovery.version == 3 && !self.checkpoint_failed,
             "No valid current-tool lease"
         );
@@ -2309,6 +2359,32 @@ impl Lease {
             self.viewport.unchanged(reference, &state.image),
             "Cleanup viewport changed"
         );
+        if self.recovery.version == 3 {
+            use crate::workflow::indicator::{BOTTOM, LEFT, RIGHT, TOP};
+            ensure!(
+                (0..1024).all(|y| (0..61).all(|x| {
+                    ((20..=40).contains(&x) && (391..=405).contains(&y))
+                        || before.get_pixel(x, y).0[0].abs_diff(state.image.get_pixel(x, y).0[0])
+                            <= 8
+                })),
+                "Cleanup toolbar changed outside observed undo icon"
+            );
+            // The inherited landmark redraw allowance must never hide changed
+            // neighbors of the erased footprint. Require an additional ring
+            // outside the existing 12-pixel blank clearance to remain exact.
+            ensure!(
+                (TOP - 24..=(BOTTOM + 24).min(1023)).all(|y| {
+                    (LEFT - 24..=(RIGHT + 24).min(767)).all(|x| {
+                        ((LEFT - 12..=RIGHT + 12).contains(&x)
+                            && (TOP - 12..=BOTTOM + 12).contains(&y))
+                            || before.get_pixel(x as u32, y as u32).0[0]
+                                .abs_diff(state.image.get_pixel(x as u32, y as u32).0[0])
+                                <= 8
+                    })
+                }),
+                "Cleanup changed ink beside the reserved footprint"
+            );
+        }
         ensure!(
             crate::workflow::indicator::eligible(&image::DynamicImage::ImageLuma8(state.image)),
             "Cleanup corner is not clear"

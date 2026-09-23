@@ -3,3 +3,11 @@ Additional closed primary Yellow Highlighter and secondary Ballpoint frames were
 Native open/closed secondary Yellow Highlighter frames were captured on47b after manually selecting both Highlighters and saving primary Fineliner Red/Thick in the UI. The document content file still reported old primary Fineliner Black/Medium and secondary Ballpoint values. These fixtures validate control recognition and open-menu refusal; saved-file equality is not current UI restoration evidence.
 
 paper-before.png and paper-after-erase.png are exact virtual lease baseline and rejected observation from the bad866b diagnostic on the same disposable technical-paper page (public PDF linked in docs/validation/README.md), RM2 3.28.0.172. After owned-path erasure,77 pixels differ by more than8 outside the old toolbar/status masks, confined to x589..599,y843..920. No pixel outside the newly documented empirical redraw region changed in this pair. These fixtures preserve the original strict-guard failure; they do not prove arbitrary page stability or annotation preservation. Tests keep pre-restoration refusal strict, qualify distributed page landmarks, and reject translation/zoom and changes in the invariant page region. Native eraser/neighbor tests remain separate acceptance evidence. The diagnostic pair may represent the latest failing observation, not necessarily the first failure.
+
+current-toolbar-before.png/current-toolbar-active.png are exact grayscale x0..60
+crops of the2026-09-23 current-tool-thick calibration (helper e4b263a, RM2
+3.28.0.172). Actual Black/Thick primary Fineliner, no tool changes during drawing.
+The46 changed pixels at20..40/391..405 are the PDF undo icon enabling. Tests place
+these native toolbar crops on a modeled blank canvas; that composition is not a
+native full-page sample or notes-page chrome proof. Full original images remain
+in the local current-tool-thick evidence; no document content is in these crops.
