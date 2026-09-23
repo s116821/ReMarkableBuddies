@@ -146,6 +146,17 @@ pub struct InputObserver {
     owned_pen: Option<OwnedPen>,
     #[cfg(test)]
     scripted_polls: Option<std::collections::VecDeque<Result<Vec<Interaction>>>>,
+    #[cfg(test)]
+    replay: Option<Replay>,
+}
+
+// Replace only OS reads for Linux regression tests. Raw event decoding,
+// window completion, observer loss and the caller's cancellation remain real.
+#[cfg(test)]
+#[derive(Default)]
+struct Replay {
+    batches: Vec<(bool, Vec<super::owned_pen_window::Event>)>,
+    pen: std::collections::VecDeque<Vec<super::owned_pen_window::Event>>,
 }
 
 impl InputObserver {
@@ -222,6 +233,8 @@ impl InputObserver {
             owned_pen: None,
             #[cfg(test)]
             scripted_polls: None,
+            #[cfg(test)]
+            replay: None,
         })
     }
 
@@ -326,6 +339,16 @@ impl InputObserver {
         if let Some(polls) = self.scripted_polls.as_mut() {
             return polls.pop_front().expect("unexpected diagnostic poll");
         }
+        #[cfg(test)]
+        if let Some(replay) = self.replay.as_mut() {
+            let batches = std::mem::take(&mut replay.batches);
+            let mut output = Vec::new();
+            for (touch, events) in batches {
+                self.feed_events(touch, events, &mut output)?;
+            }
+            self.finish_poll(&mut output)?;
+            return Ok(output);
+        }
         ensure!(self.inventory == inventory()?, "Input device set changed");
         let mut output = Vec::new();
         if self.initial_input {
@@ -336,36 +359,58 @@ impl InputObserver {
             }
             output.push(self.reducer.cancel());
         }
-        for source in &mut self.sources {
+        for index in 0..self.sources.len() {
+            let source = &mut self.sources[index];
             let events: Vec<_> = match source.device.fetch_events() {
                 Ok(events) => events.collect(),
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
                 Err(e) => return Err(e.into()),
             };
             ensure!(events.len() <= 8192, "Input observer event limit");
-            for event in events {
-                let kind = event.event_type().0;
-                if !source.touch {
-                    if kind != 0 || event.code() == 3 {
-                        output.push(self.reducer.cancel());
-                    }
-                    continue;
-                }
-                // Finger-count hints are checked against the complete slots.
-                // Other buttons are unrelated actions and invalidate history.
-                if kind == 1 && !matches!(event.code(), 330 | 325 | 333 | 334 | 335 | 328) {
+            let touch = source.touch;
+            self.feed_events(
+                touch,
+                events
+                    .into_iter()
+                    .map(|event| (event.event_type().0, event.code(), event.value())),
+                &mut output,
+            )?;
+        }
+        self.finish_poll(&mut output)?;
+        Ok(output)
+    }
+
+    fn feed_events(
+        &mut self,
+        touch: bool,
+        events: impl IntoIterator<Item = super::owned_pen_window::Event>,
+        output: &mut Vec<Interaction>,
+    ) -> Result<()> {
+        for (kind, code, value) in events {
+            if !touch {
+                if kind != 0 || code == 3 {
                     output.push(self.reducer.cancel());
                 }
-                match self.frames.feed(kind, event.code(), event.value()) {
-                    Observation::Pending => {}
-                    Observation::Lost => anyhow::bail!("Lost native contact frame"),
-                    Observation::Frame(contacts) => output.extend(
-                        self.reducer
-                            .frame(&Self::transform(self.model, contacts), self.clock.elapsed()),
-                    ),
-                }
+                continue;
+            }
+            // Finger-count hints are checked against the complete slots.
+            // Other buttons are unrelated actions and invalidate history.
+            if kind == 1 && !matches!(code, 330 | 325 | 333 | 334 | 335 | 328) {
+                output.push(self.reducer.cancel());
+            }
+            match self.frames.feed(kind, code, value) {
+                Observation::Pending => {}
+                Observation::Lost => anyhow::bail!("Lost native contact frame"),
+                Observation::Frame(contacts) => output.extend(
+                    self.reducer
+                        .frame(&Self::transform(self.model, contacts), self.clock.elapsed()),
+                ),
             }
         }
+        Ok(())
+    }
+
+    fn finish_poll(&mut self, output: &mut Vec<Interaction>) -> Result<()> {
         let contacts = self
             .frames
             .contacts()
@@ -376,7 +421,36 @@ impl InputObserver {
                     .frame(&Self::transform(self.model, contacts), self.clock.elapsed()),
             );
         }
-        Ok(output)
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn replay_owned(batches: Vec<(bool, Vec<super::owned_pen_window::Event>)>) -> Self {
+        let mut observer = Self::scripted(vec![]);
+        observer.scripted_polls = None;
+        observer.replay = Some(Replay {
+            batches,
+            pen: [vec![
+                (1, 320, 1),
+                (1, 330, 1),
+                (3, 24, 20),
+                (0, 0, 0),
+                (3, 24, 0),
+                (1, 330, 0),
+                (1, 320, 0),
+                (0, 0, 0),
+            ]]
+            .into(),
+        });
+        observer.owned_pen = Some(OwnedPen {
+            index: 0,
+            writer: DescriptorIdentity {
+                inode: 1,
+                device: 1,
+            },
+            started: observer.clock.elapsed(),
+        });
+        observer
     }
 
     #[cfg(test)]
@@ -392,6 +466,7 @@ impl InputObserver {
             initial_input: false,
             owned_pen: None,
             scripted_polls: Some(polls.into()),
+            replay: None,
         }
     }
 }
@@ -406,6 +481,10 @@ impl super::owned_pen_window::WindowIo for WindowAdapter<'_> {
     }
     fn validate_source(&mut self) -> Result<()> {
         ensure!(!self.observer.lost, "Owned input observer was lost");
+        #[cfg(test)]
+        if self.observer.replay.is_some() {
+            return Ok(());
+        }
         ensure!(
             self.observer.inventory == inventory()?,
             "Input inventory changed during owned pen window"
@@ -422,6 +501,10 @@ impl super::owned_pen_window::WindowIo for WindowAdapter<'_> {
         Ok(())
     }
     fn next_events(&mut self) -> Result<Option<Vec<super::owned_pen_window::Event>>> {
+        #[cfg(test)]
+        if let Some(replay) = self.observer.replay.as_mut() {
+            return Ok(replay.pen.pop_front());
+        }
         let source = &mut self.observer.sources[self.window.index];
         match source.device.fetch_events() {
             Ok(events) => Ok(Some(
@@ -435,6 +518,12 @@ impl super::owned_pen_window::WindowIo for WindowAdapter<'_> {
         }
     }
     fn released_snapshot(&mut self) -> Result<()> {
+        #[cfg(test)]
+        if self.observer.replay.is_some() {
+            // The regression specifically models a gesture already released:
+            // a kernel state snapshot alone cannot detect its queued events.
+            return Ok(());
+        }
         for source in &self.observer.sources {
             if source.touch {
                 ensure!(

@@ -410,6 +410,79 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn completed_external_input_survives_owned_window_and_retains_real_journal() {
+        use crate::device::input_observer::InputObserver;
+        let touch = vec![
+            (3, 47, 0),
+            (3, 57, 7),
+            (3, 53, 500),
+            (3, 54, 800),
+            (0, 0, 0),
+            (3, 57, -1),
+            (0, 0, 0),
+        ];
+        let key = vec![(1, 116, 1), (0, 0, 0), (1, 116, 0), (0, 0, 0)];
+        // Control proves the test is not an unconditional failure seam.
+        let mut quiet = InputObserver::replay_owned(vec![]);
+        quiet.finish_owned_pen().unwrap();
+        assert!(quiet.quiescent());
+        assert!(quiet.poll().unwrap().is_empty());
+        for (name, batches) in [
+            ("touch", vec![(true, touch)]),
+            ("key", vec![(false, key)]),
+            ("late-pen", vec![(false, vec![(3, 24, 0), (0, 0, 0)])]),
+        ] {
+            let mut io = current_io();
+            let mut lease = Lease::prepare_current(io.state.clone(), false)
+                .unwrap()
+                .unwrap();
+            let path = std::env::temp_dir().join(format!(
+                "rb-owned-replay-{}-{name}.jsonl",
+                std::process::id()
+            ));
+            io.journal = Some(Journal::create(&path, &lease.recovery).unwrap());
+            lease.acquire(&mut io).unwrap();
+            let journal_before = fs::read(&path).unwrap();
+            let mut harness = (
+                WaitCancellation::default(),
+                InputObserver::replay_owned(batches),
+                0,
+            );
+            let error = guarded_injection(
+                &mut harness,
+                |h| &mut h.0,
+                |h| {
+                    h.2 += 1;
+                    Ok(())
+                },
+                |h| {
+                    let result = h.1.finish_owned_pen();
+                    h.0.record(result)
+                },
+            )
+            .unwrap_err();
+            assert!(format!("{error:#}").contains("External or delayed input"));
+            assert!(!harness.1.has_owned_pen());
+            assert!(!harness.1.quiescent());
+            assert!(harness.1.poll().is_err()); // Observer loss is sticky even after queues emptied.
+            assert!(guarded_injection(
+                &mut harness,
+                |h| &mut h.0,
+                |_| panic!("later mutation"),
+                |_| panic!("later rearm"),
+            )
+            .is_err());
+            assert_eq!(harness.2, 1);
+            assert!(harness.0.check().is_err()); // Same gate as native journal completion.
+            assert_eq!(fs::read(&path).unwrap(), journal_before);
+            assert_eq!(Recovery::read(&path).unwrap().phase, Phase::CurrentInk);
+            drop(io);
+            fs::remove_file(path).unwrap(); // Deliberate fixture disposal only.
+        }
+    }
+
     fn fixture(bytes: &[u8]) -> GrayImage {
         image::load_from_memory(bytes).unwrap().to_luma8()
     }

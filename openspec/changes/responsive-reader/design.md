@@ -459,3 +459,21 @@ review, ARM compilation and bounded hardware validation. These tests do not clai
 to inject real kernel hotplug, held contacts or persistence failure. Earlier real
 journal failure regressions remain required. No automatic fallback to descriptor
 replacement, generic drains or broader erasure is present.
+
+Linux production-observer regression follow-up: extract the existing event feed
+and final frame/timer processing without changing decoding rules. Test-only replay
+replaces OS queue reads, descriptor checks and released-state snapshots, then runs
+the actual InputObserver.finish_owned_pen / WindowAdapter / poll decoder / contact
+reducer. Model completed touch down/up and key down/up queued while owned pen input
+is pending, plus late pen activity. A quiet positive control must pass; each external
+case must latch observer loss and shared cancellation, refuse later injection, and
+retain the exact real current-ink recovery journal. This complements native positive
+event-delivery evidence; it does not establish kernel hotplug, real contact concurrency,
+or syscall fault handling. Run this Linux-only test under the ARM target emulator;
+Windows-only test success cannot validate this path.
+
+The completed-external-input regression passed on ARM Linux under the target
+emulator (1m43 build, test0.39s). It covers completed touch/key and late pen queues,
+a quiet success control, sticky loss/cancellation and byte-identical retained
+recovery journal. The syscall reads are modeled; this is not native concurrency
+or physical-contact proof. Host strict clippy/fmt and OpenSpec validation passed.

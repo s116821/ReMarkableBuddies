@@ -588,3 +588,27 @@ After single recorded-sentinel removal and document close,122 original recognize
 Lines match exactly. OriginalFineBlackMedium/secondaryunchanged/doc46e/f39/hashes
 restored, serviceactivePID11393/NRestarts0/no active journal. Full admission and
 performance gates remain open.
+
+Primary Black/Medium cycle56ebd92 succeeds after retained-descriptor change.
+Exact helper SHA f0a94bed472965831c718c34d5b974e2f25f1f9f5dbfc8ad8e48a51c67684939;
+ARM build1m56, 200 Windows-host tests on2682080 plus four focused owned-window
+tests and strict checks on56. All25 injection windows reported positive delivery:
+93..415events,44..137frames,83.723..221.657ms total window,2.763..6.676ms drain.
+This verifies delivery on this native adapter; no EIO/reacquisition branch ran.
+Acquisition358.423902ms, cleanup4995.625ms, final387.276ms: union5741.324902ms.
+Cleanup preparation533.110ms and erase/verify4462.146ms; ten guards2681.086ms,
+physical input1407.686ms, rearm65.750ms. Nested13 observations2529.721ms,
+ten cleanup-pixel scopes133.475ms,118 input guards131.766ms,39 owner guards335.017ms
+and checkpoint4.724ms are non-additive. This is one Medium sample, not a matched
+Thin/Thick comparison, repeated latency gate, or full-workflow acceptance.
+Stages202/333/398/407 new darkpixels stay within706..737/942..972; both tool tiles
+remain exact, final corner clear, neighboring pixel rectangles exact.125 recognized
+Lines equal before/after cycle; unknown native records remain outside parser proof.
+V3 phases0/1/2 retired successfully; owner exact and no menu-input spans. Actual
+primary Fine/Black/Medium unchanged, secondary untouched. Three developer sentinels
+removed once along their recorded paths;122 original Lines exact after document
+close. Original46e/f39 visually/native verified, notes/header/runtime hashes unchanged,
+serviceactivePID12008/NRestarts0, no active journal. Installed runtime remains
+caa5dd3e51e5443d665c727c4ff5730af475ec6d4d7175ef5eb3f78fab57f03b.
+Production admission, remaining slots/negative/error/notes cases and full Q&A/history
+remain open. Raw-event production observer replay is the next admission check.
