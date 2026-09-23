@@ -291,3 +291,12 @@ community solution cannot exist; bring promising tradeoffs to review.
 Clarification: a reliable community direct interface can satisfy the no-menu
 principle; vendor-official status is not a prerequisite. The injected bridges are
 candidates with unverified compatibility/deployment cost, not permanently excluded.
+
+User decision after reviewing community findings: defer Qt/XOVI bridge reconsideration
+until AFTER the full roadmap, and only if the user misses automatic marker
+swapping. No installation, implementation, further bridge research or scheduled
+investigation belongs to the current MVP. Retain source findings as optional
+future context. Continue current-selected-pen/no-menu work with proven safe
+eligibility and core Q&A available. Writer scope remains notes/notebooks to full
+notes in the chosen backend, with optional refinement using the same plain Reader
+Q&A interaction; no tablet rich-formatting requirement is introduced.

@@ -53,6 +53,172 @@ mod tests {
     use super::*;
     use image::{imageops::replace, Luma};
 
+    struct CurrentIo {
+        state: Observation,
+        records: Vec<Recovery>,
+        journal: Option<Journal>,
+        fail_checkpoint: bool,
+        change_after_checkpoint: bool,
+        cancelled: bool,
+    }
+    impl StyleIo for CurrentIo {
+        fn observe(&mut self) -> Result<Observation> {
+            Ok(self.state.clone())
+        }
+        fn checkpoint(&mut self, record: &Recovery) -> Result<()> {
+            ensure!(!self.fail_checkpoint, "injected journal failure");
+            record.validate()?;
+            if let Some(journal) = &mut self.journal {
+                journal.append(record)?;
+            }
+            self.records.push(record.clone());
+            if self.change_after_checkpoint {
+                self.state.identity.visit = "changed".into();
+            }
+            Ok(())
+        }
+        fn press(&mut self, _: (u32, u32)) -> Result<()> {
+            panic!("current-tool path sent menu input")
+        }
+        fn monotonic(&self) -> Duration {
+            Duration::ZERO
+        }
+        fn pace(&mut self, _: Duration) {
+            panic!("current-tool path waited for a menu")
+        }
+        fn begin_wait(&mut self) -> Result<()> {
+            self.check_wait()
+        }
+        fn check_wait(&mut self) -> Result<()> {
+            ensure!(!self.cancelled, "cancelled");
+            Ok(())
+        }
+        fn end_wait(&mut self) {}
+    }
+    fn current_io() -> CurrentIo {
+        CurrentIo {
+            state: Observation {
+                identity: identity(),
+                preferences: prefs(),
+                image: closed(),
+            },
+            records: vec![],
+            journal: None,
+            fail_checkpoint: false,
+            change_after_checkpoint: false,
+            cancelled: false,
+        }
+    }
+    #[test]
+    fn current_tool_candidate_uses_closed_pixels_not_saved_preferences() {
+        let io = current_io(); // Deliberately stale Highlighter/Red saved settings.
+        assert_eq!(closed_black_fineliner(&io.state.image), Some("primary"));
+        for bytes in [
+            include_bytes!("../../tests/fixtures/status-style/closed-highlighter.png").as_slice(),
+            include_bytes!("../../tests/fixtures/status-style/closed-secondary.png").as_slice(),
+            include_bytes!("../../tests/fixtures/status-style/closed-secondary-highlighter.png")
+                .as_slice(),
+            include_bytes!("../../tests/fixtures/status-style/open-fineliner.png").as_slice(),
+        ] {
+            assert_eq!(
+                closed_black_fineliner(&image::load_from_memory(bytes).unwrap().to_luma8()),
+                None
+            );
+        }
+        let mut changed = io.state.image.clone();
+        for y in 70..77 {
+            for x in 46..53 {
+                changed.put_pixel(x, y, Luma([255]));
+            }
+        }
+        assert_eq!(closed_black_fineliner(&changed), None);
+        // Model only: a moved active tile is not native secondary-slot proof.
+        let mut secondary = io.state.image.clone();
+        for y in 61..123 {
+            for x in 0..61 {
+                secondary.put_pixel(x, y + 62, *io.state.image.get_pixel(x, y));
+                secondary.put_pixel(x, y, Luma([255]));
+            }
+        }
+        assert_eq!(closed_black_fineliner(&secondary), Some("secondary"));
+    }
+    #[test]
+    fn current_tool_journal_and_cleanup_issue_no_menu_input() {
+        let mut io = current_io();
+        let mut lease = Lease::prepare_current(io.state.clone(), false)
+            .unwrap()
+            .unwrap();
+        let path =
+            std::env::temp_dir().join(format!("rb-current-tool-{}.jsonl", std::process::id()));
+        io.journal = Some(Journal::create(&path, &lease.recovery).unwrap());
+        lease.acquire(&mut io).unwrap();
+        assert_eq!(Recovery::read(&path).unwrap().phase, Phase::CurrentInk);
+        assert!(lease
+            .transition(&mut io, Phase::OpenPrimary, (30, 90), |_| true)
+            .is_err());
+        lease.verify_current(&mut io).unwrap();
+        lease.prepare_cleanup(&mut io).unwrap();
+        assert_eq!(Recovery::read(&path).unwrap().phase, Phase::PendingCleanup);
+        lease.finish_cleanup(&mut io).unwrap();
+        io.journal.take().unwrap().finish().unwrap();
+        assert!(!path.exists());
+        assert!(io
+            .records
+            .iter()
+            .all(|r| r.mutations == Mutations::default() && r.original_fine.is_none()));
+    }
+    #[test]
+    fn current_tool_stops_on_checkpoint_owner_content_and_input_faults() {
+        for fault in 0..4 {
+            let mut io = current_io();
+            let mut lease = Lease::prepare_current(io.state.clone(), false)
+                .unwrap()
+                .unwrap();
+            match fault {
+                0 => io.fail_checkpoint = true,
+                1 => io.change_after_checkpoint = true,
+                2 => io.state.image.put_pixel(200, 300, Luma([0])),
+                _ => io.cancelled = true,
+            }
+            assert!(lease.acquire(&mut io).is_err());
+        }
+        let mut io = current_io();
+        let mut lease = Lease::prepare_current(io.state.clone(), false)
+            .unwrap()
+            .unwrap();
+        lease.acquire(&mut io).unwrap();
+        io.state.image.put_pixel(200, 100, Luma([0])); // Old menu exclusion must not apply.
+        assert!(lease.verify_current(&mut io).is_err());
+    }
+    #[test]
+    fn current_tool_cleanup_requires_durable_intent_and_unchanged_input() {
+        for fault in 0..3 {
+            let mut io = current_io();
+            let mut lease = Lease::prepare_current(io.state.clone(), false)
+                .unwrap()
+                .unwrap();
+            lease.acquire(&mut io).unwrap();
+            match fault {
+                0 => io.fail_checkpoint = true,
+                1 => io.change_after_checkpoint = true,
+                _ => io.cancelled = true,
+            }
+            assert!(lease.prepare_cleanup(&mut io).is_err());
+            assert!(lease.finish_cleanup(&mut io).is_err());
+        }
+        let mut io = current_io();
+        let mut lease = Lease::prepare_current(io.state.clone(), false)
+            .unwrap()
+            .unwrap();
+        lease.acquire(&mut io).unwrap();
+        lease.prepare_cleanup(&mut io).unwrap();
+        io.state.image.put_pixel(720, 960, Luma([0]));
+        assert!(lease.finish_cleanup(&mut io).is_err());
+        let mut changed_version = lease.recovery.clone();
+        changed_version.version = 2;
+        assert!(changed_version.validate().is_err());
+    }
+
     fn fixture(bytes: &[u8]) -> GrayImage {
         image::load_from_memory(bytes).unwrap().to_luma8()
     }
@@ -1008,6 +1174,7 @@ mod tests {
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
     Prepared,
+    CurrentInk,
     SelectPrimary,
     OpenPrimary,
     SelectFine,
@@ -1086,7 +1253,7 @@ impl Recovery {
     }
     fn validate(&self) -> Result<()> {
         ensure!(
-            self.version == 2 && self.sequence < RECORD_COUNT,
+            matches!(self.version, 2 | 3) && self.sequence < RECORD_COUNT,
             "Unsupported status recovery version/sequence"
         );
         for id in [&self.identity.document, &self.identity.page] {
@@ -1142,7 +1309,21 @@ impl Recovery {
             !(self.mutations.color || self.mutations.width) || self.original_fine.is_some(),
             "Missing style rollback target"
         );
+        if self.version == 3 {
+            ensure!(
+                self.mutations == Mutations::default()
+                    && self.original_grid.is_none()
+                    && self.original_fine.is_none()
+                    && matches!(
+                        (self.sequence, self.phase),
+                        (0, Phase::Prepared) | (1, Phase::CurrentInk) | (2, Phase::PendingCleanup)
+                    ),
+                "Invalid current-tool recovery intent"
+            );
+            return Ok(());
+        }
         let intended = match self.phase {
+            Phase::CurrentInk => false,
             Phase::Prepared => self.sequence == 0 && self.mutations == Mutations::default(),
             Phase::SelectPrimary | Phase::RestoreSelectPrimary | Phase::RestoreSlot => {
                 self.mutations.slot
@@ -1166,7 +1347,8 @@ impl Recovery {
             "Cleanup checkpoint is terminal"
         );
         ensure!(
-            self.sequence == old.sequence + 1
+            self.version == old.version
+                && self.sequence == old.sequence + 1
                 && self.identity == old.identity
                 && self.advisory == old.advisory
                 && self.original_slot == old.original_slot,
@@ -1433,6 +1615,30 @@ pub struct Controls {
     pub fine: Option<(usize, usize)>,
 }
 
+/// Positive closed-toolbar candidate only; this does not establish the unknown
+/// width or an eraser envelope. Preferences are deliberately not an input.
+fn closed_black_fineliner(image: &GrayImage) -> Option<&'static str> {
+    static REFERENCE: std::sync::LazyLock<GrayImage> = std::sync::LazyLock::new(|| {
+        image::load_from_memory(include_bytes!(
+            "../../tests/fixtures/status-style/closed-fineliner.png"
+        ))
+        .expect("checked native Fineliner fixture")
+        .to_luma8()
+    });
+    let ui = controls(image)?;
+    if ui.menu {
+        return None;
+    }
+    let offset = if ui.slot == "secondary" { 62 } else { 0 };
+    (61..123)
+        .all(|y| {
+            (0..61).all(|x| {
+                image.get_pixel(x, y + offset).0[0].abs_diff(REFERENCE.get_pixel(x, y).0[0]) <= 8
+            })
+        })
+        .then_some(ui.slot)
+}
+
 pub fn controls(image: &GrayImage) -> Option<Controls> {
     if image.dimensions() != (768, 1024) {
         return None;
@@ -1562,6 +1768,19 @@ impl CleanupViewport {
     }
 }
 impl Lease {
+    /// Candidate current-tool path. Callers must separately establish the native
+    /// footprint contract before enabling this in the product. No menu input.
+    pub fn prepare_current(observed: Observation, debug_dump: bool) -> Result<Option<Self>> {
+        if closed_black_fineliner(&observed.image).is_none() {
+            return Ok(None);
+        }
+        let Some(mut lease) = Self::prepare(observed, debug_dump)? else {
+            return Ok(None);
+        };
+        lease.recovery.version = 3;
+        lease.recovery.validate()?;
+        Ok(Some(lease))
+    }
     pub fn prepare(observed: Observation, debug_dump: bool) -> Result<Option<Self>> {
         let Some(ui) = controls(&observed.image) else {
             return Ok(None);
@@ -1596,8 +1815,8 @@ impl Lease {
         );
         let changed = (0..1024).find_map(|y| {
             (0..768).find_map(|x| {
-                let unchanged = x < 61
-                    || (x < 280 && (61..651).contains(&y))
+                let unchanged = (self.recovery.version == 2
+                    && (x < 61 || (x < 280 && (61..651).contains(&y))))
                     || (x >= 686 && y >= 922)
                     || state.image.get_pixel(x, y).0[0]
                         .abs_diff(self.baseline.get_pixel(x, y).0[0])
@@ -1679,7 +1898,7 @@ impl Lease {
             Phase::RestorePrimary => {
                 serde_json::json!({"slot":"primary","menu":true,"grid":self.recovery.original_grid})
             }
-            Phase::RestoreSlot | Phase::Prepared | Phase::PendingCleanup => {
+            Phase::RestoreSlot | Phase::Prepared | Phase::CurrentInk | Phase::PendingCleanup => {
                 serde_json::json!({"slot":self.recovery.original_slot,"menu":false})
             }
         };
@@ -1708,6 +1927,10 @@ impl Lease {
         point: (u32, u32),
         expected: impl Fn(&Controls) -> bool,
     ) -> Result<()> {
+        ensure!(
+            self.recovery.version == 2,
+            "Current-tool lease forbids toolbar input"
+        );
         let (_, before) = self.observe(io)?;
         if phase == Phase::CloseForDrawing {
             ensure!(
@@ -1727,7 +1950,7 @@ impl Lease {
             Phase::SelectFine | Phase::RestorePrimary => m.primary = true,
             Phase::SetColor | Phase::RestoreColor => m.color = true,
             Phase::SetWidth | Phase::RestoreWidth => m.width = true,
-            Phase::Prepared | Phase::PendingCleanup => {
+            Phase::Prepared | Phase::CurrentInk | Phase::PendingCleanup => {
                 anyhow::bail!("Phase cannot send toolbar input")
             }
         }
@@ -1820,6 +2043,27 @@ impl Lease {
         Ok(current)
     }
     pub fn acquire(&mut self, io: &mut impl StyleIo) -> Result<()> {
+        if self.recovery.version == 3 {
+            ensure!(
+                self.recovery.phase == Phase::Prepared,
+                "Duplicate current-tool acquisition"
+            );
+            io.begin_wait()?;
+            let result = (|| {
+                io.check_wait()?;
+                self.verify_current(io)?;
+                self.recovery.phase = Phase::CurrentInk;
+                self.recovery.sequence = 1;
+                if let Err(error) = io.checkpoint(&self.recovery) {
+                    self.checkpoint_failed = true;
+                    return Err(error);
+                }
+                self.verify_current(io)?;
+                io.check_wait()
+            })();
+            io.end_wait();
+            return result;
+        }
         self.primary_menu(io, false)?;
         let (_, mut ui) = self.observe(io)?;
         self.recovery.original_grid = Some(ui.grid.context("Missing actual primary tool grid")?);
@@ -1955,10 +2199,43 @@ impl Lease {
         );
         Ok(())
     }
+    /// Fresh ownership/content/tool proof; does not mutate or infer saved width.
+    pub fn verify_current(&self, io: &mut impl StyleIo) -> Result<()> {
+        ensure!(
+            self.recovery.version == 3 && !self.checkpoint_failed,
+            "No valid current-tool lease"
+        );
+        let (state, ui) = self.observe(io)?;
+        ensure!(
+            !ui.menu
+                && ui.slot == self.recovery.original_slot
+                && closed_black_fineliner(&state.image) == Some(ui.slot)
+                && self.original_controls(&state.image),
+            "Current drawing tool changed"
+        );
+        Ok(())
+    }
     pub fn cleanup_pending(&self) -> bool {
         self.recovery.phase == Phase::PendingCleanup
     }
     pub fn prepare_cleanup(&mut self, io: &mut impl StyleIo) -> Result<()> {
+        if self.recovery.version == 3 {
+            io.begin_wait()?;
+            let result = (|| {
+                io.check_wait()?;
+                ensure!(
+                    self.recovery.phase == Phase::CurrentInk,
+                    "No owned ink intent"
+                );
+                self.prepare_cleanup_inner(io)?;
+                io.check_wait()
+            })();
+            io.end_wait();
+            return result;
+        }
+        self.prepare_cleanup_inner(io)
+    }
+    fn prepare_cleanup_inner(&mut self, io: &mut impl StyleIo) -> Result<()> {
         self.restore(io)?;
         let (state, ui) = self.observe(io)?;
         ensure!(
@@ -1986,6 +2263,19 @@ impl Lease {
         Ok(())
     }
     pub fn finish_cleanup(&self, io: &mut impl StyleIo) -> Result<()> {
+        if self.recovery.version == 3 {
+            io.begin_wait()?;
+            let result = (|| {
+                io.check_wait()?;
+                self.finish_cleanup_inner(io)?;
+                io.check_wait()
+            })();
+            io.end_wait();
+            return result;
+        }
+        self.finish_cleanup_inner(io)
+    }
+    fn finish_cleanup_inner(&self, io: &mut impl StyleIo) -> Result<()> {
         ensure!(
             self.cleanup_pending() && !self.checkpoint_failed,
             "No valid pending cleanup checkpoint"
