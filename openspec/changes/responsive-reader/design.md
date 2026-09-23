@@ -612,3 +612,34 @@ Investigate the full emitted integer-coordinate and saved-curve interpretation
 pipeline offline, retain independent cases/negatives, and review an evidence-backed
 predicate before another native test. Never use this candidate as its own expected
 fixture. Product erasure and broader admission remain unverified.
+
+Bounded offline reconstruction after count fix: exact f32 virtual-to-input scaling
+and integer follow-path interpolation reconstructed from bc692a5 source gives
+maximum waypoint quantization0.1465 native units. Persisted circle vs reconstructed
+commanded trajectory still differs1.283/1.574 native units bidirectionally; this does
+not establish that integer input rounding caused the discrepancy. This is source
+reconstruction, not recorded kernel events. No geometry bound changed.
+Current rmc revision da87813a31496d156ca6ea8a27bf5128670fb45a renders stored points
+as a [polyline](https://github.com/ricklupton/rmc/blob/da87813a31496d156ca6ea8a27bf5128670fb45a/src/rmc/exporters/svg.py);
+its [Fineliner width](https://github.com/ricklupton/rmc/blob/da87813a31496d156ca6ea8a27bf5128670fb45a/src/rmc/exporters/writing_tools.py)
+heuristic is not a vendor guarantee of xochitl smoothing or native eraser behavior.
+No direct supported curve-completion mechanism or validated smoothing bound was
+established by this targeted source inspection. No extension/Qt work resumed.
+
+Reviewed next diagnostic predicate amendment (before implementation): define only
+circle geometry as footprint-equivalent within half of the independently measured
+2-output-pixel Medium sentinel width. Use1.0 output pixel times the smaller fixed
+native/output scale: min(2.5122531797827743,2.5302505493164062)=2.5122531797827743
+native units. The pixel grid has up to half-pixel boundary uncertainty; this bound
+is a deliberately stated output-footprint comparison, not a measurement of exact
+physical pen radius or a vendor guarantee. Do not enlarge it to absorb that
+uncertainty or tune it against the rejected circle. Nine edge paths retain1.0 native
+unit. Keep exact Black Fine Medium style, six circle repetitions, unique ordered
+bidirectional path coverage/endpoints, owned ROI, original full blocks and opaque
+records, and all ownership/input/deadline checks. Test circle translations, radial
+expansion and detours inside/outside the defined bound to disclose what equivalence
+accepts. Correctly recognized active ink alone is not erasure success: after the
+single reviewed native cycle, require ALL15 accepted added IDs gone, every original
+ID/property preserved, then fresh owner/reopened visual clearance. Unavailable saved
+final proof is inconclusive; no repeated drawing loop. No more smoothing research,
+new product waits or generalized diagnostic framework is part of this amendment.
