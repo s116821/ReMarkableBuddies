@@ -8,6 +8,7 @@ use std::{
     fs,
     io::{Read, Write},
     path::Path,
+    time::Duration,
 };
 
 pub type Preferences = BTreeMap<String, String>;
@@ -79,6 +80,7 @@ mod tests {
         identity: Identity,
         canvas: Option<GrayImage>,
         fail_cleanup_checkpoint: bool,
+        clock: Duration,
     }
     impl Model {
         fn new() -> Self {
@@ -104,10 +106,24 @@ mod tests {
                 identity: identity(),
                 canvas: None,
                 fail_cleanup_checkpoint: false,
+                clock: Duration::ZERO,
             }
         }
     }
     impl StyleIo for Model {
+        fn monotonic(&self) -> Duration {
+            self.clock
+        }
+        fn pace(&mut self, duration: Duration) {
+            self.clock += duration;
+        }
+        fn begin_wait(&mut self) -> Result<()> {
+            Ok(())
+        }
+        fn check_wait(&mut self) -> Result<()> {
+            Ok(())
+        }
+        fn end_wait(&mut self) {}
         fn checkpoint(&mut self, record: &Recovery) -> Result<()> {
             ensure!(
                 !(self.fail_cleanup_checkpoint && record.phase == Phase::PendingCleanup),
@@ -266,6 +282,128 @@ mod tests {
         state.image = GrayImage::from_pixel(768, 1024, Luma([255]));
         assert!(Lease::prepare(state, false).unwrap().is_none());
         assert_eq!(io.count, 0);
+    }
+
+    struct DelayedTransition {
+        model: Model,
+        before: Observation,
+        pending_reads: usize,
+        reads: usize,
+        observation_cost: Duration,
+        waiting: bool,
+        guard_calls: usize,
+        cancel_at: Option<usize>,
+        wrong_owner: bool,
+    }
+    impl DelayedTransition {
+        fn new(pending_reads: usize, observation_cost: Duration) -> Self {
+            let mut model = Model::new();
+            let before = model.observe().unwrap();
+            Self {
+                model,
+                before,
+                pending_reads,
+                reads: 0,
+                observation_cost,
+                waiting: false,
+                guard_calls: 0,
+                cancel_at: None,
+                wrong_owner: false,
+            }
+        }
+        fn run(&mut self) -> Result<()> {
+            let mut lease = Lease::prepare(self.before.clone(), false)?.unwrap();
+            lease.transition(self, Phase::SelectPrimary, (30, 90), |ui| {
+                ui.slot == "primary" && !ui.menu
+            })
+        }
+    }
+    impl StyleIo for DelayedTransition {
+        fn monotonic(&self) -> Duration {
+            self.model.clock
+        }
+        fn pace(&mut self, duration: Duration) {
+            self.model.clock += duration;
+        }
+        fn begin_wait(&mut self) -> Result<()> {
+            self.waiting = true;
+            Ok(())
+        }
+        fn check_wait(&mut self) -> Result<()> {
+            self.guard_calls += 1;
+            ensure!(self.cancel_at != Some(self.guard_calls), "Cancelled input");
+            Ok(())
+        }
+        fn end_wait(&mut self) {
+            self.waiting = false;
+        }
+        fn checkpoint(&mut self, record: &Recovery) -> Result<()> {
+            self.model.checkpoint(record)
+        }
+        fn press(&mut self, point: (u32, u32)) -> Result<()> {
+            self.model.press(point)
+        }
+        fn observe(&mut self) -> Result<Observation> {
+            if !self.waiting {
+                return self.model.observe();
+            }
+            self.reads += 1;
+            self.model.clock += self.observation_cost;
+            let mut observed = if self.reads <= self.pending_reads {
+                self.before.clone()
+            } else {
+                self.model.observe()?
+            };
+            if self.wrong_owner {
+                observed.identity.visit = "changed".into();
+            }
+            Ok(observed)
+        }
+    }
+
+    #[test]
+    fn transition_waits_for_fresh_predicate_without_repeating_input() {
+        for delayed in [0, 1, 7] {
+            let mut io = DelayedTransition::new(delayed, Duration::from_millis(1));
+            io.run().unwrap();
+            assert_eq!(io.reads, delayed + 1);
+            assert_eq!(io.model.count, 1);
+            assert_eq!(io.model.checkpoints.len(), 1);
+            assert_eq!(
+                io.model.clock,
+                Duration::from_millis((delayed * 51 + 1) as u64)
+            );
+            assert!(!io.waiting);
+        }
+    }
+
+    #[test]
+    fn transition_timeout_and_late_success_never_retry_input() {
+        for (pending, cost) in [
+            (usize::MAX, Duration::from_millis(500)),
+            (0, Duration::from_secs(5)),
+        ] {
+            let mut io = DelayedTransition::new(pending, cost);
+            assert!(io.run().is_err());
+            assert_eq!(io.model.count, 1);
+            assert_eq!(io.model.checkpoints.len(), 1);
+            assert!(!io.waiting);
+            assert!(io.model.clock >= Duration::from_secs(5));
+            assert!(io.model.clock < Duration::from_millis(5500));
+        }
+    }
+
+    #[test]
+    fn transition_cancellation_and_changed_owner_stop_on_both_sides_of_capture() {
+        for cancel_at in [Some(1), Some(2), None] {
+            let mut io = DelayedTransition::new(0, Duration::from_millis(1));
+            io.cancel_at = cancel_at;
+            io.wrong_owner = cancel_at.is_none();
+            assert!(io.run().is_err());
+            assert_eq!(io.model.count, 1);
+            assert_eq!(io.reads, usize::from(cancel_at != Some(1)));
+            assert!(!io.waiting);
+        }
     }
 
     #[test]
@@ -1245,6 +1383,13 @@ pub trait StyleIo {
     fn observe(&mut self) -> Result<Observation>;
     fn checkpoint(&mut self, record: &Recovery) -> Result<()>;
     fn press(&mut self, point: (u32, u32)) -> Result<()>;
+    fn monotonic(&self) -> Duration;
+    fn pace(&mut self, duration: Duration);
+    /// Observe external input throughout the no-input post-press wait. Native
+    /// touch injection shares the physical device, so this starts after release.
+    fn begin_wait(&mut self) -> Result<()>;
+    fn check_wait(&mut self) -> Result<()>;
+    fn end_wait(&mut self);
 }
 
 pub struct Lease {
@@ -1398,13 +1543,30 @@ impl Lease {
             return Err(error);
         }
         io.press(point)?;
-        for _ in 0..5 {
-            let (_, ui) = self.observe(io)?;
-            if expected(&ui) {
-                return Ok(());
+        let deadline = io.monotonic().saturating_add(Duration::from_secs(5));
+        io.begin_wait()?;
+        let result = (|| {
+            loop {
+                io.check_wait()?;
+                ensure!(
+                    io.monotonic() < deadline,
+                    "Status controls did not converge before deadline"
+                );
+                let (_, ui) = self.observe(io)?;
+                io.check_wait()?;
+                // A slow capture cannot turn an expired operation into success.
+                ensure!(
+                    io.monotonic() < deadline,
+                    "Status observation exceeded deadline"
+                );
+                if expected(&ui) {
+                    return Ok(());
+                }
+                io.pace(Duration::from_millis(50).min(deadline.saturating_sub(io.monotonic())));
             }
-        }
-        anyhow::bail!("Status controls did not converge after input")
+        })();
+        io.end_wait();
+        result
     }
     fn primary_menu(&mut self, io: &mut impl StyleIo, restoring: bool) -> Result<()> {
         let (_, ui) = self.observe(io)?;

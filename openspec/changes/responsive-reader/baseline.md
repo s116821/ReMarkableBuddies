@@ -166,3 +166,25 @@ or a blank successor; do not broaden eligibility in this performance change.
 Original page restored visually; both notes hashes, header and installed runtime
 unchanged. Service active PID1597, NRestarts0, no active recovery journal. Diagnostic
 source passed strict all-target clippy and independent source review; no paid retry.
+
+### Owned-image capture, source3062716
+All168 host tests, strict all-target clippy, formatting, OpenSpec strict validation
+and independent source review passed. ARM binary/examples build1m39s. Capture-only
+helper SHA256 `f8fc3ba23b85a5a263f8688667671bd51d329d2a98c97f2abec0eb86f47c7475`.
+Three interleaved encoded/pixel-only pairs on the unchanged original notes:
+
+| Path | Individual capture.total milliseconds | Median | Maximum |
+| --- | --- | --- | --- |
+| Encoded native+overview | 303.503,302.977,280.277 | 302.977 | 303.503 |
+| Owned normalized pixels | 185.921,183.131,186.394 | 185.921 | 186.394 |
+
+The image-only diagnostic saves its artifact after capture.total; that save is
+not included. Real status observation additionally reads/brackets ownership and
+classifies pixels, so these are capture costs, not total status costs. All six
+PNG hashes exactly matched c17116581603fd301152e833ee5a17d09506e8ae66af9c9efda169df4b9ec897;
+a new image was retrieved and visually inspected. Debug timing enabled as before;
+logging overhead remains included/unisolated. Service stayed active PID1597 with
+zero restarts, no model call/input action. No Paper Pro hardware or full-workflow
+performance claim. Five-observation toolbar convergence needs a real elapsed
+deadline before full integration tests because faster capture shortens that old
+implicit allowance. Other sequencing and acceptance gates remain open.

@@ -79,6 +79,9 @@ pub struct RealDevice {
     status_style: Option<super::status_style::Lease>,
     status_journal: Option<super::status_style::Journal>,
     status_style_supported: bool,
+    status_wait_cancelled: bool,
+    #[cfg(target_os = "linux")]
+    status_wait_input: Option<super::input_observer::InputObserver>,
     debug_dump: bool,
     clock: std::time::Instant,
     #[cfg(target_os = "linux")]
@@ -137,6 +140,9 @@ impl RealDevice {
             status_style: None,
             debug_dump,
             status_journal: None,
+            status_wait_cancelled: false,
+            #[cfg(target_os = "linux")]
+            status_wait_input: None,
             status_style_supported: !no_draw
                 && std::fs::read_to_string("/etc/os-release").is_ok_and(|release| {
                     super::native_page::verified_contract(super::DeviceModel::detect(), &release)
@@ -353,6 +359,65 @@ impl DeviceBackend for RealDevice {
 }
 
 impl super::status_style::StyleIo for RealDevice {
+    fn monotonic(&self) -> Duration {
+        self.clock.elapsed()
+    }
+    fn pace(&mut self, duration: Duration) {
+        std::thread::sleep(duration);
+    }
+    fn begin_wait(&mut self) -> Result<()> {
+        anyhow::ensure!(
+            !self.status_wait_cancelled,
+            "Status input ownership was cancelled"
+        );
+        #[cfg(target_os = "linux")]
+        {
+            match super::input_observer::InputObserver::new(TriggerCorner::LowerLeft, None) {
+                Ok(input) => {
+                    self.status_wait_input = Some(input);
+                    Ok(())
+                }
+                Err(error) => {
+                    self.status_wait_cancelled = true;
+                    Err(error)
+                }
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        anyhow::bail!("Native status input observation unavailable")
+    }
+    fn check_wait(&mut self) -> Result<()> {
+        anyhow::ensure!(
+            !self.status_wait_cancelled,
+            "Status input ownership was cancelled"
+        );
+        #[cfg(target_os = "linux")]
+        {
+            let result = (|| {
+                let input = self
+                    .status_wait_input
+                    .as_mut()
+                    .context("Status wait observer missing")?;
+                anyhow::ensure!(
+                    input.poll()?.is_empty() && input.quiescent(),
+                    "Input cancelled status transition"
+                );
+                Ok(())
+            })();
+            if result.is_err() {
+                self.status_wait_cancelled = true;
+            }
+            result
+        }
+        #[cfg(not(target_os = "linux"))]
+        anyhow::bail!("Native status input observation unavailable")
+    }
+    fn end_wait(&mut self) {
+        #[cfg(target_os = "linux")]
+        {
+            self.status_wait_input = None;
+        }
+    }
     fn checkpoint(&mut self, record: &super::status_style::Recovery) -> Result<()> {
         self.status_journal
             .as_mut()
@@ -361,6 +426,10 @@ impl super::status_style::StyleIo for RealDevice {
     }
     fn observe(&mut self) -> Result<super::status_style::Observation> {
         let _timing = crate::measurement::Span::new("status.observe");
+        anyhow::ensure!(
+            !self.status_wait_cancelled,
+            "Status input ownership was cancelled; further input stopped"
+        );
         use super::{
             native_page,
             status_style::{Identity, Observation},
@@ -407,7 +476,6 @@ impl super::status_style::StyleIo for RealDevice {
         let up = self.touch.touch_stop();
         down?;
         up?;
-        std::thread::sleep(Duration::from_millis(100));
         Ok(())
     }
 }

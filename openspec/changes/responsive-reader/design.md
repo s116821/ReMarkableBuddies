@@ -44,6 +44,24 @@ through this shared production wait. Repeated identical overlay frames are not
 ready. Keep the exact old-pair strict active-lease refusal regression.
 
 ## Safety, regression and native gates
+Toolbar transitions now issue exactly one journaled press and verify the expected
+controls with fresh observations until a five-second monotonic deadline. Check
+deadline and cancellation before and after observation; reject a late successful
+frame. Pending states are paced at50ms, bounded by the remaining time. Duplicate
+or stale nonmatching observations cannot cause another press. The phase/sequence
+and immutable lease identity/baseline correlate this synchronous wait to its
+operation; there is no unsupported asynchronous UI signal claim. Preserve durable
+intent before input and existing recovery behavior on timeout or capture failure.
+
+The native wait opens an all-input observer after touch release and checks it
+around every capture. Cancellation/observer failure latches further status input
+off, retains the recovery journal, and cannot be cleared by rollback. This observes
+the no-input wait only: injected touches share the physical input source, so it
+does not claim attribution of simultaneous external input during the250ms contact.
+The former100ms post-release settling sleep is replaced by verified convergence;
+contact duration remains a separately scoped physical-input candidate exception
+requiring native validation. No active baseline refresh or repeated input retry.
+
 The owned-image implementation converts each fresh native frame once. Encoded
 workflow captures serialize that image once for native strips and once after
 normalization; status observations and cleanup checks consume normalized owned
