@@ -102,6 +102,7 @@ impl NativeHistory {
         required_owner: Option<&Owner>,
     ) -> Result<PageState> {
         let started = Instant::now();
+        let _timing = crate::measurement::Span::new("history.persistence");
         let deadline = started + Duration::from_secs(30);
         let mut previous = None;
         let mut repeats = 0;

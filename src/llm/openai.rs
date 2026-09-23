@@ -77,6 +77,7 @@ impl LLMEngine for OpenAI {
     }
 
     fn execute(&mut self) -> Result<String> {
+        let _timing = crate::measurement::Span::new("provider.request");
         let body = json!({
             "model": self.model,
             "messages": [{
@@ -119,8 +120,11 @@ impl LLMEngine for OpenAI {
         progress: &mut dyn FnMut() -> Result<()>,
     ) -> Result<String> {
         std::thread::scope(|scope| {
+            let run = crate::measurement::context();
+            let _timing = crate::measurement::Span::new("provider.wait_with_progress");
             let (sender, receiver) = std::sync::mpsc::sync_channel(1);
             let worker = scope.spawn(move || {
+                let _run = crate::measurement::Run::enter(run);
                 let _ = sender.send(self.execute());
             });
             let mut due = std::time::Instant::now();

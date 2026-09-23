@@ -167,16 +167,24 @@ impl DeviceBackend for RealDevice {
         self.touch.tap_middle_bottom()
     }
     fn navigate(&mut self, direction: NavigationDirection) -> Result<()> {
+        let _timing = crate::measurement::Span::new("device.navigation");
         #[cfg(target_os = "linux")]
         self.history.other_edit();
         XochitlIntegration::navigate_to_page(&mut self.touch, direction)
     }
     fn render_text(&mut self, text: &str) -> Result<()> {
+        let _timing = crate::measurement::Span::new("device.text_input");
+        log::debug!(
+            "timing_text run={} characters={}",
+            crate::measurement::context(),
+            text.chars().count()
+        );
         #[cfg(target_os = "linux")]
         self.history.note_render(text);
         self.keyboard.string_to_keypresses(text)
     }
     fn body_mode(&mut self) -> Result<()> {
+        let _timing = crate::measurement::Span::new("device.body_mode");
         #[cfg(target_os = "linux")]
         self.history.other_edit();
         self.keyboard.key_cmd_body()
@@ -197,11 +205,13 @@ impl DeviceBackend for RealDevice {
         }
     }
     fn status_stroke(&mut self, stroke: crate::workflow::indicator::Stroke) -> Result<()> {
+        let _timing = crate::measurement::Span::new("status.stroke_input");
         log::debug!("Status stroke {stroke:?} at {:?}", self.clock.elapsed());
         self.pen.draw_path_screen(&stroke.points())
     }
     fn status_style_begin(&mut self) -> Result<bool> {
         use super::status_style::{Journal, Lease, Recovery, StyleIo};
+        let _timing = crate::measurement::Span::new("status.acquire");
         use std::path::Path;
         const RECORD: &str = "/var/cache/reader-buddy/status-style-recovery.json";
         if self.status_style.is_some() {
@@ -246,6 +256,7 @@ impl DeviceBackend for RealDevice {
         Ok(true)
     }
     fn status_style_end(&mut self) -> Result<()> {
+        let _timing = crate::measurement::Span::new("status.restore");
         let Some(mut lease) = self.status_style.take() else {
             return Ok(());
         };
@@ -269,6 +280,7 @@ impl DeviceBackend for RealDevice {
         Ok(())
     }
     fn status_clear(&mut self, strokes: &[crate::workflow::indicator::Stroke]) -> Result<()> {
+        let _timing = crate::measurement::Span::new("status.cleanup");
         let mut lease = self
             .status_style
             .take()
@@ -321,6 +333,7 @@ impl super::status_style::StyleIo for RealDevice {
             .append(record)
     }
     fn observe(&mut self) -> Result<super::status_style::Observation> {
+        let _timing = crate::measurement::Span::new("status.observe");
         use super::{
             native_page,
             status_style::{Identity, Observation},
@@ -360,6 +373,7 @@ impl super::status_style::StyleIo for RealDevice {
         })
     }
     fn press(&mut self, point: (u32, u32)) -> Result<()> {
+        let _timing = crate::measurement::Span::new("status.press_input");
         let down = self.touch.touch_start((point.0 as i32, point.1 as i32));
         if down.is_ok() {
             std::thread::sleep(Duration::from_millis(250));

@@ -1,5 +1,10 @@
 //! Capture without initializing input devices or requiring provider credentials.
 fn main() -> anyhow::Result<()> {
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("info,remarkable_reader_buddy=debug"),
+    )
+    .format_timestamp_millis()
+    .init();
     let mut args = std::env::args_os().skip(1);
     let path = args
         .next()

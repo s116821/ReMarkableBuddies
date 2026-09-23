@@ -85,6 +85,7 @@ impl Screenshot {
     }
 
     pub fn take_screenshot(&mut self) -> Result<()> {
+        let _timing = crate::measurement::Span::new("capture.total");
         // Find xochitl's process
         debug!("screenshot: finding pid");
         let pid = Self::find_xochitl_pid()?;
@@ -112,6 +113,7 @@ impl Screenshot {
     }
 
     fn find_xochitl_pid() -> Result<String> {
+        let _timing = crate::measurement::Span::new("capture.pid");
         let output = process::Command::new("pidof").arg("xochitl").output()?;
         let pids = String::from_utf8(output.stdout)?;
         if let Some(pid) = pids.split_whitespace().next() {
@@ -121,6 +123,7 @@ impl Screenshot {
     }
 
     fn find_framebuffer_address(&self, pid: &str) -> Result<u64> {
+        let _timing = crate::measurement::Span::new("capture.address");
         if self.rm2_bgra {
             return self.find_rm2_bgra_allocation(pid);
         }
@@ -274,6 +277,7 @@ impl Screenshot {
     }
 
     fn read_framebuffer(&self, pid: &str, skip_bytes: u64) -> Result<Vec<u8>> {
+        let _timing = crate::measurement::Span::new("capture.read");
         let window_bytes =
             self.screen_width() as usize * self.screen_height() as usize * self.bytes_per_pixel();
         let mut buffer = vec![0u8; window_bytes];
@@ -284,6 +288,7 @@ impl Screenshot {
     }
 
     fn process_image(&self, data: Vec<u8>) -> Result<Vec<u8>> {
+        let _timing = crate::measurement::Span::new("capture.overview");
         // Encode the raw data to PNG
         debug!("Encoding raw image data to PNG");
         let png_data = self.encode_png(&data)?;
@@ -293,7 +298,10 @@ impl Screenshot {
             "Resizing image to {}x{}",
             SCREENSHOT_VIRTUAL_WIDTH, SCREENSHOT_VIRTUAL_HEIGHT
         );
+        let decode = crate::measurement::Span::new("capture.decode");
         let img = image::load_from_memory(&png_data)?;
+        drop(decode);
+        let resize = crate::measurement::Span::new("capture.resize");
         let resized_img = img.resize_exact(
             SCREENSHOT_VIRTUAL_WIDTH,
             SCREENSHOT_VIRTUAL_HEIGHT,
@@ -301,6 +309,8 @@ impl Screenshot {
         );
 
         // Encode the resized image back to PNG
+        drop(resize);
+        let _serialize = crate::measurement::Span::new("capture.overview_png");
         debug!("Re-encoding resized image");
         let mut resized_png_data = Vec::new();
         let encoder = image::codecs::png::PngEncoder::new(&mut resized_png_data);
@@ -329,6 +339,7 @@ impl Screenshot {
     }
 
     fn encode_png(&self, raw_data: &[u8]) -> Result<Vec<u8>> {
+        let _timing = crate::measurement::Span::new("capture.native_png");
         match self.device_model {
             DeviceModel::RemarkablePaperPro => {
                 // RMPP uses 32-bit RGBA format
@@ -348,6 +359,7 @@ impl Screenshot {
         );
         if self.rm2_bgra {
             // The monochrome RM2 still stores colored highlights in portrait BGRA.
+            let conversion = crate::measurement::Span::new("capture.raw_conversion");
             // Luminance preserves neutral gray exactly and keeps yellow marks light.
             let pixels: Vec<u8> = raw_data
                 .as_chunks::<4>()
@@ -362,6 +374,8 @@ impl Screenshot {
                 })
                 .collect();
             let mut png = Vec::new();
+            drop(conversion);
+            let _serialize = crate::measurement::Span::new("capture.native_serialize");
             image::codecs::png::PngEncoder::new(&mut png).write_image(
                 &pixels,
                 1404,
@@ -370,6 +384,7 @@ impl Screenshot {
             )?;
             return Ok(png);
         }
+        let conversion = crate::measurement::Span::new("capture.raw_conversion");
         let raw_u8: Vec<u8> = raw_data
             .as_chunks::<2>()
             .0
@@ -387,6 +402,8 @@ impl Screenshot {
             .ok_or_else(|| anyhow::anyhow!("Failed to create image from raw data"))?;
         let rotated_img = image::imageops::rotate270(&img);
         let final_image = image::imageops::flip_horizontal(&rotated_img);
+        drop(conversion);
+        let _serialize = crate::measurement::Span::new("capture.native_serialize");
         let mut png_data = Vec::new();
         let encoder = image::codecs::png::PngEncoder::new(&mut png_data);
         encoder.write_image(
@@ -400,6 +417,7 @@ impl Screenshot {
     }
 
     fn encode_png_rmpp(&self, raw_data: &[u8]) -> Result<Vec<u8>> {
+        let _serialize = crate::measurement::Span::new("capture.native_serialize");
         let width = self.screen_width();
         let height = self.screen_height();
         let mut png_data = Vec::new();
@@ -437,6 +455,7 @@ impl Screenshot {
     /// questions or text lines across left/right crops. Order: top to bottom.
     /// Navigation still uses the normalized overview.
     pub fn detail_images_base64(&self) -> Result<Vec<String>> {
+        let _timing = crate::measurement::Span::new("capture.detail_strips");
         let img = image::load_from_memory(&self.native_data)?;
         let (w, h) = (img.width(), img.height());
         let th = h * 2 / 5;

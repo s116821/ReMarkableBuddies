@@ -45,6 +45,17 @@ test evidence in PR comments, and complete the issue's acceptance gates before m
 
 ## Simulator learning
 
+Prefer supported completion events plus verified operation/page/session
+postconditions for Reader/Writer sequencing. Where events are unavailable, use
+paced fresh-state polling with monotonic deadlines and cancellation; elapsed time
+alone is not success. Keep input serialized and ownership/recovery guards intact.
+Document the reason, scope, bound and validation for necessary fixed waits;
+gesture qualification, animation, polling and timeout timing are distinct from
+completion assumptions. Test delayed/lost/stale/repeated signals and cancellation
+through the real operation path. Public/manual workflows remain supported; do not
+require private integrations or invasive tablet dependencies. The final integrated
+performance gate must audit later features for preservation of these properties.
+
 For each device/workflow change or native finding, check its simulator impact.
 Update the shared model, fixtures, faults or assertions as applicable in the same
 implementation PR, including OpenSpec simulator deltas when behavior changes.

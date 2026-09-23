@@ -94,10 +94,12 @@ impl<M: LLMEngine> Orchestrator<M> {
     /// Run one complete iteration of the reader buddy workflow
     /// Processes one outlined/highlighted concept and question per trigger.
     pub fn run_iteration(&mut self) -> Result<()> {
+        let _run = crate::measurement::Run::new();
         self.run_iteration_with_trigger(self.trigger_enabled)
     }
 
     fn run_iteration_with_trigger(&mut self, wait_for_trigger: bool) -> Result<()> {
+        let _timing = crate::measurement::Span::new("reader.iteration");
         self.workflow.begin_iteration()?;
         let result = self.run_iteration_inner(wait_for_trigger);
         // Preserve the original diagnostic without retrying input after a
@@ -128,8 +130,19 @@ impl<M: LLMEngine> Orchestrator<M> {
 
         // Step 1: Wait for trigger
         if wait_for_trigger {
+            let _timing = crate::measurement::Span::new("reader.trigger_wait");
             self.workflow.wait_for_trigger()?;
         }
+        let _active = crate::measurement::Span::new("reader.active");
+        log::debug!(
+            "timing_origin run={} origin={}",
+            crate::measurement::context(),
+            if self.trigger_enabled {
+                "trigger_observed"
+            } else {
+                "immediate_capture"
+            }
+        );
 
         // Step 2: Capture screenshot (of current/question page)
         let (screenshot_base64, screenshot_png_data) =
@@ -480,6 +493,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         info!("Starting Reader Buddy main loop");
 
         loop {
+            let _run = crate::measurement::Run::new();
             if self.trigger_enabled {
                 // History remains owned until another Reader trigger or an
                 // invalidating input. Do not begin an iteration while idle.
