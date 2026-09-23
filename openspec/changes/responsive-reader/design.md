@@ -765,3 +765,16 @@ Test late/stale frames, owner/content/tool changes, partial/malformed touch fram
 completed other-source input, lost devices and write/release/rearm failures before
 reviewed native validation. No runtime replacement or broad admission until tests,
 builds, source review and the focused native trigger/capture/navigation gates pass.
+
+Classifier review correction: whole-patch equality was insufficient to reject a
+mostly retained menu with sparse changed pixels. Preserve that exact adversarial
+case before and after the single tap. Closed qualification now requires the
+closed controls/seam plus no substantial known-panel residue: fewer than25% of
+reference-dark pixels (reference<=80, observed<248) in each of six fixed menu-row
+feature regions, and no at-least90%-nonwhite vertical edge across y655..1023 near
+x270..311. These are explicit conservative pattern thresholds, not confidence
+scores or proof that every unknown overlay is absent. Incidental page matches can
+refuse. Boundary tests disclose what below-threshold synthetic residue accepts;
+actual open/closed and altered-tool positives remain separate. Keep broader
+popup/language/firmware coverage unclaimed. The release-observed timing span is
+now confined to its own scope before any dismissal work.

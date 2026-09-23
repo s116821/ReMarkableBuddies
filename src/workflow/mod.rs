@@ -265,7 +265,9 @@ impl Workflow {
     }
 
     fn prepare_reader_trigger(&mut self) -> Result<()> {
-        let _release = crate::measurement::Span::new("reader.trigger_release_observed");
+        {
+            let _release = crate::measurement::Span::new("reader.trigger_release_observed");
+        }
         anyhow::ensure!(
             !self.indicator_cleanup_failed,
             "Prior input failure blocks Reader trigger"

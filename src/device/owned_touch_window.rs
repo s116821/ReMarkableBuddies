@@ -247,6 +247,7 @@ mod tests {
             vec![(0, 3, 0)],
             vec![(1, 330, 1)],
             vec![(3, 57, 2)],
+            vec![(0, 0, 0); MAX_EVENTS + 1],
         ] {
             assert!(finish(&mut io(events), Duration::ZERO, POINT, &mut decoder()).is_err());
         }

@@ -34,8 +34,10 @@ fn panel(image: &GrayImage) -> Panel {
     }
     // Positive full exposed seam/closed-control check excludes this native
     // panel and partial transitions. This does not recognize every popover.
-    // Border disappearance alone is insufficient: retained menu icons/text are
-    // an unqualified partial transition. Conservative incidental matches refuse.
+    // Border disappearance alone is insufficient. Refuse when at least one
+    // quarter of a row's independently selected dark features remains nonwhite,
+    // or a near-position panel edge remains mostly intact. This is a bounded
+    // known-panel residual check, not recognition of arbitrary overlays.
     let remnant = [
         (78, 675, 180, 699),
         (78, 734, 154, 759),
@@ -46,9 +48,22 @@ fn panel(image: &GrayImage) -> Panel {
     ]
     .into_iter()
     .any(|(left, top, right, bottom)| {
-        (top..bottom).all(|y| {
-            (left..right).all(|x| image.get_pixel(x, y)[0].abs_diff(OPEN.get_pixel(x, y)[0]) <= 8)
-        })
+        let (mut features, mut remaining) = (0usize, 0usize);
+        for y in top..bottom {
+            for x in left..right {
+                if OPEN.get_pixel(x, y)[0] <= 80 {
+                    features += 1;
+                    remaining += usize::from(image.get_pixel(x, y)[0] < 248);
+                }
+            }
+        }
+        features > 0 && remaining * 4 >= features
+    }) || (270..312).any(|x| {
+        (655..1024)
+            .filter(|&y| image.get_pixel(x, y)[0] < 248)
+            .count()
+            * 10
+            >= 369 * 9
     });
     if controls(image).is_some_and(|ui| !ui.menu) && !remnant {
         return Panel::Closed;
@@ -245,7 +260,71 @@ mod tests {
             }
         }
         assert_eq!(panel(&borderless.image), Panel::Unknown);
+        // Reviewer regression: changing one pixel in each rectangle must not
+        // turn almost the entire retained menu into a claimed closed state.
+        for (x, y) in [
+            (78, 675),
+            (78, 734),
+            (78, 797),
+            (78, 857),
+            (78, 919),
+            (78, 979),
+        ] {
+            let old = borderless.image.get_pixel(x, y)[0];
+            borderless.image.put_pixel(x, y, Luma([255 - old]));
+        }
+        assert_eq!(panel(&borderless.image), Panel::Unknown);
+        let mut state = io(vec![borderless.clone()]);
+        assert!(dismiss(&mut state, &mut WaitCancellation::default()).is_err());
+        assert_eq!(state.taps, 0);
+        let mut state = io(vec![snapshot(true), borderless]);
+        assert!(dismiss(&mut state, &mut WaitCancellation::default()).is_err());
+        assert_eq!(state.taps, 1);
     }
+    #[test]
+    fn residual_feature_and_edge_boundaries_are_explicit() {
+        let mut base = snapshot(false).image;
+        let rows = [
+            (78, 675, 180, 699),
+            (78, 734, 154, 759),
+            (78, 797, 227, 823),
+            (78, 857, 184, 884),
+            (78, 919, 193, 946),
+            (78, 979, 207, 1010),
+        ];
+        for (left, top, right, bottom) in rows {
+            for y in top..bottom {
+                for x in left..right {
+                    base.put_pixel(x, y, Luma([255]));
+                }
+            }
+        }
+        let features: Vec<_> = (675..699)
+            .flat_map(|y| (78..180).map(move |x| (x, y)))
+            .filter(|&(x, y)| OPEN.get_pixel(x, y)[0] <= 80)
+            .collect();
+        let threshold = features.len().div_ceil(4);
+        for count in [threshold - 1, threshold] {
+            let mut image = base.clone();
+            for &(x, y) in &features[..count] {
+                image.put_pixel(x, y, Luma([247]));
+            }
+            assert_eq!(
+                panel(&image),
+                if count < threshold {
+                    Panel::Closed
+                } else {
+                    Panel::Unknown
+                }
+            );
+        }
+        // A displaced vertical edge outside the original seam is also refused.
+        for y in 655..1024 {
+            base.put_pixel(290, y, Luma([200]));
+        }
+        assert_eq!(panel(&base), Panel::Unknown);
+    }
+
     #[test]
     fn closed_skips_and_delayed_known_panel_taps_only_once() {
         let mut closed = io(vec![snapshot(false)]);
