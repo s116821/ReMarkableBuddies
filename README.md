@@ -235,6 +235,16 @@ explicit examples above. `reader_once` uses environment credentials/endpoint, th
 default model and LL corner, with image dumps disabled. Restore the normal service
 after the bounded diagnostic. Paper Pro examples use the aarch64 target.
 
+For answer-page eligibility diagnosis without a model call or input-device
+initialization, build `--example page_eligibility` and run
+`./page_eligibility native /tmp/new-eligibility-evidence` on an authorized tablet.
+It saves the exact classifier image/reference and bracketed page/session metadata
+plus the existing classifier result. Confirm the visible page independently;
+metadata alone is not UI proof. The output directory must be new. Offline replay:
+`cargo run --example page_eligibility -- offline input.png reference.png new-output`.
+Use `-` instead of a reference path to test the absent-cache case. An Invalid
+result is evidence of refusal, not a successful Q&A or permission to loosen checks.
+
 `--api-key` overrides `OPENAI_API_KEY`; prefer the protected environment because
 command arguments may appear in shell history or process listings. No real key is
 needed for offline simulation. `--base-url` overrides `OPENAI_BASE_URL`.
