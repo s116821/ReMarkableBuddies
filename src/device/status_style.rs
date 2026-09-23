@@ -636,6 +636,42 @@ mod tests {
     }
 
     #[test]
+    fn internal_native_footer_pair_preserves_strict_pre_mutation_refusal() {
+        let before = fixture(include_bytes!(
+            "../../tests/fixtures/status-style/native-footer-before.png"
+        ));
+        let after = fixture(include_bytes!(
+            "../../tests/fixtures/status-style/native-footer-after.png"
+        ));
+        // Actual f38748d internal lease pair. Unlike the REM34 external frames,
+        // this pair differs only in the observed bottom navigation overlay.
+        let changed: Vec<_> = before
+            .enumerate_pixels()
+            .filter_map(|(x, y, p)| (p[0].abs_diff(after.get_pixel(x, y)[0]) > 8).then_some((x, y)))
+            .collect();
+        assert_eq!(changed.len(), 1414);
+        assert_eq!(changed[0], (143, 991));
+        assert!(changed
+            .iter()
+            .all(|(x, y)| (138..=629).contains(x) && (991..=1011).contains(y)));
+        let mut io = Model::new();
+        io.canvas = Some(before);
+        let mut lease = Lease::prepare(io.observe().unwrap(), false)
+            .unwrap()
+            .unwrap();
+        io.canvas = Some(after);
+        assert!(lease
+            .acquire(&mut io)
+            .unwrap_err()
+            .to_string()
+            .contains("(143, 991)"));
+        assert!(lease.restore(&mut io).is_err());
+        assert_eq!(io.count, 0);
+        assert!(io.checkpoints.is_empty());
+        assert_eq!(lease.recovery.phase, Phase::Prepared);
+    }
+
+    #[test]
     fn changed_page_refuses_rollback_input() {
         let mut io = Model::new();
         let mut lease = Lease::prepare(io.observe().unwrap(), false)
