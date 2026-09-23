@@ -92,6 +92,34 @@ the task-local evidence folder; preserve failed attempts alongside later results
 
 ## Remaining gates
 
+### Readiness retest, source9330b4c
+The separately reviewed readiness implementation passed165 host tests, strict
+clippy, ARM release build3m05s and AArch64 build1m31s. Native Reader SHA256
+`bff62ce6ff735cd4dbd234ced03e7da111453f2cd170842dfafd784b01da3c10`.
+A bounded triggered attempt on the same ordinary tool/document observed initial
+readiness in958.508ms and post-return readiness in3022.553ms. Both style leases
+acquired successfully; no143,991 refusal or recovery journal remained. The source
+failure marker was visually verified and then its exact owned paths were erased;
+clear corner and actual Fineliner Black/Medium were checked afterward.
+
+This was **successful invalid-successor handling, not successful Q&A**. The next
+page classified Invalid, the Reader verified return to source and drew the proper
+failure marker; no answer was typed and notes retained the same d3b4... hash. The
+generic “Iteration completed successfully” log refers to handled control flow.
+Post-run visual inspection of the successor shows a large serif Reader header,
+whereas the preserved global cached header is smaller sans-serif; that mismatch
+is a plausible classifier cause, not a captured in-operation classification-frame
+diagnosis. Do not silently relabel it an intentionally occupied-page fixture or
+count it as an answered workflow. Future successful tests need a valid configured
+header/blank successor; broader header fallback remains separate roadmap scope.
+
+Active inner time55.967973s, provider6.843142+3.365465s,38 captures. Acquisition
+scopes12.395734+14.438697s; cleanup5.471845s and final restoration/verification
+0.974589+0.983519s. These include nested readiness observations and are not a
+performance improvement claim. Repeated ordinary/nondefault runs and visible
+timings remain open. Original document/header/notes/binary restored again;
+installed service active PID1445, restart count0, no test process or active journal.
+
 Successful repeated ordinary/nondefault primary/secondary runs, slow/error/history
 coverage, visible timing and observer overhead, current budget review, completion
 sequencing, exact-pixel optimization, and all final delivery gates remain open.
