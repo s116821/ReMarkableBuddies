@@ -404,7 +404,10 @@ impl DeviceBackend for RealDevice {
             .take()
             .context("Cleanup requires owned style lease")?;
         let started = std::time::Instant::now();
-        let restored = lease.prepare_cleanup(self);
+        let restored = {
+            let _timing = crate::measurement::Span::new("status.cleanup.restore_tools");
+            lease.prepare_cleanup(self)
+        };
         self.status_style = Some(lease);
         restored.context("Restore original tools before status cleanup")?;
         log::info!(
@@ -412,6 +415,7 @@ impl DeviceBackend for RealDevice {
             started.elapsed()
         );
         log::debug!("Clearing {} owned status paths", strokes.len());
+        let _erasure_timing = crate::measurement::Span::new("status.cleanup.erase_and_verify");
         for stroke in strokes {
             self.pen.erase_path_screen(&stroke.points())?;
         }
