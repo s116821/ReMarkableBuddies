@@ -61,6 +61,19 @@ pub struct PageSpec {
     #[serde(default)]
     pub text: String,
     pub strokes: Option<PathBuf>,
+    #[serde(default)]
+    pub status_capability: StatusCapability,
+}
+
+/// Declared simulation input; it does not recognize native UI or document type.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusCapability {
+    #[default]
+    CalibratedFinePdf,
+    UnsuitableTool,
+    UnknownTool,
+    UnverifiedLayout,
 }
 
 #[derive(Clone, Deserialize)]

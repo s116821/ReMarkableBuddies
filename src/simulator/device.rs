@@ -23,6 +23,7 @@ pub type Shared = Rc<RefCell<State>>;
 
 #[derive(Clone)]
 pub struct Page {
+    pub status_capability: StatusCapability,
     pub background: RgbaImage,
     pub text: String,
     pub lines: Vec<((i32, i32), (i32, i32))>,
@@ -209,6 +210,7 @@ impl State {
                 }
             }
             pages.push(Page {
+                status_capability: spec.status_capability,
                 background,
                 text: spec.text.clone(),
                 lines: Vec::new(),
@@ -511,12 +513,6 @@ impl DeviceBackend for SimDevice {
         }
         bail!("Simulator gesture sequence ended without a valid hold")
     }
-    fn dismiss_trigger(&mut self) -> Result<()> {
-        let mut state = self.0.borrow_mut();
-        state.event("dismiss_trigger", "middle-bottom tap");
-        state.clock += 100;
-        Ok(())
-    }
     fn navigate(
         &mut self,
         direction: NavigationDirection,
@@ -572,6 +568,7 @@ impl DeviceBackend for SimDevice {
             }
         }
         state.pages[page] = Page {
+            status_capability: state.pages[page].status_capability,
             background: image,
             text: String::new(),
             lines: Vec::new(),
@@ -651,6 +648,9 @@ impl DeviceBackend for SimDevice {
         let mut state = self.0.borrow_mut();
         anyhow::ensure!(!state.status_style_active, "Duplicate style acquisition");
         if state.operation(Operation::StatusStyleBegin)? == Some(Effect::Unavailable) {
+            return Ok(false);
+        }
+        if state.pages[state.active].status_capability != StatusCapability::CalibratedFinePdf {
             return Ok(false);
         }
         state.status_style_active = true;

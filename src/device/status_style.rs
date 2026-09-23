@@ -146,11 +146,17 @@ mod tests {
         fn end_wait(&mut self) {}
     }
     fn current_io() -> CurrentIo {
+        let mut image = closed();
+        for y in 185..380 {
+            for x in 0..61 {
+                image.put_pixel(x, y, *CURRENT_TOOLBAR.get_pixel(x, y));
+            }
+        }
         CurrentIo {
             state: Observation {
                 identity: identity(),
                 preferences: prefs(),
-                image: closed(),
+                image,
             },
             records: vec![],
             journal: None,
@@ -159,6 +165,25 @@ mod tests {
             cancelled: false,
         }
     }
+    #[test]
+    fn current_tool_refuses_notes_and_unverified_toolbar_before_acquisition() {
+        let mut state = current_io().state;
+        assert!(Lease::prepare_current(state.clone(), false)
+            .unwrap()
+            .is_some());
+        // Actual notes fixture includes the extra Text tool; its selected pen
+        // alone is eligible, but its shifted toolbar/undo layout is not.
+        state.image = closed();
+        assert_eq!(closed_black_fineliner(&state.image), Some("primary"));
+        assert!(Lease::prepare_current(state, false).unwrap().is_none());
+        for (x, y) in [(30, 213), (30, 277), (30, 338)] {
+            let mut state = current_io().state;
+            let old = state.image.get_pixel(x, y)[0];
+            state.image.put_pixel(x, y, Luma([255 - old]));
+            assert!(Lease::prepare_current(state, false).unwrap().is_none());
+        }
+    }
+
     #[test]
     fn current_tool_candidate_uses_closed_pixels_not_saved_preferences() {
         let io = current_io(); // Deliberately stale Highlighter/Red saved settings.
@@ -1914,6 +1939,24 @@ fn closed_black_fineliner(image: &GrayImage) -> Option<&'static str> {
         .then_some(ui.slot)
 }
 
+static CURRENT_TOOLBAR: std::sync::LazyLock<GrayImage> = std::sync::LazyLock::new(|| {
+    image::load_from_memory(include_bytes!(
+        "../../tests/fixtures/status-style/current-toolbar-before.png"
+    ))
+    .expect("checked native annotation toolbar fixture")
+    .to_luma8()
+});
+
+/// Pixel-layout eligibility only, not semantic document-type detection. The
+/// extra Text tool on notes pages shifts the undo control outside our guard.
+fn calibrated_annotation_toolbar(image: &GrayImage) -> bool {
+    image.dimensions() == (768, 1024)
+        && (185..380).all(|y| {
+            (0..61)
+                .all(|x| image.get_pixel(x, y)[0].abs_diff(CURRENT_TOOLBAR.get_pixel(x, y)[0]) <= 8)
+        })
+}
+
 pub fn controls(image: &GrayImage) -> Option<Controls> {
     if image.dimensions() != (768, 1024) {
         return None;
@@ -2046,7 +2089,9 @@ impl Lease {
     /// Candidate current-tool path. Callers must separately establish the native
     /// footprint contract before enabling this in the product. No menu input.
     pub fn prepare_current(observed: Observation, debug_dump: bool) -> Result<Option<Self>> {
-        if closed_black_fineliner(&observed.image).is_none() {
+        if closed_black_fineliner(&observed.image).is_none()
+            || !calibrated_annotation_toolbar(&observed.image)
+        {
             return Ok(None);
         }
         let Some(mut lease) = Self::prepare(observed, debug_dump)? else {

@@ -24,4 +24,12 @@ path without pretending modeled tool footprints establish native safety.
 
 #### Scenario: Footprint and recovery faults
 - **WHEN** a stroke or eraser envelope approaches neighboring ink, or owner/input/journal/cleanup observations fail
-- **THEN** pre-mutation uncertainty suppresses optional ink and post-mutation uncertainty fails closed with retained recovery evidence; no broadened erasure or stale success occurs.
+- **THEN** unsupported tool/layout eligibility suppresses optional ink; owner/input/capture/journal errors fail closed even before drawing, and post-mutation uncertainty retains recovery evidence; no broadened erasure or stale success occurs.
+
+#### Scenario: Declared unsupported status capability
+- **WHEN** a page declares an unsuitable tool, unknown tool or unverified layout
+- **THEN** the shared workflow preserves exact core Q&A with no status drawing or erasure; this declaration is a modeled input and does not prove native recognition or notes-page eligibility.
+
+#### Scenario: Trigger without synthetic dismissal
+- **WHEN** a modeled hold qualifies
+- **THEN** the workflow emits no synthetic dismissal tap; actual native overlay behavior remains a separate acceptance gate, and the no-menu rule still permits a necessary verified non-menu tap.

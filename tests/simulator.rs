@@ -5,6 +5,62 @@ use remarkable_reader_buddy::simulator::{
 };
 use std::path::{Path, PathBuf};
 
+#[test]
+fn status_admission_error_stops_core_work_instead_of_suppressing_feedback() {
+    use remarkable_reader_buddy::simulator::scenario::{Effect, Fault};
+    let mut scenario = load("blank-answer");
+    scenario.expect = Default::default();
+    scenario.replies.clear();
+    scenario.faults.push(Fault {
+        operation: Operation::StatusStyleBegin,
+        call: 1,
+        effect: Effect::Error,
+    });
+    let run = execute(&scenario, &root()).unwrap();
+    assert_eq!(run.report.errors.len(), 1);
+    assert_eq!(run.report.model_calls, 0);
+    assert!(run.report.pages.iter().all(|page| page.unchanged));
+    assert!(!run.report.trace.iter().any(|event| matches!(
+        event.action.as_str(),
+        "status_suppressed" | "statusstroke" | "statusclear" | "next" | "previous" | "text"
+    )));
+}
+
+#[test]
+fn unsupported_selected_tool_or_layout_preserves_exact_core_answer_without_ink() {
+    use remarkable_reader_buddy::simulator::scenario::StatusCapability;
+    let baseline = run("blank-answer");
+    for capability in [
+        StatusCapability::UnsuitableTool,
+        StatusCapability::UnknownTool,
+        StatusCapability::UnverifiedLayout,
+    ] {
+        let mut scenario = load("blank-answer");
+        for page in &mut scenario.pages {
+            page.status_capability = capability;
+        }
+        let run = execute(&scenario, &root()).unwrap();
+        assert!(
+            run.report.assertion_failures.is_empty(),
+            "{:?}",
+            run.report.assertion_failures
+        );
+        assert!(run.report.errors.is_empty());
+        assert_eq!(run.report.model_calls, baseline.report.model_calls);
+        assert_eq!(run.report.pages[1].text, baseline.report.pages[1].text);
+        assert!(run.report.pages[0].unchanged);
+        assert!(run
+            .report
+            .trace
+            .iter()
+            .any(|event| event.action == "status_suppressed"));
+        assert!(!run.report.trace.iter().any(|event| matches!(
+            event.action.as_str(),
+            "statusstroke" | "statusclear" | "line" | "erase"
+        )));
+    }
+}
+
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/simulator/scenarios")
 }
@@ -476,7 +532,12 @@ fn stationary_hold_uses_virtual_deadline() {
         .find(|e| e.action == "hold_triggered")
         .unwrap();
     assert_eq!(trigger.at_ms, 2000);
-    assert_eq!(run.report.virtual_ms, 4600 + 11 * 333); // Workflow delays plus staged strokes.
+    assert_eq!(run.report.virtual_ms, 4500 + 11 * 333); // No dismissal tap delay.
+    assert!(!run
+        .report
+        .trace
+        .iter()
+        .any(|event| event.action == "dismiss_trigger"));
 }
 #[test]
 fn interrupted_hold_discards_elapsed_time() {

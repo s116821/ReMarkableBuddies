@@ -261,8 +261,6 @@ impl Workflow {
     pub fn wait_for_trigger(&mut self) -> Result<()> {
         info!("Waiting for trigger...");
         self.device.wait_for_trigger()?;
-        let _timing = crate::measurement::Span::new("reader.trigger_dismiss");
-        self.device.dismiss_trigger()?;
         Ok(())
     }
 
@@ -292,8 +290,6 @@ impl Workflow {
             }
             if events.contains(&Interaction::Reader) {
                 self.invalidate_history();
-                let _timing = crate::measurement::Span::new("reader.trigger_dismiss");
-                self.device.dismiss_trigger()?;
                 return Ok(());
             }
             if !invalidated {

@@ -227,13 +227,6 @@ impl Touch {
         Ok(())
     }
 
-    pub fn tap_middle_bottom(&mut self) -> Result<()> {
-        self.touch_start((384, 1023))?; // middle bottom
-        sleep(Duration::from_millis(100));
-        self.touch_stop()?;
-        Ok(())
-    }
-
     fn is_in_trigger_zone(&self, x: i32, y: i32) -> bool {
         self.trigger_corner.contains(x, y)
     }
@@ -320,10 +313,6 @@ impl Touch {
     }
 
     pub fn goto_xy(&mut self, _xy: (i32, i32)) -> Result<()> {
-        Ok(())
-    }
-
-    pub fn tap_middle_bottom(&mut self) -> Result<()> {
         Ok(())
     }
 }

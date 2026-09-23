@@ -52,7 +52,6 @@ pub trait DeviceBackend {
     fn capture(&mut self) -> Result<Frame>;
     fn detail_images(&self) -> Result<Vec<String>>;
     fn wait_for_trigger(&mut self) -> Result<()>;
-    fn dismiss_trigger(&mut self) -> Result<()>;
     fn navigate(&mut self, direction: NavigationDirection) -> Result<NavigationCompletion>;
     fn render_text(&mut self, text: &str) -> Result<()>;
     fn body_mode(&mut self) -> Result<()>;
@@ -89,7 +88,6 @@ pub struct RealDevice {
     status_style: Option<super::status_style::Lease>,
     status_journal: Option<super::status_style::Journal>,
     status_style_supported: bool,
-    current_tool_probe: bool,
     status_wait_cancellation: super::status_style::WaitCancellation,
     #[cfg(target_os = "linux")]
     status_wait_input: Option<super::input_observer::InputObserver>,
@@ -235,19 +233,13 @@ impl RealDevice {
         })
     }
 
-    /// Explicit disposable-page validation only, until native admission gates
-    /// pass. Normal Reader construction remains unchanged during development.
+    /// Diagnostic alias: exercises the same selected-tool path as Reader.
     pub fn current_tool_probe(corner: TriggerCorner, debug_dump: bool) -> Result<Self> {
-        let mut device = Self::new(false, corner, debug_dump)?;
-        device.current_tool_probe = true;
-        Ok(device)
+        Self::new(false, corner, debug_dump)
     }
 
     fn guard_current_input(&mut self, erasing: bool, points: &[(i32, i32)]) -> Result<()> {
         let _timing = crate::measurement::Span::new("status.path.guard");
-        if !self.current_tool_probe {
-            return Ok(());
-        }
         use crate::workflow::indicator::{BOTTOM, LEFT, RIGHT, TOP};
         anyhow::ensure!(
             !points.is_empty()
@@ -294,7 +286,7 @@ impl RealDevice {
     }
     fn rearm_current_input(&mut self) -> Result<()> {
         let _timing = crate::measurement::Span::new("status.path.rearm");
-        if self.current_tool_probe {
+        {
             use super::status_style::StyleIo;
             #[cfg(target_os = "linux")]
             if let Some(observer) = self.status_wait_input.as_mut() {
@@ -318,9 +310,6 @@ impl RealDevice {
                 device.pen.draw_path_screen(points)
             }
         };
-        if !self.current_tool_probe {
-            return inject(self);
-        }
         super::status_style::guarded_injection(
             self,
             |device| &mut device.status_wait_cancellation,
@@ -336,13 +325,8 @@ impl RealDevice {
             use super::{input_observer::InputObserver, status_style::StyleIo};
             // No device mutation occurs in this scope. Observe every input source,
             // including our devices; any activity invalidates the pending baseline.
-            let mut input = match InputObserver::new(TriggerCorner::LowerLeft, None) {
-                Ok(input) => input,
-                Err(_) => {
-                    log::debug!("Status readiness input observer unavailable; suppressing status");
-                    return Ok(None);
-                }
-            };
+            let mut input = InputObserver::new(TriggerCorner::LowerLeft, None)
+                .context("Status readiness input observation failed")?;
             let started = std::time::Instant::now();
             let debug_dump = self.debug_dump;
             super::status_readiness::wait_ready(
@@ -374,7 +358,6 @@ impl RealDevice {
         }
         Ok(Self {
             status_style: None,
-            current_tool_probe: false,
             debug_dump,
             status_journal: None,
             status_wait_cancellation: super::status_style::WaitCancellation::default(),
@@ -436,9 +419,6 @@ impl DeviceBackend for RealDevice {
     }
     fn wait_for_trigger(&mut self) -> Result<()> {
         self.touch.wait_for_trigger()
-    }
-    fn dismiss_trigger(&mut self) -> Result<()> {
-        self.touch.tap_middle_bottom()
     }
     fn navigate(&mut self, direction: NavigationDirection) -> Result<NavigationCompletion> {
         let _timing = crate::measurement::Span::new("device.navigation");
@@ -517,31 +497,16 @@ impl DeviceBackend for RealDevice {
             log::debug!("Status readiness unavailable; no lease or input");
             return Ok(false);
         };
-        let prepared = if self.current_tool_probe {
-            Lease::prepare_current(observed, self.debug_dump)?
-        } else {
-            Lease::prepare(observed, self.debug_dump)?
-        };
+        let prepared = Lease::prepare_current(observed, self.debug_dump)?;
         let Some(mut lease) = prepared else {
             return Ok(false);
         };
         self.status_journal = Some(Journal::create(Path::new(RECORD), &lease.recovery)?);
         let started = std::time::Instant::now();
         if let Err(error) = lease.acquire(self) {
-            let restored = lease.restore(self);
             self.status_style = Some(lease);
-            restored.context("Status acquisition failed and restoration could not be verified")?;
-            self.status_style = None;
-            self.status_journal
-                .take()
-                .context("Missing owned recovery journal")?
-                .finish()?;
-            #[cfg(target_os = "linux")]
-            if self.current_tool_probe {
-                self.status_wait_input = None;
-            }
-            log::warn!("Status probe declined after verified UI rollback: {error}");
-            return Ok(false);
+            self.status_wait_cancellation.latch();
+            return Err(error.context("Status acquisition failed; recovery record retained"));
         }
         log::info!("Status style acquired in {:?}", started.elapsed());
         self.status_style = Some(lease);
@@ -550,7 +515,7 @@ impl DeviceBackend for RealDevice {
     }
     fn status_style_end(&mut self) -> Result<()> {
         let _timing = crate::measurement::Span::new("status.restore");
-        if self.current_tool_probe && self.status_style.is_some() {
+        if self.status_style.is_some() {
             self.rearm_current_input()?;
         }
         let Some(mut lease) = self.status_style.take() else {
@@ -568,7 +533,7 @@ impl DeviceBackend for RealDevice {
                 error.context("Status preference restoration failed; further input stopped")
             );
         }
-        if self.current_tool_probe {
+        {
             use super::status_style::StyleIo;
             if let Err(error) = self.check_wait() {
                 self.status_style = Some(lease);
@@ -580,7 +545,7 @@ impl DeviceBackend for RealDevice {
             .context("Missing owned recovery journal")?
             .finish()?;
         #[cfg(target_os = "linux")]
-        if self.current_tool_probe {
+        {
             self.status_wait_input = None;
         }
         log::info!("Status style restored in {:?}", started.elapsed());
@@ -687,12 +652,7 @@ impl super::status_style::StyleIo for RealDevice {
         )))
     }
     fn end_wait(&mut self) {
-        #[cfg(target_os = "linux")]
-        {
-            if !self.current_tool_probe {
-                self.status_wait_input = None;
-            }
-        }
+        // Preserve pending events across the entire current-tool lease.
     }
     fn checkpoint(&mut self, record: &super::status_style::Recovery) -> Result<()> {
         let _timing = crate::measurement::Span::new("status.checkpoint");
@@ -703,7 +663,7 @@ impl super::status_style::StyleIo for RealDevice {
     }
     fn observe(&mut self) -> Result<super::status_style::Observation> {
         #[cfg(target_os = "linux")]
-        if self.current_tool_probe && self.status_wait_input.is_some() {
+        if self.status_wait_input.is_some() {
             let result = super::capture_recovery::observe(&mut NativeStatusObservation(self));
             if result.is_err() {
                 self.status_wait_cancellation.latch();
@@ -714,15 +674,7 @@ impl super::status_style::StyleIo for RealDevice {
         // observations. Never create/reset an observer to qualify a retry.
         self.observe_status_once()
     }
-    fn press(&mut self, point: (u32, u32)) -> Result<()> {
-        let _timing = crate::measurement::Span::new("status.press_input");
-        let down = self.touch.touch_start((point.0 as i32, point.1 as i32));
-        if down.is_ok() {
-            std::thread::sleep(Duration::from_millis(250));
-        }
-        let up = self.touch.touch_stop();
-        down?;
-        up?;
-        Ok(())
+    fn press(&mut self, _: (u32, u32)) -> Result<()> {
+        anyhow::bail!("Native status leases forbid menu input")
     }
 }

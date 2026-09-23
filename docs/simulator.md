@@ -30,6 +30,17 @@ Explicit live provider execution is available through the [local development set
 
 ## Scenario format
 
+Each page can declare `status_capability`: `calibrated_fine_pdf` (the default),
+`unsuitable_tool`, `unknown_tool`, or `unverified_layout`. Unsupported values
+suppress optional status ink before drawing while preserving core Q&A. This is a
+modeled eligibility input, not recognition of native pen settings or page type.
+The default retains existing abstract scenario coverage, including answer pages;
+actual notes toolbars are currently unqualified and suppress native status ink.
+Native pixel fixtures test the separate closed-tool and annotation-layout checks.
+The trigger model no longer emits an automatic bottom-center dismissal tap;
+native trigger/overlay verification remains required. A necessary non-menu tap
+is allowed by the product rule and may be restored if supported by evidence.
+
 Start from a maintained JSON file in [simulator/scenarios](simulator/scenarios).
 Unknown fields and invalid states fail before execution. Page indices are zero
 based; operation call numbers are one based and span the whole scenario.
