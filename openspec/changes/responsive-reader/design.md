@@ -477,3 +477,14 @@ emulator (1m43 build, test0.39s). It covers completed touch/key and late pen que
 a quiet success control, sticky loss/cancellation and byte-identical retained
 recovery journal. The syscall reads are modeled; this is not native concurrency
 or physical-contact proof. Host strict clippy/fmt and OpenSpec validation passed.
+
+Next bounded native coverage uses the existing positive current-tool cycle for
+secondary Thin/Medium. The failure-current-tool diagnostic selects that same
+candidate constructor and calls the unchanged production draw_failure(code),
+retaining a before image. Failure X/code marks intentionally persist as before;
+they are not activity paths and must not be reported as automatically erased.
+Developer cleanup uses only the exact recorded X and selected-code paths after
+fresh owner/image checks. Each case stops at first semantic failure, retains any
+journal, verifies neighboring strokes/actual tool, and restores original state.
+No normal-constructor admission yet. All131 Linux ARM library tests passed under
+the emulator at1530075 (65.14s); independent review found no source blocker.

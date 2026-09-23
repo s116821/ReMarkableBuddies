@@ -417,7 +417,7 @@ fn main() -> Result<()> {
             result?;
             cleanup?;
         }
-        Some("failure-code") => {
+        Some("failure-code") | Some("failure-current-tool") => {
             use remarkable_reader_buddy::workflow::indicator::Failure;
             let code = match args.get(2).map(String::as_str) {
                 Some("selection") => Failure::Selection,
@@ -429,8 +429,17 @@ fn main() -> Result<()> {
                 _ => bail!("failure-code requires selection/transcription/provider/no-successor/invalid-successor/device"),
             };
             let mut workflow =
-                remarkable_reader_buddy::Workflow::new(false, TriggerCorner::LowerLeft, false)?;
-            workflow.capture_page_data()?;
+                if args[1] == "failure-current-tool" {
+                    remarkable_reader_buddy::Workflow::with_device(Box::new(
+                    remarkable_reader_buddy::device::backend::RealDevice::current_tool_probe(
+                        TriggerCorner::LowerLeft, true)?), true)
+                } else {
+                    remarkable_reader_buddy::Workflow::new(false, TriggerCorner::LowerLeft, false)?
+                };
+            std::fs::write(
+                "/tmp/reader-buddy-status-before.png",
+                workflow.capture_page_data()?,
+            )?;
             workflow.draw_failure(code)?;
         }
         Some("return-check") => {
