@@ -551,3 +551,32 @@ input, owner or read failure retains active phase/journal and stops without auto
 cleanup, as existing native-evidence mode does. Final/reopen saved native identity
 comparison and clear pixels remain separate acceptance checks. Do not add this wait
 to normal Reader or interpret elapsed time/changed bytes alone as successful erasure.
+
+Review revision: raw byte change is not an acceptance predicate. In the explicit
+native-evidence diagnostic only, keep the drawn marker untouched for a maximum30s
+monotonic observation window, paced500ms. Preserve each distinct changed native
+snapshot using create-new private files (maximum16versions,64MiB cumulative;
+8MiB per read); publish its numbered ready record only after the snapshot closes.
+An external, bounded host diagnostic may inspect these immutable snapshots using
+the existing rmscene parser. It must retain every original recognized stroke ID
+and property and verify the added marker's expected geometry/count and Black Fine
+style in the known status region, not merely a count or changed hash. Parser
+ambiguity, extra/unexpected records or baseline changes forbid acknowledgement.
+Unknown native records remain an explicit evidence limit. No new on-tablet parser.
+
+Only an atomic diagnostic acknowledgement naming the exact validated snapshot
+number permits continuation. Before accepting it, the device must compare fresh
+two-equal bounded page reads with that snapshot, recheck fixed owner/session,
+separate continuous read-only InputObserver and the same deadline. A stale/invalid
+acknowledgement fails closed. The host's acknowledgement is test evidence, never
+production IPC or an automatic runtime policy. Persist the validation report and
+snapshot hash on the host. The existing production observer is never reset or
+replaced; it also retains all events for the next unchanged guarded cleanup.
+No acknowledgement, timeout, input, read/owner failure or storage-cap exhaustion
+returns the original failure before automatic cleanup, retaining active journal.
+The host has a bounded watchdog, and cannot acknowledge after its own deadline;
+the device's deadline is authoritative. No drawing retry, forced save, active-page
+close or marker redraw. Successful acknowledgement leads to the unchanged normal
+cleanup, saved-final check and separate deliberate developer close/reopen audit.
+Test metadata-only changes, unexpected lines, stale acknowledgement, timeout and
+input/owner cancellation without claiming synthetic fixtures are hardware proof.
