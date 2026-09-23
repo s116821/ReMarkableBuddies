@@ -264,6 +264,18 @@ frames and identities. Preserve them with the source/binary/reference hashes and
 visually verify the page. Use a bounded caller and restore the agreed page/service;
 this diagnostic sequence is not a complete Reader iteration.
 
+For explicit no-model append diagnosis on an already selected disposable page,
+build `--example append_probe` and run
+`./append_probe QA_FILE NEW_OUTPUT_DIR EXPECTED_DOCUMENT EXPECTED_PAGE` with the
+normal service stopped and a bounded caller. This **writes the supplied text once**
+through production body-mode/text APIs, with no status ink or undo/redo. It saves
+the exact requested/expected text and native snapshots before/after body-mode setup
+and typing, including page/visit/session identity, paragraph formatting and opaque
+native seals. The new output directory is private; files contain document content.
+An owner mismatch stops further writes; content mismatches remain failures and
+are never normalized. Snapshot/logging overhead makes this diagnostic unsuitable
+as a latency benchmark. Inspect the output and restore the agreed page/service.
+
 `--api-key` overrides `OPENAI_API_KEY`; prefer the protected environment because
 command arguments may appear in shell history or process listings. No real key is
 needed for offline simulation. `--base-url` overrides `OPENAI_BASE_URL`.

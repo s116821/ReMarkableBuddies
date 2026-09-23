@@ -103,63 +103,47 @@ impl NativeHistory {
     ) -> Result<PageState> {
         let started = Instant::now();
         let _timing = crate::measurement::Span::new("history.persistence");
-        let deadline = started + Duration::from_secs(30);
-        let mut previous = None;
-        let mut repeats = 0;
-        let mut last_error = "Native state did not settle".to_owned();
-        loop {
-            self.input_guard()?;
-            if let Some(owner) = required_owner {
-                self.owner_guard(owner)?;
-            }
-            let observed = (|| -> Result<PageState> {
-                let session = native_page::xochitl_session(Path::new("/proc"))?;
-                let page = native_page::observed_candidate(
-                    Path::new(ROOT),
-                    Path::new(SETTINGS),
-                    session.clone(),
-                )?;
-                ensure!(
-                    native_page::session_matches(Path::new("/proc"), &session)?,
-                    "Native session changed"
-                );
-                ensure!(
-                    expected.is_none_or(|text| page.content.text() == text),
-                    "Persisted native text has not reached expected complete content"
-                );
-                ensure!(
-                    required_owner.is_none_or(|owner| page.owner == *owner),
-                    "Native page/visit changed"
-                );
-                Ok(page)
-            })();
-            self.input_guard()?;
-            match observed {
-                Ok(mut page) => {
-                    if previous.as_ref() == Some(&page) {
-                        repeats += 1;
-                    } else {
-                        repeats = 0;
-                    }
-                    if repeats >= 2 {
-                        page.supported = true;
-                        log::debug!(
-                            "Native history content settled after {}ms",
-                            started.elapsed().as_millis()
-                        );
-                        return Ok(page);
-                    }
-                    previous = Some(page);
+        let page = super::history_readiness::wait_settled(
+            || {
+                self.input_guard()?;
+                if let Some(owner) = required_owner {
+                    self.owner_guard(owner)?;
                 }
-                Err(error) => {
-                    previous = None;
-                    repeats = 0;
-                    last_error = error.to_string();
-                }
-            }
-            ensure!(Instant::now() < deadline, "{last_error}");
-            sleep(Duration::from_millis(100));
-        }
+                let observed = (|| -> Result<PageState> {
+                    let session = native_page::xochitl_session(Path::new("/proc"))?;
+                    let page = native_page::observed_candidate(
+                        Path::new(ROOT),
+                        Path::new(SETTINGS),
+                        session.clone(),
+                    )?;
+                    ensure!(
+                        native_page::session_matches(Path::new("/proc"), &session)?,
+                        "Native session changed"
+                    );
+                    if let Some(expected) = expected {
+                        let actual = page.content.text();
+                        ensure!(actual == expected,
+                        "Persisted native text has not reached expected complete content (expected {} characters, observed {}; equal prefix {} characters)",
+                        expected.chars().count(), actual.chars().count(),
+                        expected.chars().zip(actual.chars()).take_while(|(a,b)| a == b).count());
+                    }
+                    ensure!(
+                        required_owner.is_none_or(|owner| page.owner == *owner),
+                        "Native page/visit changed"
+                    );
+                    Ok(page)
+                })();
+                self.input_guard()?;
+                Ok(observed)
+            },
+            || started.elapsed(),
+            sleep,
+        )?;
+        log::debug!(
+            "Native history content settled after {}ms",
+            started.elapsed().as_millis()
+        );
+        Ok(page)
     }
 
     pub fn snapshot(
