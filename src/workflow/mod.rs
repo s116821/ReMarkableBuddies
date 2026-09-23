@@ -261,7 +261,20 @@ impl Workflow {
     pub fn wait_for_trigger(&mut self) -> Result<()> {
         info!("Waiting for trigger...");
         self.device.wait_for_trigger()?;
-        Ok(())
+        self.prepare_reader_trigger()
+    }
+
+    fn prepare_reader_trigger(&mut self) -> Result<()> {
+        let _release = crate::measurement::Span::new("reader.trigger_release_observed");
+        anyhow::ensure!(
+            !self.indicator_cleanup_failed,
+            "Prior input failure blocks Reader trigger"
+        );
+        let result = self.device.prepare_reader_trigger();
+        if result.is_err() {
+            self.indicator_cleanup_failed = true;
+        }
+        result
     }
 
     /// Stay idle without clearing the last Q&A. Cross-device event order is
@@ -290,7 +303,7 @@ impl Workflow {
             }
             if events.contains(&Interaction::Reader) {
                 self.invalidate_history();
-                return Ok(());
+                return self.prepare_reader_trigger();
             }
             if !invalidated {
                 for event in events {

@@ -6,11 +6,15 @@ use super::{
 use anyhow::{ensure, Result};
 use std::time::Duration;
 
+pub(super) trait TouchWindowIo: WindowIo {
+    fn commit_decoder(&mut self, decoder: &ContactFrames);
+}
+
 pub(super) fn finish(
-    io: &mut impl WindowIo,
+    io: &mut impl TouchWindowIo,
     started: Duration,
     point: (i32, i32),
-    mut decoder: ContactFrames,
+    decoder: &mut ContactFrames,
 ) -> Result<()> {
     let drain_started = io.now();
     let deadline = |io: &dyn WindowIo| -> Result<()> {
@@ -114,6 +118,7 @@ pub(super) fn finish(
     );
     io.released_snapshot()?;
     io.validate_source()?;
+    io.commit_decoder(decoder);
     io.check_other_input()?;
     deadline(io)?;
     log::debug!("Owned touch event drain observed events={count} frames={frames}");
@@ -182,6 +187,9 @@ mod tests {
             Ok(())
         }
     }
+    impl TouchWindowIo for Io {
+        fn commit_decoder(&mut self, _: &ContactFrames) {}
+    }
     fn io(events: Vec<Event>) -> Io {
         Io {
             batches: vec![events].into(),
@@ -193,14 +201,36 @@ mod tests {
         }
     }
     #[test]
+    #[cfg(target_os = "linux")]
+    fn linux_adapter_keeps_completed_other_input_and_latches_raw_touch_failure() {
+        use crate::device::input_observer::InputObserver;
+        let mut quiet = InputObserver::replay_owned_touch(vec![], tap());
+        assert!(quiet.finish_owned_touch().is_ok());
+        assert!(quiet.quiescent());
+        for batches in [
+            vec![(false, vec![(1, 30, 1), (0, 0, 0), (1, 30, 0), (0, 0, 0)])],
+            vec![(true, vec![(3, 57, 9), (0, 0, 0), (3, 57, -1), (0, 0, 0)])],
+            vec![(false, vec![(1, 320, 1), (0, 0, 0), (1, 320, 0), (0, 0, 0)])],
+        ] {
+            let mut state = InputObserver::replay_owned_touch(batches, tap());
+            assert!(state.finish_owned_touch().is_err());
+            assert!(state.poll().is_err());
+            assert!(!state.quiescent());
+        }
+        let mut malformed = InputObserver::replay_owned_touch(vec![], vec![(0, 3, 0)]);
+        assert!(malformed.finish_owned_touch().is_err());
+        assert!(malformed.poll().is_err());
+    }
+
+    #[test]
     fn exact_single_contact_accepts_split_batches_and_kernel_axis_deduplication() {
         let mut full = io(tap());
-        assert!(finish(&mut full, Duration::ZERO, POINT, decoder()).is_ok());
+        assert!(finish(&mut full, Duration::ZERO, POINT, &mut decoder()).is_ok());
         // evdev may omit unchanged ABS slot/coordinates; the retained seed is
         // authoritative, not an assumed zero position.
         let mut dedup = io(vec![(3, 57, 1), (0, 0, 0), (3, 57, -1), (0, 0, 0)]);
         dedup.batches = vec![vec![(3, 57, 1)], vec![(0, 0, 0), (3, 57, -1), (0, 0, 0)]].into();
-        assert!(finish(&mut dedup, Duration::ZERO, POINT, decoder()).is_ok());
+        assert!(finish(&mut dedup, Duration::ZERO, POINT, &mut decoder()).is_ok());
     }
     #[test]
     fn malformed_wrong_point_repeated_or_missing_delivery_refuses() {
@@ -218,7 +248,7 @@ mod tests {
             vec![(1, 330, 1)],
             vec![(3, 57, 2)],
         ] {
-            assert!(finish(&mut io(events), Duration::ZERO, POINT, decoder()).is_err());
+            assert!(finish(&mut io(events), Duration::ZERO, POINT, &mut decoder()).is_err());
         }
     }
     #[test]
@@ -232,7 +262,7 @@ mod tests {
                 3 => state.held = true,
                 _ => state.external = true,
             }
-            assert!(finish(&mut state, Duration::ZERO, POINT, decoder()).is_err());
+            assert!(finish(&mut state, Duration::ZERO, POINT, &mut decoder()).is_err());
         }
     }
 }

@@ -6,6 +6,75 @@ use remarkable_reader_buddy::simulator::{
 use std::path::{Path, PathBuf};
 
 #[test]
+fn known_trigger_overlay_uses_one_outside_tap_and_preserves_core_answer() {
+    use remarkable_reader_buddy::simulator::scenario::{StatusCapability, TriggerOverlay};
+    let baseline = run("stationary-hold");
+    let mut scenario = load("stationary-hold");
+    scenario.pages[0].trigger_overlay = TriggerOverlay::KnownOpen;
+    // Unsuitable ink must not be an entry/dismissal restriction.
+    scenario.pages[0].status_capability = StatusCapability::UnsuitableTool;
+    let run = execute(&scenario, &root()).unwrap();
+    assert!(
+        run.report.assertion_failures.is_empty(),
+        "{:?}",
+        run.report.assertion_failures
+    );
+    assert_eq!(run.report.pages[1].text, baseline.report.pages[1].text);
+    assert_eq!(run.report.model_calls, baseline.report.model_calls);
+    assert_eq!(
+        run.report
+            .trace
+            .iter()
+            .filter(|event| event.action == "trigger_dismiss_tap")
+            .count(),
+        1
+    );
+    assert!(!run
+        .report
+        .trace
+        .iter()
+        .any(|event| event.page == 0 && event.action == "statusstroke"));
+}
+
+#[test]
+fn unknown_or_failed_trigger_dismissal_stops_before_model_and_ink() {
+    use remarkable_reader_buddy::simulator::scenario::{Effect, Fault, TriggerOverlay};
+    for failed_tap in [false, true] {
+        let mut scenario = load("stationary-hold");
+        scenario.expect = Default::default();
+        scenario.replies.clear();
+        scenario.pages[0].trigger_overlay = if failed_tap {
+            TriggerOverlay::KnownOpen
+        } else {
+            TriggerOverlay::Unknown
+        };
+        if failed_tap {
+            scenario.faults.push(Fault {
+                operation: Operation::TriggerDismiss,
+                call: 1,
+                effect: Effect::NoMove,
+            });
+        }
+        let run = execute(&scenario, &root()).unwrap();
+        assert_eq!(run.report.errors.len(), 1);
+        assert_eq!(run.report.model_calls, 0);
+        assert!(run.report.pages.iter().all(|page| page.unchanged));
+        assert_eq!(
+            run.report
+                .trace
+                .iter()
+                .filter(|event| event.action == "trigger_dismiss_tap")
+                .count(),
+            usize::from(failed_tap)
+        );
+        assert!(!run.report.trace.iter().any(|event| matches!(
+            event.action.as_str(),
+            "statusstroke" | "next" | "previous" | "text"
+        )));
+    }
+}
+
+#[test]
 fn status_admission_error_stops_core_work_instead_of_suppressing_feedback() {
     use remarkable_reader_buddy::simulator::scenario::{Effect, Fault};
     let mut scenario = load("blank-answer");

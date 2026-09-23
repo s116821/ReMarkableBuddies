@@ -63,6 +63,8 @@ pub struct PageSpec {
     pub strokes: Option<PathBuf>,
     #[serde(default)]
     pub status_capability: StatusCapability,
+    #[serde(default)]
+    pub trigger_overlay: TriggerOverlay,
 }
 
 /// Declared simulation input; it does not recognize native UI or document type.
@@ -74,6 +76,15 @@ pub enum StatusCapability {
     UnsuitableTool,
     UnknownTool,
     UnverifiedLayout,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TriggerOverlay {
+    #[default]
+    Closed,
+    KnownOpen,
+    Unknown,
 }
 
 #[derive(Clone, Deserialize)]
@@ -130,6 +141,7 @@ pub enum Operation {
     Body,
     Line,
     Trigger,
+    TriggerDismiss,
     HeaderSave,
     StatusStroke,
     StatusClear,
@@ -296,7 +308,10 @@ impl Scenario {
                     Effect::Error => true,
                     Effect::NoMove => matches!(
                         fault.operation,
-                        Operation::Next | Operation::Previous | Operation::StatusClear
+                        Operation::Next
+                            | Operation::Previous
+                            | Operation::StatusClear
+                            | Operation::TriggerDismiss
                     ),
                     Effect::Stale => matches!(
                         fault.operation,

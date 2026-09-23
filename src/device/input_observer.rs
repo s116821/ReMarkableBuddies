@@ -57,6 +57,12 @@ struct OwnedPen {
     started: Duration,
 }
 
+struct OwnedTouch {
+    window: OwnedPen,
+    point: (i32, i32),
+    decoder: ContactFrames,
+}
+
 fn inventory() -> Result<BTreeMap<PathBuf, Identity>> {
     let mut result = BTreeMap::new();
     for entry in fs::read_dir("/dev/input")? {
@@ -144,6 +150,7 @@ pub struct InputObserver {
     lost: bool,
     initial_input: bool,
     owned_pen: Option<OwnedPen>,
+    owned_touch: Option<OwnedTouch>,
     #[cfg(test)]
     scripted_polls: Option<std::collections::VecDeque<Result<Vec<Interaction>>>>,
     #[cfg(test)]
@@ -163,7 +170,7 @@ impl InputObserver {
     /// Mutation guards cannot wait for a gesture to qualify or be released.
     /// Even an unfinished contact frame means the cursor is no longer owned.
     pub fn quiescent(&self) -> bool {
-        self.owned_pen.is_none() && self.quiescent_state()
+        self.owned_pen.is_none() && self.owned_touch.is_none() && self.quiescent_state()
     }
 
     fn quiescent_state(&self) -> bool {
@@ -231,6 +238,7 @@ impl InputObserver {
             lost: false,
             initial_input,
             owned_pen: None,
+            owned_touch: None,
             #[cfg(test)]
             scripted_polls: None,
             #[cfg(test)]
@@ -261,7 +269,7 @@ impl InputObserver {
         if self.lost {
             anyhow::bail!("Native input observer permanently lost; recreate before waiting");
         }
-        let result = if self.owned_pen.is_some() {
+        let result = if self.owned_pen.is_some() || self.owned_touch.is_some() {
             Err(anyhow::anyhow!("Input observer is inside owned pen window"))
         } else {
             self.poll_inner()
@@ -323,10 +331,78 @@ impl InputObserver {
             &mut WindowAdapter {
                 observer: self,
                 window,
+                touch: false,
             },
             window.started,
         );
         self.owned_pen = None;
+        if result.is_err() {
+            self.lost = true;
+            self.reducer.cancel();
+        }
+        result
+    }
+
+    pub(super) fn begin_owned_touch(
+        &mut self,
+        writer: DescriptorIdentity,
+        point: (i32, i32),
+    ) -> Result<()> {
+        let result = (|| {
+            ensure!(
+                self.poll()?.is_empty() && self.quiescent(),
+                "Input before owned touch window"
+            );
+            let indices: Vec<_> = self
+                .sources
+                .iter()
+                .enumerate()
+                .filter_map(|(index, source)| {
+                    (source.touch
+                        && source.identity.inode == writer.inode
+                        && source.identity.device == writer.device)
+                        .then_some(index)
+                })
+                .collect();
+            ensure!(
+                indices.len() == 1,
+                "Touch writer does not identify one observed source"
+            );
+            let index = indices[0];
+            ensure!(
+                descriptor_identity(self.sources[index].device.as_fd())? == writer,
+                "Touch reader/writer descriptor mismatch"
+            );
+            self.owned_touch = Some(OwnedTouch {
+                window: OwnedPen {
+                    index,
+                    writer,
+                    started: self.clock.elapsed(),
+                },
+                point,
+                decoder: self.frames.clone(),
+            });
+            Ok(())
+        })();
+        if result.is_err() {
+            self.lost = true;
+            self.reducer.cancel();
+        }
+        result
+    }
+
+    pub(super) fn finish_owned_touch(&mut self) -> Result<()> {
+        let mut owned = self.owned_touch.take().context("No owned touch window")?;
+        let result = super::owned_touch_window::finish(
+            &mut WindowAdapter {
+                observer: self,
+                window: owned.window,
+                touch: true,
+            },
+            owned.window.started,
+            owned.point,
+            &mut owned.decoder,
+        );
         if result.is_err() {
             self.lost = true;
             self.reducer.cancel();
@@ -454,6 +530,31 @@ impl InputObserver {
     }
 
     #[cfg(test)]
+    pub(super) fn replay_owned_touch(
+        batches: Vec<(bool, Vec<super::owned_pen_window::Event>)>,
+        events: Vec<super::owned_pen_window::Event>,
+    ) -> Self {
+        let mut observer = Self::replay_owned(batches);
+        let window = observer.owned_pen.take().unwrap();
+        observer.replay.as_mut().unwrap().pen = vec![events].into();
+        observer.frames = ContactFrames::seeded(
+            vec![Slot {
+                tracking: None,
+                x: Some(702),
+                y: Some(1),
+            }],
+            0,
+        )
+        .unwrap();
+        observer.owned_touch = Some(OwnedTouch {
+            window,
+            point: (702, 1),
+            decoder: observer.frames.clone(),
+        });
+        observer
+    }
+
+    #[cfg(test)]
     pub(super) fn scripted(polls: Vec<Result<Vec<Interaction>>>) -> Self {
         Self {
             sources: Vec::new(),
@@ -465,6 +566,7 @@ impl InputObserver {
             lost: false,
             initial_input: false,
             owned_pen: None,
+            owned_touch: None,
             scripted_polls: Some(polls.into()),
             replay: None,
         }
@@ -474,6 +576,13 @@ impl InputObserver {
 struct WindowAdapter<'a> {
     observer: &'a mut InputObserver,
     window: OwnedPen,
+    touch: bool,
+}
+impl super::owned_touch_window::TouchWindowIo for WindowAdapter<'_> {
+    fn commit_decoder(&mut self, decoder: &ContactFrames) {
+        // Preserve updated ABS state before processing any later external input.
+        self.observer.frames = decoder.clone();
+    }
 }
 impl super::owned_pen_window::WindowIo for WindowAdapter<'_> {
     fn now(&self) -> Duration {
@@ -495,7 +604,8 @@ impl super::owned_pen_window::WindowIo for WindowAdapter<'_> {
             .get(self.window.index)
             .context("Owned pen source missing")?;
         ensure!(
-            !source.touch && descriptor_identity(source.device.as_fd())? == self.window.writer,
+            source.touch == self.touch
+                && descriptor_identity(source.device.as_fd())? == self.window.writer,
             "Owned pen descriptor identity changed"
         );
         Ok(())

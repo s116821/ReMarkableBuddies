@@ -30,6 +30,6 @@ path without pretending modeled tool footprints establish native safety.
 - **WHEN** a page declares an unsuitable tool, unknown tool or unverified layout
 - **THEN** the shared workflow preserves exact core Q&A with no status drawing or erasure; this declaration is a modeled input and does not prove native recognition or notes-page eligibility.
 
-#### Scenario: Trigger without synthetic dismissal
+#### Scenario: Conditional trigger dismissal
 - **WHEN** a modeled hold qualifies
-- **THEN** the workflow emits no synthetic dismissal tap; actual native overlay behavior remains a separate acceptance gate, and the no-menu rule still permits a necessary verified non-menu tap.
+- **THEN** a declared closed overlay emits no tap, a qualified known-open panel receives one outside-panel tap, and unknown or failed dismissal stops before Q&A mutations; actual native overlay behavior remains a separate acceptance gate.

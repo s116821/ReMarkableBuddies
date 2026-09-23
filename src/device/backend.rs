@@ -52,6 +52,7 @@ pub trait DeviceBackend {
     fn capture(&mut self) -> Result<Frame>;
     fn detail_images(&self) -> Result<Vec<String>>;
     fn wait_for_trigger(&mut self) -> Result<()>;
+    fn prepare_reader_trigger(&mut self) -> Result<()>;
     fn navigate(&mut self, direction: NavigationDirection) -> Result<NavigationCompletion>;
     fn render_text(&mut self, text: &str) -> Result<()>;
     fn body_mode(&mut self) -> Result<()>;
@@ -188,6 +189,124 @@ impl super::capture_recovery::ObservationIo for NativeStatusObservation<'_> {
     }
     fn capture(&mut self) -> Result<Self::Frame> {
         self.0.observe_status_once()
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct NativeTriggerDismiss<'a> {
+    device: &'a mut RealDevice,
+    input: super::input_observer::InputObserver,
+    observations: usize,
+}
+
+#[cfg(target_os = "linux")]
+impl super::trigger_dismiss::DismissIo for NativeTriggerDismiss<'_> {
+    fn observe(&mut self) -> Result<super::trigger_dismiss::Snapshot> {
+        use std::{io::Read, path::Path};
+        let root = Path::new("/home/root/.local/share/remarkable/xochitl");
+        let owner = || {
+            let session = super::native_page::xochitl_session(Path::new("/proc"))?;
+            super::native_page::observed_owner(
+                root,
+                Path::new("/home/root/.config/remarkable/xochitl.conf"),
+                session,
+            )
+        };
+        let before = owner()?;
+        let path = root
+            .join(&before.document)
+            .join(format!("{}.rm", before.page));
+        let native = || -> Result<Option<Vec<u8>>> {
+            match std::fs::symlink_metadata(&path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error.into()),
+                Ok(metadata) => anyhow::ensure!(
+                    metadata.is_file() && metadata.len() <= 8 * 1024 * 1024,
+                    "Unsupported trigger native page file"
+                ),
+            }
+            let mut bytes = Vec::new();
+            std::fs::File::open(&path)?
+                .take(8 * 1024 * 1024 + 1)
+                .read_to_end(&mut bytes)?;
+            anyhow::ensure!(
+                bytes.len() <= 8 * 1024 * 1024,
+                "Trigger native page exceeds bound"
+            );
+            Ok(Some(bytes))
+        };
+        let bytes = native()?;
+        let image = self.device.status_screenshot.take_image()?.to_luma8();
+        anyhow::ensure!(
+            native()? == bytes && owner()? == before,
+            "Trigger owner/native content changed during capture"
+        );
+        if self.device.debug_dump {
+            let stage = if self.observations == 0 {
+                "before"
+            } else {
+                "latest"
+            };
+            image.save(format!(
+                "/tmp/reader-buddy-trigger-{}-{stage}.png",
+                std::process::id()
+            ))?;
+        }
+        self.observations += 1;
+        Ok(super::trigger_dismiss::Snapshot {
+            identity: super::status_style::Identity {
+                document: before.document,
+                page: before.page,
+                visit: before.visit,
+                session: before.session,
+            },
+            native: bytes,
+            image,
+        })
+    }
+    fn guard(&mut self) -> Result<()> {
+        self.device.status_wait_cancellation.check()?;
+        anyhow::ensure!(
+            self.input.poll()?.is_empty() && self.input.quiescent(),
+            "Input cancelled trigger dismissal"
+        );
+        Ok(())
+    }
+    fn tap_once(&mut self, point: (i32, i32)) -> Result<()> {
+        anyhow::ensure!(
+            point == super::trigger_dismiss::OUTSIDE_POINT,
+            "Unknown dismissal point"
+        );
+        anyhow::ensure!(
+            super::native_page::verified_contract(
+                super::DeviceModel::detect(),
+                &std::fs::read_to_string("/etc/os-release")?
+            ),
+            "Unqualified trigger dismissal firmware/device"
+        );
+        let writer = self.device.touch.input_identity()?;
+        self.input
+            .begin_owned_touch(writer, self.device.touch.native_point(point))?;
+        let down = self.device.touch.touch_start(point);
+        if down.is_ok() {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        // These execute even when the initial write partially failed.
+        let release = self.device.touch.touch_stop();
+        let rearm = self.input.finish_owned_touch();
+        match (down.and(release), rearm) {
+            (Err(error), Err(rearm)) => {
+                Err(error.context(format!("Trigger touch observation also failed: {rearm:#}")))
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+            (Ok(()), Ok(())) => Ok(()),
+        }
+    }
+    fn now(&self) -> Duration {
+        self.device.clock.elapsed()
+    }
+    fn pace(&mut self, duration: Duration) {
+        std::thread::sleep(duration);
     }
 }
 
@@ -419,6 +538,32 @@ impl DeviceBackend for RealDevice {
     }
     fn wait_for_trigger(&mut self) -> Result<()> {
         self.touch.wait_for_trigger()
+    }
+    fn prepare_reader_trigger(&mut self) -> Result<()> {
+        let _timing = crate::measurement::Span::new("reader.trigger_dismiss");
+        self.status_wait_cancellation.check()?;
+        #[cfg(target_os = "linux")]
+        let result = (|| {
+            anyhow::ensure!(
+                self.status_style.is_none(),
+                "Trigger dismissal during active status lease"
+            );
+            let input = super::input_observer::InputObserver::new(TriggerCorner::LowerLeft, None)?;
+            super::trigger_dismiss::dismiss(
+                &mut NativeTriggerDismiss {
+                    device: self,
+                    input,
+                    observations: 0,
+                },
+                &mut super::status_style::WaitCancellation::default(),
+            )
+            .map(|_| ())
+        })();
+        #[cfg(not(target_os = "linux"))]
+        let result = Err(anyhow::anyhow!(
+            "Native trigger dismissal observation unavailable"
+        ));
+        self.status_wait_cancellation.record(result)
     }
     fn navigate(&mut self, direction: NavigationDirection) -> Result<NavigationCompletion> {
         let _timing = crate::measurement::Span::new("device.navigation");

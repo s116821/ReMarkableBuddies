@@ -24,6 +24,7 @@ pub type Shared = Rc<RefCell<State>>;
 #[derive(Clone)]
 pub struct Page {
     pub status_capability: StatusCapability,
+    pub trigger_overlay: TriggerOverlay,
     pub background: RgbaImage,
     pub text: String,
     pub lines: Vec<((i32, i32), (i32, i32))>,
@@ -211,6 +212,7 @@ impl State {
             }
             pages.push(Page {
                 status_capability: spec.status_capability,
+                trigger_overlay: spec.trigger_overlay,
                 background,
                 text: spec.text.clone(),
                 lines: Vec::new(),
@@ -513,6 +515,28 @@ impl DeviceBackend for SimDevice {
         }
         bail!("Simulator gesture sequence ended without a valid hold")
     }
+    fn prepare_reader_trigger(&mut self) -> Result<()> {
+        let mut state = self.0.borrow_mut();
+        let effect = state.operation(Operation::TriggerDismiss)?;
+        let page = state.active;
+        match state.pages[page].trigger_overlay {
+            TriggerOverlay::Closed => state.event("trigger_overlay_closed", "no dismissal input"),
+            TriggerOverlay::Unknown => bail!("Unknown trigger overlay; no dismissal input"),
+            TriggerOverlay::KnownOpen => {
+                state.event(
+                    "trigger_dismiss_tap",
+                    "one outside-panel contact, no menu item",
+                );
+                state.clock += 100;
+                anyhow::ensure!(
+                    effect != Some(Effect::NoMove),
+                    "Trigger panel did not dismiss before deadline"
+                );
+                state.pages[page].trigger_overlay = TriggerOverlay::Closed;
+            }
+        }
+        Ok(())
+    }
     fn navigate(
         &mut self,
         direction: NavigationDirection,
@@ -569,6 +593,7 @@ impl DeviceBackend for SimDevice {
         }
         state.pages[page] = Page {
             status_capability: state.pages[page].status_capability,
+            trigger_overlay: state.pages[page].trigger_overlay,
             background: image,
             text: String::new(),
             lines: Vec::new(),

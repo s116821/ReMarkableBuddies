@@ -34,7 +34,23 @@ fn panel(image: &GrayImage) -> Panel {
     }
     // Positive full exposed seam/closed-control check excludes this native
     // panel and partial transitions. This does not recognize every popover.
-    if controls(image).is_some_and(|ui| !ui.menu) {
+    // Border disappearance alone is insufficient: retained menu icons/text are
+    // an unqualified partial transition. Conservative incidental matches refuse.
+    let remnant = [
+        (78, 675, 180, 699),
+        (78, 734, 154, 759),
+        (78, 797, 227, 823),
+        (78, 857, 184, 884),
+        (78, 919, 193, 946),
+        (78, 979, 207, 1010),
+    ]
+    .into_iter()
+    .any(|(left, top, right, bottom)| {
+        (top..bottom).all(|y| {
+            (left..right).all(|x| image.get_pixel(x, y)[0].abs_diff(OPEN.get_pixel(x, y)[0]) <= 8)
+        })
+    });
+    if controls(image).is_some_and(|ui| !ui.menu) && !remnant {
         return Panel::Closed;
     }
     let selected = |y: u32| {
@@ -212,7 +228,7 @@ mod tests {
         }
     }
     #[test]
-    fn partial_or_shifted_native_panel_never_becomes_closed() {
+    fn partial_native_panel_never_becomes_closed() {
         for (x, y) in [(100, 685), (279, 750), (30, 990)] {
             let mut frame = snapshot(true);
             let old = frame.image.get_pixel(x, y)[0];
@@ -222,6 +238,13 @@ mod tests {
             assert!(dismiss(&mut state, &mut WaitCancellation::default()).is_err());
             assert_eq!(state.taps, 0);
         }
+        let mut borderless = snapshot(true);
+        for y in 655..1024 {
+            for x in 61..65 {
+                borderless.image.put_pixel(x, y, Luma([255]));
+            }
+        }
+        assert_eq!(panel(&borderless.image), Panel::Unknown);
     }
     #[test]
     fn closed_skips_and_delayed_known_panel_taps_only_once() {

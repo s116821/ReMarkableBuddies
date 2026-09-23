@@ -37,9 +37,12 @@ modeled eligibility input, not recognition of native pen settings or page type.
 The default retains existing abstract scenario coverage, including answer pages;
 actual notes toolbars are currently unqualified and suppress native status ink.
 Native pixel fixtures test the separate closed-tool and annotation-layout checks.
-The trigger model no longer emits an automatic bottom-center dismissal tap;
-native trigger/overlay verification remains required. A necessary non-menu tap
-is allowed by the product rule and may be restored if supported by evidence.
+Each page also declares `trigger_overlay`: `closed` (default), `known_open`, or
+`unknown`. A closed overlay emits no tap, the known panel emits one outside-panel
+tap, and unknown or failed dismissal stops before model calls or writing.
+`trigger_dismiss` supports `error` and `no_move` faults. This abstract state model
+does not prove native overlay recognition, touch delivery or firmware coverage;
+actual pixel-pair and input-window tests supply separate evidence.
 
 Start from a maintained JSON file in [simulator/scenarios](simulator/scenarios).
 Unknown fields and invalid states fail before execution. Page indices are zero

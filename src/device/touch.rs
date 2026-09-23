@@ -106,6 +106,20 @@ pub struct Touch {
 
 #[cfg(target_os = "linux")]
 impl Touch {
+    pub(super) fn input_identity(&self) -> Result<super::input_observer::DescriptorIdentity> {
+        use std::os::fd::AsFd;
+        super::input_observer::descriptor_identity(
+            self.device
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Touch input is disabled"))?
+                .as_fd(),
+        )
+    }
+
+    pub(super) fn native_point(&self, point: (i32, i32)) -> (i32, i32) {
+        self.virtual_to_input(point)
+    }
+
     pub fn new(no_touch: bool, trigger_corner: TriggerCorner) -> Self {
         let device_model = DeviceModel::detect();
         info!("Touch using device model: {}", device_model.name());
