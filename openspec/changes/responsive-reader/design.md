@@ -208,3 +208,73 @@ layouts remain fail-closed; any future pending state must be narrowly justified
 by actual evidence and retain deadline, cancellation, content and owner checks.
 
 In the implementation PR add a concise AGENTS/workflow rule applying this default to future Reader/Writer features, with public/manual equivalents and no optional integration prerequisite. REM35 audits new waits and verifies preservation across the integrated system. Simulator coverage must exercise immediate/delayed completion, missing/duplicate/out-of-order/stale signals, wrong page/session/operation and cancellation via actual production sequencing; assert no duplicated mutation or stale successful transition. The architecture amendment preceded implementation; the measurement checkpoint now includes the AGENTS principle, while tasks.md tracks remaining implementation and validation.
+
+## Superseding current-tool direction (2026-09-23 UTC)
+
+The user's September22 local-time steering, relayed by the read-only reviewer,
+replaces the requirement to perfect simulated toolbar swaps. Drawing should
+preserve the selected pen. Direct selection is acceptable only through a robust,
+supported mechanism without menu-coordinate presses. Preserve the measured
+capture/navigation improvements and the unresolved history work. Prior toolbar
+failures and timings remain historical evidence; further elective reproduction
+is paused. The diagnostic-only baseline b41b42d is preserved but not executed.
+
+Implement a small current-tool status lease, without opening a menu to discover
+properties. Fresh closed-toolbar pixels must positively identify a supported
+pen class and visible color; saved xochitl preferences remain advisory. Width
+is not observable in the closed toolbar, so eligibility must cover every width
+and injected-pressure footprint for the admitted class, not assume Medium.
+Initially investigate only Fineliner in either already-selected slot, using exact
+native icon/color fixtures. Admit it only after a conservative maximum footprint
+and eraser coverage are verified on the supported firmware. No Highlighter,
+white/light ink, eraser, selection tool, unknown icon/layout or ambiguous color
+is admitted by default. Broader tool support requires its own bounded evidence.
+
+A supported mark must fit completely inside the reserved blank area including
+stroke width and the physical eraser envelope. Retain owner/session/visit and
+strict content checks, external-input cancellation, serialized input and durable
+ink/cleanup intent before mutation. Cleanup uses the existing physical eraser
+input, never a toolbar-selected eraser or broad page/rectangle wipe. Verify the
+whole cleared footprint, neighboring ink and unchanged toolbar after cleanup.
+Journal changes must preserve refusal of old unresolved records; never silently
+migrate or discard recovery evidence. Do not claim a narrow centerline erasure
+covers an unmeasured thick stroke. If no safe envelope is established, suppress
+the optional mark before any input; do not experiment on user ink.
+
+Suppression keeps normal Q&A/provider/keyboard output available, records a reason,
+and does not claim visible feedback or successful indicator timing. Report this
+coverage tradeoff explicitly. Both success triangles and failure X use the same
+current-tool eligibility; persistent failure marks still require a safe footprint.
+Generic line/bitmap helpers already preserve tool selection but need a guard on
+any reachable automatic drawing path. Legacy unused draw_symbol and region-erase
+helpers are not permission to add new automatic mutation. Text rendering/body
+mode are keyboard operations and remain governed by existing content/history
+contracts, not the pen-style gate. Future Writer drawing inherits this rule.
+
+Before code: audit and preserve all actual call paths; review this plan. Then add
+closed-toolbar positive/negative fixtures and model the actual current-tool lease,
+including zero toolbar presses, either slot, stale preferences, unknown width,
+changed owner/input, journal failures and cleanup bounds. Validate a bounded
+no-model maximum-width/cleanup case on disposable material before admitting a
+class in production. Native configuration during test setup is distinct from
+production menu automation. Repeated native supported and suppressed cases must
+show unchanged tool settings, safe neighbor ink and complete Q&A/errors; retain
+provider-separated visible milestones and remaining latency/history gates.
+
+Bounded API investigation: the official developer examples document separate Qt
+Quick applications, not an observed xochitl pen-selection interface:
+https://github.com/reMarkable/remarkable-developer-examples . The upstream inkling
+xovi extension describes native tool switching through an injected extension:
+https://github.com/nathanmarlor/inkling/blob/main/xovi-ext/README.md . This is not a
+verified supported API on this tablet and would add an invasive dependency; do
+not install it for this change. Prior denied D-Bus introspection only limits that
+inspection. No robust supported direct selection mechanism has been established;
+this is not a claim that none exists anywhere. Research stops here for this scope.
+
+Further user steering (same session) makes this a product-wide architecture rule:
+NO autonomous menu navigation in Reader, Writer or future features, including
+read-only menu inspection. Simple left/right swipes remain explicitly allowed;
+keyboard input is not banned. AGENTS and the development-testing delta record the
+rule for contributors and REM35. Audit body-mode, navigation, failure and helper
+call paths rather than assuming all touch input is a menu. Developer/manual setup
+is clearly separated and announced; no diagnostic helper becomes a product bypass.

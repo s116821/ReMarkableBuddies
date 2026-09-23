@@ -9,3 +9,21 @@ Repository AGENTS/workflow guidance SHALL establish supported completion events 
 #### Scenario: Integrated final gate
 - **WHEN** REM35 validates later Reader/Writer features
 - **THEN** it audits new waits and verifies preservation of completion-driven sequencing, safety guarantees and REM9 responsiveness gains before1.0.
+
+### Requirement: Predictable menu-free product interaction
+Reader, Writer and future features SHALL NOT autonomously navigate device menus,
+including opening menus to inspect state. They SHALL prefer supported direct
+interfaces, verified simple gestures or documented safe fallback. Simple left/right
+page swipes and keyboard text input remain permitted under their existing guards.
+
+#### Scenario: Feature requires a menu
+- **WHEN** no supported non-menu mechanism can implement a proposed feature
+- **THEN** the limitation and design choice are surfaced explicitly instead of introducing hidden autonomous menu navigation.
+
+#### Scenario: Developer setup
+- **WHEN** deliberate developer/manual validation setup uses a menu
+- **THEN** it is separated from normal product execution, announced and labeled as setup; it is not evidence that normal product behavior is menu-free.
+
+#### Scenario: Integrated audit
+- **WHEN** REM35 validates the integrated Reader and Writer release
+- **THEN** every normal feature path is audited for menu automation, with permitted gestures and keyboard input distinguished explicitly.

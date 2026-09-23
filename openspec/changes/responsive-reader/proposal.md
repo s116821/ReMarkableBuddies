@@ -20,3 +20,9 @@ Reader interaction contains long local stalls and repeated guarded refusals. REM
 
 ## Impact
 Screenshot conversion and status observation, bounded diagnostic examples, workflow timing/state transitions where evidence justifies changes, regression fixtures and public guidance. No provider/prompt redesign, key change, Writer feature, account operation or release1.0. REM35 retains integrated Reader+Writer acceptance.
+
+September22 local-time user amendment: preserve the selected tool for all drawing;
+stop pursuing simulated menu swaps as the default. Use only safely recognized
+current tools, with verified full-width/cleanup footprints, and suppress optional
+marks when those guarantees are unavailable while preserving core Q&A. See the
+superseding design section and task4 for the revised method and coverage tradeoff.

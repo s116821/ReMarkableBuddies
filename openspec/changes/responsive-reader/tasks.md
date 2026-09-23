@@ -34,3 +34,16 @@ comparable full-workflow measurements remain missing. Preserve the end-to-end
 milestones (trigger release to useful visible feedback/request dispatch, provider
 spans separately, response to first visible answer, final character to tools ready),
 actual UI preferences, recovery journals, neighbor ink, and content/owner guards.
+
+## 4. Superseding selected-tool direction (2026-09-23 UTC)
+- [ ] 4.1 Review current-tool design and audit every reachable drawing/erasure path; preserve prior swap findings without further elective reproduction.
+- [ ] 4.2 Establish non-mutating current-tool eligibility and worst-width/cleanup envelope with native fixtures; reject unsupported/unknown tools without affecting Q&A.
+- [ ] 4.3 Replace production menu-based status acquisition/restoration with a current-tool lease, preserving ownership, durable recovery, input and neighbor-ink guards.
+- [ ] 4.4 Exercise both slots, all admitted widths/colors, unsafe/unknown tool suppression, success/error marks, interruption and cleanup failures through production simulator/native paths; prove zero tool-selection presses and report reduced feedback coverage.
+
+This direction supersedes the tool-swapping method in tasks1.2/3.3/3.3a: retain
+historical comparable swap timings, then measure current-tool marks and safe
+suppression separately. Nondefault primary/secondary full Q&A remains required;
+skipped marks are not successful indicator samples or visible feedback. All
+remaining full-workflow, history, latency and delivery gates stay open.
+- [ ] 4.5 Audit all normal Reader/Writer menu navigation under the product-wide prohibition; retain verified simple swipes/keyboard operations, document unavailable features and carry the rule into canonical specs and REM35.

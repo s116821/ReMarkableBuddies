@@ -13,3 +13,15 @@ The simulator SHALL model changed operation timing and reachable delayed/stale/c
 #### Scenario: Completion signal ordering and cancellation
 - **WHEN** production sequencing receives immediate, delayed, missing, duplicate, out-of-order, stale or wrong-owner signals, or cancellation
 - **THEN** modeled checks assert fresh correlated completion or bounded safe failure, no duplicate mutations and no late revival of cancelled work; timed simulation is not proof of native event availability.
+
+### Requirement: Current-tool drawing regressions
+The simulator SHALL exercise the production current-tool eligibility and cleanup
+path without pretending modeled tool footprints establish native safety.
+
+#### Scenario: No simulated tool switching
+- **WHEN** a supported current-tool indicator or a suppressed unsuitable-tool case runs
+- **THEN** the operation records zero toolbar selection/menu presses and unchanged original tool settings; unsupported feedback does not prevent core Q&A.
+
+#### Scenario: Footprint and recovery faults
+- **WHEN** a stroke or eraser envelope approaches neighboring ink, or owner/input/journal/cleanup observations fail
+- **THEN** pre-mutation uncertainty suppresses optional ink and post-mutation uncertainty fails closed with retained recovery evidence; no broadened erasure or stale success occurs.

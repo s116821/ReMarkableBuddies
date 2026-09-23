@@ -88,3 +88,15 @@ need representative live evidence before merge; contributors without access repo
 the missing gate and a maintainer supplies it. Native-only evidence follows the
 separate unattended tablet scope above. Existing authorization does not need to be
 requested again merely because a skill is used.
+
+## Predictable device interaction
+
+Normal Reader, Writer and future features must not autonomously navigate device
+menus, including opening menus merely to inspect settings. Prefer supported direct
+interfaces, verified simple gestures or a safe documented fallback. Simple left/right
+page swipes are allowed; this rule does not prohibit keyboard text input or all
+coordinate-based input. Do not hide menu automation behind helpers or optional
+fallbacks. If a feature requires menus, document the limitation and resolve the
+design explicitly before adding it. Deliberate developer/manual test setup may
+operate menus with advance notice, but must remain separate from product paths
+and be labeled clearly in evidence. REM35 audits integrated features for this rule.
