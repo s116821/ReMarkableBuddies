@@ -102,9 +102,10 @@ leases per iteration but don't double-count their inner spans.
 and ends when the inner workflow returns; `reader.iteration` also includes outer
 cleanup and may include trigger waiting.
 Historical `reader.trigger_dismiss` began after observing the qualified trigger,
-before the dismissing tap. Integration50cb909 removes that tap and its span.
-A fresh release-observation milestone must be recorded for the full-workflow
-latency gate; old dismiss timestamps are not available on this candidate. Any
+before the dismissing tap. Integration50cb909 removed that tap and its span;
+dbf5609 restores conditional dismissal and a separate short-scoped
+`reader.trigger_release_observed` marker before dismissal work. The failed native
+sample580.393ms does not establish successful dismissal or full-workflow latency. Any
 software observation includes input-poll lag, not a hardware release timestamp.
 These are host monotonic timestamps, not simulated elapsed time or a claim of
 first/last visible pixels. Rendering
@@ -133,10 +134,13 @@ Do not substitute external pre-attempt screenshots for the internal pair.
   Pressure is2630; actual maximum-width and eraser envelopes still require proof.
 - `body_mode` is Cmd3 keyboard input; answer/header rendering is keyboard input.
   Next/Previous are horizontal swipes. These are not autonomous menu navigation.
-- Integration50cb909 removes `dismiss_trigger` and its bottom-center tap. Native
-  trigger release, resulting overlay and subsequent capture/navigation remain
-  unverified. A necessary verified non-menu tap remains allowed; removal is a
-  proposed simplification, not an authorization restriction.
+- Integration50cb909's no-tap proposal failed natively because the overflow panel
+  remained open. Candidate dbf5609 permits one known-panel outside tap, with100ms
+  physical contact, positive owned-touch release, fresh postconditions and5s
+  total deadline/50ms known-open pacing. Native delivery was verified, but its
+  post-tap capture failed on a vanished allocation candidate. No successful
+  trigger/capture/navigation or latency acceptance is claimed. Task4.9 plans
+  bounded read-only capture recovery; it is not implemented at this checkpoint.
 - The100ms post-erase physical-settling exception remains before positive corner
   and final lease verification. Current evidence does not establish its minimum
   or replace it with an authoritative completion event.
