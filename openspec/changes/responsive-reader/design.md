@@ -174,4 +174,24 @@ cleanup checkpoints. Do not carry observations across independent operations or
 use persisted preferences in place of actual UI. Verify fewer observations with
 the production lease model and retain partial-failure/rollback regressions.
 
+The nondefault diagnostic still spends about 49ms converting every 1404x1872
+BGRA pixel and another 24ms normalizing each guard image, repeated across43
+status observations. For the image-only modern RM2 path, fuse the exact existing
+Nearest sampling and weighted BGRA luminance conversion: read the entire fresh
+frame as before, but convert only the selected 768x1024 pixels. Keep the same f32
+coordinate arithmetic, portrait layout, channel weights/rounding and alpha
+behavior. Encoded native/detail-strip captures remain unchanged; legacy RM2 and
+Paper Pro retain their existing conversion/normalization path.
+
+This is a pixel computation change only. Preserve fresh PID, allocation discovery
+and raw read on every attempt, clear both encoded buffers before all attempts,
+and preserve malformed-length failures. No cached address/frame or EIO retry.
+Compare fused output against the previous full native conversion plus the library
+Nearest oracle across all channels/gray boundaries/random spatial patterns and
+dimensions, including truncated/oversized frames. Reuse the existing exact-pixel
+suite rather than a self-referential sampling test. Record fused timing as its own
+phase, not as an additive comparison to nested historical conversion/resize
+spans. Run native image equivalence and repeated full indicator measurements;
+the microbenchmark alone cannot close the marker or full-workflow gates.
+
 In the implementation PR add a concise AGENTS/workflow rule applying this default to future Reader/Writer features, with public/manual equivalents and no optional integration prerequisite. REM35 audits new waits and verifies preservation across the integrated system. Simulator coverage must exercise immediate/delayed completion, missing/duplicate/out-of-order/stale signals, wrong page/session/operation and cancellation via actual production sequencing; assert no duplicated mutation or stale successful transition. The architecture amendment preceded implementation; the measurement checkpoint now includes the AGENTS principle, while tasks.md tracks remaining implementation and validation.

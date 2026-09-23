@@ -362,3 +362,39 @@ It does not retry memory reads, cache an address or infer success. The regressio
 retains the underlying OS error and asserts one read only. Native EIO reproduction
 and diagnosis, repeated nondefault/error cases, all visible milestones and full
 history/performance acceptance remain open.
+
+### Bounded EIO controls, 4430db8 and original baseline with diagnostics
+
+Capture-only ARM build 4430db8 passed (1m31); binary SHA256
+c1cc74398f3600407229da3bc35fe9920714e70e66102608381edfcc315ff28c.
+Thirty idle captures and twelve captures during each of one menu opening and
+closing all passed. All idle images and the final closed-menu image had SHA256
+c17116581603fd301152e833ee5a17d09506e8ae66af9c9efda169df4b9ec897.
+Actual Fine/Black/Medium and original document/page/visit/session were verified.
+These negative controls do not identify or fix the EIO.
+
+One original nondefault-primary workload then used pinned diagnostic source
+492c626a1d08d6065a9486c801672af492ea1aa8: parent adfe055, with ONLY the reviewed
+4430db8 screenshot context/error-chain regression applied. No later optimization.
+ARM build1m28, hardware probe SHA256
+6a81067222206686b2ef36525f0d5e114eb7c1967f211e057ca998ee82bdc025.
+This diagnostic completed once, without EIO. All twelve journal records (0-11)
+were retained through a read-only file descriptor, including after normal unlink.
+No active recovery record remained. Exact owner was e7/a718/visit1:119,
+session30974:100545844 before/after; full maps differed across the cycle but this
+is not evidence about the earlier failed syscall. All122 recognized native Line
+properties still match; unknown-format warnings retain the preservation limit.
+Highlighter/Yellow/Snap-to-text on and hidden Fine/Red/Thick were visually restored,
+and the reserved corner was clear. No additional cycle followed this diagnostic.
+
+Acquisition6109.118ms; tool restoration6598.068ms; erase/verify1648.383ms;
+whole cleanup8247.027ms; final verification233.462ms; parent union14589.594ms.
+There were43 status observations (median182.701ms),50 total captures and10 presses.
+These single diagnostic values, including observer overhead, are not repeated
+performance acceptance. They directly show that nondefault tool restoration
+remains a major cost. Repeated acceptance sampling must keep failed samples and
+stop/recover on first failure, with diagnostic context on both comparator builds.
+Do not introduce speculative retry or call this intermittent error fixed.
+
+Original Fine/Black/Medium, document, notes c284, header6faae and runtimecaa5 were
+restored and visually/hash verified; service activePID4894,NRestarts0,no journal.
