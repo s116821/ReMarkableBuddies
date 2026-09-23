@@ -527,3 +527,20 @@ AnswerReady602 and active604 new dark pixels, all bounded x705..737/y941..973.
 Both pen tiles are exact at every captured stage. Later recovery screenshot has
 clear statusROI and exact three neighboring pixel rectangles as well as125 equal
 recognized Lines. This supplements, but does not replace, final verification.
+
+Current-tool cycle4280f24: exact ARM helper SHA97c77954003d001e84af7e4d77929c1c9d6f48cecea2d03a6fefd7558e02748e,
+ARM2m48/AArch1m58 builds and195 full host tests pass. One primary Black/Thick
+cycle succeeds with V3 sequences0/1/2, no toolbar press spans, exact owner,
+positive331/515/602/604pixel stages within705..737/941..973, unchanged tool tiles,
+clear finalROI and three unchanged neighboring rectangles. All125 recognized Lines
+including sentinels match after the cycle; unknown-record limitation remains.
+No EIO occurred and no fresh-reacquisition log appears: native recovery-branch
+execution is NOT proven by this success. Acquisition360.976501ms, cleanup6615.661ms
+(includes530.223ms preparation and6084.876ms erase/verify), final399.910ms;
+non-overlapping union7376.548ms. This single diagnostic is not an end-to-end or
+ordinary6s budget pass. Deliberate removal of the three recorded sentinels leaves
+all122 original recognized Lines identical. Actual before/after menus show Black/
+Thick Fine; restore Black/Medium Fine, original document/files/service verified,
+PID10017/NRestarts0 and no active journal. Both candidate slots, all admitted widths,
+notes chrome, error indicators, suppression/core Q&A, history and full workflow
+latency remain admission gates. Production constructor remains on the old path.
