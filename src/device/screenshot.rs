@@ -163,19 +163,28 @@ impl Screenshot {
         // Raw bytes still come from a complete fresh framebuffer read.
         let xs = Self::nearest_positions(1404, SCREENSHOT_VIRTUAL_WIDTH);
         let ys = Self::nearest_positions(1872, SCREENSHOT_VIRTUAL_HEIGHT);
-        Ok(image::DynamicImage::ImageLuma8(GrayImage::from_fn(
-            SCREENSHOT_VIRTUAL_WIDTH,
-            SCREENSHOT_VIRTUAL_HEIGHT,
-            |x, y| {
-                let offset = ((ys[y as usize] * 1404 + xs[x as usize]) * 4) as usize;
-                let pixel = &raw[offset..offset + 4];
-                image::Luma([((77 * u32::from(pixel[2])
-                    + 150 * u32::from(pixel[1])
-                    + 29 * u32::from(pixel[0])
-                    + 128)
-                    >> 8) as u8])
-            },
-        )))
+        let mut pixels = Vec::with_capacity(
+            SCREENSHOT_VIRTUAL_WIDTH as usize * SCREENSHOT_VIRTUAL_HEIGHT as usize,
+        );
+        for y in ys {
+            let offset = y as usize * 1404 * 4;
+            let row = &raw[offset..offset + 1404 * 4];
+            for x in &xs {
+                let offset = *x as usize * 4;
+                let pixel = &row[offset..offset + 4];
+                pixels.push(
+                    ((77 * u32::from(pixel[2])
+                        + 150 * u32::from(pixel[1])
+                        + 29 * u32::from(pixel[0])
+                        + 128)
+                        >> 8) as u8,
+                );
+            }
+        }
+        Ok(image::DynamicImage::ImageLuma8(
+            GrayImage::from_raw(SCREENSHOT_VIRTUAL_WIDTH, SCREENSHOT_VIRTUAL_HEIGHT, pixels)
+                .context("Invalid normalized BGRA framebuffer")?,
+        ))
     }
 
     fn native_image(&self, raw: &[u8]) -> Result<image::DynamicImage> {

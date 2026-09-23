@@ -398,3 +398,21 @@ Do not introduce speculative retry or call this intermittent error fixed.
 
 Original Fine/Black/Medium, document, notes c284, header6faae and runtimecaa5 were
 restored and visually/hash verified; service activePID4894,NRestarts0,no journal.
+
+### Fused image-only conversion, 87aab2d
+
+Exact 87aab2dd3eec52a2e379230af759fc82bf0569c8 passed183 host tests, strict
+clippy, OpenSpec validation, ARM build2m53 and AArch64 build1m40. Independent
+source review found no blocker. Three alternating read-only pairs compared
+4430db8 with the fused image-only screenshot binary (SHA256
+79c89bfdda432f0df63a6ef0be0eef858859b73046210f129805cbd7b079a27f).
+All six normalized PNGs exactly matched c1711658 (full hash above); the candidate
+image was visually inspected. Owner46e/f39/visit1:75/session30974:100545844 matched
+before/after. The installed service and tools remained unchanged.
+
+Capture totals in milliseconds: old172.501/171.401/164.759 (median171.401),
+fused132.999/142.443/143.266 (median142.443). Fused conversion itself took
+35.563/35.384/39.376ms, replacing old conversion plus resize. This is only a
+three-pair idle microbenchmark, not marker or workflow acceptance. A subsequent
+equivalent row loop removes the image iterator's per-pixel coordinate overhead;
+its native improvement must be measured separately before claiming further gains.
