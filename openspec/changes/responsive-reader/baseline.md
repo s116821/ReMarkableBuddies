@@ -387,9 +387,9 @@ properties still match; unknown-format warnings retain the preservation limit.
 Highlighter/Yellow/Snap-to-text on and hidden Fine/Red/Thick were visually restored,
 and the reserved corner was clear. No additional cycle followed this diagnostic.
 
-Acquisition6109.118ms; tool restoration6598.068ms; erase/verify1648.383ms;
-whole cleanup8247.027ms; final verification233.462ms; parent union14589.594ms.
-There were43 status observations (median182.701ms),50 total captures and10 presses.
+Acquisition6109.121ms; tool restoration6598.072ms; erase/verify1648.383ms;
+whole cleanup8247.032ms; final verification233.462ms; parent union14589.594ms.
+There were43 status observations (median182.702ms),50 total captures and10 presses.
 These single diagnostic values, including observer overhead, are not repeated
 performance acceptance. They directly show that nondefault tool restoration
 remains a major cost. Repeated acceptance sampling must keep failed samples and

@@ -100,7 +100,7 @@ impl Screenshot {
     /// Fresh owned pixels for guards that do not consume encoded images.
     pub fn take_image(&mut self) -> Result<image::DynamicImage> {
         let _timing = crate::measurement::Span::new("capture.total");
-        Self::normalize_timed(&self.capture_fresh(Self::capture_native)?)
+        self.capture_fresh(|capture| capture.normalized_image(&capture.capture_raw()?))
     }
 
     fn capture_fresh(
@@ -130,6 +130,10 @@ impl Screenshot {
     }
 
     fn capture_native(&self) -> Result<image::DynamicImage> {
+        self.native_image(&self.capture_raw()?)
+    }
+
+    fn capture_raw(&self) -> Result<Vec<u8>> {
         // Find xochitl's process
         debug!("screenshot: finding pid");
         let pid = Self::find_xochitl_pid()?;
@@ -145,8 +149,33 @@ impl Screenshot {
 
         // Read the framebuffer data
         debug!("screenshot: reading data");
-        let screenshot_data = self.read_framebuffer(&pid, skip_bytes)?;
-        self.native_image(&screenshot_data)
+        self.read_framebuffer(&pid, skip_bytes)
+    }
+
+    fn normalized_image(&self, raw: &[u8]) -> Result<image::DynamicImage> {
+        if self.device_model != DeviceModel::Remarkable2 || !self.rm2_bgra {
+            return Self::normalize_timed(&self.native_image(raw)?);
+        }
+        let _timing = crate::measurement::Span::new("capture.fused_conversion");
+        anyhow::ensure!(raw.len() == 1404 * 1872 * 4, "Invalid framebuffer length");
+        // Identical Nearest coordinates and luminance arithmetic to the native
+        // conversion then resize path. Only selected pixels need conversion.
+        // Raw bytes still come from a complete fresh framebuffer read.
+        let xs = Self::nearest_positions(1404, SCREENSHOT_VIRTUAL_WIDTH);
+        let ys = Self::nearest_positions(1872, SCREENSHOT_VIRTUAL_HEIGHT);
+        Ok(image::DynamicImage::ImageLuma8(GrayImage::from_fn(
+            SCREENSHOT_VIRTUAL_WIDTH,
+            SCREENSHOT_VIRTUAL_HEIGHT,
+            |x, y| {
+                let offset = ((ys[y as usize] * 1404 + xs[x as usize]) * 4) as usize;
+                let pixel = &raw[offset..offset + 4];
+                image::Luma([((77 * u32::from(pixel[2])
+                    + 150 * u32::from(pixel[1])
+                    + 29 * u32::from(pixel[0])
+                    + 128)
+                    >> 8) as u8])
+            },
+        )))
     }
 
     fn native_image(&self, raw: &[u8]) -> Result<image::DynamicImage> {
@@ -461,20 +490,8 @@ impl Screenshot {
     fn normalize_native(img: &image::DynamicImage) -> Result<image::DynamicImage> {
         let (width, height) = (img.width(), img.height());
         anyhow::ensure!(width > 0 && height > 0, "Empty native capture");
-        let xs: Vec<_> = (0..SCREENSHOT_VIRTUAL_WIDTH)
-            .map(|x| {
-                (((x as f32 + 0.5) * (width as f32 / SCREENSHOT_VIRTUAL_WIDTH as f32)).floor()
-                    as u32)
-                    .min(width - 1)
-            })
-            .collect();
-        let ys: Vec<_> = (0..SCREENSHOT_VIRTUAL_HEIGHT)
-            .map(|y| {
-                (((y as f32 + 0.5) * (height as f32 / SCREENSHOT_VIRTUAL_HEIGHT as f32)).floor()
-                    as u32)
-                    .min(height - 1)
-            })
-            .collect();
+        let xs = Self::nearest_positions(width, SCREENSHOT_VIRTUAL_WIDTH);
+        let ys = Self::nearest_positions(height, SCREENSHOT_VIRTUAL_HEIGHT);
         match img {
             image::DynamicImage::ImageLuma8(source) => {
                 Ok(image::DynamicImage::ImageLuma8(image::GrayImage::from_fn(
@@ -492,6 +509,15 @@ impl Screenshot {
             }
             _ => anyhow::bail!("Unexpected native capture pixel format"),
         }
+    }
+
+    fn nearest_positions(source: u32, destination: u32) -> Vec<u32> {
+        (0..destination)
+            .map(|position| {
+                (((position as f32 + 0.5) * (source as f32 / destination as f32)).floor() as u32)
+                    .min(source - 1)
+            })
+            .collect()
     }
 
     #[cfg(test)]
@@ -683,16 +709,26 @@ mod tests {
                 old_native
             );
             let overview = Screenshot::normalize_native(&actual).unwrap();
+            let direct = screenshot.normalized_image(&raw).unwrap();
+            let library_oracle = oracle.resize_exact(
+                SCREENSHOT_VIRTUAL_WIDTH,
+                SCREENSHOT_VIRTUAL_HEIGHT,
+                image::imageops::FilterType::Nearest,
+            );
+            assert_eq!(direct.color(), library_oracle.color());
+            assert_eq!(direct.as_bytes(), library_oracle.as_bytes());
             assert_eq!(
                 Screenshot::serialize(&overview, "test.overview").unwrap(),
                 screenshot.process_image(raw.clone()).unwrap()
             );
             for bad in [&raw[..0], &raw[..len - 1]] {
                 assert!(screenshot.native_image(bad).is_err());
+                assert!(screenshot.normalized_image(bad).is_err());
             }
             let mut oversized = raw;
             oversized.push(0);
             assert!(screenshot.native_image(&oversized).is_err());
+            assert!(screenshot.normalized_image(&oversized).is_err());
         }
     }
 
@@ -864,8 +900,22 @@ mod tests {
         assert_eq!(img.get_pixel(301, 0).0, [29]);
         assert_eq!(img.get_pixel(302, 0).0, [77]);
         assert!(screenshot.encode_png_rm2(&raw[..raw.len() - 1]).is_err());
+        // Repeated gray ramps cover every neutral value after downsampling;
+        // the first rows retain the independent known colored/position samples.
+        for (i, pixel) in raw
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .enumerate()
+            .skip(1404 * 2)
+        {
+            let gray = (i % 256) as u8;
+            pixel.copy_from_slice(&[gray, gray, gray, (i % 251) as u8]);
+        }
+        let direct = screenshot.normalized_image(&raw).unwrap();
         let normalized = image::load_from_memory(&screenshot.process_image(raw).unwrap()).unwrap();
         assert_eq!((normalized.width(), normalized.height()), (768, 1024));
+        assert_eq!(direct.as_bytes(), normalized.as_bytes());
     }
 
     #[test]
