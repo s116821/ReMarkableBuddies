@@ -31,11 +31,13 @@ impl WaitCancellation {
         Ok(())
     }
     pub(super) fn record(&mut self, result: Result<()>) -> Result<()> {
-        self.check()?;
         if result.is_err() {
             self.cancelled = true;
+            // A nested observer can already have latched the failure. Keep its
+            // original chain instead of replacing it with a generic refusal.
+            return result;
         }
-        result
+        self.check()
     }
 }
 
@@ -80,6 +82,24 @@ pub struct Identity {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn nested_cancellation_keeps_error_chain_and_never_revives() {
+        let mut latch = super::WaitCancellation::default();
+        latch.latch();
+        let error = anyhow::Error::from(std::io::Error::from_raw_os_error(5))
+            .context("vanished discovery header");
+        let error = latch.record(Err(error)).unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .raw_os_error(),
+            Some(5)
+        );
+        assert!(format!("{error:#}").contains("vanished discovery header"));
+        assert!(latch.record(Ok(())).is_err());
+        assert!(latch.check().is_err());
+    }
     use super::*;
     use image::{imageops::replace, Luma};
 

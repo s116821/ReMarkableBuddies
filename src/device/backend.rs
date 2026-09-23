@@ -243,6 +243,7 @@ impl RealDevice {
     }
 
     fn guard_current_input(&mut self, erasing: bool, points: &[(i32, i32)]) -> Result<()> {
+        let _timing = crate::measurement::Span::new("status.path.guard");
         if !self.current_tool_probe {
             return Ok(());
         }
@@ -283,6 +284,7 @@ impl RealDevice {
         Ok(())
     }
     fn rearm_current_input(&mut self) -> Result<()> {
+        let _timing = crate::measurement::Span::new("status.path.rearm");
         if self.current_tool_probe {
             use super::status_style::StyleIo;
             self.begin_wait()?;
@@ -293,6 +295,7 @@ impl RealDevice {
     fn inject_status_path(&mut self, points: &[(i32, i32)], erasing: bool) -> Result<()> {
         self.guard_current_input(erasing, points)?;
         let inject = |device: &mut Self| {
+            let _timing = crate::measurement::Span::new("status.path.inject");
             if erasing {
                 device.pen.erase_path_screen(points)
             } else {
@@ -675,6 +678,7 @@ impl super::status_style::StyleIo for RealDevice {
         }
     }
     fn checkpoint(&mut self, record: &super::status_style::Recovery) -> Result<()> {
+        let _timing = crate::measurement::Span::new("status.checkpoint");
         self.status_journal
             .as_mut()
             .context("Missing owned recovery journal")?

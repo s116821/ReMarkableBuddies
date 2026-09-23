@@ -381,3 +381,19 @@ The500ms bound includes metadata and revalidation; ordinary499ms synthetic captu
 passes,500ms and late second completion refuse. Four shared recovery tests plus
 one typed-cause/partial-scan regression are modeled evidence, not native recovery
 proof. Existing190-test full suite passed on ddbd8dd before this recovery change.
+
+Cleanup measurement follow-up: the successful4280 ten-path erase/verify parent
+contains about2.12s in ten status.observe spans, but the remaining time is not
+separately attributable yet. Add content-free status.path.guard/inject/rearm and
+status.checkpoint spans without changing input timing or geometry. The next bounded
+secondary Black/Thick case should combine missing-slot coverage with measured
+cleanup attribution. Nested spans remain non-additive. Retain100ms final settling
+wait as an inventoried completion-work item, not permission to delete it blindly.
+Potential future exact-endpoint joining requires a separate reviewed proposal,
+same ordered owned segments, no bridges or broad region erasure, bounded contact
+exposure and native corner/neighbor proof. No joining is implemented here.
+
+Nested failure propagation follow-up: WaitCancellation.record retains an incoming
+error chain even if an inner observation already latched cancellation. A successful
+result still refuses when the latch was previously set; cancellation is monotonic.
+The regression checks preserved EIO5/context and no revival after a later Ok.
