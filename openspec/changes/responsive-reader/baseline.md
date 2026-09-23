@@ -92,6 +92,22 @@ the task-local evidence folder; preserve failed attempts alongside later results
 
 ## Remaining gates
 
+### Direct nearest capture-only measurement, sourcea9e1716
+Reviewed source `a9e1716dfd2e2c199ff21f0cb98c93f1970f0316` passed the exact
+pixel/alpha oracle, all7 screenshot tests and strict clippy. ARM capture helper
+build passed1m30s, SHA256
+`1e04e37ccbe504a94a5fd993731807438fee189e85d3608bc74a7b90d148cfdb`.
+Three captures on the unchanged original notes page took
+**462.843,489.112,443.368ms**, median462.843/max489.112 versus baseline
+median752.569/max754.901ms. Median reduction289.726ms (about38.5%) is for full
+capture only. Resize spans21.408,24.328,21.294ms versus319.406–321.007ms before.
+All three output PNGs match the baseline SHA256 c1711658... byte for byte; the
+new output was also visually inspected. Debug logging remains enabled in both
+batches; observer/logging overhead is included, no correction or percentile claim.
+Installed service remained active PID1445/restart0, no journal/input/UI changes.
+This is not a measured full-workflow speedup, Paper Pro hardware proof, or REM9
+acceptance. Double conversion/serialization and other waiting work remain.
+
 ### Readiness retest, source9330b4c
 The separately reviewed readiness implementation passed165 host tests, strict
 clippy, ARM release build3m05s and AArch64 build1m31s. Native Reader SHA256
