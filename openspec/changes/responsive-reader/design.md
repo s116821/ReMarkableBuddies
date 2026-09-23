@@ -488,3 +488,43 @@ fresh owner/image checks. Each case stops at first semantic failure, retains any
 journal, verifies neighboring strokes/actual tool, and restores original state.
 No normal-constructor admission yet. All131 Linux ARM library tests passed under
 the emulator at1530075 (65.14s); independent review found no source blocker.
+
+Durable-erasure finding and next bounded diagnostic plan (before implementation):
+The secondaryMedium sentinel block audit shows the same top-line CRDT item(1,1857),
+unchanged points/properties and deleted_length0 in post-cycle, post-failure,
+immediate post-removal, post-close and later snapshots. It disappears only after
+the visually confirmed reopened line receives one deliberate same-path erase.
+This is stronger than simple delayed observation: that line was visible again
+on reopen. It does not establish the runtime cause or prove product indicators
+recur. Existing rmscene tree comparisons omit unsupported/tombstone interpretation;
+retain raw blocks and visual evidence rather than treating parser count as universal
+native truth. Original recognized lines remained unchanged.
+
+Manual e4 erase-strokes and candidate use the same Pen.erase_path_screen. Manual
+paths lack intervening fresh framebuffer/owner/input guards; nextpath pen_up still
+introduces10ms, so this is not a zero-gap claim. Candidate guards add measured
+observation time but are not themselves proof of durable application erasure.
+No repeat-erasure policy, minimum-delay guess or geometry change is authorized
+by this finding. Preserve it alongside the distinct unresolved history persistence
+and extra-newline findings; no common cause has been established.
+
+Bounded community check: Ghostwriter currentHEAD equals the already pinned
+5c2f2560328bff536f7916dca540dc40efb48020. Its
+[pen source](https://github.com/awwaiid/ghostwriter/blob/5c2f2560328bff536f7916dca540dc40efb48020/src/pen.rs)
+contains hover/contact/release drawing but no rubber-erasure completion protocol;
+no eraser/stroke-titled issue in the inspected100-item issue listing supplied a
+verified solution. No Qt/XOVI research or dependency work resumed.
+
+Next diagnostic-only amendment captures bounded native page bytes at initial,
+active-mark and final stages of the existing current-tool cycle, each with fresh
+owner/session bracketing and monotonic phase logging. Save private artifacts,
+never change native bytes, page baseline, input observer or normal constructor.
+Native active snapshots must actually contain owned marker ink to support a
+persisted-ink-to-persisted-clear claim; unchanged old bytes are not success.
+After a successful guarded cycle, deliberately close/reopen the disposable page,
+verify owner, visual clearance and native original-content preservation, and keep
+all intermediate snapshots. This is test evidence, not a proposed product navigation
+or forced-flush behavior. If active ink is not yet persisted, record that limitation
+and design a bounded observation predicate; do not silently sleep/repeat mutations.
+Before broader native coverage/admission, distinguish manual sentinel failure from
+production erasure and establish durable cleanup evidence on the tested path.
