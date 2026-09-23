@@ -159,6 +159,41 @@ mod tests {
     }
 
     #[test]
+    fn native_scrollbar_disappearance_preserves_strict_content_refusal() {
+        let mut before = frame(false);
+        before.image = image::load_from_memory(include_bytes!(
+            "../../tests/fixtures/status-style/native-scrollbar-before.png"
+        ))
+        .unwrap()
+        .to_luma8();
+        let mut after = frame(true);
+        after.image = image::load_from_memory(include_bytes!(
+            "../../tests/fixtures/status-style/native-scrollbar-after.png"
+        ))
+        .unwrap()
+        .to_luma8();
+        let changed: Vec<_> = (0..1024)
+            .flat_map(|y| (0..768).map(move |x| (x, y)))
+            .filter(|&(x, y)| {
+                before.image.get_pixel(x, y)[0].abs_diff(after.image.get_pixel(x, y)[0]) > 8
+            })
+            .collect();
+        assert_eq!(changed.len(), 3480);
+        assert_eq!(changed[0], (736, 137));
+        assert_eq!(changed.iter().filter(|(_, y)| *y < 984).count(), 3237);
+        assert!(changed
+            .iter()
+            .all(|&(x, y)| y >= 984 || (735..=739).contains(&x)));
+        let (result, captures, _) = run(vec![before, after], None, Duration::ZERO);
+        assert!(result
+            .err()
+            .expect("Native scrollbar transition must refuse")
+            .to_string()
+            .contains("Page or toolbar changed"));
+        assert_eq!(captures, 2);
+    }
+
+    #[test]
     fn repeated_overlay_unknown_ink_and_late_ready_frame_are_not_success() {
         let (result, captures, _) = run(vec![frame(false)], None, Duration::from_millis(100));
         assert!(result.unwrap().is_none());

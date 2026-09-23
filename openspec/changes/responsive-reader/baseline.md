@@ -209,3 +209,29 @@ readiness rejection images/identities and a no-model production-readiness probe.
 The shared cancellation latch/real-journal regression proves observer-open
 failure or cancellation blocks subsequent acquisition rollback/cleanup input,
 retains the unresolved journal and cannot be revived by a later good poll.
+
+### Exact no-model readiness refusal, sourcee788aa0
+ARM probe build1m33s, SHA256
+`498846e0e46c571fbad153a5f4ef47af50e557b159babe939dd4a5d282fea175`.
+After one diagnostic source-to-notes swipe, production classification ExistingQA
+was followed by the same readiness refusal at1.968744s. No model, answer/status
+ink or lease journal. The exact first-pending/rejected images are retained as
+`native-scrollbar-before.png` (SHA256
+`665a8cff369a9ef083c3a3bb5c2133c2673b51776fa2b2069e1ca92cfc45db9b`)
+and `native-scrollbar-after.png` (SHA256
+`ab2fdd38ddcac229a3256de83a1891334c8aa79cd27304c87f24e047b7752ebc`).
+Both observations had identical documente7f661f1-db6f-4dfc-854a-b38aff7f75de,
+pagef39ae285-3e0c-43dd-b27c-866dff7a24cd, visit1:114, session30974:100545844.
+Reference af13e3f521d25efc77b2b95fe8dd51890d61aede804e0ef18c36f994fd62f115
+was unchanged before/after the exclusive-writer probe.
+
+Visual inspection shows the right scrollbar and bottom page label disappearing.
+At the production difference tolerance8,3480pixels differ,3237 above row984;
+all those3237 are within x735..739, first(736,137). The remaining243 are in the
+footer. All other pixels are unchanged. Preserve this exact pair as a strict
+readiness refusal regression. This identifies the cause in the no-model probe,
+not an uncaptured earlier iteration, and does not permit a content mask or active
+baseline refresh. Navigation/capture sequencing must establish completed page UI
+before classification/lease preparation. Its diagnostic visual difference plus
+same document/session is not proof of an exact requested successor in general.
+Original document/header/notes/runtime restored; service activePID2145,NRestarts0.
