@@ -53,7 +53,7 @@ pub trait DeviceBackend {
     fn detail_images(&self) -> Result<Vec<String>>;
     fn wait_for_trigger(&mut self) -> Result<()>;
     fn dismiss_trigger(&mut self) -> Result<()>;
-    fn navigate(&mut self, direction: NavigationDirection) -> Result<()>;
+    fn navigate(&mut self, direction: NavigationDirection) -> Result<NavigationCompletion>;
     fn render_text(&mut self, text: &str) -> Result<()>;
     fn body_mode(&mut self) -> Result<()>;
     fn line(&mut self, from: (i32, i32), to: (i32, i32)) -> Result<()>;
@@ -75,6 +75,16 @@ pub trait DeviceBackend {
     fn delay(&mut self, duration: Duration);
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NavigationCompletion {
+    /// Composite verified-layout readiness; not a native render acknowledgement.
+    Settled,
+    /// No requested neighbor, or a guarded unchanged source after one attempt.
+    NoMovement,
+    /// Existing unsupported-layout heuristic; caller still supplies its settling wait.
+    Legacy,
+}
+
 pub struct RealDevice {
     status_style: Option<super::status_style::Lease>,
     status_journal: Option<super::status_style::Journal>,
@@ -94,6 +104,65 @@ pub struct RealDevice {
 }
 
 const HEADER_PATH: &str = "/var/cache/reader-buddy/header-pattern.png";
+
+#[cfg(target_os = "linux")]
+struct NativeNavigation<'a> {
+    device: &'a mut RealDevice,
+    input: Option<super::input_observer::InputObserver>,
+}
+
+#[cfg(target_os = "linux")]
+impl super::navigation_completion::NavigationIo for NativeNavigation<'_> {
+    fn observe(&mut self) -> Result<super::navigation_completion::Frame> {
+        use super::native_page;
+        use std::path::Path;
+        let root = Path::new("/home/root/.local/share/remarkable/xochitl");
+        let settings = Path::new("/home/root/.config/remarkable/xochitl.conf");
+        let session = native_page::xochitl_session(Path::new("/proc"))?;
+        let before = native_page::observed_navigation(root, settings, session.clone())?;
+        let image = self.device.status_screenshot.take_image()?.to_luma8();
+        anyhow::ensure!(
+            native_page::xochitl_session(Path::new("/proc"))? == session,
+            "Navigation session changed during capture"
+        );
+        let after = native_page::observed_navigation(root, settings, session)?;
+        Ok(super::navigation_completion::Frame {
+            before,
+            after,
+            image,
+        })
+    }
+    fn swipe(&mut self, direction: NavigationDirection) -> Result<()> {
+        XochitlIntegration::swipe(&mut self.device.touch, direction)
+    }
+    fn now(&self) -> Duration {
+        self.device.clock.elapsed()
+    }
+    fn pace(&mut self, duration: Duration) {
+        std::thread::sleep(duration);
+    }
+    fn begin_guard(&mut self) -> Result<()> {
+        self.input = Some(super::input_observer::InputObserver::new(
+            TriggerCorner::LowerLeft,
+            None,
+        )?);
+        Ok(())
+    }
+    fn guard(&mut self) -> Result<()> {
+        let input = self
+            .input
+            .as_mut()
+            .context("Navigation input observer unavailable")?;
+        anyhow::ensure!(
+            input.poll()?.is_empty() && input.quiescent(),
+            "Input cancelled navigation ownership"
+        );
+        Ok(())
+    }
+    fn end_guard(&mut self) {
+        self.input = None;
+    }
+}
 
 impl RealDevice {
     /// Read-only production pre-lease readiness, exposed for bounded diagnostic
@@ -207,11 +276,22 @@ impl DeviceBackend for RealDevice {
     fn dismiss_trigger(&mut self) -> Result<()> {
         self.touch.tap_middle_bottom()
     }
-    fn navigate(&mut self, direction: NavigationDirection) -> Result<()> {
+    fn navigate(&mut self, direction: NavigationDirection) -> Result<NavigationCompletion> {
         let _timing = crate::measurement::Span::new("device.navigation");
         #[cfg(target_os = "linux")]
         self.history.other_edit();
-        XochitlIntegration::navigate_to_page(&mut self.touch, direction)
+        #[cfg(target_os = "linux")]
+        if self.status_style_supported {
+            return super::navigation_completion::navigate(
+                &mut NativeNavigation {
+                    device: self,
+                    input: None,
+                },
+                direction,
+            );
+        }
+        XochitlIntegration::navigate_to_page(&mut self.touch, direction)?;
+        Ok(NavigationCompletion::Legacy)
     }
     fn render_text(&mut self, text: &str) -> Result<()> {
         let _timing = crate::measurement::Span::new("device.text_input");

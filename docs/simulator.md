@@ -235,3 +235,22 @@ establishes a new baseline only before a lease exists. These tests model sequenc
 not physical display timing or the Linux input observer. The scenario backend does
 not yet render native page-navigation chrome; broader timing/state integration and
 native successful Q&A/performance acceptance remain required.
+
+### Verified-layout navigation model
+
+The shared production `device::navigation_completion` wait is exercised with
+scripted metadata brackets, native chrome images and a virtual clock. Tests
+separate metadata-ahead-of-pixels, pixels-ahead-of-metadata, a lagging persisted
+index, changing partial rendering, repeated pending states and the exact scrollbar
+pair. Wrong neighbor/document/session/visit, changed order/redirects, cancellation,
+observer-open failure, boundary/no movement and late capture cannot repeat input.
+An inked source to blank notes is positive; blank-to-blank/identical pages and
+legitimate gutter ink conservatively refuse. Composite readiness is not a native
+render acknowledgement or independent pixel-to-page provenance.
+
+The scenario backend still models legacy navigation timing and does not render
+native scrollbar transitions. It now explicitly reports no movement for a boundary
+or injected no-move result, exercising the workflow's fresh-source verification
+before failure marking. The shared wait tests establish production sequencing;
+native UI behavior, Linux observer timing and successful full Q&A remain separate
+gates. Do not quote virtual-clock values as tablet performance.

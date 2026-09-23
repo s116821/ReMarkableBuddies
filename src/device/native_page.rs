@@ -204,6 +204,138 @@ pub fn observed_owner(root: &Path, settings: &Path, session: String) -> Result<O
     })
 }
 
+#[cfg(any(target_os = "linux", test))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct OrderedPage {
+    pub id: String,
+    pub key: String,
+    pub redirect: Option<u64>,
+}
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NavigationMetadata {
+    pub owner: Owner,
+    pub order: Vec<OrderedPage>,
+    // The independently persisted index can lag cPages during a transition.
+    // Such a sample is pending, never a stable current/destination owner.
+    pub index_matches: bool,
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn navigation_metadata(
+    document: String,
+    session: String,
+    metadata: &Value,
+    content: &Value,
+) -> Result<NavigationMetadata> {
+    ensure!(uuid(&document), "Invalid navigation document ID");
+    let entries = content["cPages"]["pages"]
+        .as_array()
+        .context("Missing navigation page order")?;
+    ensure!(
+        !entries.is_empty() && entries.len() <= 10000,
+        "Navigation page count limit"
+    );
+    let mut order = Vec::new();
+    let mut ids = std::collections::BTreeSet::new();
+    for entry in entries {
+        let deleted = &entry["deleted"];
+        if !deleted.is_null() {
+            let value = deleted["value"]
+                .as_bool()
+                .context("Unknown page deletion state")?;
+            if value {
+                continue;
+            }
+        }
+        let id = entry["id"].as_str().context("Missing navigation page ID")?;
+        let key = entry["idx"]["value"]
+            .as_str()
+            .context("Missing navigation ordering key")?;
+        ensure!(
+            uuid(id) && !key.is_empty() && key.len() <= 256 && ids.insert(id),
+            "Invalid or duplicate navigation page"
+        );
+        let redirect = if entry["redir"].is_null() {
+            None
+        } else {
+            let value = entry["redir"]["value"]
+                .as_u64()
+                .context("Unknown PDF page redirect")?;
+            ensure!(
+                content["cPages"]["original"]["value"]
+                    .as_u64()
+                    .is_some_and(|count| value < count),
+                "PDF page redirect outside original page count"
+            );
+            Some(value)
+        };
+        order.push(OrderedPage {
+            id: id.into(),
+            key: key.into(),
+            redirect,
+        });
+    }
+    order.sort_by(|a, b| a.key.cmp(&b.key));
+    ensure!(
+        !order.is_empty() && !order.windows(2).any(|p| p[0].key == p[1].key),
+        "Ambiguous navigation page order"
+    );
+    let page = content["cPages"]["lastOpened"]["value"]
+        .as_str()
+        .context("Missing navigation current page")?;
+    let current_index = order
+        .iter()
+        .position(|entry| entry.id == page)
+        .context("Navigation current page absent from order")?;
+    // Reuse the validated visit parser; use the actual order position so an
+    // independently lagging metadata index remains explicitly pending.
+    let (page, visit) = page_identity(content, current_index)?;
+    let index = usize::try_from(
+        metadata["lastOpenedPage"]
+            .as_u64()
+            .context("Missing navigation current index")?,
+    )?;
+    ensure!(
+        index < order.len(),
+        "Navigation current index outside page order"
+    );
+    Ok(NavigationMetadata {
+        owner: Owner {
+            document,
+            page,
+            visit,
+            session,
+        },
+        order,
+        index_matches: index == current_index,
+    })
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn observed_navigation(
+    root: &Path,
+    settings: &Path,
+    session: String,
+) -> Result<NavigationMetadata> {
+    let document = last_open(settings)?.context("No open navigation document")?;
+    let metadata = serde_json::from_slice(&bounded(
+        &root.join(format!("{document}.metadata")),
+        META_LIMIT,
+    )?)?;
+    let content = serde_json::from_slice(&bounded(
+        &root.join(format!("{document}.content")),
+        META_LIMIT,
+    )?)?;
+    let result = navigation_metadata(document.clone(), session, &metadata, &content)?;
+    ensure!(
+        last_open(settings)?.as_ref() == Some(&document),
+        "Navigation document changed during metadata read"
+    );
+    Ok(result)
+}
+
 pub fn verified_contract(model: super::DeviceModel, release: &str) -> bool {
     let versions: Vec<_> = release
         .lines()
@@ -340,6 +472,76 @@ mod tests {
     use serde_json::json;
     const DOC: &str = "00000000-0000-0000-0000-000000000001";
     const PAGE: &str = "00000000-0000-0000-0000-000000000002";
+    #[test]
+    fn navigation_order_handles_inserted_notes_and_rejects_ambiguous_redirects() {
+        let note = "00000000-0000-0000-0000-000000000003";
+        let third = "00000000-0000-0000-0000-000000000004";
+        let content = json!({"cPages":{"lastOpened":{"value":note,"timestamp":"1:5"},"original":{"value":2},"pages":[
+            {"id":third,"idx":{"value":"b"},"redir":{"value":1}},
+            {"id":PAGE,"idx":{"value":"a"},"redir":{"value":0}},
+            {"id":note,"idx":{"value":"ab"}}
+        ]}});
+        let meta = json!({"lastOpenedPage":1});
+        let parsed = navigation_metadata(DOC.into(), "5:6".into(), &meta, &content).unwrap();
+        assert_eq!(
+            parsed
+                .order
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>(),
+            [PAGE, note, third]
+        );
+        assert_eq!(parsed.order[1].redirect, None);
+        assert!(parsed.index_matches);
+        assert!(
+            !navigation_metadata(
+                DOC.into(),
+                "5:6".into(),
+                &json!({"lastOpenedPage":0}),
+                &content
+            )
+            .unwrap()
+            .index_matches
+        );
+        for fault in 0..5 {
+            let mut bad = content.clone();
+            match fault {
+                0 => bad["cPages"]["pages"][0]["id"] = json!(PAGE),
+                1 => bad["cPages"]["pages"][0]["idx"]["value"] = json!("a"),
+                2 => bad["cPages"]["pages"][0]["redir"]["value"] = json!(-1),
+                3 => bad["cPages"]["pages"][0]["redir"]["value"] = json!(2),
+                _ => bad["cPages"]["pages"][0]["deleted"] = json!({"value":"unknown"}),
+            }
+            assert!(navigation_metadata(DOC.into(), "5:6".into(), &meta, &bad).is_err());
+        }
+        let root = std::env::temp_dir().join(format!(
+            "reader-navigation-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let settings = root.join("settings.ini");
+        let metadata = root.join(format!("{DOC}.metadata"));
+        let contents = root.join(format!("{DOC}.content"));
+        fs::write(
+            &settings,
+            format!("[General]\nLastOpen=@ByteArray({DOC})\n"),
+        )
+        .unwrap();
+        fs::write(&metadata, serde_json::to_vec(&meta).unwrap()).unwrap();
+        fs::write(&contents, serde_json::to_vec(&content).unwrap()).unwrap();
+        assert_eq!(
+            observed_navigation(&root, &settings, "5:6".into()).unwrap(),
+            parsed
+        );
+        for path in [settings, metadata, contents] {
+            fs::remove_file(path).unwrap();
+        }
+        fs::remove_dir(root).unwrap();
+    }
     #[test]
     fn metadata_ties_and_unsafe_paths_are_not_guessed() {
         let meta = json!({"type":"DocumentType", "lastOpened":"123", "lastOpenedPage":0});

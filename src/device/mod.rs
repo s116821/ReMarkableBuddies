@@ -8,6 +8,8 @@ pub mod keyboard;
 pub mod native_history;
 pub mod native_page;
 pub mod native_text;
+#[cfg(any(target_os = "linux", test))]
+mod navigation_completion;
 pub mod pen;
 pub mod screenshot;
 #[cfg(any(target_os = "linux", test))]

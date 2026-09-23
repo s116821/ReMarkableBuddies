@@ -411,10 +411,15 @@ impl<M: LLMEngine> Orchestrator<M> {
         let original_img = self.workflow.capture_page()?;
 
         // Step 2: Attempt to navigate to next page
-        self.workflow.navigate_to_next_page()?;
+        let completion = self.workflow.navigate_to_next_page()?;
         self.workflow.delay(std::time::Duration::from_millis(800));
 
-        if self.workflow.verify_navigation_to(&original_img)? {
+        let unchanged = self.workflow.verify_navigation_to(&original_img)?;
+        anyhow::ensure!(
+            completion != crate::device::backend::NavigationCompletion::NoMovement || unchanged,
+            "Unconfirmed source after navigation reported no movement; classification stopped"
+        );
+        if unchanged {
             info!("No page movement detected; drawing X on original");
             self.workflow.draw_failure(Failure::NoSuccessor)?;
             return Ok(());

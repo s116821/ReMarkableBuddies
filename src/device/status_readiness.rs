@@ -8,7 +8,7 @@ use std::time::Duration;
 const LIMIT: Duration = Duration::from_secs(5);
 const PACE: Duration = Duration::from_millis(50);
 
-fn footer_ready(image: &GrayImage) -> bool {
+pub(super) fn footer_ready(image: &GrayImage) -> bool {
     image.dimensions() == (768, 1024)
         && (984..1024).all(|y| {
             let white = (61..768).all(|x| image.get_pixel(x, y)[0] >= 248);

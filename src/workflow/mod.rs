@@ -611,23 +611,25 @@ impl Workflow {
     }
 
     /// Navigate to the next page (swipe left)
-    pub fn navigate_to_next_page(&mut self) -> Result<()> {
+    pub fn navigate_to_next_page(
+        &mut self,
+    ) -> Result<crate::device::backend::NavigationCompletion> {
         self.invalidate_history();
         self.clear_indicator()?;
         self.indicator_eligible = false;
         self.device
-            .navigate(xochitl_integration::NavigationDirection::Next)?;
-        Ok(())
+            .navigate(xochitl_integration::NavigationDirection::Next)
     }
 
     /// Navigate back to the previous page (swipe right)
-    pub fn navigate_to_previous_page(&mut self) -> Result<()> {
+    pub fn navigate_to_previous_page(
+        &mut self,
+    ) -> Result<crate::device::backend::NavigationCompletion> {
         self.invalidate_history();
         self.clear_indicator()?;
         self.indicator_eligible = false;
         self.device
-            .navigate(xochitl_integration::NavigationDirection::Previous)?;
-        Ok(())
+            .navigate(xochitl_integration::NavigationDirection::Previous)
     }
 
     /// Draw a guarded failure X in the same 50x50 status area.

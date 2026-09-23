@@ -508,13 +508,17 @@ impl DeviceBackend for SimDevice {
         state.clock += 100;
         Ok(())
     }
-    fn navigate(&mut self, direction: NavigationDirection) -> Result<()> {
+    fn navigate(
+        &mut self,
+        direction: NavigationDirection,
+    ) -> Result<crate::device::backend::NavigationCompletion> {
         let mut state = self.0.borrow_mut();
         let operation = match direction {
             NavigationDirection::Next => Operation::Next,
             NavigationDirection::Previous => Operation::Previous,
         };
         let effect = state.operation(operation)?;
+        let before = state.active;
         if effect != Some(Effect::NoMove) {
             state.visit += 1;
             state.active = match direction {
@@ -524,7 +528,11 @@ impl DeviceBackend for SimDevice {
         }
         state.clock += 700; // 50 ms contact + 15*10 ms motion + 500 ms transition.
         state.event("navigation_settled", "");
-        Ok(())
+        Ok(if state.active == before {
+            crate::device::backend::NavigationCompletion::NoMovement
+        } else {
+            crate::device::backend::NavigationCompletion::Legacy
+        })
     }
     fn render_text(&mut self, text: &str) -> Result<()> {
         let mut state = self.0.borrow_mut();
