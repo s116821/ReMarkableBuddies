@@ -101,10 +101,11 @@ leases per iteration but don't double-count their inner spans.
 `reader.active` starts after trigger dispatch/iteration setup (or before immediate capture)
 and ends when the inner workflow returns; `reader.iteration` also includes outer
 cleanup and may include trigger waiting.
-`reader.trigger_dismiss` begins immediately after observing the qualified trigger,
-before the dismissing tap; it is a release-observation proxy with input-poll lag,
-not a hardware release timestamp. The normal loop establishes its run ID before
-idle dispatch so this span and the subsequent iteration can be correlated.
+Historical `reader.trigger_dismiss` began after observing the qualified trigger,
+before the dismissing tap. Integration50cb909 removes that tap and its span.
+A fresh release-observation milestone must be recorded for the full-workflow
+latency gate; old dismiss timestamps are not available on this candidate. Any
+software observation includes input-poll lag, not a hardware release timestamp.
 These are host monotonic timestamps, not simulated elapsed time or a claim of
 first/last visible pixels. Rendering
 logs include character count only. Bounded visible observation, logging overhead,
@@ -118,9 +119,11 @@ Do not substitute external pre-attempt screenshots for the internal pair.
 
 ## Menu and drawing audit (2026-09-23 UTC)
 
-- `RealDevice::status_style_begin/end/clear` currently invoke the legacy lease;
-  `status_style::transition` is the sole normal toolbar-menu press path. Replace
-  this path under task4; keeping its old tests/evidence does not authorize runtime use.
+- Integration50cb909 makes `RealDevice::status_style_begin/end/clear` use V3
+  current-tool leases exclusively. Native `StyleIo::press` refuses without input;
+  historical V2 parsing/tests remain but no normal native acquisition reaches them.
+  Input continuity covers the active lease; prelease readiness uses a separate
+  scoped observer, and is not continuous observation from the trigger.
 - `Workflow::draw_failure` obtains the same style lease before its three generic
   lines. Success indicator paths use status_stroke. Both must share new eligibility.
 - `draw_symbol`, `erase_region`, `erase_region_smart`, Pen bitmap/rectangle helpers
@@ -130,10 +133,13 @@ Do not substitute external pre-attempt screenshots for the internal pair.
   Pressure is2630; actual maximum-width and eraser envelopes still require proof.
 - `body_mode` is Cmd3 keyboard input; answer/header rendering is keyboard input.
   Next/Previous are horizontal swipes. These are not autonomous menu navigation.
-- `dismiss_trigger` still unconditionally taps bottomcenter(384,1023). Its footer
-  effect/necessity needs review under task4.5; do not silently call it a harmless
-  menu-free action. Prefer relying on observed trigger release and readiness if
-  that removes unnecessary chrome mutation without changing gesture semantics.
+- Integration50cb909 removes `dismiss_trigger` and its bottom-center tap. Native
+  trigger release, resulting overlay and subsequent capture/navigation remain
+  unverified. A necessary verified non-menu tap remains allowed; removal is a
+  proposed simplification, not an authorization restriction.
+- The100ms post-erase physical-settling exception remains before positive corner
+  and final lease verification. Current evidence does not establish its minimum
+  or replace it with an authoritative completion event.
 
 ## Targeted community evidence (2026-09-23 UTC)
 
