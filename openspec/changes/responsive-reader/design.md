@@ -44,6 +44,52 @@ through this shared production wait. Repeated identical overlay frames are not
 ready. Keep the exact old-pair strict active-lease refusal regression.
 
 ## Safety, regression and native gates
+### Navigation completion after the captured scrollbar refusal
+On the verified RM2 firmware contract, resolve the adjacent native page before
+one swipe from the validated current ordered cPages list. Preserve source
+document/page/visit/session and the complete active ordering/redirect map through
+the operation. Inserted notes pages are real neighbors; PDF redirect numbers are
+not navigation indices. Reject duplicate/ambiguous IDs, unsupported entries and
+mutated ordering. A known boundary issues no swipe. Input failure must release
+the owned touch, and timeout must never repeat the swipe.
+
+Use a fresh source image bracketed by its owner/order. After the swipe, poll
+fresh target images with the same brackets, an all-input observer around reads,
+a five-second monotonic deadline and50ms pacing. Target UUID must be the resolved
+neighbor in the same document/session with a new visit. Old source metadata or
+old source pixels cannot complete navigation. A wrong page/session/order cancels;
+after target observation, a different visit cannot silently establish a new target.
+The input observer covers read-only periods before/after the gesture; direct
+physical-device injection still prevents attribution during the owned gesture.
+
+Require positive clear footer and white x735..739 gutter over rows61..983 on the
+verified layout, plus two matching fresh target candidate images within tolerance8
+and a visual difference from the source using the existing page comparison.
+Legitimate ink in that gutter conservatively prevents readiness; no pixels are
+ignored or erased. Explicitly test/measure this availability limit across the
+technical paper, Q&A and blank successor. Persistent/stale states time out with a
+specific reason rather than silently adding a recurring sleep.
+
+This composite of identity, fresh pixels and positive chrome is observable
+readiness evidence, not a native render acknowledgement or independent pixel-to-page
+provenance. Delayed metadata and delayed/partial rendering are separate faults;
+keep downstream eligibility and immutable status/content guards. Identical-looking
+adjacent pages conservatively refuse, including blank-to-blank; an inked Reader
+question source to a blank successor is distinguishable and must pass. A stable
+source after the deadline is no movement, not successful destination readiness;
+the existing verified-source failure handling remains available without a retry.
+
+Scope this new completion contract to verified RM2 firmware3.28.0.172. Other
+hardware/firmware retains its existing heuristic/timing compatibility behavior
+with explicit unvalidated limits; no cross-device completion claim. Initially
+retain the caller's800ms wait while native evidence is collected. Before removing
+that stacked wait, expose an explicit completion result/capability so unsupported
+fallback paths preserve their sequencing. The production wait must have shared
+deterministic tests for delayed metadata/render, stale/duplicate reads, wrong
+neighbor/session/visit, order/redirect mutation, input cancellation and slow reads
+past the deadline. No change to either readiness's strict content comparison or
+an active lease baseline is authorized by the scrollbar evidence.
+
 Toolbar transitions now issue exactly one journaled press and verify the expected
 controls with fresh observations until a five-second monotonic deadline. Check
 deadline and cancellation before and after observation; reject a late successful
