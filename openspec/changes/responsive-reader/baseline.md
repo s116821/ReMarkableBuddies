@@ -568,3 +568,23 @@ PrimaryFineBlackMedium, secondaryBallpointBlackMedium and temporarysecondaryFine
 Medium visually restored; original46e/f39 notes/header/runtime hashes unchanged,
 serviceactivePID10743/NRestarts0/no active journal. Further native acceptance and
 full Q&A/history/performance gates remain open.
+
+Primary Black/Thin cycleb43b083 succeeds (ARM1m43, helperSHA2f01d03c8fc6e19740602c9a867426b8819e2b67489493884169fd8c35fd058f).
+Stages131/197/240/249 new darkpixels within706..736/942..972, unchanged tool tiles,
+clear finalROI, exact neighboring rectangles and125 recognized Lines. Actual menus
+verify unchanged Thin/Black Fine. Acquisition370.746564ms, cleanup6524.580ms,
+final404.321ms; union7299.647564ms. No EIO/reacquisition. Cleanup: ten pathguards
+4287.504ms, physicalinputs1382.386ms, rearms36.208ms. The ten cleanup pixel-verification
+scopes total117.537ms; they also include identity/control predicates, not pure pixel
+CPU. All108 input-guard scopes in cleanup total148.455ms;39 recovery owner-guard
+scopes270.045ms;13 status observations2464.059ms. These scopes overlap and must
+not be summed across levels. Per-path interval analysis finds1756.056ms total
+between each last input-guard end and its enclosing guard end (146.721..217.917ms).
+That source interval contains lease bookkeeping, cancellation check and observer
+drop. This supports investigating descriptor teardown; it does not independently
+measure a kernel close syscall or establish its cause. Do not optimize pixel
+predicates or join paths based on the earlier unattributed remainder hypothesis.
+After single recorded-sentinel removal and document close,122 original recognized
+Lines match exactly. OriginalFineBlackMedium/secondaryunchanged/doc46e/f39/hashes
+restored, serviceactivePID11393/NRestarts0/no active journal. Full admission and
+performance gates remain open.

@@ -404,3 +404,33 @@ These scopes remain nested and content-free; their names describe call scopes,
 not mutually exclusive workload categories. Use the next missing-width native
 case to attribute guard overhead before changing predicates or path grouping.
 No capture cache, tolerance/mask, ownership check, eraser geometry or pacing change.
+
+Proposed next concrete optimization (pending review, not implemented): preserve
+native input read descriptors across each explicitly owned pen/rubber contact
+window instead of dropping/reopening the whole observer. Identify the injected
+source by the actual pen writer descriptor's device/inode identity, matched to the
+unchanged inventoried source, never by a broad device-name exclusion. Before the
+window, preserve the existing fresh owner/pixel/input checks and require quiescent
+pending events. During the window the observer cannot authorize other operations.
+After release, drain only the identified source's expected pen/rubber event classes
+with bounded count/deadline, reject dropped/malformed/unexpected events and held
+keys, then restore ordinary polling. Keep every other source's buffered events;
+a touch/key gesture during injection must still invalidate ownership even if it
+ended before release. Recheck inventory and kernel contact/key state. No reset of
+cancellation, baseline, page identity, other-source events or observer clock.
+Always finish the owned window after attempted release including write failure;
+shared failure boundary still latches and retains journal. Events wholly inside
+the same physical pen's injection window remain unattributable, as before; do not
+claim exclusive stylus ownership or expand the window. No path joining, new erase
+segments, pacing change, menu action or background/deferred close worker.
+
+Require deterministic tests for pending input before entry, unrelated released
+contacts during injection, unexpected pen events, SYN_DROPPED, held contacts/keys,
+inventory/descriptor mismatch, drain overflow/deadline, failed writes/releases,
+failed rearming and no later mutation or journal completion. Keep existing observer
+behavior for noncandidate workflows. Review exact source and ARM build before one
+bounded native case; measure identical full cleanup and neighbor/footprint/tool/
+journal checks. Native delivery of injected events to retained descriptors must be
+verified, not assumed. If the observer cannot establish the contracted window,
+fail closed without falling back to a blind drain/retry. This targets the measured
+teardown interval rather than weakening fresh guards.
