@@ -58,7 +58,7 @@ impl NativeEvidence {
         Ok(bytes)
     }
     /// Host-validated evidence handshake, exclusive to this explicit example.
-    fn await_persisted_marker(&self) -> Result<()> {
+    fn await_persisted_marker(&self) -> Result<std::time::Instant> {
         use remarkable_reader_buddy::{
             device::input_observer::InputObserver,
             workflow::indicator::{Stage, Stroke},
@@ -159,7 +159,7 @@ impl NativeEvidence {
                     "run":run,"number":ack.number,"sha256":ack.sha256,
                     "meaning":"Explicit host marker predicate accepted; unknown record semantics remain unverified"}))?)?;
                 guard(&mut input)?;
-                return Ok(());
+                return Ok(deadline);
             }
             guard(&mut input)?;
             sleep(
@@ -667,7 +667,12 @@ fn main() -> Result<()> {
                 active.take_screenshot()?;
                 active.save_image("/tmp/reader-buddy-status-active.png")?;
                 if let Some(native) = &native {
-                    native.await_persisted_marker()?;
+                    let deadline = native.await_persisted_marker()?;
+                    // Dropping read-only input descriptors can itself take time.
+                    anyhow::ensure!(
+                        std::time::Instant::now() < deadline,
+                        "Native marker proof deadline after observer close"
+                    );
                 }
                 Ok(())
             })();

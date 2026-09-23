@@ -36,7 +36,7 @@ def decode(data):
     from rmscene.scene_items import Line
     blocks = list(read_blocks(io.BytesIO(data)))
     require(len(blocks) <= 100_000, "too many blocks")
-    lines, opaque = {}, []
+    lines, opaque, original_blocks = {}, [], {}
     for block in blocks:
         if isinstance(block, SceneLineItemBlock):
             if block.item.value is None:
@@ -49,13 +49,14 @@ def decode(data):
             key = str(block.item.item_id)
             require(key not in lines, "duplicate line ID")
             lines[key] = dataclasses.asdict(block.item.value)
+            original_blocks[key] = block
         elif not isinstance(block, PageInfoBlock):
             # Includes unsupported blocks and tombstones: no added/changed ones.
             opaque.append(block)
     live = [dataclasses.asdict(x) for x in read_tree(io.BytesIO(data)).walk() if isinstance(x, Line)]
     require(len(lines) == len(live) and all(v in live for v in lines.values()),
             "block/tree live-line interpretations differ")
-    return lines, opaque
+    return lines, opaque, original_blocks
 
 
 def native(point):
@@ -126,9 +127,11 @@ def validate_lines(before, after, screen_paths):
 
 
 def validate(initial, candidate, expected):
-    before, opaque_before = decode(initial)
-    after, opaque_after = decode(candidate)
+    before, opaque_before, blocks_before = decode(initial)
+    after, opaque_after, blocks_after = decode(candidate)
     require(opaque_before == opaque_after, "opaque non-PageInfo records changed")
+    require(all(blocks_after.get(k) == block for k, block in blocks_before.items()),
+            "original line parent/CRDT links/opaque value bytes changed")
     added = validate_lines(before, after, expected['paths'])
     return {'run': expected['run'], 'sha256': hashlib.sha256(candidate).hexdigest(),
             'added_ids': added, 'original_lines': len(before), 'tolerance_native': TOLERANCE,
