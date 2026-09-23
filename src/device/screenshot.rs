@@ -16,6 +16,42 @@ pub const SCREENSHOT_VIRTUAL_WIDTH: u32 = 768;
 /// Virtual screen height - all screenshots are normalized to this size  
 pub const SCREENSHOT_VIRTUAL_HEIGHT: u32 = 1024;
 
+/// Only attached to a discovery-header EIO whose candidate is absent from a
+/// fresh maps sample. It does not identify that candidate as the framebuffer.
+#[derive(Debug)]
+pub(crate) struct VanishedDiscoveryCandidate;
+
+impl std::fmt::Display for VanishedDiscoveryCandidate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RM2 discovery candidate vanished during header read")
+    }
+}
+
+fn discovery_error(error: std::io::Error, address: u64, maps: Option<&str>) -> anyhow::Error {
+    let absent = maps.is_some_and(|maps| {
+        !maps.lines().any(|line| {
+            let Some((start, end)) = line
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.split_once('-'))
+            else {
+                return true;
+            };
+            match (u64::from_str_radix(start, 16), u64::from_str_radix(end, 16)) {
+                (Ok(start), Ok(end)) if start < end => start <= address && address < end,
+                _ => true, // A malformed sample cannot qualify recovery.
+            }
+        }) && !maps.trim().is_empty()
+    });
+    let qualifies = error.raw_os_error() == Some(5) && absent;
+    let error = anyhow::Error::from(error);
+    if qualifies {
+        error.context(VanishedDiscoveryCandidate)
+    } else {
+        error
+    }
+}
+
 pub struct Screenshot {
     data: Vec<u8>,
     native_data: Vec<u8>,
@@ -288,22 +324,22 @@ impl Screenshot {
                     format!("Seek RM2 allocation header pid={pid} address={address:#x}")
                 })?;
             let mut header = [0u8; 8];
-            mem.read_exact(&mut header).with_context(|| {
+            mem.read_exact(&mut header).map_err(|error| {
                 // Failure evidence only: no second memory read, retry, cached
                 // address, or success inferred from a later mapping snapshot.
                 let current = std::fs::read_to_string(format!("/proc/{pid}/maps"));
-                let details = match current {
+                let details = match &current {
                     Ok(current) => {
                         let region = current.lines().find(|line| {
                             let Some(range) = line.split_whitespace().next() else { return false; };
                             let Some((start,end)) = range.split_once('-') else { return false; };
                             matches!((u64::from_str_radix(start,16),u64::from_str_radix(end,16)), (Ok(start),Ok(end)) if start <= address && address < end)
                         }).map(|line| line.split_whitespace().take(2).collect::<Vec<_>>().join(" ")).unwrap_or_else(|| "unmapped".into());
-                        format!("maps_changed={} current_region={region}", current != maps)
+                        format!("maps_changed={} current_region={region}", *current != maps)
                     }
                     Err(error) => format!("current_maps_unavailable={error}"),
                 };
-                format!("Read RM2 allocation header pid={pid} address={address:#x} bytes=8; {details}")
+                discovery_error(error, address, current.as_deref().ok()).context(format!("Read RM2 allocation header pid={pid} address={address:#x} bytes=8; {details}"))
             })?;
             Ok(header)
         })
@@ -784,6 +820,53 @@ mod tests {
         header[..4].copy_from_slice(&previous.to_le_bytes());
         header[4..].copy_from_slice(&size.to_le_bytes());
         header
+    }
+
+    #[test]
+    fn discovery_recovery_requires_eio_and_valid_fresh_absence() {
+        let address = 0x64ba1000;
+        for (errno, maps, expected) in [
+            (5, Some("65297000-65c2a000 rw-p 00000000 00:00 0\n"), true),
+            (5, Some("64ba1000-65c2a000 rw-p 00000000 00:00 0\n"), false),
+            (13, Some("65297000-65c2a000 rw-p 00000000 00:00 0\n"), false),
+            (5, None, false),
+            (5, Some(""), false),
+            (5, Some("malformed\n"), false),
+        ] {
+            let error = discovery_error(std::io::Error::from_raw_os_error(errno), address, maps);
+            assert_eq!(
+                error.downcast_ref::<VanishedDiscoveryCandidate>().is_some(),
+                expected
+            );
+            assert_eq!(
+                error
+                    .downcast_ref::<std::io::Error>()
+                    .unwrap()
+                    .raw_os_error(),
+                Some(errno)
+            );
+        }
+        // Preserve the failed scan: no valid candidate from an earlier read may
+        // escape when a later candidate vanishes.
+        let mut reads = 0;
+        let result =
+            Screenshot::locate_rm2_allocation("1000-a09000 rw-p 00000000 00:00 0\n", |address| {
+                reads += 1;
+                if address == 0x1000 {
+                    Ok(mmap_header(0, 0xa07002))
+                } else {
+                    Err(discovery_error(
+                        std::io::Error::from_raw_os_error(5),
+                        address,
+                        Some("b00000-c00000 rw-p 00000000 00:00 0\n"),
+                    ))
+                }
+            });
+        assert_eq!(reads, 2);
+        assert!(result
+            .unwrap_err()
+            .downcast_ref::<VanishedDiscoveryCandidate>()
+            .is_some());
     }
 
     #[test]

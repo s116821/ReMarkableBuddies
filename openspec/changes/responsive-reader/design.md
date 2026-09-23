@@ -366,3 +366,18 @@ cancellation and external input; ambiguity; deadline expiry before retry and lat
 success; cache clearing and at most two reads with zero input operations. Preserve
 an exact sampled-region regression and distinguish synthetic faults from native
 proof. Review implementation and ARM build before any further native attempt.
+
+Recovery implementation scope refinement: enabled only in explicit current-tool
+candidate observations when an existing input observer is already present.
+Prelease calls without that observer, legacy status, navigation and other capture
+paths keep immediate failure behavior. The observer is never created or reset to
+qualify recovery. The whole one-shot status observation (fresh owner, image,
+metadata and final owner/session) is repeated once; the initial recovery owner
+remains fixed and input is checked before/after owner reads. All failed participating
+observations latch cancellation before returning, so acquisition rollback cannot
+continue into journal completion after an uncertain observation. Each capture
+still clears encoded caches before discovery and owns/discards its raw buffers.
+The500ms bound includes metadata and revalidation; ordinary499ms synthetic capture
+passes,500ms and late second completion refuse. Four shared recovery tests plus
+one typed-cause/partial-scan regression are modeled evidence, not native recovery
+proof. Existing190-test full suite passed on ddbd8dd before this recovery change.

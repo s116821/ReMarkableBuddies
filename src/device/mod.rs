@@ -1,4 +1,6 @@
 pub mod backend;
+#[cfg(any(target_os = "linux", test))]
+mod capture_recovery;
 pub mod contact_frames;
 #[cfg(any(target_os = "linux", test))]
 mod history_readiness;

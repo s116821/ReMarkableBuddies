@@ -20,6 +20,9 @@ pub(super) struct WaitCancellation {
     cancelled: bool,
 }
 impl WaitCancellation {
+    pub(super) fn latch(&mut self) {
+        self.cancelled = true;
+    }
     pub(super) fn check(&self) -> Result<()> {
         ensure!(
             !self.cancelled,
@@ -58,7 +61,7 @@ pub(super) fn guarded_injection<T>(
     // Rearming may itself already have latched cancellation. Do not replace the
     // original injection chain with the latch's generic follow-up refusal.
     if result.is_err() {
-        cancellation(io).cancelled = true;
+        cancellation(io).latch();
     }
     result
 }

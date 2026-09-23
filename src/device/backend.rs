@@ -165,7 +165,75 @@ impl super::navigation_completion::NavigationIo for NativeNavigation<'_> {
     }
 }
 
+#[cfg(target_os = "linux")]
+struct NativeStatusObservation<'a>(&'a mut RealDevice);
+
+#[cfg(target_os = "linux")]
+impl super::capture_recovery::ObservationIo for NativeStatusObservation<'_> {
+    type Owner = crate::workflow::history::Owner;
+    type Frame = super::status_style::Observation;
+    fn now(&self) -> Duration {
+        self.0.clock.elapsed()
+    }
+    fn owner(&mut self) -> Result<Self::Owner> {
+        use std::path::Path;
+        let session = super::native_page::xochitl_session(Path::new("/proc"))?;
+        super::native_page::observed_owner(
+            Path::new("/home/root/.local/share/remarkable/xochitl"),
+            Path::new("/home/root/.config/remarkable/xochitl.conf"),
+            session,
+        )
+    }
+    fn check_input(&mut self) -> Result<()> {
+        super::status_style::StyleIo::check_wait(self.0)
+    }
+    fn capture(&mut self) -> Result<Self::Frame> {
+        self.0.observe_status_once()
+    }
+}
+
 impl RealDevice {
+    fn observe_status_once(&mut self) -> Result<super::status_style::Observation> {
+        let _timing = crate::measurement::Span::new("status.observe");
+        self.status_wait_cancellation.check()?;
+        use super::{
+            native_page,
+            status_style::{Identity, Observation},
+        };
+        use std::{io::Read, path::Path};
+        let root = Path::new("/home/root/.local/share/remarkable/xochitl");
+        let settings = Path::new("/home/root/.config/remarkable/xochitl.conf");
+        let session = native_page::xochitl_session(Path::new("/proc"))?;
+        let owner = native_page::observed_owner(root, settings, session.clone())?;
+        let image = self.status_screenshot.take_image()?.to_luma8();
+        let mut bytes = Vec::new();
+        std::fs::File::open(root.join(format!("{}.content", owner.document)))?
+            .take(1024 * 1024 + 1)
+            .read_to_end(&mut bytes)?;
+        anyhow::ensure!(
+            bytes.len() <= 1024 * 1024,
+            "Status document metadata exceeds bound"
+        );
+        let content: serde_json::Value = serde_json::from_slice(&bytes)?;
+        let preferences = serde_json::from_value(content["extraMetadata"].clone())?;
+        let after_session = native_page::xochitl_session(Path::new("/proc"))?;
+        anyhow::ensure!(
+            after_session == session
+                && native_page::observed_owner(root, settings, after_session)? == owner,
+            "Page changed during status observation"
+        );
+        Ok(Observation {
+            identity: Identity {
+                document: owner.document,
+                page: owner.page,
+                visit: owner.visit,
+                session: owner.session,
+            },
+            preferences,
+            image,
+        })
+    }
+
     /// Explicit disposable-page validation only, until native admission gates
     /// pass. Normal Reader construction remains unchanged during development.
     pub fn current_tool_probe(corner: TriggerCorner, debug_dump: bool) -> Result<Self> {
@@ -613,44 +681,17 @@ impl super::status_style::StyleIo for RealDevice {
             .append(record)
     }
     fn observe(&mut self) -> Result<super::status_style::Observation> {
-        let _timing = crate::measurement::Span::new("status.observe");
-        self.status_wait_cancellation.check()?;
-        use super::{
-            native_page,
-            status_style::{Identity, Observation},
-        };
-        use std::{io::Read, path::Path};
-        let root = Path::new("/home/root/.local/share/remarkable/xochitl");
-        let settings = Path::new("/home/root/.config/remarkable/xochitl.conf");
-        let session = native_page::xochitl_session(Path::new("/proc"))?;
-        let owner = native_page::observed_owner(root, settings, session.clone())?;
-        let image = self.status_screenshot.take_image()?.to_luma8();
-        let mut bytes = Vec::new();
-        std::fs::File::open(root.join(format!("{}.content", owner.document)))?
-            .take(1024 * 1024 + 1)
-            .read_to_end(&mut bytes)?;
-        anyhow::ensure!(
-            bytes.len() <= 1024 * 1024,
-            "Status document metadata exceeds bound"
-        );
-        let content: serde_json::Value = serde_json::from_slice(&bytes)?;
-        let preferences = serde_json::from_value(content["extraMetadata"].clone())?;
-        let after_session = native_page::xochitl_session(Path::new("/proc"))?;
-        anyhow::ensure!(
-            after_session == session
-                && native_page::observed_owner(root, settings, after_session)? == owner,
-            "Page changed during status observation"
-        );
-        Ok(Observation {
-            identity: Identity {
-                document: owner.document,
-                page: owner.page,
-                visit: owner.visit,
-                session: owner.session,
-            },
-            preferences,
-            image,
-        })
+        #[cfg(target_os = "linux")]
+        if self.current_tool_probe && self.status_wait_input.is_some() {
+            let result = super::capture_recovery::observe(&mut NativeStatusObservation(self));
+            if result.is_err() {
+                self.status_wait_cancellation.latch();
+            }
+            return result;
+        }
+        // No established observer means no recovery, including early prelease
+        // observations. Never create/reset an observer to qualify a retry.
+        self.observe_status_once()
     }
     fn press(&mut self, point: (u32, u32)) -> Result<()> {
         let _timing = crate::measurement::Span::new("status.press_input");

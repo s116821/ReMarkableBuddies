@@ -522,3 +522,8 @@ restored; notes/header/runtime hashes unchanged, serviceactivePID9361/NRestarts0
 no active recovery journal. Preserved original journal retired only after manual
 verification. Local private artifacts: outputs/rem9/current-ddbd-primary-thick,
 current-ddbd-sentinels, current-ddbd-recovery-observe and current-ddbd-*.png.
+Pixel analysis of the failed ddbd8dd cycle: Preparing331, AnswerPending515,
+AnswerReady602 and active604 new dark pixels, all bounded x705..737/y941..973.
+Both pen tiles are exact at every captured stage. Later recovery screenshot has
+clear statusROI and exact three neighboring pixel rectangles as well as125 equal
+recognized Lines. This supplements, but does not replace, final verification.
