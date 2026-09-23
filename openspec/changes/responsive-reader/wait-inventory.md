@@ -115,3 +115,22 @@ Exact internal rejected-frame dumping already exists behind the resolved
 example intentionally disables it. For refusal investigation use the normal
 bounded loop with opt-in dumping and preserve both images after each attempt.
 Do not substitute external pre-attempt screenshots for the internal pair.
+
+## Menu and drawing audit (2026-09-23 UTC)
+
+- `RealDevice::status_style_begin/end/clear` currently invoke the legacy lease;
+  `status_style::transition` is the sole normal toolbar-menu press path. Replace
+  this path under task4; keeping its old tests/evidence does not authorize runtime use.
+- `Workflow::draw_failure` obtains the same style lease before its three generic
+  lines. Success indicator paths use status_stroke. Both must share new eligibility.
+- `draw_symbol`, `erase_region`, `erase_region_smart`, Pen bitmap/rectangle helpers
+  have no normal src callers beyond their public wrappers; do not introduce uses
+  without current-tool/footprint review. Diagnostic examples require separate audit.
+- `status_clear` emits physical BTN_TOOL_RUBBER along owned paths, not menu input.
+  Pressure is2630; actual maximum-width and eraser envelopes still require proof.
+- `body_mode` is Cmd3 keyboard input; answer/header rendering is keyboard input.
+  Next/Previous are horizontal swipes. These are not autonomous menu navigation.
+- `dismiss_trigger` still unconditionally taps bottomcenter(384,1023). Its footer
+  effect/necessity needs review under task4.5; do not silently call it a harmless
+  menu-free action. Prefer relying on observed trigger release and readiness if
+  that removes unnecessary chrome mutation without changing gesture semantics.

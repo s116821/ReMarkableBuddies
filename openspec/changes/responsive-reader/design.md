@@ -278,3 +278,12 @@ keyboard input is not banned. AGENTS and the development-testing delta record th
 rule for contributors and REM35. Audit body-mode, navigation, failure and helper
 call paths rather than assuming all touch input is a menu. Developer/manual setup
 is clearly separated and announced; no diagnostic helper becomes a product bypass.
+
+Further user research guidance qualifies the stopping point above: when a concrete
+no-menu roadblock appears, inspect relevant current community repositories and
+actual code/issues/releases for alternative mechanisms. This includes the present
+current-tool observability/footprint roadblock. Record source links/revisions,
+firmware compatibility and distinguish direct supported interfaces, native file
+mechanisms, injected extensions and UI automation. No exhaustive survey or silent
+invasive installation is implied. A prior failed D-Bus probe is not proof that a
+community solution cannot exist; bring promising tradeoffs to review.

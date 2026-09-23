@@ -27,3 +27,15 @@ page swipes and keyboard text input remain permitted under their existing guards
 #### Scenario: Integrated audit
 - **WHEN** REM35 validates the integrated Reader and Writer release
 - **THEN** every normal feature path is audited for menu automation, with permitted gestures and keyboard input distinguished explicitly.
+
+### Requirement: Targeted community investigation at architecture roadblocks
+When the no-menu architecture blocks a required operation, contributors SHALL
+investigate relevant current open-source reMarkable implementations, inspecting
+actual code, issues/releases and firmware compatibility. Findings SHALL link
+sources/revisions and distinguish supported direct APIs, native/file mechanisms,
+injected extensions and UI automation. Research SHALL remain bounded to the
+concrete roadblock, with safety, maintenance cost and unresolved limits explicit.
+
+#### Scenario: Promising community mechanism
+- **WHEN** a community implementation offers a non-menu alternative
+- **THEN** its compatibility and tradeoffs are reviewed before adoption; investigation alone does not authorize invasive installation or establish native correctness.

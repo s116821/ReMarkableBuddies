@@ -100,3 +100,12 @@ fallbacks. If a feature requires menus, document the limitation and resolve the
 design explicitly before adding it. Deliberate developer/manual test setup may
 operate menus with advance notice, but must remain separate from product paths
 and be labeled clearly in evidence. REM35 audits integrated features for this rule.
+
+When the no-menu rule blocks an operation, investigate relevant current open-source
+reMarkable community implementations before concluding it is unavailable. Keep the
+research targeted to that roadblock. Inspect actual code, issues/releases and
+firmware compatibility; record links/revisions and distinguish supported direct
+interfaces, native/file-format mechanisms, injected extensions and UI automation.
+Evaluate safety, maintenance and scope costs; do not silently install invasive
+dependencies or treat saved preferences as actual UI state. Record promising
+alternatives and unresolved limits rather than conducting an endless survey.
