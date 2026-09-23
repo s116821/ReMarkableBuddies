@@ -111,12 +111,18 @@ fn main() -> Result<()> {
         Workflow::classify_answer_page(&image::load_from_memory(&classified.png)?, header.as_ref());
     // Same production readiness function; no lease acquisition even on success.
     let result = device.ready_status_observation();
+    let owner_matches = result
+        .as_ref()
+        .ok()
+        .and_then(|value| value.as_ref())
+        .map(|observed| observed.identity == expected_owner);
     let report = serde_json::json!({
         "version": env!("READER_BUDDY_VERSION"), "mode": args[0],
         "source_owner": source_owner, "classifier_owner": classifier_owner,
         "expected_target": args.get(2), "navigation_completion": completion.map(|value| format!("{value:?}")),
         "classification": format!("{classification:?}"),
-        "readiness": match &result { Ok(Some(_)) => "ready", Ok(None) => "unavailable", Err(_) => "error" },
+        "readiness": match &result { Ok(Some(_)) if owner_matches == Some(true) => "ready", Ok(Some(_)) => "owner-mismatch", Ok(None) => "unavailable", Err(_) => "error" },
+        "expected_owner": expected_owner, "readiness_owner_matches": owner_matches,
         "error": result.as_ref().err().map(ToString::to_string),
         "final_owner": result.as_ref().ok().and_then(|r| r.as_ref()).map(|r| &r.identity),
         "meaning": "Production readiness after diagnostic navigation/captures; no model, answer or status ink; not a complete Reader iteration"
