@@ -528,3 +528,10 @@ or forced-flush behavior. If active ink is not yet persisted, record that limita
 and design a bounded observation predicate; do not silently sleep/repeat mutations.
 Before broader native coverage/admission, distinguish manual sentinel failure from
 production erasure and establish durable cleanup evidence on the tested path.
+
+Diagnostic review correction: Linux examples cannot access the library-private
+measurement API. Snapshot timing uses local Instant and fixed-label debug begin/end
+instead; no internal API is exposed. Final native snapshot occurs after successful
+normal cleanup and journal retirement. Failure at that point is a diagnostic evidence
+failure, not a claim that the already-retired journal remains. Active-stage failure
+still stops before automatic cleanup and preserves its prior recovery phase.

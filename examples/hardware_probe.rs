@@ -43,7 +43,8 @@ impl NativeEvidence {
             io::{Read, Write},
             os::unix::fs::OpenOptionsExt,
         };
-        let _timing = remarkable_reader_buddy::measurement::Span::new("diagnostic.native_snapshot");
+        let timing = std::time::Instant::now();
+        log::debug!("diagnostic_native_snapshot stage={stage} event=begin");
         let started_us = self.started.elapsed().as_micros();
         anyhow::ensure!(
             Self::owner()? == self.owner,
@@ -88,6 +89,10 @@ impl NativeEvidence {
                 "meaning":"Two equal bounded reads with matching owner; persisted marker presence requires offline verification, not a completion signal"
             }))?,
         )?;
+        log::debug!(
+            "diagnostic_native_snapshot stage={stage} event=end elapsed_us={}",
+            timing.elapsed().as_micros()
+        );
         Ok(())
     }
 }
