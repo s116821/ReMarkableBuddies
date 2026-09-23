@@ -165,4 +165,13 @@ Keep input/owner guards and failure propagation around every observation. Test t
 actual shared wait with delayed matching observations, changed/error observations,
 and fatal cancellation rather than testing a detached timeout predicate.
 
+Measured ordinary indicator work used32 status observations across two leases.
+Consolidate consecutive toolbar property decisions using one fresh classified
+observation only when no input/checkpoint/callback intervenes. After every toolbar
+mutation obtain a new observation; retain transition pre-input checks, durable
+intent, bounded post-input verification, final style checks, and both sides of
+cleanup checkpoints. Do not carry observations across independent operations or
+use persisted preferences in place of actual UI. Verify fewer observations with
+the production lease model and retain partial-failure/rollback regressions.
+
 In the implementation PR add a concise AGENTS/workflow rule applying this default to future Reader/Writer features, with public/manual equivalents and no optional integration prerequisite. REM35 audits new waits and verifies preservation across the integrated system. Simulator coverage must exercise immediate/delayed completion, missing/duplicate/out-of-order/stale signals, wrong page/session/operation and cancellation via actual production sequencing; assert no duplicated mutation or stale successful transition. The architecture amendment preceded implementation; the measurement checkpoint now includes the AGENTS principle, while tasks.md tracks remaining implementation and validation.
