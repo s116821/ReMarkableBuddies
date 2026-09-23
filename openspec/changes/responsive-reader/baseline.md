@@ -494,3 +494,31 @@ NRestarts0, no active journal/writer. Full188 hosttests pass on8756945. These ar
 segmented calibration cases, not V3 production lease/full Q&A acceptance; continuous
 auxiliary paths, maximum eraser envelope, notes chrome and remaining widths/slots
 still require verification before admission.
+
+Native V3 diagnostic ddbd8dd (2026-09-23T05:21:57..05:22:15Z): one
+primary Black/Thick Fineliner cycle with three recorded neighboring strokes.
+Acquisition322.049177ms; cleanup parent6239.007ms (includes478.456ms preparation
+and5760.006ms erase/verify); final status.restore failed after101.416ms. Do not
+count this as successful indicator latency. Positive stage images and active
+image exist; all10 owned paths were erased, but final verification failed.
+The exact error chain reports allocation discovery candidate0x64ba1000 in sampled
+anonymous rw-p region0x64ba1000-0x65c2a000, eight-byte header read EIO5,
+maps_changed=true/current_region=unmapped. Preceding successful captures selected
+framebuffer0x6d2f9008, so the failed discovery candidate is NOT established as the
+framebuffer. Before/after batch maps both contain65297000-65c2a000; they are not
+the exact failure-time snapshots. PID30974/start100545844 and page owner remain
+unchanged in batch brackets. Later maps are evidence of change, not syscall-time
+proof or proof that historical EIO failures share this cause.
+
+No retry occurred. V3 sequences0/1/2 retain PendingCleanup; preserved journal SHA
+0bd27c769a2370cb25b7e96e7a03c145fd278eea82c45f6285d95a16e1ef6fbd.
+Separate later read-only inspection proves matching owner and clear corner, not
+success of the original failed verification. Native125 recognized Line properties
+(122 original plus3 neighbors) compare equal before/after the cycle. Deliberate
+recovery removed only the three recorded neighbors;122 original recognized Lines
+remain equal, unknown records are unverified. Actual menus before/after prove
+unchanged Black/Thick Fine. Original Black/Medium Fine and original46e/f39 document
+restored; notes/header/runtime hashes unchanged, serviceactivePID9361/NRestarts0,
+no active recovery journal. Preserved original journal retired only after manual
+verification. Local private artifacts: outputs/rem9/current-ddbd-primary-thick,
+current-ddbd-sentinels, current-ddbd-recovery-observe and current-ddbd-*.png.

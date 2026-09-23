@@ -333,3 +333,36 @@ fails. The shared native wrapper is exercised by injected partial-write/release
 faults with a real V3 journal, including rearm failure and subsequent mutation
 attempts. This supersedes any implication that a successful rearm alone permits
 cleanup after an uncertain write.
+
+Proposed allocation-lifetime recovery (pending exact plan review): apply only to
+status observations and only an explicitly typed discovery-header EIO5 for which
+a fresh maps sample no longer contains the candidate address. Do not classify
+from error strings, whole-map inequality alone, raw-frame read errors, other errno,
+ambiguous candidates or arbitrary observation failures. The existing discovery
+scan still fails immediately; it must not skip a vanished candidate and accept
+partial scan results. Preserve the complete original error chain and failure
+address/range diagnostics.
+
+At the status observation boundary, retain the initial native owner including
+visit and process session. Permit at most one additional completely fresh image
+capture after the typed failure, only after rechecking the same owner/session and
+pending external input/cancellation. Discard first-attempt maps, addresses, raw
+bytes, candidate list and cached outputs. Reacquire PID/maps/address from scratch;
+then retain the existing final owner/session bracket and every lease pixel,
+phase, geometry, neighbor and clear-corner predicate. Never repeat any input,
+journal mutation, pen stroke or erase path. Use one monotonic500ms budget across
+both capture attempts; check it before starting another attempt and after capture
+before accepting pixels. Synchronous OS reads cannot be preempted by this budget;
+late completion must be rejected, not published as a successful observation.
+If revalidation, retry or deadline fails, preserve both error contexts, latch the
+failure through existing callers and retain the recovery journal. Normal unrelated
+capture paths retain current fail-closed behavior. No menu, cached frame, baseline
+refresh, retry loop, model call or historical-error claim is introduced.
+
+Test through the shared observation recovery mechanism: vanished discovery
+candidate followed by a fresh valid capture; same errno with still-mapped address;
+other errno; raw-frame EIO; persistent failure; changed owner/visit/process session;
+cancellation and external input; ambiguity; deadline expiry before retry and late
+success; cache clearing and at most two reads with zero input operations. Preserve
+an exact sampled-region regression and distinguish synthetic faults from native
+proof. Review implementation and ARM build before any further native attempt.

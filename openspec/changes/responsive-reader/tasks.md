@@ -47,3 +47,4 @@ suppression separately. Nondefault primary/secondary full Q&A remains required;
 skipped marks are not successful indicator samples or visible feedback. All
 remaining full-workflow, history, latency and delivery gates stay open.
 - [ ] 4.5 Audit all normal Reader/Writer menu navigation under the product-wide prohibition; retain verified simple swipes/keyboard operations, document unavailable features and carry the rule into canonical specs and REM35.
+- [ ] 4.6 Review and implement narrowly typed vanished-discovery-candidate recovery for status observation only, with one fresh read-only reacquisition, unchanged owner/session/input and total deadline; preserve native failure evidence and deterministic refusal regressions before further hardware admission.
