@@ -693,3 +693,28 @@ Admission refusal for an unsupported layout is distinct from safety failure: own
 input or capture errors propagate and stop the operation; they are never converted
 to optional-feedback suppression. The pixel band recognizes only the calibrated
 layout, not semantic PDF type, and conservatively refuses other configurations.
+
+### Controlled history provenance investigation
+
+Before changing history comparison or retrying a paid Q&A, use the existing
+no-model append diagnostic and bounded read-only snapshots of the disposable
+notes page. First preserve closed-page bytes, open it without typing, and record
+fresh owner-bracketed bytes/parsed text/full scene blocks through a30s monotonic
+observation window. A changed PageInfo first field plus three identical fresh
+snapshots is a measured transition; unchanged bytes at deadline are inconclusive,
+not proof that no delayed transition exists. Repeat one close/open no-edit control
+only to distinguish an opening-related counter from text editing. Preserve every
+changed version, exact owner/visit/session and before/after screenshots.
+
+If the no-edit controls retain exact text, root layout and all other scene blocks,
+run at most one existing append_probe on that controlled page with one bounded
+known ASCII Q&A. Save its in-process before-body, after-body, before-render,
+immediate-after-render and final snapshots/seals, exact requested/expected text,
+and complete errors. Compare the changed counter separately from every other
+field; do not infer safety from the parser's loads_count name alone. Any extra
+newlines, changed ink/layout/owner or unexplained native records remain a failure
+requiring diagnosis. No product normalization, cursor repositioning, forced save,
+fixed persistence delay or paid retry follows automatically from this evidence.
+A proposed production fix must receive its own evidence-backed plan/review and
+regression fixtures before implementation. Manual navigation is diagnostic setup
+only and original document/tools/service are restored at batch end.
