@@ -718,3 +718,50 @@ fixed persistence delay or paid retry follows automatically from this evidence.
 A proposed production fix must receive its own evidence-backed plan/review and
 regression fixtures before implementation. Manual navigation is diagnostic setup
 only and original document/tools/service are restored at batch end.
+
+### Conditional outside-overlay dismissal after the no-tap failure
+
+Native50cb909 accepted Reader release but left the known lower-left overflow
+panel open. Supersede unconditional tap removal with a bounded conditional
+outside-panel dismissal; no menu item is selected, and no other menu navigation
+is permitted. Preserve the actual open/closed pair as regression fixtures. Qualify
+the measured RM2 firmware contract and known panel pixels (x61..279/y655..1023),
+selected tool tiles and surrounding toolbar. A positively closed toolbar/seam
+skips input; an unknown or partial panel refuses. Do not claim recognition of all
+popovers, languages, firmware or tool-dependent menu variants. Expand coverage
+only from independent real fixtures, preserving unsupported-tool core-Q&A gates.
+
+Before the single permitted tap384,1023, pin document/page/visit/session, bounded
+native page bytes and a fresh image, then prove all input sources released. The
+point lies outside the qualified panel and menu items. Retain the input observer
+across a narrowly owned touch window using actual reader/writer descriptor identity
+and unchanged device inventory. Use a separate touch-event policy, not the pen
+whitelist: at most one slot0 contact at the exact native point, complete down/up
+frames, positive delivery, no extra contact/coordinate/key or dropped event, and
+released kernel slots/keys. Keep other-source pending events and reject them in
+the ordinary final poll. Bound the physical contact to the existing100ms candidate
+exception, owned window1s, drain50ms/8192events. Always attempt release and finish
+observation after write failure; any write/release/rearm failure is sticky. A real
+finger coinciding with the identical owned stream cannot be attributed uniquely;
+state this limitation instead of claiming exclusive physical ownership.
+
+After release, use fresh read-only observations with a5s monotonic deadline and
+50ms pacing, no repeated tap and no fixed post-tap settling delay. Require known
+panel absent, same owner/native page bytes and unchanged selected tool/exposed
+content outside x0..279/y655..1023. Pixels hidden by the former panel have no visual
+baseline; native byte equality supplies a separate bounded content check, not
+universal format semantics. Page-byte changes, external input, changed exposed
+content or unknown controls fail immediately; stable known-open pixels may wait
+until deadline. No new baseline, blind dismissal, menu fallback or draw/erase.
+
+Wire both production Reader trigger dispatch paths through this operation and
+restore a release-observation measurement marker separate from dismissal duration.
+Any failure latches Workflow input failure and prevents later Q&A mutations. Keep
+historical V2 menu code unreachable. Extend the shared simulator with known-open,
+closed and unknown trigger-overlay inputs, once-only conditional tap traces,
+postcondition/cancellation faults and exact core answer preservation. Native-pixel
+fixtures test the real classifier; modeled overlays do not prove native behavior.
+Test late/stale frames, owner/content/tool changes, partial/malformed touch frames,
+completed other-source input, lost devices and write/release/rearm failures before
+reviewed native validation. No runtime replacement or broad admission until tests,
+builds, source review and the focused native trigger/capture/navigation gates pass.

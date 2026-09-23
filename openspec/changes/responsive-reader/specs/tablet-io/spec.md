@@ -38,3 +38,11 @@ Normal Q&A SHALL remain available when optional feedback is suppressed.
 #### Scenario: Trigger release does not navigate menus
 - **WHEN** a Reader trigger qualifies
 - **THEN** the workflow must not navigate menus; the proposed removal of the automatic bottom-center tap requires native trigger/overlay verification. A necessary verified non-menu tap remains allowed, and subsequent operations retain their ownership checks.
+
+#### Scenario: Known trigger overlay needs an outside dismissal
+- **WHEN** a released Reader trigger leaves the positively qualified overflow panel visible
+- **THEN** one guarded tap outside every menu item may dismiss it, followed by fresh unchanged-owner/tool/native-content and panel-absence verification; no menu item is selected.
+
+#### Scenario: Missing or unknown trigger overlay
+- **WHEN** the trigger overlay is positively absent or its layout cannot be qualified
+- **THEN** absence emits no dismissal input, while unknown layout fails closed; no guessed or repeated tap occurs.
