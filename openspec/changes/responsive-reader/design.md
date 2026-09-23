@@ -153,4 +153,16 @@ Fallback polling uses monotonic deadlines, cancellation checks and paced interva
 
 Fixed delays require a recorded underlying protocol requirement, measured physical minimum, or unavailable observable predicate, with scope, bound and validation. Gesture qualification, animation cadence, polling pacing, retry backoff and timeout deadlines remain legitimate timing behavior. The target is replacing unsupported completion assumptions, not deleting all clocks. Existing safety checks, strict image comparison, history inactivity and recovery latches remain mandatory.
 
+History persistence diagnosis must retain the actual pre-render native content and
+owner, requested append bytes, and observed post-render content/owner when using an
+explicit bounded diagnostic on a disposable page. No-model diagnostics may exercise
+the same body-mode, snapshot, text-input and persistence APIs without undo/redo or
+status ink. Extra paragraphs are evidence to investigate, never permission to trim
+or normalize the exact ownership comparison. Production persistence retains its
+30-second bound and three equal fresh observations, with deadline checks before
+and after expensive observations; a late third match cannot establish success.
+Keep input/owner guards and failure propagation around every observation. Test the
+actual shared wait with delayed matching observations, changed/error observations,
+and fatal cancellation rather than testing a detached timeout predicate.
+
 In the implementation PR add a concise AGENTS/workflow rule applying this default to future Reader/Writer features, with public/manual equivalents and no optional integration prerequisite. REM35 audits new waits and verifies preservation across the integrated system. Simulator coverage must exercise immediate/delayed completion, missing/duplicate/out-of-order/stale signals, wrong page/session/operation and cancellation via actual production sequencing; assert no duplicated mutation or stale successful transition. The architecture amendment preceded implementation; the measurement checkpoint now includes the AGENTS principle, while tasks.md tracks remaining implementation and validation.
