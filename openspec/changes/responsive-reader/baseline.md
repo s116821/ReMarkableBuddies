@@ -728,3 +728,49 @@ properties and clear corner. Unknown native semantics are not claimed as verifie
 Original46e/f39 document and unchanged actual tools restored; notes/header/runtime
 hashes exact, serviceactive15902/NRestarts0. Original journal preserved and retired
 only after manual restoration. No runtime installation or product admission.
+
+### Saved-marker production cleanup and reopened verification: 556a599
+
+Exact556a5992763e0fd136b3e57b054e7244e01f50bd independently reviewed; ARM example
+build1m33, helperSHA6daa17b674952f11a6f7cf65285342237ba66f989fc9d23a359c9176c8954149.
+Nine synthetic predicate regressions passed (mocked decode checks enforcement, not
+parser fidelity). Original native-block mutation negatives were separately replayed.
+ONE primaryBlackFineMedium cycle accepted saved active SHA
+80f0b2503057b57bc62221f23886e5d71f4e5471bb29d46aa8b137a21b791ca3:
+125 original/sentinel Lines plus15 marker IDs(1,1931..1945), all original full Line
+blocks and non-PageInfo opaque records preserved. Circle acceptance is independently
+measured ink-footprint equivalence, not exact commanded-centerline or vendor proof.
+
+Unchanged guarded production cleanup completed, without toolbar input/reacquisition
+or remaining journal. Immediate final native snapshot was still the old140 Lines;
+it is not the final persistence proof. Later fresh owner-bracketed saved observations
+reached125 Lines, SHA024cb5c94344b5824fd1e8ff4e153e651e35db9f5cffa6a6bf7daea40b707c6f.
+ALL15 accepted additions absent and ALL125 original full SceneLineItemBlocks exact.
+Manual close/reopen repeated those results and showed a clear corner with all three
+neighboring sentinels present. Stage dark pixels202/333/398/407, bounds706942..737972;
+actual tool tiles and neighboring rectangles exact, final clearance verified.
+
+Raw audit: all66 prior opaque non-PageInfo records unchanged; one added record:
+SceneLineItemBlock(extra_data=b'', parent_id=CrdtId(0,11),
+item=CrdtSequenceItem(item_id=CrdtId(1,1931), left_id=CrdtId(1,1930),
+right_id=CrdtId(0,0), deleted_length=19, value=None), extra_value_data=b'').
+Four identifiers beyond the15 captured active markers have unobserved intermediate
+provenance/semantics. No original live ID overlaps the corresponding1931..1949
+interval, but that does not prove those four were eraser fragments. Claim only
+preserved recognized original content/opaque records and durable removal of the15
+accepted markers in this case; NOT full native-file equivalence/universal integrity.
+No normalization of unexplained records or additional drawing to chase this detail.
+
+Diagnostic waiting is separate from production timing: host handshake13.641s includes
+its startup/transfer/validation, whole probe roughly33s. Acquisition367.347138ms,
+cleanup4928.387ms, final restoration378.852075ms; nonoverlapping sum5674.586213ms.
+Cleanup includes preparation554.386 and erase/verify4373.486; nested guards2599.011,
+physical injection1460.574 and rearm59.240ms are not added to their parent totals.
+Do not present the diagnostic as an end-to-end Q&A or repeated latency benchmark.
+
+Three sentinels then received one erase each with saved verification124/123/122;
+reopened source matches122 original IDs/properties with clear corner. Original46e/f39
+visually/native verified; selected tools unchanged, notes/header/runtime hashes exact,
+serviceactive17078/NRestarts0, no journal. Stop equivalent diagnostic batches here;
+normal current-tool integration, suppression/error/notes cases and full Q&A/history,
+performance/OpenSpec/PR/release gates remain open.
