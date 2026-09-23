@@ -125,3 +125,12 @@ The connected cursive input is a previously constructed synthetic native fixture
 not a new human-handwriting sample. `docs/validation/images/rem34` contains a
 scripted simulator answer (approximate bitmap glyphs) and restored original tablet
 view for public evidence; these are separate evidence categories.
+
+`hardware_probe indicator-current-tool` is an explicit development-only candidate
+path, not normal Reader behavior or a tool-admission claim. Use only reviewed
+builds on verified disposable pages with a manually verified Black Fineliner.
+Preserve its V3 journal and stop after any guard/cleanup failure; do not retry or
+replace the baseline. This mode never opens a toolbar menu. It exercises the
+production geometry/input methods with fresh per-stroke/per-eraser guards; actual
+width/slot coverage, cleanup footprint, input observer continuity and full Q&A
+acceptance remain required before switching the normal constructor.

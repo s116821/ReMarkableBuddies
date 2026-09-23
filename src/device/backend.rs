@@ -89,6 +89,7 @@ pub struct RealDevice {
     status_style: Option<super::status_style::Lease>,
     status_journal: Option<super::status_style::Journal>,
     status_style_supported: bool,
+    current_tool_probe: bool,
     status_wait_cancellation: super::status_style::WaitCancellation,
     #[cfg(target_os = "linux")]
     status_wait_input: Option<super::input_observer::InputObserver>,
@@ -165,6 +166,62 @@ impl super::navigation_completion::NavigationIo for NativeNavigation<'_> {
 }
 
 impl RealDevice {
+    /// Explicit disposable-page validation only, until native admission gates
+    /// pass. Normal Reader construction remains unchanged during development.
+    pub fn current_tool_probe(corner: TriggerCorner, debug_dump: bool) -> Result<Self> {
+        let mut device = Self::new(false, corner, debug_dump)?;
+        device.current_tool_probe = true;
+        Ok(device)
+    }
+
+    fn guard_current_input(&mut self, erasing: bool, points: &[(i32, i32)]) -> Result<()> {
+        if !self.current_tool_probe {
+            return Ok(());
+        }
+        use crate::workflow::indicator::{BOTTOM, LEFT, RIGHT, TOP};
+        anyhow::ensure!(
+            !points.is_empty()
+                && points
+                    .iter()
+                    .all(|&(x, y)| (LEFT + 8..=RIGHT - 8).contains(&x)
+                        && (TOP + 8..=BOTTOM - 8).contains(&y)),
+            "Current-tool input exceeds reserved status geometry"
+        );
+        use super::status_style::StyleIo;
+        let lease = self
+            .status_style
+            .take()
+            .context("Current-tool input requires a lease")?;
+        let result = (|| {
+            // begin_wait reuses an existing observer: pending events from the
+            // provider/cadence interval must be checked before it is discarded.
+            self.begin_wait()?;
+            self.check_wait()?;
+            if erasing {
+                lease.verify_current_erasure(self)?;
+            } else {
+                lease.verify_current(self)?;
+            }
+            self.check_wait()
+        })();
+        self.status_style = Some(lease);
+        self.status_wait_cancellation.record(result)?;
+        // Injection shares the physical source. Only this owned input interval
+        // lacks attribution; immediately rearm after release, even on failure.
+        #[cfg(target_os = "linux")]
+        {
+            self.status_wait_input = None;
+        }
+        Ok(())
+    }
+    fn rearm_current_input(&mut self) -> Result<()> {
+        if self.current_tool_probe {
+            use super::status_style::StyleIo;
+            self.begin_wait()?;
+            self.check_wait()?;
+        }
+        Ok(())
+    }
     /// Read-only production pre-lease readiness, exposed for bounded diagnostic
     /// examples. This does not establish a lease or emit tool/pen input.
     pub fn ready_status_observation(&mut self) -> Result<Option<super::status_style::Observation>> {
@@ -211,6 +268,7 @@ impl RealDevice {
         }
         Ok(Self {
             status_style: None,
+            current_tool_probe: false,
             debug_dump,
             status_journal: None,
             status_wait_cancellation: super::status_style::WaitCancellation::default(),
@@ -311,7 +369,11 @@ impl DeviceBackend for RealDevice {
         self.keyboard.key_cmd_body()
     }
     fn line(&mut self, from: (i32, i32), to: (i32, i32)) -> Result<()> {
-        self.pen.draw_path_screen(&[from, to])
+        self.guard_current_input(false, &[from, to])?;
+        let result = self.pen.draw_path_screen(&[from, to]);
+        let observed = self.rearm_current_input();
+        observed?;
+        result
     }
     fn erase(&mut self, from: (i32, i32), to: (i32, i32)) -> Result<()> {
         self.pen.erase_rectangle(from, to)
@@ -328,7 +390,12 @@ impl DeviceBackend for RealDevice {
     fn status_stroke(&mut self, stroke: crate::workflow::indicator::Stroke) -> Result<()> {
         let _timing = crate::measurement::Span::new("status.stroke_input");
         log::debug!("Status stroke {stroke:?} at {:?}", self.clock.elapsed());
-        self.pen.draw_path_screen(&stroke.points())
+        let points = stroke.points();
+        self.guard_current_input(false, &points)?;
+        let result = self.pen.draw_path_screen(&points);
+        let observed = self.rearm_current_input();
+        observed?;
+        result
     }
     fn status_style_begin(&mut self) -> Result<bool> {
         use super::status_style::{Journal, Lease, Recovery};
@@ -352,7 +419,12 @@ impl DeviceBackend for RealDevice {
             log::debug!("Status readiness unavailable; no lease or input");
             return Ok(false);
         };
-        let Some(mut lease) = Lease::prepare(observed, self.debug_dump)? else {
+        let prepared = if self.current_tool_probe {
+            Lease::prepare_current(observed, self.debug_dump)?
+        } else {
+            Lease::prepare(observed, self.debug_dump)?
+        };
+        let Some(mut lease) = prepared else {
             return Ok(false);
         };
         self.status_journal = Some(Journal::create(Path::new(RECORD), &lease.recovery)?);
@@ -366,15 +438,23 @@ impl DeviceBackend for RealDevice {
                 .take()
                 .context("Missing owned recovery journal")?
                 .finish()?;
+            #[cfg(target_os = "linux")]
+            if self.current_tool_probe {
+                self.status_wait_input = None;
+            }
             log::warn!("Status probe declined after verified UI rollback: {error}");
             return Ok(false);
         }
         log::info!("Status style acquired in {:?}", started.elapsed());
         self.status_style = Some(lease);
+        self.rearm_current_input()?;
         Ok(true)
     }
     fn status_style_end(&mut self) -> Result<()> {
         let _timing = crate::measurement::Span::new("status.restore");
+        if self.current_tool_probe && self.status_style.is_some() {
+            self.rearm_current_input()?;
+        }
         let Some(mut lease) = self.status_style.take() else {
             return Ok(());
         };
@@ -390,10 +470,21 @@ impl DeviceBackend for RealDevice {
                 error.context("Status preference restoration failed; further input stopped")
             );
         }
+        if self.current_tool_probe {
+            use super::status_style::StyleIo;
+            if let Err(error) = self.check_wait() {
+                self.status_style = Some(lease);
+                return Err(error);
+            }
+        }
         self.status_journal
             .take()
             .context("Missing owned recovery journal")?
             .finish()?;
+        #[cfg(target_os = "linux")]
+        if self.current_tool_probe {
+            self.status_wait_input = None;
+        }
         log::info!("Status style restored in {:?}", started.elapsed());
         Ok(())
     }
@@ -417,7 +508,12 @@ impl DeviceBackend for RealDevice {
         log::debug!("Clearing {} owned status paths", strokes.len());
         let _erasure_timing = crate::measurement::Span::new("status.cleanup.erase_and_verify");
         for stroke in strokes {
-            self.pen.erase_path_screen(&stroke.points())?;
+            let points = stroke.points();
+            self.guard_current_input(true, &points)?;
+            let erased = self.pen.erase_path_screen(&points);
+            let observed = self.rearm_current_input();
+            observed?;
+            erased?;
         }
         std::thread::sleep(Duration::from_millis(100));
         let clean = self.status_screenshot.take_image()?;
@@ -457,6 +553,9 @@ impl super::status_style::StyleIo for RealDevice {
         self.status_wait_cancellation.check()?;
         #[cfg(target_os = "linux")]
         {
+            if self.status_wait_input.is_some() {
+                return self.check_wait();
+            }
             match super::input_observer::InputObserver::new(TriggerCorner::LowerLeft, None) {
                 Ok(input) => {
                     self.status_wait_input = Some(input);
@@ -495,7 +594,9 @@ impl super::status_style::StyleIo for RealDevice {
     fn end_wait(&mut self) {
         #[cfg(target_os = "linux")]
         {
-            self.status_wait_input = None;
+            if !self.current_tool_probe {
+                self.status_wait_input = None;
+            }
         }
     }
     fn checkpoint(&mut self, record: &super::status_style::Recovery) -> Result<()> {

@@ -309,3 +309,18 @@ chrome exemption. Notes-page undo position/state still needs separate evidence
 before product admission. Current-tool cleanup additionally preserves a12-pixel
 outer neighbor ring beyond the existing12-pixel blank clearance. This adds a
 check; it does not establish the maximum eraser footprint or validate all widths.
+
+Development-only `hardware_probe indicator-current-tool` constructs the candidate
+current-tool backend explicitly; normal Reader construction still uses the old
+path pending admission. The candidate retains its input observer between strokes
+and provider/cadence intervals, checks buffered events before reuse, and discards
+it only around its own physical pen/rubber injection. It rearms after release
+including failed writes. Events occurring wholly inside that shared-source contact
+window cannot be attributed; do not claim exclusive input ownership. Each pen line
+(including failure-X lines) requires CurrentInk and fresh context before input;
+each eraser path requires PendingCleanup with the original checkpoint/context,
+unchanged toolbar/neighbor ring and the qualified viewport contract. Interim
+cleanup may retain owned ink; final cleanup must prove the entire corner clear.
+No baseline refresh, menu input, erasure broadening or retry is introduced.
+Review source and cross-build before a bounded native candidate run; helper success
+still requires positive mark/cleanup evidence, not just exit status.

@@ -282,6 +282,28 @@ mod tests {
             io.state.image.put_pixel(x, y, old);
         }
     }
+    #[test]
+    fn current_tool_partial_erasure_keeps_original_context_and_final_clear_gate() {
+        let mut io = current_io();
+        let mut lease = Lease::prepare_current(io.state.clone(), false)
+            .unwrap()
+            .unwrap();
+        assert!(lease.verify_current_erasure(&mut io).is_err());
+        lease.acquire(&mut io).unwrap();
+        io.state.image.put_pixel(720, 960, Luma([0]));
+        assert!(lease.verify_current_erasure(&mut io).is_err());
+        lease.prepare_cleanup(&mut io).unwrap();
+        lease.verify_current_erasure(&mut io).unwrap();
+        assert!(lease.finish_cleanup(&mut io).is_err());
+        io.state.image.put_pixel(720, 960, Luma([255]));
+        lease.verify_current_erasure(&mut io).unwrap();
+        lease.finish_cleanup(&mut io).unwrap();
+        io.state.image.put_pixel(685, 960, Luma([0]));
+        assert!(lease.verify_current_erasure(&mut io).is_err());
+        io.state.image = closed();
+        io.state.identity.visit = "other".into();
+        assert!(lease.verify_current_erasure(&mut io).is_err());
+    }
 
     fn fixture(bytes: &[u8]) -> GrayImage {
         image::load_from_memory(bytes).unwrap().to_luma8()
@@ -2364,6 +2386,15 @@ impl Lease {
         self.finish_cleanup_inner(io)
     }
     fn finish_cleanup_inner(&self, io: &mut impl StyleIo) -> Result<()> {
+        self.verify_cleanup_observation(io, true)
+    }
+    /// Before each owned rubber path, allow the same qualified redraw caused by
+    /// earlier erasure but preserve the original checkpoint and neighbor ring.
+    pub fn verify_current_erasure(&self, io: &mut impl StyleIo) -> Result<()> {
+        ensure!(self.recovery.version == 3, "No current-tool cleanup lease");
+        self.verify_cleanup_observation(io, false)
+    }
+    fn verify_cleanup_observation(&self, io: &mut impl StyleIo, require_clear: bool) -> Result<()> {
         ensure!(
             self.cleanup_pending() && !self.checkpoint_failed,
             "No valid pending cleanup checkpoint"
@@ -2393,10 +2424,20 @@ impl Lease {
         } else {
             before
         };
-        ensure!(
-            self.viewport.unchanged(reference, &state.image),
-            "Cleanup viewport changed"
-        );
+        let unchanged = if !require_clear && self.viewport == CleanupViewport::Blank {
+            // Pending owned paths can still contain ink between eraser strokes.
+            // The blank-page contract stays exact everywhere outside that ROI.
+            (0..1024).all(|y| {
+                (61..768).all(|x| {
+                    ((686..=759).contains(&x) && (922..=995).contains(&y))
+                        || reference.get_pixel(x, y).0[0].abs_diff(state.image.get_pixel(x, y).0[0])
+                            <= 8
+                })
+            })
+        } else {
+            self.viewport.unchanged(reference, &state.image)
+        };
+        ensure!(unchanged, "Cleanup viewport changed");
         if self.recovery.version == 3 {
             use crate::workflow::indicator::{BOTTOM, LEFT, RIGHT, TOP};
             ensure!(
@@ -2424,7 +2465,10 @@ impl Lease {
             );
         }
         ensure!(
-            crate::workflow::indicator::eligible(&image::DynamicImage::ImageLuma8(state.image)),
+            !require_clear
+                || crate::workflow::indicator::eligible(&image::DynamicImage::ImageLuma8(
+                    state.image
+                )),
             "Cleanup corner is not clear"
         );
         Ok(())
