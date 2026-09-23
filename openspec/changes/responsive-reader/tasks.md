@@ -14,6 +14,7 @@
 - [ ] 3.1 Extend reachable simulator timing/state/fault coverage; immediate/delayed/lost/duplicate/out-of-order/stale/wrong-owner signals and cancellation through production paths; exact positive/negative assertions, no duplicate input or history status switching.
 - [ ] 3.2 Run fmt/strictclippy/fulltests and both target builds; representative authorized real-model tests for integration acceptance.
 - [ ] 3.3 Run repeated native before/after ordinary and both nondefault slots, typical/slow, success/errors/history; verify pixels, neighbor ink, real settings and restoration.
+- [ ] 3.3a Directly resolve the REM32/REM8 indicator tool-switching regression: compare equivalent repeated ordinary Fine and nondefault primary/secondary marker workflows; report every lease's acquisition, actual original tip/color/width/slot restoration within cleanup, erasure/final verification, and total indicator-induced blocking without double-counting nested spans. Include success and failure indicators. Capture microbenchmarks and provider latency improvements cannot satisfy this gate.
 - [ ] 3.4 Assess budgets and availability honestly, document PaperPro native limits, resolve remaining dominant avoidable stalls before completion.
 - [ ] 3.5 Publish grouped evidence, re-read comments, independent exact-head review and required CI; sync/archive in same PR and verify merge/release.
 - [x] 3.6 Add concise AGENTS/workflow guidance for future Reader/Writer completion-driven sequencing with public/manual fallbacks; record REM35 preservation audit handoff.
@@ -25,3 +26,11 @@ native D-Bus observation limits, and proposed fallback decisions. Task1.4 stays
 open until required exceptions are validated. Task3.6 hands the AGENTS principle
 to the final REM35 integrated audit; it does not claim future features comply.
 No completion-wait optimization or performance/native acceptance is complete.
+
+User clarification: the roughly thirty-second delay specifically includes the
+additional status/error symbols switching pen/marker settings and restoring them.
+Keep REM9 open while large avoidable local blocking persists or repeated successful
+comparable full-workflow measurements remain missing. Preserve the end-to-end
+milestones (trigger release to useful visible feedback/request dispatch, provider
+spans separately, response to first visible answer, final character to tools ready),
+actual UI preferences, recovery journals, neighbor ink, and content/owner guards.

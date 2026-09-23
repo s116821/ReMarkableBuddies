@@ -254,3 +254,8 @@ or injected no-move result, exercising the workflow's fresh-source verification
 before failure marking. The shared wait tests establish production sequencing;
 native UI behavior, Linux observer timing and successful full Q&A remain separate
 gates. Do not quote virtual-clock values as tablet performance.
+
+`capture` now accepts `wrong_page` when the scenario contains another page. This
+returns that page's pixels without changing the modeled active page. The full
+workflow regression combines it with `next: no_move`: conflicting fresh pixels
+must stop before classification, further navigation, answer text or failure ink.

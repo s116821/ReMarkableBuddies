@@ -453,7 +453,16 @@ impl DeviceBackend for SimDevice {
                 details: Vec::new(),
             });
         }
-        let image = DynamicImage::ImageRgba8(state.pages[state.active].image());
+        let captured = if effect == Some(Effect::WrongPage) {
+            anyhow::ensure!(
+                state.pages.len() > 1,
+                "Wrong-page capture needs another page"
+            );
+            (state.active + 1) % state.pages.len()
+        } else {
+            state.active
+        };
+        let image = DynamicImage::ImageRgba8(state.pages[captured].image());
         let h = image.height();
         let th = h * 2 / 5;
         let details = [0, (h - th) / 2, h - th]

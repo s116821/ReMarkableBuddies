@@ -415,10 +415,12 @@ impl<M: LLMEngine> Orchestrator<M> {
         self.workflow.delay(std::time::Duration::from_millis(800));
 
         let unchanged = self.workflow.verify_navigation_to(&original_img)?;
-        anyhow::ensure!(
-            completion != crate::device::backend::NavigationCompletion::NoMovement || unchanged,
-            "Unconfirmed source after navigation reported no movement; classification stopped"
-        );
+        if completion == crate::device::backend::NavigationCompletion::NoMovement && !unchanged {
+            self.workflow.invalidate_captured_viewport();
+            anyhow::bail!(
+                "Unconfirmed source after navigation reported no movement; classification stopped"
+            );
+        }
         if unchanged {
             info!("No page movement detected; drawing X on original");
             self.workflow.draw_failure(Failure::NoSuccessor)?;

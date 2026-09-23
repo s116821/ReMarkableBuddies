@@ -295,7 +295,9 @@ impl Scenario {
                     ),
                     Effect::Lag => fault.operation == Operation::HistorySnapshot,
                     Effect::Partial => fault.operation == Operation::HistoryMutation,
-                    Effect::WrongPage => fault.operation == Operation::HistorySnapshot,
+                    Effect::WrongPage =>
+                        fault.operation == Operation::HistorySnapshot
+                            || (fault.operation == Operation::Capture && self.pages.len() > 1),
                     Effect::Unavailable => matches!(
                         fault.operation,
                         Operation::HistorySnapshot | Operation::StatusStyleBegin

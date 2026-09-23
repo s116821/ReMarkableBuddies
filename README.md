@@ -253,8 +253,10 @@ result is evidence of refusal, not a successful Q&A or permission to loosen chec
 
 For no-model readiness investigation, build `--example readiness_probe`. With the
 normal service stopped, `./readiness_probe current NEW_OUTPUT_DIR` observes the
-current page; `next` instead sends one real forward swipe before diagnostic
-navigation/classification captures. Neither writes answer or status ink. It calls
+current page; `next NEW_OUTPUT_DIR EXPECTED_PAGE_UUID` or
+`previous NEW_OUTPUT_DIR EXPECTED_PAGE_UUID` sends one real swipe before diagnostic
+navigation/classification captures and verifies the explicitly expected target.
+No mode writes answer or status ink. It calls
 the production pre-lease readiness check, saving its result and bracketed source
 and classifier ownership. Debug refusal artifacts in
 `/tmp/reader-buddy-readiness-{before,rejected}.{png,json}` are the exact compared

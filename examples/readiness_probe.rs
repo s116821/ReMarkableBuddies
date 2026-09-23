@@ -1,8 +1,8 @@
 //! Bounded no-model navigation/readiness diagnostic. Stop the normal service.
-//! `next` sends one real page swipe; neither mode writes answer or status ink.
+//! `next`/`previous` sends one real page swipe; no mode writes answer or status ink.
 use anyhow::{ensure, Result};
 use remarkable_reader_buddy::{
-    device::backend::{DeviceBackend, RealDevice},
+    device::backend::{DeviceBackend, NavigationCompletion, RealDevice},
     workflow::xochitl_integration::NavigationDirection,
     TriggerCorner, Workflow,
 };
@@ -31,8 +31,9 @@ fn main() -> Result<()> {
     .init();
     let args: Vec<_> = std::env::args().skip(1).collect();
     ensure!(
-        args.len() == 2 && matches!(args[0].as_str(), "current" | "next"),
-        "Usage: readiness_probe current|next NEW_OUTPUT_DIR"
+        (args.len() == 2 && args[0] == "current")
+            || (args.len() == 3 && matches!(args[0].as_str(), "next" | "previous")),
+        "Usage: readiness_probe current NEW_OUTPUT_DIR | next|previous NEW_OUTPUT_DIR EXPECTED_PAGE_UUID"
     );
     let output = Path::new(&args[1]);
     ensure!(!output.exists(), "Output directory must be new");
@@ -45,8 +46,38 @@ fn main() -> Result<()> {
         "Owner changed during source capture"
     );
     fs::write(output.join("source.png"), &source.png)?;
-    if args[0] == "next" {
-        device.navigate(NavigationDirection::Next)?;
+    let mut completion = None;
+    if args[0] != "current" {
+        let result = device.navigate(if args[0] == "next" {
+            NavigationDirection::Next
+        } else {
+            NavigationDirection::Previous
+        });
+        let destination = owner();
+        fs::write(
+            output.join("navigation.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "source_owner": &source_owner, "expected_target": args[2],
+                "completion": result.as_ref().ok().map(|value| format!("{value:?}")),
+                "error": result.as_ref().err().map(ToString::to_string),
+                "observed_owner": destination.as_ref().ok(),
+                "owner_error": destination.as_ref().err().map(ToString::to_string),
+                "meaning": "Metadata observation after navigation; inspect captured pixels independently"
+            }))?,
+        )?;
+        let result = result?;
+        ensure!(
+            result == NavigationCompletion::Settled,
+            "Diagnostic destination did not establish verified-layout readiness: {result:?}"
+        );
+        completion = Some(result);
+        let destination = destination?;
+        ensure!(
+            destination.page == args[2]
+                && destination.document == source_owner.document
+                && destination.session == source_owner.session,
+            "Diagnostic reached an unexpected target"
+        );
         device.delay(Duration::from_millis(800));
         let moved = device.capture()?;
         fs::write(output.join("after-navigation.png"), &moved.png)?;
@@ -82,6 +113,7 @@ fn main() -> Result<()> {
     let report = serde_json::json!({
         "version": env!("READER_BUDDY_VERSION"), "mode": args[0],
         "source_owner": source_owner, "classifier_owner": classifier_owner,
+        "expected_target": args.get(2), "navigation_completion": completion.map(|value| format!("{value:?}")),
         "classification": format!("{classification:?}"),
         "readiness": match &result { Ok(Some(_)) => "ready", Ok(None) => "unavailable", Err(_) => "error" },
         "error": result.as_ref().err().map(ToString::to_string),

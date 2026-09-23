@@ -61,6 +61,48 @@ fn circle_and_highlight_tags_follow_the_selection_not_the_question() {
 }
 
 #[test]
+fn no_movement_with_conflicting_pixels_never_advances_to_classification_or_output() {
+    use remarkable_reader_buddy::simulator::scenario::{Effect, Fault};
+    let mut scenario = load("forward-no-movement");
+    scenario.expect = Default::default();
+    scenario.faults.push(Fault {
+        operation: Operation::Capture,
+        call: 3,
+        effect: Effect::WrongPage,
+    });
+    let run = execute(&scenario, &root()).unwrap();
+    assert_eq!(run.report.model_calls, 2);
+    assert_eq!(run.report.errors.len(), 1);
+    assert!(
+        run.report.errors[0].contains("Unconfirmed source after navigation reported no movement")
+    );
+    assert_eq!(
+        run.report
+            .trace
+            .iter()
+            .filter(|event| event.action == "capture")
+            .count(),
+        3
+    );
+    assert_eq!(
+        run.report
+            .trace
+            .iter()
+            .filter(|event| event.action == "next")
+            .count(),
+        1
+    );
+    assert!(!run
+        .report
+        .trace
+        .iter()
+        .any(|event| matches!(event.action.as_str(), "previous" | "text")));
+    assert!(run.report.pages.iter().all(|page| page.text.is_empty()
+        && page.failure_codes.is_empty()
+        && !page.indicator_visible));
+}
+
+#[test]
 fn invalid_successor_returns_without_attempting_an_activity_mark() {
     let mut scenario = load("occupied-return");
     // Keep printed content, but make its status corner eligible: the old ordering

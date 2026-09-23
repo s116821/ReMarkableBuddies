@@ -221,6 +221,11 @@ impl Workflow {
         self.indicator_cleanup_failed
     }
 
+    /// Conflicting navigation evidence cannot authorize even a failure mark.
+    pub(super) fn invalidate_captured_viewport(&mut self) {
+        self.indicator_eligible = false;
+    }
+
     pub fn begin_iteration(&mut self) -> Result<()> {
         self.invalidate_history();
         anyhow::ensure!(
