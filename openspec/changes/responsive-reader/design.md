@@ -44,6 +44,20 @@ through this shared production wait. Repeated identical overlay frames are not
 ready. Keep the exact old-pair strict active-lease refusal regression.
 
 ## Safety, regression and native gates
+The owned-image implementation converts each fresh native frame once. Encoded
+workflow captures serialize that image once for native strips and once after
+normalization; status observations and cleanup checks consume normalized owned
+pixels directly, without PNG encoding/decoding. Both encoded buffers are cleared
+before a capture attempt and published together only after both encodings succeed.
+PID/allocation discovery still occurs for every capture. Status owner/session
+bracketing and active-lease pixel guards are unchanged. The old codec/conversion
+path remains test-only as an exact native/overview oracle across all three layouts.
+The screenshot diagnostic's optional --image-only saves outside capture.total;
+that additional artifact serialization is not part of the status capture timing.
+New capture.raw_conversion and capture.native_png phases are disjoint; older
+capture.native_png included conversion. Compare totals or appropriately described
+phases, never sum nested historical spans as if they were exclusive.
+
 Pure conversion tests compare the old codec pipeline and direct pixels across modern RM2BGRA (all neutral values, colored samples, random patterns, exact dimensions), legacy RM2 curves/rotation/flip and Paper ProRGBA including alpha. Keep malformed/truncated/ambiguous allocation failures. Runtime model/overview/detail images must decode to identical pixels; byte-level compression differences are not image differences. Test any failure leaves no stale usable capture. Existing native-frame fixtures remain strict; do not relabel synthesized input as human handwriting.
 
 Simulator tests preserve actual workflow routing, exact output/delimiters, negative no-write/navigation policy, history ownership and modeled operation costs. Virtual elapsed time is not native latency. Add delayed/stale/UI-changing captures and failures only through reachable production paths; preserve all rejected fixtures. Meaningful full fmt/clippy/tests and both target builds precede merge.

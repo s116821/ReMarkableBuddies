@@ -65,8 +65,12 @@ native RM2 dimensions (modern and rotated legacy), Paper Pro dimensions, gray
 levels, RGBA/alpha, upscaling and equal dimensions; invalid formats/empty images
 refuse. Raw conversion/orientation, both PNG encodes, allocation discovery and
 owner guards remain unchanged in this incremental step. No native speedup is
-claimed before repeated captures on the new build. Full direct-image status and
-serialization elimination remain future work in this change.
+claimed from source checks alone; baseline.md records the subsequent three native
+captures and their limits. The next owned-image implementation removes the second
+native conversion/encode/decode from workflow capture and all PNG round trips
+from status observation. Conversion and native serialization now have separate
+spans. The old codec path remains a test-only oracle; full native integration and
+repeated performance acceptance remain open.
 
 Debug logs emit fixed `timing` fields: process ID, run ID, operation ID, phase,
 begin/end, monotonic microseconds and elapsed microseconds. An iteration gets a

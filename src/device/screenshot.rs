@@ -86,6 +86,50 @@ impl Screenshot {
 
     pub fn take_screenshot(&mut self) -> Result<()> {
         let _timing = crate::measurement::Span::new("capture.total");
+        let native = self.capture_fresh(Self::capture_native)?;
+        let native_data = Self::serialize(&native, "capture.native_png")?;
+        let normalized = Self::normalize_timed(&native)?;
+        let data = Self::serialize(&normalized, "capture.overview_png")?;
+        // Publish only a complete capture. A failed attempt cannot expose old
+        // overview pixels paired with a different native frame.
+        self.native_data = native_data;
+        self.data = data;
+        Ok(())
+    }
+
+    /// Fresh owned pixels for guards that do not consume encoded images.
+    pub fn take_image(&mut self) -> Result<image::DynamicImage> {
+        let _timing = crate::measurement::Span::new("capture.total");
+        Self::normalize_timed(&self.capture_fresh(Self::capture_native)?)
+    }
+
+    fn capture_fresh(
+        &mut self,
+        read: impl FnOnce(&Self) -> Result<image::DynamicImage>,
+    ) -> Result<image::DynamicImage> {
+        self.data.clear();
+        self.native_data.clear();
+        read(self)
+    }
+
+    fn normalize_timed(native: &image::DynamicImage) -> Result<image::DynamicImage> {
+        let _timing = crate::measurement::Span::new("capture.resize");
+        Self::normalize_native(native)
+    }
+
+    fn serialize(image: &image::DynamicImage, phase: &'static str) -> Result<Vec<u8>> {
+        let _timing = crate::measurement::Span::new(phase);
+        let mut bytes = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut bytes).write_image(
+            image.as_bytes(),
+            image.width(),
+            image.height(),
+            image.color().into(),
+        )?;
+        Ok(bytes)
+    }
+
+    fn capture_native(&self) -> Result<image::DynamicImage> {
         // Find xochitl's process
         debug!("screenshot: finding pid");
         let pid = Self::find_xochitl_pid()?;
@@ -102,14 +146,53 @@ impl Screenshot {
         // Read the framebuffer data
         debug!("screenshot: reading data");
         let screenshot_data = self.read_framebuffer(&pid, skip_bytes)?;
-        self.native_data = self.encode_png(&screenshot_data)?;
-        // Process the image data (transpose, color correction, etc.)
-        debug!("screenshot: processing image");
-        let processed_data = self.process_image(screenshot_data)?;
+        self.native_image(&screenshot_data)
+    }
 
-        self.data = processed_data;
-
-        Ok(())
+    fn native_image(&self, raw: &[u8]) -> Result<image::DynamicImage> {
+        let _timing = crate::measurement::Span::new("capture.raw_conversion");
+        anyhow::ensure!(
+            raw.len()
+                == self.screen_width() as usize
+                    * self.screen_height() as usize
+                    * self.bytes_per_pixel(),
+            "Invalid framebuffer length"
+        );
+        if self.device_model == DeviceModel::RemarkablePaperPro {
+            return Ok(image::DynamicImage::ImageRgba8(
+                image::RgbaImage::from_raw(self.screen_width(), self.screen_height(), raw.to_vec())
+                    .ok_or_else(|| anyhow::anyhow!("Invalid RGBA framebuffer"))?,
+            ));
+        }
+        if self.rm2_bgra {
+            let pixels = raw
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|pixel| {
+                    ((77 * u32::from(pixel[2])
+                        + 150 * u32::from(pixel[1])
+                        + 29 * u32::from(pixel[0])
+                        + 128)
+                        >> 8) as u8
+                })
+                .collect();
+            return Ok(image::DynamicImage::ImageLuma8(
+                GrayImage::from_raw(1404, 1872, pixels)
+                    .ok_or_else(|| anyhow::anyhow!("Invalid BGRA framebuffer"))?,
+            ));
+        }
+        let pixels = raw
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pixel| Self::apply_curves(pixel[1]))
+            .collect();
+        let image = GrayImage::from_raw(self.screen_width(), self.screen_height(), pixels)
+            .ok_or_else(|| anyhow::anyhow!("Invalid legacy framebuffer"))?;
+        Ok(image::DynamicImage::ImageLuma8(
+            image::imageops::flip_horizontal(&image::imageops::rotate270(&image)),
+        ))
     }
 
     fn find_xochitl_pid() -> Result<String> {
@@ -287,6 +370,7 @@ impl Screenshot {
         Ok(buffer)
     }
 
+    #[cfg(test)]
     fn process_image(&self, data: Vec<u8>) -> Result<Vec<u8>> {
         let _timing = crate::measurement::Span::new("capture.overview");
         // Encode the raw data to PNG
@@ -334,6 +418,7 @@ impl Screenshot {
         Ok(resized_png_data)
     }
 
+    #[cfg(test)]
     fn encode_png(&self, raw_data: &[u8]) -> Result<Vec<u8>> {
         let _timing = crate::measurement::Span::new("capture.native_png");
         match self.device_model {
@@ -388,6 +473,7 @@ impl Screenshot {
         }
     }
 
+    #[cfg(test)]
     fn encode_png_rm2(&self, raw_data: &[u8]) -> Result<Vec<u8>> {
         anyhow::ensure!(
             raw_data.len() == 1404 * 1872 * self.bytes_per_pixel(),
@@ -452,6 +538,7 @@ impl Screenshot {
         Ok(png_data)
     }
 
+    #[cfg(test)]
     fn encode_png_rmpp(&self, raw_data: &[u8]) -> Result<Vec<u8>> {
         let _serialize = crate::measurement::Span::new("capture.native_serialize");
         let width = self.screen_width();
@@ -513,6 +600,80 @@ impl Screenshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_fresh_capture_invalidates_both_previous_encoded_views() {
+        let mut screenshot = Screenshot {
+            data: vec![1, 2, 3],
+            native_data: vec![4, 5, 6],
+            device_model: DeviceModel::Remarkable2,
+            rm2_bgra: true,
+        };
+        assert!(screenshot
+            .capture_fresh(|_| anyhow::bail!("read failed"))
+            .is_err());
+        assert!(screenshot.get_image_data().is_empty());
+        assert!(screenshot.detail_images_base64().is_err());
+        screenshot.data = vec![1];
+        screenshot.native_data = vec![2];
+        assert!(screenshot
+            .capture_fresh(|capture| capture.native_image(&[0; 4]))
+            .is_err());
+        assert!(screenshot.get_image_data().is_empty());
+        assert!(screenshot.detail_images_base64().is_err());
+    }
+
+    #[test]
+    fn owned_pixels_match_previous_png_pipeline_for_all_native_layouts() {
+        for (device_model, rm2_bgra) in [
+            (DeviceModel::Remarkable2, true),
+            (DeviceModel::Remarkable2, false),
+            (DeviceModel::RemarkablePaperPro, false),
+        ] {
+            let screenshot = Screenshot {
+                data: vec![],
+                native_data: vec![],
+                device_model,
+                rm2_bgra,
+            };
+            let len = screenshot.screen_width() as usize
+                * screenshot.screen_height() as usize
+                * screenshot.bytes_per_pixel();
+            // Vary all channels (including alpha and both legacy bytes), spatial
+            // orientation and every grayscale curve boundary across a full frame.
+            let raw: Vec<u8> = (0..len)
+                .map(|i| {
+                    let n = (i as u32).wrapping_mul(1664525).wrapping_add(1013904223);
+                    (n ^ (n >> 13) ^ (n >> 24)) as u8
+                })
+                .collect();
+            let old_native = screenshot.encode_png(&raw).unwrap();
+            let oracle = image::load_from_memory(&old_native).unwrap();
+            let actual = screenshot.native_image(&raw).unwrap();
+            assert_eq!(
+                (actual.width(), actual.height(), actual.color()),
+                (oracle.width(), oracle.height(), oracle.color())
+            );
+            assert_eq!(actual.as_bytes(), oracle.as_bytes());
+            // Byte-identical native serialization also preserves the existing
+            // overlapping-strip consumer's input, including Paper Pro alpha.
+            assert_eq!(
+                Screenshot::serialize(&actual, "test.native").unwrap(),
+                old_native
+            );
+            let overview = Screenshot::normalize_native(&actual).unwrap();
+            assert_eq!(
+                Screenshot::serialize(&overview, "test.overview").unwrap(),
+                screenshot.process_image(raw.clone()).unwrap()
+            );
+            for bad in [&raw[..0], &raw[..len - 1]] {
+                assert!(screenshot.native_image(bad).is_err());
+            }
+            let mut oversized = raw;
+            oversized.push(0);
+            assert!(screenshot.native_image(&oversized).is_err());
+        }
+    }
 
     #[test]
     fn direct_nearest_matches_library_pixels_and_alpha() {

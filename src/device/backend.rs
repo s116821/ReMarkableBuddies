@@ -326,8 +326,7 @@ impl DeviceBackend for RealDevice {
             self.pen.erase_path_screen(&stroke.points())?;
         }
         std::thread::sleep(Duration::from_millis(100));
-        self.status_screenshot.take_screenshot()?;
-        let clean = image::load_from_memory(self.status_screenshot.get_image_data())?;
+        let clean = self.status_screenshot.take_image()?;
         anyhow::ensure!(
             crate::workflow::indicator::eligible(&clean),
             "Native status cleanup left marks or the corner changed; further input stopped"
@@ -371,8 +370,7 @@ impl super::status_style::StyleIo for RealDevice {
         let settings = Path::new("/home/root/.config/remarkable/xochitl.conf");
         let session = native_page::xochitl_session(Path::new("/proc"))?;
         let owner = native_page::observed_owner(root, settings, session.clone())?;
-        self.status_screenshot.take_screenshot()?;
-        let image = image::load_from_memory(self.status_screenshot.get_image_data())?.to_luma8();
+        let image = self.status_screenshot.take_image()?.to_luma8();
         let mut bytes = Vec::new();
         std::fs::File::open(root.join(format!("{}.content", owner.document)))?
             .take(1024 * 1024 + 1)

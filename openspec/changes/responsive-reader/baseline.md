@@ -140,3 +140,29 @@ Successful repeated ordinary/nondefault primary/secondary runs, slow/error/histo
 coverage, visible timing and observer overhead, current budget review, completion
 sequencing, exact-pixel optimization, and all final delivery gates remain open.
 No budget reduction or successful-Q&A waiver follows from these measurements.
+
+### Read-only eligibility diagnosis, source6e1b2c4
+The exact production classifier/decoder was exercised without a model call or
+threshold change. ARM diagnostic SHA256
+`1d041d1c6bf6b90aa28ac3de6cc2a5b737e956ca33fab956a8e4332268a9b422`.
+Original notes native input SHA256
+`c17116581603fd301152e833ee5a17d09506e8ae66af9c9efda169df4b9ec897`
+classified ExistingQA; disposable notes input
+`ab2fdd38ddcac229a3256de83a1891334c8aa79cd27304c87f24e047b7752ebc`
+classified Invalid. Both used the unchanged saved reference
+`6faae9628f71287149719e8afb2995a667628ce783b9a3e37ae8b48a1102a323`.
+Each capture was bracketed by equal session, observed document/page/visit and
+reference bytes. Session30974:100545844; original document46e07fc5-a3b5-4a0d-a71c-804a999fd2c7
+visit1:75; disposable documente7f661f1-db6f-4dfc-854a-b38aff7f75de visit1:110;
+both pagef39ae285-3e0c-43dd-b27c-866dff7a24cd. Both images were visually inspected.
+
+An offline controlled replay of the exact disposable input with its own top150
+rows as reference classified ExistingQA. Only the reference changed. This
+establishes the saved-reference mismatch as sufficient to explain the current
+rejection. It does not capture the earlier failed iteration's actual input or
+reproduce workflow capture_clean/settling, and is not semantic header recognition.
+The next successful integration fixture must have a correctly configured reference
+or a blank successor; do not broaden eligibility in this performance change.
+Original page restored visually; both notes hashes, header and installed runtime
+unchanged. Service active PID1597, NRestarts0, no active recovery journal. Diagnostic
+source passed strict all-target clippy and independent source review; no paid retry.

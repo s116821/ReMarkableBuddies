@@ -226,6 +226,12 @@ cross build --release --target armv7-unknown-linux-gnueabihf --example screensho
 ./reader_once
 ```
 
+For capture profiling, `./screenshot /tmp/page.png --image-only` uses the fresh
+owned-pixel path used by status guards. Its diagnostic PNG save occurs after the
+`capture.total` timing span; compare capture timings rather than whole command
+duration when assessing this path. Normal screenshot mode retains encoded native
+detail and overview output.
+
 The old `--input-png` and `--save-screenshot` flags were unused and are removed.
 `--no-draw` did not provide a working simulator and is also removed. Use
 `--simulate` for the maintained [local simulator](docs/simulator.md), or bounded
