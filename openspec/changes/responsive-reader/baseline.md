@@ -476,3 +476,21 @@ all widths/colors/slots, maximum eraser envelope, continuous auxiliary paths or
 production lease correctness. Local artifacts: current-tool-thick* in outputs/rem9.
 Original Fine/Black/Medium, original document and notes/header/runtime hashes were
 restored and verified; installed service activePID8419,NRestarts0, no active journal.
+
+Second current-tool calibration batch (same e4b263a helper/firmware/owner): primary
+Black/Thin segmented pattern192 darkpixels bounds706..736/942..973; secondary
+Black/Thick551pixels bounds705..737/941..974. Both clear after same-path physical
+rubber erasure, actual pen tiles exact before/active/final, owner reports equal.
+Actual menus verify original sizes after erasure. Across both batches all122
+recognized preexisting Lines match the initial source; unknown-record limit remains.
+Primary White/Medium closed tile differs160pixels>8 from Black reference and is
+rejected without drawing. Secondary native Fine tile differs131pixels>8 from the
+modeled shifted primary reference; preserve this false-refusal regression with a
+separate exact secondary reference, not a looser threshold. Thin primary tile is
+exact to original Black/Medium reference. OriginalprimaryFineBlackMedium and
+secondaryBallpointBlackMedium (also temporarysecondaryFineBlackMedium) restored
+visually; original46e/f39/header/runtime hashes match, serviceactivePID8743,
+NRestarts0, no active journal/writer. Full188 hosttests pass on8756945. These are
+segmented calibration cases, not V3 production lease/full Q&A acceptance; continuous
+auxiliary paths, maximum eraser envelope, notes chrome and remaining widths/slots
+still require verification before admission.

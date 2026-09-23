@@ -140,7 +140,33 @@ mod tests {
                 secondary.put_pixel(x, y, Luma([255]));
             }
         }
-        assert_eq!(closed_black_fineliner(&secondary), Some("secondary"));
+        assert_eq!(closed_black_fineliner(&secondary), None);
+        for (bytes, expected) in [
+            (
+                include_bytes!("../../tests/fixtures/status-style/current-secondary-fine.png")
+                    .as_slice(),
+                Some("secondary"),
+            ),
+            (
+                include_bytes!("../../tests/fixtures/status-style/current-thin-fine.png")
+                    .as_slice(),
+                Some("primary"),
+            ),
+            (
+                include_bytes!("../../tests/fixtures/status-style/current-white-fine.png")
+                    .as_slice(),
+                None,
+            ),
+        ] {
+            let mut state = io.state.image.clone();
+            replace(
+                &mut state,
+                &image::load_from_memory(bytes).unwrap().to_luma8(),
+                0,
+                0,
+            );
+            assert_eq!(closed_black_fineliner(&state), expected);
+        }
     }
     #[test]
     fn current_tool_journal_and_cleanup_issue_no_menu_input() {
@@ -1661,15 +1687,27 @@ fn closed_black_fineliner(image: &GrayImage) -> Option<&'static str> {
             .expect("checked native Fineliner fixture")
             .to_luma8()
     });
+    static SECONDARY: std::sync::LazyLock<GrayImage> = std::sync::LazyLock::new(|| {
+        image::load_from_memory(include_bytes!(
+            "fixtures/current-secondary-black-fineliner.png"
+        ))
+        .expect("checked native secondary Fineliner fixture")
+        .to_luma8()
+    });
     let ui = controls(image)?;
     if ui.menu {
         return None;
     }
     let offset = if ui.slot == "secondary" { 62 } else { 0 };
+    let reference = if ui.slot == "secondary" {
+        &*SECONDARY
+    } else {
+        &*REFERENCE
+    };
     (61..123)
         .all(|y| {
             (0..61).all(|x| {
-                image.get_pixel(x, y + offset).0[0].abs_diff(REFERENCE.get_pixel(x, y - 61).0[0])
+                image.get_pixel(x, y + offset).0[0].abs_diff(reference.get_pixel(x, y - 61).0[0])
                     <= 8
             })
         })

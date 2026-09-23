@@ -11,3 +11,12 @@ The46 changed pixels at20..40/391..405 are the PDF undo icon enabling. Tests pla
 these native toolbar crops on a modeled blank canvas; that composition is not a
 native full-page sample or notes-page chrome proof. Full original images remain
 in the local current-tool-thick evidence; no document content is in these crops.
+
+current-secondary-fine.png, current-thin-fine.png and current-white-fine.png are
+exact grayscale x0..60 crops of secondary Black/Thick, primary Black/Thin, and
+primary White/Medium closed toolbars in the2026-09-23 e4b263a manual calibration.
+Each actual setting was visually verified in its menu before closing. The native
+secondary tile differs from merely translating the primary tile (131pixels>8),
+so a separate positive native reference replaces that modeled assumption. White
+is a negative (160tilepixels>8). Model tests place these crops on blank canvas;
+no native whole-page or general tool-admission claim follows.
