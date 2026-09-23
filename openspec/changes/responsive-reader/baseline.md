@@ -286,3 +286,26 @@ Disposable answer changed as authorized, and source native bytes also changed
 after indicator drawing/erasure; byte equality is not claimed for either.
 Repeated comparable success/error/nondefault-slot tests, visible timing evidence,
 neighbor ink/UI verification and remaining dominant stalls are still open.
+
+### No-model append control, 8443818
+The explicit append probe (SHA256
+`dbf9aa614951dbb893895862965ce54d0e3bd19f6ed0f5a511a3cb5fa3861982`,
+ARM build1m22) ran once after reopening the disposable answer page. Selected,
+before-body, immediate-after-body, before-render and immediate-after-render native
+snapshots all had1227 characters/33 paragraphs. Final persisted content had1365
+characters/38 paragraphs and exactly equaled the observed before-render content
+plus the138-character requested block. All identities matched visit1:118 in the
+same document/page/session; the visible block and both delimiters were inspected.
+Persistence waited10.003155s. This control has no navigation or status ink, and did
+not reproduce the nine extra newlines of the prior normal iteration.
+
+Exact text readiness is **not history arming**. The recorded native root layout
+was unchanged, but scene-record comparison differed in PageInfo's first counter
+(3 to4; the local rmscene0.8 parser names it loads_count). Production History.arm
+therefore remains conservative. No field was ignored or normalized. Its semantic
+significance requires controlled evidence before changing ownership comparison.
+The small right-side dash visible after scrolling also exists in the prior native
+fixture as a two-point stroke; its changed coordinate representation is not proof
+of either damaged or preserved ink. Full semantic/visual preservation remains a
+gate. Original document/header/runtime were restored and visually/hash verified,
+service activePID2976,NRestarts0,no journal. No live model call in this control.

@@ -104,6 +104,8 @@ mod tests {
         canvas: Option<GrayImage>,
         fail_cleanup_checkpoint: bool,
         clock: Duration,
+        observations: usize,
+        change_style_at_observation: Option<usize>,
     }
     impl Model {
         fn new() -> Self {
@@ -130,6 +132,8 @@ mod tests {
                 canvas: None,
                 fail_cleanup_checkpoint: false,
                 clock: Duration::ZERO,
+                observations: 0,
+                change_style_at_observation: None,
             }
         }
     }
@@ -169,6 +173,11 @@ mod tests {
             Ok(())
         }
         fn observe(&mut self) -> Result<Observation> {
+            self.observations += 1;
+            if self.change_style_at_observation == Some(self.observations) {
+                self.prefs
+                    .insert("LastFinelinerv2Color".into(), "Blue".into());
+            }
             let mut image = self.canvas.clone().unwrap_or_else(closed);
             replace(
                 &mut image,
@@ -936,8 +945,34 @@ mod tests {
         let count = io.count;
         lease.restore(&mut io).unwrap();
         assert_eq!(count, io.count);
+        // Previously13. No input occurs between the consolidated property
+        // decisions; transition/cleanup verification still uses fresh captures.
+        assert_eq!(io.observations, 8);
         assert_eq!(io.prefs, original);
         assert!(!io.menu);
+    }
+
+    #[test]
+    fn changed_temporary_style_is_rejected_before_closing_menu() {
+        let mut io = Model::new();
+        for (key, value) in [
+            ("LastActiveTool", "primary"),
+            ("LastPen", "Finelinerv2"),
+            ("LastFinelinerv2Color", "Black"),
+            ("LastFinelinerv2Size", "2"),
+        ] {
+            io.prefs.insert(key.into(), value.into());
+        }
+        let mut lease = Lease::prepare(io.observe().unwrap(), false)
+            .unwrap()
+            .unwrap();
+        // First capture before closing, after the captured original settings.
+        io.change_style_at_observation = Some(6);
+        let error = lease.acquire(&mut io).unwrap_err();
+        assert!(error.to_string().contains("Temporary style not verified"));
+        assert_eq!(io.count, 1); // only opened the menu; no close or drawing
+        assert!(io.menu);
+        assert_eq!(lease.recovery.original_fine, Some((0, 1)));
     }
 
     #[test]
@@ -1591,7 +1626,13 @@ impl Lease {
         point: (u32, u32),
         expected: impl Fn(&Controls) -> bool,
     ) -> Result<()> {
-        self.observe(io)?;
+        let (_, before) = self.observe(io)?;
+        if phase == Phase::CloseForDrawing {
+            ensure!(
+                Self::fine_controls(&before)? == (0, 1),
+                "Temporary style not verified before closing"
+            );
+        }
         let m = &mut self.recovery.mutations;
         match phase {
             Phase::SelectPrimary | Phase::RestoreSelectPrimary | Phase::RestoreSlot => {
@@ -1642,7 +1683,7 @@ impl Lease {
         result
     }
     fn primary_menu(&mut self, io: &mut impl StyleIo, restoring: bool) -> Result<()> {
-        let (_, ui) = self.observe(io)?;
+        let (_, mut ui) = self.observe(io)?;
         if ui.slot != "primary" {
             ensure!(!ui.menu, "Unexpected secondary menu");
             self.transition(
@@ -1655,8 +1696,10 @@ impl Lease {
                 (30, 90),
                 |u| u.slot == "primary" && !u.menu,
             )?;
+            // The slot changed: never reuse the pre-input observation.
+            ui = self.observe(io)?.1;
         }
-        if !self.observe(io)?.1.menu {
+        if !ui.menu {
             self.transition(
                 io,
                 if restoring {
@@ -1672,6 +1715,9 @@ impl Lease {
     }
     fn fine(&self, io: &mut impl StyleIo) -> Result<(usize, usize)> {
         let (_, ui) = self.observe(io)?;
+        Self::fine_controls(&ui)
+    }
+    fn fine_controls(ui: &Controls) -> Result<(usize, usize)> {
         ensure!(
             ui.slot == "primary" && ui.grid == Some(1),
             "Fineliner menu not selected"
@@ -1693,23 +1739,29 @@ impl Lease {
     }
     pub fn acquire(&mut self, io: &mut impl StyleIo) -> Result<()> {
         self.primary_menu(io, false)?;
-        let (_, ui) = self.observe(io)?;
+        let (_, mut ui) = self.observe(io)?;
         self.recovery.original_grid = Some(ui.grid.context("Missing actual primary tool grid")?);
         if ui.grid != Some(1) {
             self.transition(io, Phase::SelectFine, GRID[1], |u| u.grid == Some(1))?;
+            ui = self.observe(io)?.1;
         }
-        self.recovery.original_fine = Some(self.fine(io)?);
-        if self.known_fine(io)?.0 != 0 {
+        let mut current = Self::fine_controls(&ui)?;
+        self.recovery.original_fine = Some(current);
+        // These are decisions from the same fresh menu, without intervening
+        // device input, callback or checkpoint. A mutation requires a new read.
+        if current.0 != 0 {
             self.transition(io, Phase::SetColor, PALETTE[0], |u| {
                 u.fine.is_some_and(|f| f.0 == 0)
             })?;
+            current = self.known_fine(io)?;
         }
-        if self.known_fine(io)?.1 != 1 {
+        if current.1 != 1 {
             self.transition(io, Phase::SetWidth, WIDTHS[1], |u| {
                 u.fine.is_some_and(|f| f.1 == 1)
             })?;
         }
-        ensure!(self.fine(io)? == (0, 1), "Temporary style not verified");
+        // transition checks the exact temporary style in its fresh pre-input
+        // observation, then verifies the closed primary slot after the press.
         self.transition(io, Phase::CloseForDrawing, (30, 90), |u| {
             !u.menu && u.slot == "primary"
         })
