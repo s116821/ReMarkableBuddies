@@ -46,3 +46,7 @@ Normal Q&A SHALL remain available when optional feedback is suppressed.
 #### Scenario: Missing or unknown trigger overlay
 - **WHEN** the trigger overlay is positively absent or its layout cannot be qualified
 - **THEN** absence emits no dismissal input, while unknown layout fails closed; no guessed or repeated tap occurs.
+
+#### Scenario: Discovery candidate vanishes during trigger observation
+- **WHEN** a trigger observation fails with the typed verified-unmapped discovery-header EIO
+- **THEN** at most one complete fresh read-only retry is allowed within500ms and the overall5s dismissal deadline, with the same retained input observer and unchanged pinned owner/session/native bytes; all other errors or guard changes refuse, and no tap is repeated.

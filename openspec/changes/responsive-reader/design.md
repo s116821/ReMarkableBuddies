@@ -778,3 +778,26 @@ refuse. Boundary tests disclose what below-threshold synthetic residue accepts;
 actual open/closed and altered-tool positives remain separate. Keep broader
 popup/language/firmware coverage unclaimed. The release-observed timing span is
 now confined to its own scope before any dismissal work.
+
+### Bounded trigger observation recovery after dbf5609
+
+The native diagnostic delivered one verified owned tap, then refused because an
+RM2 discovery candidate vanished during the post-tap allocation-header read.
+Extend the existing capture_recovery policy only to NativeTriggerDismiss read-only
+observations. Retain the SAME InputObserver and cancellation latch, the initial
+owner/session/native-byte baseline and the encompassing5s dismissal deadline.
+The existing stricter500ms observation budget and maximum2 complete fresh capture
+attempts apply, including guards and deadline rejection after capture. Only the
+typed verified-unmapped discovery-header EIO qualifies. No observer reset,
+partial scan reuse, stale frame, repeated tap, menu input or baseline refresh.
+
+Pin bounded native bytes together with owner/session in the recovery adapter, so
+an edit or None/Some transition between attempts prevents retry. The complete
+fresh observation still brackets its capture with owner/native checks. Untyped
+IO, image-write/decode, native content, ownership and input errors propagate and
+latch; failed recovery retains the original error chain. Do not broaden unrelated
+capture/navigation paths. Preserve a shared adapter regression with exactly one
+tap across a recoverable post-tap failure, plus changed owner/native/input,
+ineligible errors, repeated failure and late completion. Update simulator impact
+as an observation fault without implying native allocator recognition. Source
+review and exact checks precede any further native run; retain the prior failure.

@@ -825,3 +825,34 @@ owned test writer. Source122 recognized Line IDs/properties match the preceding
 restored baseline; unknown-format limits remain. This batch drew no status ink.
 Full Q&A/history/performance, conditional trigger dismissal, remaining native tool/
 layout/error cases and final delivery remain open.
+
+### Conditional dismissal diagnostic, dbf5609
+
+Exact dbf56091d9ec46d1928b29aeac3e689886a3fe48 passed215 host tests,
+143 ARM Linux library tests under emulation, ARM reader/helpers build1m58 and
+AArch64 reader build1m47. Independent source review cleared only the focused
+native diagnostic. Staged helper SHA256: history
+f22f9d5def2f23b1b804369a6c19aa5dd021c89cd991452d52f3d7e62d8be7a7,
+hardware0ff25ca7929d1f0c571790c8d29ce1c496a9de10a1cd0674a88daca233c6d237,
+readiness3065eded50ea4fa6b08f281641727e15328eb61cc9c1a097c3cdf3150434dac1.
+
+ONE held-trigger run on e7/a718/visit1:121/session30974:100545844 qualified the
+actual known open panel. Owned touch verification reported6 events/2 frames.
+The single outside tap was followed by a typed vanished discovery candidate
+failure while reading allocation header0x651dc000: maps_changed=true,
+current_region=unmapped, EIO5. The operation stopped with exit1, no accepted
+trigger and no captured successful postcondition. Dismiss duration580.393ms is
+a failed diagnostic duration, not a successful performance sample. No repeat
+tap, navigation, model call, status ink or text append was attempted.
+
+A separate later read-only owner-bracketed image showed the panel closed and
+the same owner. This corroborates visible dismissal but does not substitute for
+the failed production postcondition. Preserve actual trigger-before.png/run.log
+under private outputs/rem9/current-dbf5609-conditional-dismiss and the separate
+current-dbf5609-after-failure image/report. Existing capture recovery applies to
+StyleIo observations only; NativeTriggerDismiss currently calls capture directly.
+
+Original46e/f39/visit1:75 restored visually and by native owner; tools unchanged,
+original notes/header/runtime hashes exact, no recovery journal or test PID17756.
+Service activePID17847,NRestarts0. No runtime replacement. The native dismissal/
+capture/navigation gate remains FAILED and unfinished; do not relabel this run.

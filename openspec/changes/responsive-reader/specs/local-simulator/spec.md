@@ -18,6 +18,10 @@ The simulator SHALL model changed operation timing and reachable delayed/stale/c
 The simulator SHALL exercise the production current-tool eligibility and cleanup
 path without pretending modeled tool footprints establish native safety.
 
+#### Scenario: Trigger observation recovery is read-only
+- **WHEN** a modeled recoverable observation fault occurs after the single outside dismissal tap
+- **THEN** the shared recovery/dismissal adapter permits at most one fresh capture under the retained guards, never a second tap; changed content/input/owner or expired budgets stop the workflow. Modeled faults do not prove native allocator detection.
+
 #### Scenario: No simulated tool switching
 - **WHEN** a supported current-tool indicator or a suppressed unsuitable-tool case runs
 - **THEN** the operation records zero toolbar selection/menu presses and unchanged original tool settings; unsupported feedback does not prevent core Q&A.
