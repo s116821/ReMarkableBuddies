@@ -30,22 +30,27 @@ class MarkerPredicate(unittest.TestCase):
         self.paths = paths()
         self.before = {'original': line([(100, 100), (200, 200)])}
         self.after = self.before | {f'new{i}': line(p) for i, p in enumerate(self.paths)}
+        self.after.update({f'repeated{i}': line(self.paths[9]) for i in range(5)})
+        self.counts = [1]*9 + [6]
 
-    def test_ten_ordered_paths_positive_synthetic_control(self):
-        self.assertEqual(len(validate_lines(self.before, self.after, self.paths)), 10)
+    def check(self, after):
+        return validate_lines(self.before, after, self.paths, self.counts)
+
+    def test_fifteen_draws_ten_unique_paths_positive_synthetic_control(self):
+        self.assertEqual(len(self.check(self.after)), 15)
 
     def test_metadata_only_or_partial_persistence_is_not_marker_proof(self):
         for after in [self.before, self.after | {'unexpected': line(self.paths[0])},
                       {k: v for k, v in self.after.items() if k != 'new9'}]:
-            with self.assertRaises(ValueError): validate_lines(self.before, after, self.paths)
+            with self.assertRaises(ValueError): self.check(after)
 
     def test_original_mutation_removal_and_unexpected_style_fail(self):
         for key, field, value in [('original', 'color', 1), ('new0', 'color', 1),
                                   ('new0', 'tool', 2), ('new0', 'thickness_scale', 4)]:
             after = copy.deepcopy(self.after); after[key][field] = value
-            with self.assertRaises(ValueError): validate_lines(self.before, after, self.paths)
+            with self.assertRaises(ValueError): self.check(after)
         after = dict(self.after); del after['original']
-        with self.assertRaises(ValueError): validate_lines(self.before, after, self.paths)
+        with self.assertRaises(ValueError): self.check(after)
 
     def test_same_endpoints_with_detour_reversed_path_and_wrong_duplicate_fail(self):
         for mutation in ['detour', 'reverse', 'duplicate']:
@@ -55,7 +60,14 @@ class MarkerPredicate(unittest.TestCase):
                 after['new0']['points'].insert(1, middle)
             elif mutation == 'reverse': after['new0']['points'].reverse()
             else: after['new0'] = copy.deepcopy(after['new1'])
-            with self.assertRaises(ValueError): validate_lines(self.before, after, self.paths)
+            with self.assertRaises(ValueError): self.check(after)
+
+    def test_missing_extra_and_replaced_circle_rejected(self):
+        missing = dict(self.after); del missing['repeated0']
+        extra = self.after | {'extra_circle': line(self.paths[9])}
+        replacement = self.after | {'repeated0': line(self.paths[0])}
+        for after in [missing, extra, replacement]:
+            with self.assertRaises(ValueError): self.check(after)
 
     def test_fixed_transform_matches_independent_native_endpoints(self):
         # Actual previously retained top sentinel + selection failure native points.

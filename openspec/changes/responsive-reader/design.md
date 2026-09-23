@@ -600,3 +600,15 @@ line-deletion blocks are compared opaquely; new/changed ones refuse acknowledgem
 Unknown semantics remain a limitation. Six synthetic regressions pass; retained
 a511 active bytes refuse for missing ten marker lines, and its later saved bytes
 refuse due to changed deletion records. Neither old snapshot becomes active proof.
+
+Diagnostic correction after bc692a5: keep nine edge draws and six auxiliary ticks;
+export exact per-unique-path multiplicities [1,1,1,1,1,1,1,1,1,6] using the same
+auxiliary-tick constant as the helper loop. Require exactly15 added lines with each
+path's exact count, rejecting missing/extra/replaced circles. Ten unique eraser paths
+are distinct from fifteen physical draws. Seven synthetic regressions now cover
+this distinction. Native geometry remains refused at its existing strict bound;
+no calibration relaxation or further native execution is included in this fix.
+Investigate the full emitted integer-coordinate and saved-curve interpretation
+pipeline offline, retain independent cases/negatives, and review an evidence-backed
+predicate before another native test. Never use this candidate as its own expected
+fixture. Product erasure and broader admission remain unverified.

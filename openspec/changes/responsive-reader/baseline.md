@@ -692,3 +692,39 @@ Original46e/f39 verified visually/native, original notes/header/runtime hashes e
 primaryFineBlackMedium unchanged/secondaryuntouched, serviceactivePID14387/NRestarts0,
 no active journal. Remaining durable active-persistence, normal integration, all
 negative/error/page/fullQ&A/history and performance gates stay open.
+
+### Saved-active predicate refusal and manual recovery: bc692a5
+
+Exact bc692a573ca57ae90364a32d522ab8a6281ced78 passed independent source review,
+ARM example build1m29, host strict checks and six synthetic predicate tests.
+Helper SHAe07f76e6bcb344ab21339d8ae75b230f2616ec7c8a9ad7ebba7c4a07898117a6;
+host rmscene version0.8.0 verified. Additional offline tests using the actual saved
+baseline rejected original parent, CRDT-left-link and opaque-value mutations.
+
+ONE current-bc692-primary-medium-durable run saved125 original/sentinel lines plus
+15 new owned marker lines. The host refused its ten-line expectation; device30s
+proof deadline expired, retaining CurrentInk journal
+90670009e42d4b988e332a5aec95098728c328b209da5cf66bb2e4cf47243662.
+No ACK, production cleanup or journal retirement occurred in the diagnostic.
+This is a diagnostic expectation/calibration failure, missed in initial review,
+not a product erasure result. Initial/candidate bytes, full new line properties,
+source/binary identity, screenshots, logs and journal are preserved.
+
+Actual helper draws nine edges plus SIX repetitions of the final auxiliary circle;
+Workflow retains ten unique cleanup paths. All nine native edges match their fixed
+1-native-unit trajectory predicate. All six25-point native circle Lines are identical,
+but fail that bound: bidirectional sampled trajectory distances1.252/1.554 native
+units, endpoints0.378/0.585. Do not increase tolerance merely to fit this candidate
+or claim raw point indices correspond to the emitted interpolation samples. A
+bounded search of42 prior unique REM9/REM32 saved files found no independent saved
+status-curve fixture. Geometry remains unresolved; another redraw is not yet useful.
+
+Manual recovery was announced and separate: each of ten recorded owned paths was
+erased once, then owner-bracketed saved observation reached125 original/sentinel
+IDs/properties exactly. Close/reopen showed no marker recurrence. Each sentinel
+then received one separate erase, with verified saved counts124/123/122 and exactly
+one corresponding Line removed. Reopened source retained all122 original IDs/Line
+properties and clear corner. Unknown native semantics are not claimed as verified.
+Original46e/f39 document and unchanged actual tools restored; notes/header/runtime
+hashes exact, serviceactive15902/NRestarts0. Original journal preserved and retired
+only after manual restoration. No runtime installation or product admission.

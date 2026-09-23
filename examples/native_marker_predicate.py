@@ -103,13 +103,14 @@ def follows(actual, expected):
     return True
 
 
-def validate_lines(before, after, screen_paths):
+def validate_lines(before, after, screen_paths, draw_counts):
     require(len(screen_paths) == 10 and all(2 <= len(p) <= 25 for p in screen_paths), "expected ten bounded paths")
+    require(draw_counts == [1]*9 + [6], 'expected nine edges and six auxiliary draws')
     require(all(after.get(k) == value for k, value in before.items()), "baseline line removed or changed")
     added = {k: v for k, v in after.items() if k not in before}
-    require(len(added) == 10, "expected ten new marker lines")
+    require(len(added) == sum(draw_counts), "expected fifteen new marker lines")
     expected = [[native(p) for p in path] for path in screen_paths]
-    matched = set()
+    matched = [0]*len(screen_paths)
     for line in added.values():
         require(line['tool'] == 17 and line['color'] == 0 and line['color_rgba'] is None
                 and line['move_id'] is None and line['starting_length'] == 0.0
@@ -121,8 +122,9 @@ def validate_lines(before, after, screen_paths):
                     698 <= (x-TX)/SX <= 747 and 934 <= (y-TY)/SY <= 983
                     for x, y in actual), "marker outside owned area")
         matches = [i for i, path in enumerate(expected) if follows(actual, path)]
-        require(len(matches) == 1 and matches[0] not in matched, "no unique ordered marker-path match")
-        matched.add(matches[0])
+        require(len(matches) == 1, "no unique ordered marker-path match")
+        matched[matches[0]] += 1
+    require(matched == draw_counts, 'wrong per-path draw multiplicity')
     return sorted(added)
 
 
@@ -132,7 +134,7 @@ def validate(initial, candidate, expected):
     require(opaque_before == opaque_after, "opaque non-PageInfo records changed")
     require(all(blocks_after.get(k) == block for k, block in blocks_before.items()),
             "original line parent/CRDT links/opaque value bytes changed")
-    added = validate_lines(before, after, expected['paths'])
+    added = validate_lines(before, after, expected['paths'], expected['draw_counts'])
     return {'run': expected['run'], 'sha256': hashlib.sha256(candidate).hexdigest(),
             'added_ids': added, 'original_lines': len(before), 'tolerance_native': TOLERANCE,
             'limit': 'Recognized lines plus opaque equality; PageInfo metadata excluded; fixed disposable viewport only'}

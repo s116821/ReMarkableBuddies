@@ -6,6 +6,9 @@ use remarkable_reader_buddy::{Keyboard, Pen, Screenshot, Touch, TriggerCorner};
 #[cfg(target_os = "linux")]
 use std::{thread::sleep, time::Duration};
 
+#[cfg(target_os = "linux")]
+const INDICATOR_AUXILIARY_TICKS: usize = 6;
+
 /// Optional read-only native evidence for the explicit disposable-page cycle.
 #[cfg(target_os = "linux")]
 struct NativeEvidence {
@@ -99,9 +102,13 @@ impl NativeEvidence {
             }
         }
         paths.push(Stroke::Auxiliary(Stage::AnswerReady).points());
+        let mut draw_counts = vec![1usize; 9];
+        draw_counts.push(INDICATOR_AUXILIARY_TICKS);
         self.save(
             "expected.json.tmp",
-            &serde_json::to_vec(&serde_json::json!({"run":run,"paths":paths}))?,
+            &serde_json::to_vec(
+                &serde_json::json!({"run":run,"paths":paths,"draw_counts":draw_counts}),
+            )?,
         )?;
         std::fs::rename(
             self.output.join("expected.json.tmp"),
@@ -661,7 +668,7 @@ fn main() -> Result<()> {
                     active.save_image(&format!("/tmp/reader-buddy-status-{stage:?}.png"))?;
                 }
                 workflow.auxiliary_indicator()?;
-                for _ in 0..6 {
+                for _ in 0..INDICATOR_AUXILIARY_TICKS {
                     workflow.tick_indicator()?;
                 }
                 active.take_screenshot()?;
