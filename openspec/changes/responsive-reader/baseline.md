@@ -774,3 +774,54 @@ visually/native verified; selected tools unchanged, notes/header/runtime hashes 
 serviceactive17078/NRestarts0, no journal. Stop equivalent diagnostic batches here;
 normal current-tool integration, suppression/error/notes cases and full Q&A/history,
 performance/OpenSpec/PR/release gates remain open.
+
+### Normal integration and no-tap refusal, 50cb909
+
+Exact50cb9099c4f6854095cfdd8a7de2bb475ed7fe11 passed203 host tests,
+strict all-target clippy/fmt/OpenSpec,132 ARM Linux library tests under emulation,
+ARM reader/hardware build3m31, ARM history/append examples1m44, AArch64 reader2m01,
+and ARM readiness example1m02. Source review found no blocker for focused tests.
+No installed-runtime replacement. Diagnostic hashes: hardware2e8dea318f13329aada78f4c8d040f3cd17f4b89f089f48568cdfc8597fa6eea,
+history40e67b1061dad5c62022e412674c2cb99af18a1d15c596ed02cb1662a6eab8c6,
+append58d1137b2d537eeb18edf30de6d9b6d7ea8738368f489196f8a9027e473bece3,
+readinesscbcfedd8b68ec677d15c2070fde2f84c7da09fe6aa6db88985c176c11958d271.
+
+One no-model Reader-only native trigger accepted a stationary injected hold on
+e7/a718, visit1:119/session30974:100545844, but its fresh after-image retained the
+lower-left overflow menu. This is a no-tap admission FAILURE, not a successful
+normal interaction. The page owner stayed unchanged. One deliberate manual tap
+outside that panel at384,1023 dismissed it without selecting a menu item. Between
+that actual open-menu frame and the after-tap frame,18156 pixels differ above
+threshold8, all inside x0..279/y655..1023; exposed content and pen tiles outside
+that panel match. Underlying occluded pixels cannot be compared from those two
+images. Subsequent normal readiness_probe Next established Settled f39/visit1:120
+and fresh ready capture. This sequence includes manual setup/dismissal and proves
+neither automated conditional dismissal nor full Q&A. The user's necessary simple
+non-menu-tap exception applies; no menu-item navigation is proposed.
+
+### No-edit controls and one exact append, 50cb909
+
+Closed disposable notes bytes had PageInfo fields[4,0,1366,38,0], SHA256
+c27ab3521c99ff95fd2cfdbaf8f94f21cacab2bf98d9ec9d6086fdd77155da49. Two bounded
+30s no-edit open observations retained seven/eight complete owner-bracketed samples,
+all byte-identical; the intervening close also preserved bytes. Each final partial
+read exceeded remaining deadline and was excluded. No counter transition was
+observed: these are bounded inconclusive results about counter semantics, not
+proof of native save completion or permission to normalize a field.
+
+Because no-edit controls preserved all bytes, one planned no-model append emitted
+exactly146 ASCII characters. In-process before-render1365 characters became1511,
+exactly before+requested, with no extra newline. Native history persistence took
+9804.758ms, owner unchanged; actual appended block and both delimiters were
+visually inspected. Root layout and27 scene-record positions match except the
+first PageInfo counter4→5 (known text/line counters are already validated and
+normalized by the existing parser). This repeats an edit-associated counter change
+without proving its semantics; no history arming or production normalization is
+claimed. All in-process snapshots/seals and the raw final page are preserved.
+
+Original46e/f39/visit1:75, actual unchanged primary FineBlackMedium, notes/header/
+runtime hashes restored/verified; service activePID17627,NRestarts0,no journal or
+owned test writer. Source122 recognized Line IDs/properties match the preceding
+restored baseline; unknown-format limits remain. This batch drew no status ink.
+Full Q&A/history/performance, conditional trigger dismissal, remaining native tool/
+layout/error cases and final delivery remain open.
