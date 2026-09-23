@@ -235,3 +235,54 @@ baseline refresh. Navigation/capture sequencing must establish completed page UI
 before classification/lease preparation. Its diagnostic visual difference plus
 same document/session is not proof of an exact requested successor in general.
 Original document/header/notes/runtime restored; service activePID2145,NRestarts0.
+
+### Verified navigation probes and first rendered Q&A, adfe055
+Exact source `adfe055530b979a8512de917ab55a092d30886b3` passed ARM and
+AArch64 builds. Full180 host tests passed at3f2d020; subsequent diagnostic
+identity correlation and measurement-only changes passed strict all-target clippy.
+No-model probe SHA256
+`b0fab28c1f274d91864ff5e545eea7728028d54b89a1550227a166bf0cf29326`.
+One Next and one Previous each returned Settled, expected UUID and exact
+document/page/visit/session through classifier and readiness. Visually inspected
+notes/source ready images had no transient scrollbar/footer. Next ExistingQA,
+Previous Invalid as an answer page (expected for the source PDF). Navigation
+5.561460/5.259777s includes source observation/swipe before the postgesture
+deadline; readiness177.135/178.844ms. Diagnostic800+500ms waits remained.
+These are individual readiness samples, not full-workflow or latency acceptance.
+
+Normal Reader binary SHA256
+`b8ccf1382486ef3d144315432f70f4e9ad3b0afbecbfb213c56b4db6c0ca9374`
+then ran once on the same legitimate manually referenced fixture. Actual ordinary
+primary Fine/Black/Medium was visible during acquisition. Both leases completed;
+new answer and both position delimiters were visually inspected. Recorded costs:
+
+| Phase | Source lease (ms) | Answer-page lease (ms) |
+| --- | ---: | ---: |
+| Acquisition including readiness |3313.345|3380.167|
+| Original tools restored within cleanup |575.617|566.527|
+| Erasure and its immediate verification |1720.070|531.405|
+| Whole cleanup (includes preceding two rows) |2296.225|1098.406|
+| Final restoration/cleanup verification |255.853|204.161|
+
+The union of acquisition/whole-cleanup/final-restoration intervals is10.548118s;
+do not add nested rows again. This excludes animation, scheduling gaps and provider
+time, and is not first-visible-feedback evidence. Do not compare it as like-for-like
+to the older44/49s nondefault-slot runs. Provider requests18.929243/3.494736s;
+active workflow90.394073s. One external image-only observation during rendering
+adds observer cost; this run does not establish exact first/last visible timestamps.
+
+**Unresolved:** post-answer native history persistence waited30.005685s then
+reported expected complete text absent; history was disabled. The log's successful
+iteration means rendered output, not full history/performance acceptance. An
+offline parse of exact prior notesd3b4 and resulting notes0f02b3 shows the823-character
+old text retained as prefix and nine extra newlines before the395-character new
+block. The actual in-process pre-render snapshot was not dumped, so attribution
+to cursor/materialized blank paragraphs remains a hypothesis; do not normalize
+away the discrepancy or relax history ownership checks.
+
+Original notesc284, header6faae and installed runtimecaa5 hashes were preserved;
+original document visually restored, service activePID2834,NRestarts0,no journal.
+Disposable answer changed as authorized, and source native bytes also changed
+after indicator drawing/erasure; byte equality is not claimed for either.
+Repeated comparable success/error/nondefault-slot tests, visible timing evidence,
+neighbor ink/UI verification and remaining dominant stalls are still open.
