@@ -17,6 +17,11 @@ SY, TY = 2.5302505493164062, -55.32414245605469
 # Independent top-sentinel and selection-X endpoints: maximum residual .681
 # native units. One native unit (<.4 screen px) is the fixed quantization bound.
 TOLERANCE = 1.0
+# Independently measured Medium sentinels are two output pixels wide. Half that
+# sampled footprint, using the smaller axis scale, defines circle equivalence.
+# Pixel boundaries are uncertain by .5 px: this is NOT an exact physical radius
+# or a vendor smoothing bound, and that uncertainty does not enlarge acceptance.
+CIRCLE_TOLERANCE = min(SX, SY) * (2.0 / 2.0)
 
 
 def require(condition, reason):
@@ -85,10 +90,10 @@ def samples(path):
     yield path[-1]
 
 
-def follows(actual, expected):
+def follows(actual, expected, tolerance=TOLERANCE):
     if len(actual) < 2 or len(actual) > 128 or sum(math.dist(a, b) for a, b in zip(actual, actual[1:])) > 512:
         return False
-    if math.dist(actual[0], expected[0]) > TOLERANCE or math.dist(actual[-1], expected[-1]) > TOLERANCE:
+    if math.dist(actual[0], expected[0]) > tolerance or math.dist(actual[-1], expected[-1]) > tolerance:
         return False
     # Both trajectories must cover one another in order; rejects detours, gaps,
     # reversal and mere endpoint/ROI matches. Conservative ambiguity refusal.
@@ -96,7 +101,7 @@ def follows(actual, expected):
         previous = 0.0
         for point in samples(source):
             candidates = [arc for distance, arc in projections(point, target)
-                          if distance <= TOLERANCE and arc >= previous - TOLERANCE]
+                          if distance <= tolerance and arc >= previous - tolerance]
             if not candidates:
                 return False
             previous = max(previous, min(candidates))
@@ -121,7 +126,8 @@ def validate_lines(before, after, screen_paths, draw_counts):
         require(all(math.isfinite(x) and math.isfinite(y) and
                     698 <= (x-TX)/SX <= 747 and 934 <= (y-TY)/SY <= 983
                     for x, y in actual), "marker outside owned area")
-        matches = [i for i, path in enumerate(expected) if follows(actual, path)]
+        matches = [i for i, path in enumerate(expected)
+                   if follows(actual, path, CIRCLE_TOLERANCE if i == 9 else TOLERANCE)]
         require(len(matches) == 1, "no unique ordered marker-path match")
         matched[matches[0]] += 1
     require(matched == draw_counts, 'wrong per-path draw multiplicity')
@@ -136,8 +142,9 @@ def validate(initial, candidate, expected):
             "original line parent/CRDT links/opaque value bytes changed")
     added = validate_lines(before, after, expected['paths'], expected['draw_counts'])
     return {'run': expected['run'], 'sha256': hashlib.sha256(candidate).hexdigest(),
-            'added_ids': added, 'original_lines': len(before), 'tolerance_native': TOLERANCE,
-            'limit': 'Recognized lines plus opaque equality; PageInfo metadata excluded; fixed disposable viewport only'}
+            'added_ids': added, 'original_lines': len(before), 'edge_tolerance_native': TOLERANCE,
+            'circle_footprint_tolerance_native': CIRCLE_TOLERANCE,
+            'limit': 'Circle footprint equivalence, not exact commanded centerlines; recognized lines plus opaque equality; PageInfo excluded; fixed disposable viewport only'}
 
 
 if __name__ == '__main__':

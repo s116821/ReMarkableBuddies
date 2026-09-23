@@ -2,7 +2,8 @@
 import copy
 import math
 import unittest
-from native_marker_predicate import native, validate_lines, follows, TOLERANCE
+from native_marker_predicate import native, validate_lines, validate, follows, TOLERANCE, CIRCLE_TOLERANCE
+from unittest.mock import patch
 
 
 def paths():
@@ -86,6 +87,34 @@ class MarkerPredicate(unittest.TestCase):
         expected = [native(p) for p in self.paths[0]]
         self.assertFalse(follows([(x+2, y) for x, y in expected], expected))
         self.assertFalse(follows(expected*100, expected))
+
+    def test_circle_footprint_inside_outside_translation_expansion_and_detour(self):
+        expected = [native(p) for p in self.paths[9]]
+        center = native((722, 963))
+        self.assertAlmostEqual(CIRCLE_TOLERANCE, 2.5122531797827743)
+        for amount, accepted in [(CIRCLE_TOLERANCE*.5, True), (CIRCLE_TOLERANCE*1.25, False)]:
+            translated = [(x+amount, y) for x, y in expected]
+            expanded = []
+            for x, y in expected:
+                length = math.dist((x,y), center)
+                expanded.append((x+amount*(x-center[0])/length, y+amount*(y-center[1])/length))
+            # A local outward detour is subject to the same declared footprint.
+            detour = list(expected); index = 6
+            x, y = expected[index]; length = math.dist((x,y), center)
+            detour[index] = (x+amount*(x-center[0])/length, y+amount*(y-center[1])/length)
+            for name, actual in [('translation',translated), ('expansion',expanded), ('detour',detour)]:
+                with self.subTest(amount=amount, kind=name):
+                    self.assertEqual(follows(actual, expected, CIRCLE_TOLERANCE), accepted)
+        self.assertFalse(follows(list(reversed(expected)), expected, CIRCLE_TOLERANCE))
+
+    def test_full_original_block_metadata_must_match_before_geometry_acceptance(self):
+        block = dict(parent=(0,1), left=(0,0), right=(0,0), extra=b'original')
+        before = (self.before, [], {'original': block})
+        for field, value in [('parent',(1,2)), ('left',(1,2)), ('extra',b'changed')]:
+            after = (self.after, [], {'original': block | {field: value}})
+            with patch('native_marker_predicate.decode', side_effect=[before, after]):
+                with self.assertRaisesRegex(ValueError, 'original line parent/CRDT links/opaque'):
+                    validate(b'before', b'after', dict(run='synthetic',paths=self.paths,draw_counts=self.counts))
 
 
 if __name__ == '__main__': unittest.main()
