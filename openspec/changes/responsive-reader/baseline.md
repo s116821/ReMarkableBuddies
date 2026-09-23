@@ -462,3 +462,17 @@ All122 recognized source Lines remain equal, with the same unknown-format limit.
 Original Fine/Black/Medium and document46e/f39 were then visually restored; notes
 c284, header6faae and runtimecaa5 hashes matched; serviceactivePID7789,NRestarts0,
 no active recovery record or writer. No blanket unknown-layout retry is justified.
+
+Current-tool calibration: e4b263a hardware helper (SHA416f6a3d910b13bb1e1fba55e6a6694159266c71ec7d3e2f2753438c471afeea)
+drew one segmented triangle/X pattern using the manually selected primary Black
+Thick Fineliner at pressure2630, then erased only recorded paths with physical
+rubber input. No toolbar selection occurred during drawing/erasure. Native owner
+reports match before/active/after;551 new dark pixels occupy x705..737,y941..974,
+inside the reserved region; final clearance is white and toolbar pixels match
+exactly before/active/final. Actual tool menu before/after verifies unchanged Thick.
+All122 recognized preexisting Line properties compare equal after cleanup; unknown
+native records remain outside parser proof. This single pattern does NOT establish
+all widths/colors/slots, maximum eraser envelope, continuous auxiliary paths or
+production lease correctness. Local artifacts: current-tool-thick* in outputs/rem9.
+Original Fine/Black/Medium, original document and notes/header/runtime hashes were
+restored and verified; installed service activePID8419,NRestarts0, no active journal.

@@ -134,3 +134,30 @@ Do not substitute external pre-attempt screenshots for the internal pair.
   effect/necessity needs review under task4.5; do not silently call it a harmless
   menu-free action. Prefer relying on observed trigger release and readiness if
   that removes unnecessary chrome mutation without changing gesture semantics.
+
+## Targeted community evidence (2026-09-23 UTC)
+
+Roadblock: current-tool properties cannot all be proven from closed toolbar pixels.
+Inspected upstream inkling commit089efb2c9f24ce64127c6fc4d7fd30f93ae5ad94,
+[xovi bridge source](https://github.com/nathanmarlor/inkling/blob/089efb2c9f24ce64127c6fc4d7fd30f93ae5ad94/xovi-ext/inklingfb/main.c#L616).
+It accesses DocumentView.penHandler on the GUI thread, writes lineTool,
+gestureMode and lineThickness, and separately restores selectedButton. Thus it is
+a real non-coordinate approach, but a process-injected Qt bridge, not an external
+supported vendor API. Its own documentation records crash/threading constraints;
+we have not established firmware3.28.0.172 compatibility or full style restoration.
+The sampled repository has no releases and its listed PR concerns a provider,
+not compatibility. No bridge installed or process patched.
+
+Also inspected alefaraci/xovi-qmd-extensions commit0817207c6345f198d5cafeca5cd278deba2cae0b:
+[3.28 gesture source](https://github.com/alefaraci/xovi-qmd-extensions/blob/0817207c6345f198d5cafeca5cd278deba2cae0b/3.28/gestik.qmd)
+and [3.27 toolbar readout](https://github.com/alefaraci/xovi-qmd-extensions/blob/0817207c6345f198d5cafeca5cd278deba2cae0b/3.27/toolbarTool.qmd).
+These are versioned QML modifications requiring rm-xovi-extensions; the tree has
+3.28 gestures but no corresponding3.28 toolbarTool file. The sole listed release
+contains dictionary data, not a verified tool-control compatibility release.
+This establishes promising internal mechanisms, not a safe drop-in dependency.
+
+Decision for this bounded pass: retain these alternatives for review; continue
+stock current-tool eligibility/footprint validation without invasive installation.
+If closed-toolbar coverage is too narrow for acceptance, compare the bridge cost
+and compatibility explicitly rather than silently accepting universal suppression
+or claiming no alternative exists. No upstream source copied into product code.

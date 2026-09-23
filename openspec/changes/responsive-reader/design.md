@@ -287,3 +287,7 @@ firmware compatibility and distinguish direct supported interfaces, native file
 mechanisms, injected extensions and UI automation. No exhaustive survey or silent
 invasive installation is implied. A prior failed D-Bus probe is not proof that a
 community solution cannot exist; bring promising tradeoffs to review.
+
+Clarification: a reliable community direct interface can satisfy the no-menu
+principle; vendor-official status is not a prerequisite. The injected bridges are
+candidates with unverified compatibility/deployment cost, not permanently excluded.
