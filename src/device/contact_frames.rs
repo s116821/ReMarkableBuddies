@@ -21,6 +21,7 @@ pub enum Observation {
 /// Coordinates remain native until the device-specific transform is applied.
 /// Construction requires a kernel snapshot of every slot, including inactive
 /// ones. A default zero-filled position is never accepted as observed input.
+#[derive(Clone)]
 pub struct ContactFrames {
     slots: Vec<Slot>,
     selected: usize,

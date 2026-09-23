@@ -16,12 +16,16 @@ pub mod native_text;
 mod navigation_completion;
 #[cfg(any(target_os = "linux", test))]
 mod owned_pen_window;
+#[cfg(test)]
+mod owned_touch_window;
 pub mod pen;
 pub mod screenshot;
 #[cfg(any(target_os = "linux", test))]
 mod status_readiness;
 pub mod status_style;
 pub mod touch;
+#[cfg(test)]
+mod trigger_dismiss;
 
 use std::path::Path;
 
