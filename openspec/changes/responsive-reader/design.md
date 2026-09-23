@@ -535,3 +535,19 @@ instead; no internal API is exposed. Final native snapshot occurs after successf
 normal cleanup and journal retirement. Failure at that point is a diagnostic evidence
 failure, not a claim that the already-retired journal remains. Active-stage failure
 still stops before automatic cleanup and preserves its prior recovery phase.
+
+Next bounded diagnostic proposal after stale active snapshot (no code yet): while
+leaving the already-drawn marker untouched, observe native file bytes until a change
+from the pre-draw snapshot, with30s monotonic budget and500ms test-only poll cadence.
+This is a data-change signal, not proof of owned ink; inspect saved IDs/geometry
+offline before claiming persisted-active-to-erased success. No extra drawing or
+forced save/navigation. Use a separate read-only InputObserver throughout this
+idle diagnostic wait (no reset of the retained production observer), reject input
+before/after fresh owner/session-bracketed reads, and check deadline before/after
+observations and candidate acceptance. Preserve the first changed snapshot privately
+and then use unchanged guarded production cleanup. Unchanged samples need not copy
+native bytes repeatedly; log content-free timing/count and bound storage. Timeout,
+input, owner or read failure retains active phase/journal and stops without automatic
+cleanup, as existing native-evidence mode does. Final/reopen saved native identity
+comparison and clear pixels remain separate acceptance checks. Do not add this wait
+to normal Reader or interpret elapsed time/changed bytes alone as successful erasure.

@@ -664,3 +664,31 @@ verified, original secondaryBallpointBlackMedium/temporaryFineMedium restored,
 primaryFine selected unchanged, serviceactivePID13465/NRestarts0/no active journal.
 Remaining failure codes, negative/suppression, notes/blank pages, normal no-menu
 integration, full Q&A/history and repeated latency gates remain open.
+
+A511e10 primaryMedium native-snapshot cycle succeeds at the existing immediate
+pixel/journal gates; durable saved-active-ink-to-clear proof is INCONCLUSIVE.
+ARM1m47/helperSHA96bbd179b89160c4d007b41cab6e80557b9578c613d05c311180149ee415190a.
+Initial/active/final native files are byte-identical SHA57472ec082f5a09c57736706802c8b15ac5a71d52dcf12da9b746204a88bb30e,
+125 recognized baseline+sentinel Lines. Active screenshot positively shows407dark
+marker pixels, but active snapshot at10.416s contains no marker Lines. Final
+snapshot also old; later owner-bracketed polling yields different saved bytes
+SHAc210849bf4c927679b37de786195becafdc52c22062c949ea29778f0715e2139 with the same125
+recognized CRDT IDs/Line properties. Manualclose/reopen shows clear status corner,
+all three neighbors intact and those same125 IDs/properties. No activity recurrence
+in this case, but no persisted-active-marker proof. Do not relabel it a full gate.
+Snapshots added11.569/10.772/15.258ms diagnostic overhead; timing union5767.62493ms
+(acquire373.20293,cleanup4990.266,final404.156) is diagnostic-only, not a benchmark.
+All standard stagepixels/tooltiles/neighbors remain exact; no EIO/reacquisition.
+
+Manual cleanup control: each sentinel received ONE separate same-path erase, with
+fresh owner-bracketed read-only saved-file observations before the next path. Stable
+124/123/122-line results at18.250/16.594/17.297s include capture/SCP/three-sample
+observation overhead, not erase latency. Each removed exactly the expected owned
+line and preserved every other recognized property. After close/reopen, original122
+CRDT IDs/properties match and no sentinel reappears. This differs from back-to-back
+three-path cleanup, but does not isolate pacing from process/observation differences
+or prove a minimum physical delay. No product pacing/erasure change.
+Original46e/f39 verified visually/native, original notes/header/runtime hashes exact,
+primaryFineBlackMedium unchanged/secondaryuntouched, serviceactivePID14387/NRestarts0,
+no active journal. Remaining durable active-persistence, normal integration, all
+negative/error/page/fullQ&A/history and performance gates stay open.
