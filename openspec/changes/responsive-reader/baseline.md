@@ -544,3 +544,27 @@ Thick Fine; restore Black/Medium Fine, original document/files/service verified,
 PID10017/NRestarts0 and no active journal. Both candidate slots, all admitted widths,
 notes chrome, error indicators, suppression/core Q&A, history and full workflow
 latency remain admission gates. Production constructor remains on the old path.
+
+Secondary Black/Thick cycle2cde400 succeeds (ARM2m02;32 status-style tests,
+strictclippy/fmt/spec pass). Helper SHA2f1135438e92123df29badf71e365eed8833184a841fba8fcf742ee9c8bf5da6.
+Acquisition364.789859ms, cleanup6537.838ms, final390.282ms: union7292.909859ms.
+Cleanup preparation531.454ms; erase/verify6005.906ms. Ten disjoint per-path guard
+spans4282.665ms, physical injection1376.811ms, rearm36.182ms. Nested13 observations
+2470.541ms and checkpoint4.431ms are NOT additive to those parents. No EIO or
+reacquisition branch. Same331/515/602/604pixel progression/bounds as primaryThick,
+unchanged pen tiles, clear finalROI, exact neighboring pixel rectangles and125
+recognized Lines. All journal phases0/1/2 and no toolbar press spans verified.
+
+Separate developer sentinel cleanup exposed persistence lag/discrepancy: the first
+and later saved files retained the exact two-point top sentinel (123 recognized
+Lines), despite visually clear captures. All122 original Lines were unchanged.
+After fresh owner/native ownership proof, one deliberate same-path erase was made;
+the immediate file still contained123 Lines. No further erasure. After closing the
+disposable document, source-after-close.rm contains exactly122 original Lines.
+Retain all snapshots; this does not establish a general flush mechanism or justify
+forcing a product document close. It is separate from successful indicator cleanup
+and reinforces that visible clearance does not establish native persistence.
+PrimaryFineBlackMedium, secondaryBallpointBlackMedium and temporarysecondaryFine
+Medium visually restored; original46e/f39 notes/header/runtime hashes unchanged,
+serviceactivePID10743/NRestarts0/no active journal. Further native acceptance and
+full Q&A/history/performance gates remain open.
