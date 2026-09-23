@@ -643,3 +643,47 @@ single reviewed native cycle, require ALL15 accepted added IDs gone, every origi
 ID/property preserved, then fresh owner/reopened visual clearance. Unavailable saved
 final proof is inconclusive; no repeated drawing loop. No more smoothing research,
 new product waits or generalized diagnostic framework is part of this amendment.
+
+### Normal Reader selected-tool integration plan
+
+After the limited durable-cleanup evidence, remove the development-only backend
+mode split: normal RealDevice construction and the explicit probe share the same
+V3 current-tool path, retained input observer, guarded pen windows and typed capture
+recovery. Eliminate the backend boolean escape to V2 acquisition/unguarded strokes;
+retain historical V2 parsing/tests for unresolved-record compatibility, but make
+native StyleIo::press refuse without emitting touch input. No normal path may
+select or inspect tools through menus. Existing unresolved journals still block
+startup, and post-input failures still retain their evidence.
+
+Admission remains narrow: actual closed Black Fineliner in either calibrated slot,
+RM2 verified firmware contract, validated footprint/viewport, blank owned corner,
+and the native PDF annotation toolbar band (eraser/selection/layers in the measured
+positions). Compare the existing native toolbar fixture's rows185..380, outside
+selected pen tiles and the changing undo icon. This rejects notes-page toolbars
+(which include an extra text tool), open/unknown layouts and unsuitable tools
+BEFORE journal creation/pen input. Notes/blank/unknown layout feedback remains
+explicitly unavailable while core Q&A remains available; do not call this positive
+feedback coverage. Existing actual width-range calibration still bounds any admitted
+Black Fineliner width. No diagnostic persistence wait/ACK enters the product.
+
+Remove the automatic bottom-center trigger-dismiss tap from the backend/workflow
+and simulator. A trigger is input observation, not authorization to open/dismiss
+page navigation UI. Keep simple page swipes and keyboard input as authorized.
+Verify the no-tap trigger path natively before full workflow admission; no new menu
+fallback if an overlay is present. Keep all current recovery/content guards.
+
+Simulator impact: retain shared native-pixel eligibility/lease tests, add explicit
+modeled status capability per page (calibrated Black Fine PDF, unsuitable tool,
+unknown tool, unverified layout), and route unsupported states through the same
+pre-input suppression outcome while asserting exact Q&A output and no mark/erase
+operations. Preserve existing status-failure/cancellation scenarios and zero tool
+mutation assumptions. Add actual known notes-toolbar and perturbed-layout refusal
+regressions to the shared eligibility predicate. Modeled capability is a declared
+input, not hardware/tool recognition proof. Add a trigger trace regression proving
+no synthetic dismiss tap and preserve gesture/release/cancellation semantics.
+
+Before release: exact source review, appropriate host/Linux tests and both target
+builds, remaining native negative/error/notes/trigger/full-Q&A and history gates,
+then normal runtime/latency checks. This integration is development work, not a
+claim that remaining roadmap gates are complete or authorization to install an
+unreviewed runtime. History persistence/newline investigation remains separate.

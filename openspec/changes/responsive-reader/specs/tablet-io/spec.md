@@ -30,3 +30,11 @@ Normal Q&A SHALL remain available when optional feedback is suppressed.
 #### Scenario: Unsafe cleanup or external change
 - **WHEN** owner, content, input activity, controls or cleanup postconditions change after owned ink begins
 - **THEN** further mutation fails closed and recovery evidence is retained; the implementation never broadens erasure to hide the failure.
+
+#### Scenario: Uncalibrated notes toolbar
+- **WHEN** a notes/blank page toolbar or other layout differs from the calibrated PDF annotation toolbar
+- **THEN** optional ink is suppressed before journal creation or drawing, without changing tools or blocking core Q&A; the reduced feedback coverage is explicit.
+
+#### Scenario: Trigger release does not navigate menus
+- **WHEN** a Reader trigger qualifies
+- **THEN** the workflow proceeds without an automatic bottom-center tap or another menu-dismissal fallback; subsequent operations retain their ownership checks.
