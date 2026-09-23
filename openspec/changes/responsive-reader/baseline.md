@@ -633,3 +633,34 @@ notes/header/runtime hashes verified, serviceactivePID12638/NRestarts0/no journa
 Remaining secondaryMedium, persistent failure codes, unsafe/unknown suppression,
 notes/blank-context admission, normal no-menu wiring and full Q&A/history/latency
 remain open. No final performance gate claimed from these single-width samples.
+
+Secondary Black/Medium activity cycle3c1dbd5 succeeds: acquisition360.902387ms,
+cleanup4934.595ms, final422.532ms, union5718.029387ms. Ten pathguards2686.756ms,
+physical input1400.235ms, rearm50.214ms; nested13 observations2549.894ms, pixels
+143.439ms.25 positive owned windows, no EIO/reacquisition.202/333/398/407 stagepixels
+within706..737/942..972; exact tool tiles/neighbors and clear final corner. As for
+Thin, immediate saved draw snapshot still122, postcycle125 with no original Line
+changes and only the three owned sentinel lines. No125-to125 claim.
+
+Same-source secondary Medium selection-failure case uses production draw_failure:
+positive persistent X plus top horizontal code,220 new darkpixels707..737/943..973,
+three positive windows(219..517events), acquisition371.982342ms/final384.616ms.
+All125 pre-failure recognized Lines retained plus exactlythree mark Lines. Actual
+FineBlackMedium unchanged, exact toolbar/neighbors/owner, journal completed without
+menu input. Persistent marks have no automatic erasure/cleanup latency claim.
+Developer erased only the three recorded X/code paths, then three sentinel paths.
+
+Restoration finding: one e4 developer-helper post-tap screenshot refused two
+framebuffer allocations. No repeated tap; an independent read-only capture confirmed
+restored BallpointBlackMedium. This is not a candidate recovery-branch observation.
+Initial post-cleanup screenshot looked clear, but the top horizontal sentinel remained
+in the native file after close and a later read (123 Lines). Reopening displayed the
+owned top line again. Fresh owner plus exact native coordinates justified ONE
+deliberate same-path removal. After subsequent close,122 original recognized Lines
+match exactly. Retain early snapshots; visible clearance and document close alone
+are not proof of persisted erasure. No original Lines changed; unknown records are
+outside parser proof. Original46e/f39 image/owner and notes/header/runtime hashes
+verified, original secondaryBallpointBlackMedium/temporaryFineMedium restored,
+primaryFine selected unchanged, serviceactivePID13465/NRestarts0/no active journal.
+Remaining failure codes, negative/suppression, notes/blank pages, normal no-menu
+integration, full Q&A/history and repeated latency gates remain open.
