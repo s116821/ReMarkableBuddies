@@ -36,6 +36,10 @@ nix = { version = "0.29", features = ["ioctl"] }
 name = "remarkable_reader_buddy"
 path = "src/lib.rs"
 
+[dev-dependencies]
+# Explicit native-evidence example only; not linked into the installed runtime.
+sha2 = "0.10"
+
 [[bin]]
 name = "reader-buddy"
 path = "src/main.rs"

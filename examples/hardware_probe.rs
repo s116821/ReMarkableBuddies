@@ -15,6 +15,158 @@ struct NativeEvidence {
 }
 #[cfg(target_os = "linux")]
 impl NativeEvidence {
+    fn bounded_read(path: &std::path::Path, limit: usize) -> Result<Vec<u8>> {
+        use std::io::Read;
+        anyhow::ensure!(
+            path.symlink_metadata()?.file_type().is_file(),
+            "Evidence is not a regular file"
+        );
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)?
+            .take(limit as u64 + 1)
+            .read_to_end(&mut bytes)?;
+        anyhow::ensure!(bytes.len() <= limit, "Native evidence size limit exceeded");
+        Ok(bytes)
+    }
+    fn save(&self, name: &str, bytes: &[u8]) -> Result<()> {
+        use std::{io::Write, os::unix::fs::OpenOptionsExt};
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(self.output.join(name))?
+            .write_all(bytes)?;
+        Ok(())
+    }
+    fn read_native(&self) -> Result<Vec<u8>> {
+        anyhow::ensure!(
+            Self::owner()? == self.owner,
+            "Native diagnostic owner changed before read"
+        );
+        let path = std::path::Path::new("/home/root/.local/share/remarkable/xochitl")
+            .join(&self.owner.document)
+            .join(format!("{}.rm", self.owner.page));
+        let bytes = Self::bounded_read(&path, 8 * 1024 * 1024)?;
+        anyhow::ensure!(
+            bytes == Self::bounded_read(&path, 8 * 1024 * 1024)?,
+            "Native evidence changed during read"
+        );
+        anyhow::ensure!(
+            Self::owner()? == self.owner,
+            "Native diagnostic owner changed after read"
+        );
+        Ok(bytes)
+    }
+    /// Host-validated evidence handshake, exclusive to this explicit example.
+    fn await_persisted_marker(&self) -> Result<()> {
+        use remarkable_reader_buddy::{
+            device::input_observer::InputObserver,
+            workflow::indicator::{Stage, Stroke},
+        };
+        use sha2::{Digest, Sha256};
+        use std::time::Instant;
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Ack {
+            run: String,
+            number: usize,
+            sha256: String,
+        }
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut input = InputObserver::new(TriggerCorner::LowerLeft, None)?;
+        let guard = |input: &mut InputObserver| -> Result<()> {
+            anyhow::ensure!(Instant::now() < deadline, "Native marker proof deadline");
+            anyhow::ensure!(
+                input.poll()?.is_empty() && input.quiescent(),
+                "Input during native marker proof"
+            );
+            anyhow::ensure!(
+                Self::owner()? == self.owner,
+                "Owner changed during native marker proof"
+            );
+            anyhow::ensure!(Instant::now() < deadline, "Native marker proof deadline");
+            Ok(())
+        };
+        guard(&mut input)?;
+        let run = self
+            .output
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("Non-UTF8 diagnostic directory"))?;
+        let mut paths = Vec::new();
+        for stage in [Stage::Preparing, Stage::AnswerPending, Stage::AnswerReady] {
+            for edge in 0..3 {
+                paths.push(Stroke::Edge(stage, edge).points());
+            }
+        }
+        paths.push(Stroke::Auxiliary(Stage::AnswerReady).points());
+        self.save(
+            "expected.json.tmp",
+            &serde_json::to_vec(&serde_json::json!({"run":run,"paths":paths}))?,
+        )?;
+        std::fs::rename(
+            self.output.join("expected.json.tmp"),
+            self.output.join("expected.json"),
+        )?;
+        let baseline = Self::bounded_read(&self.output.join("initial.rm"), 8 * 1024 * 1024)?;
+        let mut previous = baseline;
+        let mut versions: Vec<Vec<u8>> = Vec::new();
+        let mut total = 0usize;
+        loop {
+            guard(&mut input)?;
+            let bytes = self.read_native()?;
+            guard(&mut input)?;
+            if bytes != previous {
+                anyhow::ensure!(
+                    versions.len() < 16 && total + bytes.len() <= 64 * 1024 * 1024,
+                    "Native marker proof storage limit"
+                );
+                let number = versions.len();
+                let hash = format!("{:x}", Sha256::digest(&bytes));
+                self.save(&format!("candidate-{number:02}.rm"), &bytes)?;
+                let ready_name = format!("candidate-{number:02}.json");
+                self.save(
+                    &format!("{ready_name}.tmp"),
+                    &serde_json::to_vec(
+                        &serde_json::json!({"run":run,"number":number,"sha256":hash}),
+                    )?,
+                )?;
+                std::fs::rename(
+                    self.output.join(format!("{ready_name}.tmp")),
+                    self.output.join(ready_name),
+                )?;
+                total += bytes.len();
+                previous = bytes.clone();
+                versions.push(bytes.clone());
+            }
+            let ack_path = self.output.join("ack.json");
+            if ack_path.try_exists()? {
+                let ack: Ack = serde_json::from_slice(&Self::bounded_read(&ack_path, 1024)?)?;
+                let validated = versions
+                    .get(ack.number)
+                    .ok_or_else(|| anyhow::anyhow!("Unknown snapshot acknowledgement"))?;
+                anyhow::ensure!(
+                    ack.run == run
+                        && ack.sha256 == format!("{:x}", Sha256::digest(validated))
+                        && validated == &bytes,
+                    "Stale or mismatched snapshot acknowledgement"
+                );
+                guard(&mut input)?;
+                let fresh = self.read_native()?;
+                anyhow::ensure!(fresh == *validated, "Acknowledged marker snapshot changed");
+                guard(&mut input)?;
+                self.save("active.rm", &fresh)?;
+                self.save("active.json", &serde_json::to_vec(&serde_json::json!({
+                    "run":run,"number":ack.number,"sha256":ack.sha256,
+                    "meaning":"Explicit host marker predicate accepted; unknown record semantics remain unverified"}))?)?;
+                guard(&mut input)?;
+                return Ok(());
+            }
+            guard(&mut input)?;
+            sleep(
+                Duration::from_millis(500).min(deadline.saturating_duration_since(Instant::now())),
+            );
+        }
+    }
     fn owner() -> Result<remarkable_reader_buddy::workflow::history::Owner> {
         use remarkable_reader_buddy::device::native_page;
         use std::path::Path;
@@ -515,7 +667,7 @@ fn main() -> Result<()> {
                 active.take_screenshot()?;
                 active.save_image("/tmp/reader-buddy-status-active.png")?;
                 if let Some(native) = &native {
-                    native.capture("active")?;
+                    native.await_persisted_marker()?;
                 }
                 Ok(())
             })();

@@ -580,3 +580,23 @@ close or marker redraw. Successful acknowledgement leads to the unchanged normal
 cleanup, saved-final check and separate deliberate developer close/reopen audit.
 Test metadata-only changes, unexpected lines, stale acknowledgement, timeout and
 input/owner cancellation without claiming synthetic fixtures are hardware proof.
+
+Diagnostic implementation details: SHA-256 is an example-only dev dependency;
+normal installed runtime dependencies/behavior are unchanged. Host parser runs in
+a separate process with at most5s/remaining-host-budget per operation and60s total
+startup-inclusive budget; device30s deadline remains authoritative. Numbered ready
+records and expected geometry publish atomically after private artifact closure.
+Host ACK carries unique create-new run directory, version and SHA-256. Device
+fresh-byte equality and read-only owner/input checks gate acceptance.
+
+The fixed native transform is calibrated from this disposable viewport's left/right
+sentinels, checked against eight independent top-sentinel/selection-X endpoints
+(maximum residual0.681 native units). The fixed1.0-native-unit tolerance is under0.4
+screen pixels and is not relaxed on failure. Actual helper Stroke::points exports
+nine triangle edges and the final auxiliary circle. Predicate requires ten unique
+ordered bidirectional trajectory matches, exact Black Fine Medium recognized style,
+all baseline line IDs/properties and opaque non-PageInfo blocks unchanged. Existing
+line-deletion blocks are compared opaquely; new/changed ones refuse acknowledgement.
+Unknown semantics remain a limitation. Six synthetic regressions pass; retained
+a511 active bytes refuse for missing ten marker lines, and its later saved bytes
+refuse due to changed deletion records. Neither old snapshot becomes active proof.
