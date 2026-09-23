@@ -47,6 +47,7 @@ fn main() -> Result<()> {
     );
     fs::write(output.join("source.png"), &source.png)?;
     let mut completion = None;
+    let mut expected_owner = source_owner.clone();
     if args[0] != "current" {
         let result = device.navigate(if args[0] == "next" {
             NavigationDirection::Next
@@ -78,6 +79,7 @@ fn main() -> Result<()> {
                 && destination.session == source_owner.session,
             "Diagnostic reached an unexpected target"
         );
+        expected_owner = destination;
         device.delay(Duration::from_millis(800));
         let moved = device.capture()?;
         fs::write(output.join("after-navigation.png"), &moved.png)?;
@@ -97,9 +99,8 @@ fn main() -> Result<()> {
         "Owner changed during classifier capture"
     );
     ensure!(
-        classifier_owner.document == source_owner.document
-            && classifier_owner.session == source_owner.session,
-        "Navigation changed document/session"
+        classifier_owner == expected_owner,
+        "Diagnostic owner changed after navigation"
     );
     fs::write(output.join("classifier.png"), &classified.png)?;
     let header = device.load_header();
@@ -126,6 +127,10 @@ fn main() -> Result<()> {
     )?;
     if let Ok(Some(observed)) = &result {
         observed.image.save(output.join("ready.png"))?;
+        ensure!(
+            observed.identity == expected_owner,
+            "Readiness observation belongs to a different diagnostic owner"
+        );
     }
     println!("{report}");
     result.map(|_| ())
