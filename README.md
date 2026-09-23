@@ -251,6 +251,17 @@ metadata alone is not UI proof. The output directory must be new. Offline replay
 Use `-` instead of a reference path to test the absent-cache case. An Invalid
 result is evidence of refusal, not a successful Q&A or permission to loosen checks.
 
+For no-model readiness investigation, build `--example readiness_probe`. With the
+normal service stopped, `./readiness_probe current NEW_OUTPUT_DIR` observes the
+current page; `next` instead sends one real forward swipe before diagnostic
+navigation/classification captures. Neither writes answer or status ink. It calls
+the production pre-lease readiness check, saving its result and bracketed source
+and classifier ownership. Debug refusal artifacts in
+`/tmp/reader-buddy-readiness-{before,rejected}.{png,json}` are the exact compared
+frames and identities. Preserve them with the source/binary/reference hashes and
+visually verify the page. Use a bounded caller and restore the agreed page/service;
+this diagnostic sequence is not a complete Reader iteration.
+
 `--api-key` overrides `OPENAI_API_KEY`; prefer the protected environment because
 command arguments may appear in shell history or process listings. No real key is
 needed for offline simulation. `--base-url` overrides `OPENAI_BASE_URL`.

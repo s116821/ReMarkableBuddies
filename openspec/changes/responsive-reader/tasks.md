@@ -5,8 +5,8 @@
 - [ ] 1.4 Inventory each wait/completion predicate and supported signal; document event/postcondition vs bounded-polling decisions and necessary fixed-wait exceptions with evidence.
 ## 2. Capture and workflow optimization
 - [ ] 2.0 Implement deterministic correlated completion/state sequencing, preferring supported events plus verified postconditions; otherwise paced fresh-state polling with monotonic deadlines/cancellation and safe timeout behavior.
-- [ ] 2.1 Introduce exact-equivalent owned native/normalized pixel conversion and image-only status observation, avoiding unnecessary serialization.
-- [ ] 2.2 Prove pixel equivalence for modern/legacyRM2 and PaperPro, native strips, malformed captures and unchanged owner/session guards.
+- [x] 2.1 Introduce exact-equivalent owned native/normalized pixel conversion and image-only status observation, avoiding unnecessary serialization.
+- [x] 2.2 Prove pixel equivalence for modern/legacyRM2 and PaperPro, native strips, malformed captures and unchanged owner/session guards.
 - [ ] 2.3 Profile and safely eliminate remaining redundant observations/actions; use bounded verified convergence where proven.
 - [ ] 2.4 Diagnose repeated143991 availability failure from actual internal frames and preserve adversarial edit/refusal regressions; do not close from unconfirmed overlay hypothesis.
 - [ ] 2.5 Replace navigation/settling/rendering sleep assumptions with verified completion; retain only documented protocol/physical/observability exceptions and preserve complete answer/history semantics.

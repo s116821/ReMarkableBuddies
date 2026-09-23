@@ -12,6 +12,29 @@ use std::{
 };
 
 pub type Preferences = BTreeMap<String, String>;
+
+/// Shared native/simulator latch: losing wait input ownership cannot be undone
+/// by a later successful poll or an attempted style rollback.
+#[derive(Default)]
+pub(super) struct WaitCancellation {
+    cancelled: bool,
+}
+impl WaitCancellation {
+    pub(super) fn check(&self) -> Result<()> {
+        ensure!(
+            !self.cancelled,
+            "Status input ownership was cancelled; further input stopped"
+        );
+        Ok(())
+    }
+    pub(super) fn record(&mut self, result: Result<()>) -> Result<()> {
+        self.check()?;
+        if result.is_err() {
+            self.cancelled = true;
+        }
+        result
+    }
+}
 pub(crate) const COLORS: [&str; 9] = [
     "Black", "Gray", "White", "Blue", "Red", "Green", "Yellow", "Cyan", "Magenta",
 ];
@@ -294,6 +317,8 @@ mod tests {
         guard_calls: usize,
         cancel_at: Option<usize>,
         wrong_owner: bool,
+        cancellation: WaitCancellation,
+        fail_open: bool,
     }
     impl DelayedTransition {
         fn new(pending_reads: usize, observation_cost: Duration) -> Self {
@@ -309,6 +334,8 @@ mod tests {
                 guard_calls: 0,
                 cancel_at: None,
                 wrong_owner: false,
+                cancellation: WaitCancellation::default(),
+                fail_open: false,
             }
         }
         fn run(&mut self) -> Result<()> {
@@ -326,13 +353,22 @@ mod tests {
             self.model.clock += duration;
         }
         fn begin_wait(&mut self) -> Result<()> {
+            self.cancellation.record(if self.fail_open {
+                Err(anyhow::anyhow!("Observer unavailable"))
+            } else {
+                Ok(())
+            })?;
             self.waiting = true;
             Ok(())
         }
         fn check_wait(&mut self) -> Result<()> {
             self.guard_calls += 1;
-            ensure!(self.cancel_at != Some(self.guard_calls), "Cancelled input");
-            Ok(())
+            self.cancellation
+                .record(if self.cancel_at == Some(self.guard_calls) {
+                    Err(anyhow::anyhow!("Cancelled input"))
+                } else {
+                    Ok(())
+                })
         }
         fn end_wait(&mut self) {
             self.waiting = false;
@@ -344,6 +380,7 @@ mod tests {
             self.model.press(point)
         }
         fn observe(&mut self) -> Result<Observation> {
+            self.cancellation.check()?;
             if !self.waiting {
                 return self.model.observe();
             }
@@ -403,6 +440,42 @@ mod tests {
             assert_eq!(io.model.count, 1);
             assert_eq!(io.reads, usize::from(cancel_at != Some(1)));
             assert!(!io.waiting);
+        }
+    }
+
+    #[test]
+    fn wait_cancellation_blocks_acquisition_rollback_and_retains_real_journal() {
+        for fail_open in [false, true] {
+            let mut io = DelayedTransition::new(0, Duration::from_millis(1));
+            io.fail_open = fail_open;
+            io.cancel_at = Some(2); // cancellation after the first fresh capture
+            let mut lease = Lease::prepare(io.before.clone(), false).unwrap().unwrap();
+            let path = std::env::temp_dir().join(format!(
+                "reader-wait-cancel-{}-{}-{}.json",
+                std::process::id(),
+                fail_open,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            io.model.journal = Some(Journal::create(&path, &lease.recovery).unwrap());
+            assert!(lease.acquire(&mut io).is_err());
+            let after_failure = fs::read(&path).unwrap();
+            assert_eq!(io.model.count, 1);
+            // Even a later good observer result cannot restore ownership.
+            io.fail_open = false;
+            io.cancel_at = None;
+            assert!(io.begin_wait().is_err());
+            assert!(lease.restore(&mut io).is_err());
+            assert!(lease.prepare_cleanup(&mut io).is_err());
+            assert!(lease.finish_cleanup(&mut io).is_err());
+            assert_eq!(io.model.count, 1);
+            assert_eq!(fs::read(&path).unwrap(), after_failure);
+            assert_eq!(Recovery::read(&path).unwrap().sequence, 1);
+            assert!(Journal::create(&path, &lease.recovery).is_err());
+            drop(io.model.journal.take());
+            fs::remove_file(path).unwrap();
         }
     }
 

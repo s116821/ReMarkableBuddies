@@ -79,7 +79,7 @@ pub struct RealDevice {
     status_style: Option<super::status_style::Lease>,
     status_journal: Option<super::status_style::Journal>,
     status_style_supported: bool,
-    status_wait_cancelled: bool,
+    status_wait_cancellation: super::status_style::WaitCancellation,
     #[cfg(target_os = "linux")]
     status_wait_input: Option<super::input_observer::InputObserver>,
     debug_dump: bool,
@@ -96,7 +96,9 @@ pub struct RealDevice {
 const HEADER_PATH: &str = "/var/cache/reader-buddy/header-pattern.png";
 
 impl RealDevice {
-    fn ready_status_observation(&mut self) -> Result<Option<super::status_style::Observation>> {
+    /// Read-only production pre-lease readiness, exposed for bounded diagnostic
+    /// examples. This does not establish a lease or emit tool/pen input.
+    pub fn ready_status_observation(&mut self) -> Result<Option<super::status_style::Observation>> {
         #[cfg(target_os = "linux")]
         {
             use super::{input_observer::InputObserver, status_style::StyleIo};
@@ -110,6 +112,7 @@ impl RealDevice {
                 }
             };
             let started = std::time::Instant::now();
+            let debug_dump = self.debug_dump;
             super::status_readiness::wait_ready(
                 || self.observe(),
                 || {
@@ -121,6 +124,7 @@ impl RealDevice {
                 },
                 || started.elapsed(),
                 std::thread::sleep,
+                debug_dump,
             )
         }
         #[cfg(not(target_os = "linux"))]
@@ -140,7 +144,7 @@ impl RealDevice {
             status_style: None,
             debug_dump,
             status_journal: None,
-            status_wait_cancelled: false,
+            status_wait_cancellation: super::status_style::WaitCancellation::default(),
             #[cfg(target_os = "linux")]
             status_wait_input: None,
             status_style_supported: !no_draw
@@ -366,10 +370,7 @@ impl super::status_style::StyleIo for RealDevice {
         std::thread::sleep(duration);
     }
     fn begin_wait(&mut self) -> Result<()> {
-        anyhow::ensure!(
-            !self.status_wait_cancelled,
-            "Status input ownership was cancelled"
-        );
+        self.status_wait_cancellation.check()?;
         #[cfg(target_os = "linux")]
         {
             match super::input_observer::InputObserver::new(TriggerCorner::LowerLeft, None) {
@@ -377,20 +378,16 @@ impl super::status_style::StyleIo for RealDevice {
                     self.status_wait_input = Some(input);
                     Ok(())
                 }
-                Err(error) => {
-                    self.status_wait_cancelled = true;
-                    Err(error)
-                }
+                Err(error) => self.status_wait_cancellation.record(Err(error)),
             }
         }
         #[cfg(not(target_os = "linux"))]
-        anyhow::bail!("Native status input observation unavailable")
+        self.status_wait_cancellation.record(Err(anyhow::anyhow!(
+            "Native status input observation unavailable"
+        )))
     }
     fn check_wait(&mut self) -> Result<()> {
-        anyhow::ensure!(
-            !self.status_wait_cancelled,
-            "Status input ownership was cancelled"
-        );
+        self.status_wait_cancellation.check()?;
         #[cfg(target_os = "linux")]
         {
             let result = (|| {
@@ -404,13 +401,12 @@ impl super::status_style::StyleIo for RealDevice {
                 );
                 Ok(())
             })();
-            if result.is_err() {
-                self.status_wait_cancelled = true;
-            }
-            result
+            self.status_wait_cancellation.record(result)
         }
         #[cfg(not(target_os = "linux"))]
-        anyhow::bail!("Native status input observation unavailable")
+        self.status_wait_cancellation.record(Err(anyhow::anyhow!(
+            "Native status input observation unavailable"
+        )))
     }
     fn end_wait(&mut self) {
         #[cfg(target_os = "linux")]
@@ -426,10 +422,7 @@ impl super::status_style::StyleIo for RealDevice {
     }
     fn observe(&mut self) -> Result<super::status_style::Observation> {
         let _timing = crate::measurement::Span::new("status.observe");
-        anyhow::ensure!(
-            !self.status_wait_cancelled,
-            "Status input ownership was cancelled; further input stopped"
-        );
+        self.status_wait_cancellation.check()?;
         use super::{
             native_page,
             status_style::{Identity, Observation},

@@ -24,6 +24,7 @@ pub(super) fn wait_ready(
     mut guard: impl FnMut() -> Result<()>,
     mut now: impl FnMut() -> Duration,
     mut pause: impl FnMut(Duration),
+    debug_dump: bool,
 ) -> Result<Option<Observation>> {
     let _timing = crate::measurement::Span::new("status.readiness");
     let deadline = now().saturating_add(LIMIT);
@@ -40,14 +41,34 @@ pub(super) fn wait_ready(
             "Unknown status readiness dimensions"
         );
         if let Some(first) = &initial {
-            ensure!(
-                current.identity == first.identity,
-                "Page/session changed during status readiness"
-            );
-            ensure!(
-                (0..984).all(|y| (0..768).all(|x| {
+            let same_owner = current.identity == first.identity;
+            let same_content = (0..984).all(|y| {
+                (0..768).all(|x| {
                     current.image.get_pixel(x, y)[0].abs_diff(first.image.get_pixel(x, y)[0]) <= 8
-                })),
+                })
+            });
+            if debug_dump && (!same_owner || !same_content) {
+                // Exactly the observations about to be rejected; fixed bounded
+                // opt-in artifacts, never a recapture or replacement baseline.
+                for (name, observation) in [("before", first), ("rejected", &current)] {
+                    let result = (|| -> Result<()> {
+                        observation
+                            .image
+                            .save(format!("/tmp/reader-buddy-readiness-{name}.png"))?;
+                        std::fs::write(
+                            format!("/tmp/reader-buddy-readiness-{name}.json"),
+                            serde_json::to_vec_pretty(&observation.identity)?,
+                        )?;
+                        Ok(())
+                    })();
+                    if let Err(error) = result {
+                        log::warn!("Could not save readiness diagnostic: {error}");
+                    }
+                }
+            }
+            ensure!(same_owner, "Page/session changed during status readiness");
+            ensure!(
+                same_content,
                 "Page or toolbar changed during status readiness"
             );
         }
@@ -117,6 +138,7 @@ mod tests {
                 pauses.set(pauses.get() + 1);
                 clock.set(clock.get() + duration);
             },
+            false,
         );
         (result, captures.get(), pauses.get())
     }

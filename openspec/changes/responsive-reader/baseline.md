@@ -188,3 +188,24 @@ zero restarts, no model call/input action. No Paper Pro hardware or full-workflo
 performance claim. Five-observation toolbar convergence needs a real elapsed
 deadline before full integration tests because faster capture shortens that old
 implicit allowance. Other sequencing and acceptance gates remain open.
+
+### Corrected-fixture baseline remains unsuccessful
+One bounded old9330b4c attempt used a manually configured reference from the
+visually verified disposable Reader Q&A header. This was controlled test setup,
+not an automatic cache update or general eligibility change. Both a fresh native
+diagnostic and the actual workflow classified the page ExistingQA. The run then
+refused before rendering with `Page or toolbar changed during status readiness`.
+Active scope38.718684s; provider7.750037+2.901032s; rejected readiness1.691933s.
+No new answer, status mutation on the successor, or recovery journal; disposable
+notes retained d3b4... hash. The old readiness function did not dump its compared
+frames, so the later external screenshot does not establish the changing region
+or cause. No further paid baseline retry follows without new evidence.
+
+Original page visually restored, original/disposable notes/header/runtime hashes
+unchanged; installed service active PID1987, NRestarts0. Source48b6d38 separately
+passed171 host tests and both release builds (ARM3m12s, AArch641m43s), but has no
+integrated native run yet. The subsequent diagnostic adds bounded opt-in exact
+readiness rejection images/identities and a no-model production-readiness probe.
+The shared cancellation latch/real-journal regression proves observer-open
+failure or cancellation blocks subsequent acquisition rollback/cleanup input,
+retains the unresolved journal and cannot be revived by a later good poll.
