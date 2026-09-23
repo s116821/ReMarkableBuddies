@@ -1583,7 +1583,9 @@ impl Lease {
         }))
     }
     fn observe(&self, io: &mut impl StyleIo) -> Result<(Observation, Controls)> {
+        let started = self.debug_dump.then(|| io.monotonic());
         let state = io.observe()?;
+        let returned = self.debug_dump.then(|| io.monotonic());
         ensure!(
             state.identity == self.recovery.identity,
             "Status page/session changed; restoration stopped"
@@ -1616,8 +1618,88 @@ impl Lease {
             }
             anyhow::bail!("Status page image changed at ({x}, {y}); restoration stopped");
         }
-        let ui = controls(&state.image).context("Status toolbar layout changed")?;
+        let Some(ui) = controls(&state.image) else {
+            if let (Some(started), Some(returned)) = (started, returned) {
+                if let Err(error) = self.dump_controls_refusal(&state, started, returned) {
+                    log::warn!("Could not save toolbar refusal diagnostic: {error:#}");
+                }
+            }
+            anyhow::bail!(
+                "Status toolbar layout changed (last intent {:?}, sequence {})",
+                self.recovery.phase,
+                self.recovery.sequence
+            );
+        };
         Ok((state, ui))
+    }
+    fn dump_controls_refusal(
+        &self,
+        state: &Observation,
+        started: Duration,
+        returned: Duration,
+    ) -> Result<()> {
+        let stem = format!(
+            "/tmp/reader-buddy-toolbar-refusal-{}-{}",
+            std::process::id(),
+            self.recovery.sequence
+        );
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut image_file = match options.open(format!("{stem}.png")) {
+            Ok(file) => file,
+            // Preserve the first actual rejected frame for this durable intent.
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        state
+            .image
+            .write_to(&mut image_file, image::ImageFormat::Png)?;
+        let expected = match self.recovery.phase {
+            Phase::SelectPrimary
+            | Phase::RestoreSelectPrimary
+            | Phase::CloseForDrawing
+            | Phase::RestoreClose => serde_json::json!({"slot":"primary","menu":false}),
+            Phase::OpenPrimary | Phase::RestoreOpen => {
+                serde_json::json!({"slot":"primary","menu":true})
+            }
+            Phase::SelectFine => serde_json::json!({"slot":"primary","menu":true,"grid":1}),
+            Phase::SetColor => serde_json::json!({"grid":1,"color_index":0}),
+            Phase::SetWidth => serde_json::json!({"grid":1,"width_index":1}),
+            Phase::RestoreColor => {
+                serde_json::json!({"grid":1,"color_index":self.recovery.original_fine.map(|f| f.0)})
+            }
+            Phase::RestoreWidth => {
+                serde_json::json!({"grid":1,"width_index":self.recovery.original_fine.map(|f| f.1)})
+            }
+            Phase::RestorePrimary => {
+                serde_json::json!({"slot":"primary","menu":true,"grid":self.recovery.original_grid})
+            }
+            Phase::RestoreSlot | Phase::Prepared | Phase::PendingCleanup => {
+                serde_json::json!({"slot":self.recovery.original_slot,"menu":false})
+            }
+        };
+        let metadata = serde_json::json!({
+            "meaning": "Actual rejected observation after identity/content checks; last intent is not proof of input completion",
+            "observer_pid": std::process::id(),
+            "clock": "StyleIo monotonic elapsed time; not a wall-clock timestamp",
+            "identity": state.identity,
+            "sequence": self.recovery.sequence,
+            "last_intent": self.recovery.phase,
+            "expected_after_last_intent": expected,
+            "original_grid": self.recovery.original_grid,
+            "original_fine": self.recovery.original_fine,
+            "observation_started_us": started.as_micros(),
+            "observation_returned_us": returned.as_micros(),
+        });
+        options
+            .open(format!("{stem}.json"))?
+            .write_all(&serde_json::to_vec_pretty(&metadata)?)?;
+        Ok(())
     }
     fn transition(
         &mut self,

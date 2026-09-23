@@ -109,7 +109,12 @@ impl Screenshot {
     ) -> Result<image::DynamicImage> {
         self.data.clear();
         self.native_data.clear();
-        read(self)
+        read(self).inspect_err(|error| {
+            // This boundary contains only capture/allocation errors, not provider
+            // responses or document text. Keep the source chain even when an
+            // outer workflow later logs only the top-level safe refusal.
+            debug!("Fresh framebuffer capture failed: {error:#}");
+        })
     }
 
     fn normalize_timed(native: &image::DynamicImage) -> Result<image::DynamicImage> {

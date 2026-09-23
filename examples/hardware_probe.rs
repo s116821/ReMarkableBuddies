@@ -375,9 +375,12 @@ fn main() -> Result<()> {
             touch.touch_stop()?;
         }
         Some("erase") => Pen::new(false).erase_rectangle((240, 390), (510, 510))?,
-        Some("indicator-smoke") => {
-            let mut workflow =
-                remarkable_reader_buddy::Workflow::new(false, TriggerCorner::LowerLeft, false)?;
+        Some("indicator-smoke") | Some("indicator-smoke-diagnostic") => {
+            let mut workflow = remarkable_reader_buddy::Workflow::new(
+                false,
+                TriggerCorner::LowerLeft,
+                args[1] == "indicator-smoke-diagnostic",
+            )?;
             std::fs::write(
                 "/tmp/reader-buddy-status-before.png",
                 workflow.capture_page_data()?,

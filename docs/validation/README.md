@@ -49,6 +49,17 @@ The uninterrupted stroke cadence is 333 ms; diagnostic screenshots between stage
 add delay and are not runtime scheduling evidence. Native tool acquisition and
 restoration add separate overhead that must be measured, not hidden by cadence.
 
+For a controlled investigation, `indicator-smoke-diagnostic` additionally enables
+the existing debug dumps. On an unrecognized toolbar it preserves the actual
+first rejected frame for that process/journal sequence as
+`/tmp/reader-buddy-toolbar-refusal-<pid>-<sequence>.png`, with a private JSON
+companion containing owner, last durable intent, expected controls and observation
+times. It never recaptures or replaces the active baseline. Preserve these files
+before another run; they contain page content. The ordinary helper and production
+defaults are unchanged. A zero helper exit can still mean optional status was
+suppressed after verified rollback: require visible glyphs, actual restoration
+and cleanup evidence before counting a successful performance sample.
+
 Exercise primary and secondary Highlighter with nondefault Fineliner color/width.
 Capture actual menus before and after: persisted document preferences can be stale
 and file equality does not prove current UI restoration. Status temporarily uses
