@@ -30,7 +30,10 @@ fn main() -> anyhow::Result<()> {
     );
     let directory = std::path::Path::new(&args[2]);
     std::fs::create_dir_all(directory)?;
-    let mut workflow = Workflow::new(false, TriggerCorner::LowerLeft, false)?;
+    // Preserve the actual qualified/rejected trigger frames in the bounded
+    // Reader-only diagnostic; normal runtime defaults remain unchanged.
+    let trigger_diagnostic = args.get(3).is_some_and(|mode| mode == "--reader-only");
+    let mut workflow = Workflow::new(false, TriggerCorner::LowerLeft, trigger_diagnostic)?;
     sleep(Duration::from_secs(1));
     if args.get(3).is_some_and(|mode| mode == "--reader-only") {
         println!("Waiting for lower-left Reader hold without typing or a model call");
