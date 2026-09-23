@@ -397,3 +397,10 @@ Nested failure propagation follow-up: WaitCancellation.record retains an incomin
 error chain even if an inner observation already latched cancellation. A successful
 result still refuses when the latch was previously set; cancellation is monotonic.
 The regression checks preserved EIO5/context and no revival after a later Ok.
+
+Second-level guard instrumentation separates existing status.capture.owner_guard,
+status.input_guard, status.active.verify_pixels and status.cleanup.verify_pixels.
+These scopes remain nested and content-free; their names describe call scopes,
+not mutually exclusive workload categories. Use the next missing-width native
+case to attribute guard overhead before changing predicates or path grouping.
+No capture cache, tolerance/mask, ownership check, eraser geometry or pacing change.

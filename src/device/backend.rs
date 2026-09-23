@@ -176,6 +176,7 @@ impl super::capture_recovery::ObservationIo for NativeStatusObservation<'_> {
         self.0.clock.elapsed()
     }
     fn owner(&mut self) -> Result<Self::Owner> {
+        let _timing = crate::measurement::Span::new("status.capture.owner_guard");
         use std::path::Path;
         let session = super::native_page::xochitl_session(Path::new("/proc"))?;
         super::native_page::observed_owner(
@@ -648,6 +649,7 @@ impl super::status_style::StyleIo for RealDevice {
         )))
     }
     fn check_wait(&mut self) -> Result<()> {
+        let _timing = crate::measurement::Span::new("status.input_guard");
         self.status_wait_cancellation.check()?;
         #[cfg(target_os = "linux")]
         {

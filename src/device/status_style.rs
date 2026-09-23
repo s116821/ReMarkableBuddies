@@ -2006,6 +2006,7 @@ impl Lease {
     fn observe(&self, io: &mut impl StyleIo) -> Result<(Observation, Controls)> {
         let started = self.debug_dump.then(|| io.monotonic());
         let state = io.observe()?;
+        let _pixels_timing = crate::measurement::Span::new("status.active.verify_pixels");
         let returned = self.debug_dump.then(|| io.monotonic());
         ensure!(
             state.identity == self.recovery.identity,
@@ -2509,6 +2510,7 @@ impl Lease {
             .as_ref()
             .context("Cleanup was not prepared")?;
         let state = io.observe()?;
+        let _pixels_timing = crate::measurement::Span::new("status.cleanup.verify_pixels");
         ensure!(
             state.identity == self.recovery.identity,
             "Cleanup page/session changed"
