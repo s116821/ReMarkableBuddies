@@ -37,4 +37,4 @@ Normal Q&A SHALL remain available when optional feedback is suppressed.
 
 #### Scenario: Trigger release does not navigate menus
 - **WHEN** a Reader trigger qualifies
-- **THEN** the workflow proceeds without an automatic bottom-center tap or another menu-dismissal fallback; subsequent operations retain their ownership checks.
+- **THEN** the workflow must not navigate menus; the proposed removal of the automatic bottom-center tap requires native trigger/overlay verification. A necessary verified non-menu tap remains allowed, and subsequent operations retain their ownership checks.

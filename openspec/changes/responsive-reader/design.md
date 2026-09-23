@@ -666,9 +666,10 @@ explicitly unavailable while core Q&A remains available; do not call this positi
 feedback coverage. Existing actual width-range calibration still bounds any admitted
 Black Fineliner width. No diagnostic persistence wait/ACK enters the product.
 
-Remove the automatic bottom-center trigger-dismiss tap from the backend/workflow
-and simulator. A trigger is input observation, not authorization to open/dismiss
-page navigation UI. Keep simple page swipes and keyboard input as authorized.
+Propose removing the automatic bottom-center trigger-dismiss tap from the backend/
+workflow and simulator as a simplification, subject to native trigger/overlay tests.
+A simple non-menu tap remains authorized if evidence establishes it is necessary.
+Keep simple page swipes and keyboard input as authorized.
 Verify the no-tap trigger path natively before full workflow admission; no new menu
 fallback if an overlay is present. Keep all current recovery/content guards.
 
@@ -687,3 +688,8 @@ builds, remaining native negative/error/notes/trigger/full-Q&A and history gates
 then normal runtime/latency checks. This integration is development work, not a
 claim that remaining roadmap gates are complete or authorization to install an
 unreviewed runtime. History persistence/newline investigation remains separate.
+
+Admission refusal for an unsupported layout is distinct from safety failure: owner,
+input or capture errors propagate and stop the operation; they are never converted
+to optional-feedback suppression. The pixel band recognizes only the calibrated
+layout, not semantic PDF type, and conservatively refuses other configurations.
