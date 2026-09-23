@@ -612,3 +612,24 @@ serviceactivePID12008/NRestarts0, no active journal. Installed runtime remains
 caa5dd3e51e5443d665c727c4ff5730af475ec6d4d7175ef5eb3f78fab57f03b.
 Production admission, remaining slots/negative/error/notes cases and full Q&A/history
 remain open. Raw-event production observer replay is the next admission check.
+
+Secondary Black/Thin cycle3c1dbd5 succeeds with native helper
+SHA234834aee59275c0f0a2e40d631361dc195ce47bffc3844296f79603c2c87fa4 (ARM1m46).
+Acquisition372.134213ms + cleanup5462.174ms + final393.716ms =6228.024213ms.
+Cleanup preparation525.379ms; erase/verify4936.395ms. Ten guards3126.970ms,
+physical input1426.747ms, rearm56.634ms. Nested13 observations2940.660ms and
+pixel checks137.105ms are not additive.25 windows all reported positive input
+(93..415events,44..137frames); no native EIO/reacquisition. Stages131/197/240/249
+pixels within706..736/942..972, tool tiles exact, final clear, neighbor rectangles
+exact, actual secondary Fine/Black/Thin unchanged, V3 journal completed/no menu spans.
+The immediate source-drawn.rm still contained122 recognized Lines, while the
+post-cycle file contained125: no original line missing or altered, exactly three
+added two-point lines with the sentinel geometry. Therefore do not claim a125-to125
+native comparison for this cycle. After one exact recorded-path sentinel erasure
+and document close, all122 original Lines match exactly. Unknown native records
+remain unverified. Restored temporarysecondaryFineMedium/originalsecondaryBallpoint
+BlackMedium and selected unchanged primaryFine; original46e/f39 image+owner and
+notes/header/runtime hashes verified, serviceactivePID12638/NRestarts0/no journal.
+Remaining secondaryMedium, persistent failure codes, unsafe/unknown suppression,
+notes/blank-context admission, normal no-menu wiring and full Q&A/history/latency
+remain open. No final performance gate claimed from these single-width samples.
