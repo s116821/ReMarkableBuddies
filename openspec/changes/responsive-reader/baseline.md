@@ -309,3 +309,56 @@ fixture as a two-point stroke; its changed coordinate representation is not proo
 of either damaged or preserved ink. Full semantic/visual preservation remains a
 gate. Original document/header/runtime were restored and visually/hash verified,
 service activePID2976,NRestarts0,no journal. No live model call in this control.
+
+### Repeated ordinary indicator cycles and nondefault failure
+
+Three matched single-lease cycles per build used identical three-stage triangles
+and six auxiliary ticks on the disposable source page. Baseline adfe055 and
+candidate e4b263a each completed all three ordinary Fine/Black/Medium cycles,
+cleared the reserved corner and left no active journal. Actual primary settings
+were visually verified. These are indicator-only cycles, without provider,
+navigation, answer rendering or history; they do not complete full-workflow gates.
+
+All numbers below are milliseconds. Tool restoration and erase/verify are nested
+inside whole cleanup. Total is the union of acquisition, whole cleanup and final
+verification intervals; never add the nested columns again.
+
+| Build/run | Acquire | Restore tools | Erase/verify | Whole cleanup | Final verify | Total |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| adfe/1 |3381.317|573.519|1732.152|2306.282|229.690|5917.270|
+| adfe/2 |3309.283|562.441|1787.239|2350.228|206.682|5866.173|
+| adfe/3 |3316.605|563.864|1757.986|2322.425|207.231|5846.241|
+| e4b/1 |2341.197|567.588|1749.709|2317.810|210.949|4869.936|
+| e4b/2 |2373.336|556.221|1698.113|2254.894|198.068|4826.278|
+| e4b/3 |2410.941|567.064|1851.326|2418.902|247.115|5076.938|
+
+Median total 5866.173 to 4869.936; maximum 5917.270 to 5076.938.
+Acquisition median 3316.605 to 2373.336. Cleanup is largely unchanged.
+Before/final paper comparisons differ by 35-222 pixels in the lower-right redraw
+region, so zero page-wide change is not claimed. Offline parsing found exactly
+equal properties for all 122 recognized source Lines, including after the failed
+primary cycle below; parser warnings about unknown bytes prevent full ink proof.
+
+The first nondefault primary baseline (Highlighter/Yellow/Snap-to-text on, hidden
+Fine/Red/Thick) stopped on an allocation-header read EIO during post-erasure
+capture. Acquisition excluding readiness was 5.712405s, tool restoration 6.508239s,
+and whole cleanup 8.124949s. Ten owned paths had been erased, but capture failed
+before raw-frame reading, leaving PendingCleanup sequence 11. No final verification
+or successful total is reported. No candidate primary or secondary cycle followed.
+The old error lacks candidate address/mapping evidence; its cause is unresolved.
+
+Deliberate recovery first verified no running writer, the same document/page/
+visit 1:119/session 30974:100545844, a freshly captured clear corner and actual
+recorded Highlighter/Yellow and hidden Fine/Red/Thick settings. The journal was
+preserved (SHA256 60a317ddba333402cbbe9535d0b2beb61d7b4c90b5ce3f9e2213ab4fac32ffff).
+Pre-batch Fine/Black/Medium, original document, header and installed runtime were
+then restored and visually/hash verified; service active PID3613, NRestarts0,
+no active journal. Secondary was not changed in this batch.
+
+Diagnostic-only capture context now records candidate address, sampled mapping
+range/permissions, PID and failed syscall phase. A failure-only second maps
+snapshot reports whether mappings changed and whether the address remains mapped.
+It does not retry memory reads, cache an address or infer success. The regression
+retains the underlying OS error and asserts one read only. Native EIO reproduction
+and diagnosis, repeated nondefault/error cases, all visible milestones and full
+history/performance acceptance remain open.

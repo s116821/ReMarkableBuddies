@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use image::GrayImage;
 use log::{debug, info};
 use std::fs::File;
@@ -240,9 +240,28 @@ impl Screenshot {
         let maps = std::fs::read_to_string(format!("/proc/{pid}/maps"))?;
         let mut mem = File::open(format!("/proc/{pid}/mem"))?;
         Self::locate_rm2_allocation(&maps, |address| {
-            mem.seek(std::io::SeekFrom::Start(address))?;
+            mem.seek(std::io::SeekFrom::Start(address))
+                .with_context(|| {
+                    format!("Seek RM2 allocation header pid={pid} address={address:#x}")
+                })?;
             let mut header = [0u8; 8];
-            mem.read_exact(&mut header)?;
+            mem.read_exact(&mut header).with_context(|| {
+                // Failure evidence only: no second memory read, retry, cached
+                // address, or success inferred from a later mapping snapshot.
+                let current = std::fs::read_to_string(format!("/proc/{pid}/maps"));
+                let details = match current {
+                    Ok(current) => {
+                        let region = current.lines().find(|line| {
+                            let Some(range) = line.split_whitespace().next() else { return false; };
+                            let Some((start,end)) = range.split_once('-') else { return false; };
+                            matches!((u64::from_str_radix(start,16),u64::from_str_radix(end,16)), (Ok(start),Ok(end)) if start <= address && address < end)
+                        }).map(|line| line.split_whitespace().take(2).collect::<Vec<_>>().join(" ")).unwrap_or_else(|| "unmapped".into());
+                        format!("maps_changed={} current_region={region}", current != maps)
+                    }
+                    Err(error) => format!("current_maps_unavailable={error}"),
+                };
+                format!("Read RM2 allocation header pid={pid} address={address:#x} bytes=8; {details}")
+            })?;
             Ok(header)
         })
     }
@@ -274,7 +293,9 @@ impl Screenshot {
             // Linux may coalesce adjacent mmap chunks into one VMA. Check only
             // page-aligned headers whose complete allocation stays in this map.
             for address in (start..=last_start).step_by(PAGE_SIZE as usize) {
-                let header = read_header(address)?;
+                let header = read_header(address).with_context(|| format!(
+                    "RM2 allocation discovery candidate address={address:#x} sampled_region={start:#x}-{end:#x} permissions={}", fields[1]
+                ))?;
                 let previous = u32::from_le_bytes(header[..4].try_into()?);
                 let size = u32::from_le_bytes(header[4..].try_into()?) as u64;
                 if previous == 0 && size & 7 == 2 && size & !7 == allocation_size {
@@ -755,10 +776,24 @@ mod tests {
                 .to_string()
                 .contains("found 2")
         );
-        assert!(
-            Screenshot::locate_rm2_allocation(maps, |_| anyhow::bail!("unreadable mapping"))
-                .is_err()
+        let mut reads = 0;
+        let error = Screenshot::locate_rm2_allocation(maps, |_| {
+            reads += 1;
+            Err(std::io::Error::from_raw_os_error(5).into())
+        })
+        .unwrap_err();
+        assert_eq!(reads, 1, "Diagnostic context must not retry memory reads");
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .raw_os_error(),
+            Some(5)
         );
+        let context = error.to_string();
+        assert!(context.contains("address=0x1000"));
+        assert!(context.contains("sampled_region=0x1000-0xa09000"));
+        assert!(context.contains("permissions=rw-p"));
     }
 
     #[test]
