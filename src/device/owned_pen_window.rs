@@ -32,6 +32,7 @@ pub(super) fn finish(io: &mut impl WindowIo, started: Duration) -> Result<()> {
     deadline(io)?;
     io.validate_source()?;
     let mut count = 0usize;
+    let mut frames = 0usize;
     let mut partial = false;
     // The entry guard establishes all keys released. Check complete frames;
     // an event-class whitelist alone would accept malformed contact sequences.
@@ -50,6 +51,7 @@ pub(super) fn finish(io: &mut impl WindowIo, started: Duration) -> Result<()> {
         for (kind, code, value) in events {
             match (kind, code, value) {
                 (0, 0, 0) => {
+                    frames += 1;
                     ensure!(
                         !(pen && rubber) && (!touch || pen || rubber) && (touch == (pressure > 0)),
                         "Malformed owned contact frame"
@@ -88,6 +90,12 @@ pub(super) fn finish(io: &mut impl WindowIo, started: Duration) -> Result<()> {
     // This also processes any pen events delivered after the closed drain.
     // They are ordinary external activity, never silently discarded later.
     io.check_other_input()?;
+    deadline(io)?;
+    log::debug!(
+        "Owned pen event drain observed events={count} frames={frames} window_us={} drain_us={}",
+        io.now().saturating_sub(started).as_micros(),
+        io.now().saturating_sub(drain_started).as_micros()
+    );
     deadline(io)
 }
 
