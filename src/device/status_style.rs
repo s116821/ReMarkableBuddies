@@ -35,6 +35,33 @@ impl WaitCancellation {
         result
     }
 }
+
+/// One shared failure boundary for native pen and rubber paths. A release can
+/// fail after ink was emitted, so always attempt observer rearming, then latch
+/// either failure before another mutation or automatic journal completion.
+pub(super) fn guarded_injection<T>(
+    io: &mut T,
+    cancellation: fn(&mut T) -> &mut WaitCancellation,
+    inject: impl FnOnce(&mut T) -> Result<()>,
+    rearm: impl FnOnce(&mut T) -> Result<()>,
+) -> Result<()> {
+    cancellation(io).check()?;
+    let written = inject(io);
+    let observed = rearm(io);
+    let result = match (written, observed) {
+        (Ok(()), observed) => observed,
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(observe_error)) => Err(error.context(format!(
+            "Input observer rearm also failed: {observe_error:#}"
+        ))),
+    };
+    // Rearming may itself already have latched cancellation. Do not replace the
+    // original injection chain with the latch's generic follow-up refusal.
+    if result.is_err() {
+        cancellation(io).cancelled = true;
+    }
+    result
+}
 pub(crate) const COLORS: [&str; 9] = [
     "Black", "Gray", "White", "Blue", "Red", "Green", "Yellow", "Cyan", "Magenta",
 ];
@@ -303,6 +330,61 @@ mod tests {
         io.state.image = closed();
         io.state.identity.visit = "other".into();
         assert!(lease.verify_current_erasure(&mut io).is_err());
+    }
+    #[test]
+    fn current_tool_write_and_release_failures_rearm_then_latch_and_retain_journal() {
+        for failure in ["write failed", "release failed"] {
+            for rearm_fails in [false, true] {
+                let mut io = current_io();
+                let mut lease = Lease::prepare_current(io.state.clone(), false)
+                    .unwrap()
+                    .unwrap();
+                let path = std::env::temp_dir().join(format!(
+                    "rb-current-injection-{}-{failure}-{rearm_fails}.jsonl",
+                    std::process::id()
+                ));
+                io.journal = Some(Journal::create(&path, &lease.recovery).unwrap());
+                lease.acquire(&mut io).unwrap();
+                let mut harness = (WaitCancellation::default(), Vec::new(), io);
+                let error = guarded_injection(
+                    &mut harness,
+                    |h| &mut h.0,
+                    |h| {
+                        h.1.push("write/release");
+                        // Both failures may occur after a partial visible mark.
+                        h.2.state.image.put_pixel(720, 960, Luma([0]));
+                        anyhow::bail!("{failure}")
+                    },
+                    |h| {
+                        h.1.push("rearm");
+                        h.0.record(if rearm_fails {
+                            Err(anyhow::anyhow!("rearm failed"))
+                        } else {
+                            Ok(())
+                        })
+                    },
+                )
+                .unwrap_err();
+                let chain = format!("{error:#}");
+                assert!(chain.contains(failure));
+                assert_eq!(chain.contains("rearm failed"), rearm_fails);
+                assert_eq!(harness.1, ["write/release", "rearm"]);
+                for _ in ["next ink", "automatic erase"] {
+                    assert!(guarded_injection(
+                        &mut harness,
+                        |h| &mut h.0,
+                        |_| panic!("mutation after failed injection"),
+                        |_| panic!("rearm after latched cancellation")
+                    )
+                    .is_err());
+                }
+                assert!(harness.0.check().is_err()); // Native finish checks this before journal removal.
+                assert_eq!(Recovery::read(&path).unwrap().phase, Phase::CurrentInk);
+                assert_eq!(harness.2.state.image.get_pixel(720, 960).0[0], 0);
+                drop(harness);
+                fs::remove_file(path).unwrap(); // Deliberate test-fixture disposal only.
+            }
+        }
     }
 
     fn fixture(bytes: &[u8]) -> GrayImage {

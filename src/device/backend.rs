@@ -222,6 +222,25 @@ impl RealDevice {
         }
         Ok(())
     }
+    fn inject_status_path(&mut self, points: &[(i32, i32)], erasing: bool) -> Result<()> {
+        self.guard_current_input(erasing, points)?;
+        let inject = |device: &mut Self| {
+            if erasing {
+                device.pen.erase_path_screen(points)
+            } else {
+                device.pen.draw_path_screen(points)
+            }
+        };
+        if !self.current_tool_probe {
+            return inject(self);
+        }
+        super::status_style::guarded_injection(
+            self,
+            |device| &mut device.status_wait_cancellation,
+            inject,
+            Self::rearm_current_input,
+        )
+    }
     /// Read-only production pre-lease readiness, exposed for bounded diagnostic
     /// examples. This does not establish a lease or emit tool/pen input.
     pub fn ready_status_observation(&mut self) -> Result<Option<super::status_style::Observation>> {
@@ -369,11 +388,7 @@ impl DeviceBackend for RealDevice {
         self.keyboard.key_cmd_body()
     }
     fn line(&mut self, from: (i32, i32), to: (i32, i32)) -> Result<()> {
-        self.guard_current_input(false, &[from, to])?;
-        let result = self.pen.draw_path_screen(&[from, to]);
-        let observed = self.rearm_current_input();
-        observed?;
-        result
+        self.inject_status_path(&[from, to], false)
     }
     fn erase(&mut self, from: (i32, i32), to: (i32, i32)) -> Result<()> {
         self.pen.erase_rectangle(from, to)
@@ -391,11 +406,7 @@ impl DeviceBackend for RealDevice {
         let _timing = crate::measurement::Span::new("status.stroke_input");
         log::debug!("Status stroke {stroke:?} at {:?}", self.clock.elapsed());
         let points = stroke.points();
-        self.guard_current_input(false, &points)?;
-        let result = self.pen.draw_path_screen(&points);
-        let observed = self.rearm_current_input();
-        observed?;
-        result
+        self.inject_status_path(&points, false)
     }
     fn status_style_begin(&mut self) -> Result<bool> {
         use super::status_style::{Journal, Lease, Recovery};
@@ -509,11 +520,7 @@ impl DeviceBackend for RealDevice {
         let _erasure_timing = crate::measurement::Span::new("status.cleanup.erase_and_verify");
         for stroke in strokes {
             let points = stroke.points();
-            self.guard_current_input(true, &points)?;
-            let erased = self.pen.erase_path_screen(&points);
-            let observed = self.rearm_current_input();
-            observed?;
-            erased?;
+            self.inject_status_path(&points, true)?;
         }
         std::thread::sleep(Duration::from_millis(100));
         let clean = self.status_screenshot.take_image()?;

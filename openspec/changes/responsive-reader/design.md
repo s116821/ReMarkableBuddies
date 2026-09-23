@@ -324,3 +324,12 @@ cleanup may retain owned ink; final cleanup must prove the entire corner clear.
 No baseline refresh, menu input, erasure broadening or retry is introduced.
 Review source and cross-build before a bounded native candidate run; helper success
 still requires positive mark/cleanup evidence, not just exit status.
+
+Native candidate write-failure policy: always attempt observer rearming after a
+pen/rubber write or release fails, then latch the failure. No subsequent ink,
+erasure or automatic journal completion is permitted; deliberate recovery remains
+required. Preserve the original injection error chain even when rearming also
+fails. The shared native wrapper is exercised by injected partial-write/release
+faults with a real V3 journal, including rearm failure and subsequent mutation
+attempts. This supersedes any implication that a successful rearm alone permits
+cleanup after an uncertain write.
