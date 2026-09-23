@@ -6,6 +6,92 @@ use remarkable_reader_buddy::{Keyboard, Pen, Screenshot, Touch, TriggerCorner};
 #[cfg(target_os = "linux")]
 use std::{thread::sleep, time::Duration};
 
+/// Optional read-only native evidence for the explicit disposable-page cycle.
+#[cfg(target_os = "linux")]
+struct NativeEvidence {
+    output: std::path::PathBuf,
+    owner: remarkable_reader_buddy::workflow::history::Owner,
+    started: std::time::Instant,
+}
+#[cfg(target_os = "linux")]
+impl NativeEvidence {
+    fn owner() -> Result<remarkable_reader_buddy::workflow::history::Owner> {
+        use remarkable_reader_buddy::device::native_page;
+        use std::path::Path;
+        native_page::observed_owner(
+            Path::new("/home/root/.local/share/remarkable/xochitl"),
+            Path::new("/home/root/.config/remarkable/xochitl.conf"),
+            native_page::xochitl_session(Path::new("/proc"))?,
+        )
+    }
+    fn new(output: &str, document: &str, page: &str) -> Result<Self> {
+        use std::os::unix::fs::DirBuilderExt;
+        let owner = Self::owner()?;
+        anyhow::ensure!(
+            owner.document == document && owner.page == page,
+            "Native diagnostic selected document/page differs"
+        );
+        std::fs::DirBuilder::new().mode(0o700).create(output)?;
+        Ok(Self {
+            output: output.into(),
+            owner,
+            started: std::time::Instant::now(),
+        })
+    }
+    fn capture(&self, stage: &str) -> Result<()> {
+        use std::{
+            io::{Read, Write},
+            os::unix::fs::OpenOptionsExt,
+        };
+        let _timing = remarkable_reader_buddy::measurement::Span::new("diagnostic.native_snapshot");
+        let started_us = self.started.elapsed().as_micros();
+        anyhow::ensure!(
+            Self::owner()? == self.owner,
+            "Native diagnostic owner changed before read"
+        );
+        let path = std::path::Path::new("/home/root/.local/share/remarkable/xochitl")
+            .join(&self.owner.document)
+            .join(format!("{}.rm", self.owner.page));
+        let read = || -> Result<Vec<u8>> {
+            let mut bytes = Vec::new();
+            std::fs::File::open(&path)?
+                .take(8 * 1024 * 1024 + 1)
+                .read_to_end(&mut bytes)?;
+            anyhow::ensure!(
+                bytes.len() <= 8 * 1024 * 1024,
+                "Native evidence exceeds8MiB"
+            );
+            Ok(bytes)
+        };
+        let bytes = read()?;
+        anyhow::ensure!(bytes == read()?, "Native evidence changed during read");
+        anyhow::ensure!(
+            Self::owner()? == self.owner,
+            "Native diagnostic owner changed after read"
+        );
+        let save = |suffix: &str, bytes: &[u8]| -> Result<()> {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(self.output.join(format!("{stage}.{suffix}")))?
+                .write_all(bytes)?;
+            Ok(())
+        };
+        save("rm", &bytes)?;
+        save(
+            "json",
+            &serde_json::to_vec_pretty(&serde_json::json!({
+                "stage":stage, "started_us":started_us, "finished_us":self.started.elapsed().as_micros(),
+                "bytes":bytes.len(), "document":self.owner.document, "page":self.owner.page,
+                "visit":self.owner.visit, "session":self.owner.session,
+                "meaning":"Two equal bounded reads with matching owner; persisted marker presence requires offline verification, not a completion signal"
+            }))?,
+        )?;
+        Ok(())
+    }
+}
+
 /// Diagnostic only: select a bounded suffix without deleting it, or press one key.
 #[cfg(target_os = "linux")]
 fn history_keys(action: &str, count: usize) -> Result<()> {
@@ -378,6 +464,20 @@ fn main() -> Result<()> {
         Some("indicator-smoke")
         | Some("indicator-smoke-diagnostic")
         | Some("indicator-current-tool") => {
+            let native = if args[1] == "indicator-current-tool" {
+                anyhow::ensure!(args.len() == 2 || args.len() == 5,
+                    "indicator-current-tool [NEW_NATIVE_OUTPUT_DIR EXPECTED_DOCUMENT EXPECTED_PAGE]");
+                if args.len() == 5 {
+                    Some(NativeEvidence::new(&args[2], &args[3], &args[4])?)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            if let Some(native) = &native {
+                native.capture("initial")?;
+            }
             let mut workflow =
                 if args[1] == "indicator-current-tool" {
                     remarkable_reader_buddy::Workflow::with_device(Box::new(
@@ -409,13 +509,24 @@ fn main() -> Result<()> {
                 }
                 active.take_screenshot()?;
                 active.save_image("/tmp/reader-buddy-status-active.png")?;
+                if let Some(native) = &native {
+                    native.capture("active")?;
+                }
                 Ok(())
             })();
+            // An unverified diagnostic owner/read is not authority for automatic
+            // cleanup. Retain the active phase/journal for deliberate recovery.
+            if native.is_some() && result.is_err() {
+                return result;
+            }
             let started = std::time::Instant::now();
             let cleanup = workflow.clear_indicator();
             println!("Owned-path cleanup: {} ms", started.elapsed().as_millis());
             result?;
             cleanup?;
+            if let Some(native) = &native {
+                native.capture("final")?;
+            }
         }
         Some("failure-code") | Some("failure-current-tool") => {
             use remarkable_reader_buddy::workflow::indicator::Failure;
