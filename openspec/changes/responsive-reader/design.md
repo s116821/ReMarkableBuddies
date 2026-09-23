@@ -194,4 +194,17 @@ phase, not as an additive comparison to nested historical conversion/resize
 spans. Run native image equivalence and repeated full indicator measurements;
 the microbenchmark alone cannot close the marker or full-workflow gates.
 
+The first faster nondefault-primary case refused an unrecognized toolbar after
+SelectFine. Before changing convergence policy, add opt-in diagnostic preservation
+of the actual controls-refusal frame, its owner, last durable phase/sequence,
+expected post-intent controls and observation timestamps. Content/identity guards
+must run first. Preserve the first rejected frame for a given process/sequence;
+never substitute a later capture or update the active baseline. Diagnostic write
+failure must not replace the original safe refusal. Keep private raw frames and
+the failed sample. An explicit offline diagnostic helper mode may enable the
+existing debug-dump behavior; ordinary helpers and production CLI defaults stay
+unchanged. Review this diagnostic before one bounded reproduction. Unknown
+layouts remain fail-closed; any future pending state must be narrowly justified
+by actual evidence and retain deadline, cancellation, content and owner checks.
+
 In the implementation PR add a concise AGENTS/workflow rule applying this default to future Reader/Writer features, with public/manual equivalents and no optional integration prerequisite. REM35 audits new waits and verifies preservation across the integrated system. Simulator coverage must exercise immediate/delayed completion, missing/duplicate/out-of-order/stale signals, wrong page/session/operation and cancellation via actual production sequencing; assert no duplicated mutation or stale successful transition. The architecture amendment preceded implementation; the measurement checkpoint now includes the AGENTS principle, while tasks.md tracks remaining implementation and validation.

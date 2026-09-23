@@ -416,3 +416,49 @@ fused132.999/142.443/143.266 (median142.443). Fused conversion itself took
 three-pair idle microbenchmark, not marker or workflow acceptance. A subsequent
 equivalent row loop removes the image iterator's per-pixel coordinate overhead;
 its native improvement must be measured separately before claiming further gains.
+
+The row-loop revision d3fbd5e passed the nine pixel regressions and strict clippy;
+ARM build2m04 and AArch64 build1m46 passed, with independent source review.
+Three new alternating read-only pairs remained exactly c1711658 pixels:
+4430 totals158.471/185.472/162.587ms; d3 totals134.676/121.511/118.181ms.
+Fused conversion27.370/24.708/24.724ms. No input or installed-runtime change.
+
+### Matched indicator matrix stopped on nondefault toolbar refusal
+
+Comparator492c626 is the original adfe baseline with diagnostic context only;
+candidate d3fbd5e includes consolidation and fused capture. Each ordinary case
+used the identical full three-stage plus auxiliary-tick cycle. Positive glyph
+presence, cleared reserved corner, actual Fine/Black/Medium, owner and absent
+recovery record were verified. All six final frames were visually inspected.
+
+| Build/run | Acquire | Restore tools | Erase/verify | Whole cleanup | Final verify | Total union (ms) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+|492/ordinary1|3458.369|582.677|1765.428|2348.679|220.195|6027.223|
+|492/ordinary2|3377.142|571.809|1678.535|2250.962|222.993|5851.077|
+|492/ordinary3|3354.811|564.912|1767.246|2332.714|214.023|5901.529|
+|d3/ordinary1|2088.209|430.519|1670.221|2101.230|162.923|4352.340|
+|d3/ordinary2|2127.336|428.841|1692.508|2121.911|189.515|4438.741|
+|d3/ordinary3|2104.778|440.717|1697.943|2139.151|171.172|4415.083|
+|492/primary1|6126.568|6634.658|1737.310|8372.463|269.675|14768.687|
+
+Ordinary total median5901.529 to4415.083ms, maximum6027.223 to4438.741ms;
+observations16 to11. The nested columns are not added again. Both builds retain
+the same observer/journal-preservation procedure; these are still single-lease
+indicator tests, not complete Q&A or visible-milestone acceptance.
+
+**Failed candidate primary1:** after SelectFine, acquisition refused with
+“Status toolbar layout changed”, then verified rollback and suppressed every
+indicator mark. The helper returned0, but the test's required positive acquisition/
+erasure/restoration checks correctly failed and stopped the batch. No successful
+timing is credited. Journal sequences0..4 show Prepared, OpenPrimary, SelectFine,
+RestorePrimary, RestoreClose; original grid2 and no captured Fine style. No EIO
+or active journal. The actual internal rejected toolbar frame was not saved.
+Faster capture seeing a transient popover is only a hypothesis. Remaining primary
+pairs and all secondary/error cases were not run.
+
+Fresh owner remained e7/a718/visit1:119/session30974:100545844. Actual
+Highlighter/Yellow/Snap-to-text and hidden Fine/Red/Thick were visually verified.
+All122 recognized source Lines remain equal, with the same unknown-format limit.
+Original Fine/Black/Medium and document46e/f39 were then visually restored; notes
+c284, header6faae and runtimecaa5 hashes matched; serviceactivePID7789,NRestarts0,
+no active recovery record or writer. No blanket unknown-layout retry is justified.
