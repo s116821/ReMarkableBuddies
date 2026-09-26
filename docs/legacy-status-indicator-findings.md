@@ -44,7 +44,7 @@ took 9.805 seconds to observe as persisted; a PageInfo field changed from 4 to 5
 with unknown semantics. Earlier extra-newline behavior remains unexplained.
 REM-38, REM-43 and the REM-35 integrated gate must retain opaque-content and
 ownership checks rather than normalizing unknown fields or inferring completion
-from elapsed time. No new native verification is claimed by this document.
+from elapsed time. These historical results are distinct from the current observations below.
 
 ## Retirement candidate observations
 
@@ -67,3 +67,29 @@ cache's small sans-serif heading. Reader classified it as invalid and returned
 once with both native page files unchanged. This is not successful Q&A output.
 REM-25/38 must replace or resolve global screenshot-header identity assumptions.
 Separate bounded typing diagnostics must be labeled separately from this live run.
+
+The same exact production source then completed one bounded live Q&A after deliberate
+fixture setup backed up the global header cache and seeded it with the unchanged
+classifier's exact top-150-pixel reference from the disposable notes page. This
+controlled precondition is not a fix for cross-document header identity. The initial
+refusal remains evidence. Proposal and independent transcription agreed; the run
+appended exactly337 characters (1511 to1848) with the prior text as an exact prefix.
+Only RootText and PageInfo raw records changed; all26 other length-framed records,
+including unknown payload bytes, were identical. Source native bytes were identical.
+The final screenshot was independently inspected and shows the new complete block.
+
+The single iteration took38.724433s: provider requests4.666864/1.904248s,
+navigation-completion span5.283421s (includes the gesture/preparation), text input
+13.844231s and exact native post-text persistence10.395769s. Nested spans are not
+added twice. This is one variable-length live answer, not a matched speed benchmark
+or first-visible-pixel measurement. After typing, the page scrolled and the heading
+was outside the viewport; the image classifier again returned Invalid. REM-25/37/38
+must use durable bindings and handle scrolled/edited pages; REM-40/43/35 retain
+cancellation, native persistence, history and integrated latency gates.
+
+The original cache, document view and installed service were restored. Original
+notes, cache and installed binary hashes matched their baselines; the service was
+active with zero restarts, temporary test units inactive and no recovery journal or
+account registration added. These are RM2 firmware3.28.0.172 portrait results, not
+Paper Pro, human gesture, reboot, native undo/redo or 1.0 acceptance. Minimal images
+and grouped evidence live in PR27 comments; full local snapshots remain preserved.
