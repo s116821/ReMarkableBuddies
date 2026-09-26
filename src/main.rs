@@ -97,7 +97,7 @@ fn main() -> Result<()> {
     let workflow = Workflow::new(false, effective.trigger_corner, effective.debug_dump)?;
     sleep(Duration::from_millis(1000));
     let mut orchestrator = Orchestrator::new(workflow, llm);
-    let _sync_worker = Worker::google(store, config.sync)?;
+    let _sync_worker = Worker::google(store.clone(), config.sync)?;
     info!("Initialization complete; starting main loop");
     orchestrator.run_loop()
 }

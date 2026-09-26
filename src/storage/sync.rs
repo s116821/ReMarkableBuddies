@@ -199,6 +199,7 @@ impl<T: DriveTransport> SyncEngine<T> {
                     self.state.start_token = None;
                     // Retain old observations for recovery; never infer deletions.
                     self.save()?;
+                    return Ok(Status::Discovering);
                 }
                 return Err(error);
             }
@@ -666,7 +667,15 @@ impl Worker {
                 if matches!(status,Status::AuthorizationRequired|Status::RecoveryRequired) {break;}
                 let jitter=u64::from(Uuid::new_v4().as_bytes()[0])%3;
                 let delay=retry.unwrap_or_else(|| if failures>0 {2_u64.saturating_pow(failures.min(10)).min(3600)} else if matches!(status,Status::Pending|Status::Discovering){1}else{policy.poll_seconds})+jitter;
-                let _=receiver.recv_timeout(Duration::from_secs(delay));
+                let deadline=std::time::Instant::now()+Duration::from_secs(delay);
+                loop {
+                    if engine.cancel.load(Ordering::Relaxed){break;}
+                    let remaining=deadline.saturating_duration_since(std::time::Instant::now());
+                    if remaining.is_zero() || receiver.recv_timeout(remaining).is_err(){break;}
+                    // New commits remain durable, but cannot bypass Retry-After or
+                    // backoff. Cancellation still wakes this wait immediately.
+                    if failures==0 {break;}
+                }
             }
             let _=done_sender.send(());
         })?;

@@ -449,3 +449,86 @@ fn configuration_cas_export_excludes_secrets_and_restore_keeps_settings_inactive
         .exists());
     assert!(!target.root.join("config.json").exists());
 }
+
+#[test]
+fn unsupported_incoming_versions_and_malformed_backup_do_not_change_live_heads() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    let e = record(&store, Namespace::Handwriting);
+    store.commit(vec![e.clone()], BTreeMap::new()).unwrap();
+    let original = store.manifests().unwrap()[0].clone();
+    for version in [2, 99] {
+        let mut future = e.clone();
+        future.envelope_version = version;
+        future.revision_id = Uuid::new_v4();
+        future.operation_id = Uuid::new_v4();
+        future.parents.insert(e.revision_id);
+        let bytes = serde_json::to_vec(&future).unwrap();
+        let hash = digest(&bytes);
+        let mut manifest = original.clone();
+        manifest.transaction_id = Uuid::new_v4();
+        manifest.records = vec![ObjectRef {
+            sha256: hash.clone(),
+            bytes: bytes.len() as u64,
+        }];
+        manifest.record_namespaces = BTreeMap::from([(hash.clone(), future.namespace)]);
+        assert!(store
+            .import(manifest, BTreeMap::from([(hash, bytes)]))
+            .is_err());
+        assert_eq!(
+            store
+                .value(e.namespace, e.record_id)
+                .unwrap()
+                .unwrap()
+                .revision_id,
+            e.revision_id
+        );
+    }
+    let backup = fixture.root.join("backup");
+    store.export(&backup).unwrap();
+    let mut value: serde_json::Value =
+        files::json(&backup.join("backup.json"), MAX_METADATA as u64).unwrap();
+    value["objects"][0]["sha256"] = "../escape".into();
+    fs::write(
+        backup.join("backup.json"),
+        serde_json::to_vec(&value).unwrap(),
+    )
+    .unwrap();
+    let current = fs::read(fixture.paths().data.join("CURRENT")).unwrap();
+    assert!(store.restore(&backup).is_err());
+    assert_eq!(
+        fs::read(fixture.paths().data.join("CURRENT")).unwrap(),
+        current
+    );
+}
+
+#[test]
+fn binary_replacement_fixture_preserves_store_config_and_conflict_contract() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    let original = record(&store, Namespace::Conversation);
+    store
+        .commit(vec![original.clone()], BTreeMap::new())
+        .unwrap();
+    let installed = fixture.root.join("installed-reader-buddy");
+    fs::write(&installed, b"old-fixture-binary").unwrap();
+    fs::remove_file(&installed).unwrap();
+    fs::write(&installed, b"new-fixture-binary").unwrap();
+    drop(store);
+    let reopened = fixture.open();
+    assert_eq!(
+        reopened
+            .value(original.namespace, original.record_id)
+            .unwrap()
+            .unwrap()
+            .revision_id,
+        original.revision_id
+    );
+    let deletion = edit(&original, &reopened, true);
+    reopened.commit(vec![deletion], BTreeMap::new()).unwrap();
+    assert!(reopened
+        .value(original.namespace, original.record_id)
+        .unwrap()
+        .is_none());
+    assert_eq!(reopened.manifests().unwrap().len(), 2);
+}

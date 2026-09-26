@@ -4,6 +4,7 @@
   "maintenance": ["remember-unit-state", "stop-unit", "confirm-inactive", "acquire-stable-store-lock", "validate-version-owner-expected-revision", "stage-and-commit", "release-lock", "restart-if-previously-running-and-valid"],
   "schemas": {
     "envelope": {
+      "$id": "urn:remarkable-buddies:envelope:v1",
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object", "additionalProperties": false,
       "required": ["envelope_version", "namespace", "domain_schema_version", "record_id", "revision_id", "parents", "operation_id", "actor_id", "kind", "payload", "media_descriptors"],
@@ -22,6 +23,7 @@
       }
     },
     "config": {
+      "$id": "urn:remarkable-buddies:config:v1",
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object", "additionalProperties": false,
       "properties": {
@@ -43,6 +45,7 @@
       }
     },
     "manifest": {
+      "$id": "urn:remarkable-buddies:manifest:v1",
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object", "additionalProperties": false,
       "required": ["format", "transaction_id", "scope", "records", "record_namespaces", "media", "media_coverage"],
@@ -58,6 +61,16 @@
           {"type": "object", "additionalProperties": false, "required": ["availability", "sha256", "reason"], "properties": {"availability": {"const": "omitted"}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "reason": {"enum": ["policy-disabled", "size-deferred", "unavailable-at-source"]}}}
         ]}}
       }
+    },
+    "backup": {
+      "$id": "urn:remarkable-buddies:backup:v1", "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object", "additionalProperties": false, "required": ["format", "manifests", "objects", "complete_media", "config_snapshot"],
+      "properties": {"format": {"const": 1}, "manifests": {"type": "array", "maxItems": 4096, "items": {"$ref": "urn:remarkable-buddies:manifest:v1"}}, "objects": {"type": "array", "maxItems": 4096, "items": {"$ref": "urn:remarkable-buddies:manifest:v1#/$defs/object"}}, "complete_media": {"type": "boolean"}, "config_snapshot": {"anyOf": [{"$ref": "urn:remarkable-buddies:config:v1"}, {"type": "null"}]}}
+    },
+    "drive_credentials": {
+      "$id": "urn:remarkable-buddies:drive-credentials:v1", "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object", "additionalProperties": false, "required": ["credential_version", "client_id", "access_token", "refresh_token", "expires_at", "scopes", "account_permission_id", "collection"],
+      "properties": {"credential_version": {"const": 1}, "client_id": {"type": "string", "minLength": 1}, "client_secret": {"type": ["string", "null"]}, "access_token": {"type": "string", "minLength": 1}, "refresh_token": {"type": "string"}, "expires_at": {"type": "integer", "minimum": 0}, "scopes": {"type": "array", "items": {"type": "string"}, "contains": {"const": "https://www.googleapis.com/auth/drive.appdata"}}, "account_permission_id": {"type": "string", "minLength": 1}, "collection": {"type": "string", "format": "uuid"}}
     }
   },
   "additional_runtime_validation": ["non-nil IDs", "same-record acyclic parent lineage", "full expected-head CAS for local mutations", "media coverage and namespace-map equality", "SHA-256 and byte-length integrity", "one-MiB record and eight-MiB aggregate record bounds", "exclusive ownership lease", "absolute owned non-overlapping non-symlink paths", "supported domain adapters only", "tombstones have null payload and no media"],

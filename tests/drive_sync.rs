@@ -25,6 +25,8 @@ struct Cloud {
     slow: bool,
     active_request: bool,
     cursor_expired: bool,
+    quota_once: bool,
+    change_calls: usize,
 }
 #[derive(Clone, Default)]
 struct Fake(Arc<Mutex<Cloud>>);
@@ -65,6 +67,17 @@ impl DriveTransport for Fake {
     fn changes(&mut self, page: &str) -> anyhow::Result<Page<Change>> {
         {
             let mut c = self.0.lock().unwrap();
+            c.change_calls += 1;
+            if c.quota_once {
+                c.quota_once = false;
+                return Err(TransportFailure {
+                    status: 429,
+                    retry_after_seconds: Some(2),
+                    retryable: true,
+                    authorization_required: false,
+                }
+                .into());
+            }
             if c.cursor_expired {
                 c.cursor_expired = false;
                 return Err(TransportFailure {
@@ -588,8 +601,47 @@ fn rejected_cursor_and_disappeared_collection_do_not_recreate_cloud_from_local_d
         c.changes.clear();
         c.cursor_expired = true;
     }
-    assert!(engine.step().is_err());
+    assert_eq!(engine.step().unwrap(), Status::Discovering);
     assert_eq!(engine.step().unwrap(), Status::RecoveryRequired);
     assert_eq!(cloud.0.lock().unwrap().uploads, uploads);
     assert!(a.store.value(e.namespace, e.record_id).unwrap().is_some());
+}
+
+#[test]
+fn new_local_wakes_cannot_bypass_retry_after_but_shutdown_still_cancels_wait() {
+    let cloud = Fake::default();
+    cloud.0.lock().unwrap().quota_once = true;
+    let a = Device::new();
+    let p = policy(Uuid::new_v4(), true);
+    let worker = Worker::start(a.store.clone(), p, cloud.clone())
+        .unwrap()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        let status =
+            files::json::<serde_json::Value>(&a.store.paths.data.join("sync/health.json"), 1024)
+                .ok();
+        if status.is_some_and(|v| v["status"] == "retry-later") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "worker did not encounter injected quota failure"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let calls = cloud.0.lock().unwrap().change_calls;
+    for _ in 0..3 {
+        a.store
+            .commit(
+                vec![record(&a.store, Namespace::SubjectMemory)],
+                BTreeMap::new(),
+            )
+            .unwrap();
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(cloud.0.lock().unwrap().change_calls, calls);
+    let started = Instant::now();
+    drop(worker);
+    assert!(started.elapsed() < Duration::from_secs(1));
 }

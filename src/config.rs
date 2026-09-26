@@ -99,11 +99,15 @@ impl Config {
         Ok(config)
     }
     pub fn validate(&self) -> Result<()> {
+        self.paths.validate()?;
+        self.validate_values()
+    }
+    /// Backups retain settings for review, not execution against the source paths.
+    pub fn validate_values(&self) -> Result<()> {
         ensure!(
             self.config_schema_version == 1,
             "unsupported configuration version"
         );
-        self.paths.validate()?;
         self.sync.validate()?;
         if let Some(model) = &self.model {
             ensure!(
@@ -118,6 +122,10 @@ impl Config {
             );
         }
         if let Some(level) = &self.log_level {
+            ensure!(
+                ["off", "error", "warn", "info", "debug", "trace"].contains(&level.as_str()),
+                "invalid file log level"
+            );
             level
                 .parse::<log::LevelFilter>()
                 .map_err(|_| anyhow::anyhow!("invalid log level"))?;

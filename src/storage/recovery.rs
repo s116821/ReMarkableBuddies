@@ -83,7 +83,7 @@ impl Store {
         files::safe_path(source)?;
         let backup: Backup = files::json(&source.join("backup.json"), MAX_METADATA as u64)?;
         if let Some(config) = &backup.config_snapshot {
-            config.validate()?;
+            config.validate_values()?;
         }
         ensure!(
             backup.format == FORMAT

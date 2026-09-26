@@ -109,3 +109,25 @@ fn environment_values_win_and_invalid_selected_secrets_do_not_fall_back() {
     let invalid: Config = serde_json::from_value(json!({"model_credential":"../secret"})).unwrap();
     assert!(invalid.validate().is_err());
 }
+
+#[cfg(unix)]
+#[test]
+fn linux_secret_permissions_and_symlinks_are_enforced() {
+    use remarkable_reader_buddy::storage::{files, Uuid};
+    use std::{
+        fs,
+        os::unix::fs::{symlink, PermissionsExt},
+    };
+    let root = std::env::temp_dir().join(format!("buddy-secrets-{}", Uuid::new_v4()));
+    files::directory(&root).unwrap();
+    let path = root.join("model-key");
+    files::atomic(&path, b"synthetic-key").unwrap();
+    assert!(read_secret_file(&path).is_ok());
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(read_secret_file(&path).is_err());
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    let alias = root.join("alias");
+    symlink(&path, &alias).unwrap();
+    assert!(read_secret_file(&alias).is_err());
+    fs::remove_dir_all(root).unwrap();
+}
