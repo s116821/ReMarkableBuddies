@@ -271,3 +271,181 @@ fn exclusive_lease_blocks_a_real_second_process_and_releases_on_drop() {
     drop(store);
     let _reopened = fixture.open();
 }
+
+#[test]
+fn missing_current_cannot_silently_replace_committed_store_with_empty_generation() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    store
+        .commit(
+            vec![record(&store, Namespace::Conversation)],
+            BTreeMap::new(),
+        )
+        .unwrap();
+    let current = fs::read(fixture.paths().data.join("CURRENT")).unwrap();
+    drop(store);
+    fs::remove_file(fixture.paths().data.join("CURRENT")).unwrap();
+    assert!(Store::open(fixture.paths()).is_err());
+    assert!(!fixture.paths().data.join("CURRENT").exists());
+    fs::write(fixture.paths().data.join("CURRENT"), current).unwrap();
+    assert_eq!(fixture.open().manifests().unwrap().len(), 1);
+}
+
+#[test]
+fn export_above_global_restore_bound_never_writes_a_complete_backup_marker() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    let records = (0..MAX_ITEMS)
+        .map(|_| record(&store, Namespace::Conversation))
+        .collect();
+    store.commit(records, BTreeMap::new()).unwrap();
+    store
+        .commit(
+            vec![record(&store, Namespace::Handwriting)],
+            BTreeMap::new(),
+        )
+        .unwrap();
+    let destination = fixture.root.join("oversized-backup");
+    assert!(store.export(&destination).is_err());
+    assert!(!destination.join("backup.json").exists());
+    assert_eq!(store.manifests().unwrap().len(), 2);
+}
+
+#[test]
+fn synthetic_registered_migration_has_atomic_activation_and_retained_rollback() {
+    use remarkable_reader_buddy::storage::migration::*;
+    struct Synthetic;
+    impl GenerationMigration for Synthetic {
+        fn source_version(&self) -> u32 {
+            1
+        }
+        fn target_version(&self) -> u32 {
+            2
+        }
+        fn transform(&self, path: &std::path::Path) -> anyhow::Result<()> {
+            files::atomic_json(&path.join("synthetic-v2.json"), &json!({"fixture":true}))
+        }
+        fn validate(&self, path: &std::path::Path) -> anyhow::Result<()> {
+            anyhow::ensure!(
+                files::json::<serde_json::Value>(&path.join("synthetic-v2.json"), 1024)?["fixture"]
+                    == true,
+                "invalid fixture"
+            );
+            Ok(())
+        }
+    }
+    for fault in [Fault::BeforeActivation, Fault::AfterActivation, Fault::None] {
+        let fixture = Fixture::new();
+        let store = fixture.open();
+        let e = record(&store, Namespace::Conversation);
+        store.commit(vec![e.clone()], BTreeMap::new()).unwrap();
+        let old = fs::read(fixture.paths().data.join("CURRENT")).unwrap();
+        assert!(store.migrate(&MigrationRegistry::default(), 2).is_err());
+        let mut registry = MigrationRegistry::default();
+        registry.register(Synthetic).unwrap();
+        store.set_fault(fault).unwrap();
+        let result = store.migrate(&registry, 2);
+        assert_eq!(result.is_ok(), fault == Fault::None);
+        let new = fs::read(fixture.paths().data.join("CURRENT")).unwrap();
+        assert_eq!(new == old, fault == Fault::BeforeActivation);
+        drop(store);
+        if fault == Fault::BeforeActivation {
+            assert_eq!(
+                fixture
+                    .open()
+                    .heads(e.namespace, e.record_id)
+                    .unwrap()
+                    .len(),
+                1
+            );
+        } else {
+            assert!(
+                Store::open(fixture.paths()).is_err(),
+                "v1 runtime must refuse an unsupported actual v2 format"
+            );
+        }
+        fs::write(fixture.paths().data.join("CURRENT"), old).unwrap();
+        assert_eq!(
+            fixture
+                .open()
+                .heads(e.namespace, e.record_id)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+}
+
+#[test]
+fn streamed_media_is_invisible_until_commit_and_short_input_fails_without_publication() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    let bytes = vec![37_u8; 2 * 1024 * 1024];
+    let hash = digest(&bytes);
+    let reference = ObjectRef {
+        sha256: hash.clone(),
+        bytes: bytes.len() as u64,
+    };
+    assert!(store.stage_blob(&reference, &bytes[..100]).is_err());
+    assert!(store.read_object(&reference).is_err());
+    store.stage_blob(&reference, bytes.as_slice()).unwrap();
+    assert!(store.read_object(&reference).is_err());
+    let mut e = record(&store, Namespace::Source);
+    e.media_descriptors.push(Media {
+        sha256: hash,
+        bytes: reference.bytes,
+        media_type: "application/octet-stream".into(),
+    });
+    store.commit(vec![e], BTreeMap::new()).unwrap();
+    let mut source = store.open_object(&reference).unwrap();
+    assert_eq!(source.chunk(1024, 4096).unwrap(), vec![37_u8; 4096]);
+}
+
+#[test]
+fn configuration_cas_export_excludes_secrets_and_restore_keeps_settings_inactive() {
+    use remarkable_reader_buddy::config::Config;
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    let config = Config {
+        paths: fixture.paths(),
+        model: Some("fixture-model".into()),
+        ..Default::default()
+    };
+    let path = fixture.root.join("config.json");
+    let first = store.replace_config(&path, None, &config).unwrap();
+    assert!(store.replace_config(&path, None, &config).is_err());
+    let mut invalid = config.clone();
+    invalid.config_schema_version = 2;
+    assert!(store.replace_config(&path, Some(&first), &invalid).is_err());
+    assert_eq!(digest(&fs::read(&path).unwrap()), first);
+    store.snapshot_config(&config).unwrap();
+    files::atomic(
+        &store.paths.credentials.join("fake-token"),
+        b"fixture-secret-never-export",
+    )
+    .unwrap();
+    store
+        .commit(
+            vec![record(&store, Namespace::Conversation)],
+            BTreeMap::new(),
+        )
+        .unwrap();
+    let backup = fixture.root.join("backup");
+    store.export(&backup).unwrap();
+    let text = String::from_utf8(fs::read(backup.join("backup.json")).unwrap()).unwrap();
+    assert!(text.contains("fixture-model"));
+    assert!(!text.contains("fixture-secret-never-export"));
+    assert!(!backup.join("credentials").exists());
+    let target = Fixture::new();
+    let restored = target.open();
+    restored.restore(&backup).unwrap();
+    let current: Uuid = files::json(&target.paths().data.join("CURRENT"), 128).unwrap();
+    assert!(target
+        .paths()
+        .data
+        .join("generations")
+        .join(current.to_string())
+        .join("restored-config.json")
+        .exists());
+    assert!(!target.root.join("config.json").exists());
+}

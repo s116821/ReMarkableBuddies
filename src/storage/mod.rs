@@ -1,6 +1,7 @@
 //! Versioned local persistence, independent of Reader/Writer domain semantics.
 pub mod drive;
 pub mod files;
+pub mod migration;
 mod recovery;
 pub mod sync;
 pub mod types;
@@ -13,6 +14,18 @@ use std::{
     sync::{mpsc::SyncSender, Mutex},
 };
 pub use types::*;
+pub const CONTRACT_V1: &str = include_str!("contract-v1.json");
+
+#[derive(Debug)]
+pub struct Conflict {
+    pub heads: BTreeSet<Uuid>,
+}
+impl std::fmt::Display for Conflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("conflict: expected parents changed")
+    }
+}
+impl std::error::Error for Conflict {}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -147,6 +160,12 @@ impl Store {
         let generation: Uuid = if current.exists() {
             files::json(&current, 128)?
         } else {
+            ensure!(
+                fs::read_dir(paths.data.join("generations"))?
+                    .next()
+                    .is_none(),
+                "CURRENT is missing from an existing store; explicit recovery required"
+            );
             let id = Uuid::new_v4();
             Self::create_generation(&paths.data, id)?;
             files::atomic_json(&current, &id)?;
@@ -163,6 +182,10 @@ impl Store {
             }),
             wake: Mutex::new(None),
         };
+        ensure!(
+            files::json::<u32>(&store.generation(generation).join("format.json"), 64)? == FORMAT,
+            "unsupported generation format"
+        );
         {
             let mut inner = store
                 .inner
@@ -170,10 +193,14 @@ impl Store {
                 .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
             inner.index = store.recover(generation)?;
         }
+        files::atomic(
+            &store.paths.data.join("contract-v1.json"),
+            CONTRACT_V1.as_bytes(),
+        )?;
         files::atomic_json(
             &store.paths.data.join("capabilities.json"),
             &serde_json::json!({
-                "contract_version": 1, "store_versions": [1], "envelope_versions": [1], "config_versions": [1],
+            "contract_version": 1, "schema_file":"contract-v1.json", "store_versions": [1], "envelope_versions": [1], "config_versions": [1],
                 "paths": store.paths, "lock": "stable-inode-exclusive-os-lease", "linux_lock": "flock",
                 "maintenance": "stop-confirm-lock-stage-commit-release-restart", "namespaces": ["conversation","source","export-association","subject-memory","handwriting"], "sync": "optional-immutable-drive-v1"
             }),
@@ -184,7 +211,13 @@ impl Store {
         for child in ["objects", "commits"] {
             files::directory(&root.join("generations").join(id.to_string()).join(child))?;
         }
-        Ok(())
+        files::atomic_json(
+            &root
+                .join("generations")
+                .join(id.to_string())
+                .join("format.json"),
+            &FORMAT,
+        )
     }
     fn generation(&self, id: Uuid) -> PathBuf {
         self.paths.data.join("generations").join(id.to_string())
@@ -231,11 +264,7 @@ impl Store {
     fn validate_objects(root: &Path, manifest: &Manifest) -> Result<Vec<(Envelope, String)>> {
         manifest.validate()?;
         for item in manifest.records.iter().chain(&manifest.media) {
-            let bytes = files::read(&root.join("objects").join(&item.sha256), item.bytes)?;
-            ensure!(
-                bytes.len() as u64 == item.bytes && digest(&bytes) == item.sha256,
-                "missing or corrupt required object"
-            );
+            let _ = files::Source::open(&root.join("objects").join(&item.sha256), item)?;
         }
         let mut records = Vec::new();
         let mut descriptors = BTreeMap::new();
@@ -244,6 +273,10 @@ impl Store {
             let envelope: Envelope =
                 files::json(&root.join("objects").join(&item.sha256), MAX_RECORD as u64)?;
             envelope.validate()?;
+            ensure!(
+                manifest.record_namespaces.get(&item.sha256) == Some(&envelope.namespace),
+                "manifest namespace mismatch"
+            );
             for media in &envelope.media_descriptors {
                 if let Some(previous) = descriptors.insert(media.sha256.clone(), media.clone()) {
                     ensure!(previous == *media, "inconsistent media descriptors");
@@ -349,6 +382,16 @@ impl Store {
             .filter_map(|id| inner.index.records.get(id).map(|p| p.0.clone()))
             .collect())
     }
+    pub fn value(&self, namespace: Namespace, record: Uuid) -> Result<Option<Envelope>> {
+        let mut heads = self.heads(namespace, record)?;
+        if heads.len() > 1 {
+            return Err(Conflict {
+                heads: heads.iter().map(|e| e.revision_id).collect(),
+            }
+            .into());
+        }
+        Ok(heads.pop().filter(|e| e.kind == Kind::Value))
+    }
     pub fn unavailable_commits(&self) -> Result<usize> {
         Ok(self
             .inner
@@ -374,11 +417,13 @@ impl Store {
     pub fn commit(&self, records: Vec<Envelope>, media: BTreeMap<String, Vec<u8>>) -> Result<Uuid> {
         let mut objects = media;
         let mut refs = Vec::new();
+        let mut record_namespaces = BTreeMap::new();
         let mut descriptors = BTreeMap::new();
         for envelope in &records {
             envelope.validate()?;
             let bytes = serde_json::to_vec(envelope)?;
             let sha256 = digest(&bytes);
+            record_namespaces.insert(sha256.clone(), envelope.namespace);
             refs.push(ObjectRef {
                 sha256: sha256.clone(),
                 bytes: bytes.len() as u64,
@@ -393,6 +438,7 @@ impl Store {
             transaction_id: Uuid::new_v4(),
             scope: Scope::LocalTransaction,
             records: refs,
+            record_namespaces,
             media: descriptors
                 .values()
                 .map(|m| ObjectRef {
@@ -451,19 +497,31 @@ impl Store {
                     .get(&(e.namespace, e.record_id))
                     .cloned()
                     .unwrap_or_default();
-                ensure!(heads == e.parents, "conflict: expected parents changed");
+                if heads != e.parents {
+                    return Err(Conflict { heads }.into());
+                }
             }
             if records
                 .iter()
                 .all(|(e, h)| inner.index.operations.get(&e.operation_id) == Some(h))
             {
-                return inner
+                if let Some(prior) = inner
                     .index
                     .manifests
                     .values()
-                    .find(|m| m.records.iter().any(|r| r.sha256 == records[0].1))
+                    .find(|m| {
+                        m.records.iter().map(|r| &r.sha256).collect::<BTreeSet<_>>()
+                            == manifest
+                                .records
+                                .iter()
+                                .map(|r| &r.sha256)
+                                .collect::<BTreeSet<_>>()
+                            && m.media == manifest.media
+                    })
                     .map(|m| m.transaction_id)
-                    .context("idempotent commit not indexed");
+                {
+                    return Ok(prior);
+                }
             }
         }
         Self::trip(&mut inner, Fault::BeforeCommit)?;
@@ -503,6 +561,10 @@ impl Store {
             .collect())
     }
     pub fn read_object(&self, reference: &ObjectRef) -> Result<Vec<u8>> {
+        let mut source = self.open_object(reference)?;
+        source.chunk(0, source.len())
+    }
+    pub fn open_object(&self, reference: &ObjectRef) -> Result<files::Source> {
         ensure!(
             valid_digest(&reference.sha256) && reference.bytes <= MAX_MEDIA,
             "invalid object reference"
@@ -511,17 +573,46 @@ impl Store {
             .inner
             .lock()
             .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
-        let bytes = files::read(
+        ensure!(
+            inner.index.manifests.values().any(|m| m
+                .records
+                .iter()
+                .chain(&m.media)
+                .any(|r| r == reference)),
+            "object is not reachable from a committed manifest"
+        );
+        let path = self
+            .generation(inner.generation)
+            .join("objects")
+            .join(&reference.sha256);
+        drop(inner);
+        files::Source::open(&path, reference)
+    }
+    /// Stage streaming media; it is invisible until a subsequent commit references it.
+    pub fn stage_blob(&self, reference: &ObjectRef, reader: impl std::io::Read) -> Result<()> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        files::copy_verified(
             &self
                 .generation(inner.generation)
                 .join("objects")
                 .join(&reference.sha256),
-            reference.bytes,
-        )?;
-        ensure!(
-            bytes.len() as u64 == reference.bytes && digest(&bytes) == reference.sha256,
-            "object integrity failure"
-        );
-        Ok(bytes)
+            reader,
+            reference,
+        )
+    }
+    pub fn import_staged(&self, manifest: Manifest, incoming: &Path) -> Result<Uuid> {
+        manifest.validate()?;
+        for reference in manifest.records.iter().chain(&manifest.media) {
+            if self.open_object(reference).is_ok() {
+                continue;
+            }
+            let path = incoming.join(&reference.sha256);
+            files::safe_path(&path)?;
+            self.stage_blob(reference, File::open(path)?)?;
+        }
+        self.import(manifest, BTreeMap::new())
     }
 }

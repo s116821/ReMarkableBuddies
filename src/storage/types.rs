@@ -3,7 +3,7 @@ use anyhow::{ensure, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 pub use uuid::Uuid;
 
 pub const FORMAT: u32 = 1;
@@ -165,11 +165,25 @@ pub struct Manifest {
     pub transaction_id: Uuid,
     pub scope: Scope,
     pub records: Vec<ObjectRef>,
+    pub record_namespaces: BTreeMap<String, Namespace>,
     pub media: Vec<ObjectRef>,
     pub media_coverage: Vec<Coverage>,
 }
 impl Manifest {
     pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.records.iter().all(|r| r.bytes <= MAX_RECORD as u64)
+                && self.records.iter().map(|r| r.bytes).sum::<u64>() <= MAX_METADATA as u64,
+            "record transaction exceeds supported byte bounds"
+        );
+        ensure!(
+            self.record_namespaces
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>()
+                == self.records.iter().map(|r| r.sha256.as_str()).collect(),
+            "manifest namespace coverage mismatch"
+        );
         ensure!(
             self.format == FORMAT && !self.transaction_id.is_nil(),
             "unsupported manifest"

@@ -7,6 +7,7 @@ struct Backup {
     manifests: Vec<Manifest>,
     objects: Vec<ObjectRef>,
     complete_media: bool,
+    config_snapshot: Option<crate::config::Config>,
 }
 
 impl Store {
@@ -39,24 +40,41 @@ impl Store {
             }
             descriptors.extend(manifest.media_coverage.iter().map(|c| c.hash().to_owned()));
         }
+        ensure!(
+            manifests.len() <= MAX_ITEMS && inventory.len() <= MAX_ITEMS,
+            "backup inventory exceeds supported restore bounds"
+        );
+        let complete_media = descriptors.iter().all(|h| inventory.contains_key(h));
+        let config_path = self.paths.data.join("config.snapshot.json");
+        let config_snapshot = if config_path.exists() {
+            let config: crate::config::Config = files::json(&config_path, MAX_RECORD as u64)?;
+            config.validate()?;
+            Some(config)
+        } else {
+            None
+        };
+        let backup = Backup {
+            format: FORMAT,
+            manifests,
+            objects: inventory.values().cloned().collect(),
+            complete_media,
+            config_snapshot,
+        };
+        let backup_bytes = serde_json::to_vec(&backup)?;
+        ensure!(
+            backup_bytes.len() <= MAX_METADATA,
+            "backup metadata exceeds supported restore bound"
+        );
         for item in inventory.values() {
-            let bytes = files::read(&root.join("objects").join(&item.sha256), item.bytes)?;
-            files::object(
+            let path = root.join("objects").join(&item.sha256);
+            files::safe_path(&path)?;
+            files::copy_verified(
                 &destination.join("objects").join(&item.sha256),
-                &item.sha256,
-                &bytes,
+                File::open(path)?,
+                item,
             )?;
         }
-        let complete_media = descriptors.iter().all(|h| inventory.contains_key(h));
-        files::atomic_json(
-            &destination.join("backup.json"),
-            &Backup {
-                format: FORMAT,
-                manifests,
-                objects: inventory.into_values().collect(),
-                complete_media,
-            },
-        )?;
+        files::atomic(&destination.join("backup.json"), &backup_bytes)?;
         Ok(complete_media)
     }
 
@@ -64,6 +82,9 @@ impl Store {
     pub fn restore(&self, source: &Path) -> Result<()> {
         files::safe_path(source)?;
         let backup: Backup = files::json(&source.join("backup.json"), MAX_METADATA as u64)?;
+        if let Some(config) = &backup.config_snapshot {
+            config.validate()?;
+        }
         ensure!(
             backup.format == FORMAT
                 && backup.manifests.len() <= MAX_ITEMS
@@ -82,11 +103,7 @@ impl Store {
                     .is_none(),
                 "duplicate backup object"
             );
-            let bytes = files::read(&source.join("objects").join(&item.sha256), item.bytes)?;
-            ensure!(
-                bytes.len() as u64 == item.bytes && digest(&bytes) == item.sha256,
-                "backup integrity failure"
-            );
+            let _ = files::Source::open(&source.join("objects").join(&item.sha256), item)?;
         }
         let mut required = BTreeSet::new();
         let mut descriptors = BTreeSet::new();
@@ -120,6 +137,9 @@ impl Store {
         let next = Uuid::new_v4();
         Self::create_generation(&self.paths.data, next)?;
         let next_root = self.generation(next);
+        if let Some(config) = &backup.config_snapshot {
+            files::atomic_json(&next_root.join("restored-config.json"), config)?;
+        }
         let current_root = self.generation(inner.generation);
         for (root, manifests) in [
             (
@@ -130,11 +150,12 @@ impl Store {
         ] {
             for manifest in manifests {
                 for item in manifest.records.iter().chain(&manifest.media) {
-                    let bytes = files::read(&root.join("objects").join(&item.sha256), item.bytes)?;
-                    files::object(
+                    let path = root.join("objects").join(&item.sha256);
+                    files::safe_path(&path)?;
+                    files::copy_verified(
                         &next_root.join("objects").join(&item.sha256),
-                        &item.sha256,
-                        &bytes,
+                        File::open(path)?,
+                        item,
                     )?;
                 }
                 let path = next_root
@@ -161,5 +182,46 @@ impl Store {
         inner.index = rebuilt;
         Self::trip(&mut inner, Fault::AfterActivation)?;
         Ok(())
+    }
+    pub fn snapshot_config(&self, config: &crate::config::Config) -> Result<()> {
+        config.validate()?;
+        let _inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        files::atomic_json(&self.paths.data.join("config.snapshot.json"), config)
+    }
+    /// Caller must perform the public stop/confirm/lease maintenance protocol.
+    pub fn replace_config(
+        &self,
+        path: &Path,
+        expected: Option<&str>,
+        config: &crate::config::Config,
+    ) -> Result<String> {
+        config.validate()?;
+        files::safe_path(path)?;
+        ensure!(
+            !path.starts_with(&self.paths.data)
+                && !path.starts_with(&self.paths.cache)
+                && !path.starts_with(&self.paths.credentials),
+            "configuration overlaps another owned category"
+        );
+        let _inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        let current = if path.exists() {
+            Some(digest(&files::read(path, MAX_RECORD as u64)?))
+        } else {
+            None
+        };
+        ensure!(
+            current.as_deref() == expected,
+            "configuration revision changed"
+        );
+        let bytes = serde_json::to_vec(config)?;
+        ensure!(bytes.len() <= MAX_RECORD, "configuration exceeds bound");
+        files::atomic(path, &bytes)?;
+        Ok(digest(&bytes))
     }
 }

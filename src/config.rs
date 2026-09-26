@@ -133,10 +133,6 @@ impl Config {
         }
         Ok(())
     }
-    pub fn save(&self, path: &Path) -> Result<()> {
-        self.validate()?;
-        files::atomic_json(path, self)
-    }
 }
 
 #[derive(Default)]

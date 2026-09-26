@@ -82,6 +82,7 @@ fn main() -> Result<()> {
         .init();
     info!("=== ReMarkable Reader Buddy Starting ===");
     let store = Arc::new(Store::open(config.paths.clone())?);
+    store.snapshot_config(&config)?;
     files::atomic_json(
         &store.paths.data.join("effective-config.json"),
         &effective.sources,

@@ -1,0 +1,67 @@
+{
+  "contract_version": 1,
+  "service": "reader-buddy.service",
+  "maintenance": ["remember-unit-state", "stop-unit", "confirm-inactive", "acquire-stable-store-lock", "validate-version-owner-expected-revision", "stage-and-commit", "release-lock", "restart-if-previously-running-and-valid"],
+  "schemas": {
+    "envelope": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object", "additionalProperties": false,
+      "required": ["envelope_version", "namespace", "domain_schema_version", "record_id", "revision_id", "parents", "operation_id", "actor_id", "kind", "payload", "media_descriptors"],
+      "properties": {
+        "envelope_version": {"const": 1},
+        "namespace": {"enum": ["conversation", "source", "export-association", "subject-memory", "handwriting"]},
+        "domain_schema_version": {"const": 1},
+        "record_id": {"type": "string", "format": "uuid"},
+        "revision_id": {"type": "string", "format": "uuid"},
+        "operation_id": {"type": "string", "format": "uuid"},
+        "actor_id": {"type": "string", "format": "uuid"},
+        "parents": {"type": "array", "maxItems": 4096, "uniqueItems": true, "items": {"type": "string", "format": "uuid"}},
+        "kind": {"enum": ["value", "tombstone"]},
+        "payload": {},
+        "media_descriptors": {"type": "array", "maxItems": 4096, "items": {"type": "object", "additionalProperties": false, "required": ["sha256", "bytes", "media_type"], "properties": {"sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "bytes": {"type": "integer", "minimum": 0, "maximum": 268435456}, "media_type": {"type": "string", "minLength": 1, "maxLength": 128}}}}
+      }
+    },
+    "config": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "config_schema_version": {"const": 1, "default": 1},
+        "model": {"type": ["string", "null"]}, "base_url": {"type": ["string", "null"]},
+        "trigger_corner": {"enum": ["UR", "UL", "LR", "LL", null]},
+        "log_level": {"enum": ["off", "error", "warn", "info", "debug", "trace", null]},
+        "debug_dump": {"type": ["boolean", "null"]},
+        "model_credential": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9_-]{1,80}$"},
+        "paths": {"type": "object", "additionalProperties": false, "required": ["data", "cache", "credentials"], "properties": {"data": {"type": "string"}, "cache": {"type": "string"}, "credentials": {"type": "string"}}},
+        "sync": {"type": "object", "additionalProperties": false, "properties": {
+          "enabled": {"type": "boolean", "default": false},
+          "namespaces": {"type": "array", "uniqueItems": true, "items": {"enum": ["conversation", "source", "export-association", "subject-memory", "handwriting"]}},
+          "media": {"type": "boolean", "default": false}, "max_media_bytes": {"type": "integer", "minimum": 0, "maximum": 268435456, "default": 33554432},
+          "poll_seconds": {"type": "integer", "minimum": 5, "maximum": 3600, "default": 60},
+          "batch_items": {"type": "integer", "minimum": 1, "maximum": 128, "default": 32},
+          "collection": {"type": ["string", "null"], "format": "uuid"}, "create_new": {"type": "boolean", "default": false}
+        }}
+      }
+    },
+    "manifest": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object", "additionalProperties": false,
+      "required": ["format", "transaction_id", "scope", "records", "record_namespaces", "media", "media_coverage"],
+      "$defs": {"object": {"type": "object", "additionalProperties": false, "required": ["sha256", "bytes"], "properties": {"sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "bytes": {"type": "integer", "minimum": 0, "maximum": 268435456}}}},
+      "properties": {
+        "format": {"const": 1}, "transaction_id": {"type": "string", "format": "uuid"},
+        "scope": {"enum": ["local-transaction", "selected-records", "supplemental-media"]},
+        "records": {"type": "array", "minItems": 1, "maxItems": 4096, "items": {"$ref": "#/$defs/object"}},
+        "record_namespaces": {"type": "object", "propertyNames": {"pattern": "^[0-9a-f]{64}$"}, "additionalProperties": {"enum": ["conversation", "source", "export-association", "subject-memory", "handwriting"]}},
+        "media": {"type": "array", "maxItems": 4096, "items": {"$ref": "#/$defs/object"}},
+        "media_coverage": {"type": "array", "maxItems": 4096, "items": {"oneOf": [
+          {"type": "object", "additionalProperties": false, "required": ["availability", "sha256"], "properties": {"availability": {"const": "included"}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}},
+          {"type": "object", "additionalProperties": false, "required": ["availability", "sha256", "reason"], "properties": {"availability": {"const": "omitted"}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "reason": {"enum": ["policy-disabled", "size-deferred", "unavailable-at-source"]}}}
+        ]}}
+      }
+    }
+  },
+  "additional_runtime_validation": ["non-nil IDs", "same-record acyclic parent lineage", "full expected-head CAS for local mutations", "media coverage and namespace-map equality", "SHA-256 and byte-length integrity", "one-MiB record and eight-MiB aggregate record bounds", "exclusive ownership lease", "absolute owned non-overlapping non-symlink paths", "supported domain adapters only", "tombstones have null payload and no media"],
+  "status_codes": ["disabled", "discovering", "pending", "current", "recovery-required", "authorization-required", "retry-later", "unsupported-or-corrupt"],
+  "limits": {"record_bytes": 1048576, "metadata_bytes": 8388608, "required_objects_per_manifest": 4096, "backup_manifests": 4096, "backup_objects": 4096, "remote_inventory_entries": 4096, "media_bytes": 268435456, "upload_chunk_bytes": 262144},
+  "boundaries": ["No Buddy HTTP/RPC/admin listener", "Selected-record sync completeness is not full media recovery", "No native page-operation journal is registered", "No native firmware/reset or live Drive evidence is implied"]
+}

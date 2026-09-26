@@ -32,12 +32,20 @@ struct State {
     collection: Option<Uuid>,
     initialized: bool,
     listing_page: Option<String>,
+    #[serde(default)]
+    listing_seen: BTreeSet<String>,
     start_token: Option<String>,
     cursor: Option<String>,
     files: BTreeMap<String, RemoteFile>,
     applied: BTreeSet<String>,
     uploads: BTreeMap<String, Upload>,
     recovery_required: bool,
+    #[serde(default)]
+    last_attempt: Option<String>,
+    #[serde(default)]
+    policy_fingerprint: String,
+    #[serde(default)]
+    deferred: BTreeSet<String>,
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -97,7 +105,7 @@ impl<T: DriveTransport> SyncEngine<T> {
         Ok(())
     }
     fn observe(&mut self, file: RemoteFile) -> Result<()> {
-        if file.app_properties.get("buddy_protocol").is_none() {
+        if !file.app_properties.contains_key("buddy_protocol") {
             return Ok(());
         }
         let _ = file.tag()?;
@@ -116,6 +124,13 @@ impl<T: DriveTransport> SyncEngine<T> {
             return Ok(Status::Disabled);
         }
         self.alive()?;
+        let policy_fingerprint = digest(&serde_json::to_vec(&self.policy)?);
+        if self.state.policy_fingerprint != policy_fingerprint {
+            self.state.applied.clear();
+            self.state.deferred.clear();
+            self.state.policy_fingerprint = policy_fingerprint;
+            self.save()?;
+        }
         let collection = self
             .policy
             .collection
@@ -131,6 +146,7 @@ impl<T: DriveTransport> SyncEngine<T> {
             }
             let page = self.transport.list(self.state.listing_page.as_deref())?;
             for file in page.items {
+                self.state.listing_seen.insert(file.id.clone());
                 self.observe(file)?;
             }
             self.state.listing_page = page.next;
@@ -139,11 +155,20 @@ impl<T: DriveTransport> SyncEngine<T> {
                     .state
                     .files
                     .values()
+                    .filter(|f| self.state.listing_seen.contains(&f.id))
                     .filter_map(|f| f.tag().ok().map(|t| t.collection))
                     .collect::<BTreeSet<_>>();
                 if !collections.contains(&collection)
                     && !(collections.is_empty() && self.policy.create_new)
                 {
+                    self.state.recovery_required = true;
+                    self.save()?;
+                    return Ok(Status::RecoveryRequired);
+                }
+                if self.state.files.values().any(|f| {
+                    f.tag().is_ok_and(|t| t.collection == collection)
+                        && !self.state.listing_seen.contains(&f.id)
+                }) {
                     self.state.recovery_required = true;
                     self.save()?;
                     return Ok(Status::RecoveryRequired);
@@ -170,6 +195,7 @@ impl<T: DriveTransport> SyncEngine<T> {
                 {
                     self.state.initialized = false;
                     self.state.listing_page = None;
+                    self.state.listing_seen.clear();
                     self.state.start_token = None;
                     // Retain old observations for recovery; never infer deletions.
                     self.save()?;
@@ -178,6 +204,10 @@ impl<T: DriveTransport> SyncEngine<T> {
             }
         };
         let more_changes = page.next.is_some();
+        ensure!(
+            page.next.is_some() || page.checkpoint.is_some(),
+            "change page missing checkpoint"
+        );
         for change in page.items {
             if change.removed {
                 if self.state.files.contains_key(&change.file_id) {
@@ -203,7 +233,7 @@ impl<T: DriveTransport> SyncEngine<T> {
         self.publish_pending(collection, &mut budget)
     }
     fn import_pending(&mut self, collection: Uuid, budget: &mut usize) -> Result<bool> {
-        let candidates: Vec<_> = self
+        let mut candidates: Vec<_> = self
             .state
             .files
             .values()
@@ -214,21 +244,40 @@ impl<T: DriveTransport> SyncEngine<T> {
             })
             .cloned()
             .collect();
+        candidates.sort_by_key(|f| {
+            (
+                self.state
+                    .last_attempt
+                    .as_ref()
+                    .is_some_and(|last| f.id <= *last),
+                f.id.clone(),
+            )
+        });
         let mut pending = false;
-        for file in candidates {
+        for file in candidates.into_iter().take(self.policy.batch_items) {
             self.alive()?;
             if *budget == 0 {
                 pending = true;
                 break;
             }
-            *budget -= 1;
-            let bytes = self.transport.download(&file.id, MAX_METADATA as u64)?;
+            self.state.last_attempt = Some(file.id.clone());
+            self.save()?;
             let tag = file.tag()?;
+            let incoming = self.store.paths.data.join("sync/incoming");
+            files::directory(&incoming)?;
+            let manifest_path = incoming.join(&tag.sha256);
+            let bytes = if manifest_path.exists() {
+                files::read(&manifest_path, MAX_METADATA as u64)?
+            } else {
+                *budget -= 1;
+                self.transport.download(&file.id, MAX_METADATA as u64)?
+            };
             ensure!(
                 digest(&bytes) == tag.sha256,
                 "remote manifest hash mismatch"
             );
-            let remote: RemoteCommit = serde_json::from_slice(&bytes)
+            files::object(&incoming.join(&tag.sha256), &tag.sha256, &bytes)?;
+            let mut remote: RemoteCommit = serde_json::from_slice(&bytes)
                 .map_err(|_| anyhow::anyhow!("unsupported remote manifest"))?;
             ensure!(
                 remote.protocol == FORMAT
@@ -237,29 +286,95 @@ impl<T: DriveTransport> SyncEngine<T> {
                 "remote manifest binding mismatch"
             );
             remote.manifest.validate()?;
-            let mut objects = BTreeMap::new();
+            let original_record_count = remote.manifest.records.len();
+            remote.manifest.records.retain(|r| {
+                remote
+                    .manifest
+                    .record_namespaces
+                    .get(&r.sha256)
+                    .is_some_and(|n| self.policy.namespaces.contains(n))
+            });
+            remote
+                .manifest
+                .record_namespaces
+                .retain(|_, n| self.policy.namespaces.contains(n));
+            let mut policy_deferred = original_record_count != remote.manifest.records.len();
+            if remote.manifest.records.is_empty() {
+                self.state.applied.insert(file.id.clone());
+                self.state.deferred.insert(file.id);
+                self.save()?;
+                continue;
+            }
+            // Selected record descriptors determine the required media; disabled
+            // namespace records are never fetched merely to classify their payload.
+            let mut descriptors = BTreeMap::new();
+            let mut missing_record = false;
+            for reference in &remote.manifest.records {
+                if !self.fetch_object(collection, reference, &incoming, budget)? {
+                    missing_record = true;
+                    break;
+                }
+                let record_bytes = self.store.read_object(reference).or_else(|_| {
+                    files::read(&incoming.join(&reference.sha256), MAX_RECORD as u64)
+                })?;
+                let envelope: Envelope = serde_json::from_slice(&record_bytes)
+                    .map_err(|_| anyhow::anyhow!("unsupported inbound envelope"))?;
+                envelope.validate()?;
+                ensure!(
+                    remote.manifest.record_namespaces.get(&reference.sha256)
+                        == Some(&envelope.namespace),
+                    "inbound namespace mismatch"
+                );
+                for descriptor in envelope.media_descriptors {
+                    descriptors.insert(descriptor.sha256.clone(), descriptor);
+                }
+            }
+            if missing_record {
+                pending = true;
+                continue;
+            }
+            remote
+                .manifest
+                .media_coverage
+                .retain(|c| descriptors.contains_key(c.hash()));
+            for coverage in &mut remote.manifest.media_coverage {
+                if matches!(coverage, Coverage::Included { .. }) {
+                    let reason = if !self.policy.media {
+                        Some(Omission::PolicyDisabled)
+                    } else if descriptors
+                        .get(coverage.hash())
+                        .is_some_and(|d| d.bytes > self.policy.max_media_bytes)
+                    {
+                        Some(Omission::SizeDeferred)
+                    } else {
+                        None
+                    };
+                    if let Some(reason) = reason {
+                        policy_deferred = true;
+                        *coverage = Coverage::Omitted {
+                            sha256: coverage.hash().to_owned(),
+                            reason,
+                        };
+                    }
+                }
+            }
+            remote.manifest.media.retain(|r| {
+                remote
+                    .manifest
+                    .media_coverage
+                    .iter()
+                    .any(|c| matches!(c,Coverage::Included{sha256} if sha256==&r.sha256))
+            });
+            remote.manifest.scope = Scope::SelectedRecords;
+            remote.manifest.transaction_id = Uuid::nil();
+            remote.manifest.transaction_id = Uuid::from_u128(u128::from_str_radix(
+                &digest(&serde_json::to_vec(&remote.manifest)?)[..32],
+                16,
+            )?);
             let mut missing = false;
             for reference in remote.manifest.records.iter().chain(&remote.manifest.media) {
                 self.alive()?;
-                if let Ok(bytes) = self.store.read_object(reference) {
-                    objects.insert(reference.sha256.clone(), bytes);
-                    continue;
-                }
-                let source = self.state.files.values().find(|f| {
-                    f.tag().is_ok_and(|t| {
-                        t.collection == collection
-                            && t.kind == "object"
-                            && t.sha256 == reference.sha256
-                    })
-                });
-                if let Some(source) = source {
-                    let bytes = self.transport.download(&source.id, reference.bytes)?;
-                    ensure!(
-                        bytes.len() as u64 == reference.bytes && digest(&bytes) == reference.sha256,
-                        "remote object integrity failure"
-                    );
-                    objects.insert(reference.sha256.clone(), bytes);
-                } else {
+                if !self.fetch_object(collection, reference, &incoming, budget)? {
                     missing = true;
                     break;
                 }
@@ -268,20 +383,62 @@ impl<T: DriveTransport> SyncEngine<T> {
                 pending = true;
                 continue;
             }
-            if self.store.import(remote.manifest, objects).is_err() {
+            if self
+                .store
+                .import_staged(remote.manifest, &incoming)
+                .is_err()
+            {
                 // Bytes and remote observation remain durable/recoverable; no false
                 // completion or outbound publication while lineage/schema is pending.
                 pending = true;
                 continue;
             }
+            if policy_deferred {
+                self.state.deferred.insert(file.id.clone());
+            }
             self.state.applied.insert(file.id);
             self.save()?;
         }
-        Ok(pending)
+        Ok(pending
+            || self.state.files.values().any(|f| {
+                f.tag()
+                    .is_ok_and(|t| t.collection == collection && t.kind == "manifest")
+                    && !self.state.applied.contains(&f.id)
+            }))
     }
-    fn projection(&self, source: &Manifest) -> Result<(Manifest, BTreeMap<String, Vec<u8>>)> {
+    fn fetch_object(
+        &mut self,
+        collection: Uuid,
+        reference: &ObjectRef,
+        incoming: &Path,
+        budget: &mut usize,
+    ) -> Result<bool> {
+        self.alive()?;
+        if self.store.open_object(reference).is_ok()
+            || files::Source::open(&incoming.join(&reference.sha256), reference).is_ok()
+        {
+            return Ok(true);
+        }
+        if *budget == 0 {
+            return Ok(false);
+        }
+        let source = self.state.files.values().find(|f| {
+            f.tag().is_ok_and(|t| {
+                t.collection == collection && t.kind == "object" && t.sha256 == reference.sha256
+            })
+        });
+        let Some(source) = source else {
+            return Ok(false);
+        };
+        *budget -= 1;
+        self.transport
+            .download_to(&source.id, reference, &incoming.join(&reference.sha256))?;
+        Ok(true)
+    }
+    fn projection(&self, source: &Manifest) -> Result<(Manifest, BTreeMap<String, files::Source>)> {
         let mut objects = BTreeMap::new();
         let mut records = Vec::new();
+        let mut record_namespaces = BTreeMap::new();
         let mut descriptors = BTreeMap::new();
         for reference in &source.records {
             let bytes = self.store.read_object(reference)?;
@@ -293,7 +450,8 @@ impl<T: DriveTransport> SyncEngine<T> {
             for media in envelope.media_descriptors {
                 descriptors.insert(media.sha256.clone(), media);
             }
-            objects.insert(reference.sha256.clone(), bytes);
+            objects.insert(reference.sha256.clone(), files::Source::Memory(bytes));
+            record_namespaces.insert(reference.sha256.clone(), envelope.namespace);
             records.push(reference.clone());
         }
         records.sort_by(|a, b| a.sha256.cmp(&b.sha256));
@@ -309,7 +467,7 @@ impl<T: DriveTransport> SyncEngine<T> {
             } else if descriptor.bytes > self.policy.max_media_bytes {
                 Some(Omission::SizeDeferred)
             } else {
-                match self.store.read_object(&reference) {
+                match self.store.open_object(&reference) {
                     Ok(bytes) => {
                         objects.insert(reference.sha256.clone(), bytes);
                         media.push(reference);
@@ -333,6 +491,7 @@ impl<T: DriveTransport> SyncEngine<T> {
             transaction_id: Uuid::nil(),
             scope: Scope::SelectedRecords,
             records,
+            record_namespaces,
             media,
             media_coverage: coverage,
         };
@@ -349,13 +508,13 @@ impl<T: DriveTransport> SyncEngine<T> {
             if manifest.records.is_empty() {
                 continue;
             }
-            for (hash, bytes) in objects {
+            for (hash, mut bytes) in objects {
                 let tag = Tag {
                     collection,
                     kind: "object".into(),
                     sha256: hash,
                 };
-                if !self.ensure_upload(tag, &bytes, budget)? {
+                if !self.ensure_upload(tag, &mut bytes, budget)? {
                     return Ok(Status::Pending);
                 }
             }
@@ -369,13 +528,18 @@ impl<T: DriveTransport> SyncEngine<T> {
                 kind: "manifest".into(),
                 sha256: digest(&bytes),
             };
-            if !self.ensure_upload(tag, &bytes, budget)? {
+            if !self.ensure_upload(tag, &mut files::Source::Memory(bytes), budget)? {
                 return Ok(Status::Pending);
             }
         }
         Ok(Status::Current)
     }
-    fn ensure_upload(&mut self, tag: Tag, bytes: &[u8], budget: &mut usize) -> Result<bool> {
+    fn ensure_upload(
+        &mut self,
+        tag: Tag,
+        bytes: &mut files::Source,
+        budget: &mut usize,
+    ) -> Result<bool> {
         self.alive()?;
         if self
             .state
@@ -398,10 +562,7 @@ impl<T: DriveTransport> SyncEngine<T> {
                 return Ok(false);
             }
             *budget -= 1;
-            ensure!(
-                self.transport.download(&file.id, bytes.len() as u64)? == bytes,
-                "remote retry content mismatch"
-            );
+            self.transport.verify(&file.id, &bytes.reference())?;
             self.state.uploads.insert(
                 tag.sha256.clone(),
                 Upload {
@@ -472,7 +633,17 @@ impl Worker {
             return Ok(None);
         }
         let cancel = Arc::new(AtomicBool::new(false));
-        let mut engine = SyncEngine::new(store.clone(), policy.clone(), transport, cancel.clone())?;
+        let mut engine =
+            match SyncEngine::new(store.clone(), policy.clone(), transport, cancel.clone()) {
+                Ok(engine) => engine,
+                Err(_) => {
+                    let _ = files::atomic_json(
+                        &store.paths.data.join("sync/health.json"),
+                        &json!({"status":Status::RecoveryRequired}),
+                    );
+                    return Ok(None);
+                }
+            };
         let (wake, receiver) = mpsc::sync_channel(1);
         let (done_sender, done) = mpsc::channel();
         store.set_wake(Some(wake.clone()));
@@ -484,13 +655,14 @@ impl Worker {
                     Err(error)=>{
                         failures=failures.saturating_add(1);
                         match error.downcast_ref::<TransportFailure>() {
-                            Some(e) if e.status==401 || e.status==403=>(Status::AuthorizationRequired,None),
-                            Some(e)=>(Status::RetryLater,e.retry_after_seconds),
+                            Some(e) if e.authorization_required=>(Status::AuthorizationRequired,None),
+                            Some(e) if e.retryable=>(Status::RetryLater,e.retry_after_seconds),
+                            Some(_)=>(Status::RecoveryRequired,None),
                             None=>(Status::RetryLater,None),
                         }
                     }
                 };
-                let _=files::atomic_json(&engine.store.paths.data.join("sync/health.json"),&json!({"status":status,"recovery_scope":"selected-records","full_media_recovery":false}));
+                let _=files::atomic_json(&engine.store.paths.data.join("sync/health.json"),&json!({"status":status,"recovery_scope":"selected-records","policy_deferred_manifests":engine.state.deferred.len(),"full_media_recovery":false}));
                 if matches!(status,Status::AuthorizationRequired|Status::RecoveryRequired) {break;}
                 let jitter=u64::from(Uuid::new_v4().as_bytes()[0])%3;
                 let delay=retry.unwrap_or_else(|| if failures>0 {2_u64.saturating_pow(failures.min(10)).min(3600)} else if matches!(status,Status::Pending|Status::Discovering){1}else{policy.poll_seconds})+jitter;
@@ -512,12 +684,21 @@ impl Worker {
         }
         // Loading a local credential file does not perform network I/O.
         match GoogleDrive::open(store.paths.credentials.join("drive.json")) {
-            Ok(transport) => Self::start(store, policy, transport),
+            Ok(transport) => match Self::start(store.clone(), policy, transport) {
+                Ok(worker) => Ok(worker),
+                Err(_) => {
+                    let _ = files::atomic_json(
+                        &store.paths.data.join("sync/health.json"),
+                        &json!({"status":Status::RecoveryRequired}),
+                    );
+                    Ok(None)
+                }
+            },
             Err(_) => {
-                files::atomic_json(
+                let _ = files::atomic_json(
                     &store.paths.data.join("sync/health.json"),
                     &json!({"status":Status::AuthorizationRequired}),
-                )?;
+                );
                 Ok(None)
             }
         }

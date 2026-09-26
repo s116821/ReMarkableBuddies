@@ -23,6 +23,8 @@ struct Cloud {
     uploads: usize,
     fail_after_create: bool,
     slow: bool,
+    active_request: bool,
+    cursor_expired: bool,
 }
 #[derive(Clone, Default)]
 struct Fake(Arc<Mutex<Cloud>>);
@@ -61,9 +63,24 @@ impl DriveTransport for Fake {
         })
     }
     fn changes(&mut self, page: &str) -> anyhow::Result<Page<Change>> {
+        {
+            let mut c = self.0.lock().unwrap();
+            if c.cursor_expired {
+                c.cursor_expired = false;
+                return Err(TransportFailure {
+                    status: 410,
+                    retry_after_seconds: None,
+                    retryable: false,
+                    authorization_required: false,
+                }
+                .into());
+            }
+        }
         let slow = self.0.lock().unwrap().slow;
         if slow {
+            self.0.lock().unwrap().active_request = true;
             std::thread::sleep(Duration::from_millis(600));
+            self.0.lock().unwrap().active_request = false;
         }
         let c = self.0.lock().unwrap();
         let offset: usize = page.parse()?;
@@ -92,13 +109,14 @@ impl DriveTransport for Fake {
         &mut self,
         id: &str,
         tag: &Tag,
-        bytes: &[u8],
+        source: &mut files::Source,
         _: &mut UploadSession,
     ) -> anyhow::Result<UploadProgress> {
+        let bytes = source.chunk(0, source.len())?;
         let mut c = self.0.lock().unwrap();
         c.uploads += 1;
         if let Some((file, existing)) = c.files.get(id) {
-            anyhow::ensure!(file.tag()? == *tag && existing == bytes, "409 conflict");
+            anyhow::ensure!(file.tag()? == *tag && existing == &bytes, "409 conflict");
             return Ok(UploadProgress::Complete);
         }
         let file = RemoteFile {
@@ -186,7 +204,7 @@ fn record(store: &Store, namespace: Namespace) -> Envelope {
     }
 }
 fn pump(engine: &mut SyncEngine<Fake>) {
-    for _ in 0..100 {
+    for _ in 0..500 {
         if engine.step().unwrap() == Status::Current {
             return;
         }
@@ -310,6 +328,7 @@ fn mixed_policy_history_only_later_media_and_namespace_enablement_preserve_revis
     pump(&mut eb);
     assert!(b.store.read_object(&media_ref).is_err());
     ea.policy.max_media_bytes = 1024;
+    eb.policy.media = true;
     pump(&mut ea);
     pump(&mut eb);
     assert_eq!(b.store.read_object(&media_ref).unwrap(), bytes);
@@ -370,7 +389,14 @@ fn disabled_sync_has_no_calls_and_slow_worker_never_holds_store_mutex() {
     let worker = Worker::start(a.store.clone(), p, cloud.clone())
         .unwrap()
         .unwrap();
-    std::thread::sleep(Duration::from_millis(100));
+    let deadline = Instant::now() + Duration::from_secs(6);
+    while !cloud.0.lock().unwrap().active_request && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        cloud.0.lock().unwrap().active_request,
+        "fixture must actually be stalled in network code"
+    );
     let started = Instant::now();
     a.store
         .commit(
@@ -382,4 +408,188 @@ fn disabled_sync_has_no_calls_and_slow_worker_never_holds_store_mutex() {
     let started = Instant::now();
     drop(worker);
     assert!(started.elapsed() < Duration::from_millis(500));
+}
+
+#[test]
+fn stale_or_corrupt_optional_sync_state_pauses_only_sync() {
+    let a = Device::new();
+    let cloud = Fake::default();
+    let p = policy(Uuid::new_v4(), false);
+    fs::write(a.store.paths.data.join("sync/state.json"), b"{broken").unwrap();
+    assert!(Worker::start(a.store.clone(), p.clone(), cloud.clone())
+        .unwrap()
+        .is_none());
+    let health: serde_json::Value =
+        files::json(&a.store.paths.data.join("sync/health.json"), 1024).unwrap();
+    assert_eq!(health["status"], "recovery-required");
+    a.store
+        .commit(
+            vec![record(&a.store, Namespace::Conversation)],
+            BTreeMap::new(),
+        )
+        .unwrap();
+    assert_eq!(
+        fs::read(a.store.paths.data.join("sync/state.json")).unwrap(),
+        b"{broken"
+    );
+}
+
+#[test]
+fn receiving_policy_defers_domains_and_media_without_fetching_then_replays_on_enable() {
+    let cloud = Fake::default();
+    let a = Device::new();
+    let b = Device::new();
+    let collection = Uuid::new_v4();
+    let memory = record(&a.store, Namespace::SubjectMemory);
+    let mut handwriting = record(&a.store, Namespace::Handwriting);
+    let bytes = vec![71_u8; 1024];
+    let hash = digest(&bytes);
+    handwriting.media_descriptors.push(Media {
+        sha256: hash.clone(),
+        bytes: 1024,
+        media_type: "application/octet-stream".into(),
+    });
+    a.store
+        .commit(
+            vec![memory.clone(), handwriting.clone()],
+            BTreeMap::from([(hash.clone(), bytes)]),
+        )
+        .unwrap();
+    let mut send = policy(collection, true);
+    send.media = true;
+    let mut ea = a.engine(cloud.clone(), send);
+    pump(&mut ea);
+    let mut receive = policy(collection, false);
+    receive.namespaces = BTreeSet::from([Namespace::SubjectMemory]);
+    let mut eb = b.engine(cloud.clone(), receive);
+    pump(&mut eb);
+    assert_eq!(
+        b.store
+            .heads(memory.namespace, memory.record_id)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(b
+        .store
+        .heads(handwriting.namespace, handwriting.record_id)
+        .unwrap()
+        .is_empty());
+    assert!(!b
+        .store
+        .paths
+        .data
+        .join("sync/incoming")
+        .join(digest(&serde_json::to_vec(&handwriting).unwrap()))
+        .exists());
+    assert!(!b
+        .store
+        .paths
+        .data
+        .join("sync/incoming")
+        .join(&hash)
+        .exists());
+    eb.policy.namespaces.insert(Namespace::Handwriting);
+    pump(&mut eb);
+    assert_eq!(
+        b.store
+            .heads(handwriting.namespace, handwriting.record_id)
+            .unwrap()
+            .len(),
+        1
+    );
+    let reference = ObjectRef {
+        sha256: hash,
+        bytes: 1024,
+    };
+    assert!(b.store.open_object(&reference).is_err());
+    eb.policy.media = true;
+    pump(&mut eb);
+    assert!(b.store.open_object(&reference).is_ok());
+    eb.policy.media = false;
+    eb.policy.namespaces.clear();
+    pump(&mut eb);
+    assert!(b.store.open_object(&reference).is_ok());
+}
+
+#[test]
+fn more_deferred_children_than_batch_cannot_starve_their_present_parents() {
+    let cloud = Fake::default();
+    let a = Device::new();
+    let b = Device::new();
+    let collection = Uuid::new_v4();
+    let mut e = record(&a.store, Namespace::SubjectMemory);
+    a.store.commit(vec![e.clone()], BTreeMap::new()).unwrap();
+    for _ in 0..8 {
+        e = revise(&e, &a.store, false);
+        a.store.commit(vec![e.clone()], BTreeMap::new()).unwrap();
+    }
+    let mut ea = a.engine(cloud.clone(), policy(collection, true));
+    pump(&mut ea);
+    // Put all descendant manifests before their parents in discovery key order.
+    {
+        let mut c = cloud.0.lock().unwrap();
+        let old = std::mem::take(&mut c.files);
+        c.changes.clear();
+        for (old_id, (mut file, bytes)) in old {
+            let id = if file.tag().unwrap().kind == "manifest" {
+                let manifest: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                let record_hash = manifest["manifest"]["records"][0]["sha256"]
+                    .as_str()
+                    .unwrap();
+                let reference = ObjectRef {
+                    sha256: record_hash.into(),
+                    bytes: manifest["manifest"]["records"][0]["bytes"]
+                        .as_u64()
+                        .unwrap(),
+                };
+                let envelope: Envelope =
+                    serde_json::from_slice(&a.store.read_object(&reference).unwrap()).unwrap();
+                // Root is guaranteed last; >batch children precede it.
+                format!(
+                    "manifest-{}-{old_id}",
+                    if envelope.parents.is_empty() {
+                        "z"
+                    } else {
+                        "a"
+                    }
+                )
+            } else {
+                old_id
+            };
+            file.id = id.clone();
+            c.files.insert(id, (file, bytes));
+        }
+    }
+    let mut p = policy(collection, false);
+    p.batch_items = 2;
+    let mut eb = b.engine(cloud, p);
+    pump(&mut eb);
+    assert_eq!(
+        b.store.heads(e.namespace, e.record_id).unwrap()[0].revision_id,
+        e.revision_id
+    );
+}
+
+#[test]
+fn rejected_cursor_and_disappeared_collection_do_not_recreate_cloud_from_local_defaults() {
+    let cloud = Fake::default();
+    let a = Device::new();
+    let collection = Uuid::new_v4();
+    let e = record(&a.store, Namespace::SubjectMemory);
+    a.store.commit(vec![e.clone()], BTreeMap::new()).unwrap();
+    let mut engine = a.engine(cloud.clone(), policy(collection, true));
+    pump(&mut engine);
+    pump(&mut engine);
+    let uploads = cloud.0.lock().unwrap().uploads;
+    {
+        let mut c = cloud.0.lock().unwrap();
+        c.files.clear();
+        c.changes.clear();
+        c.cursor_expired = true;
+    }
+    assert!(engine.step().is_err());
+    assert_eq!(engine.step().unwrap(), Status::RecoveryRequired);
+    assert_eq!(cloud.0.lock().unwrap().uploads, uploads);
+    assert!(a.store.value(e.namespace, e.record_id).unwrap().is_some());
 }

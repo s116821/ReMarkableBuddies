@@ -101,8 +101,10 @@ fn environment_values_win_and_invalid_selected_secrets_do_not_fall_back() {
     .unwrap();
     assert!(!error.to_string().contains("valid-fallback"));
     assert!(serde_json::from_value::<Config>(json!({"api_key":"must-not-be-here"})).is_err());
-    let mut unsupported = Config::default();
-    unsupported.config_schema_version = 2;
+    let unsupported = Config {
+        config_schema_version: 2,
+        ..Default::default()
+    };
     assert!(unsupported.validate().is_err());
     let invalid: Config = serde_json::from_value(json!({"model_credential":"../secret"})).unwrap();
     assert!(invalid.validate().is_err());
