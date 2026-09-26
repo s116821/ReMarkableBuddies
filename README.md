@@ -235,6 +235,12 @@ cross build --release --target armv7-unknown-linux-gnueabihf --example screensho
 ./reader_once
 ```
 
+For capture profiling, `./screenshot /tmp/page.png --image-only` uses the fresh
+owned-pixel path used by status guards. Its diagnostic PNG save occurs after the
+`capture.total` timing span; compare capture timings rather than whole command
+duration when assessing this path. Normal screenshot mode retains encoded native
+detail and overview output.
+
 The old `--input-png` and `--save-screenshot` flags were unused and are removed.
 `--no-draw` did not provide a working simulator and is also removed. Use
 `--simulate` for the maintained [local simulator](docs/simulator.md), or bounded
@@ -243,6 +249,41 @@ Production `--once`, `--no-trigger` and `--screenshot-only` are removed; use the
 explicit examples above. `reader_once` uses environment credentials/endpoint, the
 default model and LL corner, with image dumps disabled. Restore the normal service
 after the bounded diagnostic. Paper Pro examples use the aarch64 target.
+
+For answer-page eligibility diagnosis without a model call or input-device
+initialization, build `--example page_eligibility` and run
+`./page_eligibility native /tmp/new-eligibility-evidence` on an authorized tablet.
+It saves the exact classifier image/reference and bracketed page/session metadata
+plus the existing classifier result. Confirm the visible page independently;
+metadata alone is not UI proof. The output directory must be new. Offline replay:
+`cargo run --example page_eligibility -- offline input.png reference.png new-output`.
+Use `-` instead of a reference path to test the absent-cache case. An Invalid
+result is evidence of refusal, not a successful Q&A or permission to loosen checks.
+
+For no-model readiness investigation, build `--example readiness_probe`. With the
+normal service stopped, `./readiness_probe current NEW_OUTPUT_DIR` observes the
+current page; `next NEW_OUTPUT_DIR EXPECTED_PAGE_UUID` or
+`previous NEW_OUTPUT_DIR EXPECTED_PAGE_UUID` sends one real swipe before diagnostic
+navigation/classification captures and verifies the explicitly expected target.
+No mode writes answer or status ink. It calls
+the production pre-lease readiness check, saving its result and bracketed source
+and classifier ownership. Debug refusal artifacts in
+`/tmp/reader-buddy-readiness-{before,rejected}.{png,json}` are the exact compared
+frames and identities. Preserve them with the source/binary/reference hashes and
+visually verify the page. Use a bounded caller and restore the agreed page/service;
+this diagnostic sequence is not a complete Reader iteration.
+
+For explicit no-model append diagnosis on an already selected disposable page,
+build `--example append_probe` and run
+`./append_probe QA_FILE NEW_OUTPUT_DIR EXPECTED_DOCUMENT EXPECTED_PAGE` with the
+normal service stopped and a bounded caller. This **writes the supplied text once**
+through production body-mode/text APIs, with no status ink or undo/redo. It saves
+the exact requested/expected text and native snapshots before/after body-mode setup
+and typing, including page/visit/session identity, paragraph formatting and opaque
+native seals. The new output directory is private; files contain document content.
+An owner mismatch stops further writes; content mismatches remain failures and
+are never normalized. Snapshot/logging overhead makes this diagnostic unsuitable
+as a latency benchmark. Inspect the output and restore the agreed page/service.
 
 `--api-key` overrides `OPENAI_API_KEY`; prefer the protected environment because
 command arguments may appear in shell history or process listings. No real key is
@@ -704,12 +745,21 @@ See LICENSE file for details.
 
 For explicit provider-backed laptop runs, see [local development setup](docs/local-development.md). Normal simulator regression scenarios remain offline.
 
-## Reader activity indicator
+## Reader request ownership and feedback
 
-Reader builds nested triangles for preparation, answer-request and answer-response stages, drawing one edge every 333 ms. Auxiliary model calls use an inner circle. Activity and six distinct X-plus-segment failure codes share a 50 by 50 area near the bottom-right corner. Temporary paths are cleared before capture, page navigation, typing and completion; they are never included in model or classifier images. Drawing pauses during keyboard input so pen and keyboard operations cannot interfere.
+Source-page activity triangles, circles, spokes and failure X marks are retired.
+Normal Reader requests do not draw or erase status ink, change pen preferences or
+create status-tool recovery records. Failure reasons remain in logs; Buddy-page
+feedback is planned in REM-40.
 
-The area and surrounding clearance must be blank before Reader uses native pen marks. Existing corner handwriting, a previous failure X, or unknown image state suppresses status drawing only; normal question processing continues. Reader does not erase preexisting ink to make room for an indicator. Partial typing invalidates the earlier blank-region check. A cleanup failure stops further navigation/output and ends that orchestrator instead of attempting to erase a mark after another page might have become active.
+On the verified RM2 contract, a retained read-only input/page/session guard spans
+capture and model calls. Navigation acquires its own observer and verifies the
+original source before the request guard is released for the physical gesture.
+Header and answer typing retain the request guard while excluding only the owned
+virtual keyboard. External input or source loss stops further work.
 
-Production model requests have a 90-second global timeout. Only HTTP work runs on a worker thread; indicator updates and all tablet input stay on the workflow thread. A progress error stops further ticks and the bounded worker is joined before returning. Explicit simulator timeout settings still apply. Abrupt process termination or concurrent manual page edits can leave native marks; this is not transactional document undo.
-
-On the verified native UI contract, Reader temporarily uses black medium Fineliner and restores the exact original tool, active slot and saved preferences. Unsupported controls suppress status; failed restoration stops input. A crash recovery record prevents silent reuse of interrupted settings. See [native restoration and its hardware limits](docs/TECHNICAL.md#native-status-style-restoration).
+Production model requests retain the 90-second timeout. HTTP runs on its worker;
+all device operations and read-only progress checks remain on the caller thread.
+Unsupported layouts retain explicit heuristic limits. An unresolved historical
+status recovery record still blocks startup read-only; retirement never deletes
+or replays it. See [preserved experimental findings](docs/legacy-status-indicator-findings.md).

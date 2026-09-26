@@ -6,7 +6,6 @@ use remarkable_reader_buddy::{Keyboard, Pen, Screenshot, Touch, TriggerCorner};
 #[cfg(target_os = "linux")]
 use std::{thread::sleep, time::Duration};
 
-/// Diagnostic only: select a bounded suffix without deleting it, or press one key.
 #[cfg(target_os = "linux")]
 fn history_keys(action: &str, count: usize) -> Result<()> {
     use evdev::{uinput::VirtualDevice, AttributeSet, EventType, InputEvent, KeyCode as K};
@@ -375,51 +374,12 @@ fn main() -> Result<()> {
             touch.touch_stop()?;
         }
         Some("erase") => Pen::new(false).erase_rectangle((240, 390), (510, 510))?,
-        Some("indicator-smoke") => {
-            let mut workflow =
-                remarkable_reader_buddy::Workflow::new(false, TriggerCorner::LowerLeft, false)?;
-            std::fs::write(
-                "/tmp/reader-buddy-status-before.png",
-                workflow.capture_page_data()?,
-            )?;
-            let result = (|| -> Result<()> {
-                use remarkable_reader_buddy::workflow::indicator::Stage;
-                let mut active = Screenshot::new()?;
-                for stage in [Stage::Preparing, Stage::AnswerPending, Stage::AnswerReady] {
-                    workflow.set_indicator_stage(stage);
-                    workflow.finish_indicator_stage()?;
-                    active.take_screenshot()?;
-                    active.save_image(&format!("/tmp/reader-buddy-status-{stage:?}.png"))?;
-                }
-                workflow.auxiliary_indicator()?;
-                for _ in 0..6 {
-                    workflow.tick_indicator()?;
-                }
-                active.take_screenshot()?;
-                active.save_image("/tmp/reader-buddy-status-active.png")?;
-                Ok(())
-            })();
-            let started = std::time::Instant::now();
-            let cleanup = workflow.clear_indicator();
-            println!("Owned-path cleanup: {} ms", started.elapsed().as_millis());
-            result?;
-            cleanup?;
-        }
-        Some("failure-code") => {
-            use remarkable_reader_buddy::workflow::indicator::Failure;
-            let code = match args.get(2).map(String::as_str) {
-                Some("selection") => Failure::Selection,
-                Some("transcription") => Failure::Transcription,
-                Some("provider") => Failure::Provider,
-                Some("no-successor") => Failure::NoSuccessor,
-                Some("invalid-successor") => Failure::InvalidSuccessor,
-                Some("device") => Failure::Device,
-                _ => bail!("failure-code requires selection/transcription/provider/no-successor/invalid-successor/device"),
-            };
-            let mut workflow =
-                remarkable_reader_buddy::Workflow::new(false, TriggerCorner::LowerLeft, false)?;
-            workflow.capture_page_data()?;
-            workflow.draw_failure(code)?;
+        Some("indicator-smoke")
+        | Some("indicator-smoke-diagnostic")
+        | Some("indicator-current-tool")
+        | Some("failure-code")
+        | Some("failure-current-tool") => {
+            bail!("Source indicator diagnostics are retired; historical source is preserved at da8838d")
         }
         Some("return-check") => {
             let mut workflow =
@@ -428,7 +388,7 @@ fn main() -> Result<()> {
             workflow.navigate_to_next_page()?;
             sleep(Duration::from_millis(800));
             let outcome = workflow.return_to_original_page(&original)?;
-            workflow.draw_failure(
+            workflow.report_failure(
                 if outcome == remarkable_reader_buddy::workflow::ReturnOutcome::Unconfirmed {
                     remarkable_reader_buddy::workflow::indicator::Failure::Device
                 } else {

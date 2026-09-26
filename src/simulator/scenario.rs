@@ -13,6 +13,9 @@ pub struct Scenario {
     pub pages: Vec<PageSpec>,
     #[serde(default)]
     pub active_page: usize,
+    /// Model a backend readiness result; not proof of native rendering.
+    #[serde(default)]
+    pub verified_navigation: bool,
     #[serde(default = "corner")]
     pub trigger_corner: String,
     pub iterations: Vec<Iteration>,
@@ -61,6 +64,30 @@ pub struct PageSpec {
     #[serde(default)]
     pub text: String,
     pub strokes: Option<PathBuf>,
+    #[serde(default)]
+    pub status_capability: StatusCapability,
+    #[serde(default)]
+    pub trigger_overlay: TriggerOverlay,
+}
+
+/// Declared simulation input; it does not recognize native UI or document type.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusCapability {
+    #[default]
+    CalibratedFinePdf,
+    UnsuitableTool,
+    UnknownTool,
+    UnverifiedLayout,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TriggerOverlay {
+    #[default]
+    Closed,
+    KnownOpen,
+    Unknown,
 }
 
 #[derive(Clone, Deserialize)]
@@ -111,12 +138,14 @@ pub struct Reply {
 #[serde(rename_all = "snake_case")]
 pub enum Operation {
     Capture,
+    RequestGuard,
     Next,
     Previous,
     Text,
     Body,
     Line,
     Trigger,
+    TriggerDismiss,
     HeaderSave,
     StatusStroke,
     StatusClear,
@@ -131,6 +160,8 @@ pub enum Operation {
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Effect {
+    OwnerChange,
+    ExternalInput,
     Error,
     NoMove,
     Stale,
@@ -275,15 +306,38 @@ impl Scenario {
         let mut faults = std::collections::BTreeSet::new();
         for fault in &self.faults {
             ensure!(
+                !matches!(
+                    fault.operation,
+                    Operation::StatusStroke
+                        | Operation::StatusClear
+                        | Operation::StatusStyleBegin
+                        | Operation::StatusStyleRestore
+                        | Operation::StatusCleanupCheckpoint
+                        | Operation::StatusStyleEnd
+                ),
+                "Legacy source indicator faults are retired from normal scenarios"
+            );
+            ensure!(
                 fault.call > 0 && faults.insert((fault.operation, fault.call)),
                 "Invalid or duplicate fault call"
             );
             ensure!(
                 match fault.effect {
                     Effect::Error => true,
+                    Effect::OwnerChange | Effect::ExternalInput => matches!(
+                        fault.operation,
+                        Operation::Capture
+                            | Operation::Next
+                            | Operation::Previous
+                            | Operation::Text
+                            | Operation::Body
+                    ),
                     Effect::NoMove => matches!(
                         fault.operation,
-                        Operation::Next | Operation::Previous | Operation::StatusClear
+                        Operation::Next
+                            | Operation::Previous
+                            | Operation::StatusClear
+                            | Operation::TriggerDismiss
                     ),
                     Effect::Stale => matches!(
                         fault.operation,
@@ -295,7 +349,9 @@ impl Scenario {
                     ),
                     Effect::Lag => fault.operation == Operation::HistorySnapshot,
                     Effect::Partial => fault.operation == Operation::HistoryMutation,
-                    Effect::WrongPage => fault.operation == Operation::HistorySnapshot,
+                    Effect::WrongPage =>
+                        fault.operation == Operation::HistorySnapshot
+                            || (fault.operation == Operation::Capture && self.pages.len() > 1),
                     Effect::Unavailable => matches!(
                         fault.operation,
                         Operation::HistorySnapshot | Operation::StatusStyleBegin

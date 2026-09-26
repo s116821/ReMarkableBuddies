@@ -51,9 +51,17 @@ pub trait DeviceBackend {
     }
     fn capture(&mut self) -> Result<Frame>;
     fn detail_images(&self) -> Result<Vec<String>>;
+    fn check_request_guard(&mut self) -> Result<()> {
+        Ok(())
+    }
+    fn finish_request_guard(&mut self) -> Result<()> {
+        self.check_request_guard()
+    }
+    fn record_failure(&mut self, _failure: crate::workflow::indicator::Failure) {}
+
     fn wait_for_trigger(&mut self) -> Result<()>;
-    fn dismiss_trigger(&mut self) -> Result<()>;
-    fn navigate(&mut self, direction: NavigationDirection) -> Result<()>;
+    fn prepare_reader_trigger(&mut self) -> Result<()>;
+    fn navigate(&mut self, direction: NavigationDirection) -> Result<NavigationCompletion>;
     fn render_text(&mut self, text: &str) -> Result<()>;
     fn body_mode(&mut self) -> Result<()>;
     fn line(&mut self, from: (i32, i32), to: (i32, i32)) -> Result<()>;
@@ -75,10 +83,26 @@ pub trait DeviceBackend {
     fn delay(&mut self, duration: Duration);
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NavigationCompletion {
+    /// Composite verified-layout readiness; not a native render acknowledgement.
+    Settled,
+    /// No requested neighbor, or a guarded unchanged source after one attempt.
+    NoMovement,
+    /// Existing unsupported-layout heuristic; caller still supplies its settling wait.
+    Legacy,
+}
+
 pub struct RealDevice {
+    #[cfg(target_os = "linux")]
+    request: Option<NativeRequest>,
     status_style: Option<super::status_style::Lease>,
     status_journal: Option<super::status_style::Journal>,
     status_style_supported: bool,
+    legacy_status_diagnostics: bool,
+    status_wait_cancellation: super::status_style::WaitCancellation,
+    #[cfg(target_os = "linux")]
+    status_wait_input: Option<super::input_observer::InputObserver>,
     debug_dump: bool,
     clock: std::time::Instant,
     #[cfg(target_os = "linux")]
@@ -92,7 +116,476 @@ pub struct RealDevice {
 
 const HEADER_PATH: &str = "/var/cache/reader-buddy/header-pattern.png";
 
+#[cfg(target_os = "linux")]
+struct NativeNavigation<'a> {
+    device: &'a mut RealDevice,
+    input: Option<super::input_observer::InputObserver>,
+}
+
+#[cfg(target_os = "linux")]
+impl super::navigation_completion::NavigationIo for NativeNavigation<'_> {
+    fn observe(&mut self) -> Result<super::navigation_completion::Frame> {
+        use super::native_page;
+        use std::path::Path;
+        let root = Path::new("/home/root/.local/share/remarkable/xochitl");
+        let settings = Path::new("/home/root/.config/remarkable/xochitl.conf");
+        let session = native_page::xochitl_session(Path::new("/proc"))?;
+        let before = native_page::observed_navigation(root, settings, session.clone())?;
+        let image = self.device.status_screenshot.take_image()?.to_luma8();
+        anyhow::ensure!(
+            native_page::xochitl_session(Path::new("/proc"))? == session,
+            "Navigation session changed during capture"
+        );
+        let after = native_page::observed_navigation(root, settings, session)?;
+        Ok(super::navigation_completion::Frame {
+            before,
+            after,
+            image,
+        })
+    }
+    fn swipe(&mut self, direction: NavigationDirection) -> Result<()> {
+        // The successor observer and source capture have already overlapped
+        // the retained request. Only the deliberate physical gesture is unobserved.
+        self.device.finish_request_guard()?;
+        XochitlIntegration::swipe(&mut self.device.touch, direction)
+    }
+    fn now(&self) -> Duration {
+        self.device.clock.elapsed()
+    }
+    fn pace(&mut self, duration: Duration) {
+        std::thread::sleep(duration);
+    }
+    fn begin_guard(&mut self) -> Result<()> {
+        let owned = self.device.keyboard.owned_sysfs()?;
+        self.input = Some(super::input_observer::InputObserver::new(
+            TriggerCorner::LowerLeft,
+            owned.as_deref(),
+        )?);
+        Ok(())
+    }
+    fn check_request(&mut self) -> Result<()> {
+        self.device.check_request_guard()
+    }
+    fn guard(&mut self) -> Result<()> {
+        self.device.check_request_guard()?;
+        let input = self
+            .input
+            .as_mut()
+            .context("Navigation input observer unavailable")?;
+        anyhow::ensure!(
+            input.poll()?.is_empty() && input.quiescent(),
+            "Input cancelled navigation ownership"
+        );
+        Ok(())
+    }
+    fn end_guard(&mut self) {
+        self.input = None;
+    }
+    fn finish_guard(&mut self, owner: &crate::workflow::history::Owner) -> Result<()> {
+        self.device.check_request_guard()?;
+        let input = self
+            .input
+            .take()
+            .context("Missing navigation observer at handoff")?;
+        let mut request = NativeRequest { input, pin: None };
+        request.pin = Some(super::request_guard::RequestGuard::from_observed(
+            owner.clone(),
+            &mut request,
+        )?);
+        self.device.request = Some(request);
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct NativeRequest {
+    input: super::input_observer::InputObserver,
+    pin: Option<super::request_guard::RequestGuard<crate::workflow::history::Owner>>,
+}
+#[cfg(target_os = "linux")]
+impl super::request_guard::RequestIo for NativeRequest {
+    type Owner = crate::workflow::history::Owner;
+    fn owner(&mut self) -> Result<Self::Owner> {
+        use std::path::Path;
+        let session = super::native_page::xochitl_session(Path::new("/proc"))?;
+        super::native_page::observed_owner(
+            Path::new("/home/root/.local/share/remarkable/xochitl"),
+            Path::new("/home/root/.config/remarkable/xochitl.conf"),
+            session,
+        )
+    }
+    fn input_clear(&mut self) -> Result<()> {
+        anyhow::ensure!(
+            self.input.poll()?.is_empty() && self.input.quiescent(),
+            "External input cancelled captured request"
+        );
+        Ok(())
+    }
+}
+#[cfg(target_os = "linux")]
+impl NativeRequest {
+    fn new(keyboard: &mut Keyboard) -> Result<Self> {
+        let owned_keyboard = keyboard.owned_sysfs()?;
+        let mut request = Self {
+            input: super::input_observer::InputObserver::new(
+                TriggerCorner::LowerLeft,
+                owned_keyboard.as_deref(),
+            )?,
+            pin: None,
+        };
+        request.pin = Some(super::request_guard::RequestGuard::begin(&mut request)?);
+        Ok(request)
+    }
+    fn check(&mut self) -> Result<()> {
+        let mut pin = self.pin.take().context("Request pin missing")?;
+        let result = pin.check(self);
+        self.pin = Some(pin);
+        result
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct NativeStatusObservation<'a>(&'a mut RealDevice);
+
+#[cfg(target_os = "linux")]
+impl super::capture_recovery::ObservationIo for NativeStatusObservation<'_> {
+    type Owner = crate::workflow::history::Owner;
+    type Frame = super::status_style::Observation;
+    fn now(&self) -> Duration {
+        self.0.clock.elapsed()
+    }
+    fn owner(&mut self) -> Result<Self::Owner> {
+        let _timing = crate::measurement::Span::new("status.capture.owner_guard");
+        use std::path::Path;
+        let session = super::native_page::xochitl_session(Path::new("/proc"))?;
+        super::native_page::observed_owner(
+            Path::new("/home/root/.local/share/remarkable/xochitl"),
+            Path::new("/home/root/.config/remarkable/xochitl.conf"),
+            session,
+        )
+    }
+    fn check_input(&mut self) -> Result<()> {
+        super::status_style::StyleIo::check_wait(self.0)
+    }
+    fn capture(&mut self) -> Result<Self::Frame> {
+        self.0.observe_status_once()
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct NativeTriggerDismiss<'a> {
+    device: &'a mut RealDevice,
+    input: super::input_observer::InputObserver,
+    observations: usize,
+    owner_pin: Option<(super::status_style::Identity, Option<Vec<u8>>)>,
+}
+
+#[cfg(target_os = "linux")]
+struct NativeTriggerObservation<'a, 'b>(&'a mut NativeTriggerDismiss<'b>);
+#[cfg(target_os = "linux")]
+impl super::capture_recovery::ObservationIo for NativeTriggerObservation<'_, '_> {
+    type Owner = (super::status_style::Identity, Option<Vec<u8>>);
+    type Frame = super::trigger_dismiss::Snapshot;
+    fn now(&self) -> Duration {
+        self.0.device.clock.elapsed()
+    }
+    fn owner(&mut self) -> Result<Self::Owner> {
+        use std::{io::Read, path::Path};
+        let root = Path::new("/home/root/.local/share/remarkable/xochitl");
+        let owner = || {
+            let session = super::native_page::xochitl_session(Path::new("/proc"))?;
+            super::native_page::observed_owner(
+                root,
+                Path::new("/home/root/.config/remarkable/xochitl.conf"),
+                session,
+            )
+        };
+        let before = owner()?;
+        let path = root
+            .join(&before.document)
+            .join(format!("{}.rm", before.page));
+        let native = || -> Result<Option<Vec<u8>>> {
+            match std::fs::symlink_metadata(&path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error.into()),
+                Ok(metadata) => anyhow::ensure!(
+                    metadata.is_file() && metadata.len() <= 8 * 1024 * 1024,
+                    "Unsupported trigger native page file"
+                ),
+            }
+            let mut bytes = Vec::new();
+            std::fs::File::open(&path)?
+                .take(8 * 1024 * 1024 + 1)
+                .read_to_end(&mut bytes)?;
+            anyhow::ensure!(
+                bytes.len() <= 8 * 1024 * 1024,
+                "Trigger native page exceeds bound"
+            );
+            Ok(Some(bytes))
+        };
+        let bytes = native()?;
+        anyhow::ensure!(
+            owner()? == before,
+            "Trigger owner changed during native read"
+        );
+        let current = (
+            super::status_style::Identity {
+                document: before.document,
+                page: before.page,
+                visit: before.visit,
+                session: before.session,
+            },
+            bytes,
+        );
+        if let Some(pin) = &self.0.owner_pin {
+            anyhow::ensure!(
+                pin == &current,
+                "Trigger original owner/native content changed"
+            );
+        } else {
+            self.0.owner_pin = Some(current.clone());
+        }
+        Ok(current)
+    }
+
+    fn check_input(&mut self) -> Result<()> {
+        super::trigger_dismiss::DismissIo::guard(self.0)
+    }
+    fn capture(&mut self) -> Result<Self::Frame> {
+        let (identity, native) = self.owner()?;
+        let image = self.0.device.status_screenshot.take_image()?.to_luma8();
+        Ok(super::trigger_dismiss::Snapshot {
+            identity,
+            native,
+            image,
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl super::trigger_dismiss::DismissIo for NativeTriggerDismiss<'_> {
+    fn observe(&mut self, deadline: Duration) -> Result<super::trigger_dismiss::Snapshot> {
+        let snapshot =
+            super::capture_recovery::observe_until(&mut NativeTriggerObservation(self), deadline)?;
+        let image = &snapshot.image;
+        if self.device.debug_dump {
+            let stage = if self.observations == 0 {
+                "before"
+            } else {
+                "latest"
+            };
+            image.save(format!(
+                "/tmp/reader-buddy-trigger-{}-{stage}.png",
+                std::process::id()
+            ))?;
+        }
+        self.observations += 1;
+        Ok(snapshot)
+    }
+    fn guard(&mut self) -> Result<()> {
+        self.device.status_wait_cancellation.check()?;
+        anyhow::ensure!(
+            self.input.poll()?.is_empty() && self.input.quiescent(),
+            "Input cancelled trigger dismissal"
+        );
+        Ok(())
+    }
+    fn tap_once(&mut self, point: (i32, i32)) -> Result<()> {
+        anyhow::ensure!(
+            point == super::trigger_dismiss::OUTSIDE_POINT,
+            "Unknown dismissal point"
+        );
+        anyhow::ensure!(
+            super::native_page::verified_contract(
+                super::DeviceModel::detect(),
+                &std::fs::read_to_string("/etc/os-release")?
+            ),
+            "Unqualified trigger dismissal firmware/device"
+        );
+        let writer = self.device.touch.input_identity()?;
+        self.input
+            .begin_owned_touch(writer, self.device.touch.native_point(point))?;
+        let down = self.device.touch.touch_start(point);
+        if down.is_ok() {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        // These execute even when the initial write partially failed.
+        let release = self.device.touch.touch_stop();
+        let rearm = self.input.finish_owned_touch();
+        match (down.and(release), rearm) {
+            (Err(error), Err(rearm)) => {
+                Err(error.context(format!("Trigger touch observation also failed: {rearm:#}")))
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+            (Ok(()), Ok(())) => Ok(()),
+        }
+    }
+    fn now(&self) -> Duration {
+        self.device.clock.elapsed()
+    }
+    fn pace(&mut self, duration: Duration) {
+        std::thread::sleep(duration);
+    }
+}
+
 impl RealDevice {
+    fn observe_status_once(&mut self) -> Result<super::status_style::Observation> {
+        let _timing = crate::measurement::Span::new("status.observe");
+        self.status_wait_cancellation.check()?;
+        use super::{
+            native_page,
+            status_style::{Identity, Observation},
+        };
+        use std::{io::Read, path::Path};
+        let root = Path::new("/home/root/.local/share/remarkable/xochitl");
+        let settings = Path::new("/home/root/.config/remarkable/xochitl.conf");
+        let session = native_page::xochitl_session(Path::new("/proc"))?;
+        let owner = native_page::observed_owner(root, settings, session.clone())?;
+        let image = self.status_screenshot.take_image()?.to_luma8();
+        let mut bytes = Vec::new();
+        std::fs::File::open(root.join(format!("{}.content", owner.document)))?
+            .take(1024 * 1024 + 1)
+            .read_to_end(&mut bytes)?;
+        anyhow::ensure!(
+            bytes.len() <= 1024 * 1024,
+            "Status document metadata exceeds bound"
+        );
+        let content: serde_json::Value = serde_json::from_slice(&bytes)?;
+        let preferences = serde_json::from_value(content["extraMetadata"].clone())?;
+        let after_session = native_page::xochitl_session(Path::new("/proc"))?;
+        anyhow::ensure!(
+            after_session == session
+                && native_page::observed_owner(root, settings, after_session)? == owner,
+            "Page changed during status observation"
+        );
+        Ok(Observation {
+            identity: Identity {
+                document: owner.document,
+                page: owner.page,
+                visit: owner.visit,
+                session: owner.session,
+            },
+            preferences,
+            image,
+        })
+    }
+
+    /// Explicit historical diagnostic opt-in. Normal Reader never enables status ink.
+    pub fn current_tool_probe(corner: TriggerCorner, debug_dump: bool) -> Result<Self> {
+        let mut device = Self::new(false, corner, debug_dump)?;
+        device.legacy_status_diagnostics = true;
+        Ok(device)
+    }
+
+    fn guard_current_input(&mut self, erasing: bool, points: &[(i32, i32)]) -> Result<()> {
+        let _timing = crate::measurement::Span::new("status.path.guard");
+        use crate::workflow::indicator::{BOTTOM, LEFT, RIGHT, TOP};
+        anyhow::ensure!(
+            !points.is_empty()
+                && points
+                    .iter()
+                    .all(|&(x, y)| (LEFT + 8..=RIGHT - 8).contains(&x)
+                        && (TOP + 8..=BOTTOM - 8).contains(&y)),
+            "Current-tool input exceeds reserved status geometry"
+        );
+        use super::status_style::StyleIo;
+        let lease = self
+            .status_style
+            .take()
+            .context("Current-tool input requires a lease")?;
+        let result = (|| {
+            // begin_wait reuses an existing observer: pending events from the
+            // provider/cadence interval must be checked before it is discarded.
+            self.begin_wait()?;
+            self.check_wait()?;
+            if erasing {
+                lease.verify_current_erasure(self)?;
+            } else {
+                lease.verify_current(self)?;
+            }
+            self.check_wait()
+        })();
+        self.status_style = Some(lease);
+        self.status_wait_cancellation.record(result)?;
+        // Retain descriptors, but authorize a narrowly identified owned source
+        // only for the immediate injection/release interval. Other sources keep
+        // every pending event; the same physical pen remains unattributable here.
+        #[cfg(target_os = "linux")]
+        {
+            let result = (|| {
+                let writer = self.pen.input_identity()?;
+                self.status_wait_input
+                    .as_mut()
+                    .context("Status observer missing before injection")?
+                    .begin_owned_pen(writer)
+            })();
+            self.status_wait_cancellation.record(result)?;
+        }
+        Ok(())
+    }
+    fn rearm_current_input(&mut self) -> Result<()> {
+        let _timing = crate::measurement::Span::new("status.path.rearm");
+        {
+            use super::status_style::StyleIo;
+            #[cfg(target_os = "linux")]
+            if let Some(observer) = self.status_wait_input.as_mut() {
+                if observer.has_owned_pen() {
+                    let result = observer.finish_owned_pen();
+                    self.status_wait_cancellation.record(result)?;
+                }
+            }
+            self.begin_wait()?;
+            self.check_wait()?;
+        }
+        Ok(())
+    }
+    fn inject_status_path(&mut self, points: &[(i32, i32)], erasing: bool) -> Result<()> {
+        self.guard_current_input(erasing, points)?;
+        let inject = |device: &mut Self| {
+            let _timing = crate::measurement::Span::new("status.path.inject");
+            if erasing {
+                device.pen.erase_path_screen(points)
+            } else {
+                device.pen.draw_path_screen(points)
+            }
+        };
+        super::status_style::guarded_injection(
+            self,
+            |device| &mut device.status_wait_cancellation,
+            inject,
+            Self::rearm_current_input,
+        )
+    }
+    /// Read-only production pre-lease readiness, exposed for bounded diagnostic
+    /// examples. This does not establish a lease or emit tool/pen input.
+    pub fn ready_status_observation(&mut self) -> Result<Option<super::status_style::Observation>> {
+        #[cfg(target_os = "linux")]
+        {
+            use super::{input_observer::InputObserver, status_style::StyleIo};
+            // No device mutation occurs in this scope. Observe every input source,
+            // including our devices; any activity invalidates the pending baseline.
+            let mut input = InputObserver::new(TriggerCorner::LowerLeft, None)
+                .context("Status readiness input observation failed")?;
+            let started = std::time::Instant::now();
+            let debug_dump = self.debug_dump;
+            super::status_readiness::wait_ready(
+                || self.observe(),
+                || {
+                    anyhow::ensure!(
+                        input.poll()?.is_empty() && input.quiescent(),
+                        "Input cancelled status readiness"
+                    );
+                    Ok(())
+                },
+                || started.elapsed(),
+                std::thread::sleep,
+                debug_dump,
+            )
+        }
+        #[cfg(not(target_os = "linux"))]
+        Ok(None)
+    }
+
     pub fn new(no_draw: bool, corner: TriggerCorner, debug_dump: bool) -> Result<Self> {
         anyhow::ensure!(
             !std::path::Path::new("/var/cache/reader-buddy/status-style-recovery.json")
@@ -103,9 +596,15 @@ impl RealDevice {
             log::warn!("Failed to create cache directory: {error}");
         }
         Ok(Self {
+            #[cfg(target_os = "linux")]
+            request: None,
             status_style: None,
+            legacy_status_diagnostics: false,
             debug_dump,
             status_journal: None,
+            status_wait_cancellation: super::status_style::WaitCancellation::default(),
+            #[cfg(target_os = "linux")]
+            status_wait_input: None,
             status_style_supported: !no_draw
                 && std::fs::read_to_string("/etc/os-release").is_ok_and(|release| {
                     super::native_page::verified_contract(super::DeviceModel::detect(), &release)
@@ -150,8 +649,38 @@ impl DeviceBackend for RealDevice {
         self.history
             .wait(&mut self.keyboard, &mut self.touch, timeout)
     }
+    fn check_request_guard(&mut self) -> Result<()> {
+        self.status_wait_cancellation.check()?;
+        #[cfg(target_os = "linux")]
+        if let Some(request) = self.request.as_mut() {
+            let result = request.check();
+            self.status_wait_cancellation.record(result)?;
+        }
+        Ok(())
+    }
+    fn finish_request_guard(&mut self) -> Result<()> {
+        self.check_request_guard()?;
+        #[cfg(target_os = "linux")]
+        {
+            self.request = None;
+        }
+        Ok(())
+    }
     fn capture(&mut self) -> Result<Frame> {
-        self.screenshot.take_screenshot()?;
+        self.check_request_guard()?;
+        #[cfg(target_os = "linux")]
+        if self.status_style_supported && self.request.is_none() {
+            match NativeRequest::new(&mut self.keyboard) {
+                Ok(request) => self.request = Some(request),
+                Err(error) => {
+                    self.status_wait_cancellation.latch();
+                    return Err(error);
+                }
+            }
+        }
+        let result = self.screenshot.take_screenshot();
+        self.status_wait_cancellation.record(result)?;
+        self.check_request_guard()?;
         Ok(Frame {
             png: self.screenshot.get_image_data().to_vec(),
             details: Vec::new(),
@@ -163,26 +692,85 @@ impl DeviceBackend for RealDevice {
     fn wait_for_trigger(&mut self) -> Result<()> {
         self.touch.wait_for_trigger()
     }
-    fn dismiss_trigger(&mut self) -> Result<()> {
-        self.touch.tap_middle_bottom()
+    fn prepare_reader_trigger(&mut self) -> Result<()> {
+        let _timing = crate::measurement::Span::new("reader.trigger_dismiss");
+        self.status_wait_cancellation.check()?;
+        #[cfg(target_os = "linux")]
+        let result = (|| {
+            anyhow::ensure!(
+                self.status_style.is_none(),
+                "Trigger dismissal during active status lease"
+            );
+            let input = super::input_observer::InputObserver::new(TriggerCorner::LowerLeft, None)?;
+            super::trigger_dismiss::dismiss(
+                &mut NativeTriggerDismiss {
+                    device: self,
+                    input,
+                    observations: 0,
+                    owner_pin: None,
+                },
+                &mut super::status_style::WaitCancellation::default(),
+            )
+            .map(|_| ())
+        })();
+        #[cfg(not(target_os = "linux"))]
+        let result = Err(anyhow::anyhow!(
+            "Native trigger dismissal observation unavailable"
+        ));
+        self.status_wait_cancellation.record(result)
     }
-    fn navigate(&mut self, direction: NavigationDirection) -> Result<()> {
+    fn navigate(&mut self, direction: NavigationDirection) -> Result<NavigationCompletion> {
+        self.check_request_guard()?;
+        let _timing = crate::measurement::Span::new("device.navigation");
         #[cfg(target_os = "linux")]
         self.history.other_edit();
-        XochitlIntegration::navigate_to_page(&mut self.touch, direction)
+        #[cfg(target_os = "linux")]
+        if self.status_style_supported {
+            let result = super::navigation_completion::navigate(
+                &mut NativeNavigation {
+                    device: self,
+                    input: None,
+                },
+                direction,
+            );
+            if result.is_err() {
+                self.status_wait_cancellation.latch();
+            }
+            return result;
+        }
+        self.finish_request_guard()?;
+        XochitlIntegration::navigate_to_page(&mut self.touch, direction)?;
+        Ok(NavigationCompletion::Legacy)
     }
     fn render_text(&mut self, text: &str) -> Result<()> {
+        self.check_request_guard()?;
+        let _timing = crate::measurement::Span::new("device.text_input");
+        log::debug!(
+            "timing_text run={} characters={}",
+            crate::measurement::context(),
+            text.chars().count()
+        );
         #[cfg(target_os = "linux")]
         self.history.note_render(text);
-        self.keyboard.string_to_keypresses(text)
+        let result = self.keyboard.string_to_keypresses(text);
+        self.status_wait_cancellation.record(result)?;
+        self.check_request_guard()
     }
     fn body_mode(&mut self) -> Result<()> {
+        self.check_request_guard()?;
+        let _timing = crate::measurement::Span::new("device.body_mode");
         #[cfg(target_os = "linux")]
         self.history.other_edit();
-        self.keyboard.key_cmd_body()
+        let result = self.keyboard.key_cmd_body();
+        self.status_wait_cancellation.record(result)?;
+        self.check_request_guard()
     }
     fn line(&mut self, from: (i32, i32), to: (i32, i32)) -> Result<()> {
-        self.pen.draw_path_screen(&[from, to])
+        anyhow::ensure!(
+            self.legacy_status_diagnostics,
+            "Source status ink is retired"
+        );
+        self.inject_status_path(&[from, to], false)
     }
     fn erase(&mut self, from: (i32, i32), to: (i32, i32)) -> Result<()> {
         self.pen.erase_rectangle(from, to)
@@ -197,11 +785,21 @@ impl DeviceBackend for RealDevice {
         }
     }
     fn status_stroke(&mut self, stroke: crate::workflow::indicator::Stroke) -> Result<()> {
+        anyhow::ensure!(
+            self.legacy_status_diagnostics,
+            "Source status ink is retired"
+        );
+        let _timing = crate::measurement::Span::new("status.stroke_input");
         log::debug!("Status stroke {stroke:?} at {:?}", self.clock.elapsed());
-        self.pen.draw_path_screen(&stroke.points())
+        let points = stroke.points();
+        self.inject_status_path(&points, false)
     }
     fn status_style_begin(&mut self) -> Result<bool> {
-        use super::status_style::{Journal, Lease, Recovery, StyleIo};
+        if !self.legacy_status_diagnostics {
+            return Ok(false);
+        }
+        use super::status_style::{Journal, Lease, Recovery};
+        let _timing = crate::measurement::Span::new("status.acquire");
         use std::path::Path;
         const RECORD: &str = "/var/cache/reader-buddy/status-style-recovery.json";
         if self.status_style.is_some() {
@@ -217,35 +815,31 @@ impl DeviceBackend for RealDevice {
         if !self.status_style_supported {
             return Ok(false);
         }
-        let observed = match self.observe() {
-            Ok(state) => state,
-            Err(error) => {
-                log::debug!("Status style unavailable: {error}");
-                return Ok(false);
-            }
+        let Some(observed) = self.ready_status_observation()? else {
+            log::debug!("Status readiness unavailable; no lease or input");
+            return Ok(false);
         };
-        let Some(mut lease) = Lease::prepare(observed, self.debug_dump)? else {
+        let prepared = Lease::prepare_current(observed, self.debug_dump)?;
+        let Some(mut lease) = prepared else {
             return Ok(false);
         };
         self.status_journal = Some(Journal::create(Path::new(RECORD), &lease.recovery)?);
         let started = std::time::Instant::now();
         if let Err(error) = lease.acquire(self) {
-            let restored = lease.restore(self);
             self.status_style = Some(lease);
-            restored.context("Status acquisition failed and restoration could not be verified")?;
-            self.status_style = None;
-            self.status_journal
-                .take()
-                .context("Missing owned recovery journal")?
-                .finish()?;
-            log::warn!("Status probe declined after verified UI rollback: {error}");
-            return Ok(false);
+            self.status_wait_cancellation.latch();
+            return Err(error.context("Status acquisition failed; recovery record retained"));
         }
         log::info!("Status style acquired in {:?}", started.elapsed());
         self.status_style = Some(lease);
+        self.rearm_current_input()?;
         Ok(true)
     }
     fn status_style_end(&mut self) -> Result<()> {
+        let _timing = crate::measurement::Span::new("status.restore");
+        if self.status_style.is_some() {
+            self.rearm_current_input()?;
+        }
         let Some(mut lease) = self.status_style.take() else {
             return Ok(());
         };
@@ -261,20 +855,39 @@ impl DeviceBackend for RealDevice {
                 error.context("Status preference restoration failed; further input stopped")
             );
         }
+        {
+            use super::status_style::StyleIo;
+            if let Err(error) = self.check_wait() {
+                self.status_style = Some(lease);
+                return Err(error);
+            }
+        }
         self.status_journal
             .take()
             .context("Missing owned recovery journal")?
             .finish()?;
+        #[cfg(target_os = "linux")]
+        {
+            self.status_wait_input = None;
+        }
         log::info!("Status style restored in {:?}", started.elapsed());
         Ok(())
     }
     fn status_clear(&mut self, strokes: &[crate::workflow::indicator::Stroke]) -> Result<()> {
+        anyhow::ensure!(
+            self.legacy_status_diagnostics,
+            "Source status ink is retired"
+        );
+        let _timing = crate::measurement::Span::new("status.cleanup");
         let mut lease = self
             .status_style
             .take()
             .context("Cleanup requires owned style lease")?;
         let started = std::time::Instant::now();
-        let restored = lease.prepare_cleanup(self);
+        let restored = {
+            let _timing = crate::measurement::Span::new("status.cleanup.restore_tools");
+            lease.prepare_cleanup(self)
+        };
         self.status_style = Some(lease);
         restored.context("Restore original tools before status cleanup")?;
         log::info!(
@@ -282,12 +895,13 @@ impl DeviceBackend for RealDevice {
             started.elapsed()
         );
         log::debug!("Clearing {} owned status paths", strokes.len());
+        let _erasure_timing = crate::measurement::Span::new("status.cleanup.erase_and_verify");
         for stroke in strokes {
-            self.pen.erase_path_screen(&stroke.points())?;
+            let points = stroke.points();
+            self.inject_status_path(&points, true)?;
         }
         std::thread::sleep(Duration::from_millis(100));
-        self.status_screenshot.take_screenshot()?;
-        let clean = image::load_from_memory(self.status_screenshot.get_image_data())?;
+        let clean = self.status_screenshot.take_image()?;
         anyhow::ensure!(
             crate::workflow::indicator::eligible(&clean),
             "Native status cleanup left marks or the corner changed; further input stopped"
@@ -314,60 +928,79 @@ impl DeviceBackend for RealDevice {
 }
 
 impl super::status_style::StyleIo for RealDevice {
+    fn monotonic(&self) -> Duration {
+        self.clock.elapsed()
+    }
+    fn pace(&mut self, duration: Duration) {
+        std::thread::sleep(duration);
+    }
+    fn begin_wait(&mut self) -> Result<()> {
+        self.status_wait_cancellation.check()?;
+        #[cfg(target_os = "linux")]
+        {
+            if self.status_wait_input.is_some() {
+                return self.check_wait();
+            }
+            match super::input_observer::InputObserver::new(TriggerCorner::LowerLeft, None) {
+                Ok(input) => {
+                    self.status_wait_input = Some(input);
+                    Ok(())
+                }
+                Err(error) => self.status_wait_cancellation.record(Err(error)),
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        self.status_wait_cancellation.record(Err(anyhow::anyhow!(
+            "Native status input observation unavailable"
+        )))
+    }
+    fn check_wait(&mut self) -> Result<()> {
+        let _timing = crate::measurement::Span::new("status.input_guard");
+        self.status_wait_cancellation.check()?;
+        #[cfg(target_os = "linux")]
+        {
+            let result = (|| {
+                let input = self
+                    .status_wait_input
+                    .as_mut()
+                    .context("Status wait observer missing")?;
+                anyhow::ensure!(
+                    input.poll()?.is_empty() && input.quiescent(),
+                    "Input cancelled status transition"
+                );
+                Ok(())
+            })();
+            self.status_wait_cancellation.record(result)
+        }
+        #[cfg(not(target_os = "linux"))]
+        self.status_wait_cancellation.record(Err(anyhow::anyhow!(
+            "Native status input observation unavailable"
+        )))
+    }
+    fn end_wait(&mut self) {
+        // Preserve pending events across the entire current-tool lease.
+    }
     fn checkpoint(&mut self, record: &super::status_style::Recovery) -> Result<()> {
+        let _timing = crate::measurement::Span::new("status.checkpoint");
         self.status_journal
             .as_mut()
             .context("Missing owned recovery journal")?
             .append(record)
     }
     fn observe(&mut self) -> Result<super::status_style::Observation> {
-        use super::{
-            native_page,
-            status_style::{Identity, Observation},
-        };
-        use std::{io::Read, path::Path};
-        let root = Path::new("/home/root/.local/share/remarkable/xochitl");
-        let settings = Path::new("/home/root/.config/remarkable/xochitl.conf");
-        let session = native_page::xochitl_session(Path::new("/proc"))?;
-        let owner = native_page::observed_owner(root, settings, session.clone())?;
-        self.status_screenshot.take_screenshot()?;
-        let image = image::load_from_memory(self.status_screenshot.get_image_data())?.to_luma8();
-        let mut bytes = Vec::new();
-        std::fs::File::open(root.join(format!("{}.content", owner.document)))?
-            .take(1024 * 1024 + 1)
-            .read_to_end(&mut bytes)?;
-        anyhow::ensure!(
-            bytes.len() <= 1024 * 1024,
-            "Status document metadata exceeds bound"
-        );
-        let content: serde_json::Value = serde_json::from_slice(&bytes)?;
-        let preferences = serde_json::from_value(content["extraMetadata"].clone())?;
-        let after_session = native_page::xochitl_session(Path::new("/proc"))?;
-        anyhow::ensure!(
-            after_session == session
-                && native_page::observed_owner(root, settings, after_session)? == owner,
-            "Page changed during status observation"
-        );
-        Ok(Observation {
-            identity: Identity {
-                document: owner.document,
-                page: owner.page,
-                visit: owner.visit,
-                session: owner.session,
-            },
-            preferences,
-            image,
-        })
-    }
-    fn press(&mut self, point: (u32, u32)) -> Result<()> {
-        let down = self.touch.touch_start((point.0 as i32, point.1 as i32));
-        if down.is_ok() {
-            std::thread::sleep(Duration::from_millis(250));
+        #[cfg(target_os = "linux")]
+        if self.status_wait_input.is_some() {
+            let result = super::capture_recovery::observe(&mut NativeStatusObservation(self));
+            if result.is_err() {
+                self.status_wait_cancellation.latch();
+            }
+            return result;
         }
-        let up = self.touch.touch_stop();
-        down?;
-        up?;
-        std::thread::sleep(Duration::from_millis(100));
-        Ok(())
+        // No established observer means no recovery, including early prelease
+        // observations. Never create/reset an observer to qualify a retry.
+        self.observe_status_once()
+    }
+    fn press(&mut self, _: (u32, u32)) -> Result<()> {
+        anyhow::bail!("Native status leases forbid menu input")
     }
 }

@@ -1,0 +1,496 @@
+//! Qualified outside-panel dismissal policy; no menu-item selection or retries.
+use super::status_style::{controls, Identity, WaitCancellation};
+use anyhow::{ensure, Result};
+use image::GrayImage;
+use std::{sync::LazyLock, time::Duration};
+
+pub(super) const OUTSIDE_POINT: (i32, i32) = (384, 1023);
+static OPEN: LazyLock<GrayImage> = LazyLock::new(|| {
+    image::load_from_memory(include_bytes!(
+        "../../tests/fixtures/trigger-dismiss/open.png"
+    ))
+    .expect("qualified native trigger panel")
+    .to_luma8()
+});
+
+#[derive(Clone)]
+pub(super) struct Snapshot {
+    pub identity: Identity,
+    /// Absence is explicit; a subsequently created file is a change.
+    pub native: Option<Vec<u8>>,
+    pub image: GrayImage,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Panel {
+    Closed,
+    Open,
+    Unknown,
+}
+
+fn panel(image: &GrayImage) -> Panel {
+    if image.dimensions() != (768, 1024) {
+        return Panel::Unknown;
+    }
+    // Positive full exposed seam/closed-control check excludes this native
+    // panel and partial transitions. This does not recognize every popover.
+    // Border disappearance alone is insufficient. Refuse when at least one
+    // quarter of a row's independently selected dark features remains nonwhite,
+    // or a near-position panel edge remains mostly intact. This is a bounded
+    // known-panel residual check, not recognition of arbitrary overlays.
+    let remnant = [
+        (78, 675, 180, 699),
+        (78, 734, 154, 759),
+        (78, 797, 227, 823),
+        (78, 857, 184, 884),
+        (78, 919, 193, 946),
+        (78, 979, 207, 1010),
+    ]
+    .into_iter()
+    .any(|(left, top, right, bottom)| {
+        let (mut features, mut remaining) = (0usize, 0usize);
+        for y in top..bottom {
+            for x in left..right {
+                if OPEN.get_pixel(x, y)[0] <= 80 {
+                    features += 1;
+                    remaining += usize::from(image.get_pixel(x, y)[0] < 248);
+                }
+            }
+        }
+        features > 0 && remaining * 4 >= features
+    }) || (270..312).any(|x| {
+        (655..1024)
+            .filter(|&y| image.get_pixel(x, y)[0] < 248)
+            .count()
+            * 10
+            >= 369 * 9
+    });
+    if controls(image).is_some_and(|ui| !ui.menu) && !remnant {
+        return Panel::Closed;
+    }
+    let selected = |y: u32| {
+        [(5, y - 10), (55, y + 10), (5, y + 20), (55, y + 23)]
+            .into_iter()
+            .all(|(x, y)| image.get_pixel(x, y)[0] <= 8)
+    };
+    if selected(91) == selected(153) {
+        return Panel::Unknown;
+    }
+    let upper_seam = (62..655).all(|y| (61..65).all(|x| image.get_pixel(x, y)[0] >= 248));
+    let exact_panel = (655..1024)
+        .all(|y| (0..280).all(|x| image.get_pixel(x, y)[0].abs_diff(OPEN.get_pixel(x, y)[0]) <= 8));
+    if upper_seam && exact_panel {
+        Panel::Open
+    } else {
+        Panel::Unknown
+    }
+}
+
+pub(super) trait DismissIo {
+    fn observe(&mut self, deadline: Duration) -> Result<Snapshot>;
+    fn guard(&mut self) -> Result<()>;
+    /// Adapter must release and finish the owned touch window even after write
+    /// failure, preserving original errors. Policy never invokes this twice.
+    fn tap_once(&mut self, point: (i32, i32)) -> Result<()>;
+    fn now(&self) -> Duration;
+    fn pace(&mut self, duration: Duration);
+}
+
+pub(super) fn dismiss(io: &mut impl DismissIo, cancelled: &mut WaitCancellation) -> Result<bool> {
+    cancelled.check()?;
+    let result = (|| {
+        let deadline = io.now().saturating_add(Duration::from_secs(5));
+        io.guard()?;
+        let initial = io.observe(deadline)?;
+        io.guard()?;
+        ensure!(io.now() < deadline, "Trigger observation exceeded deadline");
+        match panel(&initial.image) {
+            Panel::Closed => return Ok(false),
+            Panel::Unknown => anyhow::bail!("Unknown trigger overlay; no dismissal input"),
+            Panel::Open => {}
+        }
+        io.guard()?;
+        ensure!(io.now() < deadline, "Late trigger dismissal input guard");
+        io.tap_once(OUTSIDE_POINT)?;
+        loop {
+            ensure!(
+                io.now() < deadline,
+                "Trigger panel did not dismiss before deadline"
+            );
+            io.guard()?;
+            let current = io.observe(deadline)?;
+            io.guard()?;
+            ensure!(io.now() < deadline, "Late trigger dismissal observation");
+            ensure!(
+                current.identity == initial.identity && current.native == initial.native,
+                "Trigger dismissal owner/native content changed"
+            );
+            ensure!(
+                current.image.dimensions() == initial.image.dimensions(),
+                "Trigger viewport changed"
+            );
+            ensure!(
+                (0..1024).all(|y| (0..768).all(|x| {
+                    (x < 280 && y >= 655)
+                        || initial.image.get_pixel(x, y)[0]
+                            .abs_diff(current.image.get_pixel(x, y)[0])
+                            <= 8
+                })),
+                "Trigger dismissal changed exposed content or tool"
+            );
+            match panel(&current.image) {
+                Panel::Closed => return Ok(true),
+                Panel::Unknown => anyhow::bail!("Unknown trigger dismissal postcondition"),
+                Panel::Open => {
+                    io.pace(Duration::from_millis(50).min(deadline.saturating_sub(io.now())))
+                }
+            }
+        }
+    })();
+    if result.is_err() {
+        cancelled.latch();
+    }
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::Luma;
+    use std::collections::VecDeque;
+    fn snapshot(open: bool) -> Snapshot {
+        Snapshot {
+            identity: Identity {
+                document: "d".into(),
+                page: "p".into(),
+                visit: "1:1".into(),
+                session: "2:3".into(),
+            },
+            native: Some(vec![1, 2, 3]),
+            image: if open {
+                OPEN.clone()
+            } else {
+                image::load_from_memory(include_bytes!(
+                    "../../tests/fixtures/trigger-dismiss/closed.png"
+                ))
+                .unwrap()
+                .to_luma8()
+            },
+        }
+    }
+    struct Io {
+        observations: VecDeque<Snapshot>,
+        last: Snapshot,
+        clock: Duration,
+        cost: Duration,
+        taps: usize,
+        cancelled: bool,
+        fail_tap: bool,
+    }
+    impl DismissIo for Io {
+        fn observe(&mut self, _deadline: Duration) -> Result<Snapshot> {
+            self.clock += self.cost;
+            if let Some(next) = self.observations.pop_front() {
+                self.last = next;
+            }
+            Ok(self.last.clone())
+        }
+        fn guard(&mut self) -> Result<()> {
+            ensure!(!self.cancelled, "external input");
+            Ok(())
+        }
+        fn tap_once(&mut self, point: (i32, i32)) -> Result<()> {
+            assert_eq!(point, OUTSIDE_POINT);
+            self.taps += 1;
+            ensure!(!self.fail_tap, "touch write/release error");
+            Ok(())
+        }
+        fn now(&self) -> Duration {
+            self.clock
+        }
+        fn pace(&mut self, duration: Duration) {
+            self.clock += duration;
+        }
+    }
+    fn io(frames: Vec<Snapshot>) -> Io {
+        Io {
+            last: frames.last().unwrap().clone(),
+            observations: frames.into(),
+            clock: Duration::ZERO,
+            cost: Duration::ZERO,
+            taps: 0,
+            cancelled: false,
+            fail_tap: false,
+        }
+    }
+    #[test]
+    fn actual_panel_and_closed_pair_qualify_without_requiring_fineliner() {
+        assert_eq!(panel(&snapshot(true).image), Panel::Open);
+        assert_eq!(panel(&snapshot(false).image), Panel::Closed);
+        for open in [false, true] {
+            let mut frame = snapshot(open);
+            // Alter the pen glyph/color inside the selected tile; eligibility
+            // for optional ink is deliberately not a dismissal prerequisite.
+            for y in 70..100 {
+                for x in 20..45 {
+                    frame.image.put_pixel(x, y, Luma([90]));
+                }
+            }
+            assert_eq!(
+                panel(&frame.image),
+                if open { Panel::Open } else { Panel::Closed }
+            );
+        }
+    }
+    #[test]
+    fn partial_native_panel_never_becomes_closed() {
+        for (x, y) in [(100, 685), (279, 750), (30, 990)] {
+            let mut frame = snapshot(true);
+            let old = frame.image.get_pixel(x, y)[0];
+            frame.image.put_pixel(x, y, Luma([255 - old]));
+            assert_eq!(panel(&frame.image), Panel::Unknown);
+            let mut state = io(vec![frame]);
+            assert!(dismiss(&mut state, &mut WaitCancellation::default()).is_err());
+            assert_eq!(state.taps, 0);
+        }
+        let mut borderless = snapshot(true);
+        for y in 655..1024 {
+            for x in 61..65 {
+                borderless.image.put_pixel(x, y, Luma([255]));
+            }
+        }
+        assert_eq!(panel(&borderless.image), Panel::Unknown);
+        // Reviewer regression: changing one pixel in each rectangle must not
+        // turn almost the entire retained menu into a claimed closed state.
+        for (x, y) in [
+            (78, 675),
+            (78, 734),
+            (78, 797),
+            (78, 857),
+            (78, 919),
+            (78, 979),
+        ] {
+            let old = borderless.image.get_pixel(x, y)[0];
+            borderless.image.put_pixel(x, y, Luma([255 - old]));
+        }
+        assert_eq!(panel(&borderless.image), Panel::Unknown);
+        let mut state = io(vec![borderless.clone()]);
+        assert!(dismiss(&mut state, &mut WaitCancellation::default()).is_err());
+        assert_eq!(state.taps, 0);
+        let mut state = io(vec![snapshot(true), borderless]);
+        assert!(dismiss(&mut state, &mut WaitCancellation::default()).is_err());
+        assert_eq!(state.taps, 1);
+    }
+    #[test]
+    fn residual_feature_and_edge_boundaries_are_explicit() {
+        let mut base = snapshot(false).image;
+        let rows = [
+            (78, 675, 180, 699),
+            (78, 734, 154, 759),
+            (78, 797, 227, 823),
+            (78, 857, 184, 884),
+            (78, 919, 193, 946),
+            (78, 979, 207, 1010),
+        ];
+        for (left, top, right, bottom) in rows {
+            for y in top..bottom {
+                for x in left..right {
+                    base.put_pixel(x, y, Luma([255]));
+                }
+            }
+        }
+        let features: Vec<_> = (675..699)
+            .flat_map(|y| (78..180).map(move |x| (x, y)))
+            .filter(|&(x, y)| OPEN.get_pixel(x, y)[0] <= 80)
+            .collect();
+        let threshold = features.len().div_ceil(4);
+        for count in [threshold - 1, threshold] {
+            let mut image = base.clone();
+            for &(x, y) in &features[..count] {
+                image.put_pixel(x, y, Luma([247]));
+            }
+            assert_eq!(
+                panel(&image),
+                if count < threshold {
+                    Panel::Closed
+                } else {
+                    Panel::Unknown
+                }
+            );
+        }
+        // A displaced vertical edge outside the original seam is also refused.
+        for y in 655..1024 {
+            base.put_pixel(290, y, Luma([200]));
+        }
+        assert_eq!(panel(&base), Panel::Unknown);
+    }
+
+    #[test]
+    fn closed_skips_and_delayed_known_panel_taps_only_once() {
+        let mut closed = io(vec![snapshot(false)]);
+        assert!(!dismiss(&mut closed, &mut WaitCancellation::default()).unwrap());
+        assert_eq!(closed.taps, 0);
+        let mut delayed = io(vec![
+            snapshot(true),
+            snapshot(true),
+            snapshot(true),
+            snapshot(false),
+        ]);
+        assert!(dismiss(&mut delayed, &mut WaitCancellation::default()).unwrap());
+        assert_eq!(delayed.taps, 1);
+    }
+    #[test]
+    fn changed_owner_native_presence_content_or_tool_is_sticky() {
+        for change in 0..5 {
+            let mut after = snapshot(false);
+            match change {
+                0 => after.identity.visit = "1:2".into(),
+                1 => after.native = None,
+                2 => after.native = Some(vec![9]),
+                3 => after.image.put_pixel(300, 300, Luma([0])),
+                _ => after.image.put_pixel(45, 75, Luma([255])),
+            }
+            let mut state = io(vec![snapshot(true), after]);
+            let mut cancelled = WaitCancellation::default();
+            assert!(dismiss(&mut state, &mut cancelled).is_err());
+            assert!(dismiss(&mut state, &mut cancelled).is_err());
+            assert_eq!(state.taps, 1);
+        }
+    }
+    #[test]
+    fn absent_native_file_stays_explicit_and_unmodified() {
+        let mut before = snapshot(true);
+        before.native = None;
+        let mut after = snapshot(false);
+        after.native = None;
+        assert!(dismiss(
+            &mut io(vec![before, after]),
+            &mut WaitCancellation::default()
+        )
+        .unwrap());
+    }
+    #[test]
+    fn timeout_late_success_input_or_write_failure_never_repeats_tap() {
+        for failure in 0..4 {
+            let mut state = io(if failure == 0 {
+                vec![snapshot(true)]
+            } else {
+                vec![snapshot(true), snapshot(false)]
+            });
+            match failure {
+                1 => state.cost = Duration::from_millis(2500),
+                2 => state.cancelled = true,
+                3 => state.fail_tap = true,
+                _ => {}
+            }
+            let mut cancelled = WaitCancellation::default();
+            assert!(dismiss(&mut state, &mut cancelled).is_err());
+            let taps = state.taps;
+            assert!(dismiss(&mut state, &mut cancelled).is_err());
+            assert_eq!(state.taps, taps);
+            assert!(taps <= 1);
+        }
+    }
+    struct RecoveringIo {
+        base: Io,
+        captures: usize,
+        fail_at: usize,
+        refusal: u8,
+        recovery_deadline: Duration,
+    }
+    struct Recovery<'a>(&'a mut RecoveringIo);
+    impl super::super::capture_recovery::ObservationIo for Recovery<'_> {
+        type Owner = (Identity, Option<Vec<u8>>);
+        type Frame = Snapshot;
+        fn now(&self) -> Duration {
+            self.0.base.clock
+        }
+        fn owner(&mut self) -> Result<Self::Owner> {
+            let mut pinned = snapshot(true);
+            if self.0.captures >= self.0.fail_at {
+                match self.0.refusal {
+                    1 => pinned.identity.page = "changed".into(),
+                    2 => pinned.identity.visit = "changed".into(),
+                    3 => pinned.identity.session = "changed".into(),
+                    4 => pinned.native = Some(vec![9]),
+                    5 => pinned.native = None,
+                    _ => {}
+                }
+            }
+            Ok((pinned.identity, pinned.native))
+        }
+        fn check_input(&mut self) -> Result<()> {
+            ensure!(
+                !(self.0.refusal == 6 && self.0.captures >= self.0.fail_at),
+                "external input"
+            );
+            self.0.base.guard()
+        }
+        fn capture(&mut self) -> Result<Snapshot> {
+            self.0.captures += 1;
+            if self.0.captures == self.0.fail_at {
+                if self.0.refusal == 7 {
+                    anyhow::bail!("untyped capture error");
+                }
+                self.0.base.clock += if self.0.refusal == 10 {
+                    Duration::from_secs(5)
+                } else {
+                    Duration::from_millis(120)
+                };
+                return Err(anyhow::Error::from(std::io::Error::from_raw_os_error(5))
+                    .context(super::super::screenshot::VanishedDiscoveryCandidate));
+            }
+            if self.0.captures > self.0.fail_at {
+                if self.0.refusal == 8 {
+                    anyhow::bail!("persistent capture error");
+                }
+                if self.0.refusal == 9 {
+                    self.0.base.clock += Duration::from_millis(500);
+                }
+            }
+            self.0.base.observe(Duration::MAX)
+        }
+    }
+    impl DismissIo for RecoveringIo {
+        fn observe(&mut self, deadline: Duration) -> Result<Snapshot> {
+            self.recovery_deadline = deadline;
+            super::super::capture_recovery::observe_until(&mut Recovery(self), deadline)
+        }
+        fn guard(&mut self) -> Result<()> {
+            self.base.guard()
+        }
+        fn tap_once(&mut self, point: (i32, i32)) -> Result<()> {
+            self.base.tap_once(point)
+        }
+        fn now(&self) -> Duration {
+            self.base.clock
+        }
+        fn pace(&mut self, duration: Duration) {
+            self.base.pace(duration)
+        }
+    }
+    #[test]
+    fn post_tap_typed_capture_recovery_never_repeats_input() {
+        for refusal in 0..=10 {
+            let mut state = RecoveringIo {
+                base: io(vec![snapshot(true), snapshot(false)]),
+                captures: 0,
+                fail_at: 2,
+                refusal,
+                recovery_deadline: Duration::ZERO,
+            };
+            let mut cancellation = WaitCancellation::default();
+            let result = dismiss(&mut state, &mut cancellation);
+            assert_eq!(result.is_ok(), refusal == 0);
+            assert_eq!(state.base.taps, 1);
+            let expected_captures = if matches!(refusal, 0 | 8 | 9) { 3 } else { 2 };
+            assert_eq!(state.captures, expected_captures);
+            assert_eq!(state.recovery_deadline, Duration::from_secs(5));
+            if refusal > 0 {
+                assert!(dismiss(&mut state, &mut cancellation).is_err());
+                assert_eq!(state.base.taps, 1);
+                assert_eq!(state.captures, expected_captures);
+            }
+        }
+    }
+}

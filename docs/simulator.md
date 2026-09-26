@@ -30,6 +30,15 @@ Explicit live provider execution is available through the [local development set
 
 ## Scenario format
 
+Each page may retain `status_capability` as a historical fixture input. All values
+now produce zero status ink and no status-admission work in normal scenarios.
+Each page also declares `trigger_overlay`: `closed` (default), `known_open`, or
+`unknown`. A closed overlay emits no tap, the known panel emits one outside-panel
+tap, and unknown or failed dismissal stops before model calls or writing.
+`trigger_dismiss` supports `error` and `no_move` faults. This abstract state model
+does not prove native overlay recognition, touch delivery or firmware coverage;
+actual pixel-pair and input-window tests supply separate evidence.
+
 Start from a maintained JSON file in [simulator/scenarios](simulator/scenarios).
 Unknown fields and invalid states fail before execution. Page indices are zero
 based; operation call numbers are one based and span the whole scenario.
@@ -40,6 +49,7 @@ based; operation call numbers are one based and span the whole scenario.
 | `name`, `mode` | Nonempty name; currently only `reader` executes. |
 | `pages` | Ordered pages. `{}` is blank. `image` loads a 768x1024 PNG; optional `text` and `strokes` add deterministic text or existing JSON pen paths. |
 | `active_page` | Starting page, default zero. |
+| `verified_navigation` | Default false retains legacy delays; true models an already verified backend completion result, not native rendering proof. |
 | `iterations` | 1–100 bounded Reader iterations. Optional `page` models the user selecting a source between iterations. `wait_for_trigger` defaults false. |
 | `trigger_corner` | UR/UL/LR/LL, default LL. |
 | `gestures` | One sequence per trigger wait. Frames contain increasing `at_ms` (within 60 seconds), `contact`, `x`, `y`. Coordinates represent complete slot-zero frames. A final active contact can reach its deadline without further movement. |
@@ -72,7 +82,7 @@ technical PDF and handwriting inputs; existing pen-path fixtures can be overlaid
 |---|---|
 | Overview | 768x1024, same production masks and thresholds: source 0.999, blank/header 0.998. |
 | Hold | Same timer and 68-pixel corner predicate; short/released/out-of-zone contact resets it, stationary hold triggers at two seconds. |
-| Navigation | Ordered pages, no implicit page at document end, 700 ms modeled swipe/transition plus production 800 ms wait. |
+| Navigation | Ordered pages, no implicit page at document end, 700 ms modeled swipe/transition; legacy completion retains caller waits, while verified completion skips them. |
 | Classification/header | Same pixel comparison and header crop; local in-memory cache substitutes for `/var/cache/reader-buddy`. |
 | Rendering | Deterministic bitmap lettering and line strokes; exact case/text in JSON, uppercase approximate lettering in PNG. Overflow is clipped visually but retained in the report. |
 | Model detail | Three overlapping strips from the simulated overview; these cannot replace full native-resolution vision evidence. |
@@ -168,15 +178,19 @@ uncertainty, not an unrelated requirement to repeat the central G value.
 
 The highlighted illegible-question fixture also declines in separate live local and native checks; the deterministic case checks the corresponding no-navigation/no-answer route.
 
-## Progress lifecycle coverage
+## Retired feedback and request ownership coverage
 
-The shared workflow now uses a guarded 50x50 status area. Simulator reports include `indicator_visible` and `failure_codes` per page, `status_path` events identifying triangle stage/edge or auxiliary circle, and `statusstroke`, `statusclear` and `status_suppressed` operation events. Stage strokes target 333 ms starts; virtual delays let scripted tests exercise complete fast-stage transitions. Unique paths retain repeat counts for deterministic darkening and bounded cleanup. Native pen input is serialized; the simulator rejects capture/navigation/typing while a temporary status path remains. This makes cleanup ordering observable rather than inferring it only from a final white corner.
+Normal scenarios assert zero line/status-stroke/clear/tool-lease operations,
+including success, disagreement, provider timeout, occupied pages and partial
+output. Existing corner ink is preserved. `failure_codes` and `failure_diagnostic`
+events are nonvisual; `x_count` and `indicator_visible` remain compatibility fields
+and stay zero/false. Legacy status-operation faults are rejected as retired.
 
-Tests cover accepted output on both pages, preexisting corner strokes with continued answering, partial circle failures, cleanup failure blocking output/navigation, persistent failure across a page change, real local-HTTP delay callbacks, timeout and callback-error completion. Scripted ticks are deterministic and do not establish real-time display behavior. Native cleanup/tool behavior needs the separate hardware acceptance run.
-
-Some older negative fixtures already contain corner marks. Their updated expectations preserve those marks and suppress a new X. Capture/navigation failures with unknown corner eligibility and possible partial typing also suppress the X. These fixtures still assert the original no-answer and bounded-navigation behavior; the preservation fallback is not recognition success. The live highlighted-illegible fixture likewise retains its preexisting X without adding a second one.
-
-REM-8 native acceptance used a disposable copy of the Gundlach technical paper: blank Q&A, cursive append, absent/illegible declines, occupied-successor single return, and a real 90-second timeout with a loopback endpoint/dummy key. The final geometry build repeated Fineliner/Highlighter circle cleanup and live rejection; both active circles fit the 50x50 box, cleanup had zero changed ROI pixels and neighboring native ink survived. The prior sparse-path and highlighter-bound failures were retained in PR evidence. Model tests use synthetic pen input and do not establish universal human-handwriting recognition.
+`request_guard` faults and model callbacks exercise retained source identity and
+completed external input. Local HTTP tests verify delay/timeout handling while
+checking ownership without ink. Shared capture/dismissal policy tests cover a
+single read-only retry, original error retention, input/owner changes and deadlines.
+These are deterministic control-flow checks, not native reliability measurements.
 
 The history_snapshot unavailable fault preserves the observed post-restart case where a document is visible but LastOpen is empty. Normal rendering continues, while that transaction never gains undo ownership even if identity later becomes available. Reopening and a new successful iteration may establish a new transaction.
 
@@ -204,21 +218,47 @@ prove that a predicted center lies inside the mark. Simulator replies establish
 routing and normalization, not visual accuracy or physical gesture recognition.
 
 
-Failure codes use the shared persistent X and one centered half-box segment:
+Nonvisual diagnostic codes retain these meanings: `Selection` (unreadable or
+ambiguous question/selection), `Transcription` (independent disagreement),
+`Provider` (model/network failure), `NoSuccessor`, `InvalidSuccessor`, and `Device`.
+`expect.failure_codes` maps pages to their ordered diagnostic names. No code draws
+an X or half-box segment. Historical geometry and toolbar-restoration unit tests
+remain isolated diagnostic coverage; normal scenario injection rejects those
+retired operations.
 
-| Code | Segment | Condition |
-| --- | --- | --- |
-| Selection | Top | Missing, unreadable or ambiguous selection/question; malformed proposal |
-| Transcription | Right | Independent reading invalid or disagrees |
-| Provider | Bottom | Model/network unavailable or timeout |
-| NoSuccessor | Left | Forward navigation makes no movement |
-| InvalidSuccessor | Horizontal midpoint | Unsuitable page with confirmed source recovery |
-| Device | Vertical midpoint | Device, rendering or unconfirmed recovery failure |
+### Native footer readiness model
 
-Scenario `expect.failure_codes` maps page indices to ordered code names. Occupied or unknown corners suppress these marks. Loop diagnostics stay in logs; single-iteration provider/device errors still propagate. Simulator rasterization models geometry and relative retracing darkness, not native brush width, e-ink refresh or persistence.
+The shared production pre-lease wait has deterministic virtual-clock tests in
+`device::status_readiness`: exact native footer frames cover immediate readiness,
+delayed disappearance, repeated/persistent overlays, unknown footer ink, late
+observations, wrong document/page/visit/session, other content changes and input
+cancellation. No mutation interface is available during this wait. The existing
+active-lease test still refuses the exact before/after pair at143,991; the wait
+establishes a new baseline only before a lease exists. These tests model sequencing,
+not physical display timing or the Linux input observer. The scenario backend does
+not yet render native page-navigation chrome; broader timing/state integration and
+native successful Q&A/performance acceptance remain required.
 
+### Verified-layout navigation model
 
-Status-style tests also enforce acquisition/restoration around native marks. `status_style_begin` supports `unavailable` and error faults; `status_style_end` supports error faults. Capture, navigation, output and history reject an active lease. A separate deterministic toolbar model exercises every partial acquisition action, exact secondary/primary preferences and page-change refusal, with native image fixtures checking layout recognition. These tests do not prove physical menu timing, metadata persistence or visual legibility; those remain native acceptance gates.
+The shared production `device::navigation_completion` wait is exercised with
+scripted metadata brackets, native chrome images and a virtual clock. Tests
+separate metadata-ahead-of-pixels, pixels-ahead-of-metadata, a lagging persisted
+index, changing partial rendering, repeated pending states and the exact scrollbar
+pair. Wrong neighbor/document/session/visit, changed order/redirects, cancellation,
+observer-open failure, boundary/no movement and late capture cannot repeat input.
+An inked source to blank notes is positive; blank-to-blank/identical pages and
+legitimate gutter ink conservatively refuse. Composite readiness is not a native
+render acknowledgement or independent pixel-to-page provenance.
 
+The scenario backend still models legacy navigation timing and does not render
+native scrollbar transitions. It now explicitly reports no movement for a boundary
+or injected no-move result, exercising the workflow's fresh-source verification
+before recording a nonvisual failure. The shared wait tests establish production sequencing;
+native UI behavior, Linux observer timing and successful full Q&A remain separate
+gates. Do not quote virtual-clock values as tablet performance.
 
-The toolbar model separates actual UI preferences from stale advisory document values (including actual Red/Thick while the file reports Black/Medium). Failure tests cover each acquisition/restoration input before and after its possible effect, both original slots, unknown Fineliner styles, and journal failure before input. Recovery tests enforce exclusive creation, immutable captured values, reserved rollback capacity, incomplete-tail refusal and retained evidence after I/O failure. Model results establish those control-flow invariants, not physical persistence timing; native menu screenshots remain necessary for current-preference restoration evidence.
+`capture` now accepts `wrong_page` when the scenario contains another page. This
+returns that page's pixels without changing the modeled active page. The full
+workflow regression combines it with `next: no_move`: conflicting fresh pixels
+must stop before classification, further navigation, answer text or failure ink.

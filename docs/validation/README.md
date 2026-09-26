@@ -1,5 +1,10 @@
 # Hardware fixtures
 
+Source status ink is retired. Marker sections below preserve historical diagnostic
+procedures and evidence only; they are not normal Reader acceptance gates or
+authorization to draw new marks. The current hardware probe refuses retired marker
+commands; use preserved source/evidence for historical analysis. See [retirement findings](../legacy-status-indicator-findings.md).
+
 Use the repository's reader-buddy-testing skill before running these fixtures on
 an authorized development tablet. JSON stroke fixtures and their Python generators
 exercise known question, shorthand, ambiguous-ink, and missing-question cases with
@@ -27,13 +32,12 @@ not the source tree; reusable fixtures and diagnostic probes remain here.
 
 With the normal service stopped and exclusive authorized dev-tablet access,
 `hardware_probe return-check` captures the current page, attempts one forward swipe,
-then invokes the same single-attempt recovery used by Reader Buddy. It draws the
-failure X and saves the resulting screenshot. This is an offline input/capture check;
+then invokes the same single-attempt recovery used by Reader Buddy. It records the
+nonvisual diagnostic without drawing a failure X. This is an offline input/capture check;
 it does not make a model call or test answer classification.
 
-On a page with a successor, expect `Returned` and the X on the captured source.
-At the document end, expect `AlreadySource`, no reverse swipe and the X on the last
-page. Inspect before/after images. Failed swipe and capture cases are exercised with
+On a page with a successor, expect `Returned` with the captured source unchanged.
+At the document end, expect `AlreadySource`, no reverse swipe and no source marks. Inspect before/after images. Failed swipe and capture cases are exercised with
 scripted navigation doubles in unit tests; do not report those as physical failures.
 
 ## Activity indicator check
@@ -48,6 +52,17 @@ Retrieve and inspect these images; compare the status region and neighboring ink
 The uninterrupted stroke cadence is 333 ms; diagnostic screenshots between stages
 add delay and are not runtime scheduling evidence. Native tool acquisition and
 restoration add separate overhead that must be measured, not hidden by cadence.
+
+For a controlled investigation, `indicator-smoke-diagnostic` additionally enables
+the existing debug dumps. On an unrecognized toolbar it preserves the actual
+first rejected frame for that process/journal sequence as
+`/tmp/reader-buddy-toolbar-refusal-<pid>-<sequence>.png`, with a private JSON
+companion containing owner, last durable intent, expected controls and observation
+times. It never recaptures or replaces the active baseline. Preserve these files
+before another run; they contain page content. The ordinary helper and production
+defaults are unchanged. A zero helper exit can still mean optional status was
+suppressed after verified rollback: require visible glyphs, actual restoration
+and cleanup evidence before counting a successful performance sample.
 
 Exercise primary and secondary Highlighter with nondefault Fineliner color/width.
 Capture actual menus before and after: persisted document preferences can be stale
@@ -114,3 +129,12 @@ The connected cursive input is a previously constructed synthetic native fixture
 not a new human-handwriting sample. `docs/validation/images/rem34` contains a
 scripted simulator answer (approximate bitmap glyphs) and restored original tablet
 view for public evidence; these are separate evidence categories.
+
+`hardware_probe indicator-current-tool` is an explicit development-only candidate
+path, not normal Reader behavior or a tool-admission claim. Use only reviewed
+builds on verified disposable pages with a manually verified Black Fineliner.
+Preserve its V3 journal and stop after any guard/cleanup failure; do not retry or
+replace the baseline. This mode never opens a toolbar menu. It exercises the
+production geometry/input methods with fresh per-stroke/per-eraser guards; actual
+width/slot coverage, cleanup footprint, input observer continuity and full Q&A
+acceptance remain required before switching the normal constructor.

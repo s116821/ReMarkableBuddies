@@ -51,6 +51,17 @@ or builds. Read [public contribution routing](https://github.com/s116821/Remarka
 
 ## Simulator learning
 
+Prefer supported completion events plus verified operation/page/session
+postconditions for Reader/Writer sequencing. Where events are unavailable, use
+paced fresh-state polling with monotonic deadlines and cancellation; elapsed time
+alone is not success. Keep input serialized and ownership/recovery guards intact.
+Document the reason, scope, bound and validation for necessary fixed waits;
+gesture qualification, animation, polling and timeout timing are distinct from
+completion assumptions. Test delayed/lost/stale/repeated signals and cancellation
+through the real operation path. Public/manual workflows remain supported; do not
+require private integrations or invasive tablet dependencies. The final integrated
+performance gate must audit later features for preservation of these properties.
+
 For each device/workflow change or native finding, check its simulator impact.
 Update the shared model, fixtures, faults or assertions as applicable in the same
 implementation PR, including OpenSpec simulator deltas when behavior changes.
@@ -83,3 +94,24 @@ need representative live evidence before merge; contributors without access repo
 the missing gate and a maintainer supplies it. Native-only evidence follows the
 separate unattended tablet scope above. Existing authorization does not need to be
 requested again merely because a skill is used.
+
+## Predictable device interaction
+
+Normal Reader, Writer and future features must not autonomously navigate device
+menus, including opening menus merely to inspect settings. Prefer supported direct
+interfaces, verified simple gestures or a safe documented fallback. Simple left/right
+page swipes are allowed; this rule does not prohibit keyboard text input or all
+coordinate-based input. Do not hide menu automation behind helpers or optional
+fallbacks. If a feature requires menus, document the limitation and resolve the
+design explicitly before adding it. Deliberate developer/manual test setup may
+operate menus with advance notice, but must remain separate from product paths
+and be labeled clearly in evidence. REM35 audits integrated features for this rule.
+
+When the no-menu rule blocks an operation, investigate relevant current open-source
+reMarkable community implementations before concluding it is unavailable. Keep the
+research targeted to that roadblock. Inspect actual code, issues/releases and
+firmware compatibility; record links/revisions and distinguish supported direct
+interfaces, native/file-format mechanisms, injected extensions and UI automation.
+Evaluate safety, maintenance and scope costs; do not silently install invasive
+dependencies or treat saved preferences as actual UI state. Record promising
+alternatives and unresolved limits rather than conducting an endless survey.

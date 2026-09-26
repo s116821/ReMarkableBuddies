@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use image::GrayImage;
 use log::{debug, info};
 use std::fs::File;
@@ -15,6 +15,42 @@ use super::DeviceModel;
 pub const SCREENSHOT_VIRTUAL_WIDTH: u32 = 768;
 /// Virtual screen height - all screenshots are normalized to this size  
 pub const SCREENSHOT_VIRTUAL_HEIGHT: u32 = 1024;
+
+/// Only attached to a discovery-header EIO whose candidate is absent from a
+/// fresh maps sample. It does not identify that candidate as the framebuffer.
+#[derive(Debug)]
+pub(crate) struct VanishedDiscoveryCandidate;
+
+impl std::fmt::Display for VanishedDiscoveryCandidate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RM2 discovery candidate vanished during header read")
+    }
+}
+
+fn discovery_error(error: std::io::Error, address: u64, maps: Option<&str>) -> anyhow::Error {
+    let absent = maps.is_some_and(|maps| {
+        !maps.lines().any(|line| {
+            let Some((start, end)) = line
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.split_once('-'))
+            else {
+                return true;
+            };
+            match (u64::from_str_radix(start, 16), u64::from_str_radix(end, 16)) {
+                (Ok(start), Ok(end)) if start < end => start <= address && address < end,
+                _ => true, // A malformed sample cannot qualify recovery.
+            }
+        }) && !maps.trim().is_empty()
+    });
+    let qualifies = error.raw_os_error() == Some(5) && absent;
+    let error = anyhow::Error::from(error);
+    if qualifies {
+        error.context(VanishedDiscoveryCandidate)
+    } else {
+        error
+    }
+}
 
 pub struct Screenshot {
     data: Vec<u8>,
@@ -85,6 +121,60 @@ impl Screenshot {
     }
 
     pub fn take_screenshot(&mut self) -> Result<()> {
+        let _timing = crate::measurement::Span::new("capture.total");
+        let native = self.capture_fresh(Self::capture_native)?;
+        let native_data = Self::serialize(&native, "capture.native_png")?;
+        let normalized = Self::normalize_timed(&native)?;
+        let data = Self::serialize(&normalized, "capture.overview_png")?;
+        // Publish only a complete capture. A failed attempt cannot expose old
+        // overview pixels paired with a different native frame.
+        self.native_data = native_data;
+        self.data = data;
+        Ok(())
+    }
+
+    /// Fresh owned pixels for guards that do not consume encoded images.
+    pub fn take_image(&mut self) -> Result<image::DynamicImage> {
+        let _timing = crate::measurement::Span::new("capture.total");
+        self.capture_fresh(|capture| capture.normalized_image(&capture.capture_raw()?))
+    }
+
+    fn capture_fresh(
+        &mut self,
+        read: impl FnOnce(&Self) -> Result<image::DynamicImage>,
+    ) -> Result<image::DynamicImage> {
+        self.data.clear();
+        self.native_data.clear();
+        read(self).inspect_err(|error| {
+            // This boundary contains only capture/allocation errors, not provider
+            // responses or document text. Keep the source chain even when an
+            // outer workflow later logs only the top-level safe refusal.
+            debug!("Fresh framebuffer capture failed: {error:#}");
+        })
+    }
+
+    fn normalize_timed(native: &image::DynamicImage) -> Result<image::DynamicImage> {
+        let _timing = crate::measurement::Span::new("capture.resize");
+        Self::normalize_native(native)
+    }
+
+    fn serialize(image: &image::DynamicImage, phase: &'static str) -> Result<Vec<u8>> {
+        let _timing = crate::measurement::Span::new(phase);
+        let mut bytes = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut bytes).write_image(
+            image.as_bytes(),
+            image.width(),
+            image.height(),
+            image.color().into(),
+        )?;
+        Ok(bytes)
+    }
+
+    fn capture_native(&self) -> Result<image::DynamicImage> {
+        self.native_image(&self.capture_raw()?)
+    }
+
+    fn capture_raw(&self) -> Result<Vec<u8>> {
         // Find xochitl's process
         debug!("screenshot: finding pid");
         let pid = Self::find_xochitl_pid()?;
@@ -100,18 +190,92 @@ impl Screenshot {
 
         // Read the framebuffer data
         debug!("screenshot: reading data");
-        let screenshot_data = self.read_framebuffer(&pid, skip_bytes)?;
-        self.native_data = self.encode_png(&screenshot_data)?;
-        // Process the image data (transpose, color correction, etc.)
-        debug!("screenshot: processing image");
-        let processed_data = self.process_image(screenshot_data)?;
+        self.read_framebuffer(&pid, skip_bytes)
+    }
 
-        self.data = processed_data;
+    fn normalized_image(&self, raw: &[u8]) -> Result<image::DynamicImage> {
+        if self.device_model != DeviceModel::Remarkable2 || !self.rm2_bgra {
+            return Self::normalize_timed(&self.native_image(raw)?);
+        }
+        let _timing = crate::measurement::Span::new("capture.fused_conversion");
+        anyhow::ensure!(raw.len() == 1404 * 1872 * 4, "Invalid framebuffer length");
+        // Identical Nearest coordinates and luminance arithmetic to the native
+        // conversion then resize path. Only selected pixels need conversion.
+        // Raw bytes still come from a complete fresh framebuffer read.
+        let xs = Self::nearest_positions(1404, SCREENSHOT_VIRTUAL_WIDTH);
+        let ys = Self::nearest_positions(1872, SCREENSHOT_VIRTUAL_HEIGHT);
+        let mut pixels = Vec::with_capacity(
+            SCREENSHOT_VIRTUAL_WIDTH as usize * SCREENSHOT_VIRTUAL_HEIGHT as usize,
+        );
+        for y in ys {
+            let offset = y as usize * 1404 * 4;
+            let row = &raw[offset..offset + 1404 * 4];
+            for x in &xs {
+                let offset = *x as usize * 4;
+                let pixel = &row[offset..offset + 4];
+                pixels.push(
+                    ((77 * u32::from(pixel[2])
+                        + 150 * u32::from(pixel[1])
+                        + 29 * u32::from(pixel[0])
+                        + 128)
+                        >> 8) as u8,
+                );
+            }
+        }
+        Ok(image::DynamicImage::ImageLuma8(
+            GrayImage::from_raw(SCREENSHOT_VIRTUAL_WIDTH, SCREENSHOT_VIRTUAL_HEIGHT, pixels)
+                .context("Invalid normalized BGRA framebuffer")?,
+        ))
+    }
 
-        Ok(())
+    fn native_image(&self, raw: &[u8]) -> Result<image::DynamicImage> {
+        let _timing = crate::measurement::Span::new("capture.raw_conversion");
+        anyhow::ensure!(
+            raw.len()
+                == self.screen_width() as usize
+                    * self.screen_height() as usize
+                    * self.bytes_per_pixel(),
+            "Invalid framebuffer length"
+        );
+        if self.device_model == DeviceModel::RemarkablePaperPro {
+            return Ok(image::DynamicImage::ImageRgba8(
+                image::RgbaImage::from_raw(self.screen_width(), self.screen_height(), raw.to_vec())
+                    .ok_or_else(|| anyhow::anyhow!("Invalid RGBA framebuffer"))?,
+            ));
+        }
+        if self.rm2_bgra {
+            let pixels = raw
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|pixel| {
+                    ((77 * u32::from(pixel[2])
+                        + 150 * u32::from(pixel[1])
+                        + 29 * u32::from(pixel[0])
+                        + 128)
+                        >> 8) as u8
+                })
+                .collect();
+            return Ok(image::DynamicImage::ImageLuma8(
+                GrayImage::from_raw(1404, 1872, pixels)
+                    .ok_or_else(|| anyhow::anyhow!("Invalid BGRA framebuffer"))?,
+            ));
+        }
+        let pixels = raw
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pixel| Self::apply_curves(pixel[1]))
+            .collect();
+        let image = GrayImage::from_raw(self.screen_width(), self.screen_height(), pixels)
+            .ok_or_else(|| anyhow::anyhow!("Invalid legacy framebuffer"))?;
+        Ok(image::DynamicImage::ImageLuma8(
+            image::imageops::flip_horizontal(&image::imageops::rotate270(&image)),
+        ))
     }
 
     fn find_xochitl_pid() -> Result<String> {
+        let _timing = crate::measurement::Span::new("capture.pid");
         let output = process::Command::new("pidof").arg("xochitl").output()?;
         let pids = String::from_utf8(output.stdout)?;
         if let Some(pid) = pids.split_whitespace().next() {
@@ -121,6 +285,7 @@ impl Screenshot {
     }
 
     fn find_framebuffer_address(&self, pid: &str) -> Result<u64> {
+        let _timing = crate::measurement::Span::new("capture.address");
         if self.rm2_bgra {
             return self.find_rm2_bgra_allocation(pid);
         }
@@ -154,9 +319,28 @@ impl Screenshot {
         let maps = std::fs::read_to_string(format!("/proc/{pid}/maps"))?;
         let mut mem = File::open(format!("/proc/{pid}/mem"))?;
         Self::locate_rm2_allocation(&maps, |address| {
-            mem.seek(std::io::SeekFrom::Start(address))?;
+            mem.seek(std::io::SeekFrom::Start(address))
+                .with_context(|| {
+                    format!("Seek RM2 allocation header pid={pid} address={address:#x}")
+                })?;
             let mut header = [0u8; 8];
-            mem.read_exact(&mut header)?;
+            mem.read_exact(&mut header).map_err(|error| {
+                // Failure evidence only: no second memory read, retry, cached
+                // address, or success inferred from a later mapping snapshot.
+                let current = std::fs::read_to_string(format!("/proc/{pid}/maps"));
+                let details = match &current {
+                    Ok(current) => {
+                        let region = current.lines().find(|line| {
+                            let Some(range) = line.split_whitespace().next() else { return false; };
+                            let Some((start,end)) = range.split_once('-') else { return false; };
+                            matches!((u64::from_str_radix(start,16),u64::from_str_radix(end,16)), (Ok(start),Ok(end)) if start <= address && address < end)
+                        }).map(|line| line.split_whitespace().take(2).collect::<Vec<_>>().join(" ")).unwrap_or_else(|| "unmapped".into());
+                        format!("maps_changed={} current_region={region}", *current != maps)
+                    }
+                    Err(error) => format!("current_maps_unavailable={error}"),
+                };
+                discovery_error(error, address, current.as_deref().ok()).context(format!("Read RM2 allocation header pid={pid} address={address:#x} bytes=8; {details}"))
+            })?;
             Ok(header)
         })
     }
@@ -188,7 +372,9 @@ impl Screenshot {
             // Linux may coalesce adjacent mmap chunks into one VMA. Check only
             // page-aligned headers whose complete allocation stays in this map.
             for address in (start..=last_start).step_by(PAGE_SIZE as usize) {
-                let header = read_header(address)?;
+                let header = read_header(address).with_context(|| format!(
+                    "RM2 allocation discovery candidate address={address:#x} sampled_region={start:#x}-{end:#x} permissions={}", fields[1]
+                ))?;
                 let previous = u32::from_le_bytes(header[..4].try_into()?);
                 let size = u32::from_le_bytes(header[4..].try_into()?) as u64;
                 if previous == 0 && size & 7 == 2 && size & !7 == allocation_size {
@@ -274,6 +460,7 @@ impl Screenshot {
     }
 
     fn read_framebuffer(&self, pid: &str, skip_bytes: u64) -> Result<Vec<u8>> {
+        let _timing = crate::measurement::Span::new("capture.read");
         let window_bytes =
             self.screen_width() as usize * self.screen_height() as usize * self.bytes_per_pixel();
         let mut buffer = vec![0u8; window_bytes];
@@ -283,7 +470,9 @@ impl Screenshot {
         Ok(buffer)
     }
 
+    #[cfg(test)]
     fn process_image(&self, data: Vec<u8>) -> Result<Vec<u8>> {
+        let _timing = crate::measurement::Span::new("capture.overview");
         // Encode the raw data to PNG
         debug!("Encoding raw image data to PNG");
         let png_data = self.encode_png(&data)?;
@@ -293,14 +482,15 @@ impl Screenshot {
             "Resizing image to {}x{}",
             SCREENSHOT_VIRTUAL_WIDTH, SCREENSHOT_VIRTUAL_HEIGHT
         );
+        let decode = crate::measurement::Span::new("capture.decode");
         let img = image::load_from_memory(&png_data)?;
-        let resized_img = img.resize_exact(
-            SCREENSHOT_VIRTUAL_WIDTH,
-            SCREENSHOT_VIRTUAL_HEIGHT,
-            image::imageops::FilterType::Nearest,
-        );
+        drop(decode);
+        let resize = crate::measurement::Span::new("capture.resize");
+        let resized_img = Self::normalize_native(&img)?;
 
         // Encode the resized image back to PNG
+        drop(resize);
+        let _serialize = crate::measurement::Span::new("capture.overview_png");
         debug!("Re-encoding resized image");
         let mut resized_png_data = Vec::new();
         let encoder = image::codecs::png::PngEncoder::new(&mut resized_png_data);
@@ -328,7 +518,9 @@ impl Screenshot {
         Ok(resized_png_data)
     }
 
+    #[cfg(test)]
     fn encode_png(&self, raw_data: &[u8]) -> Result<Vec<u8>> {
+        let _timing = crate::measurement::Span::new("capture.native_png");
         match self.device_model {
             DeviceModel::RemarkablePaperPro => {
                 // RMPP uses 32-bit RGBA format
@@ -341,6 +533,44 @@ impl Screenshot {
         }
     }
 
+    /// Exact image0.25 Nearest sampling for the two native eight-bit formats.
+    /// Its zero-support kernel selects floor((out+0.5)*ratio), using f32.
+    /// Keep that arithmetic (not an integer approximation) and copy channels
+    /// directly instead of constructing an intermediate RGBA float image.
+    fn normalize_native(img: &image::DynamicImage) -> Result<image::DynamicImage> {
+        let (width, height) = (img.width(), img.height());
+        anyhow::ensure!(width > 0 && height > 0, "Empty native capture");
+        let xs = Self::nearest_positions(width, SCREENSHOT_VIRTUAL_WIDTH);
+        let ys = Self::nearest_positions(height, SCREENSHOT_VIRTUAL_HEIGHT);
+        match img {
+            image::DynamicImage::ImageLuma8(source) => {
+                Ok(image::DynamicImage::ImageLuma8(image::GrayImage::from_fn(
+                    SCREENSHOT_VIRTUAL_WIDTH,
+                    SCREENSHOT_VIRTUAL_HEIGHT,
+                    |x, y| *source.get_pixel(xs[x as usize], ys[y as usize]),
+                )))
+            }
+            image::DynamicImage::ImageRgba8(source) => {
+                Ok(image::DynamicImage::ImageRgba8(image::RgbaImage::from_fn(
+                    SCREENSHOT_VIRTUAL_WIDTH,
+                    SCREENSHOT_VIRTUAL_HEIGHT,
+                    |x, y| *source.get_pixel(xs[x as usize], ys[y as usize]),
+                )))
+            }
+            _ => anyhow::bail!("Unexpected native capture pixel format"),
+        }
+    }
+
+    fn nearest_positions(source: u32, destination: u32) -> Vec<u32> {
+        (0..destination)
+            .map(|position| {
+                (((position as f32 + 0.5) * (source as f32 / destination as f32)).floor() as u32)
+                    .min(source - 1)
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
     fn encode_png_rm2(&self, raw_data: &[u8]) -> Result<Vec<u8>> {
         anyhow::ensure!(
             raw_data.len() == 1404 * 1872 * self.bytes_per_pixel(),
@@ -348,6 +578,7 @@ impl Screenshot {
         );
         if self.rm2_bgra {
             // The monochrome RM2 still stores colored highlights in portrait BGRA.
+            let conversion = crate::measurement::Span::new("capture.raw_conversion");
             // Luminance preserves neutral gray exactly and keeps yellow marks light.
             let pixels: Vec<u8> = raw_data
                 .as_chunks::<4>()
@@ -362,6 +593,8 @@ impl Screenshot {
                 })
                 .collect();
             let mut png = Vec::new();
+            drop(conversion);
+            let _serialize = crate::measurement::Span::new("capture.native_serialize");
             image::codecs::png::PngEncoder::new(&mut png).write_image(
                 &pixels,
                 1404,
@@ -370,6 +603,7 @@ impl Screenshot {
             )?;
             return Ok(png);
         }
+        let conversion = crate::measurement::Span::new("capture.raw_conversion");
         let raw_u8: Vec<u8> = raw_data
             .as_chunks::<2>()
             .0
@@ -387,6 +621,8 @@ impl Screenshot {
             .ok_or_else(|| anyhow::anyhow!("Failed to create image from raw data"))?;
         let rotated_img = image::imageops::rotate270(&img);
         let final_image = image::imageops::flip_horizontal(&rotated_img);
+        drop(conversion);
+        let _serialize = crate::measurement::Span::new("capture.native_serialize");
         let mut png_data = Vec::new();
         let encoder = image::codecs::png::PngEncoder::new(&mut png_data);
         encoder.write_image(
@@ -399,7 +635,9 @@ impl Screenshot {
         Ok(png_data)
     }
 
+    #[cfg(test)]
     fn encode_png_rmpp(&self, raw_data: &[u8]) -> Result<Vec<u8>> {
+        let _serialize = crate::measurement::Span::new("capture.native_serialize");
         let width = self.screen_width();
         let height = self.screen_height();
         let mut png_data = Vec::new();
@@ -437,6 +675,7 @@ impl Screenshot {
     /// questions or text lines across left/right crops. Order: top to bottom.
     /// Navigation still uses the normalized overview.
     pub fn detail_images_base64(&self) -> Result<Vec<String>> {
+        let _timing = crate::measurement::Span::new("capture.detail_strips");
         let img = image::load_from_memory(&self.native_data)?;
         let (w, h) = (img.width(), img.height());
         let th = h * 2 / 5;
@@ -459,11 +698,175 @@ impl Screenshot {
 mod tests {
     use super::*;
 
+    #[test]
+    fn failed_fresh_capture_invalidates_both_previous_encoded_views() {
+        let mut screenshot = Screenshot {
+            data: vec![1, 2, 3],
+            native_data: vec![4, 5, 6],
+            device_model: DeviceModel::Remarkable2,
+            rm2_bgra: true,
+        };
+        assert!(screenshot
+            .capture_fresh(|_| anyhow::bail!("read failed"))
+            .is_err());
+        assert!(screenshot.get_image_data().is_empty());
+        assert!(screenshot.detail_images_base64().is_err());
+        screenshot.data = vec![1];
+        screenshot.native_data = vec![2];
+        assert!(screenshot
+            .capture_fresh(|capture| capture.native_image(&[0; 4]))
+            .is_err());
+        assert!(screenshot.get_image_data().is_empty());
+        assert!(screenshot.detail_images_base64().is_err());
+    }
+
+    #[test]
+    fn owned_pixels_match_previous_png_pipeline_for_all_native_layouts() {
+        for (device_model, rm2_bgra) in [
+            (DeviceModel::Remarkable2, true),
+            (DeviceModel::Remarkable2, false),
+            (DeviceModel::RemarkablePaperPro, false),
+        ] {
+            let screenshot = Screenshot {
+                data: vec![],
+                native_data: vec![],
+                device_model,
+                rm2_bgra,
+            };
+            let len = screenshot.screen_width() as usize
+                * screenshot.screen_height() as usize
+                * screenshot.bytes_per_pixel();
+            // Vary all channels (including alpha and both legacy bytes), spatial
+            // orientation and every grayscale curve boundary across a full frame.
+            let raw: Vec<u8> = (0..len)
+                .map(|i| {
+                    let n = (i as u32).wrapping_mul(1664525).wrapping_add(1013904223);
+                    (n ^ (n >> 13) ^ (n >> 24)) as u8
+                })
+                .collect();
+            let old_native = screenshot.encode_png(&raw).unwrap();
+            let oracle = image::load_from_memory(&old_native).unwrap();
+            let actual = screenshot.native_image(&raw).unwrap();
+            assert_eq!(
+                (actual.width(), actual.height(), actual.color()),
+                (oracle.width(), oracle.height(), oracle.color())
+            );
+            assert_eq!(actual.as_bytes(), oracle.as_bytes());
+            // Byte-identical native serialization also preserves the existing
+            // overlapping-strip consumer's input, including Paper Pro alpha.
+            assert_eq!(
+                Screenshot::serialize(&actual, "test.native").unwrap(),
+                old_native
+            );
+            let overview = Screenshot::normalize_native(&actual).unwrap();
+            let direct = screenshot.normalized_image(&raw).unwrap();
+            let library_oracle = oracle.resize_exact(
+                SCREENSHOT_VIRTUAL_WIDTH,
+                SCREENSHOT_VIRTUAL_HEIGHT,
+                image::imageops::FilterType::Nearest,
+            );
+            assert_eq!(direct.color(), library_oracle.color());
+            assert_eq!(direct.as_bytes(), library_oracle.as_bytes());
+            assert_eq!(
+                Screenshot::serialize(&overview, "test.overview").unwrap(),
+                screenshot.process_image(raw.clone()).unwrap()
+            );
+            for bad in [&raw[..0], &raw[..len - 1]] {
+                assert!(screenshot.native_image(bad).is_err());
+                assert!(screenshot.normalized_image(bad).is_err());
+            }
+            let mut oversized = raw;
+            oversized.push(0);
+            assert!(screenshot.native_image(&oversized).is_err());
+            assert!(screenshot.normalized_image(&oversized).is_err());
+        }
+    }
+
+    #[test]
+    fn direct_nearest_matches_library_pixels_and_alpha() {
+        // Actual normalized-native dimensions for modern/rotated legacy RM2 and
+        // Paper Pro, plus small/upscaled and equal-size boundaries. Varied alpha
+        // must remain a copied channel, never premultiplied or discarded.
+        for (width, height) in [(1404, 1872), (1632, 2154), (3, 7), (768, 1024)] {
+            let rgba = image::RgbaImage::from_fn(width, height, |x, y| {
+                let n = x
+                    .wrapping_mul(1664525)
+                    .wrapping_add(y.wrapping_mul(1013904223));
+                image::Rgba([(n >> 24) as u8, (n >> 16) as u8, (n >> 8) as u8, n as u8])
+            });
+            let gray = image::GrayImage::from_fn(width, height, |x, y| {
+                image::Luma([(x.wrapping_mul(31).wrapping_add(y.wrapping_mul(17))) as u8])
+            });
+            for native in [
+                image::DynamicImage::ImageLuma8(gray),
+                image::DynamicImage::ImageRgba8(rgba),
+            ] {
+                let oracle = native.resize_exact(
+                    SCREENSHOT_VIRTUAL_WIDTH,
+                    SCREENSHOT_VIRTUAL_HEIGHT,
+                    image::imageops::FilterType::Nearest,
+                );
+                let actual = Screenshot::normalize_native(&native).unwrap();
+                assert_eq!(actual.color(), oracle.color());
+                assert_eq!(actual.as_bytes(), oracle.as_bytes(), "{width}x{height}");
+            }
+        }
+        assert!(Screenshot::normalize_native(&image::DynamicImage::new_luma8(0, 0)).is_err());
+        assert!(Screenshot::normalize_native(&image::DynamicImage::new_rgb8(5, 5)).is_err());
+    }
+
     fn mmap_header(previous: u32, size: u32) -> [u8; 8] {
         let mut header = [0; 8];
         header[..4].copy_from_slice(&previous.to_le_bytes());
         header[4..].copy_from_slice(&size.to_le_bytes());
         header
+    }
+
+    #[test]
+    fn discovery_recovery_requires_eio_and_valid_fresh_absence() {
+        let address = 0x64ba1000;
+        for (errno, maps, expected) in [
+            (5, Some("65297000-65c2a000 rw-p 00000000 00:00 0\n"), true),
+            (5, Some("64ba1000-65c2a000 rw-p 00000000 00:00 0\n"), false),
+            (13, Some("65297000-65c2a000 rw-p 00000000 00:00 0\n"), false),
+            (5, None, false),
+            (5, Some(""), false),
+            (5, Some("malformed\n"), false),
+        ] {
+            let error = discovery_error(std::io::Error::from_raw_os_error(errno), address, maps);
+            assert_eq!(
+                error.downcast_ref::<VanishedDiscoveryCandidate>().is_some(),
+                expected
+            );
+            assert_eq!(
+                error
+                    .downcast_ref::<std::io::Error>()
+                    .unwrap()
+                    .raw_os_error(),
+                Some(errno)
+            );
+        }
+        // Preserve the failed scan: no valid candidate from an earlier read may
+        // escape when a later candidate vanishes.
+        let mut reads = 0;
+        let result =
+            Screenshot::locate_rm2_allocation("1000-a09000 rw-p 00000000 00:00 0\n", |address| {
+                reads += 1;
+                if address == 0x1000 {
+                    Ok(mmap_header(0, 0xa07002))
+                } else {
+                    Err(discovery_error(
+                        std::io::Error::from_raw_os_error(5),
+                        address,
+                        Some("b00000-c00000 rw-p 00000000 00:00 0\n"),
+                    ))
+                }
+            });
+        assert_eq!(reads, 2);
+        assert!(result
+            .unwrap_err()
+            .downcast_ref::<VanishedDiscoveryCandidate>()
+            .is_some());
     }
 
     #[test]
@@ -506,10 +909,24 @@ mod tests {
                 .to_string()
                 .contains("found 2")
         );
-        assert!(
-            Screenshot::locate_rm2_allocation(maps, |_| anyhow::bail!("unreadable mapping"))
-                .is_err()
+        let mut reads = 0;
+        let error = Screenshot::locate_rm2_allocation(maps, |_| {
+            reads += 1;
+            Err(std::io::Error::from_raw_os_error(5).into())
+        })
+        .unwrap_err();
+        assert_eq!(reads, 1, "Diagnostic context must not retry memory reads");
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .raw_os_error(),
+            Some(5)
         );
+        let context = error.to_string();
+        assert!(context.contains("address=0x1000"));
+        assert!(context.contains("sampled_region=0x1000-0xa09000"));
+        assert!(context.contains("permissions=rw-p"));
     }
 
     #[test]
@@ -580,8 +997,22 @@ mod tests {
         assert_eq!(img.get_pixel(301, 0).0, [29]);
         assert_eq!(img.get_pixel(302, 0).0, [77]);
         assert!(screenshot.encode_png_rm2(&raw[..raw.len() - 1]).is_err());
+        // Repeated gray ramps cover every neutral value after downsampling;
+        // the first rows retain the independent known colored/position samples.
+        for (i, pixel) in raw
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .enumerate()
+            .skip(1404 * 2)
+        {
+            let gray = (i % 256) as u8;
+            pixel.copy_from_slice(&[gray, gray, gray, (i % 251) as u8]);
+        }
+        let direct = screenshot.normalized_image(&raw).unwrap();
         let normalized = image::load_from_memory(&screenshot.process_image(raw).unwrap()).unwrap();
         assert_eq!((normalized.width(), normalized.height()), (768, 1024));
+        assert_eq!(direct.as_bytes(), normalized.as_bytes());
     }
 
     #[test]

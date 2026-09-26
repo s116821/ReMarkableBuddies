@@ -106,6 +106,20 @@ pub struct Touch {
 
 #[cfg(target_os = "linux")]
 impl Touch {
+    pub(super) fn input_identity(&self) -> Result<super::input_observer::DescriptorIdentity> {
+        use std::os::fd::AsFd;
+        super::input_observer::descriptor_identity(
+            self.device
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Touch input is disabled"))?
+                .as_fd(),
+        )
+    }
+
+    pub(super) fn native_point(&self, point: (i32, i32)) -> (i32, i32) {
+        self.virtual_to_input(point)
+    }
+
     pub fn new(no_touch: bool, trigger_corner: TriggerCorner) -> Self {
         let device_model = DeviceModel::detect();
         info!("Touch using device model: {}", device_model.name());
@@ -227,13 +241,6 @@ impl Touch {
         Ok(())
     }
 
-    pub fn tap_middle_bottom(&mut self) -> Result<()> {
-        self.touch_start((384, 1023))?; // middle bottom
-        sleep(Duration::from_millis(100));
-        self.touch_stop()?;
-        Ok(())
-    }
-
     fn is_in_trigger_zone(&self, x: i32, y: i32) -> bool {
         self.trigger_corner.contains(x, y)
     }
@@ -320,10 +327,6 @@ impl Touch {
     }
 
     pub fn goto_xy(&mut self, _xy: (i32, i32)) -> Result<()> {
-        Ok(())
-    }
-
-    pub fn tap_middle_bottom(&mut self) -> Result<()> {
         Ok(())
     }
 }

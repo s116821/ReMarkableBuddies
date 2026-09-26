@@ -8,9 +8,65 @@ use std::{
     fs,
     io::{Read, Write},
     path::Path,
+    time::Duration,
 };
 
 pub type Preferences = BTreeMap<String, String>;
+
+/// Shared native/simulator latch: losing wait input ownership cannot be undone
+/// by a later successful poll or an attempted style rollback.
+#[derive(Default)]
+pub(super) struct WaitCancellation {
+    cancelled: bool,
+}
+impl WaitCancellation {
+    pub(super) fn latch(&mut self) {
+        self.cancelled = true;
+    }
+    pub(super) fn check(&self) -> Result<()> {
+        ensure!(
+            !self.cancelled,
+            "Status input ownership was cancelled; further input stopped"
+        );
+        Ok(())
+    }
+    pub(super) fn record(&mut self, result: Result<()>) -> Result<()> {
+        if result.is_err() {
+            self.cancelled = true;
+            // A nested observer can already have latched the failure. Keep its
+            // original chain instead of replacing it with a generic refusal.
+            return result;
+        }
+        self.check()
+    }
+}
+
+/// One shared failure boundary for native pen and rubber paths. A release can
+/// fail after ink was emitted, so always attempt observer rearming, then latch
+/// either failure before another mutation or automatic journal completion.
+pub(super) fn guarded_injection<T>(
+    io: &mut T,
+    cancellation: fn(&mut T) -> &mut WaitCancellation,
+    inject: impl FnOnce(&mut T) -> Result<()>,
+    rearm: impl FnOnce(&mut T) -> Result<()>,
+) -> Result<()> {
+    cancellation(io).check()?;
+    let written = inject(io);
+    let observed = rearm(io);
+    let result = match (written, observed) {
+        (Ok(()), observed) => observed,
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(observe_error)) => Err(error.context(format!(
+            "Input observer rearm also failed: {observe_error:#}"
+        ))),
+    };
+    // Rearming may itself already have latched cancellation. Do not replace the
+    // original injection chain with the latch's generic follow-up refusal.
+    if result.is_err() {
+        cancellation(io).latch();
+    }
+    result
+}
 pub(crate) const COLORS: [&str; 9] = [
     "Black", "Gray", "White", "Blue", "Red", "Green", "Yellow", "Cyan", "Magenta",
 ];
@@ -26,8 +82,431 @@ pub struct Identity {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn nested_cancellation_keeps_error_chain_and_never_revives() {
+        let mut latch = super::WaitCancellation::default();
+        latch.latch();
+        let error = anyhow::Error::from(std::io::Error::from_raw_os_error(5))
+            .context("vanished discovery header");
+        let error = latch.record(Err(error)).unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .raw_os_error(),
+            Some(5)
+        );
+        assert!(format!("{error:#}").contains("vanished discovery header"));
+        assert!(latch.record(Ok(())).is_err());
+        assert!(latch.check().is_err());
+    }
     use super::*;
     use image::{imageops::replace, Luma};
+
+    struct CurrentIo {
+        state: Observation,
+        records: Vec<Recovery>,
+        journal: Option<Journal>,
+        fail_checkpoint: bool,
+        change_after_checkpoint: bool,
+        cancelled: bool,
+    }
+    impl StyleIo for CurrentIo {
+        fn observe(&mut self) -> Result<Observation> {
+            Ok(self.state.clone())
+        }
+        fn checkpoint(&mut self, record: &Recovery) -> Result<()> {
+            ensure!(!self.fail_checkpoint, "injected journal failure");
+            record.validate()?;
+            if let Some(journal) = &mut self.journal {
+                journal.append(record)?;
+            }
+            self.records.push(record.clone());
+            if self.change_after_checkpoint {
+                self.state.identity.visit = "changed".into();
+            }
+            Ok(())
+        }
+        fn press(&mut self, _: (u32, u32)) -> Result<()> {
+            panic!("current-tool path sent menu input")
+        }
+        fn monotonic(&self) -> Duration {
+            Duration::ZERO
+        }
+        fn pace(&mut self, _: Duration) {
+            panic!("current-tool path waited for a menu")
+        }
+        fn begin_wait(&mut self) -> Result<()> {
+            self.check_wait()
+        }
+        fn check_wait(&mut self) -> Result<()> {
+            ensure!(!self.cancelled, "cancelled");
+            Ok(())
+        }
+        fn end_wait(&mut self) {}
+    }
+    fn current_io() -> CurrentIo {
+        let mut image = closed();
+        for y in 185..380 {
+            for x in 0..61 {
+                image.put_pixel(x, y, *CURRENT_TOOLBAR.get_pixel(x, y));
+            }
+        }
+        CurrentIo {
+            state: Observation {
+                identity: identity(),
+                preferences: prefs(),
+                image,
+            },
+            records: vec![],
+            journal: None,
+            fail_checkpoint: false,
+            change_after_checkpoint: false,
+            cancelled: false,
+        }
+    }
+    #[test]
+    fn current_tool_refuses_notes_and_unverified_toolbar_before_acquisition() {
+        let mut state = current_io().state;
+        assert!(Lease::prepare_current(state.clone(), false)
+            .unwrap()
+            .is_some());
+        // Actual notes fixture includes the extra Text tool; its selected pen
+        // alone is eligible, but its shifted toolbar/undo layout is not.
+        state.image = closed();
+        assert_eq!(closed_black_fineliner(&state.image), Some("primary"));
+        assert!(Lease::prepare_current(state, false).unwrap().is_none());
+        for (x, y) in [(30, 213), (30, 277), (30, 338)] {
+            let mut state = current_io().state;
+            let old = state.image.get_pixel(x, y)[0];
+            state.image.put_pixel(x, y, Luma([255 - old]));
+            assert!(Lease::prepare_current(state, false).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn current_tool_candidate_uses_closed_pixels_not_saved_preferences() {
+        let io = current_io(); // Deliberately stale Highlighter/Red saved settings.
+        assert_eq!(closed_black_fineliner(&io.state.image), Some("primary"));
+        for bytes in [
+            include_bytes!("../../tests/fixtures/status-style/closed-highlighter.png").as_slice(),
+            include_bytes!("../../tests/fixtures/status-style/closed-secondary.png").as_slice(),
+            include_bytes!("../../tests/fixtures/status-style/closed-secondary-highlighter.png")
+                .as_slice(),
+            include_bytes!("../../tests/fixtures/status-style/open-fineliner.png").as_slice(),
+        ] {
+            assert_eq!(
+                closed_black_fineliner(&image::load_from_memory(bytes).unwrap().to_luma8()),
+                None
+            );
+        }
+        let mut changed = io.state.image.clone();
+        for y in 70..77 {
+            for x in 46..53 {
+                changed.put_pixel(x, y, Luma([255]));
+            }
+        }
+        assert_eq!(closed_black_fineliner(&changed), None);
+        // Model only: a moved active tile is not native secondary-slot proof.
+        let mut secondary = io.state.image.clone();
+        for y in 61..123 {
+            for x in 0..61 {
+                secondary.put_pixel(x, y + 62, *io.state.image.get_pixel(x, y));
+                secondary.put_pixel(x, y, Luma([255]));
+            }
+        }
+        assert_eq!(closed_black_fineliner(&secondary), None);
+        for (bytes, expected) in [
+            (
+                include_bytes!("../../tests/fixtures/status-style/current-secondary-fine.png")
+                    .as_slice(),
+                Some("secondary"),
+            ),
+            (
+                include_bytes!("../../tests/fixtures/status-style/current-thin-fine.png")
+                    .as_slice(),
+                Some("primary"),
+            ),
+            (
+                include_bytes!("../../tests/fixtures/status-style/current-white-fine.png")
+                    .as_slice(),
+                None,
+            ),
+        ] {
+            let mut state = io.state.image.clone();
+            replace(
+                &mut state,
+                &image::load_from_memory(bytes).unwrap().to_luma8(),
+                0,
+                0,
+            );
+            assert_eq!(closed_black_fineliner(&state), expected);
+        }
+    }
+    #[test]
+    fn current_tool_journal_and_cleanup_issue_no_menu_input() {
+        let mut io = current_io();
+        let mut lease = Lease::prepare_current(io.state.clone(), false)
+            .unwrap()
+            .unwrap();
+        assert!(lease.verify_current(&mut io).is_err());
+        let path =
+            std::env::temp_dir().join(format!("rb-current-tool-{}.jsonl", std::process::id()));
+        io.journal = Some(Journal::create(&path, &lease.recovery).unwrap());
+        lease.acquire(&mut io).unwrap();
+        assert_eq!(Recovery::read(&path).unwrap().phase, Phase::CurrentInk);
+        assert!(lease
+            .transition(&mut io, Phase::OpenPrimary, (30, 90), |_| true)
+            .is_err());
+        lease.verify_current(&mut io).unwrap();
+        lease.prepare_cleanup(&mut io).unwrap();
+        assert!(lease.verify_current(&mut io).is_err());
+        assert_eq!(Recovery::read(&path).unwrap().phase, Phase::PendingCleanup);
+        lease.finish_cleanup(&mut io).unwrap();
+        io.journal.take().unwrap().finish().unwrap();
+        assert!(!path.exists());
+        assert!(io
+            .records
+            .iter()
+            .all(|r| r.mutations == Mutations::default() && r.original_fine.is_none()));
+    }
+    #[test]
+    fn current_tool_stops_on_checkpoint_owner_content_and_input_faults() {
+        for fault in 0..4 {
+            let mut io = current_io();
+            let mut lease = Lease::prepare_current(io.state.clone(), false)
+                .unwrap()
+                .unwrap();
+            match fault {
+                0 => io.fail_checkpoint = true,
+                1 => io.change_after_checkpoint = true,
+                2 => io.state.image.put_pixel(200, 300, Luma([0])),
+                _ => io.cancelled = true,
+            }
+            assert!(lease.acquire(&mut io).is_err());
+        }
+        let mut io = current_io();
+        let mut lease = Lease::prepare_current(io.state.clone(), false)
+            .unwrap()
+            .unwrap();
+        lease.acquire(&mut io).unwrap();
+        io.state.image.put_pixel(200, 100, Luma([0])); // Old menu exclusion must not apply.
+        assert!(lease.verify_current(&mut io).is_err());
+    }
+    #[test]
+    fn current_tool_cleanup_requires_durable_intent_and_unchanged_input() {
+        for fault in 0..3 {
+            let mut io = current_io();
+            let mut lease = Lease::prepare_current(io.state.clone(), false)
+                .unwrap()
+                .unwrap();
+            lease.acquire(&mut io).unwrap();
+            match fault {
+                0 => io.fail_checkpoint = true,
+                1 => io.change_after_checkpoint = true,
+                _ => io.cancelled = true,
+            }
+            assert!(lease.prepare_cleanup(&mut io).is_err());
+            assert!(lease.finish_cleanup(&mut io).is_err());
+        }
+        let mut io = current_io();
+        let mut lease = Lease::prepare_current(io.state.clone(), false)
+            .unwrap()
+            .unwrap();
+        lease.acquire(&mut io).unwrap();
+        lease.prepare_cleanup(&mut io).unwrap();
+        io.state.image.put_pixel(720, 960, Luma([0]));
+        assert!(lease.finish_cleanup(&mut io).is_err());
+        let mut changed_version = lease.recovery.clone();
+        changed_version.version = 2;
+        assert!(changed_version.validate().is_err());
+        // Exercise the landmark redraw allowance without allowing it to hide
+        // changed neighbors immediately outside the blank erasure footprint.
+        io.state.image = closed();
+        lease.viewport = CleanupViewport::Landmarks;
+        io.state.image.put_pixel(685, 960, Luma([0]));
+        assert!(lease.finish_cleanup(&mut io).is_err());
+        io.state.image = closed();
+        io.state.image.put_pixel(30, 350, Luma([0]));
+        assert!(lease.finish_cleanup(&mut io).is_err());
+    }
+    #[test]
+    fn current_tool_only_allows_observed_undo_chrome() {
+        let before = image::load_from_memory(include_bytes!(
+            "../../tests/fixtures/status-style/current-toolbar-before.png"
+        ))
+        .unwrap()
+        .to_luma8();
+        let active = image::load_from_memory(include_bytes!(
+            "../../tests/fixtures/status-style/current-toolbar-active.png"
+        ))
+        .unwrap()
+        .to_luma8();
+        let mut io = current_io();
+        replace(&mut io.state.image, &before, 0, 0);
+        let mut lease = Lease::prepare_current(io.state.clone(), false)
+            .unwrap()
+            .unwrap();
+        lease.acquire(&mut io).unwrap();
+        replace(&mut io.state.image, &active, 0, 0);
+        lease.verify_current(&mut io).unwrap();
+        for (x, y) in [(30, 210), (30, 350), (49, 73), (760, 960), (720, 1000)] {
+            let old = *io.state.image.get_pixel(x, y);
+            io.state.image.put_pixel(x, y, Luma([255 - old.0[0]]));
+            assert!(lease.verify_current(&mut io).is_err(), "changed {x},{y}");
+            io.state.image.put_pixel(x, y, old);
+        }
+    }
+    #[test]
+    fn current_tool_partial_erasure_keeps_original_context_and_final_clear_gate() {
+        let mut io = current_io();
+        let mut lease = Lease::prepare_current(io.state.clone(), false)
+            .unwrap()
+            .unwrap();
+        assert!(lease.verify_current_erasure(&mut io).is_err());
+        lease.acquire(&mut io).unwrap();
+        io.state.image.put_pixel(720, 960, Luma([0]));
+        assert!(lease.verify_current_erasure(&mut io).is_err());
+        lease.prepare_cleanup(&mut io).unwrap();
+        lease.verify_current_erasure(&mut io).unwrap();
+        assert!(lease.finish_cleanup(&mut io).is_err());
+        io.state.image.put_pixel(720, 960, Luma([255]));
+        lease.verify_current_erasure(&mut io).unwrap();
+        lease.finish_cleanup(&mut io).unwrap();
+        io.state.image.put_pixel(685, 960, Luma([0]));
+        assert!(lease.verify_current_erasure(&mut io).is_err());
+        io.state.image = closed();
+        io.state.identity.visit = "other".into();
+        assert!(lease.verify_current_erasure(&mut io).is_err());
+    }
+    #[test]
+    fn current_tool_write_and_release_failures_rearm_then_latch_and_retain_journal() {
+        for failure in ["write failed", "release failed"] {
+            for rearm_fails in [false, true] {
+                let mut io = current_io();
+                let mut lease = Lease::prepare_current(io.state.clone(), false)
+                    .unwrap()
+                    .unwrap();
+                let path = std::env::temp_dir().join(format!(
+                    "rb-current-injection-{}-{failure}-{rearm_fails}.jsonl",
+                    std::process::id()
+                ));
+                io.journal = Some(Journal::create(&path, &lease.recovery).unwrap());
+                lease.acquire(&mut io).unwrap();
+                let mut harness = (WaitCancellation::default(), Vec::new(), io);
+                let error = guarded_injection(
+                    &mut harness,
+                    |h| &mut h.0,
+                    |h| {
+                        h.1.push("write/release");
+                        // Both failures may occur after a partial visible mark.
+                        h.2.state.image.put_pixel(720, 960, Luma([0]));
+                        anyhow::bail!("{failure}")
+                    },
+                    |h| {
+                        h.1.push("rearm");
+                        h.0.record(if rearm_fails {
+                            Err(anyhow::anyhow!("rearm failed"))
+                        } else {
+                            Ok(())
+                        })
+                    },
+                )
+                .unwrap_err();
+                let chain = format!("{error:#}");
+                assert!(chain.contains(failure));
+                assert_eq!(chain.contains("rearm failed"), rearm_fails);
+                assert_eq!(harness.1, ["write/release", "rearm"]);
+                for _ in ["next ink", "automatic erase"] {
+                    assert!(guarded_injection(
+                        &mut harness,
+                        |h| &mut h.0,
+                        |_| panic!("mutation after failed injection"),
+                        |_| panic!("rearm after latched cancellation")
+                    )
+                    .is_err());
+                }
+                assert!(harness.0.check().is_err()); // Native finish checks this before journal removal.
+                assert_eq!(Recovery::read(&path).unwrap().phase, Phase::CurrentInk);
+                assert_eq!(harness.2.state.image.get_pixel(720, 960).0[0], 0);
+                drop(harness);
+                fs::remove_file(path).unwrap(); // Deliberate test-fixture disposal only.
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn completed_external_input_survives_owned_window_and_retains_real_journal() {
+        use crate::device::input_observer::InputObserver;
+        let touch = vec![
+            (3, 47, 0),
+            (3, 57, 7),
+            (3, 53, 500),
+            (3, 54, 800),
+            (0, 0, 0),
+            (3, 57, -1),
+            (0, 0, 0),
+        ];
+        let key = vec![(1, 116, 1), (0, 0, 0), (1, 116, 0), (0, 0, 0)];
+        // Control proves the test is not an unconditional failure seam.
+        let mut quiet = InputObserver::replay_owned(vec![]);
+        quiet.finish_owned_pen().unwrap();
+        assert!(quiet.quiescent());
+        assert!(quiet.poll().unwrap().is_empty());
+        for (name, batches) in [
+            ("touch", vec![(true, touch)]),
+            ("key", vec![(false, key)]),
+            ("late-pen", vec![(false, vec![(3, 24, 0), (0, 0, 0)])]),
+        ] {
+            let mut io = current_io();
+            let mut lease = Lease::prepare_current(io.state.clone(), false)
+                .unwrap()
+                .unwrap();
+            let path = std::env::temp_dir().join(format!(
+                "rb-owned-replay-{}-{name}.jsonl",
+                std::process::id()
+            ));
+            io.journal = Some(Journal::create(&path, &lease.recovery).unwrap());
+            lease.acquire(&mut io).unwrap();
+            let journal_before = fs::read(&path).unwrap();
+            let mut harness = (
+                WaitCancellation::default(),
+                InputObserver::replay_owned(batches),
+                0,
+            );
+            let error = guarded_injection(
+                &mut harness,
+                |h| &mut h.0,
+                |h| {
+                    h.2 += 1;
+                    Ok(())
+                },
+                |h| {
+                    let result = h.1.finish_owned_pen();
+                    h.0.record(result)
+                },
+            )
+            .unwrap_err();
+            assert!(format!("{error:#}").contains("External or delayed input"));
+            assert!(!harness.1.has_owned_pen());
+            assert!(!harness.1.quiescent());
+            assert!(harness.1.poll().is_err()); // Observer loss is sticky even after queues emptied.
+            assert!(guarded_injection(
+                &mut harness,
+                |h| &mut h.0,
+                |_| panic!("later mutation"),
+                |_| panic!("later rearm"),
+            )
+            .is_err());
+            assert_eq!(harness.2, 1);
+            assert!(harness.0.check().is_err()); // Same gate as native journal completion.
+            assert_eq!(fs::read(&path).unwrap(), journal_before);
+            assert_eq!(Recovery::read(&path).unwrap().phase, Phase::CurrentInk);
+            drop(io);
+            fs::remove_file(path).unwrap(); // Deliberate fixture disposal only.
+        }
+    }
 
     fn fixture(bytes: &[u8]) -> GrayImage {
         image::load_from_memory(bytes).unwrap().to_luma8()
@@ -79,6 +558,9 @@ mod tests {
         identity: Identity,
         canvas: Option<GrayImage>,
         fail_cleanup_checkpoint: bool,
+        clock: Duration,
+        observations: usize,
+        change_style_at_observation: Option<usize>,
     }
     impl Model {
         fn new() -> Self {
@@ -104,10 +586,26 @@ mod tests {
                 identity: identity(),
                 canvas: None,
                 fail_cleanup_checkpoint: false,
+                clock: Duration::ZERO,
+                observations: 0,
+                change_style_at_observation: None,
             }
         }
     }
     impl StyleIo for Model {
+        fn monotonic(&self) -> Duration {
+            self.clock
+        }
+        fn pace(&mut self, duration: Duration) {
+            self.clock += duration;
+        }
+        fn begin_wait(&mut self) -> Result<()> {
+            Ok(())
+        }
+        fn check_wait(&mut self) -> Result<()> {
+            Ok(())
+        }
+        fn end_wait(&mut self) {}
         fn checkpoint(&mut self, record: &Recovery) -> Result<()> {
             ensure!(
                 !(self.fail_cleanup_checkpoint && record.phase == Phase::PendingCleanup),
@@ -130,6 +628,11 @@ mod tests {
             Ok(())
         }
         fn observe(&mut self) -> Result<Observation> {
+            self.observations += 1;
+            if self.change_style_at_observation == Some(self.observations) {
+                self.prefs
+                    .insert("LastFinelinerv2Color".into(), "Blue".into());
+            }
             let mut image = self.canvas.clone().unwrap_or_else(closed);
             replace(
                 &mut image,
@@ -266,6 +769,178 @@ mod tests {
         state.image = GrayImage::from_pixel(768, 1024, Luma([255]));
         assert!(Lease::prepare(state, false).unwrap().is_none());
         assert_eq!(io.count, 0);
+    }
+
+    struct DelayedTransition {
+        model: Model,
+        before: Observation,
+        pending_reads: usize,
+        reads: usize,
+        observation_cost: Duration,
+        waiting: bool,
+        guard_calls: usize,
+        cancel_at: Option<usize>,
+        wrong_owner: bool,
+        cancellation: WaitCancellation,
+        fail_open: bool,
+    }
+    impl DelayedTransition {
+        fn new(pending_reads: usize, observation_cost: Duration) -> Self {
+            let mut model = Model::new();
+            let before = model.observe().unwrap();
+            Self {
+                model,
+                before,
+                pending_reads,
+                reads: 0,
+                observation_cost,
+                waiting: false,
+                guard_calls: 0,
+                cancel_at: None,
+                wrong_owner: false,
+                cancellation: WaitCancellation::default(),
+                fail_open: false,
+            }
+        }
+        fn run(&mut self) -> Result<()> {
+            let mut lease = Lease::prepare(self.before.clone(), false)?.unwrap();
+            lease.transition(self, Phase::SelectPrimary, (30, 90), |ui| {
+                ui.slot == "primary" && !ui.menu
+            })
+        }
+    }
+    impl StyleIo for DelayedTransition {
+        fn monotonic(&self) -> Duration {
+            self.model.clock
+        }
+        fn pace(&mut self, duration: Duration) {
+            self.model.clock += duration;
+        }
+        fn begin_wait(&mut self) -> Result<()> {
+            self.cancellation.record(if self.fail_open {
+                Err(anyhow::anyhow!("Observer unavailable"))
+            } else {
+                Ok(())
+            })?;
+            self.waiting = true;
+            Ok(())
+        }
+        fn check_wait(&mut self) -> Result<()> {
+            self.guard_calls += 1;
+            self.cancellation
+                .record(if self.cancel_at == Some(self.guard_calls) {
+                    Err(anyhow::anyhow!("Cancelled input"))
+                } else {
+                    Ok(())
+                })
+        }
+        fn end_wait(&mut self) {
+            self.waiting = false;
+        }
+        fn checkpoint(&mut self, record: &Recovery) -> Result<()> {
+            self.model.checkpoint(record)
+        }
+        fn press(&mut self, point: (u32, u32)) -> Result<()> {
+            self.model.press(point)
+        }
+        fn observe(&mut self) -> Result<Observation> {
+            self.cancellation.check()?;
+            if !self.waiting {
+                return self.model.observe();
+            }
+            self.reads += 1;
+            self.model.clock += self.observation_cost;
+            let mut observed = if self.reads <= self.pending_reads {
+                self.before.clone()
+            } else {
+                self.model.observe()?
+            };
+            if self.wrong_owner {
+                observed.identity.visit = "changed".into();
+            }
+            Ok(observed)
+        }
+    }
+
+    #[test]
+    fn transition_waits_for_fresh_predicate_without_repeating_input() {
+        for delayed in [0, 1, 7] {
+            let mut io = DelayedTransition::new(delayed, Duration::from_millis(1));
+            io.run().unwrap();
+            assert_eq!(io.reads, delayed + 1);
+            assert_eq!(io.model.count, 1);
+            assert_eq!(io.model.checkpoints.len(), 1);
+            assert_eq!(
+                io.model.clock,
+                Duration::from_millis((delayed * 51 + 1) as u64)
+            );
+            assert!(!io.waiting);
+        }
+    }
+
+    #[test]
+    fn transition_timeout_and_late_success_never_retry_input() {
+        for (pending, cost) in [
+            (usize::MAX, Duration::from_millis(500)),
+            (0, Duration::from_secs(5)),
+        ] {
+            let mut io = DelayedTransition::new(pending, cost);
+            assert!(io.run().is_err());
+            assert_eq!(io.model.count, 1);
+            assert_eq!(io.model.checkpoints.len(), 1);
+            assert!(!io.waiting);
+            assert!(io.model.clock >= Duration::from_secs(5));
+            assert!(io.model.clock < Duration::from_millis(5500));
+        }
+    }
+
+    #[test]
+    fn transition_cancellation_and_changed_owner_stop_on_both_sides_of_capture() {
+        for cancel_at in [Some(1), Some(2), None] {
+            let mut io = DelayedTransition::new(0, Duration::from_millis(1));
+            io.cancel_at = cancel_at;
+            io.wrong_owner = cancel_at.is_none();
+            assert!(io.run().is_err());
+            assert_eq!(io.model.count, 1);
+            assert_eq!(io.reads, usize::from(cancel_at != Some(1)));
+            assert!(!io.waiting);
+        }
+    }
+
+    #[test]
+    fn wait_cancellation_blocks_acquisition_rollback_and_retains_real_journal() {
+        for fail_open in [false, true] {
+            let mut io = DelayedTransition::new(0, Duration::from_millis(1));
+            io.fail_open = fail_open;
+            io.cancel_at = Some(2); // cancellation after the first fresh capture
+            let mut lease = Lease::prepare(io.before.clone(), false).unwrap().unwrap();
+            let path = std::env::temp_dir().join(format!(
+                "reader-wait-cancel-{}-{}-{}.json",
+                std::process::id(),
+                fail_open,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            io.model.journal = Some(Journal::create(&path, &lease.recovery).unwrap());
+            assert!(lease.acquire(&mut io).is_err());
+            let after_failure = fs::read(&path).unwrap();
+            assert_eq!(io.model.count, 1);
+            // Even a later good observer result cannot restore ownership.
+            io.fail_open = false;
+            io.cancel_at = None;
+            assert!(io.begin_wait().is_err());
+            assert!(lease.restore(&mut io).is_err());
+            assert!(lease.prepare_cleanup(&mut io).is_err());
+            assert!(lease.finish_cleanup(&mut io).is_err());
+            assert_eq!(io.model.count, 1);
+            assert_eq!(fs::read(&path).unwrap(), after_failure);
+            assert_eq!(Recovery::read(&path).unwrap().sequence, 1);
+            assert!(Journal::create(&path, &lease.recovery).is_err());
+            drop(io.model.journal.take());
+            fs::remove_file(path).unwrap();
+        }
     }
 
     #[test]
@@ -636,6 +1311,42 @@ mod tests {
     }
 
     #[test]
+    fn internal_native_footer_pair_preserves_strict_pre_mutation_refusal() {
+        let before = fixture(include_bytes!(
+            "../../tests/fixtures/status-style/native-footer-before.png"
+        ));
+        let after = fixture(include_bytes!(
+            "../../tests/fixtures/status-style/native-footer-after.png"
+        ));
+        // Actual f38748d internal lease pair. Unlike the REM34 external frames,
+        // this pair differs only in the observed bottom navigation overlay.
+        let changed: Vec<_> = before
+            .enumerate_pixels()
+            .filter_map(|(x, y, p)| (p[0].abs_diff(after.get_pixel(x, y)[0]) > 8).then_some((x, y)))
+            .collect();
+        assert_eq!(changed.len(), 1414);
+        assert_eq!(changed[0], (143, 991));
+        assert!(changed
+            .iter()
+            .all(|(x, y)| (138..=629).contains(x) && (991..=1011).contains(y)));
+        let mut io = Model::new();
+        io.canvas = Some(before);
+        let mut lease = Lease::prepare(io.observe().unwrap(), false)
+            .unwrap()
+            .unwrap();
+        io.canvas = Some(after);
+        assert!(lease
+            .acquire(&mut io)
+            .unwrap_err()
+            .to_string()
+            .contains("(143, 991)"));
+        assert!(lease.restore(&mut io).is_err());
+        assert_eq!(io.count, 0);
+        assert!(io.checkpoints.is_empty());
+        assert_eq!(lease.recovery.phase, Phase::Prepared);
+    }
+
+    #[test]
     fn changed_page_refuses_rollback_input() {
         let mut io = Model::new();
         let mut lease = Lease::prepare(io.observe().unwrap(), false)
@@ -689,8 +1400,34 @@ mod tests {
         let count = io.count;
         lease.restore(&mut io).unwrap();
         assert_eq!(count, io.count);
+        // Previously13. No input occurs between the consolidated property
+        // decisions; transition/cleanup verification still uses fresh captures.
+        assert_eq!(io.observations, 8);
         assert_eq!(io.prefs, original);
         assert!(!io.menu);
+    }
+
+    #[test]
+    fn changed_temporary_style_is_rejected_before_closing_menu() {
+        let mut io = Model::new();
+        for (key, value) in [
+            ("LastActiveTool", "primary"),
+            ("LastPen", "Finelinerv2"),
+            ("LastFinelinerv2Color", "Black"),
+            ("LastFinelinerv2Size", "2"),
+        ] {
+            io.prefs.insert(key.into(), value.into());
+        }
+        let mut lease = Lease::prepare(io.observe().unwrap(), false)
+            .unwrap()
+            .unwrap();
+        // First capture before closing, after the captured original settings.
+        io.change_style_at_observation = Some(6);
+        let error = lease.acquire(&mut io).unwrap_err();
+        assert!(error.to_string().contains("Temporary style not verified"));
+        assert_eq!(io.count, 1); // only opened the menu; no close or drawing
+        assert!(io.menu);
+        assert_eq!(lease.recovery.original_fine, Some((0, 1)));
     }
 
     #[test]
@@ -726,6 +1463,7 @@ mod tests {
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
     Prepared,
+    CurrentInk,
     SelectPrimary,
     OpenPrimary,
     SelectFine,
@@ -804,7 +1542,7 @@ impl Recovery {
     }
     fn validate(&self) -> Result<()> {
         ensure!(
-            self.version == 2 && self.sequence < RECORD_COUNT,
+            matches!(self.version, 2 | 3) && self.sequence < RECORD_COUNT,
             "Unsupported status recovery version/sequence"
         );
         for id in [&self.identity.document, &self.identity.page] {
@@ -860,7 +1598,21 @@ impl Recovery {
             !(self.mutations.color || self.mutations.width) || self.original_fine.is_some(),
             "Missing style rollback target"
         );
+        if self.version == 3 {
+            ensure!(
+                self.mutations == Mutations::default()
+                    && self.original_grid.is_none()
+                    && self.original_fine.is_none()
+                    && matches!(
+                        (self.sequence, self.phase),
+                        (0, Phase::Prepared) | (1, Phase::CurrentInk) | (2, Phase::PendingCleanup)
+                    ),
+                "Invalid current-tool recovery intent"
+            );
+            return Ok(());
+        }
         let intended = match self.phase {
+            Phase::CurrentInk => false,
             Phase::Prepared => self.sequence == 0 && self.mutations == Mutations::default(),
             Phase::SelectPrimary | Phase::RestoreSelectPrimary | Phase::RestoreSlot => {
                 self.mutations.slot
@@ -884,7 +1636,8 @@ impl Recovery {
             "Cleanup checkpoint is terminal"
         );
         ensure!(
-            self.sequence == old.sequence + 1
+            self.version == old.version
+                && self.sequence == old.sequence + 1
                 && self.identity == old.identity
                 && self.advisory == old.advisory
                 && self.original_slot == old.original_slot,
@@ -1151,6 +1904,59 @@ pub struct Controls {
     pub fine: Option<(usize, usize)>,
 }
 
+/// Positive closed-toolbar candidate only; this does not establish the unknown
+/// width or an eraser envelope. Preferences are deliberately not an input.
+fn closed_black_fineliner(image: &GrayImage) -> Option<&'static str> {
+    static REFERENCE: std::sync::LazyLock<GrayImage> = std::sync::LazyLock::new(|| {
+        image::load_from_memory(include_bytes!("fixtures/current-black-fineliner.png"))
+            .expect("checked native Fineliner fixture")
+            .to_luma8()
+    });
+    static SECONDARY: std::sync::LazyLock<GrayImage> = std::sync::LazyLock::new(|| {
+        image::load_from_memory(include_bytes!(
+            "fixtures/current-secondary-black-fineliner.png"
+        ))
+        .expect("checked native secondary Fineliner fixture")
+        .to_luma8()
+    });
+    let ui = controls(image)?;
+    if ui.menu {
+        return None;
+    }
+    let offset = if ui.slot == "secondary" { 62 } else { 0 };
+    let reference = if ui.slot == "secondary" {
+        &*SECONDARY
+    } else {
+        &*REFERENCE
+    };
+    (61..123)
+        .all(|y| {
+            (0..61).all(|x| {
+                image.get_pixel(x, y + offset).0[0].abs_diff(reference.get_pixel(x, y - 61).0[0])
+                    <= 8
+            })
+        })
+        .then_some(ui.slot)
+}
+
+static CURRENT_TOOLBAR: std::sync::LazyLock<GrayImage> = std::sync::LazyLock::new(|| {
+    image::load_from_memory(include_bytes!(
+        "../../tests/fixtures/status-style/current-toolbar-before.png"
+    ))
+    .expect("checked native annotation toolbar fixture")
+    .to_luma8()
+});
+
+/// Pixel-layout eligibility only, not semantic document-type detection. The
+/// extra Text tool on notes pages shifts the undo control outside our guard.
+fn calibrated_annotation_toolbar(image: &GrayImage) -> bool {
+    image.dimensions() == (768, 1024)
+        && (185..380).all(|y| {
+            (0..61)
+                .all(|x| image.get_pixel(x, y)[0].abs_diff(CURRENT_TOOLBAR.get_pixel(x, y)[0]) <= 8)
+        })
+}
+
 pub fn controls(image: &GrayImage) -> Option<Controls> {
     if image.dimensions() != (768, 1024) {
         return None;
@@ -1209,6 +2015,13 @@ pub trait StyleIo {
     fn observe(&mut self) -> Result<Observation>;
     fn checkpoint(&mut self, record: &Recovery) -> Result<()>;
     fn press(&mut self, point: (u32, u32)) -> Result<()>;
+    fn monotonic(&self) -> Duration;
+    fn pace(&mut self, duration: Duration);
+    /// Observe external input throughout the no-input post-press wait. Native
+    /// touch injection shares the physical device, so this starts after release.
+    fn begin_wait(&mut self) -> Result<()>;
+    fn check_wait(&mut self) -> Result<()>;
+    fn end_wait(&mut self);
 }
 
 pub struct Lease {
@@ -1273,6 +2086,21 @@ impl CleanupViewport {
     }
 }
 impl Lease {
+    /// Candidate current-tool path. Callers must separately establish the native
+    /// footprint contract before enabling this in the product. No menu input.
+    pub fn prepare_current(observed: Observation, debug_dump: bool) -> Result<Option<Self>> {
+        if closed_black_fineliner(&observed.image).is_none()
+            || !calibrated_annotation_toolbar(&observed.image)
+        {
+            return Ok(None);
+        }
+        let Some(mut lease) = Self::prepare(observed, debug_dump)? else {
+            return Ok(None);
+        };
+        lease.recovery.version = 3;
+        lease.recovery.validate()?;
+        Ok(Some(lease))
+    }
     pub fn prepare(observed: Observation, debug_dump: bool) -> Result<Option<Self>> {
         let Some(ui) = controls(&observed.image) else {
             return Ok(None);
@@ -1294,7 +2122,10 @@ impl Lease {
         }))
     }
     fn observe(&self, io: &mut impl StyleIo) -> Result<(Observation, Controls)> {
+        let started = self.debug_dump.then(|| io.monotonic());
         let state = io.observe()?;
+        let _pixels_timing = crate::measurement::Span::new("status.active.verify_pixels");
+        let returned = self.debug_dump.then(|| io.monotonic());
         ensure!(
             state.identity == self.recovery.identity,
             "Status page/session changed; restoration stopped"
@@ -1305,9 +2136,15 @@ impl Lease {
         );
         let changed = (0..1024).find_map(|y| {
             (0..768).find_map(|x| {
-                let unchanged = x < 61
-                    || (x < 280 && (61..651).contains(&y))
-                    || (x >= 686 && y >= 922)
+                // Native PDF calibration: only the undo icon enabled here.
+                let unchanged = (x < 61 && self.recovery.version == 2)
+                    || (self.recovery.version == 3
+                        && (20..=40).contains(&x)
+                        && (391..=405).contains(&y))
+                    || (self.recovery.version == 2 && x < 280 && (61..651).contains(&y))
+                    || (x >= 686
+                        && y >= 922
+                        && (self.recovery.version == 2 || (x <= 759 && y <= 995)))
                     || state.image.get_pixel(x, y).0[0]
                         .abs_diff(self.baseline.get_pixel(x, y).0[0])
                         <= 8;
@@ -1327,8 +2164,88 @@ impl Lease {
             }
             anyhow::bail!("Status page image changed at ({x}, {y}); restoration stopped");
         }
-        let ui = controls(&state.image).context("Status toolbar layout changed")?;
+        let Some(ui) = controls(&state.image) else {
+            if let (Some(started), Some(returned)) = (started, returned) {
+                if let Err(error) = self.dump_controls_refusal(&state, started, returned) {
+                    log::warn!("Could not save toolbar refusal diagnostic: {error:#}");
+                }
+            }
+            anyhow::bail!(
+                "Status toolbar layout changed (last intent {:?}, sequence {})",
+                self.recovery.phase,
+                self.recovery.sequence
+            );
+        };
         Ok((state, ui))
+    }
+    fn dump_controls_refusal(
+        &self,
+        state: &Observation,
+        started: Duration,
+        returned: Duration,
+    ) -> Result<()> {
+        let stem = format!(
+            "/tmp/reader-buddy-toolbar-refusal-{}-{}",
+            std::process::id(),
+            self.recovery.sequence
+        );
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut image_file = match options.open(format!("{stem}.png")) {
+            Ok(file) => file,
+            // Preserve the first actual rejected frame for this durable intent.
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        state
+            .image
+            .write_to(&mut image_file, image::ImageFormat::Png)?;
+        let expected = match self.recovery.phase {
+            Phase::SelectPrimary
+            | Phase::RestoreSelectPrimary
+            | Phase::CloseForDrawing
+            | Phase::RestoreClose => serde_json::json!({"slot":"primary","menu":false}),
+            Phase::OpenPrimary | Phase::RestoreOpen => {
+                serde_json::json!({"slot":"primary","menu":true})
+            }
+            Phase::SelectFine => serde_json::json!({"slot":"primary","menu":true,"grid":1}),
+            Phase::SetColor => serde_json::json!({"grid":1,"color_index":0}),
+            Phase::SetWidth => serde_json::json!({"grid":1,"width_index":1}),
+            Phase::RestoreColor => {
+                serde_json::json!({"grid":1,"color_index":self.recovery.original_fine.map(|f| f.0)})
+            }
+            Phase::RestoreWidth => {
+                serde_json::json!({"grid":1,"width_index":self.recovery.original_fine.map(|f| f.1)})
+            }
+            Phase::RestorePrimary => {
+                serde_json::json!({"slot":"primary","menu":true,"grid":self.recovery.original_grid})
+            }
+            Phase::RestoreSlot | Phase::Prepared | Phase::CurrentInk | Phase::PendingCleanup => {
+                serde_json::json!({"slot":self.recovery.original_slot,"menu":false})
+            }
+        };
+        let metadata = serde_json::json!({
+            "meaning": "Actual rejected observation after identity/content checks; last intent is not proof of input completion",
+            "observer_pid": std::process::id(),
+            "clock": "StyleIo monotonic elapsed time; not a wall-clock timestamp",
+            "identity": state.identity,
+            "sequence": self.recovery.sequence,
+            "last_intent": self.recovery.phase,
+            "expected_after_last_intent": expected,
+            "original_grid": self.recovery.original_grid,
+            "original_fine": self.recovery.original_fine,
+            "observation_started_us": started.as_micros(),
+            "observation_returned_us": returned.as_micros(),
+        });
+        options
+            .open(format!("{stem}.json"))?
+            .write_all(&serde_json::to_vec_pretty(&metadata)?)?;
+        Ok(())
     }
     fn transition(
         &mut self,
@@ -1337,7 +2254,17 @@ impl Lease {
         point: (u32, u32),
         expected: impl Fn(&Controls) -> bool,
     ) -> Result<()> {
-        self.observe(io)?;
+        ensure!(
+            self.recovery.version == 2,
+            "Current-tool lease forbids toolbar input"
+        );
+        let (_, before) = self.observe(io)?;
+        if phase == Phase::CloseForDrawing {
+            ensure!(
+                Self::fine_controls(&before)? == (0, 1),
+                "Temporary style not verified before closing"
+            );
+        }
         let m = &mut self.recovery.mutations;
         match phase {
             Phase::SelectPrimary | Phase::RestoreSelectPrimary | Phase::RestoreSlot => {
@@ -1350,7 +2277,7 @@ impl Lease {
             Phase::SelectFine | Phase::RestorePrimary => m.primary = true,
             Phase::SetColor | Phase::RestoreColor => m.color = true,
             Phase::SetWidth | Phase::RestoreWidth => m.width = true,
-            Phase::Prepared | Phase::PendingCleanup => {
+            Phase::Prepared | Phase::CurrentInk | Phase::PendingCleanup => {
                 anyhow::bail!("Phase cannot send toolbar input")
             }
         }
@@ -1362,16 +2289,33 @@ impl Lease {
             return Err(error);
         }
         io.press(point)?;
-        for _ in 0..5 {
-            let (_, ui) = self.observe(io)?;
-            if expected(&ui) {
-                return Ok(());
+        let deadline = io.monotonic().saturating_add(Duration::from_secs(5));
+        io.begin_wait()?;
+        let result = (|| {
+            loop {
+                io.check_wait()?;
+                ensure!(
+                    io.monotonic() < deadline,
+                    "Status controls did not converge before deadline"
+                );
+                let (_, ui) = self.observe(io)?;
+                io.check_wait()?;
+                // A slow capture cannot turn an expired operation into success.
+                ensure!(
+                    io.monotonic() < deadline,
+                    "Status observation exceeded deadline"
+                );
+                if expected(&ui) {
+                    return Ok(());
+                }
+                io.pace(Duration::from_millis(50).min(deadline.saturating_sub(io.monotonic())));
             }
-        }
-        anyhow::bail!("Status controls did not converge after input")
+        })();
+        io.end_wait();
+        result
     }
     fn primary_menu(&mut self, io: &mut impl StyleIo, restoring: bool) -> Result<()> {
-        let (_, ui) = self.observe(io)?;
+        let (_, mut ui) = self.observe(io)?;
         if ui.slot != "primary" {
             ensure!(!ui.menu, "Unexpected secondary menu");
             self.transition(
@@ -1384,8 +2328,10 @@ impl Lease {
                 (30, 90),
                 |u| u.slot == "primary" && !u.menu,
             )?;
+            // The slot changed: never reuse the pre-input observation.
+            ui = self.observe(io)?.1;
         }
-        if !self.observe(io)?.1.menu {
+        if !ui.menu {
             self.transition(
                 io,
                 if restoring {
@@ -1401,6 +2347,9 @@ impl Lease {
     }
     fn fine(&self, io: &mut impl StyleIo) -> Result<(usize, usize)> {
         let (_, ui) = self.observe(io)?;
+        Self::fine_controls(&ui)
+    }
+    fn fine_controls(ui: &Controls) -> Result<(usize, usize)> {
         ensure!(
             ui.slot == "primary" && ui.grid == Some(1),
             "Fineliner menu not selected"
@@ -1421,24 +2370,51 @@ impl Lease {
         Ok(current)
     }
     pub fn acquire(&mut self, io: &mut impl StyleIo) -> Result<()> {
+        if self.recovery.version == 3 {
+            ensure!(
+                self.recovery.phase == Phase::Prepared,
+                "Duplicate current-tool acquisition"
+            );
+            io.begin_wait()?;
+            let result = (|| {
+                io.check_wait()?;
+                self.observe_current(io)?;
+                self.recovery.phase = Phase::CurrentInk;
+                self.recovery.sequence = 1;
+                if let Err(error) = io.checkpoint(&self.recovery) {
+                    self.checkpoint_failed = true;
+                    return Err(error);
+                }
+                self.observe_current(io)?;
+                io.check_wait()
+            })();
+            io.end_wait();
+            return result;
+        }
         self.primary_menu(io, false)?;
-        let (_, ui) = self.observe(io)?;
+        let (_, mut ui) = self.observe(io)?;
         self.recovery.original_grid = Some(ui.grid.context("Missing actual primary tool grid")?);
         if ui.grid != Some(1) {
             self.transition(io, Phase::SelectFine, GRID[1], |u| u.grid == Some(1))?;
+            ui = self.observe(io)?.1;
         }
-        self.recovery.original_fine = Some(self.fine(io)?);
-        if self.known_fine(io)?.0 != 0 {
+        let mut current = Self::fine_controls(&ui)?;
+        self.recovery.original_fine = Some(current);
+        // These are decisions from the same fresh menu, without intervening
+        // device input, callback or checkpoint. A mutation requires a new read.
+        if current.0 != 0 {
             self.transition(io, Phase::SetColor, PALETTE[0], |u| {
                 u.fine.is_some_and(|f| f.0 == 0)
             })?;
+            current = self.known_fine(io)?;
         }
-        if self.known_fine(io)?.1 != 1 {
+        if current.1 != 1 {
             self.transition(io, Phase::SetWidth, WIDTHS[1], |u| {
                 u.fine.is_some_and(|f| f.1 == 1)
             })?;
         }
-        ensure!(self.fine(io)? == (0, 1), "Temporary style not verified");
+        // transition checks the exact temporary style in its fresh pre-input
+        // observation, then verifies the closed primary slot after the press.
         self.transition(io, Phase::CloseForDrawing, (30, 90), |u| {
             !u.menu && u.slot == "primary"
         })
@@ -1550,10 +2526,50 @@ impl Lease {
         );
         Ok(())
     }
+    /// Fresh ownership/content/tool proof; does not mutate or infer saved width.
+    pub fn verify_current(&self, io: &mut impl StyleIo) -> Result<()> {
+        ensure!(
+            self.recovery.phase == Phase::CurrentInk,
+            "No active owned ink intent"
+        );
+        self.observe_current(io)
+    }
+    fn observe_current(&self, io: &mut impl StyleIo) -> Result<()> {
+        ensure!(
+            self.recovery.version == 3 && !self.checkpoint_failed,
+            "No valid current-tool lease"
+        );
+        let (state, ui) = self.observe(io)?;
+        ensure!(
+            !ui.menu
+                && ui.slot == self.recovery.original_slot
+                && closed_black_fineliner(&state.image) == Some(ui.slot)
+                && self.original_controls(&state.image),
+            "Current drawing tool changed"
+        );
+        Ok(())
+    }
     pub fn cleanup_pending(&self) -> bool {
         self.recovery.phase == Phase::PendingCleanup
     }
     pub fn prepare_cleanup(&mut self, io: &mut impl StyleIo) -> Result<()> {
+        if self.recovery.version == 3 {
+            io.begin_wait()?;
+            let result = (|| {
+                io.check_wait()?;
+                ensure!(
+                    self.recovery.phase == Phase::CurrentInk,
+                    "No owned ink intent"
+                );
+                self.prepare_cleanup_inner(io)?;
+                io.check_wait()
+            })();
+            io.end_wait();
+            return result;
+        }
+        self.prepare_cleanup_inner(io)
+    }
+    fn prepare_cleanup_inner(&mut self, io: &mut impl StyleIo) -> Result<()> {
         self.restore(io)?;
         let (state, ui) = self.observe(io)?;
         ensure!(
@@ -1581,6 +2597,28 @@ impl Lease {
         Ok(())
     }
     pub fn finish_cleanup(&self, io: &mut impl StyleIo) -> Result<()> {
+        if self.recovery.version == 3 {
+            io.begin_wait()?;
+            let result = (|| {
+                io.check_wait()?;
+                self.finish_cleanup_inner(io)?;
+                io.check_wait()
+            })();
+            io.end_wait();
+            return result;
+        }
+        self.finish_cleanup_inner(io)
+    }
+    fn finish_cleanup_inner(&self, io: &mut impl StyleIo) -> Result<()> {
+        self.verify_cleanup_observation(io, true)
+    }
+    /// Before each owned rubber path, allow the same qualified redraw caused by
+    /// earlier erasure but preserve the original checkpoint and neighbor ring.
+    pub fn verify_current_erasure(&self, io: &mut impl StyleIo) -> Result<()> {
+        ensure!(self.recovery.version == 3, "No current-tool cleanup lease");
+        self.verify_cleanup_observation(io, false)
+    }
+    fn verify_cleanup_observation(&self, io: &mut impl StyleIo, require_clear: bool) -> Result<()> {
         ensure!(
             self.cleanup_pending() && !self.checkpoint_failed,
             "No valid pending cleanup checkpoint"
@@ -1590,6 +2628,7 @@ impl Lease {
             .as_ref()
             .context("Cleanup was not prepared")?;
         let state = io.observe()?;
+        let _pixels_timing = crate::measurement::Span::new("status.cleanup.verify_pixels");
         ensure!(
             state.identity == self.recovery.identity,
             "Cleanup page/session changed"
@@ -1610,12 +2649,51 @@ impl Lease {
         } else {
             before
         };
+        let unchanged = if !require_clear && self.viewport == CleanupViewport::Blank {
+            // Pending owned paths can still contain ink between eraser strokes.
+            // The blank-page contract stays exact everywhere outside that ROI.
+            (0..1024).all(|y| {
+                (61..768).all(|x| {
+                    ((686..=759).contains(&x) && (922..=995).contains(&y))
+                        || reference.get_pixel(x, y).0[0].abs_diff(state.image.get_pixel(x, y).0[0])
+                            <= 8
+                })
+            })
+        } else {
+            self.viewport.unchanged(reference, &state.image)
+        };
+        ensure!(unchanged, "Cleanup viewport changed");
+        if self.recovery.version == 3 {
+            use crate::workflow::indicator::{BOTTOM, LEFT, RIGHT, TOP};
+            ensure!(
+                (0..1024).all(|y| (0..61).all(|x| {
+                    ((20..=40).contains(&x) && (391..=405).contains(&y))
+                        || before.get_pixel(x, y).0[0].abs_diff(state.image.get_pixel(x, y).0[0])
+                            <= 8
+                })),
+                "Cleanup toolbar changed outside observed undo icon"
+            );
+            // The inherited landmark redraw allowance must never hide changed
+            // neighbors of the erased footprint. Require an additional ring
+            // outside the existing 12-pixel blank clearance to remain exact.
+            ensure!(
+                (TOP - 24..=(BOTTOM + 24).min(1023)).all(|y| {
+                    (LEFT - 24..=(RIGHT + 24).min(767)).all(|x| {
+                        ((LEFT - 12..=RIGHT + 12).contains(&x)
+                            && (TOP - 12..=BOTTOM + 12).contains(&y))
+                            || before.get_pixel(x as u32, y as u32).0[0]
+                                .abs_diff(state.image.get_pixel(x as u32, y as u32).0[0])
+                                <= 8
+                    })
+                }),
+                "Cleanup changed ink beside the reserved footprint"
+            );
+        }
         ensure!(
-            self.viewport.unchanged(reference, &state.image),
-            "Cleanup viewport changed"
-        );
-        ensure!(
-            crate::workflow::indicator::eligible(&image::DynamicImage::ImageLuma8(state.image)),
+            !require_clear
+                || crate::workflow::indicator::eligible(&image::DynamicImage::ImageLuma8(
+                    state.image
+                )),
             "Cleanup corner is not clear"
         );
         Ok(())

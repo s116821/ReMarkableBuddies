@@ -46,16 +46,8 @@ pub struct Workflow {
     frame: Frame,
     debug_dump: bool,
     iteration_count: u32,
-    indicator_eligible: bool,
-    indicator_paths: Vec<indicator::Stroke>,
-    indicator_stage: indicator::Stage,
-    indicator_target: indicator::Stage,
-    indicator_edges: u8,
-    indicator_auxiliary: bool,
-    indicator_deadline: Option<std::time::Duration>,
     failure_attempted: bool,
-    indicator_cleanup_failed: bool,
-    indicator_style_active: bool,
+    input_failed: bool,
     history: history::History,
 }
 
@@ -77,16 +69,8 @@ impl Workflow {
             frame: Frame::default(),
             debug_dump,
             iteration_count: 0,
-            indicator_eligible: false,
-            indicator_paths: Vec::new(),
-            indicator_stage: indicator::Stage::Preparing,
-            indicator_target: indicator::Stage::Preparing,
-            indicator_edges: 0,
-            indicator_auxiliary: false,
-            indicator_deadline: None,
             failure_attempted: false,
-            indicator_cleanup_failed: false,
-            indicator_style_active: false,
+            input_failed: false,
             history: history::History::default(),
         }
     }
@@ -95,152 +79,52 @@ impl Workflow {
         self.device.delay(duration);
     }
 
-    pub fn set_indicator_stage(&mut self, stage: indicator::Stage) {
-        self.indicator_target = stage;
-        self.indicator_auxiliary = false;
-    }
-
-    pub fn finish_indicator_stage(&mut self) -> Result<()> {
-        if !self.indicator_eligible {
-            return Ok(());
-        }
-        while self.indicator_eligible
-            && (self.indicator_stage < self.indicator_target || self.indicator_edges < 3)
-        {
-            self.tick_indicator()?;
-        }
-        Ok(())
-    }
-
-    pub fn auxiliary_indicator(&mut self) -> Result<()> {
-        self.finish_indicator_stage()?;
-        self.indicator_auxiliary = true;
-        Ok(())
-    }
-
-    pub fn tick_indicator(&mut self) -> Result<()> {
-        self.invalidate_history();
+    /// Read-only request checks replace source-page progress drawing.
+    pub fn check_request_progress(&mut self) -> Result<()> {
         anyhow::ensure!(
-            !self.indicator_cleanup_failed,
-            "Status cleanup failed; further activity is stopped"
+            !self.input_failed,
+            "Request input lost; further activity stopped"
         );
-        if !self.indicator_eligible {
-            self.device.status_suppressed();
-            return Ok(());
-        }
-        if !self.begin_indicator_style()? {
-            return Ok(());
-        }
-        if let Some(deadline) = self.indicator_deadline {
-            self.device
-                .delay(deadline.saturating_sub(self.device.monotonic()));
-        }
-        if self.indicator_edges >= 3 && self.indicator_stage < self.indicator_target {
-            self.indicator_stage = self.indicator_stage.next();
-            self.indicator_edges = 0;
-        }
-        let stroke = if self.indicator_auxiliary {
-            indicator::Stroke::Auxiliary(self.indicator_stage)
-        } else {
-            indicator::Stroke::Edge(self.indicator_stage, self.indicator_edges % 3)
-        };
-        // Record ownership before input: even a failed draw can leave ink.
-        if !self.indicator_paths.contains(&stroke) {
-            self.indicator_paths.push(stroke);
-        }
-        let started = self.device.monotonic();
-        if let Err(error) = self.device.status_stroke(stroke) {
-            self.clear_indicator()?;
+        if let Err(error) = self.device.check_request_guard() {
+            self.input_failed = true;
             return Err(error);
         }
-        self.indicator_deadline = Some(indicator::next_deadline(started, self.device.monotonic()));
-        if !self.indicator_auxiliary {
-            self.indicator_edges = if self.indicator_edges < 3 {
-                self.indicator_edges + 1
-            } else {
-                3 + (self.indicator_edges + 1) % 3
-            };
+        Ok(())
+    }
+
+    pub fn finish_request(&mut self) -> Result<()> {
+        self.check_request_progress()?;
+        if let Err(error) = self.device.finish_request_guard() {
+            self.input_failed = true;
+            return Err(error);
         }
         Ok(())
     }
 
-    pub fn clear_indicator(&mut self) -> Result<()> {
-        anyhow::ensure!(
-            !self.indicator_cleanup_failed,
-            "Status cleanup/restoration already failed; no further input permitted"
-        );
-        if !self.indicator_paths.is_empty() {
-            self.invalidate_history();
-            if let Err(error) = self.device.status_clear(&self.indicator_paths) {
-                self.indicator_cleanup_failed = true;
-                return Err(error.context("Clear owned activity paths"));
-            }
-            self.indicator_paths.clear();
-        }
-        self.end_indicator_style()?;
-        self.indicator_deadline = None;
-        self.indicator_edges = 0;
-        self.indicator_stage = self.indicator_target;
-        self.indicator_auxiliary = false;
-        Ok(())
+    pub fn input_failed(&self) -> bool {
+        self.input_failed
     }
 
-    fn begin_indicator_style(&mut self) -> Result<bool> {
-        if self.indicator_style_active {
-            return Ok(true);
-        }
-        match self.device.status_style_begin() {
-            Ok(true) => {
-                self.indicator_style_active = true;
-                Ok(true)
-            }
-            Ok(false) => {
-                self.indicator_eligible = false;
-                self.device.status_suppressed();
-                Ok(false)
-            }
-            Err(error) => {
-                self.indicator_cleanup_failed = true;
-                Err(error)
-            }
-        }
-    }
-
-    fn end_indicator_style(&mut self) -> Result<()> {
-        if self.indicator_style_active {
-            if let Err(error) = self.device.status_style_end() {
-                self.indicator_cleanup_failed = true;
-                return Err(error);
-            }
-            self.indicator_style_active = false;
-        }
-        Ok(())
-    }
-
-    pub fn cleanup_failed(&self) -> bool {
-        self.indicator_cleanup_failed
+    pub(super) fn invalidate_captured_viewport(&mut self) {
+        self.input_failed = true;
     }
 
     pub fn begin_iteration(&mut self) -> Result<()> {
+        self.check_request_progress()?;
         self.invalidate_history();
-        anyhow::ensure!(
-            !self.indicator_cleanup_failed,
-            "Status cleanup failed; restart before another iteration"
-        );
-        self.clear_indicator()?;
-        self.indicator_eligible = false;
-        self.indicator_stage = indicator::Stage::Preparing;
-        self.indicator_target = indicator::Stage::Preparing;
         self.failure_attempted = false;
         Ok(())
     }
 
     fn capture_clean(&mut self) -> Result<()> {
-        self.clear_indicator()?;
-        self.indicator_eligible = false;
-        self.frame = self.device.capture()?;
-        self.indicator_eligible =
-            image::load_from_memory(&self.frame.png).is_ok_and(|image| indicator::eligible(&image));
+        self.check_request_progress()?;
+        match self.device.capture() {
+            Ok(frame) => self.frame = frame,
+            Err(error) => {
+                self.input_failed = true;
+                return Err(error);
+            }
+        }
         Ok(())
     }
 
@@ -256,8 +140,22 @@ impl Workflow {
     pub fn wait_for_trigger(&mut self) -> Result<()> {
         info!("Waiting for trigger...");
         self.device.wait_for_trigger()?;
-        self.device.dismiss_trigger()?;
-        Ok(())
+        self.prepare_reader_trigger()
+    }
+
+    fn prepare_reader_trigger(&mut self) -> Result<()> {
+        {
+            let _release = crate::measurement::Span::new("reader.trigger_release_observed");
+        }
+        anyhow::ensure!(
+            !self.input_failed,
+            "Prior input failure blocks Reader trigger"
+        );
+        let result = self.device.prepare_reader_trigger();
+        if result.is_err() {
+            self.input_failed = true;
+        }
+        result
     }
 
     /// Stay idle without clearing the last Q&A. Cross-device event order is
@@ -286,8 +184,7 @@ impl Workflow {
             }
             if events.contains(&Interaction::Reader) {
                 self.invalidate_history();
-                self.device.dismiss_trigger()?;
-                return Ok(());
+                return self.prepare_reader_trigger();
             }
             if !invalidated {
                 for event in events {
@@ -517,16 +414,14 @@ impl Workflow {
         self.history.state()
     }
 
-    /// Registers only a completely persisted Q&A after all status/header/body
+    /// Registers only a completely persisted Q&A after all header/body
     /// operations. Observation failure does not retroactively fail rendered text.
     pub fn render_qa(&mut self, text: &str) -> Result<()> {
         self.invalidate_history();
-        self.clear_indicator()?;
         let before = self.device.history_snapshot(None).unwrap_or_else(|error| {
             log::warn!("Q&A history preparation unavailable: {error}");
             None
         });
-        self.indicator_eligible = false;
         if let Err(error) = self.device.render_text(text) {
             self.invalidate_history();
             return Err(error);
@@ -590,9 +485,7 @@ impl Workflow {
     /// Note: The caller is responsible for including any desired newlines in the text
     pub fn render_text(&mut self, text: &str) -> Result<()> {
         self.invalidate_history();
-        self.clear_indicator()?;
-        // Typing can change the status region, including on a partial failure.
-        self.indicator_eligible = false;
+        // Typing may partially change the page before a backend failure.
         info!("Rendering text: {}", text);
         self.device.render_text(text)?;
         Ok(())
@@ -601,77 +494,38 @@ impl Workflow {
     /// Switch keyboard to body text mode (should be called once before rendering)
     pub fn set_body_text_mode(&mut self) -> Result<()> {
         self.invalidate_history();
-        self.clear_indicator()?;
         // Even a partial mode change can alter the viewport.
-        self.indicator_eligible = false;
         self.device.body_mode()?;
         Ok(())
     }
 
     /// Navigate to the next page (swipe left)
-    pub fn navigate_to_next_page(&mut self) -> Result<()> {
+    pub fn navigate_to_next_page(
+        &mut self,
+    ) -> Result<crate::device::backend::NavigationCompletion> {
         self.invalidate_history();
-        self.clear_indicator()?;
-        self.indicator_eligible = false;
         self.device
-            .navigate(xochitl_integration::NavigationDirection::Next)?;
-        Ok(())
+            .navigate(xochitl_integration::NavigationDirection::Next)
     }
 
     /// Navigate back to the previous page (swipe right)
-    pub fn navigate_to_previous_page(&mut self) -> Result<()> {
+    pub fn navigate_to_previous_page(
+        &mut self,
+    ) -> Result<crate::device::backend::NavigationCompletion> {
         self.invalidate_history();
-        self.clear_indicator()?;
-        self.indicator_eligible = false;
         self.device
-            .navigate(xochitl_integration::NavigationDirection::Previous)?;
-        Ok(())
+            .navigate(xochitl_integration::NavigationDirection::Previous)
     }
 
-    /// Draw a guarded failure X in the same 50x50 status area.
-    /// Used to indicate that no valid answer page was found
-    pub fn draw_failure(&mut self, failure: indicator::Failure) -> Result<()> {
+    /// Diagnostic classification only. REM40 owns future Buddy-page feedback.
+    pub fn report_failure(&mut self, failure: indicator::Failure) -> Result<()> {
         if self.failure_attempted {
             return Ok(());
         }
         self.failure_attempted = true;
         self.invalidate_history();
-        info!("Drawing failure X in bottom-right corner");
-
-        self.clear_indicator()?;
-        if !self.indicator_eligible || self.indicator_cleanup_failed {
-            self.device.status_suppressed();
-            return Ok(());
-        }
-        if !self.begin_indicator_style()? {
-            return Ok(());
-        }
-        self.indicator_eligible = false;
-        let (x_start, y_start, x_end, y_end) = (
-            indicator::LEFT + indicator::X_INSET,
-            indicator::TOP + indicator::X_INSET,
-            indicator::RIGHT - indicator::X_INSET,
-            indicator::BOTTOM - indicator::X_INSET,
-        );
-
-        // Draw two diagonal lines to form an X (using screen coordinates)
-        // Line 1: top-left to bottom-right
-        let result = (|| -> Result<()> {
-            self.device.line((x_start, y_start), (x_end, y_end))?;
-
-            // Line 2: top-right to bottom-left
-            self.device.line((x_end, y_start), (x_start, y_end))?;
-            let (from, to) = failure.segment();
-            self.device.line(from, to)?;
-            Ok(())
-        })();
-        self.end_indicator_style()?;
-        result?;
-
-        debug!(
-            "Failure X drawn at ({}, {}) to ({}, {})",
-            x_start, y_start, x_end, y_end
-        );
+        info!("Reader outcome: {failure:?}");
+        self.device.record_failure(failure);
         Ok(())
     }
 
@@ -682,7 +536,6 @@ impl Workflow {
     ///
     /// Returns the page type: Blank, ExistingQA, or Invalid
     pub fn is_valid_answer_page(&mut self) -> Result<AnswerPageType> {
-        self.delay(std::time::Duration::from_millis(500));
         self.capture_clean()?;
         let img = match image::load_from_memory(&self.frame.png) {
             Ok(img) => img,

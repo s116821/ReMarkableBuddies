@@ -445,11 +445,8 @@ pub fn run_file(path: &Path) -> Result<Report> {
 }
 
 #[cfg(test)]
-mod indicator_capture_tests {
+mod request_retirement_tests {
     use super::*;
-    use crate::workflow::{indicator, AnswerPageType};
-    use image::Rgba;
-
     fn blank_successor() -> (Shared, Workflow) {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/simulator/scenarios");
         let scenario: Scenario =
@@ -460,110 +457,6 @@ mod indicator_capture_tests {
         let workflow = Workflow::with_device(Box::new(SimDevice(state.clone())), false);
         (state, workflow)
     }
-
-    #[test]
-    fn all_stages_have_three_edges_at_333_ms_with_bounded_retracing_cleanup() {
-        use indicator::{Stage, Stroke};
-        let (state, mut workflow) = blank_successor();
-        workflow.capture_page_data().unwrap();
-        workflow.tick_indicator().unwrap();
-        workflow.set_indicator_stage(Stage::AnswerPending);
-        workflow.tick_indicator().unwrap();
-        workflow.set_indicator_stage(Stage::AnswerReady);
-        workflow.finish_indicator_stage().unwrap();
-        workflow.auxiliary_indicator().unwrap();
-        for _ in 0..30 {
-            workflow.tick_indicator().unwrap();
-        }
-        {
-            let state = state.borrow();
-            let paths: Vec<_> = state
-                .events
-                .iter()
-                .filter(|e| e.action == "status_path")
-                .collect();
-            assert_eq!(paths.len(), 39);
-            assert!(paths.windows(2).all(|p| p[1].at_ms - p[0].at_ms == 333));
-            assert_eq!(paths[0].detail, "Edge(Preparing, 0)");
-            assert_eq!(paths[3].detail, "Edge(AnswerPending, 0)");
-            assert_eq!(paths[6].detail, "Edge(AnswerReady, 0)");
-            assert_eq!(paths[9].detail, "Auxiliary(AnswerReady)");
-            assert_eq!(state.pages[1].indicator_paths.len(), 10);
-            assert_eq!(
-                state.pages[1].indicator_paths.last(),
-                Some(&(Stroke::Auxiliary(Stage::AnswerReady), 30))
-            );
-        }
-        workflow.clear_indicator().unwrap();
-        assert!(state.borrow().pages[1].indicator_paths.is_empty());
-        assert!(state.borrow().pages[1].lines.is_empty());
-    }
-
-    #[test]
-    fn repeated_loop_failures_never_type_diagnostics_or_retry_failed_markers() {
-        use crate::device::interaction::Interaction;
-        use scenario::{Effect, Fault};
-        for failure in ["provider", "capture", "marker"] {
-            let (state, workflow) = blank_successor();
-            state.borrow_mut().idle_events = vec![vec![Interaction::Reader]; 2].into();
-            if failure == "capture" {
-                state.borrow_mut().faults = (1..=2)
-                    .map(|call| Fault {
-                        operation: Operation::Capture,
-                        call,
-                        effect: Effect::Error,
-                    })
-                    .collect();
-            } else if failure == "marker" {
-                state.borrow_mut().faults.push(Fault {
-                    operation: Operation::Line,
-                    call: 1,
-                    effect: Effect::Error,
-                });
-            }
-            let model = ScriptedModel {
-                state: state.clone(),
-                replies: vec![
-                    Reply {
-                        text: None,
-                        error: Some("network unavailable".into())
-                    };
-                    2
-                ]
-                .into(),
-                text_count: 0,
-                images: Vec::new(),
-            };
-            let mut orchestrator = Orchestrator::new(workflow, model);
-            assert!(orchestrator
-                .run_loop()
-                .unwrap_err()
-                .to_string()
-                .contains("no remaining input"));
-            let state = state.borrow();
-            assert_eq!(state.model_calls, if failure == "capture" { 0 } else { 2 });
-            assert!(state
-                .pages
-                .iter()
-                .all(|p| p.text.is_empty() && !p.indicator_visible));
-            assert!(!state
-                .events
-                .iter()
-                .any(|e| matches!(e.action.as_str(), "text" | "body")));
-            if failure == "provider" {
-                // First error mark makes the corner occupied on the next trigger.
-                assert_eq!(state.pages[1].failure_codes(), ["Provider"]);
-                assert_eq!(state.counts.get(&Operation::Line), Some(&3));
-            } else if failure == "capture" {
-                assert!(state.pages[1].lines.is_empty());
-            } else {
-                // One failed first attempt, then one normal marker next iteration.
-                assert_eq!(state.counts.get(&Operation::Line), Some(&4));
-                assert_eq!(state.pages[1].failure_codes(), ["Provider"]);
-            }
-        }
-    }
-
     #[test]
     fn idle_loop_preserves_history_until_reader_and_prioritizes_input_loss() {
         use crate::{device::interaction::Interaction as I, workflow::history::State as H};
@@ -596,144 +489,140 @@ mod indicator_capture_tests {
         }
     }
 
-    #[test]
-    fn classification_clears_owned_paths_before_capture() {
-        let (state, mut workflow) = blank_successor();
-        workflow.capture_page_data().unwrap();
-        workflow.tick_indicator().unwrap();
-        assert!(state.borrow().pages[1].indicator_visible);
-        assert_eq!(
-            workflow.is_valid_answer_page().unwrap(),
-            AnswerPageType::Blank
-        );
-        let state = state.borrow();
-        assert!(!state.pages[1].indicator_visible);
-        assert_eq!(state.counts.get(&Operation::StatusClear), Some(&1));
+    struct ChangingModel {
+        state: Shared,
+        change: usize,
     }
-
-    #[test]
-    fn status_style_restoration_failure_stops_future_input() {
-        use scenario::{Effect, Fault};
-        let (state, mut workflow) = blank_successor();
-        workflow.capture_page_data().unwrap();
-        workflow.tick_indicator().unwrap();
-        state.borrow_mut().faults.push(Fault {
-            operation: Operation::StatusStyleEnd,
-            call: 1,
-            effect: Effect::Error,
-        });
-        assert!(workflow.clear_indicator().is_err());
-        assert!(workflow.cleanup_failed());
-        let attempts = state
-            .borrow()
-            .counts
-            .get(&Operation::StatusStyleEnd)
-            .copied();
-        assert!(workflow.clear_indicator().is_err());
-        assert_eq!(
-            state
-                .borrow()
-                .counts
-                .get(&Operation::StatusStyleEnd)
-                .copied(),
-            attempts
-        );
-        assert!(workflow.begin_iteration().is_err());
-        assert!(!state.borrow().pages[1].indicator_visible);
-        assert!(state.borrow().status_style_active);
-    }
-
-    #[test]
-    fn cleanup_orders_restore_checkpoint_erase_finish_and_stops_at_each_failure() {
-        use scenario::{Effect, Fault};
-        let order = [
-            Operation::StatusStyleRestore,
-            Operation::StatusCleanupCheckpoint,
-            Operation::StatusClear,
-            Operation::StatusStyleEnd,
-        ];
-        for failed in 0..=order.len() {
-            let (state, mut workflow) = blank_successor();
-            workflow.capture_page_data().unwrap();
-            workflow.tick_indicator().unwrap();
-            if failed < order.len() {
-                state.borrow_mut().faults.push(Fault {
-                    operation: order[failed],
-                    call: 1,
-                    effect: Effect::Error,
-                });
+    impl LLMEngine for ChangingModel {
+        fn add_text_content(&mut self, _: &str) {}
+        fn add_image_content(&mut self, _: &str) {}
+        fn clear_content(&mut self) {}
+        fn execute(&mut self) -> Result<String> {
+            let mut state = self.state.borrow_mut();
+            state.model_calls += 1;
+            match self.change {
+                0 => state.active = 0,
+                1 => state.visit += 1,
+                2 => state.session += 1,
+                3 => {
+                    let call = state
+                        .counts
+                        .get(&Operation::RequestGuard)
+                        .copied()
+                        .unwrap_or(0)
+                        + 1;
+                    state.faults.push(scenario::Fault {
+                        operation: Operation::RequestGuard,
+                        call,
+                        effect: scenario::Effect::Error,
+                    });
+                }
+                _ => {}
             }
-            let result = workflow.clear_indicator();
-            assert_eq!(result.is_err(), failed < order.len());
-            let observed: Vec<_> = state
-                .borrow()
-                .events
-                .iter()
-                .filter_map(|event| {
-                    order
-                        .iter()
-                        .position(|op| event.action == format!("{op:?}").to_lowercase())
-                })
-                .collect();
-            let expected: Vec<_> = (0..=failed.min(order.len() - 1)).collect();
-            assert_eq!(observed, expected);
-            assert_eq!(state.borrow().pages[1].indicator_visible, failed <= 2);
-            assert_eq!(state.borrow().status_style_active, failed < order.len());
-            if failed < order.len() {
-                let events = state.borrow().events.len();
-                assert!(workflow.clear_indicator().is_err());
-                assert!(workflow.begin_iteration().is_err());
-                assert_eq!(state.borrow().events.len(), events);
-            }
+            Ok("QUESTION: Why?\nQUESTION_BOX: 20,20,30,30\nSELECTION_CENTER: 300,400\n---\nANSWER: Because.".into())
         }
     }
-
     #[test]
-    fn unsupported_style_suppresses_without_finish_loop_or_strokes() {
-        use scenario::{Effect, Fault};
-        let (state, mut workflow) = blank_successor();
-        workflow.capture_page_data().unwrap();
-        state.borrow_mut().faults.push(Fault {
+    fn lost_source_after_response_never_rebaselines_or_starts_verification() {
+        for change in 0..4 {
+            let (state, workflow) = blank_successor();
+            let model = ChangingModel {
+                state: state.clone(),
+                change,
+            };
+            let mut orchestrator = Orchestrator::new(workflow, model);
+            orchestrator.set_trigger_enabled(false);
+            assert!(orchestrator.run_iteration().is_err());
+            assert!(orchestrator.run_iteration().is_err());
+            let state = state.borrow();
+            assert_eq!(state.model_calls, 1);
+            assert!(state
+                .pages
+                .iter()
+                .all(|p| p.lines.is_empty() && p.text.is_empty() && !p.indicator_visible));
+            assert!(!state.events.iter().any(|e| matches!(
+                e.action.as_str(),
+                "next"
+                    | "previous"
+                    | "text"
+                    | "body"
+                    | "statusstylebegin"
+                    | "statusstroke"
+                    | "statusclear"
+            )));
+        }
+    }
+    #[test]
+    fn legacy_indicator_faults_are_rejected_for_product_scenarios() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/simulator/scenarios");
+        let mut scenario: Scenario =
+            serde_json::from_slice(&std::fs::read(root.join("blank-answer.json")).unwrap())
+                .unwrap();
+        scenario.faults.push(scenario::Fault {
             operation: Operation::StatusStyleBegin,
             call: 1,
-            effect: Effect::Unavailable,
+            effect: scenario::Effect::Error,
         });
-        workflow.set_indicator_stage(indicator::Stage::AnswerReady);
-        workflow.finish_indicator_stage().unwrap();
-        workflow.tick_indicator().unwrap();
-        let state = state.borrow();
-        assert_eq!(state.counts.get(&Operation::StatusStyleBegin), Some(&1));
-        assert!(!state.counts.contains_key(&Operation::StatusStroke));
-        assert!(!state.status_style_active);
+        assert!(scenario
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("retired"));
     }
-
     #[test]
-    fn classification_refreshes_eligibility_from_settled_frame() {
-        let (state, mut workflow) = blank_successor();
-        workflow.capture_page_data().unwrap();
-        state.borrow_mut().pages[1].background.put_pixel(
-            indicator::LEFT as u32,
-            indicator::TOP as u32,
-            Rgba([0, 0, 0, 255]),
-        );
-        assert_eq!(
-            workflow.is_valid_answer_page().unwrap(),
-            AnswerPageType::Blank
-        );
-        workflow.tick_indicator().unwrap();
-        let state = state.borrow();
-        assert!(!state.pages[1].indicator_visible);
-        assert!(!state.counts.contains_key(&Operation::StatusStroke));
-        assert!(!state.counts.contains_key(&Operation::StatusClear));
-        assert!(state
-            .events
-            .iter()
-            .any(|event| event.action == "status_suppressed"));
-        assert_eq!(
-            state.pages[1]
-                .background
-                .get_pixel(indicator::LEFT as u32, indicator::TOP as u32,),
-            &Rgba([0, 0, 0, 255])
-        );
+    fn capture_and_keyboard_boundaries_preserve_original_pin_and_latch_loss() {
+        use crate::device::backend::DeviceBackend;
+        use scenario::{Effect, Fault};
+        for operation in [
+            Operation::Capture,
+            Operation::Body,
+            Operation::Text,
+            Operation::Previous,
+        ] {
+            for effect in [Effect::OwnerChange, Effect::ExternalInput] {
+                let (state, _) = blank_successor();
+                let mut device = SimDevice(state.clone());
+                if operation != Operation::Capture {
+                    device.capture().unwrap();
+                }
+                state.borrow_mut().faults.push(Fault {
+                    operation,
+                    call: 1,
+                    effect,
+                });
+                let result = match operation {
+                    Operation::Capture => device.capture().map(|_| ()),
+                    Operation::Body => device.body_mode(),
+                    Operation::Text => device.render_text("partial output"),
+                    Operation::Previous => device
+                        .navigate(
+                            crate::workflow::xochitl_integration::NavigationDirection::Previous,
+                        )
+                        .map(|_| ()),
+                    _ => unreachable!(),
+                };
+                assert!(result.is_err(), "{operation:?}/{effect:?}");
+                let before = state.borrow().counts.clone();
+                assert!(device.capture().is_err());
+                assert!(device.body_mode().is_err());
+                assert!(device.render_text("must not append").is_err());
+                assert_eq!(state.borrow().counts, before);
+            }
+        }
+        for effect in [Effect::Stale, Effect::Corrupt] {
+            let (state, _) = blank_successor();
+            let mut device = SimDevice(state.clone());
+            device.capture().unwrap();
+            let original = state.borrow().request_pin;
+            state.borrow_mut().faults.push(Fault {
+                operation: Operation::Capture,
+                call: 2,
+                effect,
+            });
+            device.capture().unwrap();
+            assert_eq!(state.borrow().request_pin, original);
+            state.borrow_mut().visit += 1;
+            assert!(device.capture().is_err());
+        }
     }
 }

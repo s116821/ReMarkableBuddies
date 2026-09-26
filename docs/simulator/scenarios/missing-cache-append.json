@@ -5,14 +5,14 @@
     "errors": [],
     "x_count": {
       "1": 0,
-      "0": 1
+      "0": 0
     },
     "unchanged_pages": [],
     "operations": {
       "capture": 11,
       "next": 2,
       "text": 2,
-      "line": 3,
+      "line": 0,
       "body": 1,
       "previous": 1
     },

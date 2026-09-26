@@ -1,6 +1,7 @@
 pub mod analysis;
 pub mod device;
 pub mod llm;
+mod measurement;
 pub mod simulator;
 pub mod util;
 pub mod workflow;
