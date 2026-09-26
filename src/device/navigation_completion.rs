@@ -19,6 +19,8 @@ pub(super) trait NavigationIo {
     fn now(&self) -> Duration;
     fn pace(&mut self, duration: Duration);
     fn begin_guard(&mut self) -> Result<()>;
+    /// Retained capture owner/input, independent of the newly opened observer.
+    fn check_request(&mut self) -> Result<()>;
     fn guard(&mut self) -> Result<()>;
     fn end_guard(&mut self);
 }
@@ -80,9 +82,11 @@ pub(super) fn navigate(
     let _timing = crate::measurement::Span::new("navigation.completion");
     let result = (|| {
         io.begin_guard()?;
+        io.check_request()?;
         io.guard()?;
         let source = io.observe()?;
         io.guard()?;
+        io.check_request()?;
         ensure!(
             source.before == source.after && source.before.index_matches,
             "Source identity/order not settled before navigation"
@@ -109,6 +113,7 @@ pub(super) fn navigate(
         };
         // The gesture shares the physical input device. Observe read-only
         // intervals on either side without pretending to attribute own events.
+        io.check_request()?;
         io.end_guard();
         io.swipe(direction)?;
         let deadline = io.now().saturating_add(Duration::from_secs(5));
@@ -228,6 +233,8 @@ mod tests {
         opens: usize,
         fail_open: Option<usize>,
         guarding: bool,
+        request_checks: usize,
+        request_loss_at: Option<usize>,
     }
     impl Scripted {
         fn new(frames: Vec<Frame>) -> Self {
@@ -243,6 +250,8 @@ mod tests {
                 opens: 0,
                 fail_open: None,
                 guarding: false,
+                request_checks: 0,
+                request_loss_at: None,
             }
         }
     }
@@ -270,6 +279,18 @@ mod tests {
             self.opens += 1;
             ensure!(self.fail_open != Some(self.opens), "Observer open failed");
             self.guarding = true;
+            Ok(())
+        }
+        fn check_request(&mut self) -> Result<()> {
+            assert!(
+                self.guarding,
+                "Successor observer must overlap incoming request"
+            );
+            self.request_checks += 1;
+            ensure!(
+                self.request_loss_at != Some(self.request_checks),
+                "Captured source lost during handoff"
+            );
             Ok(())
         }
         fn guard(&mut self) -> Result<()> {
@@ -433,5 +454,16 @@ mod tests {
         );
         assert_eq!(io.swipes, 1);
         assert!(!io.guarding);
+    }
+    #[test]
+    fn incoming_request_loss_during_observer_or_source_handoff_never_swipes() {
+        for boundary in 1..=3 {
+            let mut io = Scripted::new(vec![frame(false), frame(true), frame(true)]);
+            io.request_loss_at = Some(boundary);
+            assert!(navigate(&mut io, NavigationDirection::Next).is_err());
+            assert_eq!(io.opens, 1);
+            assert_eq!(io.swipes, 0);
+            assert_eq!(io.reads, usize::from(boundary > 1));
+        }
     }
 }

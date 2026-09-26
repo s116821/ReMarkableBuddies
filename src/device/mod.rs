@@ -19,6 +19,8 @@ mod owned_pen_window;
 #[cfg(any(target_os = "linux", test))]
 mod owned_touch_window;
 pub mod pen;
+#[cfg(any(target_os = "linux", test))]
+mod request_guard;
 pub mod screenshot;
 #[cfg(any(target_os = "linux", test))]
 mod status_readiness;

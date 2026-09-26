@@ -246,7 +246,7 @@ fn declined_new_iteration_forgets_the_previous_answer_before_analysis() {
         .insert(1, self::scenario("blank-answer").expect.text[&1].clone());
     scenario.expect.active_page = Some(0);
     scenario.expect.model_calls = Some(3);
-    scenario.expect.x_count.insert(0, 1);
+    scenario.expect.x_count.insert(0, 0);
     scenario.expect.unchanged_pages.clear();
     scenario.expect.operations.clear();
     scenario

@@ -75,27 +75,6 @@ fn unknown_or_failed_trigger_dismissal_stops_before_model_and_ink() {
 }
 
 #[test]
-fn status_admission_error_stops_core_work_instead_of_suppressing_feedback() {
-    use remarkable_reader_buddy::simulator::scenario::{Effect, Fault};
-    let mut scenario = load("blank-answer");
-    scenario.expect = Default::default();
-    scenario.replies.clear();
-    scenario.faults.push(Fault {
-        operation: Operation::StatusStyleBegin,
-        call: 1,
-        effect: Effect::Error,
-    });
-    let run = execute(&scenario, &root()).unwrap();
-    assert_eq!(run.report.errors.len(), 1);
-    assert_eq!(run.report.model_calls, 0);
-    assert!(run.report.pages.iter().all(|page| page.unchanged));
-    assert!(!run.report.trace.iter().any(|event| matches!(
-        event.action.as_str(),
-        "status_suppressed" | "statusstroke" | "statusclear" | "next" | "previous" | "text"
-    )));
-}
-
-#[test]
 fn unsupported_selected_tool_or_layout_preserves_exact_core_answer_without_ink() {
     use remarkable_reader_buddy::simulator::scenario::StatusCapability;
     let baseline = run("blank-answer");
@@ -122,7 +101,7 @@ fn unsupported_selected_tool_or_layout_preserves_exact_core_answer_without_ink()
             .report
             .trace
             .iter()
-            .any(|event| event.action == "status_suppressed"));
+            .all(|event| event.action != "status_suppressed"));
         assert!(!run.report.trace.iter().any(|event| matches!(
             event.action.as_str(),
             "statusstroke" | "statusclear" | "line" | "erase"
@@ -266,47 +245,12 @@ fn invalid_successor_returns_without_attempting_an_activity_mark() {
         1
     );
     assert!(run.report.pages[1].unchanged);
-    assert_eq!(run.report.pages[0].x_count, 1);
-}
-#[test]
-fn indicators_clear_before_navigation_and_successful_output() {
-    let run = run("blank-answer");
-    assert!(run.report.pages.iter().all(|page| !page.indicator_visible));
-    let trace = &run.report.trace;
-    let successor_paths: Vec<_> = trace
-        .iter()
-        .filter(|e| e.page == 1 && e.action == "status_path")
-        .map(|e| e.detail.as_str())
-        .collect();
-    assert_eq!(
-        successor_paths,
-        [
-            "Edge(AnswerReady, 0)",
-            "Edge(AnswerReady, 1)",
-            "Edge(AnswerReady, 2)"
-        ]
-    );
-    let next = trace
-        .iter()
-        .position(|event| event.action == "next")
-        .unwrap();
-    assert!(trace[..next]
-        .iter()
-        .any(|event| event.action == "statusstroke" && event.page == 0));
-    assert!(trace[..next]
-        .iter()
-        .any(|event| event.action == "statusclear" && event.page == 0));
-    assert!(trace[next..]
-        .iter()
-        .any(|event| event.action == "statusstroke" && event.page == 1));
-    assert!(trace[next..]
-        .iter()
-        .any(|event| event.action == "statusclear" && event.page == 1));
+    assert_eq!(run.report.pages[0].x_count, 0);
     assert!(run.report.pages[0].unchanged);
 }
 
 #[test]
-fn preexisting_corner_ink_suppresses_only_status_not_the_answer() {
+fn preexisting_corner_ink_is_preserved_without_status_admission() {
     let mut scenario = load("blank-answer");
     let path = std::env::temp_dir().join(format!("reader-corner-{}.json", std::process::id()));
     std::fs::write(&path, "[[[690,940],[690,960]]]").unwrap();
@@ -320,173 +264,17 @@ fn preexisting_corner_ink_suppresses_only_status_not_the_answer() {
     );
     assert!(run.report.pages[0].unchanged);
     assert!(!run.report.pages[1].text.is_empty());
-    assert!(run
+    assert!(!run
         .report
         .trace
         .iter()
-        .any(|event| event.page == 0 && event.action == "status_suppressed"));
+        .any(|event| event.action == "status_suppressed"));
     assert!(!run
         .report
         .trace
         .iter()
         .any(|event| event.page == 0
             && matches!(event.action.as_str(), "statusstroke" | "statusclear")));
-}
-
-#[test]
-fn failed_indicator_cleanup_prevents_navigation_and_answer() {
-    use remarkable_reader_buddy::simulator::scenario::{Effect, Fault};
-    let mut scenario = load("blank-answer");
-    scenario.faults.push(Fault {
-        operation: Operation::StatusClear,
-        call: 1,
-        effect: Effect::Error,
-    });
-    let run = execute(&scenario, &root()).unwrap();
-    assert!(run
-        .report
-        .errors
-        .iter()
-        .any(|error| error.contains("Clear owned activity paths")));
-    assert!(!run
-        .report
-        .trace
-        .iter()
-        .any(|event| matches!(event.action.as_str(), "next" | "previous" | "text")));
-    assert!(run.report.pages.iter().all(|page| page.text.is_empty()));
-    // The first failed erase can leave owned ink. Never perform a second erase
-    // merely to make the final image look clean after ownership is uncertain.
-    assert!(run.report.pages[0].indicator_visible);
-    assert!(!run.report.pages[0].unchanged);
-    assert_eq!(
-        run.report
-            .trace
-            .iter()
-            .filter(|event| event.action == "statusclear")
-            .count(),
-        1
-    );
-}
-
-#[test]
-fn partial_stroke_error_is_cleaned_without_a_model_request() {
-    use remarkable_reader_buddy::simulator::scenario::{Effect, Fault};
-    let mut scenario = load("blank-answer");
-    scenario.faults.push(Fault {
-        operation: Operation::StatusStroke,
-        call: 1,
-        effect: Effect::Error,
-    });
-    let run = execute(&scenario, &root()).unwrap();
-    assert_eq!(run.report.errors.len(), 1);
-    assert_eq!(run.report.model_calls, 0);
-    assert_eq!(run.report.pages[0].failure_codes, ["Device"]);
-    assert!(run
-        .report
-        .pages
-        .iter()
-        .all(|page| page.text.is_empty() && !page.indicator_visible));
-}
-
-#[test]
-fn verification_progress_errors_are_not_successful_question_declines() {
-    use remarkable_reader_buddy::simulator::scenario::{Effect, Fault};
-    for cleanup_fails in [false, true] {
-        let mut scenario = load("blank-answer");
-        scenario.faults.push(Fault {
-            operation: Operation::StatusStroke,
-            call: 10,
-            effect: Effect::Error,
-        });
-        if cleanup_fails {
-            scenario.faults.push(Fault {
-                operation: Operation::StatusClear,
-                call: 1,
-                effect: Effect::Error,
-            });
-        }
-        let run = execute(&scenario, &root()).unwrap();
-        assert_eq!(run.report.model_calls, 1);
-        assert_eq!(run.report.errors.len(), 1);
-        assert_eq!(
-            run.report.pages[0].failure_codes,
-            if cleanup_fails {
-                vec![]
-            } else {
-                vec!["Device".to_string()]
-            }
-        );
-        assert!(run.report.errors[0].contains("Question verification progress failed"));
-        assert!(!run
-            .report
-            .trace
-            .iter()
-            .any(|event| matches!(event.action.as_str(), "next" | "previous" | "text")));
-        assert!(run.report.pages.iter().all(|page| page.text.is_empty()));
-        assert_eq!(run.report.pages[0].indicator_visible, cleanup_fails);
-        assert!(run.report.pages[1..]
-            .iter()
-            .all(|page| !page.indicator_visible));
-        if cleanup_fails {
-            assert_eq!(
-                run.report
-                    .trace
-                    .iter()
-                    .filter(|event| event.action == "statusclear")
-                    .count(),
-                1
-            );
-        }
-    }
-}
-
-#[test]
-fn successful_input_without_visible_erasure_halts_before_navigation() {
-    use remarkable_reader_buddy::simulator::scenario::{Effect, Fault};
-    let mut scenario = load("blank-answer");
-    // Repeated input can be accepted without changing the native scene.
-    for call in [1, 2] {
-        scenario.faults.push(Fault {
-            operation: Operation::StatusClear,
-            call,
-            effect: Effect::NoMove,
-        });
-    }
-    let run = execute(&scenario, &root()).unwrap();
-    assert_eq!(run.report.errors.len(), 1);
-    assert!(run.report.errors[0].contains("cleanup left marks"));
-    assert!(run.report.pages[0].indicator_visible);
-    assert!(!run.report.trace.iter().any(|e| matches!(
-        e.action.as_str(),
-        "next" | "previous" | "body" | "text" | "line"
-    )));
-}
-
-#[test]
-fn persistent_cleanup_failure_never_erases_a_later_page() {
-    use remarkable_reader_buddy::simulator::scenario::{Effect, Fault, Iteration};
-    let mut scenario = load("blank-answer");
-    for call in [1, 2] {
-        scenario.faults.push(Fault {
-            operation: Operation::StatusClear,
-            call,
-            effect: Effect::Error,
-        });
-    }
-    scenario.iterations.push(Iteration {
-        page: Some(1),
-        wait_for_trigger: false,
-        actions: Vec::new(),
-    });
-    let run = execute(&scenario, &root()).unwrap();
-    assert_eq!(run.report.errors.len(), 2);
-    assert!(run.report.pages[0].indicator_visible);
-    assert!(run.report.pages[1].unchanged);
-    assert!(!run.report.trace.iter().any(|event| event.page == 1
-        && matches!(
-            event.action.as_str(),
-            "statusclear" | "text" | "next" | "previous"
-        )));
 }
 
 #[test]
@@ -510,13 +298,25 @@ fn occupied_or_unknown_corner_failures_do_not_add_or_erase_marks() {
             run.report
                 .trace
                 .iter()
-                .any(|event| event.action == "status_suppressed"),
+                .all(|event| event.action != "status_suppressed"),
             "{name}"
         );
     }
 }
 fn run(name: &str) -> Run {
     let run = execute(&load(name), &root()).unwrap();
+    assert!(
+        !run.report.trace.iter().any(|event| matches!(
+            event.action.as_str(),
+            "line"
+                | "statusstroke"
+                | "statusclear"
+                | "statusstylebegin"
+                | "statusstylerestore"
+                | "statusstyleend"
+        )),
+        "{name}: retired source ink or lease operation"
+    );
     assert!(
         run.report.assertion_failures.is_empty(),
         "{name}: {:?}",
@@ -601,7 +401,7 @@ fn stationary_hold_uses_virtual_deadline() {
         .find(|e| e.action == "hold_triggered")
         .unwrap();
     assert_eq!(trigger.at_ms, 2000);
-    assert_eq!(run.report.virtual_ms, 4500 + 11 * 333); // No dismissal tap delay.
+    assert_eq!(run.report.virtual_ms, 4500); // No source indicator cadence or unconditional dismissal tap.
     assert!(!run
         .report
         .trace
@@ -722,3 +522,25 @@ scenario_test!(
     highlight_with_illegible_question_is_rejected,
     "highlight-illegible"
 );
+
+#[test]
+fn verified_navigation_omits_only_redundant_transition_waits() {
+    for (name, saved_ms) in [("blank-answer", 1300), ("occupied-return", 2100)] {
+        let legacy = run(name);
+        let mut scenario = load(name);
+        scenario.verified_navigation = true;
+        let ready = execute(&scenario, &root()).unwrap();
+        assert!(
+            ready.report.assertion_failures.is_empty(),
+            "{:?}",
+            ready.report.assertion_failures
+        );
+        assert_eq!(legacy.report.virtual_ms - ready.report.virtual_ms, saved_ms);
+        assert_eq!(legacy.report.model_calls, ready.report.model_calls);
+        for (before, after) in legacy.report.pages.iter().zip(&ready.report.pages) {
+            assert_eq!(before.text, after.text);
+            assert_eq!(before.unchanged, after.unchanged);
+            assert_eq!(after.x_count, 0);
+        }
+    }
+}

@@ -23,6 +23,7 @@ pub type Shared = Rc<RefCell<State>>;
 
 #[derive(Clone)]
 pub struct Page {
+    pub diagnostics: Vec<String>,
     pub status_capability: StatusCapability,
     pub trigger_overlay: TriggerOverlay,
     pub background: RgbaImage,
@@ -56,35 +57,9 @@ impl Page {
         }
         image
     }
+    /// Non-visual diagnostics, never inferred from source ink.
     pub fn failure_codes(&self) -> Vec<String> {
-        use crate::workflow::indicator::Failure;
-        let codes = [
-            Failure::Selection,
-            Failure::Transcription,
-            Failure::Provider,
-            Failure::NoSuccessor,
-            Failure::InvalidSuccessor,
-            Failure::Device,
-        ];
-        self.lines
-            .windows(3)
-            .filter_map(|lines| {
-                use crate::workflow::indicator::{BOTTOM, LEFT, RIGHT, TOP, X_INSET};
-                let (l, t, r, b) = (
-                    LEFT + X_INSET,
-                    TOP + X_INSET,
-                    RIGHT - X_INSET,
-                    BOTTOM - X_INSET,
-                );
-                if lines[0] != ((l, t), (r, b)) || lines[1] != ((r, t), (l, b)) {
-                    return None;
-                }
-                codes
-                    .iter()
-                    .find(|code| code.segment() == lines[2])
-                    .map(|code| format!("{code:?}"))
-            })
-            .collect()
+        self.diagnostics.clone()
     }
     pub fn x_count(&self) -> usize {
         self.lines
@@ -113,6 +88,9 @@ pub struct Event {
 }
 
 pub struct State {
+    verified_navigation: bool,
+    pub request_pin: Option<(usize, u64, u64)>,
+    pub request_lost: bool,
     pub status_style_active: bool,
     pub status_style_restored: bool,
     #[cfg(test)]
@@ -211,6 +189,7 @@ impl State {
                 }
             }
             pages.push(Page {
+                diagnostics: Vec::new(),
                 status_capability: spec.status_capability,
                 trigger_overlay: spec.trigger_overlay,
                 background,
@@ -232,6 +211,8 @@ impl State {
             pages,
             initial,
             active: scenario.active_page,
+            request_pin: None,
+            request_lost: false,
             status_style_active: false,
             status_style_restored: false,
             clock: 0,
@@ -246,6 +227,7 @@ impl State {
             last: Frame::default(),
             visit: 0,
             session: 0,
+            verified_navigation: scenario.verified_navigation,
             persisted: None,
             deletion: None,
         })
@@ -441,7 +423,36 @@ impl DeviceBackend for SimDevice {
         Ok(result)
     }
 
+    fn check_request_guard(&mut self) -> Result<()> {
+        let mut state = self.0.borrow_mut();
+        anyhow::ensure!(!state.request_lost, "Request ownership already lost");
+        if let Some(pin) = state.request_pin {
+            let result = (|| {
+                state.operation(Operation::RequestGuard)?;
+                anyhow::ensure!(
+                    pin == (state.active, state.visit, state.session),
+                    "Request page/session changed"
+                );
+                Ok(())
+            })();
+            state.request_lost |= result.is_err();
+            return result;
+        }
+        Ok(())
+    }
+    fn finish_request_guard(&mut self) -> Result<()> {
+        self.check_request_guard()?;
+        self.0.borrow_mut().request_pin = None;
+        Ok(())
+    }
+    fn record_failure(&mut self, failure: crate::workflow::indicator::Failure) {
+        let mut state = self.0.borrow_mut();
+        let page = state.active;
+        state.pages[page].diagnostics.push(format!("{failure:?}"));
+        state.event("failure_diagnostic", format!("{failure:?}"));
+    }
     fn capture(&mut self) -> Result<Frame> {
+        self.check_request_guard()?;
         let mut state = self.0.borrow_mut();
         let effect = state.operation(Operation::Capture)?;
         if effect == Some(Effect::Stale) {
@@ -477,6 +488,7 @@ impl DeviceBackend for SimDevice {
             png: png(&image)?,
             details,
         };
+        state.request_pin = Some((state.active, state.visit, state.session));
         Ok(state.last.clone())
     }
     fn detail_images(&self) -> Result<Vec<String>> {
@@ -541,6 +553,7 @@ impl DeviceBackend for SimDevice {
         &mut self,
         direction: NavigationDirection,
     ) -> Result<crate::device::backend::NavigationCompletion> {
+        self.finish_request_guard()?;
         let mut state = self.0.borrow_mut();
         let operation = match direction {
             NavigationDirection::Next => Operation::Next,
@@ -559,11 +572,14 @@ impl DeviceBackend for SimDevice {
         state.event("navigation_settled", "");
         Ok(if state.active == before {
             crate::device::backend::NavigationCompletion::NoMovement
+        } else if state.verified_navigation {
+            crate::device::backend::NavigationCompletion::Settled
         } else {
             crate::device::backend::NavigationCompletion::Legacy
         })
     }
     fn render_text(&mut self, text: &str) -> Result<()> {
+        self.check_request_guard()?;
         let mut state = self.0.borrow_mut();
         state.operation(Operation::Text)?;
         let page = state.active;
@@ -571,6 +587,7 @@ impl DeviceBackend for SimDevice {
         Ok(())
     }
     fn body_mode(&mut self) -> Result<()> {
+        self.check_request_guard()?;
         self.0.borrow_mut().operation(Operation::Body)?;
         Ok(())
     }
@@ -592,6 +609,7 @@ impl DeviceBackend for SimDevice {
             }
         }
         state.pages[page] = Page {
+            diagnostics: state.pages[page].diagnostics.clone(),
             status_capability: state.pages[page].status_capability,
             trigger_overlay: state.pages[page].trigger_overlay,
             background: image,

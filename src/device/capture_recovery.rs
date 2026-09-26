@@ -15,6 +15,10 @@ pub(super) trait ObservationIo {
 }
 
 pub(super) fn observe<I: ObservationIo>(io: &mut I) -> Result<I::Frame> {
+    observe_until(io, Duration::MAX)
+}
+
+pub(super) fn observe_until<I: ObservationIo>(io: &mut I, deadline: Duration) -> Result<I::Frame> {
     let started = io.now();
     io.check_input()?;
     let owner = io.owner()?;
@@ -26,8 +30,8 @@ pub(super) fn observe<I: ObservationIo>(io: &mut I) -> Result<I::Frame> {
         );
         io.check_input()?;
         anyhow::ensure!(
-            io.now().saturating_sub(started) < BUDGET,
-            "Status capture exceeded 500ms observation budget"
+            io.now().saturating_sub(started) < BUDGET && io.now() < deadline,
+            "Capture exceeded observation budget or operation deadline"
         );
         Ok(())
     };
@@ -187,5 +191,22 @@ mod tests {
             assert!(observe(&mut changed).is_err());
             assert_eq!(changed.reads, 2);
         }
+    }
+    #[test]
+    fn outer_deadline_blocks_retry_and_rejects_late_success() {
+        let mut expired = io(vec![]);
+        assert!(observe_until(&mut expired, Duration::ZERO).is_err());
+        assert_eq!(expired.reads, 0);
+        let mut no_retry = io(vec![Err(vanished())]);
+        assert!(observe_until(&mut no_retry, Duration::from_millis(120)).is_err());
+        assert_eq!(no_retry.reads, 1);
+        let mut late = io(vec![Err(vanished()), Ok(2)]);
+        assert!(observe_until(&mut late, Duration::from_millis(240)).is_err());
+        assert_eq!(late.reads, 2);
+        let mut timely = io(vec![Err(vanished()), Ok(2)]);
+        assert_eq!(
+            observe_until(&mut timely, Duration::from_millis(241)).unwrap(),
+            2
+        );
     }
 }

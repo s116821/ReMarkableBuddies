@@ -47,8 +47,10 @@ impl SourceNavigation for WorkflowNavigation<'_> {
     }
 
     fn previous_page(&mut self) -> Result<()> {
-        self.workflow.navigate_to_previous_page()?;
-        self.workflow.delay(std::time::Duration::from_millis(800));
+        let completion = self.workflow.navigate_to_previous_page()?;
+        if completion == crate::device::backend::NavigationCompletion::Legacy {
+            self.workflow.delay(std::time::Duration::from_millis(800));
+        }
         Ok(())
     }
 }

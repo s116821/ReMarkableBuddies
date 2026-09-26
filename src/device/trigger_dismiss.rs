@@ -87,7 +87,7 @@ fn panel(image: &GrayImage) -> Panel {
 }
 
 pub(super) trait DismissIo {
-    fn observe(&mut self) -> Result<Snapshot>;
+    fn observe(&mut self, deadline: Duration) -> Result<Snapshot>;
     fn guard(&mut self) -> Result<()>;
     /// Adapter must release and finish the owned touch window even after write
     /// failure, preserving original errors. Policy never invokes this twice.
@@ -101,7 +101,7 @@ pub(super) fn dismiss(io: &mut impl DismissIo, cancelled: &mut WaitCancellation)
     let result = (|| {
         let deadline = io.now().saturating_add(Duration::from_secs(5));
         io.guard()?;
-        let initial = io.observe()?;
+        let initial = io.observe(deadline)?;
         io.guard()?;
         ensure!(io.now() < deadline, "Trigger observation exceeded deadline");
         match panel(&initial.image) {
@@ -118,7 +118,7 @@ pub(super) fn dismiss(io: &mut impl DismissIo, cancelled: &mut WaitCancellation)
                 "Trigger panel did not dismiss before deadline"
             );
             io.guard()?;
-            let current = io.observe()?;
+            let current = io.observe(deadline)?;
             io.guard()?;
             ensure!(io.now() < deadline, "Late trigger dismissal observation");
             ensure!(
@@ -188,7 +188,7 @@ mod tests {
         fail_tap: bool,
     }
     impl DismissIo for Io {
-        fn observe(&mut self) -> Result<Snapshot> {
+        fn observe(&mut self, _deadline: Duration) -> Result<Snapshot> {
             self.clock += self.cost;
             if let Some(next) = self.observations.pop_front() {
                 self.last = next;
@@ -389,6 +389,108 @@ mod tests {
             assert!(dismiss(&mut state, &mut cancelled).is_err());
             assert_eq!(state.taps, taps);
             assert!(taps <= 1);
+        }
+    }
+    struct RecoveringIo {
+        base: Io,
+        captures: usize,
+        fail_at: usize,
+        refusal: u8,
+        recovery_deadline: Duration,
+    }
+    struct Recovery<'a>(&'a mut RecoveringIo);
+    impl super::super::capture_recovery::ObservationIo for Recovery<'_> {
+        type Owner = (Identity, Option<Vec<u8>>);
+        type Frame = Snapshot;
+        fn now(&self) -> Duration {
+            self.0.base.clock
+        }
+        fn owner(&mut self) -> Result<Self::Owner> {
+            let mut pinned = snapshot(true);
+            if self.0.captures >= self.0.fail_at {
+                match self.0.refusal {
+                    1 => pinned.identity.page = "changed".into(),
+                    2 => pinned.identity.visit = "changed".into(),
+                    3 => pinned.identity.session = "changed".into(),
+                    4 => pinned.native = Some(vec![9]),
+                    5 => pinned.native = None,
+                    _ => {}
+                }
+            }
+            Ok((pinned.identity, pinned.native))
+        }
+        fn check_input(&mut self) -> Result<()> {
+            ensure!(
+                !(self.0.refusal == 6 && self.0.captures >= self.0.fail_at),
+                "external input"
+            );
+            self.0.base.guard()
+        }
+        fn capture(&mut self) -> Result<Snapshot> {
+            self.0.captures += 1;
+            if self.0.captures == self.0.fail_at {
+                if self.0.refusal == 7 {
+                    anyhow::bail!("untyped capture error");
+                }
+                self.0.base.clock += if self.0.refusal == 10 {
+                    Duration::from_secs(5)
+                } else {
+                    Duration::from_millis(120)
+                };
+                return Err(anyhow::Error::from(std::io::Error::from_raw_os_error(5))
+                    .context(super::super::screenshot::VanishedDiscoveryCandidate));
+            }
+            if self.0.captures > self.0.fail_at {
+                if self.0.refusal == 8 {
+                    anyhow::bail!("persistent capture error");
+                }
+                if self.0.refusal == 9 {
+                    self.0.base.clock += Duration::from_millis(500);
+                }
+            }
+            self.0.base.observe(Duration::MAX)
+        }
+    }
+    impl DismissIo for RecoveringIo {
+        fn observe(&mut self, deadline: Duration) -> Result<Snapshot> {
+            self.recovery_deadline = deadline;
+            super::super::capture_recovery::observe_until(&mut Recovery(self), deadline)
+        }
+        fn guard(&mut self) -> Result<()> {
+            self.base.guard()
+        }
+        fn tap_once(&mut self, point: (i32, i32)) -> Result<()> {
+            self.base.tap_once(point)
+        }
+        fn now(&self) -> Duration {
+            self.base.clock
+        }
+        fn pace(&mut self, duration: Duration) {
+            self.base.pace(duration)
+        }
+    }
+    #[test]
+    fn post_tap_typed_capture_recovery_never_repeats_input() {
+        for refusal in 0..=10 {
+            let mut state = RecoveringIo {
+                base: io(vec![snapshot(true), snapshot(false)]),
+                captures: 0,
+                fail_at: 2,
+                refusal,
+                recovery_deadline: Duration::ZERO,
+            };
+            let mut cancellation = WaitCancellation::default();
+            let result = dismiss(&mut state, &mut cancellation);
+            assert_eq!(result.is_ok(), refusal == 0);
+            assert_eq!(state.base.taps, 1);
+            let expected_captures = if matches!(refusal, 0 | 8 | 9) { 3 } else { 2 };
+            assert_eq!(state.captures, expected_captures);
+            assert_eq!(state.recovery_deadline, Duration::from_secs(5));
+            if refusal > 0 {
+                assert!(dismiss(&mut state, &mut cancellation).is_err());
+                assert_eq!(state.base.taps, 1);
+                assert_eq!(state.captures, expected_captures);
+            }
         }
     }
 }

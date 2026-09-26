@@ -13,6 +13,9 @@ pub struct Scenario {
     pub pages: Vec<PageSpec>,
     #[serde(default)]
     pub active_page: usize,
+    /// Model a backend readiness result; not proof of native rendering.
+    #[serde(default)]
+    pub verified_navigation: bool,
     #[serde(default = "corner")]
     pub trigger_corner: String,
     pub iterations: Vec<Iteration>,
@@ -135,6 +138,7 @@ pub struct Reply {
 #[serde(rename_all = "snake_case")]
 pub enum Operation {
     Capture,
+    RequestGuard,
     Next,
     Previous,
     Text,
@@ -299,6 +303,18 @@ impl Scenario {
         }
         let mut faults = std::collections::BTreeSet::new();
         for fault in &self.faults {
+            ensure!(
+                !matches!(
+                    fault.operation,
+                    Operation::StatusStroke
+                        | Operation::StatusClear
+                        | Operation::StatusStyleBegin
+                        | Operation::StatusStyleRestore
+                        | Operation::StatusCleanupCheckpoint
+                        | Operation::StatusStyleEnd
+                ),
+                "Legacy source indicator faults are retired from normal scenarios"
+            );
             ensure!(
                 fault.call > 0 && faults.insert((fault.operation, fault.call)),
                 "Invalid or duplicate fault call"

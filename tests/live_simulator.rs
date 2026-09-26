@@ -123,7 +123,7 @@ fn server_with_delay(
 }
 
 #[test]
-fn delayed_success_refreshes_staged_paths_and_cleans_both_pages() {
+fn delayed_success_checks_source_ownership_without_feedback_ink() {
     let path = directory();
     let (endpoint, handle) = server_with_delay(replies(), false, Duration::from_millis(1100));
     let mut value = fixture();
@@ -141,7 +141,7 @@ fn delayed_success_refreshes_staged_paths_and_cleans_both_pages() {
         .as_array()
         .unwrap()
         .iter()
-        .filter(|event| event["page"] == 0 && event["action"] == "statusstroke")
+        .filter(|event| event["page"] == 0 && event["action"] == "requestguard")
         .count();
     assert!(source_ticks >= 4);
     assert!(report["pages"]
@@ -287,7 +287,14 @@ fn live_timeout_is_bounded_and_retains_failure_evidence() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|e| e["action"] == "statusclear"));
+        .any(|e| e["action"] == "failure_diagnostic"));
+    assert_eq!(report["pages"][0]["unchanged"], true);
+    assert!(
+        !report["trace"].as_array().unwrap().iter().any(|e| matches!(
+            e["action"].as_str(),
+            Some("statusclear" | "statusstroke" | "line")
+        ))
+    );
     assert!(String::from_utf8_lossy(&output.stderr)
         .to_lowercase()
         .contains("timeout"));
