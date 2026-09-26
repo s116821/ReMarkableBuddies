@@ -31,17 +31,23 @@ to a task and acceptance check. Re-read new comments before review and closure.
 Reviewers must check this coverage as well as code/spec agreement. Track confirmed
 omissions as actionable work; documenting an omission does not complete it.
 
-Use the repo-local skills in `.codex/skills/openspec-*` when available for planned work:
-propose the full change (proposal, design, delta specs, tasks), apply, verify,
-sync canonical specs, and archive in the same implementation PR. See
-[the workflow guide](openspec/README.md). Do not split feature planning into a
-prerequisite planning-only PR. REM-27 is the deliberate baseline-only exception.
-The equivalent public/manual workflow is to create proposal.md, design.md, delta
-specs and tasks.md under openspec/changes, implement and verify the requirements,
-sync openspec/specs, then move the completed change into changes/archive in the
-same PR. The OpenSpec CLI can validate these files but Codex is not required.
-Current available issue scope and source behavior outrank historical plans. Record actual
-test evidence in PR comments, and complete the issue's acceptance gates before merge.
+All OpenSpec artifacts and workflow assets live exclusively in the public
+[RemarkableBuddiesDocs repository](https://github.com/s116821/RemarkableBuddiesDocs).
+Read its AGENTS.md and [central workflow](https://github.com/s116821/RemarkableBuddiesDocs/blob/main/openspec/README.md).
+Create proposal/design/tasks/deltas there before implementing here. Run OpenSpec
+commands from the Docs checkout, and Cargo/simulator commands from this checkout.
+Use the central skills or the equivalent public manual file workflow; never
+generate or copy a component-local OpenSpec tree or workflow skill.
+
+Link the Docs and Rust PRs, change ID, exact spec/code revisions, shared acceptance
+evidence and coordinated merge order. Verify implementation and requirements,
+sync canonical specs and archive only completed work in the linked delivery.
+Do not split a feature into a completed prerequisite planning-only PR or archive
+unfinished work. Legacy references to `openspec/...` in implementation guides
+now resolve in Docs, including release-versioning and archived release changes.
+Current task requirements and source behavior outrank historical plans.
+REM-35 alone owns the integrated 1.0 gate; Docs changes must not trigger app tags
+or builds. Read [public contribution routing](https://github.com/s116821/RemarkableBuddiesDocs/blob/main/CONTRIBUTING.md).
 
 ## Simulator learning
 
@@ -68,7 +74,7 @@ cannot be faithfully simulated. Unrelated changes need no artificial simulation.
 For tablet compatibility, integration, or end-to-end Reader Buddy testing, when
 full unattended SSH is available to an authorized development tablet the user is
 not actively using, use
-[reader-buddy-testing](.agents/skills/reader-buddy-testing/SKILL.md). It covers
+[reader-buddy-testing](https://github.com/s116821/RemarkableBuddiesDocs/blob/main/.agents/skills/reader-buddy-testing/SKILL.md). It covers
 device coordination, realistic test inputs and evidence. Unrelated source or
 documentation edits do not require the tablet workflow. The unattended workflow
 does not apply to actively used/personal tablets or without full unattended SSH.
@@ -80,7 +86,7 @@ steps where feasible rather than require a particular assistant or connector.
 
 ## Local development testing
 
-Use [.agents/skills/reader-simulator-testing/SKILL.md](.agents/skills/reader-simulator-testing/SKILL.md)
+Use [.agents/skills/reader-simulator-testing/SKILL.md](https://github.com/s116821/RemarkableBuddiesDocs/blob/main/.agents/skills/reader-simulator-testing/SKILL.md)
 for local scenario selection, deterministic regressions and authorized live-model
 checks. It is also a manual checklist. Offline development requires no private
 board, assistant integration, API credential or tablet. Model-facing changes still

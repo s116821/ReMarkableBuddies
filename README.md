@@ -1,5 +1,14 @@
 # ReMarkableBuddies
 
+The [public ecosystem hub](https://github.com/s116821/RemarkableBuddiesDocs) owns
+all OpenSpec specs, active changes, archives, config and workflow skills.
+Start with its [contributor guide](https://github.com/s116821/RemarkableBuddiesDocs/blob/main/CONTRIBUTING.md)
+and [central specs](https://github.com/s116821/RemarkableBuddiesDocs/tree/main/openspec/specs).
+Legacy `openspec/...` references in component guides resolve there after migration.
+The [Angular browser/Electron companion](https://github.com/s116821/RemarkableBuddiesManager)
+has independent releases; this repository remains the unified Reader/Writer Rust app.
+
+
 This repository currently contains Reader Buddy. The Rust package, `reader-buddy`
 executable, service, and release archive names retain their existing names.
 
