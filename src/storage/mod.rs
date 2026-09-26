@@ -186,6 +186,17 @@ impl Store {
             files::json::<u32>(&store.generation(generation).join("format.json"), 64)? == FORMAT,
             "unsupported generation format"
         );
+        for directory in [
+            store.paths.data.clone(),
+            store.paths.credentials.clone(),
+            store.paths.data.join("sync"),
+            store.paths.data.join("sync/incoming"),
+            store.generation(generation),
+            store.generation(generation).join("objects"),
+            store.generation(generation).join("commits"),
+        ] {
+            files::cleanup_staging(&directory)?;
+        }
         {
             let mut inner = store
                 .inner

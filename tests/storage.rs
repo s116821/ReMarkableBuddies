@@ -248,6 +248,16 @@ fn refuse_unowned_overlapping_and_symlink_roots() {
 
 #[test]
 fn process_lease_child() {
+    if let Some(root) = std::env::var_os("BUDDY_CRASH_FIXTURE") {
+        let fixture = Fixture {
+            root: PathBuf::from(root),
+        };
+        let _store = fixture.open();
+        fs::write(fixture.root.join("ready"), b"locked").unwrap();
+        loop {
+            std::thread::park();
+        }
+    }
     if let Some(root) = std::env::var_os("BUDDY_LOCK_FIXTURE") {
         let root = PathBuf::from(root);
         let paths = StorePaths {
@@ -257,6 +267,37 @@ fn process_lease_child() {
         };
         assert!(Store::open(paths).is_err());
     }
+}
+
+#[test]
+fn killed_owner_releases_os_lease_and_stale_status_does_not_authorize_a_writer() {
+    use std::time::{Duration, Instant};
+    let fixture = Fixture::new();
+    drop(fixture.open());
+    fs::write(
+        fixture.paths().data.join("status.json"),
+        b"{\"pid\":0,\"running\":false}",
+    )
+    .unwrap();
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "process_lease_child"])
+        .env("BUDDY_CRASH_FIXTURE", &fixture.root)
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !fixture.root.join("ready").exists() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("child did not acquire lease");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let blocked = Store::open(fixture.paths()).is_err();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(blocked);
+    let _reopened = fixture.open();
 }
 #[test]
 fn exclusive_lease_blocks_a_real_second_process_and_releases_on_drop() {

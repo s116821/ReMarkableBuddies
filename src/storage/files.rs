@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
-    path::{Component, Path},
+    path::{Component, Path, PathBuf},
 };
 
 pub enum Source {
@@ -95,37 +95,26 @@ pub fn copy_verified(path: &Path, mut reader: impl Read, reference: &ObjectRef) 
         let _ = Source::open(path, reference)?;
         return Ok(());
     }
-    let parent = path.parent().context("missing object parent")?;
-    let tmp = parent.join(format!(".stage-{}", Uuid::new_v4()));
-    let mut options = OpenOptions::new();
-    options.create_new(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(&tmp)?;
-    let mut total = 0_u64;
-    let mut hash = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let n = reader.read(&mut buffer)?;
-        if n == 0 {
-            break;
+    atomic_with(path, |file| {
+        let mut total = 0_u64;
+        let mut hash = Sha256::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let n = reader.read(&mut buffer)?;
+            if n == 0 {
+                break;
+            }
+            total += n as u64;
+            ensure!(total <= reference.bytes, "stream exceeds declared size");
+            hash.update(&buffer[..n]);
+            file.write_all(&buffer[..n])?;
         }
-        total += n as u64;
-        ensure!(total <= reference.bytes, "stream exceeds declared size");
-        hash.update(&buffer[..n]);
-        file.write_all(&buffer[..n])?;
-    }
-    ensure!(
-        total == reference.bytes && format!("{:x}", hash.finalize()) == reference.sha256,
-        "stream integrity failure"
-    );
-    file.sync_all()?;
-    drop(file);
-    fs::rename(tmp, path)?;
-    sync_dir(parent)
+        ensure!(
+            total == reference.bytes && format!("{:x}", hash.finalize()) == reference.sha256,
+            "stream integrity failure"
+        );
+        Ok(())
+    })
 }
 
 pub fn safe_path(path: &Path) -> Result<()> {
@@ -225,6 +214,20 @@ pub fn json<T: DeserializeOwned>(path: &Path, limit: u64) -> Result<T> {
         .map_err(|_| anyhow::anyhow!("invalid or unsupported stored JSON"))
 }
 pub fn atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    atomic_with(path, |file| Ok(file.write_all(bytes)?))
+}
+struct Temporary {
+    path: PathBuf,
+    file: Option<File>,
+}
+impl Drop for Temporary {
+    fn drop(&mut self) {
+        drop(self.file.take());
+        // Only this attempt's create_new file; never remove the destination.
+        let _ = fs::remove_file(&self.path);
+    }
+}
+fn atomic_with(path: &Path, write: impl FnOnce(&mut File) -> Result<()>) -> Result<()> {
     safe_path(path)?;
     let parent = path.parent().context("missing owned parent")?;
     let tmp = parent.join(format!(".stage-{}", Uuid::new_v4()));
@@ -235,12 +238,39 @@ pub fn atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let mut file = options.open(&tmp)?;
-    file.write_all(bytes)?;
+    let file = options.open(&tmp)?;
+    let mut temporary = Temporary {
+        path: tmp,
+        file: Some(file),
+    };
+    let file = temporary.file.as_mut().unwrap();
+    write(file)?;
     file.sync_all()?;
-    drop(file);
-    fs::rename(&tmp, path).context("atomic publication failed")?;
+    drop(temporary.file.take());
+    fs::rename(&temporary.path, path).context("atomic publication failed")?;
     sync_dir(parent)
+}
+
+/// Caller holds the store lease and has validated this directory's ownership.
+/// Interrupted staging has no commit authority; retain all other files.
+pub(crate) fn cleanup_staging(directory: &Path) -> Result<()> {
+    safe_path(directory)?;
+    if !directory.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(id) = name.to_str().and_then(|n| n.strip_prefix(".stage-")) else {
+            continue;
+        };
+        if Uuid::parse_str(id).is_ok() {
+            safe_path(&entry.path())?;
+            ensure!(entry.file_type()?.is_file(), "invalid staging entry");
+            fs::remove_file(entry.path())?;
+        }
+    }
+    sync_dir(directory)
 }
 pub fn atomic_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     atomic(path, &serde_json::to_vec(value)?)
@@ -278,6 +308,39 @@ pub fn object(path: &Path, expected: &str, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn failed_writes_clean_only_attempt_staging_and_keep_published_bytes() {
+        let root = std::env::temp_dir().join(format!("buddy-stage-cleanup-{}", Uuid::new_v4()));
+        directory(&root).unwrap();
+        let target = root.join("published");
+        atomic(&target, b"prior").unwrap();
+        for _ in 0..4 {
+            let error = atomic_with(&target, |file| {
+                file.write_all(b"partial")?;
+                Err(std::io::Error::from(std::io::ErrorKind::StorageFull).into())
+            })
+            .unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<std::io::Error>().unwrap().kind(),
+                std::io::ErrorKind::StorageFull
+            );
+            assert_eq!(fs::read(&target).unwrap(), b"prior");
+            let reference = ObjectRef {
+                sha256: digest(b"complete"),
+                bytes: 8,
+            };
+            assert!(copy_verified(&root.join("object"), &b"short"[..], &reference).is_err());
+            assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        }
+        let interrupted = root.join(format!(".stage-{}", Uuid::new_v4()));
+        fs::write(&interrupted, b"interrupted").unwrap();
+        fs::write(root.join(".stage-not-an-owned-uuid"), b"retain").unwrap();
+        cleanup_staging(&root).unwrap();
+        assert!(!interrupted.exists());
+        assert_eq!(fs::read(&target).unwrap(), b"prior");
+        assert!(root.join(".stage-not-an-owned-uuid").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn new_directory_entries_are_synced_in_ancestor_order_and_failure_propagates() {
         let root =

@@ -645,3 +645,110 @@ fn new_local_wakes_cannot_bypass_retry_after_but_shutdown_still_cancels_wait() {
     drop(worker);
     assert!(started.elapsed() < Duration::from_secs(1));
 }
+
+#[test]
+fn worker_polls_remote_only_arrivals_and_durable_work_survives_a_lost_wake() {
+    let cloud = Fake::default();
+    let a = Device::new();
+    let b = Device::new();
+    let collection = Uuid::new_v4();
+    let first = record(&a.store, Namespace::Conversation);
+    a.store
+        .commit(vec![first.clone()], BTreeMap::new())
+        .unwrap();
+    let mut ea = a.engine(cloud.clone(), policy(collection, true));
+    pump(&mut ea);
+    let mut p = policy(collection, false);
+    p.poll_seconds = 5;
+    let worker = Worker::start(b.store.clone(), p.clone(), cloud.clone())
+        .unwrap()
+        .unwrap();
+    let wait_for = |e: &Envelope| {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while b.store.value(e.namespace, e.record_id).unwrap().is_none() {
+            assert!(
+                Instant::now() < deadline,
+                "remote polling did not import record"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    wait_for(&first);
+    let second = record(&a.store, Namespace::Conversation);
+    a.store
+        .commit(vec![second.clone()], BTreeMap::new())
+        .unwrap();
+    pump(&mut ea);
+    wait_for(&second); // No local commit or wake on b.
+    b.store.set_wake(None); // Model a lost hint, keeping the durable commit.
+    let local = record(&b.store, Namespace::SubjectMemory);
+    b.store
+        .commit(vec![local.clone()], BTreeMap::new())
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        pump(&mut ea);
+        if a.store
+            .value(local.namespace, local.record_id)
+            .unwrap()
+            .is_some()
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "lost wake stranded durable work");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    drop(worker);
+    let worker = Worker::start(b.store.clone(), p, cloud).unwrap().unwrap();
+    assert_eq!(
+        b.store
+            .heads(local.namespace, local.record_id)
+            .unwrap()
+            .len(),
+        1
+    );
+    drop(worker);
+}
+
+#[test]
+fn namespace_labels_cannot_smuggle_a_disabled_domain_into_selected_records() {
+    let cloud = Fake::default();
+    let a = Device::new();
+    let b = Device::new();
+    let collection = Uuid::new_v4();
+    let e = record(&a.store, Namespace::SubjectMemory);
+    a.store.commit(vec![e.clone()], BTreeMap::new()).unwrap();
+    pump(&mut a.engine(cloud.clone(), policy(collection, true)));
+    {
+        let mut c = cloud.0.lock().unwrap();
+        for (file, bytes) in c.files.values_mut() {
+            if file.tag().unwrap().kind == "manifest" {
+                let mut value: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+                for label in value["manifest"]["record_namespaces"]
+                    .as_object_mut()
+                    .unwrap()
+                    .values_mut()
+                {
+                    *label = "conversation".into();
+                }
+                *bytes = serde_json::to_vec(&value).unwrap();
+                file.app_properties.insert("sha256".into(), digest(bytes));
+            }
+        }
+    }
+    let mut p = policy(collection, false);
+    p.namespaces = BTreeSet::from([Namespace::Conversation]);
+    let mut engine = b.engine(cloud.clone(), p);
+    let uploads = cloud.0.lock().unwrap().uploads;
+    let mut refused = false;
+    for _ in 0..20 {
+        if let Err(error) = engine.step() {
+            assert!(error.to_string().contains("namespace mismatch"));
+            refused = true;
+            break;
+        }
+    }
+    assert!(refused);
+    assert!(b.store.manifests().unwrap().is_empty());
+    assert_eq!(cloud.0.lock().unwrap().uploads, uploads);
+}
