@@ -156,9 +156,10 @@ impl super::navigation_completion::NavigationIo for NativeNavigation<'_> {
         std::thread::sleep(duration);
     }
     fn begin_guard(&mut self) -> Result<()> {
+        let owned = self.device.keyboard.owned_sysfs()?;
         self.input = Some(super::input_observer::InputObserver::new(
             TriggerCorner::LowerLeft,
-            None,
+            owned.as_deref(),
         )?);
         Ok(())
     }
@@ -179,6 +180,20 @@ impl super::navigation_completion::NavigationIo for NativeNavigation<'_> {
     }
     fn end_guard(&mut self) {
         self.input = None;
+    }
+    fn finish_guard(&mut self, owner: &crate::workflow::history::Owner) -> Result<()> {
+        self.device.check_request_guard()?;
+        let input = self
+            .input
+            .take()
+            .context("Missing navigation observer at handoff")?;
+        let mut request = NativeRequest { input, pin: None };
+        request.pin = Some(super::request_guard::RequestGuard::from_observed(
+            owner.clone(),
+            &mut request,
+        )?);
+        self.device.request = Some(request);
+        Ok(())
     }
 }
 
@@ -711,13 +726,17 @@ impl DeviceBackend for RealDevice {
         self.history.other_edit();
         #[cfg(target_os = "linux")]
         if self.status_style_supported {
-            return super::navigation_completion::navigate(
+            let result = super::navigation_completion::navigate(
                 &mut NativeNavigation {
                     device: self,
                     input: None,
                 },
                 direction,
             );
+            if result.is_err() {
+                self.status_wait_cancellation.latch();
+            }
+            return result;
         }
         self.finish_request_guard()?;
         XochitlIntegration::navigate_to_page(&mut self.touch, direction)?;

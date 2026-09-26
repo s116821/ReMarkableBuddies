@@ -160,6 +160,8 @@ pub enum Operation {
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Effect {
+    OwnerChange,
+    ExternalInput,
     Error,
     NoMove,
     Stale,
@@ -322,6 +324,14 @@ impl Scenario {
             ensure!(
                 match fault.effect {
                     Effect::Error => true,
+                    Effect::OwnerChange | Effect::ExternalInput => matches!(
+                        fault.operation,
+                        Operation::Capture
+                            | Operation::Next
+                            | Operation::Previous
+                            | Operation::Text
+                            | Operation::Body
+                    ),
                     Effect::NoMove => matches!(
                         fault.operation,
                         Operation::Next

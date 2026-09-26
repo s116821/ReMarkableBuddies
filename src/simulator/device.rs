@@ -115,6 +115,13 @@ pub struct State {
 }
 
 impl State {
+    fn interrupt_request(&mut self, effect: Option<Effect>) {
+        match effect {
+            Some(Effect::OwnerChange) => self.visit += 1,
+            Some(Effect::ExternalInput) => self.request_lost = true,
+            _ => {}
+        }
+    }
     fn history_page(&self) -> Result<crate::workflow::history::PageState> {
         self.history_page_at(self.active)
     }
@@ -427,7 +434,7 @@ impl DeviceBackend for SimDevice {
         let mut state = self.0.borrow_mut();
         anyhow::ensure!(!state.request_lost, "Request ownership already lost");
         if let Some(pin) = state.request_pin {
-            let result = (|| {
+            let result: Result<_> = (|| {
                 state.operation(Operation::RequestGuard)?;
                 anyhow::ensure!(
                     pin == (state.active, state.visit, state.session),
@@ -454,42 +461,52 @@ impl DeviceBackend for SimDevice {
     fn capture(&mut self) -> Result<Frame> {
         self.check_request_guard()?;
         let mut state = self.0.borrow_mut();
-        let effect = state.operation(Operation::Capture)?;
-        if effect == Some(Effect::Stale) {
-            anyhow::ensure!(
-                !state.last.png.is_empty(),
-                "No previous capture for stale fault"
-            );
-            return Ok(state.last.clone());
+        if state.request_pin.is_none() {
+            state.request_pin = Some((state.active, state.visit, state.session));
         }
-        if effect == Some(Effect::Corrupt) {
-            return Ok(Frame {
-                png: vec![0],
-                details: Vec::new(),
-            });
-        }
-        let captured = if effect == Some(Effect::WrongPage) {
-            anyhow::ensure!(
-                state.pages.len() > 1,
-                "Wrong-page capture needs another page"
-            );
-            (state.active + 1) % state.pages.len()
-        } else {
-            state.active
-        };
-        let image = DynamicImage::ImageRgba8(state.pages[captured].image());
-        let h = image.height();
-        let th = h * 2 / 5;
-        let details = [0, (h - th) / 2, h - th]
-            .iter()
-            .map(|&y| Ok(STANDARD.encode(png(&image.crop_imm(0, y, image.width(), th))?)))
-            .collect::<Result<Vec<_>>>()?;
-        state.last = Frame {
-            png: png(&image)?,
-            details,
-        };
-        state.request_pin = Some((state.active, state.visit, state.session));
-        Ok(state.last.clone())
+        let result: Result<_> = (|| {
+            let effect = state.operation(Operation::Capture)?;
+            state.interrupt_request(effect);
+            if effect == Some(Effect::Stale) {
+                anyhow::ensure!(
+                    !state.last.png.is_empty(),
+                    "No previous capture for stale fault"
+                );
+                return Ok(state.last.clone());
+            }
+            if effect == Some(Effect::Corrupt) {
+                return Ok(Frame {
+                    png: vec![0],
+                    details: Vec::new(),
+                });
+            }
+            let captured = if effect == Some(Effect::WrongPage) {
+                anyhow::ensure!(
+                    state.pages.len() > 1,
+                    "Wrong-page capture needs another page"
+                );
+                (state.active + 1) % state.pages.len()
+            } else {
+                state.active
+            };
+            let image = DynamicImage::ImageRgba8(state.pages[captured].image());
+            let h = image.height();
+            let th = h * 2 / 5;
+            let details = [0, (h - th) / 2, h - th]
+                .iter()
+                .map(|&y| Ok(STANDARD.encode(png(&image.crop_imm(0, y, image.width(), th))?)))
+                .collect::<Result<Vec<_>>>()?;
+            state.last = Frame {
+                png: png(&image)?,
+                details,
+            };
+            Ok(state.last.clone())
+        })();
+        state.request_lost |= result.is_err();
+        drop(state);
+        let frame = result?;
+        self.check_request_guard()?;
+        Ok(frame)
     }
     fn detail_images(&self) -> Result<Vec<String>> {
         Ok(self.0.borrow().last.details.clone())
@@ -553,43 +570,69 @@ impl DeviceBackend for SimDevice {
         &mut self,
         direction: NavigationDirection,
     ) -> Result<crate::device::backend::NavigationCompletion> {
-        self.finish_request_guard()?;
+        self.check_request_guard()?;
         let mut state = self.0.borrow_mut();
         let operation = match direction {
             NavigationDirection::Next => Operation::Next,
             NavigationDirection::Previous => Operation::Previous,
         };
-        let effect = state.operation(operation)?;
-        let before = state.active;
-        if effect != Some(Effect::NoMove) {
-            state.visit += 1;
-            state.active = match direction {
-                NavigationDirection::Next => (state.active + 1).min(state.pages.len() - 1),
-                NavigationDirection::Previous => state.active.saturating_sub(1),
-            };
-        }
-        state.clock += 700; // 50 ms contact + 15*10 ms motion + 500 ms transition.
-        state.event("navigation_settled", "");
-        Ok(if state.active == before {
-            crate::device::backend::NavigationCompletion::NoMovement
-        } else if state.verified_navigation {
-            crate::device::backend::NavigationCompletion::Settled
-        } else {
-            crate::device::backend::NavigationCompletion::Legacy
-        })
+        let result: Result<_> = (|| {
+            let effect = state.operation(operation)?;
+            let before = state.active;
+            if effect != Some(Effect::NoMove) {
+                state.active = match direction {
+                    NavigationDirection::Next => (state.active + 1).min(state.pages.len() - 1),
+                    NavigationDirection::Previous => state.active.saturating_sub(1),
+                };
+                if state.active != before {
+                    state.visit += 1;
+                }
+            }
+            // Transfer the exact modeled destination before a boundary fault.
+            state.request_pin = Some((state.active, state.visit, state.session));
+            state.interrupt_request(effect);
+            state.clock += 700;
+            state.event("navigation_settled", "");
+            Ok(if state.active == before {
+                crate::device::backend::NavigationCompletion::NoMovement
+            } else if state.verified_navigation {
+                crate::device::backend::NavigationCompletion::Settled
+            } else {
+                crate::device::backend::NavigationCompletion::Legacy
+            })
+        })();
+        state.request_lost |= result.is_err();
+        drop(state);
+        let completion = result?;
+        self.check_request_guard()?;
+        Ok(completion)
     }
     fn render_text(&mut self, text: &str) -> Result<()> {
         self.check_request_guard()?;
         let mut state = self.0.borrow_mut();
-        state.operation(Operation::Text)?;
-        let page = state.active;
-        state.pages[page].text.push_str(text);
-        Ok(())
+        let result: Result<_> = (|| {
+            let effect = state.operation(Operation::Text)?;
+            let page = state.active;
+            state.pages[page].text.push_str(text);
+            state.interrupt_request(effect);
+            Ok(())
+        })();
+        state.request_lost |= result.is_err();
+        drop(state);
+        result?;
+        self.check_request_guard()
     }
     fn body_mode(&mut self) -> Result<()> {
         self.check_request_guard()?;
-        self.0.borrow_mut().operation(Operation::Body)?;
-        Ok(())
+        let mut state = self.0.borrow_mut();
+        let result = state.operation(Operation::Body);
+        state.request_lost |= result.is_err();
+        if let Ok(effect) = result {
+            state.interrupt_request(effect);
+        }
+        drop(state);
+        result?;
+        self.check_request_guard()
     }
     fn line(&mut self, from: (i32, i32), to: (i32, i32)) -> Result<()> {
         let mut state = self.0.borrow_mut();

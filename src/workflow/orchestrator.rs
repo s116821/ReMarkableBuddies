@@ -105,7 +105,10 @@ impl<M: LLMEngine> Orchestrator<M> {
                 "Request input lost; further input stopped"
             )));
         }
-        self.workflow.finish_request()?;
+        if let Err(error) = self.workflow.finish_request() {
+            log::warn!("Request finalization failed: {error:#}");
+            return result.and(Err(error));
+        }
         if result.is_err() {
             self.workflow.report_failure(Failure::Device)?;
         }

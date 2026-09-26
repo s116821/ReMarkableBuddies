@@ -569,4 +569,60 @@ mod request_retirement_tests {
             .to_string()
             .contains("retired"));
     }
+    #[test]
+    fn capture_and_keyboard_boundaries_preserve_original_pin_and_latch_loss() {
+        use crate::device::backend::DeviceBackend;
+        use scenario::{Effect, Fault};
+        for operation in [
+            Operation::Capture,
+            Operation::Body,
+            Operation::Text,
+            Operation::Previous,
+        ] {
+            for effect in [Effect::OwnerChange, Effect::ExternalInput] {
+                let (state, _) = blank_successor();
+                let mut device = SimDevice(state.clone());
+                if operation != Operation::Capture {
+                    device.capture().unwrap();
+                }
+                state.borrow_mut().faults.push(Fault {
+                    operation,
+                    call: 1,
+                    effect,
+                });
+                let result = match operation {
+                    Operation::Capture => device.capture().map(|_| ()),
+                    Operation::Body => device.body_mode(),
+                    Operation::Text => device.render_text("partial output"),
+                    Operation::Previous => device
+                        .navigate(
+                            crate::workflow::xochitl_integration::NavigationDirection::Previous,
+                        )
+                        .map(|_| ()),
+                    _ => unreachable!(),
+                };
+                assert!(result.is_err(), "{operation:?}/{effect:?}");
+                let before = state.borrow().counts.clone();
+                assert!(device.capture().is_err());
+                assert!(device.body_mode().is_err());
+                assert!(device.render_text("must not append").is_err());
+                assert_eq!(state.borrow().counts, before);
+            }
+        }
+        for effect in [Effect::Stale, Effect::Corrupt] {
+            let (state, _) = blank_successor();
+            let mut device = SimDevice(state.clone());
+            device.capture().unwrap();
+            let original = state.borrow().request_pin;
+            state.borrow_mut().faults.push(Fault {
+                operation: Operation::Capture,
+                call: 2,
+                effect,
+            });
+            device.capture().unwrap();
+            assert_eq!(state.borrow().request_pin, original);
+            state.borrow_mut().visit += 1;
+            assert!(device.capture().is_err());
+        }
+    }
 }

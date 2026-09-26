@@ -2,7 +2,8 @@
 
 Source status ink is retired. Marker sections below preserve historical diagnostic
 procedures and evidence only; they are not normal Reader acceptance gates or
-authorization to draw new marks. See [retirement findings](../legacy-status-indicator-findings.md).
+authorization to draw new marks. The current hardware probe refuses retired marker
+commands; use preserved source/evidence for historical analysis. See [retirement findings](../legacy-status-indicator-findings.md).
 
 Use the repository's reader-buddy-testing skill before running these fixtures on
 an authorized development tablet. JSON stroke fixtures and their Python generators
@@ -31,13 +32,12 @@ not the source tree; reusable fixtures and diagnostic probes remain here.
 
 With the normal service stopped and exclusive authorized dev-tablet access,
 `hardware_probe return-check` captures the current page, attempts one forward swipe,
-then invokes the same single-attempt recovery used by Reader Buddy. It draws the
-failure X and saves the resulting screenshot. This is an offline input/capture check;
+then invokes the same single-attempt recovery used by Reader Buddy. It records the
+nonvisual diagnostic without drawing a failure X. This is an offline input/capture check;
 it does not make a model call or test answer classification.
 
-On a page with a successor, expect `Returned` and the X on the captured source.
-At the document end, expect `AlreadySource`, no reverse swipe and the X on the last
-page. Inspect before/after images. Failed swipe and capture cases are exercised with
+On a page with a successor, expect `Returned` with the captured source unchanged.
+At the document end, expect `AlreadySource`, no reverse swipe and no source marks. Inspect before/after images. Failed swipe and capture cases are exercised with
 scripted navigation doubles in unit tests; do not report those as physical failures.
 
 ## Activity indicator check

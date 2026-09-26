@@ -23,6 +23,8 @@ pub(super) trait NavigationIo {
     fn check_request(&mut self) -> Result<()>;
     fn guard(&mut self) -> Result<()>;
     fn end_guard(&mut self);
+    /// Transfer the existing observer with this exact verified identity.
+    fn finish_guard(&mut self, owner: &crate::workflow::history::Owner) -> Result<()>;
 }
 
 fn chrome_ready(image: &GrayImage) -> bool {
@@ -109,6 +111,7 @@ pub(super) fn navigate(
             .and_then(|n| source.before.order.get(n))
             .map(|p| p.id.clone())
         else {
+            io.finish_guard(&source.before.owner)?;
             return Ok(NavigationCompletion::NoMovement);
         };
         // The gesture shares the physical input device. Observe read-only
@@ -126,6 +129,7 @@ pub(super) fn navigate(
             io.guard()?;
             if io.now() >= deadline {
                 if source_confirmed && target_visit.is_none() {
+                    io.finish_guard(&source.before.owner)?;
                     return Ok(NavigationCompletion::NoMovement);
                 }
                 anyhow::bail!("Destination not ready before deadline: pending identity, indistinguishable pixels or occupied chrome gutter/footer");
@@ -163,6 +167,8 @@ pub(super) fn navigate(
                         io.now() < deadline,
                         "Navigation verification exceeded deadline"
                     );
+                    io.finish_guard(&current.after.owner)?;
+                    ensure!(io.now() < deadline, "Navigation handoff exceeded deadline");
                     return Ok(NavigationCompletion::Settled);
                 }
                 candidate = Some(current.image);
@@ -235,6 +241,8 @@ mod tests {
         guarding: bool,
         request_checks: usize,
         request_loss_at: Option<usize>,
+        fail_finish: bool,
+        finished_owner: Option<Owner>,
     }
     impl Scripted {
         fn new(frames: Vec<Frame>) -> Self {
@@ -252,6 +260,8 @@ mod tests {
                 guarding: false,
                 request_checks: 0,
                 request_loss_at: None,
+                fail_finish: false,
+                finished_owner: None,
             }
         }
     }
@@ -301,6 +311,12 @@ mod tests {
         }
         fn end_guard(&mut self) {
             self.guarding = false;
+        }
+        fn finish_guard(&mut self, owner: &Owner) -> Result<()> {
+            assert!(self.guarding);
+            ensure!(!self.fail_finish, "Input or owner changed before transfer");
+            self.finished_owner = Some(owner.clone());
+            Ok(())
         }
     }
 
@@ -464,6 +480,19 @@ mod tests {
             assert_eq!(io.opens, 1);
             assert_eq!(io.swipes, 0);
             assert_eq!(io.reads, usize::from(boundary > 1));
+        }
+    }
+    #[test]
+    fn completion_transfers_exact_owner_and_rejects_lost_handoff() {
+        for failure in [false, true] {
+            let mut io = Scripted::new(vec![frame(false), frame(true), frame(true)]);
+            io.fail_finish = failure;
+            assert_eq!(
+                navigate(&mut io, NavigationDirection::Next).is_ok(),
+                !failure
+            );
+            assert_eq!(io.swipes, 1);
+            assert_eq!(io.finished_owner, (!failure).then(|| metadata(true).owner));
         }
     }
 }

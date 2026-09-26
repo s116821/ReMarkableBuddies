@@ -15,10 +15,12 @@ pub(super) struct RequestGuard<O> {
 impl<O: PartialEq> RequestGuard<O> {
     pub fn begin(io: &mut impl RequestIo<Owner = O>) -> Result<Self> {
         io.input_clear()?;
-        let mut guard = Self {
-            owner: io.owner()?,
-            lost: false,
-        };
+        let owner = io.owner()?;
+        Self::from_observed(owner, io)
+    }
+
+    pub fn from_observed(owner: O, io: &mut impl RequestIo<Owner = O>) -> Result<Self> {
+        let mut guard = Self { owner, lost: false };
         guard.check(io)?;
         Ok(guard)
     }
@@ -90,5 +92,22 @@ mod tests {
         let mut io = io();
         io.change_on_poll = 3;
         assert!(RequestGuard::begin(&mut io).is_err());
+    }
+    #[test]
+    fn transferred_owner_is_checked_without_repinning_or_discarding_input() {
+        for boundary in 0..3 {
+            let mut io = io();
+            let verified = io.owner;
+            if boundary == 1 {
+                io.owner[1] += 1;
+            }
+            if boundary == 2 {
+                io.input = true;
+            }
+            assert_eq!(
+                RequestGuard::from_observed(verified, &mut io).is_ok(),
+                boundary == 0
+            );
+        }
     }
 }
