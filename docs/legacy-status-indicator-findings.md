@@ -45,3 +45,25 @@ with unknown semantics. Earlier extra-newline behavior remains unexplained.
 REM-38, REM-43 and the REM-35 integrated gate must retain opaque-content and
 ownership checks rather than normalizing unknown fields or inferring completion
 from elapsed time. No new native verification is claimed by this document.
+
+## Retirement candidate observations
+
+Candidate `f63a7f2` passed a real known-panel dismissal with exactly one observed
+touch (six events/two frames); the source native file was byte-identical afterward.
+The vanished-allocation failure did not recur in that run. Typed retry behavior
+has shared-policy evidence; do not claim a reproduced native retry.
+
+A delayed local HTTP cancellation check detected external input and forbade later
+navigation/text. Its scoped HTTP worker still had to finish before the guard error
+returned: 30 seconds in that fixture, bounded by the provider timeout in production.
+Systemd then restarted the failed process under its existing five-second policy.
+This establishes safe refusal and restart, not responsive cancellation UX. REM-40
+and REM-35 own the remaining provider-join latency; it is distinct from retired
+marker waits and native text-persistence stalls.
+
+A live proposal and independent transcription agreed on the question, but the
+selected disposable successor's large serif heading did not match the global
+cache's small sans-serif heading. Reader classified it as invalid and returned
+once with both native page files unchanged. This is not successful Q&A output.
+REM-25/38 must replace or resolve global screenshot-header identity assumptions.
+Separate bounded typing diagnostics must be labeled separately from this live run.

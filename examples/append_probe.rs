@@ -65,6 +65,9 @@ fn main() -> anyhow::Result<()> {
     let mut device = RealDevice::new(false, TriggerCorner::LowerLeft, true)?;
     // Same existing input-registration exception as the normal process startup.
     device.delay(Duration::from_secs(1));
+    // Exercise the same retained request ownership as capture-led Reader output.
+    let captured = device.capture()?;
+    fs::write(output.join("before-input.png"), &captured.png)?;
     let before_body = device
         .history_snapshot(None)?
         .context("History unsupported")?;
@@ -101,6 +104,9 @@ fn main() -> anyhow::Result<()> {
     let settled = result?.context("History unsupported")?;
     same(&settled, &owner)?;
     ensure!(settled.content.text() == expected, "Exact append missing");
+    let captured = device.capture()?;
+    fs::write(output.join("after-input.png"), &captured.png)?;
+    device.finish_request_guard()?;
     Ok(())
 }
 
