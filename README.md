@@ -745,12 +745,21 @@ See LICENSE file for details.
 
 For explicit provider-backed laptop runs, see [local development setup](docs/local-development.md). Normal simulator regression scenarios remain offline.
 
-## Reader activity indicator
+## Reader request ownership and feedback
 
-Reader builds nested triangles for preparation, answer-request and answer-response stages, drawing one edge every 333 ms. Auxiliary model calls use an inner circle. Activity and six distinct X-plus-segment failure codes share a 50 by 50 area near the bottom-right corner. Temporary paths are cleared before capture, page navigation, typing and completion; they are never included in model or classifier images. Drawing pauses during keyboard input so pen and keyboard operations cannot interfere.
+Source-page activity triangles, circles, spokes and failure X marks are retired.
+Normal Reader requests do not draw or erase status ink, change pen preferences or
+create status-tool recovery records. Failure reasons remain in logs; Buddy-page
+feedback is planned in REM-40.
 
-The area and surrounding clearance must be blank before Reader uses native pen marks. Existing corner handwriting, a previous failure X, or unknown image state suppresses status drawing only; normal question processing continues. Reader does not erase preexisting ink to make room for an indicator. Partial typing invalidates the earlier blank-region check. A cleanup failure stops further navigation/output and ends that orchestrator instead of attempting to erase a mark after another page might have become active.
+On the verified RM2 contract, a retained read-only input/page/session guard spans
+capture and model calls. Navigation acquires its own observer and verifies the
+original source before the request guard is released for the physical gesture.
+Header and answer typing retain the request guard while excluding only the owned
+virtual keyboard. External input or source loss stops further work.
 
-Production model requests have a 90-second global timeout. Only HTTP work runs on a worker thread; indicator updates and all tablet input stay on the workflow thread. A progress error stops further ticks and the bounded worker is joined before returning. Explicit simulator timeout settings still apply. Abrupt process termination or concurrent manual page edits can leave native marks; this is not transactional document undo.
-
-On the verified native UI contract, Reader temporarily uses black medium Fineliner and restores the exact original tool, active slot and saved preferences. Unsupported controls suppress status; failed restoration stops input. A crash recovery record prevents silent reuse of interrupted settings. See [native restoration and its hardware limits](docs/TECHNICAL.md#native-status-style-restoration).
+Production model requests retain the 90-second timeout. HTTP runs on its worker;
+all device operations and read-only progress checks remain on the caller thread.
+Unsupported layouts retain explicit heuristic limits. An unresolved historical
+status recovery record still blocks startup read-only; retirement never deletes
+or replays it. See [preserved experimental findings](docs/legacy-status-indicator-findings.md).

@@ -329,22 +329,32 @@ using only blue darkened yellow highlights. The conversion preserves all neutral
 gray values and improves printed-text contrast under yellow marks. Legacy RM2,
 Paper Pro and framebuffer allocation discovery are unchanged.
 
-## Reader progress ownership
+## Reader request ownership
 
-`workflow::indicator` owns geometry/clearance eligibility; `Workflow` tracks finite temporary paths and the status-style lease. Capture, navigation and keyboard wrappers erase owned paths and restore preferences first; typing/navigation invalidate stale eligibility. A cleanup or restoration failure stops future iterations. The HTTP worker never owns tablet input. Caller-thread callbacks schedule stroke starts every 333 ms, skipping missed deadlines without a burst. The native backend establishes rubber proximity before contact, erases each unique path and verifies a fresh clean-corner image. Accepted input alone is not successful erasure.
+The normal workflow has no indicator state, pen lease, status cadence or cleanup.
+Failure codes are nonvisual diagnostics. A request guard retains its input observer
+and page/visit/session identity across capture and provider waits. Navigation's
+new observer overlaps the retained request through source verification; only the
+explicit physical gesture window releases it. Keyboard operations retain the
+request observer with an exact owned-keyboard exclusion and pre/post checks.
 
-Earlier REM-8 circle tests proved cleanup only for that geometry. REM-32 found that open triangle edges needed the rubber-proximity correction and that broad Highlighter strokes obscured nested geometry. The failed captures remain evidence; earlier circle dimensions/timings do not describe current triangles.
+Trigger dismissal performs at most one positively observed outside-panel tap.
+Its read-only capture recovery permits one fresh attempt only for a typed vanished
+allocation candidate, retaining original owner/native bytes and both the 500ms
+observation budget and 5s dismissal deadline. No failure retries input.
 
-### Reader status stages and failures
-
-The reserved bottom-right 50x50 region must be blank with its 12-pixel clearance before status drawing. Preparing, answer-request and answer-response stages use successively smaller triangles. Each edge starts on a 333 ms schedule; pending activity retraces edges. Queued first traversals complete in order while HTTP dispatch proceeds, so very fast responses can precede their displayed transition. Independent transcription uses a tangent incircle inside the innermost triangle. A page-scoped temporary black medium Fineliner style keeps the geometry readable; exact original tool, active slot and saved preferences must return before continuation.
-
-Temporary paths are recorded before input and erased before capture, navigation or typing. Cleanup is bounded by unique paths, not request duration. Failed cleanup stops further input. Error marks are persistent X-plus-segment codes documented in [the simulator guide](simulator.md); neither expected failures nor outer-loop model/network errors type diagnostics into the document. History gestures draw no activity, and native scene ownership checks remain conservative. REM-4 will add context-enhancement center spokes; they are not implemented by this change.
-
-The hardware probe's `indicator-smoke` command captures each stage and the auxiliary circle under `/tmp/reader-buddy-status-*.png`, then cleans its owned paths. `failure-code <code>` draws one guarded persistent failure mark on the currently selected disposable page. These are explicit native mutation diagnostics: stop the normal service, verify the selected document/tool/corner and restore state afterwards. They make no model request.
-
+Verified navigation completion omits redundant 800ms/500ms caller waits. Legacy
+navigation retains those fallbacks. Header-template capture still has a bounded
+500ms fallback; this is not native save acknowledgement. Exact native Q&A history
+persistence remains independently guarded. See the central responsive-reader
+change and [historical findings](legacy-status-indicator-findings.md).
 
 ### Native status style restoration
+
+**Historical diagnostic contract only.** Normal Reader never acquires this lease.
+The following describes preserved legacy mechanics, not current product behavior
+or authorization to run marker probes. Startup only refuses unresolved records.
+
 
 The initial style UI contract is limited to RM2 firmware 3.28.0.172 in the observed portrait toolbar layout. Unsupported/hidden controls, an already-open menu, active non-pen tools or ambiguous identity suppress status. Screenshots used to inspect controls have a separate buffer, preserving clean model detail images. Before dependent UI input the lease checks page/session identity, visible page content and supported controls. Repeated status ticks never toggle tools or write recovery checkpoints.
 

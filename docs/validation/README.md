@@ -1,5 +1,9 @@
 # Hardware fixtures
 
+Source status ink is retired. Marker sections below preserve historical diagnostic
+procedures and evidence only; they are not normal Reader acceptance gates or
+authorization to draw new marks. See [retirement findings](../legacy-status-indicator-findings.md).
+
 Use the repository's reader-buddy-testing skill before running these fixtures on
 an authorized development tablet. JSON stroke fixtures and their Python generators
 exercise known question, shorthand, ambiguous-ink, and missing-question cases with
