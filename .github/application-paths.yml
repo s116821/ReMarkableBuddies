@@ -1,0 +1,15 @@
+# Unknown paths are relevant. Keep GitVersion.yml exclusions equivalent.
+application:
+  - '**'
+  - '!README.md'
+  - '!AGENTS.md'
+  - '!CHANGELOG.md'
+  - '!LICENSE'
+  - '!LICENSE-*'
+  - '!docs/**/*.md'
+  - '!docs/licenses/**/*.txt'
+  - '!docs/{images,validation/images}/**/*.{png,jpg,jpeg,gif,webp,svg,pdf}'
+  - '!openspec/**'
+  - '!.agents/**/*.md'
+  - '!.codex/**/*.md'
+  - '!.github/pull_request_template.md'

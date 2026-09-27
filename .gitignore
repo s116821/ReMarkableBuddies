@@ -26,3 +26,5 @@ test_output/
 __pycache__/
 node_modules/
 
+# Pinned upstream distributions used only by release fixtures.
+.upstream/

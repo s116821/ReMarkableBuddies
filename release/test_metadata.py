@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 import unittest
 
-from policy import git
+from build import git
 
 ROOT = Path(__file__).resolve().parents[1]
 

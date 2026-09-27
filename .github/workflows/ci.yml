@@ -9,22 +9,48 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   policy:
     name: Release policy
     runs-on: ubuntu-latest
     outputs:
-      application: ${{ steps.policy.outputs.application }}
+      application: ${{ steps.paths.outputs.application }}
     steps:
+      # The upstream API paginates but caps results at 3,000 files.
+      - name: Require complete PR file observation
+        if: github.event_name != 'push' && !(github.event.pull_request.changed_files > 0 && github.event.pull_request.changed_files < 3000)
+        run: |
+          echo 'Missing or unsupported changed-file count; split PRs of 3,000 files or more.' >&2
+          exit 1
       - uses: actions/checkout@v4
+        if: github.event_name != 'push'
         with:
-          fetch-depth: 0
-      - uses: actions/setup-python@v5
+          persist-credentials: false
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        if: github.event_name != 'push'
+        id: paths
         with:
-          python-version: '3.12'
-      - id: policy
-        run: python release/policy.py
+          filters: .github/application-paths.yml
+          predicate-quantifier: every
+      - name: Validate application title
+        if: steps.paths.outputs.application == 'true'
+        uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          requireScope: true
+          types: |
+            feat
+            fix
+            perf
+            refactor
+            build
+            ci
+            chore
+            test
+            revert
 
   check:
     name: Check Build & Lint
@@ -80,8 +106,44 @@ jobs:
         if: github.event_name == 'pull_request' && needs.policy.outputs.application == 'true'
         with:
           python-version: '3.12'
-      - uses: ./.github/actions/release-tools
+      - uses: actions/setup-node@v4
         if: github.event_name == 'pull_request' && needs.policy.outputs.application == 'true'
+        with:
+          node-version: '24'
+      - uses: GitTools/actions/gitversion/setup@7417b1089e2c7de93510f1901d656ddf60bb024f # v4.7.0
+        if: github.event_name == 'pull_request' && needs.policy.outputs.application == 'true'
+        with:
+          versionSpec: 6.8.2
+      - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request' && needs.policy.outputs.application == 'true'
+        with:
+          repository: dorny/paths-filter
+          ref: ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d
+          path: .upstream/paths
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request' && needs.policy.outputs.application == 'true'
+        with:
+          repository: ncipollo/release-action
+          ref: 339a81892b84b4eeb0f6e744e4574d79d0d9b8dd
+          path: .upstream/release
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request' && needs.policy.outputs.application == 'true'
+        with:
+          repository: rickstaa/action-create-tag
+          ref: a1c7777fcb2fee4f19b0f283ba888afa11678b72
+          path: .upstream/tag
+          persist-credentials: false
+      - name: Execute upstream Actions against isolated fixtures
+        if: github.event_name == 'pull_request' && needs.policy.outputs.application == 'true'
+        env:
+          PATHS_ACTION: ${{ github.workspace }}/.upstream/paths
+          RELEASE_ACTION: ${{ github.workspace }}/.upstream/release
+          TAG_ACTION: ${{ github.workspace }}/.upstream/tag
+        run: |
+          npm ci --prefix release/fixtures --ignore-scripts --no-audit --no-fund
+          npm test --prefix release/fixtures
       - name: Release regression repositories
         if: github.event_name == 'pull_request' && needs.policy.outputs.application == 'true'
         run: |
