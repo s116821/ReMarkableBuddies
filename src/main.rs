@@ -2,8 +2,10 @@ use anyhow::Result;
 use clap::Parser;
 use dotenv::dotenv;
 use log::info;
-use remarkable_reader_buddy::llm::openai::DEFAULT_MODEL;
-use remarkable_reader_buddy::{OpenAI, Orchestrator, TriggerCorner, Workflow};
+use remarkable_reader_buddy::config::{self, Config, Environment, Overrides};
+use remarkable_reader_buddy::storage::{files, sync::Worker, Store};
+use remarkable_reader_buddy::{OpenAI, Orchestrator, Workflow};
+use std::sync::Arc;
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -18,39 +20,20 @@ pub struct Args {
     #[arg(long)]
     api_key: Option<String>,
     /// OpenAI model to use
-    #[arg(long, short, default_value = DEFAULT_MODEL)]
-    model: String,
+    #[arg(long, short)]
+    model: Option<String>,
     /// OpenAI endpoint (overrides OPENAI_BASE_URL)
     #[arg(long)]
     base_url: Option<String>,
     /// Trigger corner (UR, UL, LR, LL)
-    #[arg(long, default_value = "LL")]
-    trigger_corner: String,
+    #[arg(long)]
+    trigger_corner: Option<String>,
     /// Global log level, overriding RUST_LOG: off, error, warn, info, debug, trace
     #[arg(long)]
     log_level: Option<log::LevelFilter>,
     /// Save local page-image diagnostics (independent of logging)
     #[arg(long)]
     debug_dump: bool,
-}
-
-fn api_key(cli: Option<String>, environment: Option<String>) -> Result<String> {
-    let key = cli
-        .or(environment)
-        .ok_or_else(|| anyhow::anyhow!("Set OPENAI_API_KEY or supply --api-key"))?;
-    anyhow::ensure!(!key.trim().is_empty(), "Selected API key is empty");
-    Ok(key)
-}
-
-fn debug_dump_enabled(explicit: bool, environment: Option<&str>) -> Result<bool> {
-    if explicit {
-        return Ok(true);
-    }
-    match environment {
-        None | Some("0" | "false") => Ok(false),
-        Some("1" | "true") => Ok(true),
-        Some(_) => anyhow::bail!("READER_BUDDY_DEBUG_DUMP must be true, false, 1 or 0"),
-    }
 }
 
 fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_logger::Builder {
@@ -72,27 +55,49 @@ fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_lo
 fn main() -> Result<()> {
     dotenv().ok();
     let args = Args::parse();
-    logging(args.log_level, std::env::var("RUST_LOG").ok().as_deref()).init();
-    info!("=== ReMarkable Reader Buddy Starting ===");
     if let Some(path) = args.simulate {
+        logging(args.log_level, std::env::var("RUST_LOG").ok().as_deref()).init();
         remarkable_reader_buddy::simulator::run_file(&path)?;
         return Ok(());
     }
-    let trigger_corner = TriggerCorner::from_string(&args.trigger_corner)?;
-    let debug_dump = debug_dump_enabled(
-        args.debug_dump,
-        std::env::var("READER_BUDDY_DEBUG_DUMP").ok().as_deref(),
+    let config = Config::load(std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into))?;
+    let effective = config::resolve(
+        &config,
+        Overrides {
+            api_key: args.api_key,
+            model: args.model,
+            base_url: args.base_url,
+            trigger_corner: args.trigger_corner,
+            log_level: args.log_level,
+            debug_dump: args.debug_dump,
+        },
+        Environment::current(),
     )?;
-    let key = api_key(args.api_key, std::env::var("OPENAI_API_KEY").ok())?;
-    let base_url = args
-        .base_url
-        .or_else(|| std::env::var("OPENAI_BASE_URL").ok());
-    info!("Model: {}", args.model);
-    info!("Trigger Corner: {}", args.trigger_corner);
-    let llm = OpenAI::new(args.model, key, base_url);
-    let workflow = Workflow::new(false, trigger_corner, debug_dump)?;
+    let mut logger = logging(effective.log_level, effective.log_filter.as_deref());
+    // HTTP dependency trace messages can include private resumable-session URLs.
+    // Keep the established app logging policy, but never emit transport internals.
+    logger
+        .filter_module("ureq", log::LevelFilter::Off)
+        .filter_module("ureq_proto", log::LevelFilter::Off)
+        .init();
+    info!("=== ReMarkable Reader Buddy Starting ===");
+    let store = Arc::new(Store::open(config.paths.clone())?);
+    store.snapshot_config(&config)?;
+    files::atomic_json(
+        &store.paths.data.join("effective-config.json"),
+        &effective.sources,
+    )?;
+    info!("Model: {}", effective.model);
+    info!("Trigger Corner: {}", effective.corner_name);
+    let llm = OpenAI::new(
+        effective.model,
+        effective.key.into_string(),
+        effective.base_url,
+    );
+    let workflow = Workflow::new(false, effective.trigger_corner, effective.debug_dump)?;
     sleep(Duration::from_millis(1000));
     let mut orchestrator = Orchestrator::new(workflow, llm);
+    let _sync_worker = Worker::google(store.clone(), config.sync)?;
     info!("Initialization complete; starting main loop");
     orchestrator.run_loop()
 }
@@ -123,8 +128,8 @@ mod tests {
             ]
         );
         let args = Args::try_parse_from(["reader-buddy"]).unwrap();
-        assert_eq!(args.model, DEFAULT_MODEL);
-        assert_eq!(args.trigger_corner, "LL");
+        assert!(args.model.is_none());
+        assert!(args.trigger_corner.is_none());
         assert!(!args.debug_dump);
         for flag in [
             "--once",
@@ -169,36 +174,6 @@ mod tests {
             .to_string();
             assert!(!error.contains("fixture-secret"));
         }
-    }
-
-    #[test]
-    fn credentials_resolve_without_value_bearing_errors() {
-        assert_eq!(
-            api_key(Some("cli-fixture".into()), Some("env-fixture".into())).unwrap(),
-            "cli-fixture"
-        );
-        assert_eq!(
-            api_key(None, Some("env-fixture".into())).unwrap(),
-            "env-fixture"
-        );
-        assert!(api_key(None, None).is_err());
-        assert!(api_key(Some("  ".into()), Some("env-fixture".into())).is_err());
-        assert!(api_key(None, Some("\t".into())).is_err());
-        let help = Args::command().render_long_help().to_string();
-        assert!(!help.contains("env-fixture"));
-    }
-
-    #[test]
-    fn dumps_are_independent_and_explicit_flag_wins() {
-        for value in [None, Some("false"), Some("0")] {
-            assert!(!debug_dump_enabled(false, value).unwrap());
-        }
-        for value in [Some("true"), Some("1")] {
-            assert!(debug_dump_enabled(false, value).unwrap());
-        }
-        assert!(debug_dump_enabled(false, Some("invalid")).is_err());
-        assert!(debug_dump_enabled(true, Some("invalid")).unwrap());
-        assert!(debug_dump_enabled(true, Some("false")).unwrap());
     }
 
     fn enabled(logger: &env_logger::Logger, target: &str, level: Level) -> bool {

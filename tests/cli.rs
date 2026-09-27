@@ -23,6 +23,10 @@ fn offline_entrypoint_ignores_normal_environment_and_preserves_scenario_assertio
             .env("OPENAI_API_KEY", "")
             .env("OPENAI_BASE_URL", "http://127.0.0.1:1")
             .env("READER_BUDDY_DEBUG_DUMP", "invalid-unused-normal-setting")
+            .env(
+                "REMARKABLE_BUDDIES_CONFIG",
+                temp.join("missing-normal-config.json"),
+            )
             .env("RUST_LOG", "trace")
             .output()
             .unwrap();

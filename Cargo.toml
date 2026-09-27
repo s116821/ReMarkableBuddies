@@ -27,6 +27,8 @@ env_logger = "0.11.6"
 log = "0.4.22"
 figment = { version = "0.10", features = ["toml", "env"] }
 toml = "0.8"
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4", "serde"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.13"
