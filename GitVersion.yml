@@ -1,0 +1,26 @@
+# GitVersion owns all bump arithmetic; manifests never choose the app version.
+workflow: GitHubFlow/v1
+mode: ContinuousDeployment
+tag-prefix: '[vV]'
+strategies: [TaggedCommit, Mainline]
+commit-message-incrementing: Enabled
+major-version-bump-message: '\A(?:feat|fix|perf|refactor|build|ci|chore|test|revert)(?:\([^\r\n()]+\))?!:|(?m)^BREAKING[ -]CHANGE:'
+minor-version-bump-message: '\Afeat(?:\([^\r\n()]+\))?:'
+patch-version-bump-message: '\A(?:fix|perf|refactor|build|ci|chore|test|revert)(?:\([^\r\n()]+\))?:'
+no-bump-message: '\Adocs(?:\([^\r\n()]+\))?:'
+branches:
+  main:
+    regex: ^main$
+    label: ''
+    increment: Patch
+    prevent-increment:
+      when-current-commit-tagged: true
+ignore:
+  paths:
+    - '^(README\.md|AGENTS\.md|CHANGELOG\.md|LICENSE|LICENSE-[^/]+)$'
+    - '^docs/.*\.md$'
+    - '^docs/licenses/.*\.txt$'
+    - '^docs/(images|validation/images)/.*\.(png|jpg|jpeg|gif|webp|svg|pdf)$'
+    - '^openspec/'
+    - '^\.(agents|codex)/.*\.md$'
+    - '^\.github/pull_request_template\.md$'
