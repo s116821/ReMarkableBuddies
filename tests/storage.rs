@@ -525,6 +525,36 @@ fn unsupported_incoming_versions_and_malformed_backup_do_not_change_live_heads()
             e.revision_id
         );
     }
+    let mut left = edit(&e, &store, false);
+    let mut right = edit(&e, &store, false);
+    left.parents = BTreeSet::from([right.revision_id]);
+    right.parents = BTreeSet::from([left.revision_id]);
+    let mut cyclic = original.clone();
+    cyclic.transaction_id = Uuid::new_v4();
+    cyclic.records.clear();
+    cyclic.record_namespaces.clear();
+    let mut objects = BTreeMap::new();
+    for envelope in [left, right] {
+        let bytes = serde_json::to_vec(&envelope).unwrap();
+        let hash = digest(&bytes);
+        cyclic.records.push(ObjectRef {
+            sha256: hash.clone(),
+            bytes: bytes.len() as u64,
+        });
+        cyclic
+            .record_namespaces
+            .insert(hash.clone(), envelope.namespace);
+        objects.insert(hash, bytes);
+    }
+    assert!(store
+        .import(cyclic, objects)
+        .unwrap_err()
+        .to_string()
+        .contains("cyclic lineage"));
+    assert_eq!(
+        store.heads(e.namespace, e.record_id).unwrap()[0].revision_id,
+        e.revision_id
+    );
     let backup = fixture.root.join("backup");
     store.export(&backup).unwrap();
     let mut value: serde_json::Value =

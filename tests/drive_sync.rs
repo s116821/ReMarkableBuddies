@@ -27,6 +27,7 @@ struct Cloud {
     cursor_expired: bool,
     quota_once: bool,
     change_calls: usize,
+    fail_list_once: bool,
 }
 #[derive(Clone, Default)]
 struct Fake(Arc<Mutex<Cloud>>);
@@ -49,7 +50,11 @@ impl DriveTransport for Fake {
         Ok(self.0.lock().unwrap().changes.len().to_string())
     }
     fn list(&mut self, page: Option<&str>) -> anyhow::Result<Page<RemoteFile>> {
-        let c = self.0.lock().unwrap();
+        let mut c = self.0.lock().unwrap();
+        if page.is_some() && c.fail_list_once {
+            c.fail_list_once = false;
+            anyhow::bail!("injected listing interruption");
+        }
         let offset: usize = page.unwrap_or("0").parse()?;
         let items = c
             .files
@@ -242,47 +247,73 @@ fn revise(original: &Envelope, store: &Store, delete: bool) -> Envelope {
 
 #[test]
 fn offline_two_device_conflicts_delete_and_empty_recovery_converge_without_clocks() {
-    let cloud = Fake::default();
-    let a = Device::new();
-    let b = Device::new();
-    let collection = Uuid::new_v4();
-    let original = record(&a.store, Namespace::SubjectMemory);
-    a.store
-        .commit(vec![original.clone()], BTreeMap::new())
-        .unwrap();
-    let mut ea = a.engine(cloud.clone(), policy(collection, true));
-    pump(&mut ea);
-    let mut eb = b.engine(cloud.clone(), policy(collection, false));
-    pump(&mut eb);
-    assert_eq!(
-        b.store
-            .heads(original.namespace, original.record_id)
-            .unwrap()
-            .len(),
-        1
-    );
-    a.store
-        .commit(vec![revise(&original, &a.store, false)], BTreeMap::new())
-        .unwrap();
-    b.store
-        .commit(vec![revise(&original, &b.store, true)], BTreeMap::new())
-        .unwrap();
-    pump(&mut eb);
-    pump(&mut ea);
-    pump(&mut eb);
-    let heads = |s: &Store| {
-        s.heads(original.namespace, original.record_id)
-            .unwrap()
-            .iter()
-            .map(|e| e.revision_id)
-            .collect::<BTreeSet<_>>()
-    };
-    assert_eq!(heads(&a.store), heads(&b.store));
-    assert_eq!(heads(&a.store).len(), 2);
-    let c = Device::new();
-    let mut ec = c.engine(cloud, policy(collection, false));
-    pump(&mut ec);
-    assert_eq!(heads(&a.store), heads(&c.store));
+    for deletion in [false, true] {
+        for reverse in [false, true] {
+            let cloud = Fake::default();
+            let a = Device::new();
+            let b = Device::new();
+            let collection = Uuid::new_v4();
+            let original = record(&a.store, Namespace::SubjectMemory);
+            a.store
+                .commit(vec![original.clone()], BTreeMap::new())
+                .unwrap();
+            let mut ea = a.engine(cloud.clone(), policy(collection, true));
+            pump(&mut ea);
+            let mut eb = b.engine(cloud.clone(), policy(collection, false));
+            pump(&mut eb);
+            assert_eq!(
+                b.store
+                    .heads(original.namespace, original.record_id)
+                    .unwrap()
+                    .len(),
+                1
+            );
+            a.store
+                .commit(vec![revise(&original, &a.store, false)], BTreeMap::new())
+                .unwrap();
+            b.store
+                .commit(vec![revise(&original, &b.store, deletion)], BTreeMap::new())
+                .unwrap();
+            if reverse {
+                pump(&mut ea);
+            }
+            pump(&mut eb);
+            pump(&mut ea);
+            pump(&mut eb);
+            let heads = |s: &Store| {
+                s.heads(original.namespace, original.record_id)
+                    .unwrap()
+                    .iter()
+                    .map(|e| e.revision_id)
+                    .collect::<BTreeSet<_>>()
+            };
+            assert_eq!(heads(&a.store), heads(&b.store));
+            assert_eq!(heads(&a.store).len(), 2);
+            let c = Device::new();
+            let mut ec = c.engine(cloud.clone(), policy(collection, false));
+            pump(&mut ec);
+            assert_eq!(heads(&a.store), heads(&c.store));
+            let mut resolution = revise(&original, &a.store, false);
+            resolution.parents = heads(&a.store);
+            a.store
+                .commit(vec![resolution.clone()], BTreeMap::new())
+                .unwrap();
+            pump(&mut ea);
+            pump(&mut eb);
+            pump(&mut ec);
+            assert_eq!(heads(&b.store), BTreeSet::from([resolution.revision_id]));
+            assert_eq!(heads(&b.store), heads(&c.store));
+            // Replay an older change cursor with durable observed/applied state intact.
+            drop(eb);
+            let path = b.store.paths.data.join("sync/state.json");
+            let mut state: serde_json::Value = files::json(&path, MAX_METADATA as u64).unwrap();
+            state["cursor"] = "0".into();
+            files::atomic_json(&path, &state).unwrap();
+            let before = b.store.manifests().unwrap().len();
+            pump(&mut b.engine(cloud, policy(collection, false)));
+            assert_eq!(b.store.manifests().unwrap().len(), before);
+        }
+    }
 }
 
 #[test]
@@ -576,8 +607,24 @@ fn more_deferred_children_than_batch_cannot_starve_their_present_parents() {
     }
     let mut p = policy(collection, false);
     p.batch_items = 2;
-    let mut eb = b.engine(cloud, p);
-    pump(&mut eb);
+    cloud.0.lock().unwrap().fail_list_once = true;
+    let mut complete = false;
+    let mut interrupted = false;
+    for _ in 0..500 {
+        // Reconstruct from durable state after every bounded batch/page.
+        match b.engine(cloud.clone(), p.clone()).step() {
+            Ok(Status::Current) => {
+                complete = true;
+                break;
+            }
+            Ok(_) => (),
+            Err(error) => {
+                assert!(error.to_string().contains("injected listing interruption"));
+                interrupted = true;
+            }
+        }
+    }
+    assert!(complete && interrupted);
     assert_eq!(
         b.store.heads(e.namespace, e.record_id).unwrap()[0].revision_id,
         e.revision_id
