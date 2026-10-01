@@ -6,7 +6,7 @@
   "sdk_metadata_revision": "a53cae3de9f45417b97efc4c46c42e4c8ebdb939",
   "installer_sha256": "e2daf17a86d375aae6d290af993060f3dfb488568ca83c401eaa47869e975179",
   "local_image_id": "sha256:416c7a7be0038156797b0892f031f352b841d1921fae83f712d0a272e4724618",
-  "source_basis": "October 1 local vendor SDK metadata; all four provider hashes independently matched by coordinator to development RM2 firmware 3.28.0.172. No native application execution inferred. Compatibility DSOs libpthread/libdl are SDK-only until separately matched to the tablet; their implementation symbols resolve from loaded libc per glibc 2.34 release notes.",
+  "source_basis": "October 1 local vendor SDK metadata and coordinator-collected development RM2 provider hashes, inspected by the release lane. All six provider hashes match firmware 3.28.0.172 native files. glibc compatibility DSOs libpthread/libdl retain version definitions while implementation symbols resolve from loaded libc. Hash equality does not qualify native application behavior.",
   "elf_class": "ELF32",
   "machine": "ARM",
   "interpreter": "/lib/ld-linux-armhf.so.3",
@@ -5313,11 +5313,12 @@
         "__libpthread_version_placeholder@GLIBC_2.31",
         "__libpthread_version_placeholder@GLIBC_2.4"
       ],
-      "native_provider_hash_matched": false,
+      "native_provider_hash_matched": true,
       "symbol_providers": [
         "libc.so.6"
       ],
-      "source_basis": "glibc 2.34 compatibility DSO; implementation symbols moved to libc. https://sourceware.org/pipermail/libc-announce/2021/000032.html"
+      "source_basis": "glibc 2.34 compatibility DSO; implementation symbols moved to libc. https://sourceware.org/pipermail/libc-announce/2021/000032.html",
+      "native_hash_source": "Coordinator read-only tablet hash evidence, October 1: native-compat-provider-hashes-20261001.txt"
     },
     "libdl.so.2": {
       "sha256": "f0aa5ff0ab3e889fe3ec9f0ba59d3c7c0c4fbcb501ecc195a10ff3cb73d62989",
@@ -5325,11 +5326,12 @@
         "GLIBC_2.4",
         "__libdl_version_placeholder@GLIBC_2.4"
       ],
-      "native_provider_hash_matched": false,
+      "native_provider_hash_matched": true,
       "symbol_providers": [
         "libc.so.6"
       ],
-      "source_basis": "glibc 2.34 compatibility DSO; implementation symbols moved to libc. https://sourceware.org/pipermail/libc-announce/2021/000032.html"
+      "source_basis": "glibc 2.34 compatibility DSO; implementation symbols moved to libc. https://sourceware.org/pipermail/libc-announce/2021/000032.html",
+      "native_hash_source": "Coordinator read-only tablet hash evidence, October 1: native-compat-provider-hashes-20261001.txt"
     }
   }
 }
