@@ -7,7 +7,7 @@ use remarkable_open_sdk::{
 };
 use serde::{Deserialize, Serialize};
 
-pub const SDK_SOURCE: &str = "7e8ffd51f27cc63d79475754071b6444eab048fb";
+pub const SDK_SOURCE: &str = "2d473f0954120889f8a04c6294151241576ff8c3";
 
 fn required_option<'de, D, T>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
 where
@@ -439,6 +439,47 @@ impl HistoricalCapture {
                 derivation.parent_digest == self.native_parent.sha256
                     && derivation.parent_dimensions == self.native_parent.dimensions,
                 "historical derivative parent mismatch"
+            );
+            ensure!(
+                derivation.procedure == "image-0.25.10/crop-resize-8bit-v1",
+                "unsupported historical derivative procedure"
+            );
+            let [x, y, width, height] = self
+                .native_parent
+                .valid_region_bits
+                .map(|value| f64::from_bits(value.value()));
+            let [crop_x, crop_y, crop_width, crop_height] = derivation.crop;
+            let geometry = remarkable_open_sdk::capture::derive_geometry(
+                self.native_parent.dimensions,
+                remarkable_open_sdk::capture::Affine::new(
+                    self.native_parent
+                        .affine_bits
+                        .map(|value| f64::from_bits(value.value())),
+                )?,
+                remarkable_open_sdk::capture::SourceRegion {
+                    x,
+                    y,
+                    width,
+                    height,
+                },
+                remarkable_open_sdk::capture::PixelRect {
+                    x: crop_x,
+                    y: crop_y,
+                    width: crop_width,
+                    height: crop_height,
+                },
+                derivation.output_dimensions,
+            )?;
+            ensure!(
+                geometry.affine().coefficients().map(f64::to_bits)
+                    == image.affine_bits.map(ExactU64::value),
+                "historical derivative affine does not compose with parent"
+            );
+            let region = geometry.valid_source_region();
+            ensure!(
+                [region.x, region.y, region.width, region.height].map(f64::to_bits)
+                    == image.valid_region_bits.map(ExactU64::value),
+                "historical derivative valid region does not match parent/crop"
             );
             if image.role == Role::Overview {
                 ensure!(

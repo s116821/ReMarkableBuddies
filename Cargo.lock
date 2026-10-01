@@ -2020,7 +2020,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 [[package]]
 name = "remarkable-open-sdk"
 version = "0.0.0"
-source = "git+https://github.com/s116821/ReMarkableOpenSDK?rev=7e8ffd51f27cc63d79475754071b6444eab048fb#7e8ffd51f27cc63d79475754071b6444eab048fb"
+source = "git+https://github.com/s116821/ReMarkableOpenSDK?rev=2d473f0954120889f8a04c6294151241576ff8c3#2d473f0954120889f8a04c6294151241576ff8c3"
 dependencies = [
  "image",
  "sha2",

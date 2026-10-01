@@ -265,6 +265,12 @@ fn strict_historical_container_rejects_noncanonical_unknown_and_missing_facts() 
     let mut invalid = json.clone();
     invalid["source"]["device"] = "00000000-0000-0000-0000-000000000000".into();
     assert!(serde_json::from_value::<HistoricalCapture>(invalid).is_err());
+    let mut invalid = json.clone();
+    invalid["images"][0]["derivation"]["procedure"] = "unknown-resampler".into();
+    assert!(serde_json::from_value::<HistoricalCapture>(invalid)
+        .unwrap()
+        .validate()
+        .is_err());
     let mut invalid = json;
     invalid["native_parent"]["affine_bits"][0] = f64::NAN.to_bits().to_string().into();
     assert!(serde_json::from_value::<HistoricalCapture>(invalid)
@@ -364,32 +370,45 @@ fn fixture_storage_failures_dispatch_nothing_and_retry_original_bytes_once() {
 
 #[test]
 fn imported_capture_field_tampering_refuses_retrieval_without_effects() {
-    let fixture = Fixture::new();
-    let ledger = Ledger::new(fixture.open());
-    let conversation = create(&ledger);
-    let prepared = ledger
-        .prepare_sdk_fixture(
-            Uuid::new_v4(),
-            root(&ledger, conversation),
-            request(conversation),
-            &batch(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()),
-        )
-        .unwrap();
-    let mut envelope = ledger
-        .store()
-        .value(Namespace::Source, prepared.capture)
-        .unwrap()
-        .unwrap();
-    envelope.parents = std::collections::BTreeSet::from([envelope.revision_id]);
-    envelope.revision_id = Uuid::new_v4();
-    envelope.operation_id = Uuid::new_v4();
-    envelope.payload["record"]["facts"]["images"][0]["dimensions"][0] = 999.into();
-    ledger
-        .store()
-        .commit(vec![envelope], BTreeMap::new())
-        .unwrap();
-    assert!(ledger.stored_sdk_images(prepared.capture).is_err());
-    assert!(ledger.inspect(conversation, false).is_err());
+    for tamper in ["dimensions", "affine", "valid-region"] {
+        let fixture = Fixture::new();
+        let ledger = Ledger::new(fixture.open());
+        let conversation = create(&ledger);
+        let prepared = ledger
+            .prepare_sdk_fixture(
+                Uuid::new_v4(),
+                root(&ledger, conversation),
+                request(conversation),
+                &batch(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()),
+            )
+            .unwrap();
+        let mut envelope = ledger
+            .store()
+            .value(Namespace::Source, prepared.capture)
+            .unwrap()
+            .unwrap();
+        envelope.parents = std::collections::BTreeSet::from([envelope.revision_id]);
+        envelope.revision_id = Uuid::new_v4();
+        envelope.operation_id = Uuid::new_v4();
+        let image = &mut envelope.payload["record"]["facts"]["images"][0];
+        match tamper {
+            "dimensions" => image["dimensions"][0] = 999.into(),
+            "affine" => image["affine_bits"][0] = (0.25_f64.to_bits().to_string()).into(),
+            "valid-region" => {
+                image["valid_region_bits"][2] = (1.0_f64.to_bits().to_string()).into()
+            }
+            _ => unreachable!(),
+        }
+        ledger
+            .store()
+            .commit(vec![envelope], BTreeMap::new())
+            .unwrap();
+        assert!(
+            ledger.stored_sdk_images(prepared.capture).is_err(),
+            "{tamper}"
+        );
+        assert!(ledger.inspect(conversation, false).is_err(), "{tamper}");
+    }
 }
 
 #[test]

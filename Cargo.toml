@@ -29,7 +29,7 @@ figment = { version = "0.10", features = ["toml", "env"] }
 toml = "0.8"
 sha2 = "0.10"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
-remarkable-open-sdk = { git = "https://github.com/s116821/ReMarkableOpenSDK", rev = "7e8ffd51f27cc63d79475754071b6444eab048fb", default-features = false }
+remarkable-open-sdk = { git = "https://github.com/s116821/ReMarkableOpenSDK", rev = "2d473f0954120889f8a04c6294151241576ff8c3", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.13"
@@ -40,7 +40,7 @@ name = "remarkable_reader_buddy"
 path = "src/lib.rs"
 
 [dev-dependencies]
-remarkable-open-sdk = { git = "https://github.com/s116821/ReMarkableOpenSDK", rev = "7e8ffd51f27cc63d79475754071b6444eab048fb", default-features = false, features = ["mock"] }
+remarkable-open-sdk = { git = "https://github.com/s116821/ReMarkableOpenSDK", rev = "2d473f0954120889f8a04c6294151241576ff8c3", default-features = false, features = ["mock"] }
 # Explicit native-evidence example only; not linked into the installed runtime.
 sha2 = "0.10"
 
