@@ -23,7 +23,8 @@ jobs:
     outputs:
       tag: ${{ steps.identity.outputs.tag }}
       sha: ${{ steps.identity.outputs.sha }}
-      unfinished: ${{ steps.draft.outputs.id != '' }}
+      unfinished: ${{ fromJSON(steps.lookup.outputs.data).repository.release.isDraft || steps.create.outputs.data != '' }}
+      release_id: ${{ steps.create.outputs.data && fromJSON(steps.create.outputs.data).id || fromJSON(steps.lookup.outputs.data).repository.release.databaseId }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -87,17 +88,41 @@ jobs:
           set -euo pipefail
           git fetch origin "refs/tags/$TAG"
           test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$SHA"
-      - uses: ncipollo/release-action@339a81892b84b4eeb0f6e744e4574d79d0d9b8dd # v1.21.0
-        id: draft
+      - uses: octokit/graphql-action@ddde8ebb2493e79f390e6449c725c21663a67505 # v3.0.2
+        id: lookup
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag: ${{ steps.identity.outputs.tag }}
-          commit: ${{ steps.identity.outputs.sha }}
+          query: |
+            query($owner: String!, $repo: String!, $tag: String!) {
+              repository(owner: $owner, name: $repo) {
+                release(tagName: $tag) { databaseId tagName isDraft releaseAssets(first: 1) { totalCount } }
+              }
+            }
+          variables: |
+            owner: ${{ github.repository_owner }}
+            repo: ${{ github.event.repository.name }}
+            tag: ${{ steps.identity.outputs.tag }}
+      - name: Require complete release observation before build
+        if: >-
+          ${{ !fromJSON(steps.lookup.outputs.data).repository || !contains(toJSON(fromJSON(steps.lookup.outputs.data).repository), '"release":') || (toJSON(fromJSON(steps.lookup.outputs.data).repository.release) != 'null' && ((fromJSON(steps.lookup.outputs.data).repository.release.tagName != steps.identity.outputs.tag || !(fromJSON(steps.lookup.outputs.data).repository.release.databaseId > 0) || (toJSON(fromJSON(steps.lookup.outputs.data).repository.release.databaseId) == 'null' || !(fromJSON(steps.lookup.outputs.data).repository.release.databaseId >= 0 && fromJSON(steps.lookup.outputs.data).repository.release.databaseId <= 2147483647) || startsWith(toJSON(fromJSON(steps.lookup.outputs.data).repository.release.databaseId), '"') || contains(toJSON(fromJSON(steps.lookup.outputs.data).repository.release.databaseId), '.') || toJSON(fromJSON(steps.lookup.outputs.data).repository.release.databaseId) == 'true' || toJSON(fromJSON(steps.lookup.outputs.data).repository.release.databaseId) == 'false') || !(toJSON(fromJSON(steps.lookup.outputs.data).repository.release.isDraft) == 'true' || toJSON(fromJSON(steps.lookup.outputs.data).repository.release.isDraft) == 'false')) || (fromJSON(steps.lookup.outputs.data).repository.release.isDraft && (toJSON(fromJSON(steps.lookup.outputs.data).repository.release.releaseAssets.totalCount) == 'null' || !(fromJSON(steps.lookup.outputs.data).repository.release.releaseAssets.totalCount >= 0 && fromJSON(steps.lookup.outputs.data).repository.release.releaseAssets.totalCount <= 26) || startsWith(toJSON(fromJSON(steps.lookup.outputs.data).repository.release.releaseAssets.totalCount), '"') || contains(toJSON(fromJSON(steps.lookup.outputs.data).repository.release.releaseAssets.totalCount), '.') || toJSON(fromJSON(steps.lookup.outputs.data).repository.release.releaseAssets.totalCount) == 'true' || toJSON(fromJSON(steps.lookup.outputs.data).repository.release.releaseAssets.totalCount) == 'false')))) }}
+        run: exit 1
+      - uses: octokit/request-action@b91aabaa861c777dcdb14e2387e30eddf04619ae # v3.0.0
+        id: create
+        if: ${{ toJSON(fromJSON(steps.lookup.outputs.data).repository.release) == 'null' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          route: POST /repos/{repo}/releases
+          repo: ${{ github.repository }}
+          tag_name: ${{ steps.identity.outputs.tag }}
+          target_commitish: ${{ steps.identity.outputs.sha }}
           draft: true
-          allowUpdates: true
-          updateOnlyUnreleased: true
-          skipIfReleaseExists: true
-          omitBodyDuringUpdate: true
-          generateReleaseNotes: true
+          generate_release_notes: true
+      - name: Require exact newly created draft identity
+        if: >-
+          ${{ toJSON(fromJSON(steps.lookup.outputs.data).repository.release) == 'null' && (steps.create.outputs.status != '201' || steps.create.outputs.data == '' || (fromJSON(steps.create.outputs.data).tag_name != steps.identity.outputs.tag || !(fromJSON(steps.create.outputs.data).id > 0) || (toJSON(fromJSON(steps.create.outputs.data).id) == 'null' || !(fromJSON(steps.create.outputs.data).id >= 0 && fromJSON(steps.create.outputs.data).id <= 2147483647) || startsWith(toJSON(fromJSON(steps.create.outputs.data).id), '"') || contains(toJSON(fromJSON(steps.create.outputs.data).id), '.') || toJSON(fromJSON(steps.create.outputs.data).id) == 'true' || toJSON(fromJSON(steps.create.outputs.data).id) == 'false') || !(toJSON(fromJSON(steps.create.outputs.data).draft) == 'true' || toJSON(fromJSON(steps.create.outputs.data).draft) == 'false')) || toJSON(fromJSON(steps.create.outputs.data).draft) != 'true') }}
+        run: exit 1
   build:
     name: Build packages from verified tag
     needs: tag
@@ -126,6 +151,8 @@ jobs:
           targets: armv7-unknown-linux-gnueabihf,aarch64-unknown-linux-gnu
       - name: Install cross
         run: cargo install cross --git https://github.com/cross-rs/cross --rev 8c1a8aa4b661711f4b7b6ac07c2e8929ce2f7d27 --locked
+      - name: Install ELF inspection tool
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends binutils
       - name: Compile and verify both tablet packages
         env:
           TAG: ${{ needs.tag.outputs.tag }}
@@ -148,26 +175,68 @@ jobs:
         with:
           name: packages-${{ needs.tag.outputs.tag }}
           path: packages
-      - uses: ncipollo/release-action@339a81892b84b4eeb0f6e744e4574d79d0d9b8dd # v1.21.0
+      - uses: actions/checkout@v4
         with:
-          tag: ${{ needs.tag.outputs.tag }}
-          commit: ${{ needs.tag.outputs.sha }}
-          artifacts: 'packages/*'
-          artifactErrorsFailBuild: true
-          draft: true
-          allowUpdates: true
-          updateOnlyUnreleased: true
-          skipIfReleaseExists: true
-          omitBodyDuringUpdate: true
-          replacesArtifacts: true
-      # Never combine uploads and draft=false: updates happen before uploads.
-      - uses: ncipollo/release-action@339a81892b84b4eeb0f6e744e4574d79d0d9b8dd # v1.21.0
+          ref: ${{ github.workflow_sha }}
+          path: tooling
+          persist-credentials: false
+      - uses: actions/setup-python@v5
         with:
-          tag: ${{ needs.tag.outputs.tag }}
-          commit: ${{ needs.tag.outputs.sha }}
+          python-version: '3.12'
+      - name: Verify downloaded fixed package inventory
+        env:
+          TAG: ${{ needs.tag.outputs.tag }}
+          SHA: ${{ needs.tag.outputs.sha }}
+        run: python tooling/release/build.py --verify-only --tag "$TAG" --sha "$SHA" --output packages
+      - uses: octokit/graphql-action@ddde8ebb2493e79f390e6449c725c21663a67505 # v3.0.2
+        id: before_upload
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          query: |
+            query($owner: String!, $repo: String!, $tag: String!) {
+              repository(owner: $owner, name: $repo) {
+                release(tagName: $tag) { databaseId tagName isDraft releaseAssets(first: 1) { totalCount } }
+              }
+            }
+          variables: |
+            owner: ${{ github.repository_owner }}
+            repo: ${{ github.event.repository.name }}
+            tag: ${{ needs.tag.outputs.tag }}
+      - name: Require same draft and bounded upload inventory
+        if: >-
+          ${{ (fromJSON(steps.before_upload.outputs.data).repository.release.tagName != needs.tag.outputs.tag || !(fromJSON(steps.before_upload.outputs.data).repository.release.databaseId > 0) || (toJSON(fromJSON(steps.before_upload.outputs.data).repository.release.databaseId) == 'null' || !(fromJSON(steps.before_upload.outputs.data).repository.release.databaseId >= 0 && fromJSON(steps.before_upload.outputs.data).repository.release.databaseId <= 2147483647) || startsWith(toJSON(fromJSON(steps.before_upload.outputs.data).repository.release.databaseId), '"') || contains(toJSON(fromJSON(steps.before_upload.outputs.data).repository.release.databaseId), '.') || toJSON(fromJSON(steps.before_upload.outputs.data).repository.release.databaseId) == 'true' || toJSON(fromJSON(steps.before_upload.outputs.data).repository.release.databaseId) == 'false') || !(toJSON(fromJSON(steps.before_upload.outputs.data).repository.release.isDraft) == 'true' || toJSON(fromJSON(steps.before_upload.outputs.data).repository.release.isDraft) == 'false')) || fromJSON(steps.before_upload.outputs.data).repository.release.databaseId != needs.tag.outputs.release_id || toJSON(fromJSON(steps.before_upload.outputs.data).repository.release.isDraft) != 'true' || (toJSON(fromJSON(steps.before_upload.outputs.data).repository.release.releaseAssets.totalCount) == 'null' || !(fromJSON(steps.before_upload.outputs.data).repository.release.releaseAssets.totalCount >= 0 && fromJSON(steps.before_upload.outputs.data).repository.release.releaseAssets.totalCount <= 26) || startsWith(toJSON(fromJSON(steps.before_upload.outputs.data).repository.release.releaseAssets.totalCount), '"') || contains(toJSON(fromJSON(steps.before_upload.outputs.data).repository.release.releaseAssets.totalCount), '.') || toJSON(fromJSON(steps.before_upload.outputs.data).repository.release.releaseAssets.totalCount) == 'true' || toJSON(fromJSON(steps.before_upload.outputs.data).repository.release.releaseAssets.totalCount) == 'false') }}
+        run: exit 1
+      - uses: AButler/upload-release-assets@34491005a5d7ec239a784e460807ce844fde7962 # v4.0.0
+        with:
+          release-id: ${{ needs.tag.outputs.release_id }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          files: 'packages/reader-buddy-armv7-unknown-linux-gnueabihf.tar.gz;packages/reader-buddy-aarch64-unknown-linux-gnu.tar.gz;packages/provenance.json'
+      - uses: octokit/graphql-action@ddde8ebb2493e79f390e6449c725c21663a67505 # v3.0.2
+        id: before_publish
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          query: |
+            query($owner: String!, $repo: String!, $tag: String!) {
+              repository(owner: $owner, name: $repo) {
+                release(tagName: $tag) { databaseId tagName isDraft releaseAssets(first: 1) { totalCount } }
+              }
+            }
+          variables: |
+            owner: ${{ github.repository_owner }}
+            repo: ${{ github.event.repository.name }}
+            tag: ${{ needs.tag.outputs.tag }}
+      - name: Require same draft before publication
+        if: >-
+          ${{ (fromJSON(steps.before_publish.outputs.data).repository.release.tagName != needs.tag.outputs.tag || !(fromJSON(steps.before_publish.outputs.data).repository.release.databaseId > 0) || (toJSON(fromJSON(steps.before_publish.outputs.data).repository.release.databaseId) == 'null' || !(fromJSON(steps.before_publish.outputs.data).repository.release.databaseId >= 0 && fromJSON(steps.before_publish.outputs.data).repository.release.databaseId <= 2147483647) || startsWith(toJSON(fromJSON(steps.before_publish.outputs.data).repository.release.databaseId), '"') || contains(toJSON(fromJSON(steps.before_publish.outputs.data).repository.release.databaseId), '.') || toJSON(fromJSON(steps.before_publish.outputs.data).repository.release.databaseId) == 'true' || toJSON(fromJSON(steps.before_publish.outputs.data).repository.release.databaseId) == 'false') || !(toJSON(fromJSON(steps.before_publish.outputs.data).repository.release.isDraft) == 'true' || toJSON(fromJSON(steps.before_publish.outputs.data).repository.release.isDraft) == 'false')) || fromJSON(steps.before_publish.outputs.data).repository.release.databaseId != needs.tag.outputs.release_id || toJSON(fromJSON(steps.before_publish.outputs.data).repository.release.isDraft) != 'true' || (toJSON(fromJSON(steps.before_publish.outputs.data).repository.release.releaseAssets.totalCount) == 'null' || !(fromJSON(steps.before_publish.outputs.data).repository.release.releaseAssets.totalCount >= 0 && fromJSON(steps.before_publish.outputs.data).repository.release.releaseAssets.totalCount <= 30) || startsWith(toJSON(fromJSON(steps.before_publish.outputs.data).repository.release.releaseAssets.totalCount), '"') || contains(toJSON(fromJSON(steps.before_publish.outputs.data).repository.release.releaseAssets.totalCount), '.') || toJSON(fromJSON(steps.before_publish.outputs.data).repository.release.releaseAssets.totalCount) == 'true' || toJSON(fromJSON(steps.before_publish.outputs.data).repository.release.releaseAssets.totalCount) == 'false') }}
+        run: exit 1
+      - uses: octokit/request-action@b91aabaa861c777dcdb14e2387e30eddf04619ae # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          route: PATCH /repos/{repo}/releases/{release_id}
+          repo: ${{ github.repository }}
+          release_id: ${{ needs.tag.outputs.release_id }}
           draft: false
-          allowUpdates: true
-          updateOnlyUnreleased: true
-          skipIfReleaseExists: true
-          omitBodyDuringUpdate: true
-          makeLatest: legacy
+          make_latest: legacy

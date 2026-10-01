@@ -124,9 +124,23 @@ jobs:
       - uses: actions/checkout@v4
         if: github.event_name == 'pull_request' && needs.policy.outputs.application == 'true'
         with:
-          repository: ncipollo/release-action
-          ref: 339a81892b84b4eeb0f6e744e4574d79d0d9b8dd
-          path: .upstream/release
+          repository: octokit/graphql-action
+          ref: ddde8ebb2493e79f390e6449c725c21663a67505
+          path: .upstream/graphql
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request' && needs.policy.outputs.application == 'true'
+        with:
+          repository: octokit/request-action
+          ref: b91aabaa861c777dcdb14e2387e30eddf04619ae
+          path: .upstream/request
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request' && needs.policy.outputs.application == 'true'
+        with:
+          repository: AButler/upload-release-assets
+          ref: 34491005a5d7ec239a784e460807ce844fde7962
+          path: .upstream/upload
           persist-credentials: false
       - uses: actions/checkout@v4
         if: github.event_name == 'pull_request' && needs.policy.outputs.application == 'true'
@@ -139,7 +153,9 @@ jobs:
         if: github.event_name == 'pull_request' && needs.policy.outputs.application == 'true'
         env:
           PATHS_ACTION: ${{ github.workspace }}/.upstream/paths
-          RELEASE_ACTION: ${{ github.workspace }}/.upstream/release
+          GRAPHQL_ACTION: ${{ github.workspace }}/.upstream/graphql
+          REQUEST_ACTION: ${{ github.workspace }}/.upstream/request
+          UPLOAD_ACTION: ${{ github.workspace }}/.upstream/upload
           TAG_ACTION: ${{ github.workspace }}/.upstream/tag
         run: |
           npm ci --prefix release/fixtures --ignore-scripts --no-audit --no-fund

@@ -8,6 +8,8 @@ from pathlib import Path
 import re
 import subprocess
 import tarfile
+import tomllib
+from abi import qualify
 
 TAG = re.compile(r"v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)\Z")
 
@@ -28,6 +30,8 @@ def sha256(path):
 def verify_packages(directory, release):
     manifest = json.loads((directory / "provenance.json").read_text())
     verify_identity(manifest, release)
+    if {path.name for path in directory.iterdir()} != set(manifest['packages']) | {'provenance.json'}:
+        raise ValueError("Package directory does not match the fixed release inventory")
     for name, digest in manifest["packages"].items():
         if sha256(directory / name) != digest:
             raise ValueError(f"Package checksum mismatch: {name}")
@@ -43,9 +47,17 @@ def build_checkout(repo, release, directory, target_dir=None):
     git(repo, "checkout", "--detach", release.tag)
     if git(repo, "rev-parse", "HEAD") != release.sha:
         raise ValueError("Checkout does not match release SHA")
-    env = dict(os.environ, READER_BUDDY_RELEASE_TAG=release.tag, READER_BUDDY_RELEASE_SHA=release.sha)
+    configuration = Path(__file__).with_name("Cross.release.toml").resolve()
+    env = dict(os.environ, READER_BUDDY_RELEASE_TAG=release.tag, READER_BUDDY_RELEASE_SHA=release.sha,
+               CROSS_CONFIG=str(configuration), LD_BIND_NOW="1")
     target_dir = Path(target_dir or repo / "target").resolve()
     packages = {}
+    artifacts = {}
+    selected_images = tomllib.loads(configuration.read_text())["target"]
+    toolchain = {
+        "cross": subprocess.check_output(["cross", "--version"], text=True).strip(),
+        "rustc": subprocess.check_output(["rustc", "--version", "--verbose"], text=True).strip(),
+    }
     for target in TARGETS:
         # cross run builds first, then executes --version under target emulation.
         output = subprocess.check_output(
@@ -56,25 +68,36 @@ def build_checkout(repo, release, directory, target_dir=None):
             raise ValueError(f"{target} reports {output!r}, expected {release.tag[1:]}")
         package = directory / f"reader-buddy-{target}.tar.gz"
         binary = target_dir / target / "release" / "reader-buddy"
+        artifacts[target] = qualify(binary, target)
+        artifacts[target]["build_image"] = selected_images[target]["image"]
+        artifacts[target]["eager_runtime_binding"] = True
         with tarfile.open(package, "w:gz") as archive:
             info = archive.gettarinfo(str(binary), arcname="reader-buddy")
             info.mode = 0o755
             with binary.open("rb") as data:
                 archive.addfile(info, data)
         packages[package.name] = sha256(package)
-    manifest = dict(tag=release.tag, sha=release.sha, version=release.tag[1:], packages=packages)
+    manifest = dict(tag=release.tag, sha=release.sha, version=release.tag[1:], packages=packages,
+                    toolchain=toolchain, artifacts=artifacts)
     (directory / "provenance.json").write_text(json.dumps(manifest, indent=2) + "\n")
     verify_packages(directory, release)
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source", required=True, type=Path)
+    parser.add_argument("--source", type=Path)
+    parser.add_argument("--verify-only", action="store_true")
     parser.add_argument("--tag", required=True)
     parser.add_argument("--sha", required=True)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     if not TAG.fullmatch(args.tag) or not re.fullmatch(r"[0-9a-f]{40}", args.sha):
         parser.error("An exact stable tag and source SHA are required")
+    if args.verify_only:
+        verify_packages(args.output.resolve(), Release(args.tag, args.sha))
+        print(f"Verified package inventory: {args.tag} at {args.sha}")
+        return
+    if args.source is None:
+        parser.error("--source is required when building")
     repo = args.source.resolve()
     if git(repo, "rev-parse", "HEAD") != args.sha or git(repo, "rev-parse", f"refs/tags/{args.tag}^{{commit}}") != args.sha:
         parser.error("Checkout/tag do not match the verified source SHA")

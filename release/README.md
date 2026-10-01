@@ -1,10 +1,9 @@
 # Tag-based releases
 
-> Unmerged REM-46 checkpoint: publication is not qualified yet. The current
-> ncipollo candidate cannot recover an old draft beyond its first API page.
-> Ordinary retry fixtures pass, but the separate old-draft regression fails.
-> Do not merge or claim complete release recovery until the central
-> `action-driven-releases` change resolves that gate with upstream tooling.
+> Unmerged REM-46 implementation: actual upstream-distribution fixtures pass
+> direct recovery of an old draft with its existing ID, partial upload retry and
+> published-release skips. Hosted CI, final independent review and coordinated
+> delivery remain required; the central change is not archived or complete.
 
 Git tags are the only application version authority. GitVersion **6.8.2** computes
 versions from the exact squash commit's tagged ancestry and conventional history.
@@ -42,6 +41,18 @@ reviewed workflow revision, allowing recovery after tooling changes. Assets uplo
 to a draft; a separate final Action publishes only after all uploads succeed.
 Published releases are skipped without rebuilding or replacing their assets.
 
+Exact release discovery uses the official GraphQL Action's fixed tag query;
+an old draft is found directly without listing pages. Missing/error/malformed
+observations fail before building. Published releases skip building and writes.
+Draft IDs are preserved through fixed official create/publish requests and the
+upstream uploader. The uploader reads at most 30 existing assets, so a supported
+draft must contain at most 26 assets before upload, reserving the entire fixed
+package inventory (three Rust or four Manager files). Larger or malformed counts
+refuse safely; they are never silently treated as empty. Downloads must match the
+fixed inventory and checksums before upload; only successful uploads allow final
+publication. Native concurrency serializes workflow retries, without claiming
+protection from an external actor changing a release during a run.
+
 ## Recovery
 
 Rerun the original failed Release workflow. If a tag already exists, use **Run
@@ -57,6 +68,24 @@ the original merge run. A docs merge remains build-free and does not replay earl
 failures. Direct main commits outside the PR/squash workflow do not automatically
 receive releases; retain the PR workflow instead of manually stamping versions.
 
+## Target runtime evidence
+
+`Cross.release.toml` pins the build/emulation images. `build.py` records the
+toolchain/image identity and forces eager dynamic binding during emulated version
+verification. `abi.py` verifies ELF architecture, interpreter, ARM hard-float ABI,
+NEEDED providers and all loader symbol versions against the selected RM2 vendor
+sysroot inventory, including version requirements arising from weak symbols.
+The baseline records October 1 independently matched libc/libm/libgcc/loader
+hashes for development RM2 firmware 3.28.0.172. It contains interface metadata only,
+not provider binaries. A changed dependency requires reviewed baseline evidence;
+an unsupported provider/symbol/version fails the build.
+
+This remains a legacy cross backend. It does not claim ReMarkableOpenSDK
+consumption or native app/API qualification. AArch64 receives ELF metadata and
+selected-image emulation evidence; Paper Pro hardware qualification remains
+REM-29. One Buddy tag/source covers both target packages; Manager versions remain
+independent and no separate SDK runtime installation is introduced.
+
 ## Public fixtures
 
 Install Git, Node 24, Python 3.12 and the official GitVersion 6.8.2 tool. Its
@@ -70,15 +99,17 @@ npm ci --prefix release/fixtures --ignore-scripts
 ```
 
 The Actions fixture additionally executes pinned upstream distributions. Clone
-these repositories into `.upstream/paths`, `.upstream/release`, `.upstream/tag`,
-then checkout the exact commits below. Set `PATHS_ACTION`, `RELEASE_ACTION`, and
-`TAG_ACTION` to their absolute directories and run `npm test --prefix release/fixtures`.
+these repositories into `.upstream/paths`, `.upstream/graphql`, `.upstream/request`,
+`.upstream/upload` and `.upstream/tag`, then checkout the exact commits below.
+Set `PATHS_ACTION`, `GRAPHQL_ACTION`, `REQUEST_ACTION`, `UPLOAD_ACTION` and `TAG_ACTION` to their absolute directories and run `npm test --prefix release/fixtures`.
 These same steps appear in CI. Git Bash is used on Windows (override `BASH` if needed).
 
 | Fixture distribution | Exact commit |
 | --- | --- |
 | dorny/paths-filter v4.0.3 | ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d |
-| ncipollo/release-action v1.21.0 | 339a81892b84b4eeb0f6e744e4574d79d0d9b8dd |
+| octokit/graphql-action v3.0.2 | ddde8ebb2493e79f390e6449c725c21663a67505 |
+| octokit/request-action v3.0.0 | b91aabaa861c777dcdb14e2387e30eddf04619ae |
+| AButler/upload-release-assets v4.0.0 | 34491005a5d7ec239a784e460807ce844fde7962 |
 | rickstaa/action-create-tag v1.7.2 | a1c7777fcb2fee4f19b0f283ba888afa11678b72 |
 
 Fixtures use real local Git history/tags, actual Action bundles with a localhost

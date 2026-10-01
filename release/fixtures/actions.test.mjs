@@ -14,7 +14,9 @@ const root = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const workflow = name => parse(readFileSync(join(root, '.github/workflows', name + '.yml'), 'utf8'));
 const pins = {
   PATHS_ACTION: 'ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d',
-  RELEASE_ACTION: '339a81892b84b4eeb0f6e744e4574d79d0d9b8dd',
+  GRAPHQL_ACTION: 'ddde8ebb2493e79f390e6449c725c21663a67505',
+  REQUEST_ACTION: 'b91aabaa861c777dcdb14e2387e30eddf04619ae',
+  UPLOAD_ACTION: '34491005a5d7ec239a784e460807ce844fde7962',
   TAG_ACTION: 'a1c7777fcb2fee4f19b0f283ba888afa11678b72',
 };
 function upstream(key) {
@@ -59,7 +61,7 @@ async function action(t, key, endpoint, inputs, payload = { pull_request: { numb
   const dir = fixture(t);
   const event = join(dir, 'event.json');
   writeFileSync(event, JSON.stringify(payload));
-  const env = { ...process.env, GITHUB_REPOSITORY: 'fixture/repo', GITHUB_EVENT_NAME: 'pull_request_target', GITHUB_EVENT_PATH: event, GITHUB_API_URL: endpoint, GITHUB_TOKEN: 'fixture-only', GITHUB_WORKSPACE: root };
+  const env = { ...process.env, GITHUB_ACTION: 'fixture', GITHUB_REPOSITORY: 'fixture/repo', GITHUB_EVENT_NAME: 'pull_request_target', GITHUB_EVENT_PATH: event, GITHUB_API_URL: endpoint, GITHUB_TOKEN: 'fixture-only', GITHUB_WORKSPACE: root };
   for (const file of ['OUTPUT', 'ENV', 'PATH', 'STEP_SUMMARY']) {
     env['GITHUB_' + file] = join(dir, file);
     writeFileSync(env['GITHUB_' + file], '');
@@ -72,11 +74,19 @@ async function action(t, key, endpoint, inputs, payload = { pull_request: { numb
   result.outputs = readFileSync(env.GITHUB_OUTPUT, 'utf8');
   return result;
 }
-function outputValue(text, key) {
-  const lines = text.split(/\r?\n/);
-  const first = lines.findIndex(line => line.startsWith(key + '<<'));
-  return first < 0 ? undefined : lines[first + 1];
+function outputMap(text) {
+  const lines = text.split(/\r?\n/), outputs = {};
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index], marker = line.indexOf('<<');
+    if (marker >= 0) {
+      const key = line.slice(0, marker), delimiter = line.slice(marker + 2), content = [];
+      while (++index < lines.length && lines[index] !== delimiter) content.push(lines[index]);
+      outputs[key] = content.join('\n');
+    } else if (line.includes('=')) { const i = line.indexOf('='); outputs[line.slice(0,i)] = line.slice(i+1); }
+  }
+  return outputs;
 }
+function outputValue(text, key) { return outputMap(text)[key]; }
 function value(input) {
   if (input === null || input === undefined) return new data.Null();
   if (typeof input === 'string') return new data.StringData(input);
@@ -103,11 +113,16 @@ test('actual workflow expressions refuse incomplete observations and skip closed
   assert.equal(evaluate(release.jobs.publish.if, { github: { event_name: 'pull_request_target' }, needs: { admission: { outputs: { application: 'false' } } } }), 'false');
   assert.equal(evaluate(publish.jobs.build.if, { needs: { tag: { outputs: { unfinished: 'false' } } } }), 'false');
   assert.equal(publish.concurrency.queue, 'max');
-  const updates = publish.jobs.publish.steps.filter(s => s.uses?.startsWith('ncipollo/'));
-  assert.equal(updates[0].with.draft, true);
-  assert.ok(updates[0].with.artifacts);
-  assert.equal(updates[1].with.draft, false);
-  assert.equal(updates[1].with.artifacts, undefined);
+  const uploader = publish.jobs.publish.steps.findIndex(s => s.uses?.startsWith('AButler/'));
+  const final = publish.jobs.publish.steps.findIndex(s => s.with?.route?.startsWith('PATCH'));
+  assert.ok(uploader > 0 && final > uploader);
+  assert.equal(publish.jobs.publish.steps[final].with.draft, false);
+  assert.equal(publish.jobs.publish.steps[final].with.release_id, '${{ needs.tag.outputs.release_id }}');
+  const inventoryGuard = publish.jobs.publish.steps.find(s => s.name === 'Require same draft and bounded upload inventory').if;
+  for (const [count, refused] of [[0, false], [26, false], [27, true], [null, true], ['0', true]]) {
+    assert.equal(evaluate(inventoryGuard, { steps: { before_upload: { outputs: { data: JSON.stringify({ repository: { release: { databaseId: 55, tagName: 'v0.2.1', isDraft: true, releaseAssets: { totalCount: count } } } }) } } }, needs: { tag: { outputs: { tag: 'v0.2.1', release_id: '55' } } } }), String(refused));
+  }
+
 });
 
 test('paths-filter actual bundle sees later pages and both sides of a rename', async t => {
@@ -144,56 +159,114 @@ test('paths-filter actual bundle sees later pages and both sides of a rename', a
   }
 });
 
-test('release-action actual bundle keeps failed uploads draft, recovers, and skips published assets', async t => {
-  let release;
-  let failUpload = false;
-  const events = [];
-  const endpoint = await server(t, (req, bytes) => {
-    const path = new URL(req.url, 'http://localhost').pathname;
-    events.push([req.method, path, release?.draft]);
-    // GitHub documents this endpoint as published releases only; drafts use list.
-    // https://docs.github.com/en/rest/releases/releases#get-a-release-by-tag-name
-    if (req.method === 'GET' && path.includes('/releases/tags/')) return release && !release.draft ? { body: release } : { status: 404 };
-    if (req.method === 'GET' && path.endsWith('/releases')) return { body: release ? [release] : [] };
-    if (req.method === 'GET' && path.endsWith('/assets')) return { body: [] };
-    if (req.method === 'POST' && path.endsWith('/releases')) {
-      assert.equal(release, undefined, 'existing draft must be reused, never recreated');
-      release = { ...JSON.parse(bytes), id: 5, upload_url: `${endpoint}/upload/5{?name,label}`, html_url: 'https://example.invalid/release', assets: [] };
-      return { status: 201, body: release };
-    }
-    if (req.method === 'PATCH' && path.endsWith('/releases/5')) { Object.assign(release, JSON.parse(bytes)); return { body: release }; }
-    if (req.method === 'POST' && path === '/upload/5') {
-      assert.equal(release.draft, true, 'public release before all uploads completed');
-      if (failUpload) return { status: 422, body: { message: 'fixture upload failure' } };
-      return { status: 201, body: { id: 9, browser_download_url: 'https://example.invalid/asset' } };
-    }
-    return { status: 404, body: { message: 'unexpected fixture route: ' + path } };
-  });
-  const common = { token: 'fixture-only', tag: 'v0.2.1', commit: 'a'.repeat(40), allowUpdates: true, updateOnlyUnreleased: true, skipIfReleaseExists: true, draft: true, omitBodyDuringUpdate: true };
-  let result = await action(t, 'RELEASE_ACTION', endpoint, common);
-  assert.equal(result.code, 0, result.output);
-  assert.equal(outputValue(result.outputs, 'id'), '5');
+test('actual publisher distributions recover a page-three draft by ID and keep partial uploads private', async t => {
+  const publish = workflow('publish');
   const assets = fixture(t);
-  writeFileSync(join(assets, 'package.zip'), 'fixture archive');
-  failUpload = true;
-  result = await action(t, 'RELEASE_ACTION', endpoint, { ...common, artifacts: join(assets, '*.zip').replaceAll('\\', '/'), artifactErrorsFailBuild: true });
-  assert.notEqual(result.code, 0, result.output);
-  assert.equal(release.draft, true);
-  failUpload = false;
-  result = await action(t, 'RELEASE_ACTION', endpoint, { ...common, artifacts: join(assets, '*.zip').replaceAll('\\', '/'), artifactErrorsFailBuild: true });
-  assert.equal(result.code, 0, result.output);
-  assert.equal(release.draft, true);
-  const uploadCount = events.filter(([method, path]) => method === 'POST' && path.startsWith('/upload/')).length;
-  result = await action(t, 'RELEASE_ACTION', endpoint, { ...common, draft: false, makeLatest: 'legacy' });
-  assert.equal(result.code, 0, result.output);
-  assert.equal(release.draft, false);
-  assert.equal(events.filter(([method, path]) => method === 'POST' && path.startsWith('/upload/')).length, uploadCount);
-  const writes = events.filter(([method]) => method !== 'GET').length;
-  result = await action(t, 'RELEASE_ACTION', endpoint, common);
-  assert.equal(result.code, 0, result.output);
-  assert.equal(outputValue(result.outputs, 'id'), undefined);
-  assert.equal(events.filter(([method]) => method !== 'GET').length, writes);
+  const upload = publish.jobs.publish.steps.find(s => s.uses?.startsWith('AButler/'));
+  const fileNames = upload.with.files.split(';').map(path => path.split('/').at(-1));
+  assert.equal(new Set(fileNames).size, fileNames.length);
+  for (const name of fileNames) writeFileSync(join(assets, name), 'fixture package ' + name);
+  let mode = 'draft', failedAsset = true, built = 0;
+  let uploaded = [], created = 0, published = 0, queries = 0;
+  const oldDraft = { id: 55, tag_name: 'v0.2.1', draft: true };
+  // A list-based publisher would have to reach page three, which is intentionally
+  // not available to this composition: its upstream direct lookup must suffice.
+  const releaseListing = [...Array.from({ length: 200 }, (_, i) => ({ id: i + 100, draft: false })), oldDraft];
+  assert.equal(releaseListing.indexOf(oldDraft), 200);
+  const endpoint = await server(t, (req, bytes) => {
+    const url = new URL(req.url, 'http://fixture');
+    if (url.pathname === '/graphql') {
+      queries++;
+      const request = JSON.parse(bytes);
+      assert.equal(request.variables.tag, 'v0.2.1');
+      assert.match(request.query, /release\(tagName: \$tag\)/);
+      if (mode === 'error') return { body: { errors: [{ message: 'lookup refused' }] } };
+      let observed = { databaseId: 55, tagName: 'v0.2.1', isDraft: oldDraft.draft, releaseAssets: { totalCount: uploaded.length } };
+      if (mode === 'absent') observed = null;
+      if (mode === 'zero-release') observed = 0;
+      if (mode === 'false-release') observed = false;
+      if (mode === 'missing-repository') return { body: { data: { repository: null } } };
+      if (mode === 'missing-release') return { body: { data: { repository: {} } } };
+      if (mode === 'wrong-tag') observed.tagName = 'v0.9.9';
+      if (mode === 'bad-id') observed.databaseId = '55';
+      if (mode === 'fraction-id') observed.databaseId = 55.5;
+      if (mode === 'boolean-id') observed.databaseId = true;
+      if (mode === 'missing-id') delete observed.databaseId;
+      if (mode === 'bad-draft') observed.isDraft = 'true';
+      if (mode === 'missing-count') delete observed.releaseAssets.totalCount;
+      if (mode === 'null-count') observed.releaseAssets.totalCount = null;
+      if (mode === 'string-count') observed.releaseAssets.totalCount = '1';
+      if (mode === 'boolean-count') observed.releaseAssets.totalCount = true;
+      if (mode === 'fraction-count') observed.releaseAssets.totalCount = 1.5;
+      if (mode === 'too-many') observed.releaseAssets.totalCount = 27;
+      return { body: { data: { repository: { release: observed } } } };
+    }
+    if (req.method === 'POST' && url.pathname === '/repos/fixture/repo/releases') {
+      created++;
+      assert.equal(mode, 'absent', 'duplicate POST for existing old draft');
+      const body = JSON.parse(bytes);
+      assert.equal(body.tag_name, oldDraft.tag_name); assert.equal(body.draft, true);
+      mode = 'draft'; oldDraft.draft = true;
+      return { status: 201, body: oldDraft };
+    }
+    if (req.method === 'GET' && url.pathname === '/repos/fixture/repo/releases/55') return { body: { ...oldDraft, upload_url: `${endpoint}/upload/55{?name,label}`, html_url: 'https://example.invalid/55' } };
+    if (req.method === 'GET' && url.pathname === '/repos/fixture/repo/releases/55/assets') return { body: uploaded };
+    if (req.method === 'DELETE' && url.pathname.startsWith('/repos/fixture/repo/releases/assets/')) {
+      uploaded = uploaded.filter(a => a.id !== Number(url.pathname.split('/').at(-1)));
+      return { status: 204 };
+    }
+    if (req.method === 'POST' && url.pathname === '/upload/55') {
+      assert.equal(oldDraft.draft, true, 'asset upload to public release');
+      if (failedAsset && uploaded.length === 1) return { status: 422, body: { message: 'partial upload failure' } };
+      const asset = { id: uploaded.length + 10, name: url.searchParams.get('name') };
+      uploaded.push(asset); return { status: 201, body: asset };
+    }
+    if (req.method === 'PATCH' && url.pathname === '/repos/fixture/repo/releases/55') {
+      assert.deepEqual(new Set(uploaded.map(a => a.name)), new Set(fileNames));
+      const body = JSON.parse(bytes); assert.equal(body.draft, false); assert.equal(body.make_latest, 'legacy');
+      published++; oldDraft.draft = false; return { body: oldDraft };
+    }
+    throw new Error('Unexpected route (release listing is forbidden): ' + req.url);
+  });
+  const run = async () => {
+    const contexts = { github: { repository: 'fixture/repo', repository_owner: 'fixture', event: { repository: { name: 'repo' } } }, secrets: { GITHUB_TOKEN: 'fixture-only' }, steps: { identity: { outputs: { tag: 'v0.2.1', sha: 'a'.repeat(40) } }, create: { outputs: { data: '', status: '' } } }, needs: {} };
+    const interpolate = input => typeof input === 'string' ? input.replace(/\$\{\{[\s\S]*?\}\}/g, expr => evaluate(expr, contexts)) : input;
+    const execute = async step => {
+      if (step.if && evaluate(step.if, contexts) !== 'true') return true;
+      if (step.run === 'exit 1') return false;
+      const key = step.uses?.startsWith('octokit/graphql') ? 'GRAPHQL_ACTION' : step.uses?.startsWith('octokit/request') ? 'REQUEST_ACTION' : step.uses?.startsWith('AButler/') ? 'UPLOAD_ACTION' : undefined;
+      if (!key) return true; // Builds/package integrity and native tag tests are separate.
+      const inputs = Object.fromEntries(Object.entries(step.with).map(([k,v]) => [k, interpolate(v)]));
+      if (key === 'UPLOAD_ACTION') inputs.files = fileNames.map(name => join(assets, name).replaceAll('\\', '/')).join(';');
+      const result = await action(t, key, endpoint, inputs);
+      if (result.code !== 0) return false;
+      if (step.id) contexts.steps[step.id] = { outputs: outputMap(result.outputs) };
+      return true;
+    };
+    for (const step of publish.jobs.tag.steps.filter(s => s.id === 'lookup' || s.id === 'create' || s.run === 'exit 1')) if (!await execute(step)) return false;
+    const outputs = Object.fromEntries(Object.entries(publish.jobs.tag.outputs).map(([k,v]) => [k, interpolate(v)]));
+    contexts.needs.tag = { outputs };
+    if (evaluate(publish.jobs.build.if, contexts) !== 'true') return true;
+    built++;
+    for (const step of publish.jobs.publish.steps) if (!await execute(step)) return false;
+    return true;
+  };
+  for (mode of ['error','missing-repository','missing-release','zero-release','false-release','wrong-tag','bad-id','fraction-id','boolean-id','missing-id','bad-draft','missing-count','null-count','string-count','boolean-count','fraction-count','too-many']) {
+    assert.equal(await run(), false, mode); assert.equal(built, 0, mode); assert.equal(created, 0, mode); assert.equal(uploaded.length, 0, mode);
+  }
+  mode = 'draft';
+  assert.equal(await run(), false, 'partial upload must fail');
+  assert.equal(oldDraft.draft, true); assert.equal(uploaded.length, 1); assert.equal(created, 0); assert.equal(published, 0);
+  failedAsset = false;
+  assert.equal(await run(), true, 'old same-ID draft retry must finish');
+  assert.equal(oldDraft.draft, false); assert.equal(created, 0); assert.equal(published, 1);
+  const builtBefore = built, queriesBefore = queries;
+  assert.equal(await run(), true, 'published skip');
+  assert.equal(built, builtBefore); assert.equal(published, 1); assert.equal(queries, queriesBefore + 1);
+  uploaded = []; mode = 'absent';
+  assert.equal(await run(), true, 'explicit absent release can create'); assert.equal(created, 1); assert.equal(published, 2);
 });
+
 
 test('tag action publishes exact SHA, reuses without moving, and workflow rejects conflict', async t => {
   const directory = fixture(t);
@@ -208,7 +281,7 @@ test('tag action publishes exact SHA, reuses without moving, and workflow reject
   git('add', '.'); git('commit', '-m', 'fix(REM-46): first');
   const sha = git('rev-parse', 'HEAD');
   git('init', '--bare', remote); git('remote', 'add', 'origin', remote); git('push', '-u', 'origin', 'main');
-  const env = { ...process.env, GITHUB_WORKSPACE: source.replaceAll('\\', '/'), GITHUB_ACTOR: 'fixture', GITHUB_SHA: sha, GITHUB_REPOSITORY: 'fixture/repo', INPUT_TAG: 'v0.2.1', INPUT_COMMIT_SHA: sha, INPUT_GITHUB_TOKEN: '', INPUT_FORCE_PUSH_TAG: 'false', INPUT_TAG_EXISTS_ERROR: 'false', GIT_CONFIG_GLOBAL: join(directory, 'gitconfig').replaceAll('\\', '/'), GIT_CONFIG_NOSYSTEM: '1' };
+  const env = { ...process.env, GITHUB_WORKSPACE: source.replaceAll('\\', '/'), GITHUB_ACTOR: 'fixture', GITHUB_SHA: sha, GITHUB_ACTION: 'fixture', GITHUB_REPOSITORY: 'fixture/repo', INPUT_TAG: 'v0.2.1', INPUT_COMMIT_SHA: sha, INPUT_GITHUB_TOKEN: '', INPUT_FORCE_PUSH_TAG: 'false', INPUT_TAG_EXISTS_ERROR: 'false', GIT_CONFIG_GLOBAL: join(directory, 'gitconfig').replaceAll('\\', '/'), GIT_CONFIG_NOSYSTEM: '1' };
   for (const name of ['GITHUB_OUTPUT', 'GITHUB_ENV']) { env[name] = join(directory, name).replaceAll('\\', '/'); writeFileSync(env[name], ''); }
   const shell = process.env.BASH ?? (process.platform === 'win32' ? 'C:/Program Files/Git/bin/bash.exe' : 'bash');
   let result = await command(shell, [join(upstream('TAG_ACTION'), 'entrypoint.sh').replaceAll('\\', '/')], { cwd: source, env });
