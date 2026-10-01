@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import tarfile
+import tempfile
 import tomllib
 from abi import qualify
 
@@ -53,8 +54,7 @@ def build_checkout(repo, release, directory, target_dir=None):
     if os.name == "nt":
         container_source = "/mnt/" + container_source[0].lower() + container_source[2:]
     env = dict(os.environ, READER_BUDDY_RELEASE_TAG=release.tag, READER_BUDDY_RELEASE_SHA=release.sha,
-               CROSS_CONFIG=str(configuration), LD_BIND_NOW="1", GIT_CONFIG_COUNT="1",
-               GIT_CONFIG_KEY_0="safe.directory", GIT_CONFIG_VALUE_0=container_source)
+               CROSS_CONFIG=str(configuration), LD_BIND_NOW="1")
     target_dir = Path(target_dir or repo / "target").resolve()
     packages = {}
     artifacts = {}
@@ -64,25 +64,33 @@ def build_checkout(repo, release, directory, target_dir=None):
         "cross_binary_sha256": sha256(Path(shutil.which("cross"))),
         "host_rustc": subprocess.check_output(["rustc", "--version", "--verbose"], text=True).strip(),
     }
-    for target in TARGETS:
-        # cross run builds first, then executes --version under target emulation.
-        output = subprocess.check_output(
-            ["cross", "run", "--locked", "--release", "--target", target, "--target-dir", str(target_dir),
-             "--bin", "reader-buddy", "--", "--version"],
-            cwd=repo, env=env, text=True).strip()
-        if output.split()[-1:] != [release.tag[1:]]:
-            raise ValueError(f"{target} reports {output!r}, expected {release.tag[1:]}")
-        package = directory / f"reader-buddy-{target}.tar.gz"
-        binary = target_dir / target / "release" / "reader-buddy"
-        artifacts[target] = qualify(binary, target)
-        artifacts[target]["build_image"] = selected_images[target]["image"]
-        artifacts[target]["eager_runtime_binding"] = True
-        with tarfile.open(package, "w:gz") as archive:
-            info = archive.gettarinfo(str(binary), arcname="reader-buddy")
-            info.mode = 0o755
-            with binary.open("rb") as data:
-                archive.addfile(info, data)
-        packages[package.name] = sha256(package)
+    # Old Git in the pinned Cross images accepts ownership exceptions only in
+    # a global file. Keep that file inside this clone's Git metadata and expose
+    # it only to the disposable container; never change the host global config.
+    with tempfile.TemporaryDirectory(prefix="release-xdg-", dir=repo / ".git") as config_home:
+        config_home = Path(config_home)
+        (config_home / "git").mkdir()
+        git(repo, "config", "--file", str(config_home / "git/config"), "safe.directory", container_source)
+        env["XDG_CONFIG_HOME"] = container_source + "/.git/" + config_home.name
+        for target in TARGETS:
+            # cross run builds first, then executes --version under target emulation.
+            output = subprocess.check_output(
+                ["cross", "run", "--locked", "--release", "--target", target, "--target-dir", str(target_dir),
+                 "--bin", "reader-buddy", "--", "--version"],
+                cwd=repo, env=env, text=True).strip()
+            if output.split()[-1:] != [release.tag[1:]]:
+                raise ValueError(f"{target} reports {output!r}, expected {release.tag[1:]}")
+            package = directory / f"reader-buddy-{target}.tar.gz"
+            binary = target_dir / target / "release" / "reader-buddy"
+            artifacts[target] = qualify(binary, target)
+            artifacts[target]["build_image"] = selected_images[target]["image"]
+            artifacts[target]["eager_runtime_binding"] = True
+            with tarfile.open(package, "w:gz") as archive:
+                info = archive.gettarinfo(str(binary), arcname="reader-buddy")
+                info.mode = 0o755
+                with binary.open("rb") as data:
+                    archive.addfile(info, data)
+            packages[package.name] = sha256(package)
     manifest = dict(tag=release.tag, sha=release.sha, version=release.tag[1:], packages=packages,
                     toolchain=toolchain, artifacts=artifacts)
     (directory / "provenance.json").write_text(json.dumps(manifest, indent=2) + "\n")

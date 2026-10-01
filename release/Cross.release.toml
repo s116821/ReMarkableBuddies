@@ -1,5 +1,5 @@
 [build.env]
-passthrough = ["READER_BUDDY_RELEASE_TAG", "READER_BUDDY_RELEASE_SHA", "LD_BIND_NOW", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"]
+passthrough = ["READER_BUDDY_RELEASE_TAG", "READER_BUDDY_RELEASE_SHA", "LD_BIND_NOW", "XDG_CONFIG_HOME"]
 
 [target.armv7-unknown-linux-gnueabihf]
 image = "ghcr.io/cross-rs/armv7-unknown-linux-gnueabihf@sha256:1ab143450cd888657baa3563ad663203bc5887629e338ef77718ef515d56fb7a"
