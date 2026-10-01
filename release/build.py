@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tarfile
 import tomllib
@@ -48,15 +49,20 @@ def build_checkout(repo, release, directory, target_dir=None):
     if git(repo, "rev-parse", "HEAD") != release.sha:
         raise ValueError("Checkout does not match release SHA")
     configuration = Path(__file__).with_name("Cross.release.toml").resolve()
+    container_source = repo.as_posix()
+    if os.name == "nt":
+        container_source = "/mnt/" + container_source[0].lower() + container_source[2:]
     env = dict(os.environ, READER_BUDDY_RELEASE_TAG=release.tag, READER_BUDDY_RELEASE_SHA=release.sha,
-               CROSS_CONFIG=str(configuration), LD_BIND_NOW="1")
+               CROSS_CONFIG=str(configuration), LD_BIND_NOW="1", GIT_CONFIG_COUNT="1",
+               GIT_CONFIG_KEY_0="safe.directory", GIT_CONFIG_VALUE_0=container_source)
     target_dir = Path(target_dir or repo / "target").resolve()
     packages = {}
     artifacts = {}
     selected_images = tomllib.loads(configuration.read_text())["target"]
     toolchain = {
-        "cross": subprocess.check_output(["cross", "--version"], text=True).strip(),
-        "rustc": subprocess.check_output(["rustc", "--version", "--verbose"], text=True).strip(),
+        "cross_version_command": subprocess.check_output(["cross", "--version"], text=True).strip(),
+        "cross_binary_sha256": sha256(Path(shutil.which("cross"))),
+        "host_rustc": subprocess.check_output(["rustc", "--version", "--verbose"], text=True).strip(),
     }
     for target in TARGETS:
         # cross run builds first, then executes --version under target emulation.
