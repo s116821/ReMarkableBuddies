@@ -99,7 +99,15 @@ def verify_runtime(artifact, target, baseline=None):
         provider = baseline["providers"].get(name)
         if provider is None:
             raise ValueError(f"Runtime baseline lacks NEEDED provider: {name}")
-        missing = set(symbols) - set(provider["symbols"])
+        available = set(provider["symbols"])
+        # glibc >= 2.34 keeps libpthread/libdl version definitions in empty
+        # compatibility DSOs, while their implementation symbols live in libc.
+        # Forward only when the recorded provider is actually loaded too.
+        for forwarded in provider.get("symbol_providers", []):
+            if forwarded not in artifact["required_symbols"] or forwarded not in baseline["providers"]:
+                raise ValueError(f"Runtime symbol provider is not loaded: {forwarded}")
+            available.update(baseline["providers"][forwarded]["symbols"])
+        missing = set(symbols) - available
         if missing:
             raise ValueError(f"Runtime provider {name} lacks required symbols: {sorted(missing)}")
         defined_versions = {symbol.split("@", 1)[1] for symbol in provider["symbols"] if "@" in symbol}

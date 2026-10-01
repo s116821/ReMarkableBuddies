@@ -50,3 +50,19 @@ class RuntimeTests(unittest.TestCase):
             verify_runtime(self.artifact, self.baseline["target"], self.baseline)
         with self.assertRaisesRegex(ValueError, "qualified provider"):
             parse_elf(HEADERS, SYMBOLS.replace("(2)", "(99)"), VERSIONS)
+
+    def test_glibc_compatibility_dso_requires_its_versions_and_loaded_libc_symbols(self):
+        self.artifact["required_symbols"]["libpthread.so.0"] = ["pthread_create@GLIBC_2.4"]
+        self.artifact["required_versions"]["libpthread.so.0"] = ["GLIBC_2.4"]
+        self.baseline["providers"]["libpthread.so.0"] = {
+            "symbols": ["__libpthread_version_placeholder@GLIBC_2.4"],
+            "symbol_providers": ["libc.so.6"], "sha256": "fixture"}
+        self.baseline["providers"]["libc.so.6"]["symbols"].append("pthread_create@GLIBC_2.4")
+        verify_runtime(self.artifact, self.baseline["target"], self.baseline)
+        self.baseline["providers"]["libpthread.so.0"]["symbols"] = []
+        with self.assertRaisesRegex(ValueError, "version definitions"):
+            verify_runtime(self.artifact, self.baseline["target"], self.baseline)
+        self.baseline["providers"]["libpthread.so.0"]["symbols"] = ["__libpthread_version_placeholder@GLIBC_2.4"]
+        del self.artifact["required_symbols"]["libc.so.6"]
+        with self.assertRaisesRegex(ValueError, "not loaded"):
+            verify_runtime(self.artifact, self.baseline["target"], self.baseline)
