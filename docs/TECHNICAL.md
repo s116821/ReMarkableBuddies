@@ -205,7 +205,7 @@ they did not provide a working offline simulator.
 
 ## CI/CD Integration
 
-Uses pinned **git-cliff** for semantic versions and **vergen-gitcl** for runtime metadata:
+Uses pinned **GitVersion** for semantic versions and **vergen-gitcl** for runtime metadata:
 
 **Version Bump Rules**:
 1. **Major**: Scoped `!` syntax or `BREAKING CHANGE:` footer, including 0.x to 1.0.
@@ -213,7 +213,7 @@ Uses pinned **git-cliff** for semantic versions and **vergen-gitcl** for runtime
 3. **Patch**: Scoped fix/perf/refactor/build/ci/chore/test/revert application changes.
 4. **None**: Only explicit documentation paths changed; no main application compilation.
 
-**Path policy**: `release/cliff.toml` excludes explicit documentation paths; other
+**Path policy**: `.github/application-paths.yml` and `GitVersion.yml` excludes explicit documentation paths; other
 paths are relevant, including build/dependency changes. Misclassified application
 messages fail visibly. Mixed and multi-commit history is evaluated in full.
 
@@ -292,7 +292,7 @@ Implement in `src/analysis/circle_detector.rs`:
 ## References
 
 - **ghostwriter**: Core device interaction code source
-- **git-cliff / vergen-gitcl**: Semantic releases and Git-derived application versions
+- **GitVersion / vergen-gitcl**: Semantic releases and Git-derived application versions
 - **reMarkable Community**: Device documentation
 - **OpenAI**: Vision API capabilities
 

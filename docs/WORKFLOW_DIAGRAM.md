@@ -1,7 +1,7 @@
 # CI/CD workflow
 
 The scoped PR title becomes the squash commit message. See
-[release policy](../release/cliff.toml) and [public release tests](../release/README.md).
+[release policy](../.github/application-paths.yml) and [public release tests](../release/README.md).
 
 ## Pull requests and main CI
 
@@ -23,31 +23,24 @@ checks; a documentation-only change finishes those checks successfully.
 
 ```mermaid
 flowchart TD
-  Push[Application main push or explicit retry] --> Lock[Enter serialized release job]
-  Lock --> Fetch[Refresh main and all tags]
-  Fetch --> Recover[Recover incomplete managed tags from their exact SHAs]
-  Recover --> Analyze[git-cliff analyzes all relevant unreleased commits]
-  Analyze --> Tag[release-it tags next application squash SHA]
-  Tag --> Confirm[Push and verify immutable remote tag]
-  Confirm --> Clone[Clean full clone at exact tag]
-  Clone --> RM2[Build and run ARMv7 version under emulation]
-  RM2 --> Pro[Build and run aarch64 version under emulation]
-  Pro --> Draft[Upload both packages and provenance to draft]
-  Draft --> Verify[Verify uploaded checksums and source identity]
-  Verify --> Publish[Publish release and exit lock]
+  Merge[Merged application PR] --> Queue[Publication queue retains exact squash SHA]
+  Queue --> Version[GitVersion analyzes that SHA's tagged ancestry]
+  Version --> Tag[Upstream Action creates immutable tag]
+  Tag --> Verify[Verify fetched tag target]
+  Verify --> Draft[Create or recover draft; skip published release]
+  Draft --> Build[Build exact tag and verify both emulated binary versions]
+  Build --> Upload[Upload packages and provenance while draft]
+  Upload --> Publish[Publish only after every upload succeeds]
 ```
 
-Documentation-only pushes never enter the release lock or compile the application.
-A later documentation HEAD is not used as the release SHA. Queued application events
-are drained in commit order, with one semantic tag and release per application merge.
-Ordinary main CI only checks policy; all main compilation occurs after the tag.
-No Cargo version commit is created. The tag precedes both release builds.
+Docs-only merges never enter publication or compile the app. Native queue ordering
+is not assumed; later main changes do not alter a run's source identity. Main CI
+performs non-compiling checks. There are no Cargo version commits.
 
-A failure retains the immutable tag and any draft for retry. Use the Release
-workflow's Run workflow button on main or `gh workflow run release.yml --ref main`.
-The next application push also recovers pending releases. A docs push remains
-build-free even after a failed release. Published complete releases are verified
-and skipped; their assets are not overwritten.
+Rerun an unfinished merge run or manually dispatch Release on main with its existing
+tag: `gh workflow run release.yml --ref main -f tag=v0.1.17`. A failure before tagging
+requires the original run. Published assets remain untouched. See the public
+[release guide](../release/README.md) for limits and isolated tests.
 
 ## Semantic mapping
 

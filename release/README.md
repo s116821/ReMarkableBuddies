@@ -1,72 +1,128 @@
-# Release tooling and verification
+# Tag-based releases
 
-Requirements are public in `openspec/specs/release-versioning` and the archived
-`2026-09-22-tag-derived-releases` change proposal. The implementation uses git-cliff **2.14.2**
-for semantic version computation, release-it **19.0.6** for actual tag creation
-and vergen-gitcl **10.0.3** for Rust metadata.
-No private board, account connector, API key or development tablet is needed.
+> Unmerged REM-46 implementation: actual upstream-distribution fixtures pass
+> direct recovery of an old draft with its existing ID, partial upload retry and
+> published-release skips. Hosted CI, final independent review and coordinated
+> delivery remain required; the central change is not archived or complete.
 
-Documentation exclusions cover Markdown, OpenSpec, licenses and the evidence-image
-directory. Executable simulator JSON and validation scripts under `docs/` remain
-application-relevant: their changes must still run tests and receive release handling.
+Git tags are the only application version authority. GitVersion **6.8.2** computes
+versions from the exact squash commit's tagged ancestry and conventional history.
+The fixed package-manifest version is not maintained as an application version.
+Upstream Actions own filtering, calculation, immutable tag creation and publication;
+`build.py` only builds, packages and verifies app artifacts. There is no custom
+release coordinator, path classifier, bump algorithm or GitHub publication client.
 
-Install Git, Node.js 22+, Python 3.11+, Rust 1.96+ and the pinned git-cliff binary from its public
-GitHub release (or `cargo install git-cliff --version 2.14.2 --locked`). Then run:
+## Workflow
+
+`release.yml` admits only merged main PRs, using the trusted base workflow and the
+actual squash SHA, including contributions from forks. It never executes an
+unmerged PR head. `paths-filter` excludes the explicit documentation paths in
+`.github/application-paths.yml`; `GitVersion.yml` has equivalent history exclusions.
+Unknown paths, executable fixtures, renames and mixed changes stay relevant.
+PR file counts must be present and between 1 and 2,999; the API cannot reliably
+classify larger PRs, so split them. Required checks finish on docs-only changes.
+
+Scoped feat increments minor; fix/perf/refactor/build/ci/chore/test/revert increments
+patch; breaking syntax calculates major even at 0.x. An application PR cannot use
+a docs title. The separate REM-35 gate blocks major publication until 1.0 is ready.
+Existing baseline tags are preserved; there are no generated version-bump commits.
+
+`publish.yml` keeps the tag/build/upload sequence in one native publication queue
+(`queue: max`, at most 100 pending runs). Ordering is not assumed: every run retains
+its exact source, and GitVersion handles earlier commits after a newer descendant
+has already been tagged. Cancelled/overflowed runs remain visibly unfinished.
+The tag Action never force-updates a tag. A fetched remote tag must match the exact
+admitted SHA before compilation. Ordinary main CI never compiles the application;
+PR CI builds development artifacts. No tag-triggered second workflow or PAT is needed.
+
+Official packages contain the tag version, source SHA and checksum provenance.
+Application code is checked out at the tag while build tooling comes from the
+reviewed workflow revision, allowing recovery after tooling changes. Assets upload
+to a draft; a separate final Action publishes only after all uploads succeed.
+Published releases are skipped without rebuilding or replacing their assets.
+
+Exact release discovery uses the official GraphQL Action's fixed tag query;
+an old draft is found directly without listing pages. Missing/error/malformed
+observations fail before building. Published releases skip building and writes.
+Draft IDs are preserved through fixed official create/publish requests and the
+upstream uploader. The uploader reads at most 30 existing assets, so a supported
+draft must contain at most 26 assets before upload, reserving the entire fixed
+package inventory (three Rust or four Manager files). Larger or malformed counts
+refuse safely; they are never silently treated as empty. Downloads must match the
+fixed inventory and checksums before upload; only successful uploads allow final
+publication. Native concurrency serializes workflow retries, without claiming
+protection from an external actor changing a release during a run.
+
+## Recovery
+
+Rerun the original failed Release workflow. If a tag already exists, use **Run
+workflow** on main with that exact tag, or:
 
 ```sh
-npm ci --prefix release --ignore-scripts
-cargo fetch --locked
+gh workflow run release.yml --ref main -f tag=v0.1.17
+```
+
+Substitute the unfinished tag from this repository. Manual recovery never invents
+a version or tags current main. If failure occurred before a tag existed, rerun
+the original merge run. A docs merge remains build-free and does not replay earlier
+failures. Direct main commits outside the PR/squash workflow do not automatically
+receive releases; retain the PR workflow instead of manually stamping versions.
+
+## Target runtime evidence
+
+`Cross.release.toml` pins the build/emulation images. `build.py` records the
+toolchain/image identity and forces eager dynamic binding during emulated version
+verification. `abi.py` verifies ELF architecture, interpreter, ARM hard-float ABI,
+NEEDED providers and all loader symbol versions against the selected RM2 vendor
+sysroot inventory, including version requirements arising from weak symbols.
+The baseline records October 1 independently matched libc/libm/libgcc/loader
+hashes for development RM2 firmware 3.28.0.172. It contains interface metadata only,
+not provider binaries. A changed dependency requires reviewed baseline evidence;
+an unsupported provider/symbol/version fails the build.
+
+This remains a legacy cross backend. It does not claim ReMarkableOpenSDK
+consumption or native app/API qualification. AArch64 receives ELF metadata and
+selected-image emulation evidence; Paper Pro hardware qualification remains
+REM-29. One Buddy tag/source covers both target packages; Manager versions remain
+independent and no separate SDK runtime installation is introduced.
+
+## Public fixtures
+
+Install Git, Node 24, Python 3.12 and the official GitVersion 6.8.2 tool. Its
+`dotnet-gitversion` executable must be on PATH, or set `GITVERSION` to the standalone
+executable. CI installs it with GitTools/actions. No private board, API key, account
+connection or tablet is needed.
+
+```sh
 python -m unittest discover -s release -v
-cargo test --locked --all-features
-cargo clippy --locked --all-targets --all-features -- -D warnings
+npm ci --prefix release/fixtures --ignore-scripts
 ```
 
-Set `GIT_CLIFF` to an absolute binary path when it is not on PATH. The regression
-repositories are temporary local repositories/remotes; all fixture tags stay there.
-Tests execute the real semantic tool and actual build.rs, including cached source
-transitions, dirty/shallow/missing Git rejection, mixed/reverted application changes,
-queued requests and retry identity. Workflow tests inspect the actual docs gates.
+The Actions fixture additionally executes pinned upstream distributions. Clone
+these repositories into `.upstream/paths`, `.upstream/graphql`, `.upstream/request`,
+`.upstream/upload` and `.upstream/tag`, then checkout the exact commits below.
+Set `PATHS_ACTION`, `GRAPHQL_ACTION`, `REQUEST_ACTION`, `UPLOAD_ACTION` and `TAG_ACTION` to their absolute directories and run `npm test --prefix release/fixtures`.
+These same steps appear in CI. Git Bash is used on Windows (override `BASH` if needed).
 
-`python release/coordinator.py plan` is read-only with respect to tags/releases;
-it temporarily checks out the selected source in a disposable Git worktree. It
-requires a complete `origin/main` history and an existing semantic baseline tag.
-`publish` is reserved for the serialized protected-main workflow. It creates an
-annotated immutable tag, builds a clean clone at that tag and publishes both archives
-only after runtime and checksum verification. Do not run it as an experimental test
-against the production remote.
+| Fixture distribution | Exact commit |
+| --- | --- |
+| dorny/paths-filter v4.0.3 | ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d |
+| octokit/graphql-action v3.0.2 | ddde8ebb2493e79f390e6449c725c21663a67505 |
+| octokit/request-action v3.0.0 | b91aabaa861c777dcdb14e2387e30eddf04619ae |
+| AButler/upload-release-assets v4.0.0 | 34491005a5d7ec239a784e460807ce844fde7962 |
+| rickstaa/action-create-tag v1.7.2 | a1c7777fcb2fee4f19b0f283ba888afa11678b72 |
 
-The production workflow uses GITHUB_TOKEN with contents:write and explicit ordered
-steps. No PAT or tag-triggered second workflow is required. Its job-level lock
-includes both architecture builds and final publication. Pending GitHub jobs may replace one another; each admitted job refreshes main,
-recovers managed tags and processes every relevant unreleased squash commit in
-order, creating one semantic tag per application merge. Main CI never compiles;
-all main application builds occur after their tag is pushed. A failed run is visible and retryable from Actions
-or `gh workflow run release.yml --ref main`. A documentation push remains build-free
-even when a previous application release failed.
+Fixtures use real local Git history/tags, actual Action bundles with a localhost
+API, and GitHub's expression evaluator for the actual workflow admission guards.
+They cover pagination/renames, queued merges, tag conflicts, draft failures/retries,
+published skips and precise runtime versions. They never create production tags.
+Hosted workflow execution remains separately verified after coordinated delivery.
 
-Cross builds pass expected tag/SHA through Cross.toml. The official build script
-checks those expectations against real Git metadata; they are not a version override.
-The coordinator runs each target's binary with `cross run ... -- --version` before
-packaging. This is emulator verification, not proof of tablet hardware behavior.
-Native feature verification follows the separate authorized-tablet checklist.
+GitHub documents `queue: max`; actionlint 1.7.12 predates that key. Validate all other
+syntax normally and narrowly ignore only its `unexpected key "queue" for
+"concurrency" section` warning until the linter supports the native feature.
 
-To exercise the actual two-target builder before a release, commit the source and run:
-
-```sh
-python release/verify_tagged_build.py --output /tmp/reader-fixture-packages --target-dir target
-```
-
-This creates a temporary full clone, removes its remote, gives it a fixture tag,
-then runs the production build/package checks for both targets. Tags in the source
-repository remain untouched. The resulting packages are test artifacts, not releases.
-Use a suitable output path on Windows. On the tested Windows Docker Desktop setup,
-bind-mounted files appear owned by UID/GID 0; setting `CROSS_CONTAINER_UID=0` and
-`CROSS_CONTAINER_GID=0` for this trusted fixture matches that ownership. Other
-container setups should use their actual mount owner. Git's ownership checks remain
-enabled; no global or wildcard safe-directory exception is added. Clean clones use
-`core.autocrlf=false` so Linux sees the committed bytes. See cross's public
-[environment settings](https://github.com/cross-rs/cross/blob/main/docs/environment_variables.md).
-
-Cargo's version is a fixed unpublished package placeholder. Do not bump it for a
-release. Future registry packaging would need its own tag-derived manifest step;
-it is not a second application version source and is outside this binary workflow.
+Requirements live only in the central Docs `release-versioning` capability and
+`action-driven-releases` change. Full source and actual API behavior outrank old
+coordinator documentation. Upstream licenses are retained by their repositories;
+fixture dependencies are development-only.

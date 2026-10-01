@@ -8,8 +8,8 @@ import argparse
 from pathlib import Path
 import tempfile
 
-from coordinator import Release, build_checkout
-from policy import TAG, git
+from build import Release, build_checkout
+from build import TAG, git
 
 
 def main():

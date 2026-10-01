@@ -672,40 +672,27 @@ acceptance criteria.
 
 ## Automated Releases
 
-This project uses [git-cliff](https://git-cliff.org/) for semantic calculation,
-[release-it](https://github.com/release-it/release-it) for tag creation, and
-[vergen-gitcl](https://docs.rs/vergen-gitcl/) for Git-derived binary versions.
-Git tags are the only application version authority; Cargo's fixed `0.0.0`
-package version is non-authoritative and the package is not published to a registry.
+[GitVersion](https://gitversion.net/) selects semantic versions from Git tags and
+conventional squash history. Pinned upstream Actions filter changes, create an
+immutable tag on the exact merged SHA, then build and publish verified packages.
+[vergen-gitcl](https://docs.rs/vergen-gitcl/) embeds Git-derived Rust metadata;
+Cargo's fixed `0.0.0` is a non-authoritative unpublished package placeholder.
 
-**Version Bump Rules**:
-- **Major**: scoped `!` syntax or a `BREAKING CHANGE:` footer, including 0.x to 1.0.0.
-- **Minor**: `feat(scope): ...`, including 0.x.
-- **Patch**: `fix`, `perf`, `refactor`, `build`, `ci`, `chore`, `test` or `revert` application changes, with a scope.
-- **None**: changes confined to the documentation paths in [release/cliff.toml](release/cliff.toml).
+Scoped `feat` bumps minor; `fix`, `perf`, `refactor`, `build`, `ci`, `chore`, `test`
+and `revert` bump patch. Breaking syntax calculates major even at 0.x, but REM-35
+holds major publication until the ecosystem is ready. Pure documentation changes
+create no tag or main application build; required PR checks still finish.
 
-The scoped PR title becomes the squash commit message. Application changes labeled
-`docs` or with unsupported types fail validation. Mixed code/docs and dependency or
-build changes are relevant. Documentation-only main pushes neither create tags nor
-compile the application, and their required PR checks still finish.
+Each merged application PR keeps its own source identity even if queued runs finish
+out of order. Both tablet packages run `--version` under emulation and record
+tag/SHA/checksums in `provenance.json`. Uploads remain draft until all succeed;
+published releases are skipped without replacing their assets.
 
-The release job serializes publication, refreshes all unreleased main history and
-tags each relevant merged application commit in order before building it. Each
-application merge gets its own tag; a newer documentation commit does not change its source SHA.
-Both tablet packages execute `--version` under target emulation before publication.
-`provenance.json` records their tag, SHA, version and archive checksums. Existing
-published tags remain intact; historical releases predate this verification contract.
-
-For recovery, rerun the failed Release job or use its **Run workflow** button on
-main (CLI: `gh workflow run release.yml --ref main`). It recovers incomplete managed
-tags from their exact source, without new version commits or tag replacement.
-Documentation pushes do not retry builds; the next application push also recovers
-pending work. Complete published releases are verified and skipped.
-
-Local/PR binaries report `dev.<git-description>` or `dev.unknown` if Git metadata is
-unavailable. Official builds reject missing/shallow history, dirty source, conflicting
-metadata overrides and tag/SHA mismatches. See [release testing](release/README.md)
-for the public, isolated validation commands.
+Rerun the original failed Release run, or recover an existing tag with
+`gh workflow run release.yml --ref main -f tag=v0.1.17` (substitute its tag).
+Docs merges do not resume failed builds. Local/PR binaries retain an explicit
+`dev.<git-description>` or `dev.unknown` version. Official builds reject dirty,
+shallow or mismatched sources. See [release workflow and public fixtures](release/README.md).
 
 ## Contributing
 
@@ -739,7 +726,7 @@ See LICENSE file for details.
 ## Acknowledgments
 
 - [awwaiid/ghostwriter](https://github.com/awwaiid/ghostwriter) - Core device interaction code
-- [git-cliff](https://git-cliff.org/) and [vergen](https://github.com/rustyhorde/vergen) - Semantic releases and Git build metadata
+- [GitVersion](https://gitversion.net/) and [vergen](https://github.com/rustyhorde/vergen) - Semantic releases and Git build metadata
 - reMarkable community for documentation and tools
 - OpenAI for GPT vision capabilities
 
@@ -763,3 +750,16 @@ all device operations and read-only progress checks remain on the caller thread.
 Unsupported layouts retain explicit heuristic limits. An unresolved historical
 status recovery record still blocks startup read-only; retirement never deletes
 or replays it. See [preserved experimental findings](docs/legacy-status-indicator-findings.md).
+
+### REM-46 qualification remains open
+
+GitVersion 6.8.2 does not yet pass the same-second ancestry regression in
+`release/test_versioning_equal_dates.py`. In a linear baseline/feature/fix history
+with equal commit timestamps, it calculates `0.2.0` for the fix instead of
+`0.2.1`; after the later commit is tagged `v0.2.1`, an earlier detached feature
+job calculates `0.2.2` instead of `0.2.0`. The actual Windows and Linux binaries
+both reproduce this. The ordinary history fixture can pass when invocation time
+separates commits; that is insufficient qualification. Keep this change in draft
+until an upstream-owned remedy passes both fixtures and independent review.
+No production tag, release, or native application qualification follows from
+these isolated tests.
