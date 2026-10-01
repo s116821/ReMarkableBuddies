@@ -963,3 +963,40 @@ fn unrelated_large_history_does_not_consume_selected_conversation_bound() {
         .is_empty());
     assert_eq!(ledger.inspect(id, false).unwrap().len(), 2);
 }
+
+#[test]
+fn imported_duplicate_or_unallocated_chronology_is_refused() {
+    for invalid_sequence in [0, 2] {
+        let fixture = Fixture::new();
+        let ledger = Ledger::new(fixture.open());
+        let id = create(&ledger);
+        ledger
+            .append(
+                Uuid::new_v4(),
+                expected(&ledger, id),
+                turn(id, Mode::Reader, "first"),
+                vec![],
+            )
+            .unwrap();
+        let second = turn(id, Mode::Writer, "second");
+        let second_id = second.id;
+        ledger
+            .append(Uuid::new_v4(), expected(&ledger, id), second, vec![])
+            .unwrap();
+        let mut envelope = ledger
+            .store()
+            .value(Namespace::Conversation, second_id)
+            .unwrap()
+            .unwrap();
+        envelope.parents = BTreeSet::from([envelope.revision_id]);
+        envelope.revision_id = Uuid::new_v4();
+        envelope.operation_id = Uuid::new_v4();
+        envelope.payload["record"]["sequence"] = serde_json::json!(invalid_sequence);
+        ledger
+            .store()
+            .commit(vec![envelope], BTreeMap::new())
+            .unwrap();
+        assert!(ledger.inspect(id, false).is_err());
+        assert!(ledger.inspect(id, true).is_err());
+    }
+}

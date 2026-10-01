@@ -990,6 +990,22 @@ impl Ledger {
             ensure!(snapshot.iter().filter(|other|other.namespace==e.namespace && other.record_id==e.record_id).count()==1,"conflicted conversation descendant");
             records.push(Self::decode(e)?);
         }
+        let next_sequence = records.iter().find_map(|record| match record {
+            Record::Root(root) => Some(root.next_sequence),
+            _ => None,
+        });
+        let mut sequences = BTreeSet::new();
+        for record in &records {
+            if let Record::Turn(turn) = record {
+                ensure!(
+                    sequences.insert(turn.sequence),
+                    "duplicate conversation chronology"
+                );
+                if let Some(next) = next_sequence {
+                    ensure!(turn.sequence < next, "turn exceeds allocated chronology");
+                }
+            }
+        }
         records.sort_by_key(|r| match r {
             Record::Turn(t) => (0, t.sequence),
             _ => (1, 0),
