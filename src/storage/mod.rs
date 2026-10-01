@@ -405,18 +405,29 @@ impl Store {
     }
     /// One bounded snapshot of heads, including conflicts and tombstones.
     /// Refuses an oversized result instead of returning a partial history.
-    pub fn snapshot_heads(&self, namespaces: &[Namespace], limit: usize) -> Result<Vec<Envelope>> {
+    pub fn snapshot_heads_matching(
+        &self,
+        namespaces: &[Namespace],
+        limit: usize,
+        matches: impl Fn(&Envelope) -> bool,
+    ) -> Result<Vec<Envelope>> {
         ensure!((1..=MAX_ITEMS).contains(&limit), "invalid inspection bound");
         let inner = self
             .inner
             .lock()
             .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
-        let selected = inner
-            .index
-            .heads
-            .iter()
-            .filter(|((ns, _), _)| namespaces.contains(ns));
+        let selected = inner.index.heads.iter().filter(|((ns, _), heads)| {
+            namespaces.contains(ns)
+                && heads.iter().any(|revision| {
+                    inner
+                        .index
+                        .records
+                        .get(revision)
+                        .is_some_and(|(record, _)| matches(record))
+                })
+        });
         let mut result = Vec::new();
+        let mut metadata_bytes = 0usize;
         for (_, heads) in selected {
             ensure!(
                 result
@@ -426,15 +437,20 @@ impl Store {
                 "inspection exceeds explicit bound"
             );
             for revision in heads {
-                result.push(
-                    inner
-                        .index
-                        .records
-                        .get(revision)
-                        .context("head record unavailable")?
-                        .0
-                        .clone(),
+                let record = &inner
+                    .index
+                    .records
+                    .get(revision)
+                    .context("head record unavailable")?
+                    .0;
+                metadata_bytes = metadata_bytes
+                    .checked_add(serde_json::to_vec(record)?.len())
+                    .context("inspection byte overflow")?;
+                ensure!(
+                    metadata_bytes <= MAX_METADATA,
+                    "inspection exceeds metadata byte bound"
                 );
+                result.push(record.clone());
             }
         }
         Ok(result)

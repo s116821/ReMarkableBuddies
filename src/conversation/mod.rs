@@ -73,7 +73,67 @@ impl Ledger {
             "unsupported conversation schema"
         );
         ensure!(envelope.kind == Kind::Value, "deleted conversation record");
-        Ok(serde_json::from_value(envelope.payload.clone())?)
+        let record: Record = serde_json::from_value(envelope.payload.clone())?;
+        let (id, namespace, conversation) = match &record {
+            Record::Root(root) => (root.id, Namespace::Conversation, root.id),
+            Record::Turn(turn) => {
+                Self::validate_turn(turn)?;
+                (turn.id, Namespace::Conversation, turn.conversation)
+            }
+            Record::Source(source) => {
+                Self::validate_source_facts(source)?;
+                (source.id, Namespace::Source, source.conversation)
+            }
+            Record::Binding(binding) => {
+                Self::validate_observation(&binding.receipt.source)?;
+                ensure!(
+                    binding.id
+                        == Self::binding_id(
+                            binding.receipt.observed_document,
+                            binding.receipt.observed_page
+                        )
+                        && binding.conversation == binding.receipt.conversation,
+                    "binding payload identity mismatch"
+                );
+                (binding.id, Namespace::Conversation, binding.conversation)
+            }
+            Record::Export(export) => {
+                (export.id, Namespace::ExportAssociation, export.conversation)
+            }
+            Record::Receipt(receipt) => {
+                ensure!(
+                    crate::storage::valid_digest(&receipt.fingerprint)
+                        && !receipt.acknowledgment.applied_root_revision.is_nil()
+                        && !receipt.acknowledgment.operation.is_nil(),
+                    "invalid operation acknowledgment"
+                );
+                (
+                    Self::receipt_id(receipt.acknowledgment.operation),
+                    Namespace::Conversation,
+                    receipt.acknowledgment.conversation,
+                )
+            }
+        };
+        ensure!(
+            id == envelope.record_id && namespace == envelope.namespace && !conversation.is_nil(),
+            "domain envelope identity mismatch"
+        );
+        let mut media = match &record {
+            Record::Source(source) => vec![source.image.clone()],
+            _ => vec![],
+        };
+        if let Record::Source(source) = &record {
+            if let Some(parent) = &source.parent {
+                if parent.sha256 != source.image.sha256 {
+                    media.push(parent.clone());
+                }
+            }
+        }
+        media.sort_by(|a, b| a.sha256.cmp(&b.sha256));
+        let mut declared = envelope.media_descriptors.clone();
+        declared.sort_by(|a, b| a.sha256.cmp(&b.sha256));
+        ensure!(declared == media, "domain media descriptors mismatch");
+        Ok(record)
     }
     fn live_root(
         &self,
@@ -426,6 +486,22 @@ impl Ledger {
     }
     fn validate_turn(turn: &Turn) -> Result<()> {
         ensure!(
+            !turn.id.is_nil() && !turn.conversation.is_nil() && !turn.exchange.is_nil(),
+            "nil turn identity"
+        );
+        ensure!(
+            turn.sources.len() <= MAX_ITEMS
+                && turn.sources.iter().all(|id| !id.is_nil())
+                && turn.sources.iter().copied().collect::<BTreeSet<_>>().len()
+                    == turn.sources.len(),
+            "invalid source links"
+        );
+        ensure!(
+            turn.correction_of
+                .is_none_or(|id| !id.is_nil() && id != turn.id),
+            "invalid correction identity"
+        );
+        ensure!(
             turn.text.as_ref().is_none_or(|s| !s.is_empty()),
             "empty recorded text"
         );
@@ -471,6 +547,13 @@ impl Ledger {
                 && source.turn == turn.id,
             "source identity mismatch"
         );
+        Self::validate_source_facts(source)
+    }
+    fn validate_source_facts(source: &ImageUse) -> Result<()> {
+        ensure!(
+            !source.id.is_nil() && !source.conversation.is_nil() && !source.turn.is_nil(),
+            "nil source use identity"
+        );
         Self::validate_observation(&source.observation)?;
         ensure!(
             source.width > 0 && source.height > 0 && !source.purpose.is_empty(),
@@ -479,6 +562,12 @@ impl Ledger {
         ensure!(
             source.transform.iter().all(|v| v.is_finite()),
             "invalid viewport transform"
+        );
+        let [a, b, c, d, _, _] = source.transform;
+        let determinant = a * d - b * c;
+        ensure!(
+            determinant.is_finite() && determinant != 0.0,
+            "singular viewport transform"
         );
         if let Some(target) = source.target {
             ensure!(
@@ -509,6 +598,12 @@ impl Ledger {
         source.image.validate()?;
         if let Some(parent) = &source.parent {
             parent.validate()?;
+            if parent.sha256 == source.image.sha256 {
+                ensure!(
+                    parent == &source.image,
+                    "inconsistent parent content identity"
+                );
+            }
         }
         Ok(())
     }
@@ -845,20 +940,29 @@ impl Ledger {
             bail!("invalid source record");
         };
         self.live_root(source.conversation, None)?;
-        self.store.read_object(&ObjectRef {
-            sha256: source.image.sha256,
+        let bytes = self.store.read_object(&ObjectRef {
+            sha256: source.image.sha256.clone(),
             bytes: source.image.bytes,
-        })
+        })?;
+        Self::validate_image_bytes(&source.image, &bytes, source.width, source.height)?;
+        Ok(bytes)
     }
     /// Exact chronological facts. Drafts and machine instructions are not visible turns.
     pub fn inspect(&self, conversation: Uuid, retained: bool) -> Result<Vec<Record>> {
-        let snapshot = self.store.snapshot_heads(
+        let identity = conversation.to_string();
+        let snapshot = self.store.snapshot_heads_matching(
             &[
                 Namespace::Conversation,
                 Namespace::Source,
                 Namespace::ExportAssociation,
             ],
             MAX_ITEMS,
+            |e| {
+                let payload = &e.payload["record"];
+                payload["conversation"].as_str() == Some(&identity)
+                    || payload["acknowledgment"]["conversation"].as_str() == Some(&identity)
+                    || (e.namespace == Namespace::Conversation && e.record_id == conversation)
+            },
         )?;
         let roots: Vec<_> = snapshot
             .iter()
@@ -872,7 +976,6 @@ impl Ledger {
             );
         }
         let mut records = Vec::new();
-        let identity = conversation.to_string();
         for e in &snapshot {
             if e.kind == Kind::Tombstone {
                 continue;
@@ -899,37 +1002,61 @@ impl Ledger {
         budget: &ContextBudget,
         token_count: impl Fn(&[Turn]) -> Result<usize>,
     ) -> Result<ContextView> {
+        self.context_range(conversation, None, budget, token_count)
+    }
+    /// The caller may choose an explicit sequence range; history is never rewritten.
+    pub fn context_range(
+        &self,
+        conversation: Uuid,
+        selection: Option<TurnRange>,
+        budget: &ContextBudget,
+        token_count: impl Fn(&[Turn]) -> Result<usize>,
+    ) -> Result<ContextView> {
+        if let Some(range) = selection {
+            ensure!(
+                range.start < range.end_exclusive,
+                "invalid explicit turn range"
+            );
+        }
         let token_limit = budget
             .provider_token_limit
-            .context("provider token bound unknown")?;
+            .ok_or(ContextRefusal::UnknownProviderBudget)?;
         let records = self.inspect(conversation, false)?;
         let turns: Vec<Turn> = records
             .iter()
             .filter_map(|r| match r {
                 Record::Turn(t)
-                    if t.outcome == Outcome::Completed || t.outcome == Outcome::Interpreted =>
+                    if (t.outcome == Outcome::Completed || t.outcome == Outcome::Interpreted)
+                        && selection.is_none_or(|range| {
+                            t.sequence >= range.start && t.sequence < range.end_exclusive
+                        }) =>
                 {
                     Some(t.clone())
                 }
                 _ => None,
             })
             .collect();
-        ensure!(
-            turns.len() <= budget.max_turns,
-            "explicit context selection required: turn bound"
-        );
         let bytes = turns.iter().try_fold(0usize, |s, t| {
             s.checked_add(t.text.as_ref().map_or(0, String::len))
                 .context("context byte overflow")
         })?;
-        ensure!(
-            bytes <= budget.max_text_bytes,
-            "explicit context selection required: text bound"
-        );
-        ensure!(
-            token_count(&turns)? <= token_limit,
-            "explicit context selection required: token bound"
-        );
+        if turns.len() > budget.max_turns || bytes > budget.max_text_bytes {
+            return Err(ContextRefusal::SelectionRequired {
+                turns: turns.len(),
+                text_bytes: bytes,
+                tokens: None,
+            }
+            .into());
+        }
+        let tokens = token_count(&turns)?;
+        if tokens > token_limit {
+            return Err(ContextRefusal::SelectionRequired {
+                turns: turns.len(),
+                text_bytes: bytes,
+                tokens: Some(tokens),
+            }
+            .into());
+        }
         let source_ids = turns
             .iter()
             .flat_map(|t| t.sources.iter())
@@ -962,6 +1089,7 @@ impl Ledger {
             turns,
             sources,
             missing_media,
+            selection,
         })
     }
     /// Explicit retained-history inspection reports bytes; logical delete is not erasure.

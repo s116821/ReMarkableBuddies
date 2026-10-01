@@ -158,7 +158,12 @@ pub struct Receipt {
     pub acknowledgment: Acknowledgment,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "record_kind", content = "record", rename_all = "kebab-case")]
+#[serde(
+    tag = "record_kind",
+    content = "record",
+    rename_all = "kebab-case",
+    deny_unknown_fields
+)]
 pub enum Record {
     Root(Root),
     Turn(Turn),
@@ -189,7 +194,31 @@ pub struct ContextView {
     pub turns: Vec<Turn>,
     pub sources: Vec<ImageUse>,
     pub missing_media: Vec<Media>,
+    pub selection: Option<TurnRange>,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TurnRange {
+    pub start: u64,
+    pub end_exclusive: u64,
+}
+#[derive(Debug, PartialEq, Eq)]
+pub enum ContextRefusal {
+    UnknownProviderBudget,
+    SelectionRequired {
+        turns: usize,
+        text_bytes: usize,
+        tokens: Option<usize>,
+    },
+}
+impl std::fmt::Display for ContextRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownProviderBudget=>f.write_str("provider token bound unknown"),
+            Self::SelectionRequired {turns,text_bytes,tokens}=>write!(f,"explicit context selection required: {turns} turns, {text_bytes} text bytes, tokens {tokens:?}"),
+        }
+    }
+}
+impl std::error::Error for ContextRefusal {}
 
 #[derive(Clone, Debug)]
 pub struct RetainedMedia {
