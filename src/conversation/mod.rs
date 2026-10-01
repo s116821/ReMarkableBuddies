@@ -438,6 +438,29 @@ impl Ledger {
         let dimensions = image::ImageReader::with_format(std::io::Cursor::new(bytes), format)
             .into_dimensions()?;
         ensure!(dimensions == (width, height), "image dimensions mismatch");
+        const MAX_DECODED_BYTES: u64 = 32 * 1024 * 1024;
+        ensure!(
+            width <= 8192
+                && height <= 8192
+                && u64::from(width)
+                    .checked_mul(u64::from(height))
+                    .and_then(|n| n.checked_mul(4))
+                    .is_some_and(|n| n <= MAX_DECODED_BYTES),
+            "inference image exceeds decoded bound"
+        );
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(8192);
+        limits.max_image_height = Some(8192);
+        limits.max_alloc = Some(MAX_DECODED_BYTES);
+        let mut reader = image::ImageReader::with_format(std::io::Cursor::new(bytes), format);
+        reader.limits(limits);
+        let decoded = reader
+            .decode()
+            .context("inference image pixels unavailable")?;
+        ensure!(
+            (decoded.width(), decoded.height()) == dimensions,
+            "decoded image dimensions changed"
+        );
         Ok(())
     }
     pub fn prepared_images(&self, turn: Uuid) -> Result<PreparedImages> {
@@ -1005,6 +1028,12 @@ impl Ledger {
                     ensure!(turn.sequence < next, "turn exceeds allocated chronology");
                 }
             }
+        }
+        if let Some(next) = next_sequence {
+            ensure!(
+                sequences.len() as u64 == next,
+                "allocated conversation chronology is incomplete"
+            );
         }
         records.sort_by_key(|r| match r {
             Record::Turn(t) => (0, t.sequence),

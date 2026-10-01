@@ -1033,3 +1033,64 @@ fn retained_media_includes_source_revisions_after_source_tombstone() {
     assert!(item.available);
     assert_eq!(item.retained_revision_references, 1);
 }
+
+#[test]
+fn truncated_pixels_and_missing_allocated_turn_refuse_complete_context() {
+    let fixture = Fixture::new();
+    let ledger = Ledger::new(fixture.open());
+    let id = create(&ledger);
+    let (request, mut input) = prepared_input(id);
+    let mut offset = 8usize;
+    while &input.bytes[offset + 4..offset + 8] != b"IDAT" {
+        let length =
+            u32::from_be_bytes(input.bytes[offset..offset + 4].try_into().unwrap()) as usize;
+        offset += length + 12;
+    }
+    input.bytes.truncate(offset + 8);
+    input.source.image.sha256 = digest(&input.bytes);
+    input.source.image.bytes = input.bytes.len() as u64;
+    assert!(ledger
+        .prepare_request(Uuid::new_v4(), expected(&ledger, id), request, vec![input])
+        .is_err());
+    assert_eq!(ledger.inspect(id, false).unwrap().len(), 2);
+    let first = turn(id, Mode::Reader, "first");
+    let first_id = first.id;
+    ledger
+        .append(Uuid::new_v4(), expected(&ledger, id), first, vec![])
+        .unwrap();
+    ledger
+        .append(
+            Uuid::new_v4(),
+            expected(&ledger, id),
+            turn(id, Mode::Writer, "second"),
+            vec![],
+        )
+        .unwrap();
+    let mut original = ledger
+        .store()
+        .value(Namespace::Conversation, first_id)
+        .unwrap()
+        .unwrap();
+    original.parents = BTreeSet::from([original.revision_id]);
+    original.revision_id = Uuid::new_v4();
+    original.operation_id = Uuid::new_v4();
+    original.kind = Kind::Tombstone;
+    original.payload = serde_json::Value::Null;
+    original.media_descriptors.clear();
+    ledger
+        .store()
+        .commit(vec![original], BTreeMap::new())
+        .unwrap();
+    assert!(ledger.inspect(id, false).is_err());
+    assert!(ledger
+        .context(
+            id,
+            &ContextBudget {
+                max_text_bytes: 100,
+                max_turns: 100,
+                provider_token_limit: Some(100)
+            },
+            |_| Ok(1)
+        )
+        .is_err());
+}
