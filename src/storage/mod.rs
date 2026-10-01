@@ -403,6 +403,42 @@ impl Store {
         }
         Ok(heads.pop().filter(|e| e.kind == Kind::Value))
     }
+    /// One bounded snapshot of heads, including conflicts and tombstones.
+    /// Refuses an oversized result instead of returning a partial history.
+    pub fn snapshot_heads(&self, namespaces: &[Namespace], limit: usize) -> Result<Vec<Envelope>> {
+        ensure!((1..=MAX_ITEMS).contains(&limit), "invalid inspection bound");
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        let selected = inner
+            .index
+            .heads
+            .iter()
+            .filter(|((ns, _), _)| namespaces.contains(ns));
+        let mut result = Vec::new();
+        for (_, heads) in selected {
+            ensure!(
+                result
+                    .len()
+                    .checked_add(heads.len())
+                    .is_some_and(|n| n <= limit),
+                "inspection exceeds explicit bound"
+            );
+            for revision in heads {
+                result.push(
+                    inner
+                        .index
+                        .records
+                        .get(revision)
+                        .context("head record unavailable")?
+                        .0
+                        .clone(),
+                );
+            }
+        }
+        Ok(result)
+    }
     pub fn unavailable_commits(&self) -> Result<usize> {
         Ok(self
             .inner
@@ -410,6 +446,24 @@ impl Store {
             .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?
             .index
             .unavailable)
+    }
+    /// Count retained revision references; this is inspection, never garbage collection.
+    pub fn media_references(&self, media: &Media) -> Result<usize> {
+        media.validate()?;
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        Ok(inner
+            .index
+            .records
+            .values()
+            .filter(|(e, _)| {
+                e.media_descriptors
+                    .iter()
+                    .any(|m| m.sha256 == media.sha256 && m.bytes == media.bytes)
+            })
+            .count())
     }
     pub fn set_fault(&self, fault: Fault) -> Result<()> {
         self.inner
