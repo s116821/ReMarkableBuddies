@@ -455,6 +455,39 @@ impl Store {
         }
         Ok(result)
     }
+    /// Bounded retained revisions, including superseded facts; never a live lookup.
+    pub fn snapshot_revisions_matching(
+        &self,
+        namespaces: &[Namespace],
+        limit: usize,
+        matches: impl Fn(&Envelope) -> bool,
+    ) -> Result<Vec<Envelope>> {
+        ensure!((1..=MAX_ITEMS).contains(&limit), "invalid inspection bound");
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        let mut result = Vec::new();
+        let mut metadata_bytes = 0usize;
+        for (record, _) in inner.index.records.values() {
+            if !namespaces.contains(&record.namespace) || !matches(record) {
+                continue;
+            }
+            ensure!(
+                result.len() < limit,
+                "retained inspection exceeds explicit bound"
+            );
+            metadata_bytes = metadata_bytes
+                .checked_add(serde_json::to_vec(record)?.len())
+                .context("retained inspection byte overflow")?;
+            ensure!(
+                metadata_bytes <= MAX_METADATA,
+                "retained inspection exceeds metadata byte bound"
+            );
+            result.push(record.clone());
+        }
+        Ok(result)
+    }
     pub fn unavailable_commits(&self) -> Result<usize> {
         Ok(self
             .inner

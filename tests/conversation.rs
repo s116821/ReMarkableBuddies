@@ -1000,3 +1000,36 @@ fn imported_duplicate_or_unallocated_chronology_is_refused() {
         assert!(ledger.inspect(id, true).is_err());
     }
 }
+
+#[test]
+fn retained_media_includes_source_revisions_after_source_tombstone() {
+    let fixture = Fixture::new();
+    let ledger = Ledger::new(fixture.open());
+    let id = create(&ledger);
+    let (request, input) = prepared_input(id);
+    let source_id = input.source.id;
+    let media = input.source.image.clone();
+    ledger
+        .prepare_request(Uuid::new_v4(), expected(&ledger, id), request, vec![input])
+        .unwrap();
+    let mut source = ledger
+        .store()
+        .value(Namespace::Source, source_id)
+        .unwrap()
+        .unwrap();
+    source.parents = BTreeSet::from([source.revision_id]);
+    source.revision_id = Uuid::new_v4();
+    source.operation_id = Uuid::new_v4();
+    source.kind = Kind::Tombstone;
+    source.payload = serde_json::Value::Null;
+    source.media_descriptors.clear();
+    ledger
+        .store()
+        .commit(vec![source], BTreeMap::new())
+        .unwrap();
+    assert!(ledger.image(source_id).is_err());
+    let retained = ledger.retained_media(id).unwrap();
+    let item = retained.iter().find(|item| item.media == media).unwrap();
+    assert!(item.available);
+    assert_eq!(item.retained_revision_references, 1);
+}

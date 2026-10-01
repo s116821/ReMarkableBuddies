@@ -1110,9 +1110,16 @@ impl Ledger {
     }
     /// Explicit retained-history inspection reports bytes; logical delete is not erasure.
     pub fn retained_media(&self, conversation: Uuid) -> Result<Vec<RetainedMedia>> {
+        self.inspect(conversation, true)?;
+        let identity = conversation.to_string();
+        let revisions = self.store.snapshot_revisions_matching(
+            &[Namespace::Source],
+            MAX_ITEMS,
+            |envelope| envelope.payload["record"]["conversation"].as_str() == Some(&identity),
+        )?;
         let mut media = BTreeMap::new();
-        for record in self.inspect(conversation, true)? {
-            if let Record::Source(source) = record {
+        for envelope in revisions {
+            if let Record::Source(source) = Self::decode(&envelope)? {
                 for item in std::iter::once(source.image).chain(source.parent) {
                     if let Some(prior) = media.insert(item.sha256.clone(), item.clone()) {
                         ensure!(prior == item, "inconsistent media descriptors");
