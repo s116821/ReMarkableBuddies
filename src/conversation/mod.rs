@@ -1,4 +1,5 @@
 //! Local-first conversation ledger. Stored facts are not native effect permissions.
+pub mod capture_facts;
 mod types;
 use crate::storage::{
     digest, Conflict, Envelope, Kind, Media, Namespace, ObjectRef, Store, Uuid, FORMAT, MAX_ITEMS,
@@ -16,6 +17,16 @@ pub struct Ledger {
     store: Arc<Store>,
 }
 impl Ledger {
+    fn complete_store(&self) -> Result<()> {
+        let unavailable_commits = self.store.unavailable_commits()?;
+        if unavailable_commits != 0 {
+            return Err(IncompleteStore {
+                unavailable_commits,
+            }
+            .into());
+        }
+        Ok(())
+    }
     pub fn new(store: Arc<Store>) -> Self {
         Self { store }
     }
@@ -84,6 +95,14 @@ impl Ledger {
                 Self::validate_source_facts(source)?;
                 (source.id, Namespace::Source, source.conversation)
             }
+            Record::Capture(capture) => {
+                capture.facts.validate()?;
+                ensure!(
+                    capture.id == capture.facts.operation.value() && !capture.turn.is_nil(),
+                    "invalid historical capture identity"
+                );
+                (capture.id, Namespace::Source, capture.conversation)
+            }
             Record::Binding(binding) => {
                 Self::validate_observation(&binding.receipt.source)?;
                 ensure!(
@@ -120,6 +139,7 @@ impl Ledger {
         );
         let mut media = match &record {
             Record::Source(source) => vec![source.image.clone()],
+            Record::Capture(capture) => capture.facts.media()?,
             _ => vec![],
         };
         if let Record::Source(source) = &record {
@@ -140,6 +160,7 @@ impl Ledger {
         conversation: Uuid,
         expected: Option<&ExpectedHeads>,
     ) -> Result<(Envelope, Root)> {
+        self.complete_store()?;
         let heads = self.store.heads(Namespace::Conversation, conversation)?;
         if let Some(expected) = expected {
             ensure!(
@@ -163,6 +184,8 @@ impl Ledger {
         Ok(digest(&serde_json::to_vec(value)?))
     }
     fn replay(&self, operation: Uuid, fingerprint: &str) -> Result<Option<WriteResult>> {
+        self.complete_store()?;
+        ensure!(!operation.is_nil(), "nil domain operation identity");
         ensure!(!operation.is_nil(), "nil operation identity");
         let Some(e) = self
             .store
@@ -315,27 +338,17 @@ impl Ledger {
                 .store
                 .value(Namespace::Source, *linked)?
                 .context("existing source reference absent")?;
-            let Record::Source(source) = Self::decode(&e)? else {
-                bail!("invalid existing source reference");
+            let conversation = match Self::decode(&e)? {
+                Record::Source(source) => source.conversation,
+                Record::Capture(capture) => capture.conversation,
+                _ => bail!("invalid existing source reference"),
             };
             ensure!(
-                source.conversation == turn.conversation,
+                conversation == turn.conversation,
                 "source outside conversation"
             );
         }
-        if let Some(corrected) = turn.correction_of {
-            let e = self
-                .store
-                .value(Namespace::Conversation, corrected)?
-                .context("correction target absent")?;
-            let Record::Turn(original) = Self::decode(&e)? else {
-                bail!("invalid correction target");
-            };
-            ensure!(
-                original.conversation == turn.conversation && turn.role == Role::User,
-                "correction outside conversation"
-            );
-        }
+        self.validate_correction_target(&turn)?;
         let mut records = Vec::new();
         for source in sources {
             Self::validate_source(&source, &turn)?;
@@ -369,6 +382,151 @@ impl Ledger {
             vec![],
         )?;
         self.publish(operation, fingerprint, envelope, records, binding)
+    }
+    /// Prepare explicitly synthetic SDK fixture evidence; never grants native authority.
+    pub fn prepare_sdk_fixture(
+        &self,
+        operation: Uuid,
+        expected_root: ExpectedHeads,
+        mut turn: Turn,
+        batch: &remarkable_open_sdk::capture::CapturedBatch,
+    ) -> Result<PreparedSdkCapture> {
+        ensure!(
+            turn.role == Role::User
+                && turn.outcome == Outcome::Prepared
+                && turn.sequence == 0
+                && turn.sources.is_empty(),
+            "invalid SDK fixture request"
+        );
+        Self::validate_turn(&turn)?;
+        let facts = capture_facts::HistoricalCapture::from_batch(batch)?;
+        let capture = CaptureEvidence {
+            id: facts.operation.value(),
+            conversation: turn.conversation,
+            turn: turn.id,
+            facts,
+        };
+        turn.sources = vec![capture.id];
+        let fingerprint = Self::fingerprint(&("prepare-sdk-fixture", &turn, &capture))?;
+        if self.replay(operation, &fingerprint)?.is_some() {
+            return self.stored_sdk_images(capture.id);
+        }
+        let (_, mut root) = self.live_root(turn.conversation, Some(&expected_root))?;
+        self.validate_correction_target(&turn)?;
+        let media = capture.facts.media()?;
+        // Original SDK bytes are staged unchanged; no recreated image encoding.
+        for image in std::iter::once(batch.native_parent()).chain(batch.images()) {
+            let descriptor = Media {
+                sha256: image
+                    .sha256()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect(),
+                bytes: image.bytes().len() as u64,
+                media_type: image.mime().into(),
+            };
+            let [width, height] = image.dimensions();
+            Self::validate_image_bytes(&descriptor, image.bytes(), width, height)?;
+        }
+        for image in std::iter::once(batch.native_parent()).chain(batch.images()) {
+            let descriptor = Media {
+                sha256: image
+                    .sha256()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect(),
+                bytes: image.bytes().len() as u64,
+                media_type: image.mime().into(),
+            };
+            self.stage_image(&descriptor, image.bytes())?;
+        }
+        turn.sequence = root.next_sequence;
+        root.next_sequence = root
+            .next_sequence
+            .checked_add(1)
+            .context("sequence exhausted")?;
+        root.updated_ms = turn.updated_ms;
+        let binding = root.binding;
+        let turn_id = turn.id;
+        let capture_id = capture.id;
+        let records = vec![
+            self.envelope(
+                Namespace::Conversation,
+                turn_id,
+                ExpectedHeads::default(),
+                Record::Turn(turn),
+                vec![],
+            )?,
+            self.envelope(
+                Namespace::Source,
+                capture_id,
+                ExpectedHeads::default(),
+                Record::Capture(Box::new(capture)),
+                media,
+            )?,
+        ];
+        let root = self.envelope(
+            Namespace::Conversation,
+            root.id,
+            expected_root,
+            Record::Root(root),
+            vec![],
+        )?;
+        self.publish(operation, fingerprint, root, records, binding)?;
+        self.stored_sdk_images(capture_id)
+    }
+    /// Original facts and bytes only; restored records cannot become an SDK guard.
+    pub fn stored_sdk_images(&self, capture_id: Uuid) -> Result<PreparedSdkCapture> {
+        self.complete_store()?;
+        let envelope = self
+            .store
+            .value(Namespace::Source, capture_id)?
+            .context("historical capture absent")?;
+        let Record::Capture(capture) = Self::decode(&envelope)? else {
+            bail!("not an SDK capture record");
+        };
+        self.live_root(capture.conversation, None)?;
+        let turn = self
+            .store
+            .value(Namespace::Conversation, capture.turn)?
+            .context("capture turn absent")?;
+        let Record::Turn(turn) = Self::decode(&turn)? else {
+            bail!("invalid capture turn");
+        };
+        ensure!(
+            turn.conversation == capture.conversation
+                && turn.sources.contains(&capture.id)
+                && turn.role == Role::User
+                && matches!(turn.outcome, Outcome::Prepared | Outcome::Interpreted),
+            "capture request is unavailable or terminal"
+        );
+        let load = |image: &capture_facts::HistoricalImage, ordinal| -> Result<PreparedSdkImage> {
+            let media = image.media();
+            let bytes = self.store.read_object(&ObjectRef {
+                sha256: media.sha256.clone(),
+                bytes: media.bytes,
+            })?;
+            Self::validate_image_bytes(&media, &bytes, image.dimensions[0], image.dimensions[1])?;
+            Ok(PreparedSdkImage {
+                ordinal,
+                media,
+                bytes,
+            })
+        };
+        let native_parent = load(&capture.facts.native_parent, None)?;
+        let images = capture
+            .facts
+            .images
+            .iter()
+            .enumerate()
+            .map(|(ordinal, image)| load(image, Some(ordinal as u32)))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(PreparedSdkCapture {
+            turn: capture.turn,
+            capture: capture.id,
+            native_parent,
+            images,
+        })
     }
     /// Freeze the full inference batch before the caller may dispatch a provider.
     /// Retries use receipt/source records; no recapture or effect is performed.
@@ -464,6 +622,7 @@ impl Ledger {
         Ok(())
     }
     pub fn prepared_images(&self, turn: Uuid) -> Result<PreparedImages> {
+        self.complete_store()?;
         let e = self
             .store
             .value(Namespace::Conversation, turn)?
@@ -506,6 +665,22 @@ impl Ledger {
                 .map(|(_, id, bytes)| (id, bytes))
                 .collect(),
         })
+    }
+    fn validate_correction_target(&self, turn: &Turn) -> Result<()> {
+        if let Some(corrected) = turn.correction_of {
+            let envelope = self
+                .store
+                .value(Namespace::Conversation, corrected)?
+                .context("correction target absent")?;
+            let Record::Turn(original) = Self::decode(&envelope)? else {
+                bail!("invalid correction target");
+            };
+            ensure!(
+                original.conversation == turn.conversation && turn.role == Role::User,
+                "correction outside conversation"
+            );
+        }
+        Ok(())
     }
     fn validate_turn(turn: &Turn) -> Result<()> {
         ensure!(
@@ -955,6 +1130,7 @@ impl Ledger {
         self.publish(operation, fingerprint, root, vec![exported], binding)
     }
     pub fn image(&self, source: Uuid) -> Result<Vec<u8>> {
+        self.complete_store()?;
         let e = self
             .store
             .value(Namespace::Source, source)?
@@ -972,6 +1148,7 @@ impl Ledger {
     }
     /// Exact chronological facts. Drafts and machine instructions are not visible turns.
     pub fn inspect(&self, conversation: Uuid, retained: bool) -> Result<Vec<Record>> {
+        self.complete_store()?;
         let identity = conversation.to_string();
         let snapshot = self.store.snapshot_heads_matching(
             &[
@@ -1106,15 +1283,39 @@ impl Ledger {
             .iter()
             .flat_map(|t| t.sources.iter())
             .collect::<BTreeSet<_>>();
-        let sources: Vec<ImageUse> = records
-            .into_iter()
-            .filter_map(|r| match r {
-                Record::Source(s) if source_ids.contains(&s.id) => Some(s),
-                _ => None,
-            })
-            .collect();
-        ensure!(sources.len() == source_ids.len(), "source reference absent");
+        let mut sources = Vec::new();
+        let mut captures = Vec::new();
+        for record in records {
+            match record {
+                Record::Source(source) if source_ids.contains(&source.id) => sources.push(source),
+                Record::Capture(capture) if source_ids.contains(&capture.id) => {
+                    captures.push(*capture)
+                }
+                _ => {}
+            }
+        }
+        ensure!(
+            sources.len() + captures.len() == source_ids.len(),
+            "source reference absent"
+        );
         let mut missing_media = Vec::new();
+        let mut capture_media = Vec::new();
+        for capture in &captures {
+            capture_media.extend(capture.facts.media()?);
+        }
+        for media in &capture_media {
+            if self
+                .store
+                .open_object(&ObjectRef {
+                    sha256: media.sha256.clone(),
+                    bytes: media.bytes,
+                })
+                .is_err()
+                && !missing_media.contains(media)
+            {
+                missing_media.push(media.clone());
+            }
+        }
         for source in &sources {
             for media in std::iter::once(&source.image).chain(source.parent.iter()) {
                 if self
@@ -1133,6 +1334,7 @@ impl Ledger {
         Ok(ContextView {
             turns,
             sources,
+            captures,
             missing_media,
             selection,
         })
@@ -1148,11 +1350,16 @@ impl Ledger {
         )?;
         let mut media = BTreeMap::new();
         for envelope in revisions {
-            if let Record::Source(source) = Self::decode(&envelope)? {
-                for item in std::iter::once(source.image).chain(source.parent) {
-                    if let Some(prior) = media.insert(item.sha256.clone(), item.clone()) {
-                        ensure!(prior == item, "inconsistent media descriptors");
-                    }
+            let references = match Self::decode(&envelope)? {
+                Record::Source(source) => {
+                    std::iter::once(source.image).chain(source.parent).collect()
+                }
+                Record::Capture(capture) => capture.facts.media()?,
+                _ => vec![],
+            };
+            for item in references {
+                if let Some(prior) = media.insert(item.sha256.clone(), item.clone()) {
+                    ensure!(prior == item, "inconsistent media descriptors");
                 }
             }
         }

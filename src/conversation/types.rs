@@ -6,6 +6,29 @@ use std::collections::BTreeSet;
 pub const SCHEMA: u32 = 1;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureEvidence {
+    pub id: Uuid,
+    pub conversation: Uuid,
+    pub turn: Uuid,
+    pub facts: super::capture_facts::HistoricalCapture,
+}
+#[derive(Clone, Debug)]
+pub struct PreparedSdkImage {
+    /// Native parent has no provider ordinal; derivatives keep original order.
+    pub ordinal: Option<u32>,
+    pub media: Media,
+    pub bytes: Vec<u8>,
+}
+#[derive(Clone, Debug)]
+pub struct PreparedSdkCapture {
+    pub turn: Uuid,
+    pub capture: Uuid,
+    pub native_parent: PreparedSdkImage,
+    pub images: Vec<PreparedSdkImage>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum Mode {
     Reader,
@@ -168,6 +191,7 @@ pub enum Record {
     Root(Root),
     Turn(Turn),
     Source(ImageUse),
+    Capture(Box<CaptureEvidence>),
     Binding(Binding),
     Export(ExportAssociation),
     Receipt(Receipt),
@@ -175,6 +199,20 @@ pub enum Record {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExpectedHeads(pub BTreeSet<Uuid>);
+#[derive(Debug, PartialEq, Eq)]
+pub struct IncompleteStore {
+    pub unavailable_commits: usize,
+}
+impl std::fmt::Display for IncompleteStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "conversation storage is incomplete: {} unavailable committed transactions",
+            self.unavailable_commits
+        )
+    }
+}
+impl std::error::Error for IncompleteStore {}
 #[derive(Clone)]
 pub struct WriteResult {
     pub historical: Acknowledgment,
@@ -193,6 +231,7 @@ pub struct ContextBudget {
 pub struct ContextView {
     pub turns: Vec<Turn>,
     pub sources: Vec<ImageUse>,
+    pub captures: Vec<CaptureEvidence>,
     pub missing_media: Vec<Media>,
     pub selection: Option<TurnRange>,
 }

@@ -2018,6 +2018,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
+name = "remarkable-open-sdk"
+version = "0.0.0"
+source = "git+https://github.com/s116821/ReMarkableOpenSDK?rev=7e8ffd51f27cc63d79475754071b6444eab048fb#7e8ffd51f27cc63d79475754071b6444eab048fb"
+dependencies = [
+ "image",
+ "sha2",
+]
+
+[[package]]
 name = "remarkable-reader-buddy"
 version = "0.0.0"
 dependencies = [
@@ -2033,6 +2042,7 @@ dependencies = [
  "imageproc",
  "log",
  "nix",
+ "remarkable-open-sdk",
  "resvg",
  "serde",
  "serde_json",
