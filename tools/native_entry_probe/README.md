@@ -1,16 +1,25 @@
-# Development Qt startup experiment
+# Development Qt entry and typed registration experiments
 
-One frozen development-tablet experiment, separate from the deferred E0T
-framework. The payload proves only its nonce and execution on the Qt application
-thread. It performs no controller lookup or page mutation. The payload source is
-SDK commit `2265ebb2f993e8806a77d94a352a7fd0de2c3e42`; the operator pins its ARM
-artifact SHA-256. Its host fixture does not prove delivery on the tablet.
+Concrete one-attempt development packets, separate from the deferred E0T framework.
+The earlier SDK `2265ebb2f993e8806a77d94a352a7fd0de2c3e42` payload proved nonce and
+Qt application-thread entry on hardware. The current source pins SDK
+`9309b5276c5376bc0e94848820ee7fe367e4a7bb` for the next typed existing-registration
+and retained weak-guard proof. It performs no QObject dereference, controller
+getter/thread call, factory invocation, page mutation or engine creation. Fixed
+first-match lookup leaves uniqueness explicitly unproven. A noncleared QPointer
+does not pin QObject lifetime or identify a displayed source. The payload/build
+has independent bounded acceptance; the fresh complete operator packet must be
+reviewed before any device run. Emulator fixtures are not hardware evidence.
 
 `-PrepareOnly` creates the exact LF staging packet locally without contacting the
 tablet. Ordinary independent review of the source and generated packet is
 required before the one hardware run. The operator pins the current original
 process identity, firmware, executable, QtCore and vendor unit files. A changed
 baseline refuses activation. Evidence and payload remain private.
+The required private `ImageProfilePath` contains the first ELF load-segment anchor;
+its hash and format are pinned without publishing static metadata locators. Both
+the original and new attempted generation must have the exact executable hash,
+ET_EXEC type and zero-bias mapping before candidate evidence is accepted.
 
 The runtime-only stock-name drop-in retains the original restart policy. An
 exclusive claim is consumed before the single preload exec; subsequent starts

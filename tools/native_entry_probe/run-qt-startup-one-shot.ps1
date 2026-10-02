@@ -1,11 +1,16 @@
 param([Parameter(Mandatory=$true)][string]$PayloadPath,
+      [Parameter(Mandatory=$true)][string]$ImageProfilePath,
       [Parameter(Mandatory=$true)][string]$EvidenceDirectory, [switch]$PrepareOnly)
 $ErrorActionPreference = 'Stop'
-$nonce='894a910b62d947cf8d1602c30e162604'
+$nonce='365600d0b6284b32864723e6cfb966f9'
 $remote='/run/rmb-qt-probe-'+$nonce
 $rollback='rmb-qt-probe-'+$nonce+'-rollback'
-$payloadHash='68eb38b316aff3ef123b243f1691660eabd1221ebd733484390a95b4c7e38783'
+$payloadHash='9a3e6cec7f992549ee7533edc5ed2e3a9963914f6962dd888a39b3cd26d57ca0'
 if((Get-FileHash -LiteralPath $PayloadPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $payloadHash){throw 'Payload changed'}
+$imageProfileHash='942dec046baf86465f3b7af9b17ef5ba0062ebfc8886303fbed8522f660a494d'
+if((Get-FileHash -LiteralPath $ImageProfilePath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $imageProfileHash){throw 'Image profile changed'}
+$imageFirstLoad=[IO.File]::ReadAllText($ImageProfilePath)
+if($imageFirstLoad -cnotmatch '^[0-9a-f]{8}$'){throw 'Invalid image profile'}
 $packet=Join-Path $EvidenceDirectory ('qt-startup-packet-'+$nonce)
 if(-not(Test-Path -LiteralPath $packet)){[void](New-Item -ItemType Directory -Path $packet)}
 $files=@{}
@@ -23,7 +28,7 @@ foreach($item in @{owner=$nonce;'dropin.sha256'=$files['native-probe.conf']}.Get
     $files[$item.Key]=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 if($PrepareOnly){$files|ConvertTo-Json;return}
-$record=[ordered]@{nonce=$nonce;payload_source='2265ebb2f993e8806a77d94a352a7fd0de2c3e42';payload_sha256=$payloadHash;operator_sha256=(Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant();files=$files;results=@();arm_intent=$false;armed=$false;callback_verified=$false;restored=$false;cleanup_verified=$false}
+$record=[ordered]@{nonce=$nonce;experiment='typed-registration-guard-retention';payload_source='9309b5276c5376bc0e94848820ee7fe367e4a7bb';payload_sha256=$payloadHash;image_profile_sha256=$imageProfileHash;operator_sha256=(Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant();files=$files;results=@();arm_intent=$false;armed=$false;callback_verified=$false;candidate_profile_verified=$false;candidate_guard_proof=$false;candidate_receipt=$null;restored=$false;cleanup_verified=$false}
 function Native([string]$program,[string[]]$arguments){
     $info=[Diagnostics.ProcessStartInfo]::new();$info.FileName=$program;$info.UseShellExecute=$false
     $info.RedirectStandardOutput=$true;$info.RedirectStandardError=$true
@@ -37,16 +42,19 @@ function Native([string]$program,[string[]]$arguments){
 }
 function SSH([string]$command){Native 'ssh' @('-o','HostName=10.11.99.1','-o','StrictHostKeyChecking=yes','-o','BatchMode=yes','-o','ConnectTimeout=8','RM2',$command)}
 function Require($result){if($result.timeout -or $result.exit -ne 0){throw 'One-shot stage failed; keep evidence and rollback duty'}}
-function Expand([string]$text){$text.Replace('@ROOT@',$remote).Replace('@NONCE@',$nonce).Replace('@UNIT@',$rollback)}
+function Expand([string]$text){$text.Replace('@ROOT@',$remote).Replace('@NONCE@',$nonce).Replace('@UNIT@',$rollback).Replace('@MAPSTART@',$imageFirstLoad)}
 try{
     Require (SSH (Expand @'
 set -eu
 test "$(sed -n 's/^IMG_VERSION=//p' /etc/os-release)" = '"3.28.0.172"'
 test "$(cat /sys/devices/soc0/machine)" = 'reMarkable 2.0'
-test "$(pidof xochitl)" = 30974
-test "$(awk '{print $22}' /proc/30974/stat)" = 100545844
-test "$(sha256sum /proc/30974/exe | awk '{print $1}')" = 071d85beef3ef2d4cc0e11002140b27b82a2cc04a2ed740a5669f591069b77df
+test "$(pidof xochitl)" = 30481
+test "$(awk '{print $22}' /proc/30481/stat)" = 183534756
+test "$(sha256sum /proc/30481/exe | awk '{print $1}')" = 071d85beef3ef2d4cc0e11002140b27b82a2cc04a2ed740a5669f591069b77df
+test "$(od -An -tu2 -j16 -N2 /proc/30481/exe | tr -d '[:space:]')" = 2
+awk '$NF=="/usr/bin/xochitl" && $3=="00000000" {n++; split($1,a,"-"); if(a[1]!="@MAPSTART@") bad=1} END {exit(n!=1 || bad)}' /proc/30481/maps
 test "$(sha256sum /usr/lib/libQt6Core.so.6.10.3 | awk '{print $1}')" = 43b0e210d64e59b534490d78c4c82cc1d2958999b0969aa0f77e11a082704e5d
+test "$(sha256sum /usr/lib/libQt6Qml.so.6.10.3 | awk '{print $1}')" = e9cfb062609972005470d048f75b68c749f0ccd3bf09de45916232845694c944
 test "$(sha256sum /usr/lib/systemd/system/xochitl.service | awk '{print $1}')" = adb0a2654ce9ec884f67c0627c22d539d6475dd0af80816819ee80bf13c0e6d6
 test "$(sha256sum /usr/lib/systemd/system/xochitl.service.d/xochitl-service-override.conf | awk '{print $1}')" = b15560e1dca2f4451b59537c490015aa2f5ea691437bd7ddddc7a65411aaad6e
 test "$(systemctl show --property=RestartMode --value xochitl.service)" = direct
@@ -54,7 +62,7 @@ test "$(systemctl show --property=Restart --value xochitl.service)" = on-failure
 test "$(systemctl show --property=KillMode --value xochitl.service)" = control-group
 test "$(systemctl show --property=NRestarts --value xochitl.service)" = 0
 test -z "$(systemctl show --property=Job --value xochitl.service)"
-if awk 'BEGIN {RS="\0"} /^(LD_PRELOAD|LD_LIBRARY_PATH|XOVI_ROOT)=/ {found=1} END {exit !found}' /proc/30974/environ; then exit 90; fi
+if awk 'BEGIN {RS="\0"} /^(LD_PRELOAD|LD_LIBRARY_PATH|XOVI_ROOT)=/ {found=1} END {exit !found}' /proc/30481/environ; then exit 90; fi
 systemctl is-active xochitl.service reader-buddy.service rm-sync.service
 test ! -e '@ROOT@'
 test ! -e /run/systemd/system/xochitl.service.d
@@ -69,7 +77,7 @@ mkdir -m700 '@ROOT@'
     $record.arm_intent=$true
     Require (SSH (Expand @'
 set -eu
-test "$(sha256sum '@ROOT@/payload.so' | awk '{print $1}')" = 68eb38b316aff3ef123b243f1691660eabd1221ebd733484390a95b4c7e38783
+test "$(sha256sum '@ROOT@/payload.so' | awk '{print $1}')" = 9a3e6cec7f992549ee7533edc5ed2e3a9963914f6962dd888a39b3cd26d57ca0
 chmod 600 '@ROOT@/payload.so'
 # Prove actual target flags before arming or stopping any original service.
 exec 9>'@ROOT@/admission.lock'
@@ -103,11 +111,29 @@ exec 9>&-
 systemctl restart xochitl.service
 '@))
     for($attempt=0;$attempt -lt 10;$attempt++){
-        $observed=SSH (Expand "test -f '@ROOT@/callback.json' && test `"`$(wc -c < '@ROOT@/callback.json')`" -le 73 && cat '@ROOT@/callback.json'")
+        $observed=SSH (Expand "test -f '@ROOT@/callback.json' && test `"`$(wc -c < '@ROOT@/callback.json')`" -le 256 && cat '@ROOT@/callback.json'")
         if(-not $observed.timeout -and $observed.exit -eq 0){
             [IO.File]::WriteAllText((Join-Path $packet 'callback.json'),$observed.stdout,[Text.UTF8Encoding]::new($false))
             $callback=$observed.stdout|ConvertFrom-Json
             $record.callback_verified=$callback.nonce -ceq $nonce -and $callback.application_thread -is [bool] -and $callback.application_thread
+            $record.candidate_receipt=$callback
+            $guardFieldsMatch=$record.callback_verified -and $callback.registration_match -is [bool] -and $callback.registration_match -and $callback.typed_target_match -is [bool] -and $callback.typed_target_match -and $callback.guard_not_cleared -is [bool] -and $callback.guard_not_cleared -and $callback.uniqueness -ceq 'unproven'
+            Require (SSH (Expand @'
+set -eu
+read p started < '@ROOT@/attempt.identity'
+case "$p:$started" in *[!0-9:]*|:*|*:) exit 90;; esac
+test "$(systemctl show --property=MainPID --value xochitl.service)" = "$p"
+test "$(awk '{print $22}' "/proc/$p/stat")" = "$started"
+test "$(sha256sum "/proc/$p/exe" | awk '{print $1}')" = 071d85beef3ef2d4cc0e11002140b27b82a2cc04a2ed740a5669f591069b77df
+test "$(od -An -tu2 -j16 -N2 "/proc/$p/exe" | tr -d '[:space:]')" = 2
+awk '$NF=="/usr/bin/xochitl" && $3=="00000000" {n++; split($1,a,"-"); if(a[1]!="@MAPSTART@") bad=1} END {exit(n!=1 || bad)}' "/proc/$p/maps"
+test "$(awk '{print $22}' "/proc/$p/stat")" = "$started"
+test "$(systemctl show --property=MainPID --value xochitl.service)" = "$p"
+test -z "$(systemctl show --property=Job --value xochitl.service)"
+printf 'new-generation-et-exec-zero-bias-profile-verified\n'
+'@))
+            $record.candidate_profile_verified=$true
+            $record.candidate_guard_proof=$guardFieldsMatch
             break
         }
         if($observed.timeout){throw 'Callback observation transport unknown'}
@@ -161,4 +187,5 @@ printf 'stock-restored-and-exact-stage-removed\n'
     }
     if(-not $record.cleanup_verified){throw 'Restoration/stage uncertain; preserve exact path and timer duty, no retry'}
     if(-not $record.callback_verified){throw 'Stock restored; callback nonce/thread proof missing or failed'}
+    if(-not $record.candidate_guard_proof){throw 'Stock restored; typed registration/weak-guard proof refused or incomplete'}
 }
