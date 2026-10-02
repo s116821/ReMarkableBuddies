@@ -33,3 +33,20 @@ reexecution, reboot, concurrent configuration writer, firmware change, or accoun
 operation is part of the experiment. Recovery uncertainty requires inspection;
 it is not authorization for another payload start. The deferred E0T work remains
 unfinished and must be reassessed before an unattended production claim.
+
+The actual first packet refused before entry because target BusyBox `flock`
+lacked the assumed `-w` option. The corrected fresh-nonce packet proved the Qt
+callback on hardware. Its first restore invocation exited 1 for an unknown
+predicate; the original operator failure flags remain preserved. The timer's
+later spent-claim invocation verified stock without repeating the physical
+restart, and subsequent fresh verification/exact cleanup were recorded separately.
+
+The next operator revision records a fixed stage/exit receipt on restoration
+failure and the first refused stock observation. After the sole physical restore,
+it makes at most ten verification subprocess observations within a 20-second
+monotonic admission window, checking time before and after each observation.
+Verification may write only its small owned diagnostic; it never changes original
+services. It cannot guarantee an individual kernel/manager call returns within
+that window. The existing rollback service's 240-second timeout covers its whole
+cgroup; an overrun remains failure, not a late success. No `timeout` command or
+BusyBox timeout applet exists on this tablet, and none is installed for this test.

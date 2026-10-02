@@ -76,7 +76,7 @@ exec 9>'@ROOT@/admission.lock'
 flock -n 9
 flock -u 9
 exec 9>&-
-systemd-run --unit='@UNIT@' --on-active=45s --timer-property=AccuracySec=1s --property=Type=oneshot --property=RemainAfterExit=yes --property=Restart=no --property=TimeoutStartSec=200s --property=TimeoutStopSec=5s --property=KillMode=control-group --property=UMask=0077 /bin/sh '@ROOT@/restore.sh'
+systemd-run --unit='@UNIT@' --on-active=45s --timer-property=AccuracySec=1s --property=Type=oneshot --property=RemainAfterExit=yes --property=Restart=no --property=TimeoutStartSec=240s --property=TimeoutStopSec=5s --property=KillMode=control-group --property=UMask=0077 /bin/sh '@ROOT@/restore.sh'
 test "$(systemctl show --property=ActiveState --value '@UNIT@.timer')" = active
 test "$(systemctl show --property=OnFailure --value '@UNIT@.service')" = ''
 test "$(systemctl show --property=FailureAction --value '@UNIT@.service')" = none
@@ -129,6 +129,11 @@ systemctl restart xochitl.service
                 $collected=Native 'scp' @('-o','HostName=10.11.99.1','-o','StrictHostKeyChecking=yes','-o','BatchMode=yes','-o','ConnectTimeout=8',('RM2:'+$remote+'/'+$name),(Join-Path $packet $name))
                 Require $collected
             }
+            foreach($name in @('restore.failure','verification.first-refusal')){
+                $diagnostic=SSH ("if test -f '$remote/$name'; then test `"`$(wc -c < '$remote/$name')`" -le 128 && cat '$remote/$name'; fi")
+                Require $diagnostic
+                if($diagnostic.stdout){[IO.File]::WriteAllText((Join-Path $packet $name),$diagnostic.stdout,[Text.UTF8Encoding]::new($false))}
+            }
             $cleaned=SSH (Expand @'
 set -eu
 /bin/sh '@ROOT@/restore.sh' --verify
@@ -140,7 +145,7 @@ done
 test ! -e '/run/systemd/transient/@UNIT@.timer'
 test ! -e '/run/systemd/transient/@UNIT@.service'
 test ! -e '/run/systemd/system/xochitl.service.d/zz-rmb-qt-probe-@NONCE@.conf'
-for name in payload.so launch.sh restore.sh native-probe.conf owner dropin.sha256 callback.json attempt.claim attempt.identity restore.claim restored parent.signature admission.lock entry.closed; do rm -f '@ROOT@/'"$name"; done
+for name in payload.so launch.sh restore.sh native-probe.conf owner dropin.sha256 callback.json attempt.claim attempt.identity restore.claim restored parent.signature admission.lock entry.closed restore.failure verification.first-refusal; do rm -f '@ROOT@/'"$name"; done
 rmdir '@ROOT@'
 test ! -e '@ROOT@'
 systemctl is-active xochitl.service reader-buddy.service rm-sync.service
