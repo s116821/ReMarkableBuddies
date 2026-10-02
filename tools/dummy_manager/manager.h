@@ -1,4 +1,4 @@
-/* Preparatory shared-slot transport. Only fixed read-only --version exists.
+/* Preparatory shared-slot transport. Only fixed read-only version/owned-jobs queries exist.
  * Writable manager actions and pending-job reconciliation are not implemented.
  */
 #ifndef E0T_SYSTEMCTL_PATH
@@ -24,7 +24,7 @@ static int shared_command_lock(void) {
     }
     return fd;
 }
-static int manager_version(void) {
+static int manager_readonly(int jobs) {
     int lock = shared_command_lock();
     if (lock < 0) fail("shared manager slot unavailable");
     char previous[256];
@@ -35,7 +35,7 @@ static int manager_version(void) {
         || read_owned("manager-child", previous, sizeof(previous)) != 0)
         fail("unresolved previous manager command");
     char claim[128];
-    snprintf(claim, sizeof(claim), "version %ld %llu\n", (long)getpid(), identity);
+    snprintf(claim, sizeof(claim), "%s %ld %llu\n", jobs ? "jobs" : "version", (long)getpid(), identity);
     if (create_owned("manager-claim", claim) != 1) fail("manager intent publication");
     int channel[2];
     if (pipe2(channel, O_CLOEXEC | O_NONBLOCK)) fail("manager reply pipe");
@@ -55,7 +55,19 @@ static int manager_version(void) {
         int input = open("/dev/null", O_RDONLY | O_CLOEXEC);
         if (input < 0 || dup2(input, STDIN_FILENO) < 0) _exit(90);
         close(input);
-        execl(E0T_SYSTEMCTL_PATH, E0T_SYSTEMCTL_PATH, "--version", (char *)NULL);
+        char *environment[] = {"LC_ALL=C", "SYSTEMD_COLORS=0", "SYSTEMD_LOG_TARGET=console",
+                               "SYSTEMD_LOG_LEVEL=info", "PATH=/usr/bin:/bin", NULL};
+        char units[12][96];
+        char *arguments[21] = {E0T_SYSTEMCTL_PATH, "--no-legend", "--plain", "--full",
+                              "--no-pager", "--no-ask-password", "list-jobs"};
+        if (jobs) {
+            for (unsigned i = 0; i < 12; ++i) {
+                snprintf(units[i], sizeof(units[i]), "buddy-e0t-%s-%s.service", E0T_NONCE, roles[i]);
+                arguments[7 + i] = units[i];
+            }
+            arguments[19] = NULL;
+        } else { arguments[1] = "--version"; arguments[2] = NULL; }
+        execve(E0T_SYSTEMCTL_PATH, arguments, environment);
         _exit(90);
     }
     close(channel[1]);
@@ -98,6 +110,10 @@ static int manager_version(void) {
     } else failed = 1;
     close(lock);
     if (failed || !WIFEXITED(status) || WEXITSTATUS(status) != 0) fail("bounded read-only manager command failed");
+    if (jobs) {
+        struct e0t_job observed[12]; size_t count;
+        if (!e0t_jobs_decode(output, used, observed, &count)) fail("invalid owned job observation");
+    }
     if (fwrite(output, 1, used, stdout) != used) fail("manager result publication");
     return 0;
 }

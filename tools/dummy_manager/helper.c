@@ -155,6 +155,7 @@ static int claim(void) {
 #ifndef E0T_ACTORS
 #error "Preparatory manager transport needs the common owned-file/identity helpers"
 #endif
+#include "jobs.h"
 #include "manager.h"
 #endif
 int main(int argc, char **argv) {
@@ -165,7 +166,7 @@ int main(int argc, char **argv) {
                  * remains an explicit unqualified limit, not proven interruptible. */
     nonce_check();
     manager_parent_mode = (argc == 2 && !strcmp(argv[1], "--profile-manager"))
-        || (argc == 2 && !strcmp(argv[1], "--manager-version"))
+        || (argc == 2 && (!strcmp(argv[1], "--manager-version") || !strcmp(argv[1], "--manager-jobs")))
         || (argc == 3 && !strcmp(argv[1], "cleanup"));
     uint64_t mapped = initial_mappings();
     apply_limits(mapped);
@@ -177,8 +178,8 @@ int main(int argc, char **argv) {
     if (argc == 3 && !strcmp(argv[1], "--resource-fixture")) { open_root(); resource_fixture(argv[2]); return 0; }
 #endif
 #ifdef E0T_MANAGER
-    if (argc == 2 && !strcmp(argv[1], "--manager-version")) {
-        open_root(); identity = own_start(); return manager_version();
+    if (argc == 2 && (!strcmp(argv[1], "--manager-version") || !strcmp(argv[1], "--manager-jobs"))) {
+        open_root(); identity = own_start(); return manager_readonly(!strcmp(argv[1], "--manager-jobs"));
     }
 #endif
     if (argc != 3)

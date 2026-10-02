@@ -24,7 +24,7 @@ class ManagerTests(unittest.TestCase):
     def build(self, body):
         fake = self.parent / "fake-cli"
         source = self.parent / "fake.c"
-        source.write_text('#include <sys/resource.h>\n#include <unistd.h>\n#include <stdio.h>\n#include <string.h>\nint main(int argc, char **argv) {' + body + '}\n')
+        source.write_text('#include <stdlib.h>\n#include <sys/resource.h>\n#include <unistd.h>\n#include <stdio.h>\n#include <string.h>\nint main(int argc, char **argv) {' + body + '}\n')
         subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", str(source), "-o", str(fake)], check=True)
         subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-DE0T_ACTORS", "-DE0T_MANAGER",
                         '-DE0T_NONCE="' + self.nonce + '"',
@@ -32,8 +32,9 @@ class ManagerTests(unittest.TestCase):
                         '-DE0T_SYSTEMCTL_PATH="' + str(fake) + '"',
                         str(Path(__file__).with_name("helper.c")), "-o", str(self.binary)], check=True)
 
-    def run_command(self, expected):
-        result = subprocess.run([str(self.binary), "--manager-version"], capture_output=True, timeout=4)
+    def run_command(self, expected, command="--manager-version"):
+        result = subprocess.run([str(self.binary), command], capture_output=True, timeout=4,
+                                env={**os.environ, "SYSTEMD_COLORS": "1", "SYSTEMD_LOG_TARGET": "journal", "E0T_UNTRUSTED": "present"})
         self.assertEqual(result.returncode, expected, result.stderr)
         return result
 
@@ -72,6 +73,16 @@ class ManagerTests(unittest.TestCase):
         self.run_command(90)
         self.assertFalse((self.root / "manager-child").exists())
         self.assertFalse((self.root / "manager-claim").exists())
+
+    def test_fixed_jobs_query_and_clean_child_environment(self):
+        self.build('if(argc != 19 || strcmp(argv[1], "--no-legend") || strcmp(argv[2], "--plain") || strcmp(argv[3], "--full") || strcmp(argv[4], "--no-pager") || strcmp(argv[5], "--no-ask-password") || strcmp(argv[6], "list-jobs") || !getenv("LC_ALL") || strcmp(getenv("LC_ALL"), "C") || !getenv("SYSTEMD_COLORS") || strcmp(getenv("SYSTEMD_COLORS"), "0") || !getenv("SYSTEMD_LOG_TARGET") || strcmp(getenv("SYSTEMD_LOG_TARGET"), "console") || getenv("E0T_UNTRUSTED")) return 7; printf("123 %s start waiting\\n", argv[18]); return 0;')
+        output = self.run_command(0, "--manager-jobs").stdout
+        self.assertIn(self.nonce.encode(), output)
+        self.assertTrue(output.endswith(b" start waiting\n"))
+
+    def test_jobs_diagnostic_or_truncated_reply_refuses(self):
+        self.build('(void)argc; (void)argv; puts("diagnostic error"); return 0;')
+        self.assertIn(b"invalid owned job observation", self.run_command(90, "--manager-jobs").stderr)
 
 
 if __name__ == "__main__":

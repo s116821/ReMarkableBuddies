@@ -144,3 +144,16 @@ LC_ALL=C and SYSTEMD_COLORS=0, with no --after/--before extensions. Underlying
 ListJobs allocates manager-wide data before filtering; resource failure refuses.
 No writable dispatch, exact-job recheck/cancel, manager-instance continuity,
 late-start fencing or terminal proof is implemented by this decoder.
+
+The preparatory shared slot now supports fixed --manager-jobs as well as version.
+It constructs twelve exact compiled-nonce unit arguments with fixed full/nolegend/
+plain/nopager/noaskpassword options and execve's an explicit small environment
+(localeC, colors0, console/info logging, system executable PATH). No parent env,
+preload, shell, arbitrary unit or writable verb is passed. Completed output must
+pass the entire pure decoder before publication; diagnostics/truncation refuse.
+The same single-slot ownership/actualwait+EOF gates apply. Host fake-CLI tests
+verify fixed argv, replacement of hostile inherited log/color variables, absence
+of an arbitrary inherited variable, and rejected malformed reply. Full32host
+worker/actor/decoder/transport tests passed8.619s. Actual vendor CLI query peak,
+resource headroom, manager continuity/job recheck/cleanup and writable actions
+remain unqualified; no tablet query or staging was performed for this change.
