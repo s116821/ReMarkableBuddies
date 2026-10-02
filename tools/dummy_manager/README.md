@@ -401,3 +401,15 @@ separate trusted cleanup path still accepts its fixed closed-phase intents.
 The fixture reproduces independent close with initially open memory, proves no
 normal request file is created, then checks the internal cleanup path separately.
 No dispatch/server/lease or queued-effects authority follows from this fix.
+
+User priority correction: this entire recovery/E0T framework is DEFERRED and
+UNFINISHED, preserved for reuse. The current priority is concrete native SDK
+controller discovery and minimal controlled activation/feasibility experiments.
+The eight-case suite and generic IPC/ledger/server/lease are not prerequisites
+for every reversible development experiment. Revisit after those initial native
+experiments establish integration requirements, and before claiming production-
+ready unattended activation/recovery. Reassess which components are useful;
+do not automatically finish every experimental component. Review-held59 and its
+c02895e correction remain distinct; c028 rereview is deferred. publication_lease.h
+is an unverified, uncompiled, untested, unwired draft, preserved rather than
+discarded or marked complete. No feature/tasks/sync/archive/merge readiness.
