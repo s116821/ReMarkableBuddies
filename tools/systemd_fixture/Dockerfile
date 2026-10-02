@@ -17,4 +17,4 @@ RUN meson setup /opt/systemd-build /opt/systemd-source --prefix=/usr \
 # mappings are part of the fixture; its later runner must require private cgroups.
 ENV container=docker
 COPY parser_fixture.py /opt/buddy/parser_fixture.py
-CMD ["/usr/lib/systemd/systemd", "--system", "--unit=basic.target", "--log-target=console"]
+CMD ["python3", "/opt/buddy/parser_fixture.py"]
