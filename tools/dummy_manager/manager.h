@@ -1,4 +1,4 @@
-/* Preparatory shared-slot transport. Only fixed read-only version/owned-jobs queries exist.
+/* Preparatory shared-slot transport. Only fixed read-only version/owned-jobs/unit queries exist.
  * Writable manager actions and pending-job reconciliation are not implemented.
  */
 #ifndef E0T_SYSTEMCTL_PATH
@@ -32,7 +32,9 @@ static pid_t manager_wait(pid_t child, int *status) {
     return waitpid(child, status, WNOHANG);
 #endif
 }
-static int manager_readonly(int jobs) {
+static int manager_readonly(enum e0t_command_kind kind) {
+    if (kind != E0T_VERSION && kind != E0T_OWNED_JOBS && kind != E0T_UNIT_STATES)
+        fail("manager read-only operation required");
     uint64_t deadline = now_ms() + 2000;
     uint64_t reply_deadline = deadline - 500;
     int lock = shared_command_lock();
@@ -45,7 +47,8 @@ static int manager_readonly(int jobs) {
         || read_owned("manager-child", previous, sizeof(previous)) != 0)
         fail("unresolved previous manager command");
     char claim[128];
-    snprintf(claim, sizeof(claim), "%s %ld %llu\n", jobs ? "jobs" : "version", (long)getpid(), identity);
+    const char *operation = kind == E0T_OWNED_JOBS ? "jobs" : kind == E0T_UNIT_STATES ? "units" : "version";
+    snprintf(claim, sizeof(claim), "%s %ld %llu\n", operation, (long)getpid(), identity);
     if (create_owned("manager-claim", claim) != 1) fail("manager intent publication");
     int channel[2];
     if (pipe2(channel, O_CLOEXEC | O_NONBLOCK)) fail("manager reply pipe");
@@ -69,17 +72,9 @@ static int manager_readonly(int jobs) {
         close(input);
         char *environment[] = {"LC_ALL=C", "SYSTEMD_COLORS=0", "SYSTEMD_LOG_TARGET=console",
                                "SYSTEMD_LOG_LEVEL=info", "PATH=/usr/bin:/bin", NULL};
-        char units[12][96];
-        char *arguments[21] = {E0T_SYSTEMCTL_PATH, "--no-legend", "--plain", "--full",
-                              "--no-pager", "--no-ask-password", "list-jobs"};
-        if (jobs) {
-            for (unsigned i = 0; i < 12; ++i) {
-                snprintf(units[i], sizeof(units[i]), "buddy-e0t-%s-%s.service", E0T_NONCE, roles[i]);
-                arguments[7 + i] = units[i];
-            }
-            arguments[19] = NULL;
-        } else { arguments[1] = "--version"; arguments[2] = NULL; }
-        execve(E0T_SYSTEMCTL_PATH, arguments, environment);
+        struct e0t_command_arguments arguments;
+        if (e0t_command_encode(kind, 0, NULL, 0, NULL, 0, &arguments) != 1) _exit(90);
+        execve(E0T_SYSTEMCTL_PATH, arguments.argv, environment);
         _exit(90);
     }
     close(channel[1]);
@@ -127,9 +122,13 @@ static int manager_readonly(int jobs) {
     } else failed = 1;
     close(lock);
     if (failed || !WIFEXITED(status) || WEXITSTATUS(status) != 0) fail("bounded read-only manager command failed");
-    if (jobs) {
+    if (kind == E0T_OWNED_JOBS) {
         struct e0t_job observed[12]; size_t count;
         if (!e0t_jobs_decode(output, used, observed, &count)) fail("invalid owned job observation");
+    }
+    if (kind == E0T_UNIT_STATES) {
+        struct e0t_unit_snapshot observed;
+        if (!e0t_state_decode(output, used, &observed)) fail("invalid unit state observation");
     }
     if (now_ms() >= deadline) fail("manager result deadline");
     int output_flags = fcntl(STDOUT_FILENO, F_GETFL);

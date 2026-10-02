@@ -156,6 +156,8 @@ static int claim(void) {
 #error "Preparatory manager transport needs the common owned-file/identity helpers"
 #endif
 #include "jobs.h"
+#include "command_args.h"
+#include "unit_state.h"
 #include "manager.h"
 #endif
 int main(int argc, char **argv) {
@@ -166,7 +168,8 @@ int main(int argc, char **argv) {
                  * remains an explicit unqualified limit, not proven interruptible. */
     nonce_check();
     manager_parent_mode = (argc == 2 && !strcmp(argv[1], "--profile-manager"))
-        || (argc == 2 && (!strcmp(argv[1], "--manager-version") || !strcmp(argv[1], "--manager-jobs")))
+        || (argc == 2 && (!strcmp(argv[1], "--manager-version") || !strcmp(argv[1], "--manager-jobs")
+                         || !strcmp(argv[1], "--manager-units")))
         || (argc == 3 && !strcmp(argv[1], "cleanup"));
     uint64_t mapped = initial_mappings();
     apply_limits(mapped);
@@ -178,8 +181,11 @@ int main(int argc, char **argv) {
     if (argc == 3 && !strcmp(argv[1], "--resource-fixture")) { open_root(); resource_fixture(argv[2]); return 0; }
 #endif
 #ifdef E0T_MANAGER
-    if (argc == 2 && (!strcmp(argv[1], "--manager-version") || !strcmp(argv[1], "--manager-jobs"))) {
-        open_root(); identity = own_start(); return manager_readonly(!strcmp(argv[1], "--manager-jobs"));
+    if (argc == 2 && (!strcmp(argv[1], "--manager-version") || !strcmp(argv[1], "--manager-jobs")
+                     || !strcmp(argv[1], "--manager-units"))) {
+        enum e0t_command_kind kind = !strcmp(argv[1], "--manager-jobs") ? E0T_OWNED_JOBS
+            : !strcmp(argv[1], "--manager-units") ? E0T_UNIT_STATES : E0T_VERSION;
+        open_root(); identity = own_start(); return manager_readonly(kind);
     }
 #endif
     if (argc != 3)

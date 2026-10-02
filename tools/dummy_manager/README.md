@@ -266,3 +266,12 @@ malformed frames. These are synthetic model checks only. Integration must
 durably publish owned intent before effects and publish the actual fence before
 acknowledging close; independent lease, actual process/cgroup exit, fresh manager
 observations, phase authority and exclusive takeover remain unimplemented gates.
+
+The read-only transport now consumes the accepted fixed argument codec for
+version/owned-jobs and --manager-units. The latter requires all15 complete
+seven-property records, keeping original3 services in their separate observer
+array. Incomplete/diagnostic/foreign output is discarded before stdout. Any
+nonzero CLI status still refuses; actual vendor absent-unit fields/status remain
+unqualified. No writable opcode has an entry point despite its pure codec.
+Twelve strict host transport fixtures passed8.948s, using an owned C fake CLI;
+no real systemctl, manager, tablet or writable action was executed.
