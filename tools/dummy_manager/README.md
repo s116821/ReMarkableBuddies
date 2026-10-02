@@ -103,3 +103,20 @@ CPU limit before exec; mismatch yields unknown/no stock exec or replacement. Non
 of those test-only definitions belongs in a device artifact or extra device case.
 The complete packet still needs actual artifact profile/headroom and all command,
 cleanup, aggregate output/concurrency and original-service gates/review.
+
+Preparatory E0T_MANAGER transport currently supports only fixed read-only
+systemctl --version. It borrows one shared nonblocking slot; any retained intent
+or child publication refuses, including after the previous lock owner dies.
+The manager parent keeps AS soft8MiB/hard20MiB; its single command child raises
+only its own soft limit to20MiB and verifies all inherited limits before exec.
+SIGCHLD is reset to default so actual waitpid retains child ownership. Success
+requires both observed child exit and output EOF within2s, at most4096 output
+bytes, canonical child publication and exact current intent. Overflow/deadline
+kills and waits only the held child; missing publication remains unknown.
+
+Five tests compile a small host C fake CLI (never systemctl): fixed argv and
+actual child AS limits, serial reuse after wait, retained-claim refusal, slot
+contention, overflow and wall-time cleanup. This does not profile the tablet CLI,
+qualify writable manager jobs, implement independent cleanup, or freeze a device
+packet. The CLI20MiB candidate differs from helper8MiB; aggregate concurrency,
+command-specific peaks/headroom and job reconciliation remain open gates.

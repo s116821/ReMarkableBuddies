@@ -151,18 +151,35 @@ static int claim(void) {
 #ifdef E0T_ACTORS
 #include "actors.h"
 #endif
+#ifdef E0T_MANAGER
+#ifndef E0T_ACTORS
+#error "Preparatory manager transport needs the common owned-file/identity helpers"
+#endif
+#include "manager.h"
+#endif
 int main(int argc, char **argv) {
     uint64_t entered = now_ms();
     signal(SIGALRM, SIG_DFL);
+    signal(SIGCHLD, SIG_DFL);  /* Retain actual child ownership until waitpid. */
     alarm(15);  /* Process watchdog from entry, not after setup. Blocked kernel I/O
                  * remains an explicit unqualified limit, not proven interruptible. */
     nonce_check();
+    manager_parent_mode = (argc == 2 && !strcmp(argv[1], "--profile-manager"))
+        || (argc == 2 && !strcmp(argv[1], "--manager-version"))
+        || (argc == 3 && !strcmp(argv[1], "cleanup"));
     uint64_t mapped = initial_mappings();
     apply_limits(mapped);
     if (!inherited_limits_match()) fail("effective limits unavailable");
-    if (argc == 2 && !strcmp(argv[1], "--profile")) { profile_report(mapped); return 0; }
+    if (argc == 2 && (!strcmp(argv[1], "--profile") || !strcmp(argv[1], "--profile-manager"))) {
+        profile_report(mapped); return 0;
+    }
 #ifdef E0T_RESOURCE_TEST
     if (argc == 3 && !strcmp(argv[1], "--resource-fixture")) { open_root(); resource_fixture(argv[2]); return 0; }
+#endif
+#ifdef E0T_MANAGER
+    if (argc == 2 && !strcmp(argv[1], "--manager-version")) {
+        open_root(); identity = own_start(); return manager_version();
+    }
 #endif
     if (argc != 3)
         fail("fixed role and case required");

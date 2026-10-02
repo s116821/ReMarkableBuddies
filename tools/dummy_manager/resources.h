@@ -5,6 +5,8 @@
 #define E0T_STACK_LIMIT (512ULL * 1024)
 #define E0T_DATA_LIMIT (1024ULL * 1024)
 #define E0T_HEADROOM (E0T_STACK_LIMIT + E0T_DATA_LIMIT + 512ULL * 1024)
+#define E0T_COMMAND_AS_LIMIT (20ULL * 1024 * 1024)
+static int manager_parent_mode;
 
 struct limit_entry { int resource; const char *name; rlim_t value; };
 static const struct limit_entry limit_table[] = {
@@ -12,6 +14,12 @@ static const struct limit_entry limit_table[] = {
     {RLIMIT_DATA, "data", E0T_DATA_LIMIT}, {RLIMIT_FSIZE, "file", RECORD_CAP},
     {RLIMIT_CORE, "core", 0}, {RLIMIT_CPU, "cpu", 2}
 };
+static struct rlimit expected_limit(unsigned index) {
+    struct rlimit value = {limit_table[index].value, limit_table[index].value};
+    if (manager_parent_mode && limit_table[index].resource == RLIMIT_AS)
+        value.rlim_max = E0T_COMMAND_AS_LIMIT;
+    return value;
+}
 static uint64_t initial_mappings(void) {
     char data[16384];
     int fd = open("/proc/self/maps", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
@@ -48,7 +56,7 @@ static void apply_limits(uint64_t mapped) {
     if (E0T_AS_LIMIT <= E0T_HEADROOM || mapped > E0T_AS_LIMIT - E0T_HEADROOM)
         fail("insufficient initial mapping/headroom");
     for (unsigned i = 0; i < sizeof(limit_table) / sizeof(limit_table[0]); ++i) {
-        struct rlimit wanted = {limit_table[i].value, limit_table[i].value}, actual;
+        struct rlimit wanted = expected_limit(i), actual;
         if (setrlimit(limit_table[i].resource, &wanted)
             || getrlimit(limit_table[i].resource, &actual)
             || actual.rlim_cur != wanted.rlim_cur || actual.rlim_max != wanted.rlim_max)
@@ -58,8 +66,9 @@ static void apply_limits(uint64_t mapped) {
 static int inherited_limits_match(void) {
     for (unsigned i = 0; i < sizeof(limit_table) / sizeof(limit_table[0]); ++i) {
         struct rlimit actual;
+        struct rlimit expected = expected_limit(i);
         if (getrlimit(limit_table[i].resource, &actual)
-            || actual.rlim_cur != limit_table[i].value || actual.rlim_max != limit_table[i].value)
+            || actual.rlim_cur != expected.rlim_cur || actual.rlim_max != expected.rlim_max)
             return 0;
     }
     return 1;
@@ -74,12 +83,14 @@ static void profile_report(uint64_t mapped) {
         printf("%s\"%s\":{\"soft\":%llu,\"hard\":%llu}", i ? "," : "", limit_table[i].name,
                (unsigned long long)actual.rlim_cur, (unsigned long long)actual.rlim_max);
     }
-    puts("},\"aggregate_kernel_limit\":false,\"device_packet_frozen\":false}");
+    printf("},\"manager_parent\":%s,\"aggregate_kernel_limit\":false,\"device_packet_frozen\":false}\n",
+           manager_parent_mode ? "true" : "false");
 }
 static void record_limits(uint64_t mapped) {
     char event[160];
-    snprintf(event, sizeof(event), "limits-verified mapped=%llu as=%llu stack=%llu data=%llu file=%u core=0 cpu=2",
+    snprintf(event, sizeof(event), "limits-verified mapped=%llu as=%llu/%llu stack=%llu data=%llu file=%u core=0 cpu=2",
              (unsigned long long)mapped, (unsigned long long)E0T_AS_LIMIT,
+             (unsigned long long)(manager_parent_mode ? E0T_COMMAND_AS_LIMIT : E0T_AS_LIMIT),
              (unsigned long long)E0T_STACK_LIMIT, (unsigned long long)E0T_DATA_LIMIT, RECORD_CAP);
     record(event);
 }

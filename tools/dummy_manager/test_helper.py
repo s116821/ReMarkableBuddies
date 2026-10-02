@@ -63,6 +63,14 @@ class WorkerTests(unittest.TestCase):
         self.assertFalse(profile["aggregate_kernel_limit"])
         self.assertEqual(list(self.root.iterdir()), [self.root / "owner"])
 
+    def test_manager_parent_has_low_soft_limit_and_explicit_child_hard_ceiling(self):
+        result = subprocess.run([str(self.binary), "--profile-manager"], capture_output=True, timeout=3, check=True)
+        profile = json.loads(result.stdout)
+        self.assertTrue(profile["manager_parent"])
+        self.assertEqual(profile["limits"]["as"], {"soft": 8388608, "hard": 20971520})
+        self.assertFalse(profile["aggregate_kernel_limit"])
+        self.assertEqual(list(self.root.iterdir()), [self.root / "owner"])
+
     def test_bad_address_limit_refuses_before_owned_effects(self):
         bad = self.parent / "bad-limit-helper"
         subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-DE0T_AS_LIMIT=65536",
