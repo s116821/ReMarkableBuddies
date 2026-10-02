@@ -115,9 +115,9 @@ systemctl restart xochitl.service
         if(-not $observed.timeout -and $observed.exit -eq 0){
             [IO.File]::WriteAllText((Join-Path $packet 'callback.json'),$observed.stdout,[Text.UTF8Encoding]::new($false))
             $callback=$observed.stdout|ConvertFrom-Json
-            $record.callback_verified=$callback.nonce -ceq $nonce -and $callback.application_thread -is [bool] -and $callback.application_thread
+            $record.callback_verified=$callback.nonce -is [string] -and $callback.nonce -ceq $nonce -and $callback.application_thread -is [bool] -and $callback.application_thread
             $record.candidate_receipt=$callback
-            $guardFieldsMatch=$record.callback_verified -and $callback.registration_match -is [bool] -and $callback.registration_match -and $callback.typed_target_match -is [bool] -and $callback.typed_target_match -and $callback.guard_not_cleared -is [bool] -and $callback.guard_not_cleared -and $callback.uniqueness -ceq 'unproven'
+            $guardFieldsMatch=$record.callback_verified -and $callback.registration_match -is [bool] -and $callback.registration_match -and $callback.typed_target_match -is [bool] -and $callback.typed_target_match -and $callback.guard_not_cleared -is [bool] -and $callback.guard_not_cleared -and $callback.uniqueness -is [string] -and $callback.uniqueness -ceq 'unproven'
             Require (SSH (Expand @'
 set -eu
 read p started < '@ROOT@/attempt.identity'
