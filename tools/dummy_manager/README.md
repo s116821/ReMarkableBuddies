@@ -74,3 +74,15 @@ inferred from these host tests. Full cleanup/operator/limits/packet review is op
 prepare_packet.py produces local draft files only, marks them runnable=false, and
 lists missing gates. Its unit profiles and inode/absence expectations remain drafts;
 there is no SSH or stage/start/reload functionality in that generator.
+
+Actor review held initialc6ad6e9 for unprotected activation and an event-only B
+barrier. The follow-up writer checks current correlated peer protection and actor
+phase under the shared publication lock. B now irreversibly creates the closed-case
+fence before reporting restoration-begun; tests inspect that actual artifact before
+terminating the actor. C spends the actual one-shot claim without forking, exposing
+an interrupted pre-fork phase that the survivor reports unknown. A host-only
+E0T_TEST_IDENTITY_FAULT compile variant forces child identity refusal after actual
+fork/exec; observed child exit yields unknown with no second spawn. This compile
+variant is not part of a device artifact. Eight host actor tests now include fresh
+unprotected/unknown-peer refusals and those concrete interruption phases. Cgroups
+remain explicitly fake and full operator/cleanup/resource gates remain open.

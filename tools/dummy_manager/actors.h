@@ -61,6 +61,9 @@ static int live_identity(pid_t pid, unsigned long long expected) {
     return actual == expected;
 }
 static int publish_identity(void) {
+#ifdef E0T_TEST_IDENTITY_FAULT
+    if (!strcmp(role, "stock")) return 0;  /* Host fault build only. */
+#endif
     char name[80], data[128];
     identity_name(name, sizeof(name), role);
     snprintf(data, sizeof(data), "%ld %llu\n", (long)getpid(), identity);
@@ -111,7 +114,31 @@ static int publication_lock(void) {
     }
     return fd;
 }
-static int activation_publication(void) {
+static int fresh_protection(const char *peer) {
+    pid_t peer_pid; unsigned long long peer_start;
+    return read_identity(peer, &peer_pid, &peer_start) == 1
+        && live_identity(peer_pid, peer_start) == 1;
+}
+static int begin_restoration(const char *peer, int spend_claim) {
+    int lock = publication_lock();
+    if (lock < 0) return -1;
+    char name[80], data[128];
+    int result = -1;
+    if (fresh_protection(peer)) {
+        snprintf(name, sizeof(name), "closed-T%u", generation);
+        int closure = create_owned(name, E0T_NONCE);
+        if (closure >= 0 && read_owned(name, data, sizeof(data)) == 1 && !strcmp(data, E0T_NONCE)) {
+            result = 1;
+            if (spend_claim) {
+                snprintf(name, sizeof(name), "restore-claim-T%u", generation);
+                snprintf(data, sizeof(data), "%s %ld %llu\n", role, (long)getpid(), identity);
+                result = create_owned(name, data) == 1 ? 1 : -1;
+            }
+        }
+    }
+    close(lock); return result;
+}
+static int activation_publication(const char *peer, int permitted) {
     int lock = publication_lock();
     if (lock < 0) return -1;
     char closed[80], state[80], temporary[80], data[128];
@@ -119,7 +146,8 @@ static int activation_publication(void) {
     snprintf(state, sizeof(state), "state-T%u", generation);
     snprintf(temporary, sizeof(temporary), "activation-partial-T%u-%s", generation, role);
     int result = -1;
-    if (read_owned(closed, data, sizeof(data)) == 0 && read_owned(state, data, sizeof(data)) == 1
+    if (permitted && fresh_protection(peer) && read_owned(closed, data, sizeof(data)) == 0
+        && read_owned(state, data, sizeof(data)) == 1
         && (!strcmp(data, "stock\n") || !strcmp(data, "injected\n"))
         && create_owned(temporary, "injected\n") == 1
         && !renameat(root_fd, temporary, root_fd, state)) result = 1;
@@ -175,6 +203,10 @@ static int restore_actor_locked(const char *peer, pid_t *child, uint64_t deadlin
         _exit(90);
     }
     while (now_ms() < deadline && now_ms() + 50 < deadline) {
+        int child_status;
+        pid_t ended = waitpid(*child, &child_status, WNOHANG);
+        if (ended == *child) { *child = -1; return -1; }
+        if (ended < 0 && errno != EINTR) return -1;
         pid_t stock_pid; unsigned long long stock_start;
         int status = stock_liveness(&stock_pid, &stock_start);
         if (status == 1 && stock_pid == *child) {
@@ -206,7 +238,7 @@ static int actor_loop(uint64_t entered) {
     int control = control_pipe();
     uint64_t deadline = entered + 14000;
     pid_t child = -1;
-    int restored = 0, failed = 0, protected = 0;
+    int restored = 0, failed = 0, protected = 0, restoring = 0;
     while (!stopping && now_ms() < deadline) {
         pid_t peer_pid; unsigned long long peer_start;
         int peer_record = read_identity(peer, &peer_pid, &peer_start);
@@ -233,9 +265,15 @@ static int actor_loop(uint64_t entered) {
         if (polled > 0 && (p.revents & POLLIN)) {
             char command[2];
             if (read(control, command, sizeof(command)) != 1) fail("actor command framing");
-            if (command[0] == 'B' && protected && !restored && !failed) record("restoration-begun");
+            if ((command[0] == 'B' || command[0] == 'C') && protected && !restored && !failed) {
+                if (begin_restoration(peer, command[0] == 'C') == 1) {
+                    restoring = 1;
+                    record(command[0] == 'C' ? "restore-claim-spent" : "restoration-begun");
+                } else record("actor-command-refused");
+            }
             else if (command[0] == 'L') {
-                record(activation_publication() == 1 ? "activation-published" : "late-publication-refused");
+                record(activation_publication(peer, protected && !failed && !restored && !restoring) == 1
+                       ? "activation-published" : "late-publication-refused");
             } else if (command[0] == 'Q') {
                 pid_t stock_pid; unsigned long long stock_start;
                 record(restored && stock_state() && stock_liveness(&stock_pid, &stock_start) == 1
