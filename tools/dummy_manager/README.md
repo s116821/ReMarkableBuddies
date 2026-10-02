@@ -209,3 +209,17 @@ actual absent-unit fields/exitstatus or vendorCLIoutput fit: those remain explic
 pre-integration/freeze gates. No omitted property is fabricated, no arbitrary
 nonzero CLI result is accepted, and actual cgroup/process/late-writer proof remains
 independent. Caller discards every output on parse failure.
+
+baseline_jobs.h is a pure combined jobs observer, not wired into CLI/cleanup.
+At most two frozen read-only baseline unit names remain distinct from twelve
+owned nonce roles; baseline tuples use their own type/array and never enter the
+owned cancellation codec. Names reject wildcards, slash, whitespace, control/
+unterminated strings, duplicates and the Buddy experiment namespace. The full
+4096byte observation rejects unknown rows, malformed IDs/types/states, duplicate
+units and duplicate IDs across either class. Empty rows remain observations only;
+original jobs may naturally finish, so absence is not cancellation attribution.
+The exact baseline names/completeness/manager instance come from a future frozen
+preflight, not this decoder. More than two baseline units requires packet revision,
+not omission. Three strict compiled-C synthetic fixture tests passed0.331s, with
+combined row order, maxID and cross-class duplicate/malformed cases. No manager
+query, arbitrary mutation target, provenance guarantee or terminal proof is added.
