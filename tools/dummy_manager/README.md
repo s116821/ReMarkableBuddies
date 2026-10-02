@@ -275,3 +275,19 @@ nonzero CLI status still refuses; actual vendor absent-unit fields/status remain
 unqualified. No writable opcode has an entry point despite its pure codec.
 Twelve strict host transport fixtures passed8.948s, using an owned C fake CLI;
 no real systemctl, manager, tablet or writable action was executed.
+
+intent_file.h publishes only a canonical pending-request frame to an exact
+request-001..096 owned path using O_EXCL/no-follow/nonblocking and checked file+
+directory fsync. Root/owner token, mode, UID, regular type and single-link checks
+gate publication. Identical existing intent returns RECONCILE, never new dispatch;
+conflicting, partial, symlink, hardlink or uncertain records remain UNKNOWN and
+are retained. There is no deletion/retry, completion journal or ledger recovery.
+The strict owned host fixture passed0.221s: actual child exit after publication
+leaves intent visible to its parent, with conflict/ownership/partial-file refusal
+and exact original bytes preserved. A host-only fsync failure leaves the record
+UNKNOWN and retained; subsequent access reconciles rather than republishes.
+This is process-loss evidence, not power-loss
+or cold-boot persistence on /run, deadline interruptibility, server/lease/fence,
+dispatch authority or target qualification. It is not wired into the helper.
+The non-runnable draft now enumerates96 pending files (64bytes each),262owned
+paths; complete IPC/completion/evidence budgeting and cleanup reserve remain open.

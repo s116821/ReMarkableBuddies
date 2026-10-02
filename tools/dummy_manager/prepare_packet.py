@@ -62,6 +62,9 @@ def prepare(destination, nonce):
     for filename in ("manager-slot", "manager-claim", "manager-child"):
         owned_paths.append({"path": root + "/" + filename, "kind": "regular",
                             "mode": "0600", "max_bytes": 128})
+    for request in range(1, 97):
+        owned_paths.append({"path": root + f"/request-{request:03d}", "kind": "regular",
+                            "mode": "0600", "max_bytes": 64})
     for role in ROLES:
         owned_paths.append({"path": root + "/control-" + role, "kind": "fifo", "mode": "0600"})
     for case in range(1, 9):
@@ -90,6 +93,7 @@ def prepare(destination, nonce):
                 "owned_paths": owned_paths, "read_only_dropin_lookup_paths": sorted(lookup),
                 "effective_profile_frozen": False, "helper_artifact_sha256": None, "operator_sha256": None,
                 "missing_gates": ["experiment cleanup actor implementation",
+                                  "durable intent integration/completion/recovery and reserved cleanup capacity",
                                   "independent review of preparation-only process/file actors",
                                   "independent review of explicit barrier READY control",
                                   "exact effective-property operator gate",
