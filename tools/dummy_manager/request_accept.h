@@ -43,7 +43,9 @@ static enum e0t_request_decision e0t_accept_intent(int root,struct e0t_request_l
         }
         return decision; /* Historical or unresolved, never a new dispatch. */
     }
-    if(e0t_fenced_intent(root,frame,length)!=E0T_INTENT_PUBLISHED) {
+    enum e0t_intent_result published=cleanup ? e0t_fenced_intent(root,frame,length)
+        : e0t_fenced_publish(root,frame,length,0);
+    if(published!=E0T_INTENT_PUBLISHED) {
         ledger->closed=1; (void)e0t_fence_close(root); return E0T_REQUEST_REFUSED;
     }
     *ledger=proposed; return E0T_REQUEST_NEW; /* Only durable pending intent. */

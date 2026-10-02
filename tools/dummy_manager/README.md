@@ -386,8 +386,18 @@ After close normal IPC cannot allocate any new ID. A separate trusted INTERNAL
 cleanup entry accepts only jobs/units/cancel/stop-case intents with memory closed
 and observed valid publication fence; its mode is never supplied by IPC data.
 It still supplies no fresh tuple/phase/lease/queued-effect/manager authority.
-The strict host fixture passed1.351s: retained duplicate outcomes, disk corruption
+The strict host fixture passed1.459s: retained duplicate outcomes, disk corruption
 refusal/closure, all83normal records, close84,12reserved internal cleanup records,
 normal overflow/closed allocation refusal and independent no-ID close. No effect
 executor/server or target integration is wired. Actual case/cleanup command,
 evidence and deadline budgets require separate review before packet freeze.
+
+Initial acceptance coordinator59b0e6f was review-held: independent no-ID file
+close could leave model memory open and a normal J query allocated NEW behind
+that close. The correction checks closed-normal policy while holding the same
+actual publication slot, not solely via a racing earlier observation. Normal
+new intent now refuses after any actual close and latches memory closed; the
+separate trusted cleanup path still accepts its fixed closed-phase intents.
+The fixture reproduces independent close with initially open memory, proves no
+normal request file is created, then checks the internal cleanup path separately.
+No dispatch/server/lease or queued-effects authority follows from this fix.

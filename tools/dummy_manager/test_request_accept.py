@@ -8,7 +8,7 @@ import unittest
 class RequestAcceptTests(unittest.TestCase):
     def test_duplicate_disk_consistency_reserved_capacity_and_independent_close(self):
         with tempfile.TemporaryDirectory(prefix="e0t-accept-") as temp:
-            roots = [Path(temp) / name for name in ("first", "capacity", "overrun")]
+            roots = [Path(temp) / name for name in ("first", "capacity", "overrun", "external")]
             for root in roots:
                 root.mkdir(mode=0o700)
                 (root / "owner").write_text("0123456789abcdef0123456789abcdef")
@@ -23,11 +23,12 @@ static int complete(int root,struct e0t_request_ledger *ledger,const char *frame
     return e0t_completion_finish(root,frame,strlen(frame),outcome)==1 && e0t_request_finish(ledger,id,outcome);
 }
 int main(int argc,char **argv) {
-    if(argc!=4) return 1;
+    if(argc!=5) return 1;
     int first=open(argv[1],O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
     int capacity=open(argv[2],O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
     int overrun=open(argv[3],O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
-    if(first<0 || capacity<0 || overrun<0) return 2;
+    int external=open(argv[4],O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+    if(first<0 || capacity<0 || overrun<0 || external<0) return 2;
     struct e0t_request_ledger ledger={.generation=1};
     const char *start=E0T_NONCE " 1 1 B 7\n";
     if(e0t_request_accept(first,&ledger,start,strlen(start))!=E0T_REQUEST_NEW
@@ -64,7 +65,14 @@ int main(int argc,char **argv) {
        || faccessat(overrun,"request-084",F_OK,0)==0) return 11;
     if(e0t_request_accept(overrun,&extra,overflow,strlen(overflow))!=E0T_REQUEST_REFUSED
        || e0t_cleanup_accept(overrun,&extra,overflow,strlen(overflow))!=E0T_REQUEST_NEW) return 12;
-    close(first); close(capacity); close(overrun);
+    struct e0t_request_ledger independently_closed={.generation=1};
+    const char *query=E0T_NONCE " 1 1 J -\n";
+    if(e0t_fence_close(external)!=1
+       || e0t_request_accept(external,&independently_closed,query,strlen(query))!=E0T_REQUEST_REFUSED
+       || !independently_closed.closed || independently_closed.last_id
+       || faccessat(external,"request-001",F_OK,0)==0) return 13;
+    if(e0t_cleanup_accept(external,&independently_closed,query,strlen(query))!=E0T_REQUEST_NEW) return 14;
+    close(first); close(capacity); close(overrun); close(external);
     puts("durable pending acceptance checks passed"); return 0;
 }
 ''')

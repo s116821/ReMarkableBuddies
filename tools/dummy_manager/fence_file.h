@@ -54,17 +54,22 @@ static int e0t_fence_close(int root) {
     if(close(slot)) closed=-1;
     return closed;
 }
-static enum e0t_intent_result e0t_fenced_intent(int root,const char *frame,size_t length) {
+static enum e0t_intent_result e0t_fenced_publish(int root,const char *frame,size_t length,int allow_closed) {
     struct e0t_request request;
     if(!e0t_request_parse(frame,length,&request)) return E0T_INTENT_UNKNOWN;
     int slot=e0t_request_slot(root);
     if(slot<0) return E0T_INTENT_UNKNOWN;
     int state=e0t_fence_observe(root);
     enum e0t_intent_result result=E0T_INTENT_UNKNOWN;
-    if(state>=0 && !(state && (request.op==E0T_REQ_START || request.op==E0T_REQ_ADVANCE))
+    if(state>=0 && (!state || allow_closed)
+        && !(state && (request.op==E0T_REQ_START || request.op==E0T_REQ_ADVANCE))
         && (request.op!=E0T_REQ_CLOSE || e0t_fence_publish_locked(root)==1))
         result=e0t_intent_publish(root,frame,length);
     if(close(slot)) result=E0T_INTENT_UNKNOWN;
     return result;
+}
+/* Storage-only cleanup-capable wrapper; never normal IPC authority. */
+static enum e0t_intent_result e0t_fenced_intent(int root,const char *frame,size_t length) {
+    return e0t_fenced_publish(root,frame,length,1);
 }
 #endif
