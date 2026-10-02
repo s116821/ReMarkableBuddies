@@ -2,14 +2,20 @@
 
 Concrete one-attempt development packets, separate from the deferred E0T framework.
 The earlier SDK `2265ebb2f993e8806a77d94a352a7fd0de2c3e42` payload proved nonce and
-Qt application-thread entry on hardware. The current draft prepares public
-existing-engine QML singleton availability access. SDK source is frozen at
-`e017ccce2c6a6a0b408fe04eaca31a264d1919c8`; Main independently reviewed it and
-reran all twelve owned firmware-matched ARM-emulated fixtures successfully.
-The fresh ARM payload SHA256 is
-`481aaac69fbe8dd1689ed1851b51b6fc0e50679b9b451385b64ddfaadc10fe36`,
-with nonce `5ce20d48f7c54640b073eea27f27f948`. Exact artifact/operator review is
-required before execution. It uses application/window/component readiness
+Qt application-thread entry on hardware. SDK `e017ccc` / Buddy `6074e56` then ran
+once with nonce `5ce20d48f7c54640b073eea27f27f948`: existing-engine/application-thread
+acquisition succeeded, but helper compilation refused with component-error and
+helper/controller availability false. Original restoration and exact cleanup
+passed; source, payload and private receipts remain preserved. Do not retry it.
+
+The distinct refinement pins SDK source
+`0149b5d14cc83e6e905643cd1e952b621e58adc4`, with versionless library import matching
+the pinned community pattern and bounded fixed compilation-error categories.
+The earlier failure cause is unknown. Main independently reviewed this source
+and reran all fifteen owned firmware-matched ARM-emulated fixtures successfully.
+Nonce is `f4851e410f62491da7302dd86c5a5b19`; payload SHA256 is
+`878bcfae923ef4fc2a50d5622a6f2983463d0897cca72fde6ea939ecb34288bd`.
+Exact artifact/operator review is required before execution. It uses application/window/component readiness
 events and requires one unique existing engine on the application thread. A fixed
 QML helper checks its own DocumentController availability boolean; no controller
 methods, page operations, navigation or new engine belong in this experiment.
