@@ -346,6 +346,60 @@ class RealProcessTests(unittest.TestCase):
         self.assertEqual((self.session.root / "config").read_bytes(), b"stock\n")
         self.assertFalse(any((self.session.root / x).exists() for x in ("session", "config.partial", "session.partial")))
 
+    def test_supervisor_exit_during_restore_rpc_uses_independent_fallback(self):
+        self.session.activate()
+        self.session.restored(self.session.send("fault-restore-exit", "restored"))
+        self.assertIsNone(start_identity(next(x for x in self.session.identities
+                                             if x["role"] == "supervisor")["pid"]))
+
+    def test_publication_failure_is_uncertain_without_restore_replay(self):
+        self.session.activate()
+        receipt = self.session.root / "supervisor-recovery"
+        receipt.mkdir()  # Real filesystem replacement failure, not a mocked receipt.
+        try:
+            result = self.session.send("disable", "recovery-failed")
+            self.assertEqual(result["state"], "RecoveryFailed")
+            self.assertEqual((self.session.root / "config").read_bytes(), b"stock\n")
+            self.assertFalse(result["injected_alive"])
+            self.assertTrue(receipt.is_dir())
+            self.assertFalse(any(p.name.startswith("supervisor-recovery.partial.")
+                                 for p in self.session.root.iterdir()))
+            first = self.session.send("restore-status")["receipt"]
+            second = self.session.send("restore-status")["receipt"]
+            self.assertEqual(first, second)
+            self.assertEqual(first["state"], "RecoveryFailed")
+            self.assertEqual(first["reason"], "receipt-publication-failed")
+            self.assertEqual(first["restore_runs"], 1)
+            self.assertEqual(start_identity(first["stock"]["pid"]), first["stock"]["os_start"])
+            self.session.send("activate", "refused")
+        finally:
+            receipt.rmdir()
+
+    def test_lost_rpc_with_live_supervisor_refuses_takeover(self):
+        self.session.activate()
+        result = self.session.send("fault-restore-live", "recovery-failed")
+        self.assertTrue(result["supervisor_alive"] and result["injected_alive"])
+        self.assertFalse(result["stock_alive"])
+        self.assertEqual(result["state"], "RecoveryFailed")
+        self.assertEqual((self.session.root / "config").read_bytes(), b"injected\n")
+        self.assertFalse((self.session.root / "supervisor-recovery").exists())
+        self.session.send("activate", "refused")
+
+    def test_cached_completion_refuses_dead_stock_without_second_restore(self):
+        self.session.activate()
+        restored = self.session.send("restore-race", "restored")
+        first = restored["receipts"][0]
+        result = self.session.send("cached-stock-loss", "cached-restoration")
+        receipt = result["receipt"]
+        self.assertEqual(receipt["state"], "RecoveryFailed")
+        self.assertEqual(receipt["reason"], "cached-postcondition-lost")
+        self.assertEqual(receipt["stock"], first["stock"])
+        self.assertEqual(receipt["restore_runs"], 1)
+        self.assertIsNone(start_identity(receipt["stock"]["pid"]))
+        self.assertFalse(result["stock_alive"])
+        self.assertEqual((self.session.root / "config").read_bytes(), b"stock\n")
+        self.session.send("activate", "refused")
+
     def test_simultaneous_loss_cold_boot_ignores_leftover_payload(self):
         old_scope = self.session.activate()
         self.session.process.stdin.write('{"op":"kill-both"}\n')

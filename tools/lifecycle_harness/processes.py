@@ -110,6 +110,12 @@ def supervisor(root, token):
     def restore_owned():
         nonlocal stock, completion, disabled, restore_runs
         if completion is not None:
+            # A receipt records a past completion, not perpetual stock health.
+            if completion["state"] == "DisabledForSession" and (
+                    stock is None or stock.poll() is not None
+                    or start_identity(completion["stock"]["pid"]) != completion["stock"]["os_start"]
+                    or (root / "config").read_bytes() != (root / "stock-baseline").read_bytes()):
+                completion = dict(completion, state="RecoveryFailed", reason="cached-postcondition-lost")
             return completion
         disabled = True  # Fence this serialized activation writer before effects.
         restore_runs += 1
@@ -132,7 +138,13 @@ def supervisor(root, token):
         except (TimeoutError, queue.Empty, OSError, ValueError, RuntimeError):
             completion = {"state": "RecoveryFailed", "transaction": token,
                           "scope": scope, "restore_runs": restore_runs}
-        atomic(root / "supervisor-recovery", json.dumps(completion).encode())
+        try:
+            atomic(root / "supervisor-recovery", json.dumps(completion).encode())
+        except OSError:
+            # Effects may have completed, but publication did not. Keep ownership
+            # and cached uncertainty; never replay the restoration or claim success.
+            (root / ("supervisor-recovery.partial." + str(os.getpid()))).unlink(missing_ok=True)
+            completion = dict(completion, state="RecoveryFailed", reason="receipt-publication-failed")
         return completion
     try:
         for line in sys.stdin:
@@ -170,8 +182,17 @@ def supervisor(root, token):
                 if not armed or command.get("scope") != scope:
                     emit({"ack": op, "refused": True})
                 else:
+                    if command.get("fault") == "exit-before-effects":
+                        os._exit(71)  # Explicit owned-process E0 fault barrier.
+                    if command.get("fault") == "close-ack-live":
+                        os.close(sys.stdout.fileno())
+                        while not (root / "stop-owned-children").exists():
+                            time.sleep(0.01)
+                        os._exit(72)
                     emit({"ack": op, "receipt": restore_owned()})
                 continue
+            elif op == "kill-restored-stock" and disabled:
+                stop(stock)
             elif op == "kill-target":
                 stop(injected)
             elif op == "runtime-event":
@@ -257,6 +278,7 @@ def guard(root, token):
     heartbeat = 0
     armed = False
     fail_rollback = False
+    restore_fault = None
     def rpc(op, **fields):
         supervisor_process.stdin.write(json.dumps({"op": op, **fields}) + "\n")
         supervisor_process.stdin.flush()
@@ -278,26 +300,50 @@ def guard(root, token):
         if fail_rollback:
             report("rollback-boundary", reason=reason)
             return
+        def fallback():
+            nonlocal stock
+            # Only confirmed Supervisor death permits this independent writer.
+            # A timeout with a live writer remains uncertain, never a takeover.
+            atomic(root / "config", baseline)
+            if injected:
+                injected.wait(max(0.001, deadline - time.monotonic()))
+            for name in ("session", "config.partial", "session.partial"):
+                (root / name).unlink(missing_ok=True)
+            if stock.poll() is not None:
+                stock, identity = child(root, token + "-restored", "runtime", deadline)
+                identities.append(identity)
         try:
             if supervisor_process.poll() is None:
                 if isinstance(stock, subprocess.Popen):
                     stop(stock)
-                result = rpc("restore", scope=scope)
-                receipt = result.get("receipt", {})
-                if receipt.get("state") != "DisabledForSession":
+                try:
+                    result = rpc("restore", scope=scope, fault=restore_fault)
+                except (OSError, ValueError, queue.Empty):
+                    # EOF can precede the OS exit signal. Wait only for actual
+                    # owned-process exit; expiration does not authorize takeover.
+                    if supervisor_process.poll() is None:
+                        try:
+                            supervisor_process.wait(timeout=min(0.5, max(0.001, deadline - time.monotonic())))
+                        except subprocess.TimeoutExpired:
+                            pass
+                    if supervisor_process.poll() is None:
+                        raise
+                    fallback()
+                    result = None
+                if result is None:
+                    receipt = None
+                else:
+                    receipt = result.get("receipt", {})
+                if receipt is not None and receipt.get("state") != "DisabledForSession":
                     raise RuntimeError("Supervisor restoration refused or failed")
-                identity = receipt["stock"]
-                stock = ObservedChild(identity)
-                identities.append(identity)
-            else:
-                atomic(root / "config", baseline)
-                if injected:
-                    injected.wait(max(0.001, deadline - time.monotonic()))
-                for name in ("session", "config.partial", "session.partial"):
-                    (root / name).unlink(missing_ok=True)
-                if stock.poll() is not None:
-                    stock, identity = child(root, token + "-restored", "runtime", deadline)
+                if receipt is not None:
+                    identity = receipt["stock"]
+                    stock = ObservedChild(identity)
                     identities.append(identity)
+                    if stock.poll() is not None:
+                        raise RuntimeError("stock no longer live at receipt adoption")
+            else:
+                fallback()
             if time.monotonic() >= deadline:
                 raise TimeoutError("rollback completed too late")
         except (TimeoutError, queue.Empty, subprocess.TimeoutExpired, OSError, ValueError, RuntimeError):
@@ -399,6 +445,19 @@ def guard(root, token):
                     foreign = dict(scope, process={"pid": scope["process"]["pid"], "os_start": 0})
                 result = rpc("restore", scope=foreign)
                 report("restore-refused", refused=result.get("refused", False))
+            elif op in ("fault-restore-exit", "fault-restore-live") and state == "Ready":
+                restore_fault = "exit-before-effects" if op == "fault-restore-exit" else "close-ack-live"
+                restore(op)
+            elif op == "cached-stock-loss" and state == "DisabledForSession":
+                rpc("kill-restored-stock")
+                receipt = rpc("restore", scope=scope)["receipt"]
+                state = "RecoveryFailed"
+                report("cached-restoration", receipt=receipt)
+            elif op == "restore-status" and state == "RecoveryFailed" and supervisor_process.poll() is None:
+                receipt = rpc("restore", scope=scope)["receipt"]
+                if "stock" in receipt:
+                    identities.append(receipt["stock"])
+                report("restore-status", receipt=receipt)
             elif op == "late-apply" and state == "DisabledForSession":
                 result = rpc("apply", scope=scope)
                 partial = rpc("partial")

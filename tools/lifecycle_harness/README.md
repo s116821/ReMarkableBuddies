@@ -68,3 +68,16 @@ Owning product plan: [Docs native-buddy-page-creation at 1b8ea1b](https://github
 SDK contract: [e2b3ebbb](https://github.com/s116821/ReMarkableOpenSDK/tree/e2b3ebbb8c4c630e46041896bc266498518de437/openspec/changes/establish-native-platform-contract).
 Source basis: current coordinator E0 authorization, those exact specifications and
 original host code. Modeled transitions are assumptions for investigation, not native facts.
+
+Additional owned-process faults verify Supervisor death during a restoration RPC,
+real filesystem refusal of receipt publication, and stock death after a cached
+completion. Pipe EOF is not confirmed process death: the guard waits up to 0.5s
+within its restoration deadline for the owned Supervisor exit signal. It takes
+over only after observed exit; a live writer or expiration remains uncertain.
+Publication failure caches RecoveryFailed while retaining ownership of any stock
+child already created. Repeated queries must return that same uncertainty and
+restore count without another spawn. Cached success rechecks actual stock OS
+identity and baseline bytes before returning; lost postconditions invalidate it
+without replaying activation/restoration. Receipt files are historical observations,
+not a perpetual health lease. These checks still do not qualify concurrent native
+writers, blocked system calls, or systemd jobs.
