@@ -86,3 +86,20 @@ fork/exec; observed child exit yields unknown with no second spawn. This compile
 variant is not part of a device artifact. Eight host actor tests now include fresh
 unprotected/unknown-peer refusals and those concrete interruption phases. Cgroups
 remain explicitly fake and full operator/cleanup/resource gates remain open.
+
+Candidate resource preparation now applies and reads back kernel per-process limits:
+AS8MiB, stack512KiB, data1MiB, file2048bytes, core0 and CPU2s. It sums its own initial
+mappings without exporting addresses and requires2MiB headroom (full stack+data caps
+plus512KiB reserve). --profile reports actual mapping total and getrlimit values,
+with aggregate_kernel_limit=false and device_packet_frozen=false. Each case helper
+records verified values. A stock child checks inheritance before fixed self exec.
+These are helper candidate limits, not demonstrated ARM loader headroom, command
+artifact bounds, resident-memory totals or kernel aggregate task enforcement.
+
+Small host-only E0T_RESOURCE_TEST fixtures demonstrate a refused2MiB allocation
+under the1MiB data cap and exact2048-byte kernel file cap/EFBIG. A bad AS sizing
+variant refuses before owned effects. E0T_TEST_INHERITANCE_FAULT reduces the child
+CPU limit before exec; mismatch yields unknown/no stock exec or replacement. None
+of those test-only definitions belongs in a device artifact or extra device case.
+The complete packet still needs actual artifact profile/headroom and all command,
+cleanup, aggregate output/concurrency and original-service gates/review.

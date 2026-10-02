@@ -198,6 +198,11 @@ static int restore_actor_locked(const char *peer, pid_t *child, uint64_t deadlin
     *child = fork();
     if (*child < 0) return -1;
     if (*child == 0) {
+#ifdef E0T_TEST_INHERITANCE_FAULT
+        struct rlimit altered = {1, 1};
+        if (setrlimit(RLIMIT_CPU, &altered)) _exit(90);
+#endif
+        if (!inherited_limits_match()) _exit(90);
         char number[2] = {(char)('0' + generation), 0};
         execl("/proc/self/exe", ROOT "/helper", "stock", number, (char *)NULL);
         _exit(90);

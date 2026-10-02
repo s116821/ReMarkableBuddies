@@ -2,6 +2,7 @@
 import os
 import errno
 import fcntl
+import json
 from pathlib import Path
 import socket
 import subprocess
@@ -52,6 +53,37 @@ class WorkerTests(unittest.TestCase):
         for role, generation in (("other", 1), ("claim", 1), ("separate", 9), ("guard", 6), ("cleanup", 1)):
             self.run_helper(role, generation, 90)
         self.assertEqual(list(self.root.iterdir()), [self.root / "owner"])
+
+    def test_profile_reports_actual_kernel_limits_without_owned_effects(self):
+        result = subprocess.run([str(self.binary), "--profile"], capture_output=True, timeout=3, check=True)
+        profile = json.loads(result.stdout)
+        expected = {"as": 8388608, "stack": 524288, "data": 1048576, "file": 2048, "core": 0, "cpu": 2}
+        self.assertEqual(profile["limits"], {key: {"soft": value, "hard": value} for key, value in expected.items()})
+        self.assertLessEqual(profile["initial_mapped_bytes"] + profile["headroom_bytes"], expected["as"])
+        self.assertFalse(profile["aggregate_kernel_limit"])
+        self.assertEqual(list(self.root.iterdir()), [self.root / "owner"])
+
+    def test_bad_address_limit_refuses_before_owned_effects(self):
+        bad = self.parent / "bad-limit-helper"
+        subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-DE0T_AS_LIMIT=65536",
+                        '-DE0T_NONCE="' + self.nonce + '"',
+                        '-DE0T_RUNTIME_PARENT="' + str(self.parent) + '"',
+                        str(Path(__file__).with_name("helper.c")), "-o", str(bad)], check=True)
+        result = subprocess.run([str(bad), "fail-a", "1"], capture_output=True, timeout=3)
+        self.assertEqual(result.returncode, 90)
+        self.assertIn(b"insufficient initial mapping/headroom", result.stderr)
+        self.assertEqual(list(self.root.iterdir()), [self.root / "owner"])
+
+    def test_small_kernel_allocation_and_file_refusal_fixtures(self):
+        fixture = self.parent / "resource-fixture-helper"
+        subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-DE0T_RESOURCE_TEST",
+                        '-DE0T_NONCE="' + self.nonce + '"',
+                        '-DE0T_RUNTIME_PARENT="' + str(self.parent) + '"',
+                        str(Path(__file__).with_name("helper.c")), "-o", str(fixture)], check=True)
+        for kind in ("allocation", "file"):
+            result = subprocess.run([str(fixture), "--resource-fixture", kind], capture_output=True, timeout=3, check=True)
+            self.assertEqual(result.stdout, (kind + "-refused\n").encode())
+        self.assertEqual((self.root / "resource-file-fixture").stat().st_size, 2048)
 
     def test_markers_identity_and_owned_record_bounds(self):
         self.run_helper("fail-a", 1)

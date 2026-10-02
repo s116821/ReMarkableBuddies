@@ -147,6 +147,7 @@ static int claim(void) {
     record("stock-standin");
     return 0;
 }
+#include "resources.h"
 #ifdef E0T_ACTORS
 #include "actors.h"
 #endif
@@ -156,6 +157,13 @@ int main(int argc, char **argv) {
     alarm(15);  /* Process watchdog from entry, not after setup. Blocked kernel I/O
                  * remains an explicit unqualified limit, not proven interruptible. */
     nonce_check();
+    uint64_t mapped = initial_mappings();
+    apply_limits(mapped);
+    if (!inherited_limits_match()) fail("effective limits unavailable");
+    if (argc == 2 && !strcmp(argv[1], "--profile")) { profile_report(mapped); return 0; }
+#ifdef E0T_RESOURCE_TEST
+    if (argc == 3 && !strcmp(argv[1], "--resource-fixture")) { open_root(); resource_fixture(argv[2]); return 0; }
+#endif
     if (argc != 3)
         fail("fixed role and case required");
     for (unsigned i = 0; i < sizeof(roles) / sizeof(roles[0]); ++i)
@@ -188,9 +196,7 @@ int main(int argc, char **argv) {
 #ifndef E0T_ACTORS
     if (!strcmp(role, "controller") || !strcmp(role, "guard")) fail("actor protocol not enabled");
 #endif
-    struct rlimit no_core = {0, 0}, output = {RECORD_CAP, RECORD_CAP};
-    if (setrlimit(RLIMIT_CORE, &no_core) || setrlimit(RLIMIT_FSIZE, &output)) fail("internal limits");
-    identity = own_start(); record("started");
+    identity = own_start(); record("started"); record_limits(mapped);
     signal(SIGTERM, handle_signal); signal(SIGINT, handle_signal);
 #ifdef E0T_ACTORS
     if (!strcmp(role, "controller") || !strcmp(role, "guard")) return actor_loop(entered);

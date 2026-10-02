@@ -196,6 +196,19 @@ class ActorTests(unittest.TestCase):
         self.event("guard", "fresh-restoration-unknown")
         self.assertEqual((self.root / "events-T6-stock").read_text().count(" started\n"), 1)
 
+    def test_child_limit_inheritance_mismatch_refuses_exec(self):
+        self.compile(("-DE0T_TEST_INHERITANCE_FAULT",))
+        self.start(6)
+        self.lose("controller")
+        self.event("guard", "restoration-unknown")
+        self.assertTrue((self.root / "restore-claim-T6").is_file())
+        self.assertFalse((self.root / "identity-T6-stock").exists())
+        self.assertFalse((self.root / "events-T6-stock").exists())
+        self.assertFalse((self.root / "receipt-T6").exists())
+        self.send("guard", "Q")
+        self.event("guard", "fresh-restoration-unknown")
+        self.assertFalse((self.root / "events-T6-stock").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
