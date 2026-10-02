@@ -1,6 +1,7 @@
 """Linux-only worker foundation checks; no service manager/device operations."""
 import os
 import errno
+import fcntl
 from pathlib import Path
 import socket
 import subprocess
@@ -92,6 +93,32 @@ class WorkerTests(unittest.TestCase):
         os.link(outside, record)
         self.run_helper("fail-a", 1, 90)
         self.assertEqual(outside.read_text(), "untouched")
+
+    def test_fifo_substitution_and_record_lock_refuse_without_waiting(self):
+        for filename, role, generation in (("owner", "fail-a", 1),
+                                            ("case", "norestart", "current"),
+                                            ("claim-T2", "claim", 2),
+                                            ("events-T1-fail-a", "fail-a", 1)):
+            with self.subTest(filename=filename):
+                target = self.root / filename
+                previous = target.read_bytes() if target.exists() else None
+                target.unlink(missing_ok=True)
+                os.mkfifo(target, 0o600)
+                fd = os.open(target, os.O_RDWR | os.O_NONBLOCK)
+                try:
+                    self.run_helper(role, generation, 90)
+                finally:
+                    os.close(fd)
+                    target.unlink()
+                    if previous is not None:
+                        target.write_bytes(previous)
+        record = self.root / "events-T1-fail-b"
+        record.write_bytes(b"")
+        record.chmod(0o600)
+        with record.open("rb") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            self.run_helper("fail-b", 1, 90)
+        self.assertEqual(record.read_bytes(), b"")
 
     def test_spent_claim_never_repeats_and_controlled_hold(self):
         self.run_helper("claim", 2, 42)

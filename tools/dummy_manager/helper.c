@@ -82,7 +82,7 @@ static void open_root(void) {
     struct stat st;
     if (root_fd < 0 || fstat(root_fd, &st) || st.st_uid != geteuid()
         || (st.st_mode & 07777) != 0700) fail("owned root identity/mode");
-    int fd = openat(root_fd, "owner", O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    int fd = openat(root_fd, "owner", O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
     char token[33];
     if (fd < 0 || fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_nlink != 1
         || st.st_uid != geteuid() || st.st_size != 32) fail("owner file");
@@ -93,9 +93,9 @@ static void open_root(void) {
 static void record(const char *event) {
     char name[80], line[256];
     snprintf(name, sizeof(name), "events-T%u-%s", generation, role);
-    int fd = openat(root_fd, name, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW | O_CLOEXEC, 0600);
+    int fd = openat(root_fd, name, O_WRONLY | O_NONBLOCK | O_CREAT | O_APPEND | O_NOFOLLOW | O_CLOEXEC, 0600);
     struct stat st;
-    if (fd < 0 || flock(fd, LOCK_EX) || fstat(fd, &st) || !S_ISREG(st.st_mode)
+    if (fd < 0 || flock(fd, LOCK_EX | LOCK_NB) || fstat(fd, &st) || !S_ISREG(st.st_mode)
         || st.st_nlink != 1 || st.st_uid != geteuid() || (st.st_mode & 07777) != 0600)
         fail("record ownership");
     int length = snprintf(line, sizeof(line), "%s T%u %s pid=%ld start=%llu ms=%llu %s\n",
@@ -138,7 +138,7 @@ static int claim(void) {
         return 42;
     }
     if (errno != EEXIST) fail("claim creation");
-    fd = openat(root_fd, "claim-T2", O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    fd = openat(root_fd, "claim-T2", O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
     char token[33]; struct stat st;
     if (fd < 0 || fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_nlink != 1
         || st.st_uid != geteuid() || st.st_size != 32 || read(fd, token, sizeof(token)) != 32
@@ -148,6 +148,9 @@ static int claim(void) {
     return 0;
 }
 int main(int argc, char **argv) {
+    uint64_t entered = now_ms();
+    alarm(15);  /* Process watchdog from entry, not after setup. Blocked kernel I/O
+                 * remains an explicit unqualified limit, not proven interruptible. */
     nonce_check();
     if (argc != 3)
         fail("fixed role and case required");
@@ -157,7 +160,7 @@ int main(int argc, char **argv) {
     open_root();
     char case_number = 0;
     if (!strcmp(argv[2], "current")) {
-        int fd = openat(root_fd, "case", O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+        int fd = openat(root_fd, "case", O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
         struct stat st; char data[2];
         if (fd < 0 || fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_nlink != 1
             || st.st_uid != geteuid() || (st.st_mode & 07777) != 0600 || st.st_size != 1
@@ -192,7 +195,7 @@ int main(int argc, char **argv) {
         if (!period || strcmp(period, "3000000") || (pid && strcmp(pid, expected))) fail("watchdog context");
         notify_message("READY=1\nWATCHDOG=1"); record("ready-watchdog-sent");
     }
-    uint64_t deadline = now_ms() + 15000;
+    uint64_t deadline = entered + 15000;
     while (!stopping && now_ms() < deadline) {
         struct pollfd p = { .fd = control, .events = POLLIN };
         int result = poll(&p, 1, 50);
