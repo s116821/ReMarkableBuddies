@@ -375,3 +375,19 @@ root mismatch, stale/live endpoint and symlink refusal, permissions/FDflags and
 umask restoration. No ACK/server/lease/helper integration or target effects.
 The current non-runnable inventory has197paths; runtime record subtotal remains
 68577bytes. Complete socket kernel resources/evidence/operator budget remains open.
+
+request_accept.h connects the pure model with checked pending publication,
+but never authorizes dispatch. Proposed state is committed only after NEW
+durable intent; duplicates must match actual stored request/outcome and remain
+RECONCILE/HISTORICAL. Refusal latches closed and attempts the actual publication
+fence; ignored fence failure is uncertainty, not closure acknowledgement.
+Normal allocation stops at83IDs, reserving one close and12cleanup records.
+After close normal IPC cannot allocate any new ID. A separate trusted INTERNAL
+cleanup entry accepts only jobs/units/cancel/stop-case intents with memory closed
+and observed valid publication fence; its mode is never supplied by IPC data.
+It still supplies no fresh tuple/phase/lease/queued-effect/manager authority.
+The strict host fixture passed1.351s: retained duplicate outcomes, disk corruption
+refusal/closure, all83normal records, close84,12reserved internal cleanup records,
+normal overflow/closed allocation refusal and independent no-ID close. No effect
+executor/server or target integration is wired. Actual case/cleanup command,
+evidence and deadline budgets require separate review before packet freeze.
