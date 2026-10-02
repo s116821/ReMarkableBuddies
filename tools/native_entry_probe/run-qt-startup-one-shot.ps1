@@ -1,10 +1,10 @@
 param([Parameter(Mandatory=$true)][string]$PayloadPath,
       [Parameter(Mandatory=$true)][string]$EvidenceDirectory, [switch]$PrepareOnly)
 $ErrorActionPreference = 'Stop'
-$nonce='f4851e410f62491da7302dd86c5a5b19'
+$nonce='806dd85591ff40268a11667768f0edd3'
 $remote='/run/rmb-qt-probe-'+$nonce
 $rollback='rmb-qt-probe-'+$nonce+'-rollback'
-$payloadHash='878bcfae923ef4fc2a50d5622a6f2983463d0897cca72fde6ea939ecb34288bd'
+$payloadHash='631950d84b85945f0325c5db43bd78a99a9f29bf286e4002a4976341755a7638'
 if((Get-FileHash -LiteralPath $PayloadPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $payloadHash){throw 'Payload changed'}
 $packet=Join-Path $EvidenceDirectory ('qt-startup-packet-'+$nonce)
 if(-not(Test-Path -LiteralPath $packet)){[void](New-Item -ItemType Directory -Path $packet)}
@@ -23,7 +23,7 @@ foreach($item in @{owner=$nonce;'dropin.sha256'=$files['native-probe.conf']}.Get
     $files[$item.Key]=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 if($PrepareOnly){$files|ConvertTo-Json;return}
-$record=[ordered]@{nonce=$nonce;experiment='existing-engine-qml-singleton-access';payload_source='0149b5d14cc83e6e905643cd1e952b621e58adc4';payload_sha256=$payloadHash;operator_sha256=(Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant();files=$files;results=@();arm_intent=$false;armed=$false;callback_verified=$false;candidate_generation_verified=$false;qml_access_verified=$false;candidate_receipt=$null;restored=$false;cleanup_verified=$false}
+$record=[ordered]@{nonce=$nonce;experiment='existing-engine-qml-singleton-access';payload_source='d241243fa1f9db2de7df9f581d1ef7aaf3159ad9';payload_sha256=$payloadHash;operator_sha256=(Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant();files=$files;results=@();arm_intent=$false;armed=$false;callback_verified=$false;candidate_generation_verified=$false;qml_access_verified=$false;candidate_receipt=$null;restored=$false;cleanup_verified=$false;diagnostic_collected=$false;diagnostic_sha256=$null}
 function Native([string]$program,[string[]]$arguments){
     $info=[Diagnostics.ProcessStartInfo]::new();$info.FileName=$program;$info.UseShellExecute=$false
     $info.RedirectStandardOutput=$true;$info.RedirectStandardError=$true
@@ -43,9 +43,9 @@ try{
 set -eu
 test "$(sed -n 's/^IMG_VERSION=//p' /etc/os-release)" = '"3.28.0.172"'
 test "$(cat /sys/devices/soc0/machine)" = 'reMarkable 2.0'
-test "$(pidof xochitl)" = 31221
-test "$(awk '{print $22}' /proc/31221/stat)" = 184120857
-test "$(sha256sum /proc/31221/exe | awk '{print $1}')" = 071d85beef3ef2d4cc0e11002140b27b82a2cc04a2ed740a5669f591069b77df
+test "$(pidof xochitl)" = 31790
+test "$(awk '{print $22}' /proc/31790/stat)" = 184206113
+test "$(sha256sum /proc/31790/exe | awk '{print $1}')" = 071d85beef3ef2d4cc0e11002140b27b82a2cc04a2ed740a5669f591069b77df
 test "$(sha256sum /usr/lib/libQt6Core.so.6.10.3 | awk '{print $1}')" = 43b0e210d64e59b534490d78c4c82cc1d2958999b0969aa0f77e11a082704e5d
 test "$(sha256sum /usr/lib/libQt6Qml.so.6.10.3 | awk '{print $1}')" = e9cfb062609972005470d048f75b68c749f0ccd3bf09de45916232845694c944
 test "$(sha256sum /usr/lib/libQt6Gui.so.6.10.3 | awk '{print $1}')" = 93fe582cc61673342ca49e12306d7f689860016582fa46ce135ffa280a972839
@@ -56,7 +56,7 @@ test "$(systemctl show --property=Restart --value xochitl.service)" = on-failure
 test "$(systemctl show --property=KillMode --value xochitl.service)" = control-group
 test "$(systemctl show --property=NRestarts --value xochitl.service)" = 0
 test -z "$(systemctl show --property=Job --value xochitl.service)"
-if awk 'BEGIN {RS="\0"} /^(LD_PRELOAD|LD_LIBRARY_PATH|XOVI_ROOT)=/ {found=1} END {exit !found}' /proc/31221/environ; then exit 90; fi
+if awk 'BEGIN {RS="\0"} /^(LD_PRELOAD|LD_LIBRARY_PATH|XOVI_ROOT)=/ {found=1} END {exit !found}' /proc/31790/environ; then exit 90; fi
 systemctl is-active xochitl.service reader-buddy.service rm-sync.service
 test ! -e '@ROOT@'
 test ! -e /run/systemd/system/xochitl.service.d
@@ -71,7 +71,7 @@ mkdir -m700 '@ROOT@'
     $record.arm_intent=$true
     Require (SSH (Expand @'
 set -eu
-test "$(sha256sum '@ROOT@/payload.so' | awk '{print $1}')" = 878bcfae923ef4fc2a50d5622a6f2983463d0897cca72fde6ea939ecb34288bd
+test "$(sha256sum '@ROOT@/payload.so' | awk '{print $1}')" = 631950d84b85945f0325c5db43bd78a99a9f29bf286e4002a4976341755a7638
 chmod 600 '@ROOT@/payload.so'
 # Prove actual target flags before arming or stopping any original service.
 exec 9>'@ROOT@/admission.lock'
@@ -143,6 +143,26 @@ printf 'new-generation-executable-verified\n'
             Start-Sleep -Seconds 1
         }
         if($record.restored){
+            $diagnosticState=SSH (Expand @'
+set -eu
+if test -f '@ROOT@/diagnostics.json'; then
+    test ! -L '@ROOT@/diagnostics.json'
+    test "$(stat -c '%a %u' '@ROOT@/diagnostics.json')" = '600 0'
+    test "$(wc -c < '@ROOT@/diagnostics.json')" -le 8192
+    printf 'present\n'
+else
+    test ! -e '@ROOT@/diagnostics.json'
+    test ! -L '@ROOT@/diagnostics.json'
+    printf 'absent\n'
+fi
+'@)
+            Require $diagnosticState
+            if($diagnosticState.stdout.Trim() -ceq 'present'){
+                $diagnosticPath=Join-Path $packet 'diagnostics.json'
+                Require (Native 'scp' @('-o','HostName=10.11.99.1','-o','StrictHostKeyChecking=yes','-o','BatchMode=yes','-o','ConnectTimeout=8',('RM2:'+$remote+'/diagnostics.json'),$diagnosticPath))
+                $record.diagnostic_sha256=(Get-FileHash -LiteralPath $diagnosticPath -Algorithm SHA256).Hash.ToLowerInvariant()
+                $record.diagnostic_collected=$true
+            }elseif($diagnosticState.stdout.Trim() -cne 'absent'){throw 'Diagnostic presence uncertain; retain exact stage'}
             foreach($name in @('attempt.claim','attempt.identity','restore.claim','restored','parent.signature','entry.closed')){
                 $collected=Native 'scp' @('-o','HostName=10.11.99.1','-o','StrictHostKeyChecking=yes','-o','BatchMode=yes','-o','ConnectTimeout=8',('RM2:'+$remote+'/'+$name),(Join-Path $packet $name))
                 Require $collected
@@ -163,7 +183,7 @@ done
 test ! -e '/run/systemd/transient/@UNIT@.timer'
 test ! -e '/run/systemd/transient/@UNIT@.service'
 test ! -e '/run/systemd/system/xochitl.service.d/zz-rmb-qt-probe-@NONCE@.conf'
-for name in payload.so launch.sh restore.sh native-probe.conf owner dropin.sha256 callback.json attempt.claim attempt.identity restore.claim restored parent.signature admission.lock entry.closed restore.failure verification.first-refusal; do rm -f '@ROOT@/'"$name"; done
+for name in payload.so launch.sh restore.sh native-probe.conf owner dropin.sha256 callback.json attempt.claim attempt.identity restore.claim restored parent.signature admission.lock entry.closed restore.failure verification.first-refusal diagnostics.json; do rm -f '@ROOT@/'"$name"; done
 rmdir '@ROOT@'
 test ! -e '@ROOT@'
 systemctl is-active xochitl.service reader-buddy.service rm-sync.service

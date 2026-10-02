@@ -8,14 +8,26 @@ acquisition succeeded, but helper compilation refused with component-error and
 helper/controller availability false. Original restoration and exact cleanup
 passed; source, payload and private receipts remain preserved. Do not retry it.
 
-The distinct refinement pins SDK source
-`0149b5d14cc83e6e905643cd1e952b621e58adc4`, with versionless library import matching
-the pinned community pattern and bounded fixed compilation-error categories.
-The earlier failure cause is unknown. Main independently reviewed this source
-and reran all fifteen owned firmware-matched ARM-emulated fixtures successfully.
-Nonce is `f4851e410f62491da7302dd86c5a5b19`; payload SHA256 is
-`878bcfae923ef4fc2a50d5622a6f2983463d0897cca72fde6ea939ecb34288bd`.
-Exact artifact/operator review is required before execution. It uses application/window/component readiness
+The distinct versionless-import packet SDK `0149b5d` / Buddy `5559ef5` ran once
+with nonce `f4851e410f62491da7302dd86c5a5b19`. It again acquired the engine but
+refused with module-missing. Missing-module identity remains unknown; original
+restoration/cleanup and independent saved evidence checks passed. Do not retry it.
+
+The next combined diagnostic pins SDK source
+`d241243fa1f9db2de7df9f581d1ef7aaf3159ad9`. Main independently reviewed it and
+reran all sixteen owned firmware-matched ARM-emulated fixtures successfully.
+Nonce is `806dd85591ff40268a11667768f0edd3`; payload SHA256 is
+`631950d84b85945f0325c5db43bd78a99a9f29bf286e4002a4976341755a7638`.
+It retains the same helper/imports/readiness and fixed public categories, adding
+one private `diagnostics.json`: at most eight descriptions of at most256 UTF16
+units, line/column and explicit truncation/redaction/overflow flags, no URLs.
+Known personal paths are redacted; system plugin details remain private.
+The file uses exclusive no-follow0600 creation under the owned0700 root, one
+write and an8192-byte output cap after helper cleanup. Diagnostic failure refuses
+callback publication. Main collects/hashes this exact file only after fresh stock
+restoration and before cleanup; failed collection retains staging. Never publish
+its raw descriptions. Exact artifact/operator review is required before execution.
+It uses application/window/component readiness
 events and requires one unique existing engine on the application thread. A fixed
 QML helper checks its own DocumentController availability boolean; no controller
 methods, page operations, navigation or new engine belong in this experiment.
