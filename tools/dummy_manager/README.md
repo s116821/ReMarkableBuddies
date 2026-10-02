@@ -176,3 +176,19 @@ These require actual vendor parsing/effective-property/set-get/headroom proofs.
 Cleanup draft RuntimeMax210s leaves the original180s cleanup-trigger+30s final
 window; its source still refuses cleanup and still lacks role-specific lifetime
 implementation. The draft remainsrunnable=false and explicitly lists that gate.
+
+The read-only command budget now starts before lock/intent/fork preparation.
+Normal replies must complete by1.5s; the remaining500ms reserves held-child kill,
+nonblocking waitpid polling (through1.9s), and bookkeeping/output. A child alarm2s
+is independently armed; expiry is never OS-exit proof. If actual wait is missing,
+intent/child metadata remain and another command refuses. Final parsing/result
+publication checks the2s deadline; publication uses nonblocking stdout then restores
+its flags. Uninterruptible kernel/filesystem calls remain honest unknown limits,
+not a hard2s wall guarantee. No writable command is added.
+
+E0T_TEST_WAIT_FAULT is a host-only missing-wait-evidence build, excluded from device
+artifacts. Its test verifies retained intent/no second fork after deadline and
+uses temporary host subreaper ownership to reap only its fixture child. Another
+real child closes output while staying alive; EOF is not accepted as completion.
+Nine manager tests passed7.193s. The full cleanup/operator budget remains a design
+candidate requiring actual accounting and target profiles, not completed proof.

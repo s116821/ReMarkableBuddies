@@ -24,7 +24,17 @@ static int shared_command_lock(void) {
     }
     return fd;
 }
+static pid_t manager_wait(pid_t child, int *status) {
+#ifdef E0T_TEST_WAIT_FAULT
+    (void)child; (void)status;
+    return 0;  /* Host-only missing-exit-evidence fixture, not a device build. */
+#else
+    return waitpid(child, status, WNOHANG);
+#endif
+}
 static int manager_readonly(int jobs) {
+    uint64_t deadline = now_ms() + 2000;
+    uint64_t reply_deadline = deadline - 500;
     int lock = shared_command_lock();
     if (lock < 0) fail("shared manager slot unavailable");
     char previous[256];
@@ -39,10 +49,12 @@ static int manager_readonly(int jobs) {
     if (create_owned("manager-claim", claim) != 1) fail("manager intent publication");
     int channel[2];
     if (pipe2(channel, O_CLOEXEC | O_NONBLOCK)) fail("manager reply pipe");
+    if (now_ms() >= reply_deadline) fail("manager preparation deadline");
     pid_t child = fork();
     if (child < 0) fail("manager fork");
     if (child == 0) {
         close(channel[0]); close(lock);
+        alarm(2);  /* Independent child bound; deadline never proves OS exit. */
         struct rlimit command_as = {E0T_COMMAND_AS_LIMIT, E0T_COMMAND_AS_LIMIT};
         if (setrlimit(RLIMIT_AS, &command_as) || !command_limits_match()) _exit(90);
         char born[128];
@@ -71,10 +83,9 @@ static int manager_readonly(int jobs) {
         _exit(90);
     }
     close(channel[1]);
-    uint64_t deadline = now_ms() + 2000;
     char output[4097]; size_t used = 0;
     int ended = 0, status = 0, failed = 0, eof = 0;
-    while (now_ms() < deadline && !(ended && eof)) {
+    while (now_ms() < reply_deadline && !(ended && eof)) {
         char chunk[512];
         ssize_t amount = read(channel[0], chunk, sizeof(chunk));
         if (amount > 0) {
@@ -83,7 +94,7 @@ static int manager_readonly(int jobs) {
         } else if (amount == 0) eof = 1;
         else if (errno != EAGAIN && errno != EINTR) { failed = 1; break; }
         if (!ended) {
-            pid_t result = waitpid(child, &status, WNOHANG);
+            pid_t result = manager_wait(child, &status);
             if (result == child) ended = 1;
             else if (result < 0 && errno != EINTR) { failed = 1; break; }
         }
@@ -92,10 +103,16 @@ static int manager_readonly(int jobs) {
     if (!(ended && eof)) failed = 1;
     if (!ended) {
         kill(child, SIGKILL);
-        pid_t result; do { result = waitpid(child, &status, 0); } while (result < 0 && errno == EINTR);
-        ended = result == child; failed = 1;
+        while (now_ms() < deadline - 100 && !ended) {
+            pid_t result = manager_wait(child, &status);
+            if (result == child) ended = 1;
+            else if (result < 0 && errno != EINTR) break;
+            if (!ended) { struct timespec pace = {.tv_nsec = 10000000}; nanosleep(&pace, NULL); }
+        }
+        failed = 1;
     }
     close(channel[0]); output[used] = 0;
+    if (!ended || now_ms() >= deadline) fail("manager child exit or bookkeeping deadline unknown");
     /* The exact current claim/child metadata is removed only after actual wait.
      * A bad or missing publication remains unresolved for inspection. */
     char born[128], canonical[128]; long observed_pid; unsigned long long observed_start; char suffix;
@@ -114,6 +131,13 @@ static int manager_readonly(int jobs) {
         struct e0t_job observed[12]; size_t count;
         if (!e0t_jobs_decode(output, used, observed, &count)) fail("invalid owned job observation");
     }
-    if (fwrite(output, 1, used, stdout) != used) fail("manager result publication");
+    if (now_ms() >= deadline) fail("manager result deadline");
+    int output_flags = fcntl(STDOUT_FILENO, F_GETFL);
+    if (output_flags < 0 || fcntl(STDOUT_FILENO, F_SETFL, output_flags | O_NONBLOCK))
+        fail("manager result mode");
+    ssize_t published = write(STDOUT_FILENO, output, used);
+    int restored = fcntl(STDOUT_FILENO, F_SETFL, output_flags);
+    if (published != (ssize_t)used || restored) fail("manager result publication");
+    if (now_ms() >= deadline) fail("manager result deadline");
     return 0;
 }

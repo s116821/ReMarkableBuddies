@@ -1,9 +1,11 @@
 """Host C stand-in only: never invokes systemctl or a device manager."""
 import fcntl
+import ctypes
 import os
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 import unittest
 import uuid
 
@@ -21,12 +23,12 @@ class ManagerTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def build(self, body):
+    def build(self, body, flags=()):
         fake = self.parent / "fake-cli"
         source = self.parent / "fake.c"
         source.write_text('#include <stdlib.h>\n#include <sys/resource.h>\n#include <unistd.h>\n#include <stdio.h>\n#include <string.h>\nint main(int argc, char **argv) {' + body + '}\n')
         subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", str(source), "-o", str(fake)], check=True)
-        subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-DE0T_ACTORS", "-DE0T_MANAGER",
+        subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-DE0T_ACTORS", "-DE0T_MANAGER", *flags,
                         '-DE0T_NONCE="' + self.nonce + '"',
                         '-DE0T_RUNTIME_PARENT="' + str(self.parent) + '"',
                         '-DE0T_SYSTEMCTL_PATH="' + str(fake) + '"',
@@ -70,9 +72,40 @@ class ManagerTests(unittest.TestCase):
 
     def test_wall_deadline_is_failed_and_owned_child_reaped(self):
         self.build('(void)argc; (void)argv; for (;;) pause();')
+        began = time.monotonic()
+        self.run_command(90)
+        self.assertLess(time.monotonic() - began, 2.5)
+        self.assertFalse((self.root / "manager-child").exists())
+        self.assertFalse((self.root / "manager-claim").exists())
+
+    def test_output_eof_with_live_child_is_not_completion(self):
+        self.build('(void)argc; (void)argv; close(1); close(2); for (;;) pause();')
         self.run_command(90)
         self.assertFalse((self.root / "manager-child").exists())
         self.assertFalse((self.root / "manager-claim").exists())
+
+    def test_missing_exit_evidence_retains_intent_and_refuses_another_fork(self):
+        libc = ctypes.CDLL(None, use_errno=True)
+        previous = ctypes.c_int()
+        self.assertEqual(libc.prctl(37, ctypes.byref(previous), 0, 0, 0), 0)
+        self.assertEqual(libc.prctl(36, 1, 0, 0, 0), 0)  # Adopt only this fixture's orphan for cleanup.
+        try:
+            self.build('(void)argc; (void)argv; for (;;) pause();', ("-DE0T_TEST_WAIT_FAULT",))
+            self.assertIn(b"exit or bookkeeping deadline unknown", self.run_command(90).stderr)
+            child = int((self.root / "manager-child").read_text().split()[0])
+            claim = (self.root / "manager-claim").read_bytes()
+            self.assertIn(b"unresolved previous", self.run_command(90).stderr)
+            self.assertEqual((self.root / "manager-claim").read_bytes(), claim)
+            deadline = time.monotonic() + 2
+            while True:
+                observed, _ = os.waitpid(child, os.WNOHANG)
+                if observed == child:
+                    break
+                if time.monotonic() >= deadline:
+                    self.fail("owned fault-fixture child did not exit")
+                time.sleep(0.01)
+        finally:
+            self.assertEqual(libc.prctl(36, previous.value, 0, 0, 0), 0)
 
     def test_fixed_jobs_query_and_clean_child_environment(self):
         self.build('if(argc != 19 || strcmp(argv[1], "--no-legend") || strcmp(argv[2], "--plain") || strcmp(argv[3], "--full") || strcmp(argv[4], "--no-pager") || strcmp(argv[5], "--no-ask-password") || strcmp(argv[6], "list-jobs") || !getenv("LC_ALL") || strcmp(getenv("LC_ALL"), "C") || !getenv("SYSTEMD_COLORS") || strcmp(getenv("SYSTEMD_COLORS"), "0") || !getenv("SYSTEMD_LOG_TARGET") || strcmp(getenv("SYSTEMD_LOG_TARGET"), "console") || getenv("E0T_UNTRUSTED")) return 7; printf("123 %s start waiting\\n", argv[18]); return 0;')
