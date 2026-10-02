@@ -305,3 +305,16 @@ The strict owned host fixture passed0.196s with actual child close/exit, held-sl
 refusal, late publication refusal and close independent of full model capacity.
 The non-runnable manifest now264paths including slot0bytes/close32bytes. No
 tablets, real manager or services were involved; complete packet gates remain.
+
+completion_file.h appends exactly one fixed historical outcome to the same
+owned request file, within64bytes total. Exclusive file lock, canonical frame,
+operation/outcome compatibility and checked fsync gate append. An identical
+completed outcome returns historical-only after re-sync; different, partial or
+unsafe completion refuses and preserves bytes. Caller-provided observed/closed
+outcomes are NOT evidence of manager results, actual fence, liveness or phase.
+There is no ledger recovery/replay/dispatcher/server/lease integration. The strict
+host fixture passed0.189s with actual child append/exit, duplicate/conflicting/
+partial outcomes and no-command/start incompatibility; original intent preserved.
+request_protocol.h shares its existing outcome compatibility rule with storage;
+no request-state semantics changed. Pending publisher conservatively returns
+UNKNOWN for completed files rather than granting new-publication authority.

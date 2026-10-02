@@ -97,14 +97,17 @@ static enum e0t_request_decision e0t_request_prepare(struct e0t_request_ledger *
     if (request->op==E0T_REQ_CLOSE) ledger->closed=1;
     return E0T_REQUEST_NEW; /* Integration MUST persist this intent before effects. */
 }
+static int e0t_outcome_valid(enum e0t_request_op op, enum e0t_request_outcome outcome) {
+    return outcome>E0T_OUTCOME_PENDING && outcome<=E0T_OUTCOME_CLOSED
+        && !(outcome==E0T_OUTCOME_NO_COMMAND && op!=E0T_REQ_CANCEL)
+        && !(outcome==E0T_OUTCOME_CLOSED && op!=E0T_REQ_CLOSE)
+        && !(op==E0T_REQ_CLOSE && outcome!=E0T_OUTCOME_CLOSED && outcome!=E0T_OUTCOME_FAILED_UNKNOWN);
+}
 static int e0t_request_finish(struct e0t_request_ledger *ledger, unsigned id, enum e0t_request_outcome outcome) {
     if (!ledger || !id || id>96 || outcome<=E0T_OUTCOME_PENDING || outcome>E0T_OUTCOME_CLOSED) return 0;
     struct e0t_request_entry *entry=&ledger->entries[id-1];
     if (!entry->present || entry->outcome!=E0T_OUTCOME_PENDING) return 0;
-    if ((outcome==E0T_OUTCOME_NO_COMMAND && entry->request.op!=E0T_REQ_CANCEL)
-        || (outcome==E0T_OUTCOME_CLOSED && entry->request.op!=E0T_REQ_CLOSE)
-        || (entry->request.op==E0T_REQ_CLOSE && outcome!=E0T_OUTCOME_CLOSED
-            && outcome!=E0T_OUTCOME_FAILED_UNKNOWN)) return 0;
+    if (!e0t_outcome_valid(entry->request.op,outcome)) return 0;
     if (entry->request.op==E0T_REQ_ADVANCE && outcome==E0T_OUTCOME_OBSERVED
         && (ledger->closed || entry->request.generation!=ledger->generation)) return 0;
     entry->outcome=outcome;
