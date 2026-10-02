@@ -120,3 +120,13 @@ contention, overflow and wall-time cleanup. This does not profile the tablet CLI
 qualify writable manager jobs, implement independent cleanup, or freeze a device
 packet. The CLI20MiB candidate differs from helper8MiB; aggregate concurrency,
 command-specific peaks/headroom and job reconciliation remain open gates.
+
+The barrier worker now accepts one explicit R control byte to send READY=1;
+startup alone does not publish readiness. Repeated R refuses, and X remains the
+controlled exit. A host datagram test observes no initial message, exact READY
+on the first R and refusal/no duplicate on the second. This is worker protocol
+only, not proof of queued manager job cancellation or late-start prevention.
+The local draft manifest includes the three command-slot metadata paths and
+separate helper/manager-parent/CLI AS candidates. It continues to refuse a
+runnable/frozen status and requires actual writable-job reconciliation and
+command resource/concurrency verification.

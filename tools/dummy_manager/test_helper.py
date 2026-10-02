@@ -34,7 +34,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(result.returncode, expected, result.stderr)
         return result
 
-    def controlled_exit(self, role):
+    def controlled_exit(self, role, message=b"X"):
         deadline = time.monotonic() + 3
         while True:
             try:
@@ -45,7 +45,7 @@ class WorkerTests(unittest.TestCase):
                     raise
                 time.sleep(0.01)  # Bounded polling pace, not completion evidence.
         try:
-            self.assertEqual(os.write(fd, b"X"), 1)
+            self.assertEqual(os.write(fd, message), 1)
         finally:
             os.close(fd)
 
@@ -177,6 +177,30 @@ class WorkerTests(unittest.TestCase):
                 worker.kill()
             worker.wait(timeout=3)
             worker.stderr.close()
+
+    def test_barrier_ready_requires_explicit_control_and_repeated_ready_refuses(self):
+        os.mkfifo(self.root / "control-barrier", 0o600)
+        receiver = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        endpoint = self.parent / "barrier-socket"
+        receiver.bind(str(endpoint))
+        receiver.settimeout(0.15)
+        worker = subprocess.Popen([str(self.binary), "barrier", "5"], stderr=subprocess.PIPE,
+                                  env={**os.environ, "NOTIFY_SOCKET": str(endpoint)})
+        try:
+            with self.assertRaises(socket.timeout):
+                receiver.recv(128)
+            self.controlled_exit("barrier", b"R")
+            receiver.settimeout(3)
+            self.assertEqual(receiver.recv(128), b"READY=1")
+            self.controlled_exit("barrier", b"R")
+            self.assertEqual(worker.wait(timeout=3), 90)
+            self.assertEqual((self.root / "events-T5-barrier").read_text().count("barrier-ready-sent"), 1)
+        finally:
+            if worker.poll() is None:
+                worker.kill()
+            worker.wait(timeout=3)
+            worker.stderr.close()
+            receiver.close()
 
     def test_manager_supplied_notify_context_and_missing_context_refusal(self):
         os.mkfifo(self.root / "control-notify", 0o600)

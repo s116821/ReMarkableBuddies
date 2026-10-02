@@ -230,6 +230,7 @@ int main(int argc, char **argv) {
         if (!period || strcmp(period, "3000000") || (pid && strcmp(pid, expected))) fail("watchdog context");
         notify_message("READY=1\nWATCHDOG=1"); record("ready-watchdog-sent");
     }
+    int barrier_ready = 0;
     uint64_t deadline = entered + 14000;  /* Leave one second for normal exit and
                                          * avoid watchdog-triggered claim restarts. */
     while (!stopping && now_ms() < deadline) {
@@ -239,6 +240,9 @@ int main(int argc, char **argv) {
         if (result > 0 && (p.revents & POLLIN)) {
             char message[2]; ssize_t count = read(control, message, sizeof(message));
             if (count == 1 && message[0] == 'X') { record("controlled-exit"); break; }
+            if (count == 1 && message[0] == 'R' && !strcmp(role, "barrier") && !barrier_ready) {
+                notify_message("READY=1"); record("barrier-ready-sent"); barrier_ready = 1; continue;
+            }
             fail("unsupported control message");
         }
         /* Open FIFO without a writer may signal HUP continuously. Throttle only

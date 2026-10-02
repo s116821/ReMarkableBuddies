@@ -57,6 +57,9 @@ def prepare(destination, nonce):
     for filename in ("helper", "owner", "case", "claim-T2"):
         owned_paths.append({"path": root + "/" + filename, "kind": "regular",
                             "mode": "0700" if filename == "helper" else "0600"})
+    for filename in ("manager-slot", "manager-claim", "manager-child"):
+        owned_paths.append({"path": root + "/" + filename, "kind": "regular",
+                            "mode": "0600", "max_bytes": 128})
     for role in ROLES:
         owned_paths.append({"path": root + "/control-" + role, "kind": "fifo", "mode": "0600"})
     for case in range(1, 9):
@@ -86,11 +89,22 @@ def prepare(destination, nonce):
                 "effective_profile_frozen": False, "helper_artifact_sha256": None, "operator_sha256": None,
                 "missing_gates": ["experiment cleanup actor implementation",
                                   "independent review of preparation-only process/file actors",
-                                  "barrier READY control", "exact effective-property operator gate",
+                                  "independent review of explicit barrier READY control",
+                                  "exact effective-property operator gate",
                                   "original baselines and configuration/job drift rejection",
                                   "identity/job/late-writer/cleanup fencing", "per-barrier concurrency measurement",
+                                  "writable command transport and exact pending-job reconciliation",
+                                  "command-specific resource peaks and headroom",
                                   "artifact imports/build manifest", "independent frozen packet review",
                                   "final coordinator execution authorization"],
+                "resource_candidates": {
+                    "helper_as_soft_hard": [8388608, 8388608],
+                    "manager_parent_as_soft_hard": [8388608, 20971520],
+                    "command_as_soft_hard": [20971520, 20971520],
+                    "shared_command_slots": 1,
+                    "aggregate_kernel_enforcement": False,
+                    "concurrency_schedule_verified": False,
+                    "readonly_transport_only": True},
                 "limits": {"units": 12, "helpers": 8, "tasks": 16, "case_seconds": 15,
                            "cleanup_initiation_seconds": 180, "cleanup_seconds": 30,
                            "stage_bytes": 16777216, "evidence_bytes": 262144}}
