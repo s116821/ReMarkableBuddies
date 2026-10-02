@@ -16,7 +16,15 @@ fn main() -> anyhow::Result<()> {
     let llm = OpenAI::from_env(None)?;
     let workflow = Workflow::new(false, TriggerCorner::from_string("LL")?, false)?;
     std::thread::sleep(std::time::Duration::from_secs(1));
-    let mut orchestrator = Orchestrator::new(workflow, llm);
+    let config = remarkable_reader_buddy::config::Config::load(
+        std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+    )?;
+    let store = std::sync::Arc::new(remarkable_reader_buddy::storage::Store::open(config.paths)?);
+    let mut orchestrator = Orchestrator::new(
+        workflow,
+        llm,
+        remarkable_reader_buddy::conversation::Ledger::new(store),
+    );
     orchestrator.set_trigger_enabled(false);
     orchestrator.run_iteration()
 }

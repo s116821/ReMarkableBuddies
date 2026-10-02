@@ -1,5 +1,6 @@
 //! Local-first conversation ledger. Stored facts are not native effect permissions.
 pub mod capture_facts;
+mod legacy;
 mod types;
 use crate::storage::{
     digest, Conflict, Envelope, Kind, Media, Namespace, ObjectRef, Store, Uuid, FORMAT, MAX_ITEMS,
@@ -103,6 +104,22 @@ impl Ledger {
                 );
                 (capture.id, Namespace::Source, capture.conversation)
             }
+            Record::LegacyCapture(capture) => {
+                capture.validate()?;
+                (capture.id, Namespace::Source, capture.conversation)
+            }
+            Record::OutcomeFact(fact) => {
+                ensure!(
+                    !fact.id.is_nil()
+                        && !fact.turn.is_nil()
+                        && matches!(
+                            fact.outcome,
+                            Outcome::Failed | Outcome::Canceled | Outcome::ReconcileRequired
+                        ),
+                    "invalid attempt outcome fact"
+                );
+                (fact.id, Namespace::Conversation, fact.conversation)
+            }
             Record::Binding(binding) => {
                 Self::validate_observation(&binding.receipt.source)?;
                 ensure!(
@@ -140,6 +157,7 @@ impl Ledger {
         let mut media = match &record {
             Record::Source(source) => vec![source.image.clone()],
             Record::Capture(capture) => capture.facts.media()?,
+            Record::LegacyCapture(capture) => capture.media()?,
             _ => vec![],
         };
         if let Record::Source(source) = &record {
@@ -341,6 +359,7 @@ impl Ledger {
             let conversation = match Self::decode(&e)? {
                 Record::Source(source) => source.conversation,
                 Record::Capture(capture) => capture.conversation,
+                Record::LegacyCapture(capture) => capture.conversation,
                 _ => bail!("invalid existing source reference"),
             };
             ensure!(
@@ -827,7 +846,39 @@ impl Ledger {
         expected_turn: ExpectedHeads,
         turn: Turn,
     ) -> Result<WriteResult> {
-        let fingerprint = Self::fingerprint(&("advance", &turn))?;
+        self.advance_fact(operation, expected_root, expected_turn, turn, None)
+    }
+    /// Fact-only outcome recording. Never renders, navigates or replays effects.
+    pub fn record_attempt_outcome(
+        &self,
+        operation: Uuid,
+        expected_root: ExpectedHeads,
+        expected_turn: ExpectedHeads,
+        turn: Turn,
+        reason: AttemptReason,
+    ) -> Result<WriteResult> {
+        ensure!(
+            matches!(
+                turn.outcome,
+                Outcome::Failed | Outcome::Canceled | Outcome::ReconcileRequired
+            ),
+            "attempt outcome must remain unverified"
+        );
+        self.advance_fact(operation, expected_root, expected_turn, turn, Some(reason))
+    }
+    fn advance_fact(
+        &self,
+        operation: Uuid,
+        expected_root: ExpectedHeads,
+        expected_turn: ExpectedHeads,
+        turn: Turn,
+        reason: Option<AttemptReason>,
+    ) -> Result<WriteResult> {
+        let fingerprint = if let Some(reason) = &reason {
+            Self::fingerprint(&("attempt-outcome", &turn, reason))?
+        } else {
+            Self::fingerprint(&("advance", &turn))?
+        };
         if let Some(prior) = self.replay(operation, &fingerprint)? {
             return Ok(prior);
         }
@@ -872,13 +923,29 @@ impl Ledger {
                     | Outcome::ReconcileRequired,
             )
         );
+        let explicit_reconciliation = original.outcome == Outcome::ReconcileRequired
+            && matches!(
+                (&turn.outcome, &reason),
+                (
+                    Outcome::Failed,
+                    Some(AttemptReason::NoSuccessor | AttemptReason::InvalidSuccessor),
+                ) | (
+                    Outcome::ReconcileRequired,
+                    Some(AttemptReason::SubmittedUnverified | AttemptReason::DeviceUncertain),
+                )
+            );
         ensure!(
-            permitted,
+            permitted || explicit_reconciliation,
             "invalid outcome transition; reconciliation is explicit"
         );
-        if original.outcome == Outcome::Generated {
+        if matches!(
+            original.outcome,
+            Outcome::Generated | Outcome::ReconcileRequired
+        ) {
             ensure!(original.text == turn.text, "generated draft text changed");
         }
+        let outcome = turn.outcome.clone();
+        let turn_id = turn.id;
         root.updated_ms = turn.updated_ms;
         let binding = root.binding;
         let updated = self.envelope(
@@ -895,7 +962,27 @@ impl Ledger {
             Record::Root(root),
             vec![],
         )?;
-        self.publish(operation, fingerprint, root, vec![updated], binding)
+        let mut records = vec![updated];
+        if let Some(reason) = reason {
+            let id = Uuid::new_v5(
+                &Uuid::NAMESPACE_URL,
+                format!("urn:remarkable-buddies:outcome:v1:{operation}").as_bytes(),
+            );
+            records.push(self.envelope(
+                Namespace::Conversation,
+                id,
+                ExpectedHeads::default(),
+                Record::OutcomeFact(OutcomeFact {
+                    id,
+                    conversation: root.record_id,
+                    turn: turn_id,
+                    outcome,
+                    reason,
+                }),
+                vec![],
+            )?);
+        }
+        self.publish(operation, fingerprint, root, records, binding)
     }
     /// Store a REM-25 association receipt. SDK qualification remains a caller gate;
     /// no imported or synthetic record authorizes native reuse.
@@ -1285,23 +1372,30 @@ impl Ledger {
             .collect::<BTreeSet<_>>();
         let mut sources = Vec::new();
         let mut captures = Vec::new();
+        let mut legacy_captures = Vec::new();
         for record in records {
             match record {
                 Record::Source(source) if source_ids.contains(&source.id) => sources.push(source),
                 Record::Capture(capture) if source_ids.contains(&capture.id) => {
                     captures.push(*capture)
                 }
+                Record::LegacyCapture(capture) if source_ids.contains(&capture.id) => {
+                    legacy_captures.push(capture)
+                }
                 _ => {}
             }
         }
         ensure!(
-            sources.len() + captures.len() == source_ids.len(),
+            sources.len() + captures.len() + legacy_captures.len() == source_ids.len(),
             "source reference absent"
         );
         let mut missing_media = Vec::new();
         let mut capture_media = Vec::new();
         for capture in &captures {
             capture_media.extend(capture.facts.media()?);
+        }
+        for capture in &legacy_captures {
+            capture_media.extend(capture.media()?);
         }
         for media in &capture_media {
             if self
@@ -1335,6 +1429,7 @@ impl Ledger {
             turns,
             sources,
             captures,
+            legacy_captures,
             missing_media,
             selection,
         })
@@ -1355,6 +1450,7 @@ impl Ledger {
                     std::iter::once(source.image).chain(source.parent).collect()
                 }
                 Record::Capture(capture) => capture.facts.media()?,
+                Record::LegacyCapture(capture) => capture.media()?,
                 _ => vec![],
             };
             for item in references {
