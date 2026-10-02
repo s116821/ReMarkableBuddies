@@ -147,6 +147,9 @@ static int claim(void) {
     record("stock-standin");
     return 0;
 }
+#ifdef E0T_ACTORS
+#include "actors.h"
+#endif
 int main(int argc, char **argv) {
     uint64_t entered = now_ms();
     signal(SIGALRM, SIG_DFL);
@@ -178,17 +181,25 @@ int main(int argc, char **argv) {
         || ((!strcmp(role, "barrier") || !strcmp(role, "queued")) && generation == 5)
         || ((!strcmp(role, "controller") || !strcmp(role, "guard") || !strcmp(role, "stock")) && generation >= 6);
     if (!allowed) fail("role not valid for case");
-    /* Recovery/controller modes deliberately absent until their protocol freezes. */
-    if (!strcmp(role, "cleanup") || !strcmp(role, "controller") || !strcmp(role, "guard"))
+    /* Manager cleanup still absent. Process/file actors require an explicit host
+     * preparation build flag; it does not authorize a device packet. */
+    if (!strcmp(role, "cleanup"))
         fail("actor protocol not implemented");
+#ifndef E0T_ACTORS
+    if (!strcmp(role, "controller") || !strcmp(role, "guard")) fail("actor protocol not enabled");
+#endif
     struct rlimit no_core = {0, 0}, output = {RECORD_CAP, RECORD_CAP};
     if (setrlimit(RLIMIT_CORE, &no_core) || setrlimit(RLIMIT_FSIZE, &output)) fail("internal limits");
     identity = own_start(); record("started");
+    signal(SIGTERM, handle_signal); signal(SIGINT, handle_signal);
+#ifdef E0T_ACTORS
+    if (!strcmp(role, "controller") || !strcmp(role, "guard")) return actor_loop(entered);
+    if (!strcmp(role, "stock") && !publish_identity()) fail("stock identity publication");
+#endif
     if (!strcmp(role, "fail-a") || !strcmp(role, "fail-b")) { record("marker"); return 0; }
     if (!strcmp(role, "norestart")) { record("intentional-failure"); return 42; }
     if (!strcmp(role, "claim") && claim()) return 42;
     if (!strcmp(role, "separate")) { record("noop-complete"); return 0; }
-    signal(SIGTERM, handle_signal); signal(SIGINT, handle_signal);
     int control = control_pipe();
     if (!strcmp(role, "notify")) {
         const char *pid = getenv("WATCHDOG_PID"), *period = getenv("WATCHDOG_USEC");

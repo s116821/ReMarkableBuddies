@@ -1,7 +1,7 @@
 # E0T original dummy-helper preparation
 
-Incomplete preparation only. No device operator, units or approved packet yet.
-Recovery/controller/guard roles refuse before effects. Do not stage or run this
+Incomplete preparation only. No device operator or frozen unit/approved packet yet.
+Default builds refuse controller/guard; cleanup always refuses. Do not stage or run this
 artifact on a tablet. Owning consumer plan is Docs175f22d; SDK02398cf defines the
 finite dummy-manager experiment, with exact packet review/approval before execution.
 
@@ -39,3 +39,38 @@ Next: freeze actor cleanup/restoration/job fencing and complete operator/manifes
 unit/resource table, then compile actual nonce, inspect target imports and obtain
 independent source/artifact/operator plus final coordinator approval. No completion,
 selection or E1 qualification is claimed.
+
+Corrected worker checkpoint4da6bfc67f452a36aed393d280a16a3ffbd26ed1 received
+bounded independent acceptance: seven strict host tests0.778s, original FIFO/lock
+reproducers now refuse, and an actual stock stand-in hold exited normally14.051s.
+Owner/case/existing-claim/record opens are nonblocking and record locks refuse
+contention. A process alarm starts at entry15s; normal hold deadline is14s from
+entry. Arbitrarily blocked kernel I/O remains unqualified. Initial94ddc5a was held
+for avoidable FIFO/lock waits and is not accepted unchanged.
+
+Preparation-only process/file actors now live in actors.h behind the explicit
+E0T_ACTORS host build flag. Default worker builds still refuse controller/guard;
+experiment cleanup always refuses pending implementation. These actors use fixed
+/proc/self/exe stock children, process start identities, an observed peer death,
+and a fresh empty peer cgroup with no descendant directories. The default cgroup
+parent matches the read-only tablet hybrid profile; host tests override it with
+explicitly FAKE files, so none of those tests qualifies manager/cgroup enforcement.
+
+Restoration and activation publication share a nonblocking owned file lock. Closed
+case state permanently fences activation; a one-shot claim is spent before fork.
+A missing child identity/receipt after the claim is unknown and never respawns.
+Existing completion requires exact receipt/stock identity and current live state.
+Late publication attempts actually pass through the state writer and refuse under
+the closed fence. Actor-held stock children remain in that actor's unit cgroup;
+TasksMax2 and prior start-job/whole-cgroup fencing require future operator proof.
+SIGTERM child cleanup uses actual waitpid; arbitrarily blocked kernel I/O remains
+unqualified under the entry process alarm and future unit cleanup boundary.
+
+Five author tests use real actors/children with FAKE cgroup files: controller loss,
+guard loss/actual late-write refusal, dead cached child/no second claim, nonempty
+old cgroup/no fork, and interrupted claim without child publication/unknown. The
+actor refinement is coordinated with SDKbb39af1; no dummy-manager job recovery is
+inferred from these host tests. Full cleanup/operator/limits/packet review is open.
+prepare_packet.py produces local draft files only, marks them runnable=false, and
+lists missing gates. Its unit profiles and inode/absence expectations remain drafts;
+there is no SSH or stage/start/reload functionality in that generator.
