@@ -149,6 +149,7 @@ static int claim(void) {
 }
 int main(int argc, char **argv) {
     uint64_t entered = now_ms();
+    signal(SIGALRM, SIG_DFL);
     alarm(15);  /* Process watchdog from entry, not after setup. Blocked kernel I/O
                  * remains an explicit unqualified limit, not proven interruptible. */
     nonce_check();
@@ -195,7 +196,8 @@ int main(int argc, char **argv) {
         if (!period || strcmp(period, "3000000") || (pid && strcmp(pid, expected))) fail("watchdog context");
         notify_message("READY=1\nWATCHDOG=1"); record("ready-watchdog-sent");
     }
-    uint64_t deadline = entered + 15000;
+    uint64_t deadline = entered + 14000;  /* Leave one second for normal exit and
+                                         * avoid watchdog-triggered claim restarts. */
     while (!stopping && now_ms() < deadline) {
         struct pollfd p = { .fd = control, .events = POLLIN };
         int result = poll(&p, 1, 50);
