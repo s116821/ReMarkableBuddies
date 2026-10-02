@@ -33,14 +33,16 @@ def prepare(destination, nonce):
         watchdog = "WatchdogSec=3s\nNotifyAccess=main\n" if role == "notify" else "WatchdogSec=0\n"
         if role == "barrier":
             watchdog += "NotifyAccess=main\n"
-        runtime = "180s" if role == "cleanup" else "15s"
+        runtime = "210s" if role == "cleanup" else "15s"
+        address_limit = "8M:20M" if role == "cleanup" else "8M"
         text = ("[Unit]\nDescription=Owned E0T draft " + role + "\nDefaultDependencies=no\n"
                 "StartLimitIntervalSec=180s\nStartLimitBurst=4\nStartLimitAction=none\nFailureAction=none\n"
                 "JobTimeoutSec=15s\nJobRunningTimeoutSec=15s\nJobTimeoutAction=none\n" + dependencies
                 + "[Service]\nType=" + kind + "\nExecStart=" + root + "/helper " + role + " current\n"
                 "User=root\nGroup=root\nUMask=0077\nKillMode=control-group\nDelegate=no\n"
                 "TimeoutStartSec=10s\nTimeoutStopSec=2s\nTimeoutAbortSec=2s\nRuntimeMaxSec=" + runtime + "\n"
-                "LimitCORE=0\nLimitFSIZE=2048\nMemoryMax=8M\nTasksMax=2\n"
+                "LimitCORE=0\nLimitFSIZE=2048\nLimitSTACK=512K\nLimitDATA=1M\nLimitCPU=2\n"
+                "LimitAS=" + address_limit + "\n"
                 "StandardInput=null\nStandardOutput=null\nStandardError=null\n"
                 "UnsetEnvironment=LD_PRELOAD LD_LIBRARY_PATH\n" + restart + watchdog)
         filename = names[role]
@@ -95,6 +97,8 @@ def prepare(destination, nonce):
                                   "identity/job/late-writer/cleanup fencing", "per-barrier concurrency measurement",
                                   "writable command transport and exact pending-job reconciliation",
                                   "command-specific resource peaks and headroom",
+                                  "cleanup role-specific 180/210-second deadline implementation",
+                                  "transport process/thread/mapping budget and finite cleanup command count",
                                   "artifact imports/build manifest", "independent frozen packet review",
                                   "final coordinator execution authorization"],
                 "resource_candidates": {
@@ -102,10 +106,16 @@ def prepare(destination, nonce):
                     "manager_parent_as_soft_hard": [8388608, 20971520],
                     "command_as_soft_hard": [20971520, 20971520],
                     "shared_command_slots": 1,
+                    "program_helper_soft_as_rows": 5,
+                    "program_process_maximum": 6,
+                    "transport_process_reservation": 2,
+                    "transport_profile_frozen": False,
                     "aggregate_kernel_enforcement": False,
                     "concurrency_schedule_verified": False,
                     "readonly_transport_only": True},
-                "limits": {"units": 12, "helpers": 8, "tasks": 16, "case_seconds": 15,
+                "limits": {"units": 12, "processes": 8, "program_helpers": 5,
+                           "command_children": 1, "transport_processes": 2,
+                           "tasks": 16, "case_seconds": 15,
                            "cleanup_initiation_seconds": 180, "cleanup_seconds": 30,
                            "stage_bytes": 16777216, "evidence_bytes": 262144}}
     (destination / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", newline="\n")

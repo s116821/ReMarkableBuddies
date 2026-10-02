@@ -166,3 +166,13 @@ freshly correlate/recheck those tuples against the same manager/case instance
 under sole-writer fencing; encoding does not supply that authority or any terminal
 cancellation proof. One strict compiled-C fixture verifies zero/max/overflow/null/
 duplicate/invalid-role/type/state cases. No cancellation or writable CLI occurs.
+
+The local draft generator now aligns with the corrected authoritative consumer
+resource table: at most5programhelper rows +1sharedCLI and2unfrozentransport rows
+within8processes/16unverifiedtasks. It no longer writes unavailable MemoryMax/
+TasksMax controller values as its resource mechanism. Draft per-process unit
+limits use AS8M workers,8M:20M cleanup parent, stack512K/data1M/CPU2/file2048/core0.
+These require actual vendor parsing/effective-property/set-get/headroom proofs.
+Cleanup draft RuntimeMax210s leaves the original180s cleanup-trigger+30s final
+window; its source still refuses cleanup and still lacks role-specific lifetime
+implementation. The draft remainsrunnable=false and explicitly lists that gate.
