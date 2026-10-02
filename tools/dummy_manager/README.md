@@ -291,3 +291,17 @@ or cold-boot persistence on /run, deadline interruptibility, server/lease/fence,
 dispatch authority or target qualification. It is not wired into the helper.
 The non-runnable draft now enumerates96 pending files (64bytes each),262owned
 paths; complete IPC/completion/evidence budgeting and cleanup reserve remain open.
+
+fence_file.h adds a separate owned publication slot and irreversible close file.
+Independent file close consumes no request ID. The fenced pending-publication
+wrapper serializes close against new start/advance intent publication and refuses
+late starts/advances after close; read-only/cleanup intents remain representable.
+Held slot, malformed ownership, or uncertain sync refuses. Existing valid close
+is re-synced before closure success. Raw intent_file.h remains storage-only and
+is not dispatch authority; callers must use the fence and separate phase/model
+gates. No actual queued effects, completion recovery, server, lease or CLI is
+implemented/wired. Arbitrarily blocked filesystem syscalls remain unqualified.
+The strict owned host fixture passed0.196s with actual child close/exit, held-slot
+refusal, late publication refusal and close independent of full model capacity.
+The non-runnable manifest now264paths including slot0bytes/close32bytes. No
+tablets, real manager or services were involved; complete packet gates remain.

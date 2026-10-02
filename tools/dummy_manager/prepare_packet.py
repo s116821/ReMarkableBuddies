@@ -65,6 +65,9 @@ def prepare(destination, nonce):
     for request in range(1, 97):
         owned_paths.append({"path": root + f"/request-{request:03d}", "kind": "regular",
                             "mode": "0600", "max_bytes": 64})
+    for filename, maximum in (("request-slot", 0), ("requests-closed", 32)):
+        owned_paths.append({"path": root + "/" + filename, "kind": "regular",
+                            "mode": "0600", "max_bytes": maximum})
     for role in ROLES:
         owned_paths.append({"path": root + "/control-" + role, "kind": "fifo", "mode": "0600"})
     for case in range(1, 9):
