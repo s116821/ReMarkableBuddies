@@ -11,6 +11,15 @@ import uuid
 
 ROLES = ("cleanup", "controller", "guard", "stock", "fail-a", "fail-b",
          "claim", "norestart", "separate", "notify", "barrier", "queued")
+EVENT_ROLES = {
+    1: ("cleanup", "fail-a", "fail-b", "norestart"),
+    2: ("cleanup", "fail-a", "fail-b", "norestart", "claim"),
+    3: ("cleanup", "separate"), 4: ("cleanup", "notify"),
+    5: ("cleanup", "barrier", "queued"),
+    6: ("cleanup", "controller", "guard", "stock"),
+    7: ("cleanup", "controller", "guard", "stock"),
+    8: ("cleanup", "controller", "guard", "stock"),
+}
 
 
 def prepare(destination, nonce):
@@ -57,8 +66,11 @@ def prepare(destination, nonce):
     owned_paths.extend([{"path": parent, "kind": "directory", "mode": "0755"},
                         {"path": parent + "/owned.conf", "kind": "regular", "mode": "0644"}])
     for filename in ("helper", "owner", "case", "claim-T2"):
-        owned_paths.append({"path": root + "/" + filename, "kind": "regular",
-                            "mode": "0700" if filename == "helper" else "0600"})
+        item = {"path": root + "/" + filename, "kind": "regular",
+                "mode": "0700" if filename == "helper" else "0600"}
+        if filename != "helper":
+            item["max_bytes"] = 1 if filename == "case" else 32
+        owned_paths.append(item)
     for filename in ("manager-slot", "manager-claim", "manager-child"):
         owned_paths.append({"path": root + "/" + filename, "kind": "regular",
                             "mode": "0600", "max_bytes": 128})
@@ -71,7 +83,7 @@ def prepare(destination, nonce):
     for role in ROLES:
         owned_paths.append({"path": root + "/control-" + role, "kind": "fifo", "mode": "0600"})
     for case in range(1, 9):
-        for role in ROLES:
+        for role in EVENT_ROLES[case]:
             owned_paths.append({"path": root + f"/events-T{case}-" + role,
                                 "kind": "regular", "mode": "0600", "max_bytes": 2048})
     for case in (6, 7, 8):
@@ -95,6 +107,12 @@ def prepare(destination, nonce):
                 "dropin": {"path": parent + "/owned.conf", "sha256": hashlib.sha256(dropin.encode()).hexdigest()},
                 "owned_paths": owned_paths, "read_only_dropin_lookup_paths": sorted(lookup),
                 "effective_profile_frozen": False, "helper_artifact_sha256": None, "operator_sha256": None,
+                "evidence_candidates": {
+                    "reachable_event_files": sum(len(roles) for roles in EVENT_ROLES.values()),
+                    "bounded_runtime_record_bytes": sum(item.get("max_bytes", 0) for item in owned_paths),
+                    "full_evidence_frozen": False,
+                    "unaccounted": ["complete command/IPC/lease/operator outputs and failure receipts",
+                                    "manifest/unit/target-profile evidence copies and transport receipts"]},
                 "missing_gates": ["experiment cleanup actor implementation",
                                   "durable intent integration/completion/recovery and reserved cleanup capacity",
                                   "independent review of preparation-only process/file actors",

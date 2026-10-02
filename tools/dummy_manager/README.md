@@ -347,3 +347,15 @@ and wrong-PID refusal, nonblocking-empty/oversized frames, and32descriptor-messa
 refusals including ancillary truncation with unchanged observed FD count.
 This input-validation source remains unwired; queued-effect/phase/fence/resource
 and deadline integration are mandatory future gates, not parser authority.
+
+The reachable-event draft revision now lists28event paths rather than96: exact
+helper role/case admission rejects the other68before recording. Cleanup's eight
+possible generations remain reserved even though cleanup currently refuses.
+The compiled host inventory fixture passed0.311s, exercising all68invalid pairs
+and checking no event side effects. There are196explicit owned paths and68577
+bytes of bounded runtime-record capacity (events,96pending/completion records,
+actor records, command publications, owner/case/claim and close). No record was
+silently omitted. This subtotal excludes complete command/IPC/lease/operator
+outputs, target-profile/failure/transport receipts and manifest/unit evidence
+copies; full256KiB accounting is explicitly unfrozen. Older264/262/166-path
+descriptions refer to superseded draft inventories, not the current manifest.
