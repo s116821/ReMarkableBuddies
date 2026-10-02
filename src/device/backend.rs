@@ -23,8 +23,21 @@ impl Frame {
         STANDARD.encode(&self.png)
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AcquisitionKind {
+    Unsupported,
+    LegacyUnqualified,
+    Sdk,
+}
 
 pub trait DeviceBackend {
+    /// Must be selected before acquisition; failed SDK capture cannot downgrade.
+    fn acquisition_kind(&self) -> AcquisitionKind {
+        AcquisitionKind::Unsupported
+    }
+    fn capture_sdk(&mut self) -> Result<remarkable_open_sdk::capture::CapturedBatch> {
+        anyhow::bail!("SDK acquisition unavailable")
+    }
     /// Optional editing contract. Unsupported backends retain normal Reader
     /// behavior and cannot arm history. Expected text must be fully persisted.
     fn history_snapshot(
@@ -622,6 +635,9 @@ impl RealDevice {
 }
 
 impl DeviceBackend for RealDevice {
+    fn acquisition_kind(&self) -> AcquisitionKind {
+        AcquisitionKind::LegacyUnqualified
+    }
     #[cfg(target_os = "linux")]
     fn history_snapshot(
         &mut self,

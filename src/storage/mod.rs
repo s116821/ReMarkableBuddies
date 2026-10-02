@@ -403,6 +403,91 @@ impl Store {
         }
         Ok(heads.pop().filter(|e| e.kind == Kind::Value))
     }
+    /// One bounded snapshot of heads, including conflicts and tombstones.
+    /// Refuses an oversized result instead of returning a partial history.
+    pub fn snapshot_heads_matching(
+        &self,
+        namespaces: &[Namespace],
+        limit: usize,
+        matches: impl Fn(&Envelope) -> bool,
+    ) -> Result<Vec<Envelope>> {
+        ensure!((1..=MAX_ITEMS).contains(&limit), "invalid inspection bound");
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        let selected = inner.index.heads.iter().filter(|((ns, _), heads)| {
+            namespaces.contains(ns)
+                && heads.iter().any(|revision| {
+                    inner
+                        .index
+                        .records
+                        .get(revision)
+                        .is_some_and(|(record, _)| matches(record))
+                })
+        });
+        let mut result = Vec::new();
+        let mut metadata_bytes = 0usize;
+        for (_, heads) in selected {
+            ensure!(
+                result
+                    .len()
+                    .checked_add(heads.len())
+                    .is_some_and(|n| n <= limit),
+                "inspection exceeds explicit bound"
+            );
+            for revision in heads {
+                let record = &inner
+                    .index
+                    .records
+                    .get(revision)
+                    .context("head record unavailable")?
+                    .0;
+                metadata_bytes = metadata_bytes
+                    .checked_add(serde_json::to_vec(record)?.len())
+                    .context("inspection byte overflow")?;
+                ensure!(
+                    metadata_bytes <= MAX_METADATA,
+                    "inspection exceeds metadata byte bound"
+                );
+                result.push(record.clone());
+            }
+        }
+        Ok(result)
+    }
+    /// Bounded retained revisions, including superseded facts; never a live lookup.
+    pub fn snapshot_revisions_matching(
+        &self,
+        namespaces: &[Namespace],
+        limit: usize,
+        matches: impl Fn(&Envelope) -> bool,
+    ) -> Result<Vec<Envelope>> {
+        ensure!((1..=MAX_ITEMS).contains(&limit), "invalid inspection bound");
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        let mut result = Vec::new();
+        let mut metadata_bytes = 0usize;
+        for (record, _) in inner.index.records.values() {
+            if !namespaces.contains(&record.namespace) || !matches(record) {
+                continue;
+            }
+            ensure!(
+                result.len() < limit,
+                "retained inspection exceeds explicit bound"
+            );
+            metadata_bytes = metadata_bytes
+                .checked_add(serde_json::to_vec(record)?.len())
+                .context("retained inspection byte overflow")?;
+            ensure!(
+                metadata_bytes <= MAX_METADATA,
+                "retained inspection exceeds metadata byte bound"
+            );
+            result.push(record.clone());
+        }
+        Ok(result)
+    }
     pub fn unavailable_commits(&self) -> Result<usize> {
         Ok(self
             .inner
@@ -410,6 +495,24 @@ impl Store {
             .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?
             .index
             .unavailable)
+    }
+    /// Count retained revision references; this is inspection, never garbage collection.
+    pub fn media_references(&self, media: &Media) -> Result<usize> {
+        media.validate()?;
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        Ok(inner
+            .index
+            .records
+            .values()
+            .filter(|(e, _)| {
+                e.media_descriptors
+                    .iter()
+                    .any(|m| m.sha256 == media.sha256 && m.bytes == media.bytes)
+            })
+            .count())
     }
     pub fn set_fault(&self, fault: Fault) -> Result<()> {
         self.inner

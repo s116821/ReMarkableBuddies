@@ -2,6 +2,7 @@ pub mod history;
 pub mod indicator;
 mod navigation;
 pub mod orchestrator;
+mod reader_attempt;
 pub mod symbol_pool;
 pub mod xochitl_integration;
 
@@ -22,6 +23,10 @@ pub enum AnswerPageType {
     ExistingQA,
     /// Page is not valid for answers
     Invalid,
+}
+pub enum AcquiredEvidence {
+    Legacy { images: Vec<Vec<u8>> },
+    Sdk(Box<remarkable_open_sdk::capture::CapturedBatch>),
 }
 
 // Image comparison mask constants - skip UI elements that can change between screenshots
@@ -130,6 +135,51 @@ impl Workflow {
 
     pub fn detail_images_base64(&self) -> Result<Vec<String>> {
         self.device.detail_images()
+    }
+    /// Select first, acquire once, freeze all actual provider bytes under the guard.
+    pub fn acquire_reader_evidence(&mut self) -> Result<AcquiredEvidence> {
+        use crate::device::backend::AcquisitionKind;
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        self.check_request_progress()?;
+        match self.device.acquisition_kind() {
+            AcquisitionKind::Unsupported => anyhow::bail!("Reader acquisition unsupported"),
+            AcquisitionKind::LegacyUnqualified => {
+                let (_, png) = self.capture_screenshot_with_data()?;
+                let details = self.device.detail_images()?;
+                self.check_request_progress()?;
+                anyhow::ensure!(details.len() < 15, "legacy provider-image bound");
+                let mut images = vec![png];
+                let mut total = images[0].len();
+                for detail in details {
+                    anyhow::ensure!(detail.len() <= 44_739_244, "legacy encoded detail bound");
+                    let bytes = STANDARD.decode(detail)?;
+                    anyhow::ensure!(bytes.len() <= 32 * 1024 * 1024, "legacy image bound");
+                    total = total
+                        .checked_add(bytes.len())
+                        .ok_or_else(|| anyhow::anyhow!("legacy batch overflow"))?;
+                    anyhow::ensure!(total <= 64 * 1024 * 1024, "legacy batch bound");
+                    images.push(bytes);
+                }
+                Ok(AcquiredEvidence::Legacy { images })
+            }
+            AcquisitionKind::Sdk => {
+                let batch = self.device.capture_sdk()?;
+                self.check_request_progress()?;
+                let overview = batch
+                    .images()
+                    .first()
+                    .ok_or_else(|| anyhow::anyhow!("SDK overview absent"))?;
+                anyhow::ensure!(
+                    overview.role() == remarkable_open_sdk::capture::ImageRole::Overview,
+                    "SDK provider order mismatch"
+                );
+                self.frame = Frame {
+                    png: overview.bytes().to_vec(),
+                    details: vec![],
+                };
+                Ok(AcquiredEvidence::Sdk(Box::new(batch)))
+            }
+        }
     }
 
     pub fn current_image_base64(&self) -> String {

@@ -2,7 +2,7 @@
   "name": "failed-return",
   "mode": "reader",
   "expect": {
-    "errors": [],
+    "errors": ["Unconfirmed return after invalid successor"],
     "x_count": {
       "1": 0,
       "0": 0
