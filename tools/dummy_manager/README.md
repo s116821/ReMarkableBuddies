@@ -223,3 +223,20 @@ preflight, not this decoder. More than two baseline units requires packet revisi
 not omission. Three strict compiled-C synthetic fixture tests passed0.331s, with
 combined row order, maxID and cross-class duplicate/malformed cases. No manager
 query, arbitrary mutation target, provenance guarantee or terminal proof is added.
+
+command_args.h is a pure prospective fixed argv encoder, not wired into any
+executor. It represents version, owned/combined jobs, seven-field unit observers,
+nonempty owned cancel batches, stop11caseunits excludingcleanup, separate cleanup
+stop, one exact owned start with job-mode=fail, and daemon-reload. Baseline names
+appear ONLY in the combined readonlyquery; original3 names ONLY in unit observers.
+No arbitrary verb/unit/string, barecancel or emptybatch dispatch is represented.
+
+Argument encoding conveys no phase/profile/case/namespace/sole-writer/fresh-tuple
+or mutation authority. Those are required future caller gates; wrong-phase starts
+must refuse before dispatch. Runtime transport remains read-only. The output has
+self-referencing pointers and must be consumed in place, not copied by value.
+One strict compiled-C canary fixture passed0.124s covering allfixedtargetsets,
+empty/maxcancel, full28-argument observer, invalidroles/kinds/unusedinputs, and
+readonlybaseline separation. No actual service command, cleanup protocol or device
+operation was performed; complete IPC/intent/deadline/resource/operator review
+remains open before any writable integration or packet freeze.
