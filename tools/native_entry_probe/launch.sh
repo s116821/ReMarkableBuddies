@@ -26,5 +26,6 @@ if ! test "$(sha256sum "$root/payload.so" | awk '{print $1}')" = ddd2f966f9e429b
 if ! printf '%s %s\n' "$$" "$(awk '{print $22}' /proc/$$/stat)" > "$root/attempt.identity"; then flock -u 9; exec 9>&-; stock; fi
 flock -u 9
 exec 9>&-
+if test -e "$root/entry.closed" || test -e "$root/restore.claim"; then stock; fi
 umask "$previous_umask"
 LD_PRELOAD="$root/payload.so" exec /usr/bin/xochitl --system

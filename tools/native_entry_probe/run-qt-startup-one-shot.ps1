@@ -79,6 +79,7 @@ test "$(systemctl show --property=FailureAction --value '@UNIT@.service')" = non
     $record.armed=$true
     Require (SSH (Expand @'
 set -eu
+systemctl stop reader-buddy.service
 exec 9>'@ROOT@/admission.lock'
 flock -w 10 9
 test ! -e '@ROOT@/entry.closed'
@@ -92,7 +93,6 @@ systemctl daemon-reload
 case "$(systemctl show --property=ExecStart --value xochitl.service)" in *'path=/bin/sh ; argv[]=/bin/sh @ROOT@/launch.sh ;'*) :;; *) exit 90;; esac
 test "$(systemctl show --property=Restart --value xochitl.service)" = on-failure
 test "$(systemctl show --property=RestartMode --value xochitl.service)" = direct
-systemctl stop reader-buddy.service
 flock -u 9
 exec 9>&-
 systemctl restart xochitl.service

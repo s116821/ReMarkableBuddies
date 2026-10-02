@@ -52,9 +52,9 @@ case "${1-}" in
     '') :;;
     *) exit 90;;
 esac
+printf '%s' "$nonce" > "$root/entry.closed"
 exec 9>"$root/admission.lock"
 flock -w 30 9
-printf '%s' "$nonce" > "$root/entry.closed"
 # A failed previous execution is historical uncertainty, not restart permission.
 if ! (set -C; printf '%s' "$nonce" > "$root/restore.claim") 2>/dev/null; then
     healthy_stock
