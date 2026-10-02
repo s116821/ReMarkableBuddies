@@ -192,3 +192,20 @@ uses temporary host subreaper ownership to reap only its fixture child. Another
 real child closes output while staying alive; EOF is not accepted as completion.
 Nine manager tests passed7.193s. The full cleanup/operator budget remains a design
 candidate requiring actual accounting and target profiles, not completed proof.
+
+unit_state.h is a pure seven-property observer decoder, not wired into CLI or
+cleanup. It requires15distinct complete rows (12compilednonce-owned services and
+3fixed original services) with exactId/LoadState/ActiveState/SubState/MainPID/
+ControlPID/Job keys once, order independent, no unknown/duplicate/control/truncated
+output and4096byte maximum. Original rows have a separate readonly array, not
+owned-job/cancel tuples. Jobempty/0 is only observed absence; parsing active/failed/
+not-found state does not establish quiescence, terminal jobs or cancellation.
+
+Enumerations derive from exact upstream255.21 unit-def.c load/active/service state
+string tables; Job numeric/empty formatting derives from systemctl-show.c. The
+seven-field allowed-schema upper bound is15*205=3075bytes including delimiters;
+four strict compiled-C synthetic fixture tests passed0.364s. This is NOT proof of
+actual absent-unit fields/exitstatus or vendorCLIoutput fit: those remain explicit
+pre-integration/freeze gates. No omitted property is fabricated, no arbitrary
+nonzero CLI result is accepted, and actual cgroup/process/late-writer proof remains
+independent. Caller discards every output on parse failure.
