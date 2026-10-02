@@ -23,7 +23,7 @@ foreach($item in @{owner=$nonce;'dropin.sha256'=$files['native-probe.conf']}.Get
     $files[$item.Key]=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 if($PrepareOnly){$files|ConvertTo-Json;return}
-$record=[ordered]@{nonce=$nonce;experiment='existing-engine-qml-singleton-access';payload_source='af9074071955867b6cbaa53e56758e5931b2b61a';payload_sha256=$payloadHash;operator_sha256=(Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant();files=$files;results=@();arm_intent=$false;armed=$false;callback_verified=$false;candidate_generation_verified=$false;qml_access_verified=$false;candidate_receipt=$null;restored=$false;cleanup_verified=$false;diagnostic_collected=$false;diagnostic_sha256=$null}
+$record=[ordered]@{nonce=$nonce;experiment='existing-engine-qml-singleton-access';payload_source='af9074071955867b6cbaa53e56758e5931b2b61a';payload_sha256=$payloadHash;operator_sha256=(Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant();files=$files;results=@();arm_intent=$false;armed=$false;callback_verified=$false;candidate_generation_verified=$false;qml_access_verified=$false;candidate_receipt=$null;restored=$false;cleanup_verified=$false;diagnostic_collected=$false;diagnostic_sha256=$null;final_callback_state='not-checked';final_callback_collected=$false;final_callback_sha256=$null}
 function Native([string]$program,[string[]]$arguments){
     $info=[Diagnostics.ProcessStartInfo]::new();$info.FileName=$program;$info.UseShellExecute=$false
     $info.RedirectStandardOutput=$true;$info.RedirectStandardError=$true
@@ -143,6 +143,29 @@ printf 'new-generation-executable-verified\n'
             Start-Sleep -Seconds 1
         }
         if($record.restored){
+            # Final evidence only: never retrofit the live callback/generation
+            # qualification flags after the attempted process has been restored.
+            $finalCallbackState=SSH (Expand @'
+set -eu
+if test -f '@ROOT@/callback.json'; then
+    test ! -L '@ROOT@/callback.json'
+    test "$(stat -c '%a %u' '@ROOT@/callback.json')" = '600 0'
+    test "$(wc -c < '@ROOT@/callback.json')" -le 256
+    printf 'present\n'
+else
+    test ! -e '@ROOT@/callback.json'
+    test ! -L '@ROOT@/callback.json'
+    printf 'absent\n'
+fi
+'@)
+            Require $finalCallbackState
+            $record.final_callback_state=$finalCallbackState.stdout.Trim()
+            if($record.final_callback_state -ceq 'present'){
+                $finalCallbackPath=Join-Path $packet 'callback-final.json'
+                Require (Native 'scp' @('-o','HostName=10.11.99.1','-o','StrictHostKeyChecking=yes','-o','BatchMode=yes','-o','ConnectTimeout=8',('RM2:'+$remote+'/callback.json'),$finalCallbackPath))
+                $record.final_callback_sha256=(Get-FileHash -LiteralPath $finalCallbackPath -Algorithm SHA256).Hash.ToLowerInvariant()
+                $record.final_callback_collected=$true
+            }elseif($record.final_callback_state -cne 'absent'){throw 'Final callback presence uncertain; retain exact stage'}
             $diagnosticState=SSH (Expand @'
 set -eu
 if test -f '@ROOT@/diagnostics.json'; then
