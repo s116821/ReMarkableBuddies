@@ -130,3 +130,17 @@ The local draft manifest includes the three command-slot metadata paths and
 separate helper/manager-parent/CLI AS candidates. It continues to refuse a
 runnable/frozen status and requires actual writable-job reconciliation and
 command resource/concurrency verification.
+
+jobs.h is a pure preparation-only bounded list-jobs decoder, with no manager
+calls or cancellation authority. It accepts at most4096bytes and12owned rows,
+requires final newline/exact four ASCII columns/canonical positive uint32 IDs,
+exact fixed nonce-unit names, start/stop and waiting/running only, and refuses
+duplicate ID/unit, controls/colors/truncation/unknown rows. Caller must discard
+ALL rows and count on failure. Empty success is an empty observation, not proof
+of completion/cancellation or attribution. Four strict compiled-C host fixture
+tests passed0.347s. SDK43b0e220389c62caef23c64c513545b4dc11e7cc recommends
+--no-legend --plain --full --no-pager --no-ask-password, fixed known-unit args,
+LC_ALL=C and SYSTEMD_COLORS=0, with no --after/--before extensions. Underlying
+ListJobs allocates manager-wide data before filtering; resource failure refuses.
+No writable dispatch, exact-job recheck/cancel, manager-instance continuity,
+late-start fencing or terminal proof is implemented by this decoder.
