@@ -24,18 +24,25 @@ foreach($item in @{owner=$nonce;'dropin.sha256'=$files['native-probe.conf']}.Get
 }
 if($PrepareOnly){$files|ConvertTo-Json;return}
 $record=[ordered]@{nonce=$nonce;experiment='existing-engine-qml-singleton-access';payload_source='9951546806379cc4c6a8c7509c385e275ff123cd';payload_sha256=$payloadHash;operator_sha256=(Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant();files=$files;results=@();arm_intent=$false;armed=$false;callback_verified=$false;candidate_generation_verified=$false;qml_access_verified=$false;candidate_receipt=$null;restored=$false;cleanup_verified=$false;diagnostic_collected=$false;diagnostic_sha256=$null;final_callback_state='not-checked';final_callback_collected=$false;final_callback_sha256=$null}
-function Native([string]$program,[string[]]$arguments){
+function Native([string]$program,[string[]]$arguments,[int]$timeoutMs=20000){
     $info=[Diagnostics.ProcessStartInfo]::new();$info.FileName=$program;$info.UseShellExecute=$false
     $info.RedirectStandardOutput=$true;$info.RedirectStandardError=$true
     foreach($argument in $arguments){$info.ArgumentList.Add($argument)}
     $process=[Diagnostics.Process]::Start($info)
     $stdout=$process.StandardOutput.ReadToEndAsync();$stderr=$process.StandardError.ReadToEndAsync()
-    $timeout=-not $process.WaitForExit(20000)
+    $timeout=-not $process.WaitForExit($timeoutMs)
     if($timeout){$process.Kill($true);if(-not $process.WaitForExit(3000)){throw 'Local transport exit uncertain'}}
     $result=[ordered]@{program=$program;exit=$process.ExitCode;timeout=$timeout;stdout=$stdout.GetAwaiter().GetResult();stderr=$stderr.GetAwaiter().GetResult()}
     $process.Dispose();$record.results+=$result;return $result
 }
 function SSH([string]$command){Native 'ssh' @('-o','HostName=10.11.99.1','-o','StrictHostKeyChecking=yes','-o','BatchMode=yes','-o','ConnectTimeout=8','RM2',$command)}
+function ObservationSSH([string]$command){
+    $remaining=35000-$observationClock.ElapsedMilliseconds
+    if($remaining -le 0){throw 'Callback observation budget exhausted; restoration still required'}
+    $result=Native 'ssh' @('-o','HostName=10.11.99.1','-o','StrictHostKeyChecking=yes','-o','BatchMode=yes','-o','ConnectTimeout=2','RM2',$command) ([int][Math]::Min(3000,$remaining))
+    if($observationClock.ElapsedMilliseconds -ge 35000){throw 'Callback observation returned outside budget; restoration still required'}
+    return $result
+}
 function Require($result){if($result.timeout -or $result.exit -ne 0){throw 'One-shot stage failed; keep evidence and rollback duty'}}
 function Expand([string]$text){$text.Replace('@ROOT@',$remote).Replace('@NONCE@',$nonce).Replace('@UNIT@',$rollback)}
 try{
@@ -68,6 +75,9 @@ mkdir -m700 '@ROOT@'
     foreach($name in $files.Keys){Require (Native 'scp' @('-o','HostName=10.11.99.1','-o','StrictHostKeyChecking=yes','-o','BatchMode=yes','-o','ConnectTimeout=8',(Join-Path $packet $name),('RM2:'+$remote+'/'+$name)))}
     Require (Native 'scp' @('-o','HostName=10.11.99.1','-o','StrictHostKeyChecking=yes','-o','BatchMode=yes','-o','ConnectTimeout=8',$PayloadPath,('RM2:'+$remote+'/payload.so')))
     foreach($name in $files.Keys){Require (SSH ("set -eu; test `"`$(sha256sum '$remote/$name' | awk '{print `$1}')`" = '$($files[$name])'; chmod 600 '$remote/$name'"))}
+    # Observation admission budget starts before arming. Recovery and final
+    # evidence collection keep their separate mandatory duty after this cutoff.
+    $observationClock=[Diagnostics.Stopwatch]::StartNew()
     $record.arm_intent=$true
     Require (SSH (Expand @'
 set -eu
@@ -104,15 +114,15 @@ flock -u 9
 exec 9>&-
 systemctl restart xochitl.service
 '@))
-    for($attempt=0;$attempt -lt 10;$attempt++){
-        $observed=SSH (Expand "test -f '@ROOT@/callback.json' && test `"`$(wc -c < '@ROOT@/callback.json')`" -le 256 && cat '@ROOT@/callback.json'")
+    for($attempt=0;$attempt -lt 35;$attempt++){
+        $observed=ObservationSSH (Expand "test -f '@ROOT@/callback.json' && test `"`$(wc -c < '@ROOT@/callback.json')`" -le 256 && cat '@ROOT@/callback.json'")
         if(-not $observed.timeout -and $observed.exit -eq 0){
             [IO.File]::WriteAllText((Join-Path $packet 'callback.json'),$observed.stdout,[Text.UTF8Encoding]::new($false))
             $callback=$observed.stdout|ConvertFrom-Json
             $record.callback_verified=$callback.nonce -is [string] -and $callback.nonce -ceq $nonce -and $callback.application_thread -is [bool] -and $callback.application_thread
             $record.candidate_receipt=$callback
             $qmlFieldsMatch=$record.callback_verified -and $callback.stage -is [string] -and $callback.stage -ceq 'resolved' -and $callback.engine_thread -is [bool] -and $callback.engine_thread -and $callback.helper_available -is [bool] -and $callback.helper_available -and $callback.controller_available -is [bool] -and $callback.controller_available
-            Require (SSH (Expand @'
+            Require (ObservationSSH (Expand @'
 set -eu
 read p started < '@ROOT@/attempt.identity'
 case "$p:$started" in *[!0-9:]*|:*|*:) exit 90;; esac
@@ -129,7 +139,9 @@ printf 'new-generation-executable-verified\n'
             break
         }
         if($observed.timeout){throw 'Callback observation transport unknown'}
-        Start-Sleep -Seconds 1
+        $remaining=35000-$observationClock.ElapsedMilliseconds
+        if($remaining -le 0){throw 'Callback observation budget exhausted; restoration still required'}
+        Start-Sleep -Milliseconds ([int][Math]::Min(1000,$remaining))
     }
 }finally{
     try{
