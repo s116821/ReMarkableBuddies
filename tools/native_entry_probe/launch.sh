@@ -1,8 +1,8 @@
 #!/bin/sh
 # One approved development exec; preserve stock restart policy and environment.
 set -eu
-root=/run/rmb-qt-probe-b5e236df81cb4d3e96c981eeb41b8769
-nonce=b5e236df81cb4d3e96c981eeb41b8769
+root=/run/rmb-qt-probe-f8538b8e51fb41239cdc24128c7800fd
+nonce=f8538b8e51fb41239cdc24128c7800fd
 previous_umask=$(umask)
 stock() {
     exec 9>&-
@@ -22,7 +22,7 @@ if test -e "$root/entry.closed" || test -e "$root/restore.claim"; then
 fi
 # Consume before loading. Every later start takes the unmodified stock branch.
 if ! (set -C; printf '%s' "$nonce" > "$root/attempt.claim") 2>/dev/null; then flock -u 9; exec 9>&-; stock; fi
-if ! test "$(sha256sum "$root/payload.so" | awk '{print $1}')" = e38f99f1592f375307aee99736768b022ff850e3f2756fb9bf3960ed2594063d; then flock -u 9; exec 9>&-; stock; fi
+if ! test "$(sha256sum "$root/payload.so" | awk '{print $1}')" = dd4fcd95866e23957ab77bf4d6136f3a49b080f038d25a2579eb331fc0d742d0; then flock -u 9; exec 9>&-; stock; fi
 if ! printf '%s %s\n' "$$" "$(awk '{print $22}' /proc/$$/stat)" > "$root/attempt.identity"; then flock -u 9; exec 9>&-; stock; fi
 flock -u 9
 exec 9>&-
