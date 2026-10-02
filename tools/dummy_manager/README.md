@@ -248,3 +248,21 @@ before EVERY unit/ID target list. Strict compiled-C fixtures now reject --host=,
 --help, --all and -x.service and verify literal valid names/delimiters; maximum
 argv is29/32. The earlier28-argument description refers to the held revision.
 No codec is connected to dispatch and no service/remote command was executed.
+
+request_protocol.h is a pure canonical IPC frame and in-memory intent model;
+it is not a durable ledger, IPC server, lease, cleanup actor or CLI dispatcher.
+Frames are bounded to64bytes and bind the compiled nonce, generation1..8,
+monotonic request ID1..96, fixed opcode and owned role index or batch marker.
+Raw job IDs, unit strings and arbitrary argv cannot enter through the frame.
+An identical pending request requires reconciliation; a completed duplicate is
+historical only and cannot authorize replay. Conflicting reuse or an unknown
+outcome closes new starts/advances. Pending mutations, including advancement,
+block new starts/advances. Close latches the in-memory fence before completion;
+late advancement cannot reopen it. Outcome kinds are checked against operations.
+
+The strict compiled-C fixture passed0.101s including lost acknowledgements,
+conflicting duplicates, pending advancement, late completion after close and
+malformed frames. These are synthetic model checks only. Integration must
+durably publish owned intent before effects and publish the actual fence before
+acknowledging close; independent lease, actual process/cgroup exit, fresh manager
+observations, phase authority and exclusive takeover remain unimplemented gates.
