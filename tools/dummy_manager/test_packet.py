@@ -27,8 +27,8 @@ class PacketTests(unittest.TestCase):
                         for case, roles in EVENT_ROLES.items() for role in roles}
             self.assertEqual(event_paths, expected)
             self.assertEqual(len(event_paths), 28)
-            self.assertEqual(len(manifest["owned_paths"]), 196)
-            self.assertEqual(len({item["path"] for item in manifest["owned_paths"]}), 196)
+            self.assertEqual(len(manifest["owned_paths"]), 197)
+            self.assertEqual(len({item["path"] for item in manifest["owned_paths"]}), 197)
             self.assertEqual(manifest["evidence_candidates"]["bounded_runtime_record_bytes"], 68577)
             self.assertFalse(manifest["runnable"])
             self.assertFalse(manifest["evidence_candidates"]["full_evidence_frozen"])

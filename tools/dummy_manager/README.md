@@ -359,3 +359,19 @@ silently omitted. This subtotal excludes complete command/IPC/lease/operator
 outputs, target-profile/failure/transport receipts and manifest/unit evidence
 copies; full256KiB accounting is explicitly unfrozen. Older264/262/166-path
 descriptions refer to superseded draft inventories, not the current manifest.
+
+ipc_socket.h creates only the compiled owned root/request.sock endpoint after
+root/token checks and descriptor/path inode agreement. Existing paths (including
+stale sockets and symlinks) refuse without removal/replacement. Single-threaded
+binding temporarily sets/restores umask0177, verifies socket type/UID/single-link/
+0600mode and uses NONBLOCK/CLOEXEC/PASSCRED. Requested4096byte receive/send
+buffers must each report8192 under Linux; these target expectations and kernel
+buffer accounting are not qualified on the tablet. Failed setup closes its FD
+but retains any created endpoint for exact external cleanup; FD exit is not path
+removal. Immutable owned root/parents and single-threaded caller are explicit
+assumptions, not a hostile concurrent-directory replacement defense.
+The strict owned host fixture passed0.156s: exact bound datagram/credentials,
+root mismatch, stale/live endpoint and symlink refusal, permissions/FDflags and
+umask restoration. No ACK/server/lease/helper integration or target effects.
+The current non-runnable inventory has197paths; runtime record subtotal remains
+68577bytes. Complete socket kernel resources/evidence/operator budget remains open.

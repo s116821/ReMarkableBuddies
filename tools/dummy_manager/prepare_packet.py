@@ -80,6 +80,7 @@ def prepare(destination, nonce):
     for filename, maximum in (("request-slot", 0), ("requests-closed", 32)):
         owned_paths.append({"path": root + "/" + filename, "kind": "regular",
                             "mode": "0600", "max_bytes": maximum})
+    owned_paths.append({"path": root + "/request.sock", "kind": "unix_socket", "mode": "0600"})
     for role in ROLES:
         owned_paths.append({"path": root + "/control-" + role, "kind": "fifo", "mode": "0600"})
     for case in range(1, 9):
