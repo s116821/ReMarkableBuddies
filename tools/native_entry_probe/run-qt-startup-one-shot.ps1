@@ -79,6 +79,10 @@ test "$(systemctl show --property=FailureAction --value '@UNIT@.service')" = non
     $record.armed=$true
     Require (SSH (Expand @'
 set -eu
+exec 9>'@ROOT@/admission.lock'
+flock -w 10 9
+test ! -e '@ROOT@/entry.closed'
+test ! -e '@ROOT@/restore.claim'
 test ! -e /run/systemd/system/xochitl.service.d
 mkdir -m755 /run/systemd/system/xochitl.service.d
 stat -c '%d %i %a %u' /run/systemd/system/xochitl.service.d > '@ROOT@/parent.signature'
@@ -89,6 +93,8 @@ case "$(systemctl show --property=ExecStart --value xochitl.service)" in *'path=
 test "$(systemctl show --property=Restart --value xochitl.service)" = on-failure
 test "$(systemctl show --property=RestartMode --value xochitl.service)" = direct
 systemctl stop reader-buddy.service
+flock -u 9
+exec 9>&-
 systemctl restart xochitl.service
 '@))
     for($attempt=0;$attempt -lt 10;$attempt++){
@@ -108,18 +114,19 @@ systemctl restart xochitl.service
         # Same singleton service; never execute the restore script in a second actor.
         $trigger=SSH (Expand "systemctl start --no-block '@UNIT@.service'")
         for($check=0;$check -lt 30;$check++){
-            $restoration=SSH (Expand "test -f '@ROOT@/restored' && test `"`$(cat '@ROOT@/restored')`" = '@NONCE@ stock-verified' && test `"`$(systemctl show --property=ActiveState --value '@UNIT@.service')`" = active && test `"`$(systemctl show --property=SubState --value '@UNIT@.service')`" = exited && test `"`$(systemctl show --property=ExecMainStatus --value '@UNIT@.service')`" = 0 && systemctl is-active xochitl.service reader-buddy.service rm-sync.service && systemctl show --property=MainPID --property=Job xochitl.service")
+            $restoration=SSH (Expand "test -f '@ROOT@/restored' && test `"`$(cat '@ROOT@/restored')`" = '@NONCE@ stock-verified' && test `"`$(systemctl show --property=ActiveState --value '@UNIT@.service')`" = active && test `"`$(systemctl show --property=SubState --value '@UNIT@.service')`" = exited && test `"`$(systemctl show --property=ExecMainStatus --value '@UNIT@.service')`" = 0 && /bin/sh '@ROOT@/restore.sh' --verify && systemctl is-active xochitl.service reader-buddy.service rm-sync.service && systemctl show --property=MainPID --property=Job xochitl.service")
             if(-not $restoration.timeout -and $restoration.exit -eq 0){$record.restored=$true;break}
             if($restoration.timeout){break}
             Start-Sleep -Seconds 1
         }
         if($record.restored){
-            foreach($name in @('callback.json','attempt.claim','attempt.identity','restore.claim','restored','parent.signature')){
+            foreach($name in @('attempt.claim','attempt.identity','restore.claim','restored','parent.signature','entry.closed')){
                 $collected=Native 'scp' @('-o','HostName=10.11.99.1','-o','StrictHostKeyChecking=yes','-o','BatchMode=yes','-o','ConnectTimeout=8',('RM2:'+$remote+'/'+$name),(Join-Path $packet $name))
-                if($collected.timeout){throw 'Evidence collection uncertain; retain stage'}
+                Require $collected
             }
             $cleaned=SSH (Expand @'
 set -eu
+/bin/sh '@ROOT@/restore.sh' --verify
 systemctl stop '@UNIT@.timer' '@UNIT@.service'
 for wait in 1 2 3 4 5; do
     if test ! -e '/run/systemd/transient/@UNIT@.timer' && test ! -e '/run/systemd/transient/@UNIT@.service'; then break; fi
@@ -128,7 +135,7 @@ done
 test ! -e '/run/systemd/transient/@UNIT@.timer'
 test ! -e '/run/systemd/transient/@UNIT@.service'
 test ! -e '/run/systemd/system/xochitl.service.d/zz-rmb-qt-probe-@NONCE@.conf'
-for name in payload.so launch.sh restore.sh native-probe.conf owner dropin.sha256 callback.json attempt.claim attempt.identity restore.claim restored parent.signature; do rm -f '@ROOT@/'"$name"; done
+for name in payload.so launch.sh restore.sh native-probe.conf owner dropin.sha256 callback.json attempt.claim attempt.identity restore.claim restored parent.signature admission.lock entry.closed; do rm -f '@ROOT@/'"$name"; done
 rmdir '@ROOT@'
 test ! -e '@ROOT@'
 systemctl is-active xochitl.service reader-buddy.service rm-sync.service

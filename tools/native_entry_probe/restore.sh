@@ -37,9 +37,28 @@ healthy_stock() {
     test "$(systemctl show --property=MainPID --value xochitl.service)" = "$p"
     test "$(awk '{print $22}' "/proc/$p/stat")" = "$ps"
 }
+attempt_gone() {
+    if test -f "$root/attempt.identity"; then
+        read attempted started < "$root/attempt.identity"
+        case "$attempted" in ''|*[!0-9]*) return 1;; esac
+        case "$started" in ''|*[!0-9]*) return 1;; esac
+        if test -d "/proc/$attempted" && test "$(awk '{print $22}' "/proc/$attempted/stat")" = "$started"; then
+            case "$(awk '{print $3}' "/proc/$attempted/stat")" in Z|X) :;; *) return 1;; esac
+        fi
+    fi
+}
+case "${1-}" in
+    --verify) healthy_stock; attempt_gone; exit 0;;
+    '') :;;
+    *) exit 90;;
+esac
+exec 9>"$root/admission.lock"
+flock -w 30 9
+printf '%s' "$nonce" > "$root/entry.closed"
 # A failed previous execution is historical uncertainty, not restart permission.
 if ! (set -C; printf '%s' "$nonce" > "$root/restore.claim") 2>/dev/null; then
     healthy_stock
+    attempt_gone
     printf '%s stock-verified\n' "$nonce" > "$root/restored"
     exit 0
 fi
@@ -54,15 +73,10 @@ if test -e "$dropin"; then
     systemctl daemon-reload
     changed=yes
 fi
+flock -u 9
+exec 9>&-
 if test "$changed" = yes; then systemctl restart xochitl.service; fi
 systemctl start xochitl.service reader-buddy.service rm-sync.service
 healthy_stock
-if test -f "$root/attempt.identity"; then
-    read attempted started < "$root/attempt.identity"
-    case "$attempted" in ''|*[!0-9]*) exit 90;; esac
-    case "$started" in ''|*[!0-9]*) exit 90;; esac
-    if test -d "/proc/$attempted" && test "$(awk '{print $22}' "/proc/$attempted/stat")" = "$started"; then
-        case "$(awk '{print $3}' "/proc/$attempted/stat")" in Z|X) :;; *) exit 90;; esac
-    fi
-fi
+attempt_gone
 printf '%s stock-verified\n' "$nonce" > "$root/restored"
