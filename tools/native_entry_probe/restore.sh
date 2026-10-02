@@ -2,8 +2,8 @@
 # Sole transient oneshot writer; main and timer start the SAME service.
 set -eu
 umask 077
-root=/run/rmb-qt-probe-42d7f551ecc2435b923e5415f228f723
-nonce=42d7f551ecc2435b923e5415f228f723
+root=/run/rmb-qt-probe-894a910b62d947cf8d1602c30e162604
+nonce=894a910b62d947cf8d1602c30e162604
 parent=/run/systemd/system/xochitl.service.d
 dropin="$parent/zz-rmb-qt-probe-$nonce.conf"
 test -d "$root" && test ! -L "$root"
@@ -54,7 +54,12 @@ case "${1-}" in
 esac
 printf '%s' "$nonce" > "$root/entry.closed"
 exec 9>"$root/admission.lock"
-flock -w 30 9
+waits=0
+while ! flock -n 9; do
+    waits=$((waits + 1))
+    test "$waits" -lt 30
+    sleep 1
+done
 # A failed previous execution is historical uncertainty, not restart permission.
 if ! (set -C; printf '%s' "$nonce" > "$root/restore.claim") 2>/dev/null; then
     healthy_stock

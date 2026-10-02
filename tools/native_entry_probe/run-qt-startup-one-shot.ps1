@@ -1,10 +1,10 @@
 param([Parameter(Mandatory=$true)][string]$PayloadPath,
       [Parameter(Mandatory=$true)][string]$EvidenceDirectory, [switch]$PrepareOnly)
 $ErrorActionPreference = 'Stop'
-$nonce='42d7f551ecc2435b923e5415f228f723'
+$nonce='894a910b62d947cf8d1602c30e162604'
 $remote='/run/rmb-qt-probe-'+$nonce
 $rollback='rmb-qt-probe-'+$nonce+'-rollback'
-$payloadHash='ddd2f966f9e429b78d7f7b9e415a1994d9b355740e4bdb750e09025c0517ac41'
+$payloadHash='68eb38b316aff3ef123b243f1691660eabd1221ebd733484390a95b4c7e38783'
 if((Get-FileHash -LiteralPath $PayloadPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $payloadHash){throw 'Payload changed'}
 $packet=Join-Path $EvidenceDirectory ('qt-startup-packet-'+$nonce)
 if(-not(Test-Path -LiteralPath $packet)){[void](New-Item -ItemType Directory -Path $packet)}
@@ -69,8 +69,13 @@ mkdir -m700 '@ROOT@'
     $record.arm_intent=$true
     Require (SSH (Expand @'
 set -eu
-test "$(sha256sum '@ROOT@/payload.so' | awk '{print $1}')" = ddd2f966f9e429b78d7f7b9e415a1994d9b355740e4bdb750e09025c0517ac41
+test "$(sha256sum '@ROOT@/payload.so' | awk '{print $1}')" = 68eb38b316aff3ef123b243f1691660eabd1221ebd733484390a95b4c7e38783
 chmod 600 '@ROOT@/payload.so'
+# Prove actual target flags before arming or stopping any original service.
+exec 9>'@ROOT@/admission.lock'
+flock -n 9
+flock -u 9
+exec 9>&-
 systemd-run --unit='@UNIT@' --on-active=45s --timer-property=AccuracySec=1s --property=Type=oneshot --property=RemainAfterExit=yes --property=Restart=no --property=TimeoutStartSec=200s --property=TimeoutStopSec=5s --property=KillMode=control-group --property=UMask=0077 /bin/sh '@ROOT@/restore.sh'
 test "$(systemctl show --property=ActiveState --value '@UNIT@.timer')" = active
 test "$(systemctl show --property=OnFailure --value '@UNIT@.service')" = ''
@@ -81,7 +86,7 @@ test "$(systemctl show --property=FailureAction --value '@UNIT@.service')" = non
 set -eu
 systemctl stop reader-buddy.service
 exec 9>'@ROOT@/admission.lock'
-flock -w 10 9
+flock -n 9
 test ! -e '@ROOT@/entry.closed'
 test ! -e '@ROOT@/restore.claim'
 test ! -e /run/systemd/system/xochitl.service.d
