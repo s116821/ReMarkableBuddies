@@ -157,3 +157,12 @@ of an arbitrary inherited variable, and rejected malformed reply. Full32host
 worker/actor/decoder/transport tests passed8.619s. Actual vendor CLI query peak,
 resource headroom, manager continuity/job recheck/cleanup and writable actions
 remain unqualified; no tablet query or staging was performed for this change.
+
+cancel_args.h is a pure prospective batch argument encoder, not wired into any
+manager dispatcher. Zero tuples returns NO COMMAND; at most12distinct positive
+canonical uint32 IDs derive from validated owned-role/type/state tuples. Invalid
+input returns failure and requires discarding all partial outputs. Caller must
+freshly correlate/recheck those tuples against the same manager/case instance
+under sole-writer fencing; encoding does not supply that authority or any terminal
+cancellation proof. One strict compiled-C fixture verifies zero/max/overflow/null/
+duplicate/invalid-role/type/state cases. No cancellation or writable CLI occurs.
