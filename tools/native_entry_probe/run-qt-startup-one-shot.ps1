@@ -1,16 +1,11 @@
 param([Parameter(Mandatory=$true)][string]$PayloadPath,
-      [Parameter(Mandatory=$true)][string]$ImageProfilePath,
       [Parameter(Mandatory=$true)][string]$EvidenceDirectory, [switch]$PrepareOnly)
 $ErrorActionPreference = 'Stop'
-$nonce='365600d0b6284b32864723e6cfb966f9'
+$nonce='5ce20d48f7c54640b073eea27f27f948'
 $remote='/run/rmb-qt-probe-'+$nonce
 $rollback='rmb-qt-probe-'+$nonce+'-rollback'
-$payloadHash='9a3e6cec7f992549ee7533edc5ed2e3a9963914f6962dd888a39b3cd26d57ca0'
+$payloadHash='481aaac69fbe8dd1689ed1851b51b6fc0e50679b9b451385b64ddfaadc10fe36'
 if((Get-FileHash -LiteralPath $PayloadPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $payloadHash){throw 'Payload changed'}
-$imageProfileHash='942dec046baf86465f3b7af9b17ef5ba0062ebfc8886303fbed8522f660a494d'
-if((Get-FileHash -LiteralPath $ImageProfilePath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $imageProfileHash){throw 'Image profile changed'}
-$imageFirstLoad=[IO.File]::ReadAllText($ImageProfilePath)
-if($imageFirstLoad -cnotmatch '^[0-9a-f]{8}$'){throw 'Invalid image profile'}
 $packet=Join-Path $EvidenceDirectory ('qt-startup-packet-'+$nonce)
 if(-not(Test-Path -LiteralPath $packet)){[void](New-Item -ItemType Directory -Path $packet)}
 $files=@{}
@@ -28,7 +23,7 @@ foreach($item in @{owner=$nonce;'dropin.sha256'=$files['native-probe.conf']}.Get
     $files[$item.Key]=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 if($PrepareOnly){$files|ConvertTo-Json;return}
-$record=[ordered]@{nonce=$nonce;experiment='typed-registration-guard-retention';payload_source='9309b5276c5376bc0e94848820ee7fe367e4a7bb';payload_sha256=$payloadHash;image_profile_sha256=$imageProfileHash;operator_sha256=(Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant();files=$files;results=@();arm_intent=$false;armed=$false;callback_verified=$false;candidate_profile_verified=$false;candidate_guard_proof=$false;candidate_receipt=$null;restored=$false;cleanup_verified=$false}
+$record=[ordered]@{nonce=$nonce;experiment='existing-engine-qml-singleton-access';payload_source='e017ccce2c6a6a0b408fe04eaca31a264d1919c8';payload_sha256=$payloadHash;operator_sha256=(Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant();files=$files;results=@();arm_intent=$false;armed=$false;callback_verified=$false;candidate_generation_verified=$false;qml_access_verified=$false;candidate_receipt=$null;restored=$false;cleanup_verified=$false}
 function Native([string]$program,[string[]]$arguments){
     $info=[Diagnostics.ProcessStartInfo]::new();$info.FileName=$program;$info.UseShellExecute=$false
     $info.RedirectStandardOutput=$true;$info.RedirectStandardError=$true
@@ -42,7 +37,7 @@ function Native([string]$program,[string[]]$arguments){
 }
 function SSH([string]$command){Native 'ssh' @('-o','HostName=10.11.99.1','-o','StrictHostKeyChecking=yes','-o','BatchMode=yes','-o','ConnectTimeout=8','RM2',$command)}
 function Require($result){if($result.timeout -or $result.exit -ne 0){throw 'One-shot stage failed; keep evidence and rollback duty'}}
-function Expand([string]$text){$text.Replace('@ROOT@',$remote).Replace('@NONCE@',$nonce).Replace('@UNIT@',$rollback).Replace('@MAPSTART@',$imageFirstLoad)}
+function Expand([string]$text){$text.Replace('@ROOT@',$remote).Replace('@NONCE@',$nonce).Replace('@UNIT@',$rollback)}
 try{
     Require (SSH (Expand @'
 set -eu
@@ -51,10 +46,9 @@ test "$(cat /sys/devices/soc0/machine)" = 'reMarkable 2.0'
 test "$(pidof xochitl)" = 30481
 test "$(awk '{print $22}' /proc/30481/stat)" = 183534756
 test "$(sha256sum /proc/30481/exe | awk '{print $1}')" = 071d85beef3ef2d4cc0e11002140b27b82a2cc04a2ed740a5669f591069b77df
-test "$(od -An -tu2 -j16 -N2 /proc/30481/exe | tr -d '[:space:]')" = 2
-awk '$NF=="/usr/bin/xochitl" && $3=="00000000" {n++; split($1,a,"-"); if(a[1]!="@MAPSTART@") bad=1} END {exit(n!=1 || bad)}' /proc/30481/maps
 test "$(sha256sum /usr/lib/libQt6Core.so.6.10.3 | awk '{print $1}')" = 43b0e210d64e59b534490d78c4c82cc1d2958999b0969aa0f77e11a082704e5d
 test "$(sha256sum /usr/lib/libQt6Qml.so.6.10.3 | awk '{print $1}')" = e9cfb062609972005470d048f75b68c749f0ccd3bf09de45916232845694c944
+test "$(sha256sum /usr/lib/libQt6Gui.so.6.10.3 | awk '{print $1}')" = 93fe582cc61673342ca49e12306d7f689860016582fa46ce135ffa280a972839
 test "$(sha256sum /usr/lib/systemd/system/xochitl.service | awk '{print $1}')" = adb0a2654ce9ec884f67c0627c22d539d6475dd0af80816819ee80bf13c0e6d6
 test "$(sha256sum /usr/lib/systemd/system/xochitl.service.d/xochitl-service-override.conf | awk '{print $1}')" = b15560e1dca2f4451b59537c490015aa2f5ea691437bd7ddddc7a65411aaad6e
 test "$(systemctl show --property=RestartMode --value xochitl.service)" = direct
@@ -77,7 +71,7 @@ mkdir -m700 '@ROOT@'
     $record.arm_intent=$true
     Require (SSH (Expand @'
 set -eu
-test "$(sha256sum '@ROOT@/payload.so' | awk '{print $1}')" = 9a3e6cec7f992549ee7533edc5ed2e3a9963914f6962dd888a39b3cd26d57ca0
+test "$(sha256sum '@ROOT@/payload.so' | awk '{print $1}')" = 481aaac69fbe8dd1689ed1851b51b6fc0e50679b9b451385b64ddfaadc10fe36
 chmod 600 '@ROOT@/payload.so'
 # Prove actual target flags before arming or stopping any original service.
 exec 9>'@ROOT@/admission.lock'
@@ -117,7 +111,7 @@ systemctl restart xochitl.service
             $callback=$observed.stdout|ConvertFrom-Json
             $record.callback_verified=$callback.nonce -is [string] -and $callback.nonce -ceq $nonce -and $callback.application_thread -is [bool] -and $callback.application_thread
             $record.candidate_receipt=$callback
-            $guardFieldsMatch=$record.callback_verified -and $callback.registration_match -is [bool] -and $callback.registration_match -and $callback.typed_target_match -is [bool] -and $callback.typed_target_match -and $callback.guard_not_cleared -is [bool] -and $callback.guard_not_cleared -and $callback.uniqueness -is [string] -and $callback.uniqueness -ceq 'unproven'
+            $qmlFieldsMatch=$record.callback_verified -and $callback.stage -is [string] -and $callback.stage -ceq 'resolved' -and $callback.engine_thread -is [bool] -and $callback.engine_thread -and $callback.helper_available -is [bool] -and $callback.helper_available -and $callback.controller_available -is [bool] -and $callback.controller_available
             Require (SSH (Expand @'
 set -eu
 read p started < '@ROOT@/attempt.identity'
@@ -125,15 +119,13 @@ case "$p:$started" in *[!0-9:]*|:*|*:) exit 90;; esac
 test "$(systemctl show --property=MainPID --value xochitl.service)" = "$p"
 test "$(awk '{print $22}' "/proc/$p/stat")" = "$started"
 test "$(sha256sum "/proc/$p/exe" | awk '{print $1}')" = 071d85beef3ef2d4cc0e11002140b27b82a2cc04a2ed740a5669f591069b77df
-test "$(od -An -tu2 -j16 -N2 "/proc/$p/exe" | tr -d '[:space:]')" = 2
-awk '$NF=="/usr/bin/xochitl" && $3=="00000000" {n++; split($1,a,"-"); if(a[1]!="@MAPSTART@") bad=1} END {exit(n!=1 || bad)}' "/proc/$p/maps"
 test "$(awk '{print $22}' "/proc/$p/stat")" = "$started"
 test "$(systemctl show --property=MainPID --value xochitl.service)" = "$p"
 test -z "$(systemctl show --property=Job --value xochitl.service)"
-printf 'new-generation-et-exec-zero-bias-profile-verified\n'
+printf 'new-generation-executable-verified\n'
 '@))
-            $record.candidate_profile_verified=$true
-            $record.candidate_guard_proof=$guardFieldsMatch
+            $record.candidate_generation_verified=$true
+            $record.qml_access_verified=$qmlFieldsMatch
             break
         }
         if($observed.timeout){throw 'Callback observation transport unknown'}
@@ -187,5 +179,5 @@ printf 'stock-restored-and-exact-stage-removed\n'
     }
     if(-not $record.cleanup_verified){throw 'Restoration/stage uncertain; preserve exact path and timer duty, no retry'}
     if(-not $record.callback_verified){throw 'Stock restored; callback nonce/thread proof missing or failed'}
-    if(-not $record.candidate_guard_proof){throw 'Stock restored; typed registration/weak-guard proof refused or incomplete'}
+    if(-not $record.qml_access_verified){throw 'Stock restored; existing-engine QML availability proof refused or incomplete'}
 }

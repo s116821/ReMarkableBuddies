@@ -1,25 +1,32 @@
-# Development Qt entry and typed registration experiments
+# Development Qt entry and existing-engine QML experiments
 
 Concrete one-attempt development packets, separate from the deferred E0T framework.
 The earlier SDK `2265ebb2f993e8806a77d94a352a7fd0de2c3e42` payload proved nonce and
-Qt application-thread entry on hardware. The current source pins SDK
-`9309b5276c5376bc0e94848820ee7fe367e4a7bb` for the next typed existing-registration
-and retained weak-guard proof. It performs no QObject dereference, controller
-getter/thread call, factory invocation, page mutation or engine creation. Fixed
-first-match lookup leaves uniqueness explicitly unproven. A noncleared QPointer
-does not pin QObject lifetime or identify a displayed source. The payload/build
-has independent bounded acceptance; the fresh complete operator packet must be
-reviewed before any device run. Emulator fixtures are not hardware evidence.
+Qt application-thread entry on hardware. The current draft prepares public
+existing-engine QML singleton availability access. SDK source is frozen at
+`e017ccce2c6a6a0b408fe04eaca31a264d1919c8`; Main independently reviewed it and
+reran all twelve owned firmware-matched ARM-emulated fixtures successfully.
+The fresh ARM payload SHA256 is
+`481aaac69fbe8dd1689ed1851b51b6fc0e50679b9b451385b64ddfaadc10fe36`,
+with nonce `5ce20d48f7c54640b073eea27f27f948`. Exact artifact/operator review is
+required before execution. It uses application/window/component readiness
+events and requires one unique existing engine on the application thread. A fixed
+QML helper checks its own DocumentController availability boolean; no controller
+methods, page operations, navigation or new engine belong in this experiment.
+Imports and singleton resolution can invoke registration code, change engine
+association/ownership and evaluate bindings. This is not a pure read-only guard.
+Weak guards do not pin native lifetime or identify a displayed source. Source,
+firmware-matched fixtures, payload and exact operator review precede the one run.
+Emulator fixtures are not hardware evidence. The private typed guard packet is
+preserved in history and private evidence, unexecuted and no longer the next path.
 
 `-PrepareOnly` creates the exact LF staging packet locally without contacting the
 tablet. Ordinary independent review of the source and generated packet is
 required before the one hardware run. The operator pins the current original
-process identity, firmware, executable, QtCore and vendor unit files. A changed
+process identity, firmware, executable, QtCore/Qml/Gui and vendor unit files. A changed
 baseline refuses activation. Evidence and payload remain private.
-The required private `ImageProfilePath` contains the first ELF load-segment anchor;
-its hash and format are pinned without publishing static metadata locators. Both
-the original and new attempted generation must have the exact executable hash,
-ET_EXEC type and zero-bias mapping before candidate evidence is accepted.
+The public route needs no private metadata address profile. Both original and
+attempted generations retain executable and process-identity verification.
 
 The runtime-only stock-name drop-in retains the original restart policy. An
 exclusive claim is consumed before the single preload exec; subsequent starts
