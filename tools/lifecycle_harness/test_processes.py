@@ -10,7 +10,8 @@ import threading
 import time
 import unittest
 import uuid
-from processes import start_identity, stop
+from unittest.mock import patch
+from processes import start_identity, stop, child
 
 
 class Session:
@@ -40,10 +41,14 @@ class Session:
         self.watchdog = threading.Timer(30, self.process.kill)
         self.watchdog.daemon = True
         self.watchdog.start()
-        hello = self.next()
-        if hello["pid"] != self.process.pid or hello["role"] != "guard":
-            raise AssertionError("guard identity mismatch")
-        self.next("boot")
+        try:
+            hello = self.next()
+            if hello["pid"] != self.process.pid or hello["role"] != "guard":
+                raise AssertionError("guard identity mismatch")
+            self.next("boot")
+        except BaseException:
+            self.close()
+            raise
 
     def next(self, event=None):
         value = self.lines.get(timeout=max(0.001, self.deadline - time.monotonic()))
@@ -84,8 +89,11 @@ class Session:
     def close(self, remove=True):
         self.watchdog.cancel()
         if self.process.poll() is None:
-            self.process.stdin.write('{"op":"quit"}\n')
-            self.process.stdin.flush()
+            try:
+                self.process.stdin.write('{"op":"quit"}\n')
+                self.process.stdin.flush()
+            except (BrokenPipeError, OSError):
+                pass
             try:
                 self.process.wait(timeout=3)
             except subprocess.TimeoutExpired:
@@ -119,6 +127,42 @@ class RealProcessTests(unittest.TestCase):
 
     def tearDown(self):
         self.session.close()
+
+    def test_constructor_refusal_cleans_owned_process_and_directory(self):
+        captured = []
+        def refuse(session, event=None):
+            captured.append(session)
+            raise AssertionError("injected startup refusal")
+        with patch.object(Session, "next", refuse):
+            with self.assertRaisesRegex(AssertionError, "injected startup refusal"):
+                Session()
+        self.assertEqual(len(captured), 1)
+        self.assertIsNotNone(captured[0].process.poll())
+        self.assertFalse(captured[0].root.exists())
+        self.assertTrue(captured[0].watchdog.finished.is_set())
+
+    def test_child_malformed_absent_and_missing_identity_cleanup(self):
+        real_popen = subprocess.Popen
+        for failure in ("malformed", "absent", "identity"):
+            with self.subTest(failure=failure):
+                children = []
+                def create(*args, **kwargs):
+                    p = real_popen(*args, **kwargs)
+                    children.append(p)
+                    return p
+                with patch("processes.subprocess.Popen", create):
+                    if failure == "identity":
+                        with patch("processes.start_identity", return_value=None):
+                            with self.assertRaises(RuntimeError):
+                                child(self.session.root, self.session.token + "-fixture", "runtime")
+                    else:
+                        effect = queue.Empty if failure == "absent" else None
+                        with patch("processes.read_line", return_value="{}", side_effect=effect):
+                            with self.assertRaises((RuntimeError, queue.Empty)):
+                                child(self.session.root, self.session.token + "-fixture", "runtime")
+                self.assertEqual(len(children), 1)
+                self.assertIsNotNone(children[0].poll())
+                self.assertTrue(all(p.closed for p in (children[0].stdin, children[0].stdout, children[0].stderr)))
 
     def test_mismatch_zero_replacement(self):
         r = self.session.send("preflight", compatible=False)
@@ -175,7 +219,11 @@ class RealProcessTests(unittest.TestCase):
     def test_interrupted_rollback_is_observed_failure(self):
         self.session.activate()
         self.session.send("block-rollback", "rollback-blocked")
-        r = self.session.send("disable", "recovery-failed")
+        started = time.monotonic()
+        self.session.send("disable", "rollback-boundary")
+        r = self.session.next("recovery-failed")
+        self.assertGreaterEqual(time.monotonic() - started, 5)
+        self.assertLess(time.monotonic() - started, 8)
         self.assertEqual(r["state"], "RecoveryFailed")
         self.assertNotEqual(r["config_hash"], r["baseline_hash"])
         self.assertTrue(r["injected_alive"])

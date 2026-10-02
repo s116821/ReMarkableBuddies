@@ -58,20 +58,30 @@ def owned(root, token):
     return root
 
 
-def child(root, token, role):
+def read_line(pipe, timeout):
+    result = queue.Queue()
+    threading.Thread(target=lambda: result.put(pipe.readline()), daemon=True).start()
+    return result.get(timeout=max(0.001, timeout))
+
+
+def child(root, token, role, deadline=None):
     p = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), role,
                           str(root), token], stdin=subprocess.PIPE,
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    hello = json.loads(p.stdout.readline())
-    if hello != {"role": role, "pid": p.pid, "start": token + ":" + role}:
-        p.kill()
-        p.wait()
-        raise RuntimeError("owned child start challenge failed")
-    hello["os_start"] = start_identity(p.pid)
-    if hello["os_start"] is None:
+    try:
+        bound = min(2, deadline - time.monotonic()) if deadline is not None else 2
+        hello = json.loads(read_line(p.stdout, bound))
+        if hello != {"role": role, "pid": p.pid, "start": token + ":" + role}:
+            raise RuntimeError("owned child start challenge failed")
+        hello["os_start"] = start_identity(p.pid)
+        if hello["os_start"] is None:
+            raise RuntimeError("missing OS process start identity")
+        return p, hello
+    except BaseException:
         stop(p)
-        raise RuntimeError("missing OS process start identity")
-    return p, hello
+        for pipe in (p.stdin, p.stdout, p.stderr):
+            pipe.close()
+        raise
 
 
 def stop(p):
@@ -116,7 +126,11 @@ def guard(root, token):
         (root / name).unlink(missing_ok=True)
     unrelated = digest(root / "user-config")
     supervisor_process, supervisor_identity = child(root, token, "supervisor")
-    stock, stock_identity = child(root, token + "-stock", "runtime")
+    try:
+        stock, stock_identity = child(root, token + "-stock", "runtime")
+    except BaseException:
+        stop(supervisor_process)
+        raise
     injected = None
     identities = [supervisor_identity, stock_identity]
     commands = queue.Queue()
@@ -143,20 +157,27 @@ def guard(root, token):
               "owned_remaining": [x for x in ("session", "config.partial", "session.partial")
                                   if (root / x).exists()], **extra})
     def restore(reason):
-        nonlocal state, stock, armed
+        nonlocal state, stock, armed, deadline
         state = "RestoringStock"
+        deadline = time.monotonic() + 5
         if fail_rollback:
-            state = "RecoveryFailed"
-            report("recovery-failed", reason=reason)
-            armed = False
+            report("rollback-boundary", reason=reason)
             return
-        stop(injected)
-        atomic(root / "config", baseline)
-        for name in ("session", "config.partial", "session.partial"):
-            (root / name).unlink(missing_ok=True)
-        if stock.poll() is not None:
-            stock, identity = child(root, token + "-restored", "runtime")
-            identities.append(identity)
+        try:
+            stop(injected)
+            atomic(root / "config", baseline)
+            for name in ("session", "config.partial", "session.partial"):
+                (root / name).unlink(missing_ok=True)
+            if stock.poll() is not None:
+                stock, identity = child(root, token + "-restored", "runtime", deadline)
+                identities.append(identity)
+            if time.monotonic() >= deadline:
+                raise TimeoutError("rollback completed too late")
+        except (TimeoutError, queue.Empty, subprocess.TimeoutExpired, OSError, ValueError, RuntimeError):
+            state = "RecoveryFailed"
+            armed = False
+            report("recovery-failed", reason=reason)
+            return
         state = "DisabledForSession"
         armed = False
         report("restored", reason=reason)
@@ -164,7 +185,11 @@ def guard(root, token):
     try:
         while True:
             now = time.monotonic()
-            if armed and supervisor_process.poll() is not None:
+            if state == "RestoringStock" and now >= deadline:
+                state = "RecoveryFailed"
+                armed = False
+                report("recovery-failed", reason="rollback-deadline")
+            elif armed and supervisor_process.poll() is not None and not (fail_rollback and state == "RestoringStock"):
                 restore("supervisor-dead")
             elif state == "Activating" and injected and injected.poll() is not None:
                 restore("constructor-exit")
@@ -237,6 +262,7 @@ def guard(root, token):
                 report("runtime-stopped")
             elif op == "begin-rollback":
                 state = "RestoringStock"
+                deadline = time.monotonic() + 5
                 report("rollback-boundary")
             elif op == "block-rollback":
                 fail_rollback = True

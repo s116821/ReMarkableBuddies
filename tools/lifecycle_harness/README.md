@@ -15,6 +15,10 @@ run a fake independent guard, Supervisor and stock/injected children in unpredic
 token-owned temporary directories. Every test case has a 30-second outer watchdog;
 real readiness and heartbeat bounds are 5 and 3 seconds. Explicit pipe events sequence
 state barriers. No wait duration establishes readiness or successful recovery.
+Rollback has a five-second monotonic deadline: blocked rollback explicitly becomes
+RecoveryFailed at expiry, and late operations cannot report successful restoration.
+Child startup has a two-second bounded hello and cleanup on malformed/absent hello or
+missing OS identity. Session construction also cleans up if its own handshake refuses.
 
 The guard independently observes its actual Supervisor child exit, kills and waits
 for its owned injected child, restores exact baseline bytes, starts a fake stock child
@@ -38,6 +42,10 @@ checks; they do not exhaust arbitrary scheduling races or partial filesystem fai
 The current harness has synchronous small fake-child acknowledgments guarded by its
 outer watchdog, not a production bounded RPC implementation. No host pass authorizes
 E1. No live source continuity, native mutation, licensing or tablet timing is qualified.
+The rollback deadline detects late synchronous filesystem operations; the harness
+cannot interrupt an arbitrarily blocked filesystem syscall at exactly five seconds.
+The independent 30-second outer watchdog is its final host-process bound. That
+limitation and production recovery under blocked I/O remain open qualification gates.
 
 Owning product plan: [Docs native-buddy-page-creation at 1b8ea1b](https://github.com/s116821/ReMarkableBuddiesDocs/tree/1b8ea1b/openspec/changes/native-buddy-page-creation).
 SDK contract: [e2b3ebbb](https://github.com/s116821/ReMarkableOpenSDK/tree/e2b3ebbb8c4c630e46041896bc266498518de437/openspec/changes/establish-native-platform-contract).
