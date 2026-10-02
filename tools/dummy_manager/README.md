@@ -332,3 +332,18 @@ Manifest/foreign-path inventory remains a separate gate. The strict owned host
 fixture passed0.205s after actual writer child exit, historical advancement and
 pending-start reconstruction, held slot, ID gap and corrupt-record refusal.
 This remains unconnected to cleanup/operator/server/target execution.
+
+ipc_receive.h reads at most one nonblocking Unix datagram and requires datagram/
+Unix/nonblocking/SO_PASSCRED settings, one exact expected PID+UID+GID credential,
+and caller-supplied live PID/start checks before/after canonical frame parsing.
+Caller must supply a fresh bounded actual checker; the host fixture uses an
+explicit synthetic callback, so no actual PID/start acquisition is qualified.
+Malformed/oversized/truncated/foreign/control messages refuse without modifying
+request output. Delivered SCM_RIGHTS descriptors are closed even on refusal;
+bounded ancillary capacity represents at most4received descriptors. No reply
+address, ACK, socket binding/ownership setup, server/lease or dispatch exists.
+The owned Linux socketpair fixture tests real credentials, stale/changed callback
+and wrong-PID refusal, nonblocking-empty/oversized frames, and32descriptor-message
+refusals including ancillary truncation with unchanged observed FD count.
+This input-validation source remains unwired; queued-effect/phase/fence/resource
+and deadline integration are mandatory future gates, not parser authority.
