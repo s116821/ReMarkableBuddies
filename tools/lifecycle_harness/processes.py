@@ -93,6 +93,8 @@ def stop(p):
 
 def supervisor(root, token):
     emit({"role": "supervisor", "pid": os.getpid(), "start": token + ":supervisor"})
+    injected_identity = None
+    unrelated = digest(root / "user-config")
     for line in sys.stdin:
         command = json.loads(line)
         if command["op"] == "apply":
@@ -100,9 +102,36 @@ def supervisor(root, token):
             atomic(root / "config", b"injected\n")
         elif command["op"] == "partial":
             (root / "config.partial").write_bytes(b"incom")
+        elif command["op"] == "protect":
+            injected_identity = command["identity"]
         emit({"ack": command["op"]})
+    # Loss of the private guard pipe is an event, not a timer-based success claim.
+    # Surviving Supervisor restores stock independently of the runner.
+    stock = None
+    if injected_identity is not None:
+        deadline = time.monotonic() + 5
+        try:
+            atomic(root / "config", (root / "stock-baseline").read_bytes())
+            for name in ("session", "config.partial", "session.partial"):
+                (root / name).unlink(missing_ok=True)
+            while start_identity(injected_identity["pid"]) == injected_identity["os_start"]:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("injected child did not exit")
+                time.sleep(0.01)
+            stock, identity = child(root, token + "-supervisor-stock", "runtime", deadline)
+            if time.monotonic() >= deadline:
+                raise TimeoutError("late recovery")
+            receipt = {"state": "DisabledForSession", "stock": identity,
+                       "config_hash": digest(root / "config"),
+                       "baseline_hash": digest(root / "stock-baseline"),
+                       "unrelated_preserved": digest(root / "user-config") == unrelated,
+                       "injected_gone": start_identity(injected_identity["pid"]) != injected_identity["os_start"]}
+        except (TimeoutError, queue.Empty, OSError, ValueError, RuntimeError):
+            receipt = {"state": "RecoveryFailed"}
+        atomic(root / "supervisor-recovery", json.dumps(receipt).encode())
     while not (root / "stop-owned-children").exists():
         time.sleep(0.01)
+    stop(stock)
 
 
 def runtime(root, token):
@@ -113,7 +142,7 @@ def runtime(root, token):
         if command["op"] == "exit":
             return
         emit({"event": command["op"], "scope": command["scope"]})
-    while not (root / "stop-owned-children").exists():
+    while not (root / "stop-owned-children").exists() and (root / "config").read_bytes() != b"stock\n":
         time.sleep(0.01)
 
 
@@ -122,7 +151,7 @@ def guard(root, token):
     baseline = (root / "stock-baseline").read_bytes()
     # Simulated reboot reconstructs runtime-only state, with payload still inert.
     atomic(root / "config", baseline)
-    for name in ("session", "config.partial", "session.partial", "stop-owned-children"):
+    for name in ("session", "config.partial", "session.partial", "stop-owned-children", "supervisor-recovery"):
         (root / name).unlink(missing_ok=True)
     unrelated = digest(root / "user-config")
     supervisor_process, supervisor_identity = child(root, token, "supervisor")
@@ -204,6 +233,9 @@ def guard(root, token):
             op = command["op"]
             if op == "quit":
                 return
+            if op == "kill-both":
+                stop(supervisor_process)
+                os._exit(70)
             if op == "kill-supervisor":
                 stop(supervisor_process)
                 if not armed:
@@ -238,6 +270,11 @@ def guard(root, token):
                 stop(stock)
                 injected, identity = child(root, token + "-injected", "runtime")
                 identities.append(identity)
+                supervisor_process.stdin.write(json.dumps({"op": "protect", "identity": identity}) + "\n")
+                supervisor_process.stdin.flush()
+                if not supervisor_process.stdout.readline():
+                    restore("supervisor-died-before-protection")
+                    continue
                 state = "Activating"
                 deadline = time.monotonic() + 5
                 report("activated", scope=scope)

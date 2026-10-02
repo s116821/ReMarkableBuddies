@@ -27,9 +27,11 @@ baseline/unrelated bytes and the restored child's OS process start identity. Win
 identities use GetProcessTimes; Linux identities use /proc stat start ticks. These
 tests model no systemd/watchdog/Qt/GUI/document-worker behavior.
 
-Guard-alone death deliberately leaves an **unprotected failure**, with Supervisor
-still alive: it is not successful automatic rollback. The runner then stops owned
-orphan fixtures as cleanup. Simultaneous protection loss is likewise a limitation;
+Guard-alone death now triggers surviving-Supervisor recovery on loss of its private
+guard pipe. It restores baseline bytes, waits for the exact injected child to exit,
+starts a separately owned stock child and records verified completion. Tests inspect
+the actual stock OS identity and files before any runner cleanup. A blocked or late
+recovery records RecoveryFailed. Simultaneous protection loss remains a limitation;
 simulated cold-boot reconstruction resets fake runtime-only state and preserves an
 inert payload. That reset is an explicit host model, not evidence of real boot recovery.
 Interrupted rollback preserves injected configuration and reports RecoveryFailed;

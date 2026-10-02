@@ -109,7 +109,7 @@ class Session:
                 raise AssertionError("owned child survived cleanup")
             threading.Event().wait(0.01)
         # Explicit flat allowlist; unknown files preserve the directory for inspection.
-        expected = {"owner", "config", "stock-baseline", "user-config", "payload", "session", "session.partial", "config.partial", "stop-owned-children"}
+        expected = {"owner", "config", "stock-baseline", "user-config", "payload", "session", "session.partial", "config.partial", "stop-owned-children", "supervisor-recovery"}
         actual = {p.name for p in self.root.iterdir()}
         if not actual <= expected:
             raise AssertionError("unexpected files; preserving evidence")
@@ -229,20 +229,32 @@ class RealProcessTests(unittest.TestCase):
         self.assertTrue(r["injected_alive"])
         self.session.send("activate", "refused")
 
-    def test_guard_death_discloses_no_protected_success(self):
+    def test_guard_death_surviving_supervisor_restores_stock(self):
         self.session.activate()
         self.session.process.kill()
         self.session.process.wait(timeout=3)
         supervisor = next(x for x in self.session.identities if x["role"] == "supervisor")
         self.assertEqual(start_identity(supervisor["pid"]), supervisor["os_start"])
-        # Baseline is not restored merely by guard death; report limitation honestly.
-        self.assertEqual((self.session.root / "config").read_bytes(), b"injected\n")
-        with self.assertRaises(AssertionError):
-            self.session.next("restored")
+        deadline = time.monotonic() + 6
+        receipt = self.session.root / "supervisor-recovery"
+        while not receipt.exists():
+            self.assertLess(time.monotonic(), deadline, "no Supervisor recovery completion")
+            threading.Event().wait(0.01)
+        r = json.loads(receipt.read_bytes())
+        self.assertEqual(r["state"], "DisabledForSession")
+        self.assertEqual(r["config_hash"], r["baseline_hash"])
+        self.assertTrue(r["unrelated_preserved"] and r["injected_gone"])
+        self.assertEqual((self.session.root / "config").read_bytes(), b"stock\n")
+        self.assertEqual((self.session.root / "user-config").read_bytes(), b"do-not-touch\n")
+        self.assertTrue((self.session.root / "payload").exists())
+        self.assertEqual(start_identity(r["stock"]["pid"]), r["stock"]["os_start"])
+        self.session.identities.append(r["stock"])
+        self.assertFalse(any((self.session.root / x).exists() for x in ("session", "config.partial", "session.partial")))
 
     def test_simultaneous_loss_cold_boot_ignores_leftover_payload(self):
         old_scope = self.session.activate()
-        self.session.process.kill()
+        self.session.process.stdin.write('{"op":"kill-both"}\n')
+        self.session.process.stdin.flush()
         self.session.process.wait(timeout=3)
         old = self.session
         old.close(remove=False)
