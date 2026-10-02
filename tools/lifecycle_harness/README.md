@@ -20,11 +20,15 @@ RecoveryFailed at expiry, and late operations cannot report successful restorati
 Child startup has a two-second bounded hello and cleanup on malformed/absent hello or
 missing OS identity. Session construction also cleans up if its own handshake refuses.
 
-The guard independently observes its actual Supervisor child exit, kills and waits
-for its owned injected child, restores exact baseline bytes, starts a fake stock child
+The Supervisor creates and holds its injected child before enabling configuration.
+The guard independently observes actual Supervisor exit and the shared child's live
+OS identity, requests target stop while Supervisor lives or restores stock after it
+dies, waits for injected exit, starts a fake stock child
 and removes an explicit transaction-file allowlist. Tests independently compare
 baseline/unrelated bytes and the restored child's OS process start identity. Windows
-identities use GetProcessTimes; Linux identities use /proc stat start ticks. These
+identities use GetProcessTimes plus live-process signal state; Linux identities use
+/proc stat start ticks and reject zombies. Retained handles of dead children are
+not live evidence. These
 tests model no systemd/watchdog/Qt/GUI/document-worker behavior.
 
 Guard-alone death now triggers surviving-Supervisor recovery on loss of its private
@@ -32,6 +36,11 @@ guard pipe. It restores baseline bytes, waits for the exact injected child to ex
 starts a separately owned stock child and records verified completion. Tests inspect
 the actual stock OS identity and files before any runner cleanup. A blocked or late
 recovery records RecoveryFailed. Simultaneous protection loss remains a limitation;
+Actual death barriers include arming, partial configuration, prepared child before
+configuration, applied configuration before stock stop, stock stop and Ready. The
+Supervisor owns the child before configuration commit, closing the former apply-to-
+identity handoff gap. Restoration disables its serialized activation writer; no old
+command can reenable the completed transaction. Atomic temp files are actor-specific.
 simulated cold-boot reconstruction resets fake runtime-only state and preserves an
 inert payload. That reset is an explicit host model, not evidence of real boot recovery.
 Interrupted rollback preserves injected configuration and reports RecoveryFailed;

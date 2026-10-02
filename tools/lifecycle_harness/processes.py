@@ -24,10 +24,12 @@ def start_identity(pid):
         from ctypes import wintypes
         kernel = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel.OpenProcess.restype = wintypes.HANDLE
-        handle = kernel.OpenProcess(0x1000, False, pid)
+        handle = kernel.OpenProcess(0x1000 | 0x100000, False, pid)
         if not handle:
             return None
         try:
+            if kernel.WaitForSingleObject(wintypes.HANDLE(handle), 0) != 258:
+                return None
             values = [wintypes.FILETIME() for _ in range(4)]
             if not kernel.GetProcessTimes(wintypes.HANDLE(handle), *map(ctypes.byref, values)):
                 return None
@@ -36,13 +38,14 @@ def start_identity(pid):
             kernel.CloseHandle(wintypes.HANDLE(handle))
     try:
         raw = Path(f"/proc/{pid}/stat").read_text()
-        return int(raw[raw.rfind(")") + 2:].split()[19])
+        fields = raw[raw.rfind(")") + 2:].split()
+        return None if fields[0] == "Z" else int(fields[19])
     except (FileNotFoundError, ProcessLookupError):
         return None
 
 
 def atomic(path, data):
-    temporary = path.with_suffix(path.suffix + ".partial")
+    temporary = path.with_name(path.name + ".partial." + str(os.getpid()))
     temporary.write_bytes(data)
     os.replace(temporary, path)
 
@@ -93,31 +96,62 @@ def stop(p):
 
 def supervisor(root, token):
     emit({"role": "supervisor", "pid": os.getpid(), "start": token + ":supervisor"})
+    guard_pid = os.getppid()
+    guard_start = start_identity(guard_pid)
+    armed = False
+    disabled = False
+    injected = None
     injected_identity = None
+    scope = None
     unrelated = digest(root / "user-config")
     for line in sys.stdin:
         command = json.loads(line)
-        if command["op"] == "apply":
-            atomic(root / "session", json.dumps(command["scope"]).encode())
+        op = command["op"]
+        if op == "arm":
+            armed = True
+        elif op == "prepare":
+            if not armed or disabled or injected is not None or start_identity(guard_pid) != guard_start:
+                emit({"ack": op, "refused": True})
+                continue
+            # Supervisor holds the Popen before any enabling configuration is written.
+            injected, injected_identity = child(root, token + "-injected", "runtime")
+            scope = dict(command["scope"], process={"pid": injected.pid, "os_start": injected_identity["os_start"]})
+            emit({"ack": op, "identity": injected_identity, "scope": scope})
+            continue
+        elif op == "apply":
+            if disabled or not armed or injected is None or command["scope"] != scope or start_identity(guard_pid) != guard_start:
+                emit({"ack": op, "refused": True})
+                continue
+            atomic(root / "session", json.dumps(scope).encode())
             atomic(root / "config", b"injected\n")
-        elif command["op"] == "partial":
+        elif op == "partial":
             (root / "config.partial").write_bytes(b"incom")
-        elif command["op"] == "protect":
-            injected_identity = command["identity"]
-        emit({"ack": command["op"]})
+        elif op == "disable":
+            disabled = True
+            stop(injected)
+        elif op == "kill-target":
+            stop(injected)
+        elif op == "runtime-event":
+            if disabled or injected is None or injected.poll() is not None or command["scope"] != scope:
+                emit({"ack": op, "refused": True})
+                continue
+            injected.stdin.write(json.dumps({"op": command["event"], "scope": scope}) + "\n")
+            injected.stdin.flush()
+            response = json.loads(read_line(injected.stdout, 2))
+            emit({"ack": op, "response": response})
+            continue
+        emit({"ack": op})
     # Loss of the private guard pipe is an event, not a timer-based success claim.
     # Surviving Supervisor restores stock independently of the runner.
     stock = None
-    if injected_identity is not None:
+    if armed:
         deadline = time.monotonic() + 5
         try:
+            disabled = True
+            stop(injected)
             atomic(root / "config", (root / "stock-baseline").read_bytes())
             for name in ("session", "config.partial", "session.partial"):
                 (root / name).unlink(missing_ok=True)
-            while start_identity(injected_identity["pid"]) == injected_identity["os_start"]:
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("injected child did not exit")
-                time.sleep(0.01)
             stock, identity = child(root, token + "-supervisor-stock", "runtime", deadline)
             if time.monotonic() >= deadline:
                 raise TimeoutError("late recovery")
@@ -125,13 +159,30 @@ def supervisor(root, token):
                        "config_hash": digest(root / "config"),
                        "baseline_hash": digest(root / "stock-baseline"),
                        "unrelated_preserved": digest(root / "user-config") == unrelated,
-                       "injected_gone": start_identity(injected_identity["pid"]) != injected_identity["os_start"]}
+                       "injected_gone": injected is None or injected.poll() is not None}
         except (TimeoutError, queue.Empty, OSError, ValueError, RuntimeError):
             receipt = {"state": "RecoveryFailed"}
         atomic(root / "supervisor-recovery", json.dumps(receipt).encode())
     while not (root / "stop-owned-children").exists():
         time.sleep(0.01)
     stop(stock)
+    stop(injected)
+
+
+class ObservedChild:
+    """Identity observation only; no PID-name killing or native process control."""
+    def __init__(self, identity):
+        self.identity = identity
+
+    def poll(self):
+        return None if start_identity(self.identity["pid"]) == self.identity["os_start"] else 0
+
+    def wait(self, timeout):
+        deadline = time.monotonic() + timeout
+        while self.poll() is None:
+            if time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired("owned child observation", timeout)
+            time.sleep(0.01)
 
 
 def runtime(root, token):
@@ -175,6 +226,10 @@ def guard(root, token):
     heartbeat = 0
     armed = False
     fail_rollback = False
+    def rpc(op, **fields):
+        supervisor_process.stdin.write(json.dumps({"op": op, **fields}) + "\n")
+        supervisor_process.stdin.flush()
+        return json.loads(read_line(supervisor_process.stdout, 2))
     def report(event, **extra):
         emit({"event": event, "state": state, "attempts": attempts,
               "config_hash": digest(root / "config"),
@@ -193,8 +248,11 @@ def guard(root, token):
             report("rollback-boundary", reason=reason)
             return
         try:
-            stop(injected)
+            if supervisor_process.poll() is None:
+                rpc("disable")
             atomic(root / "config", baseline)
+            if injected:
+                injected.wait(max(0.001, deadline - time.monotonic()))
             for name in ("session", "config.partial", "session.partial"):
                 (root / name).unlink(missing_ok=True)
             if stock.poll() is not None:
@@ -248,6 +306,7 @@ def guard(root, token):
                 state = "Preflight" if command.get("compatible", True) else "DisabledForSession"
                 report("preflight")
             elif op == "arm" and state == "Preflight":
+                rpc("arm")
                 armed = True
                 state = "RecoveryArmed"
                 report("armed")
@@ -258,23 +317,39 @@ def guard(root, token):
                     restore("supervisor-died-during-partial")
                 else:
                     report("partial-applied")
-            elif op == "activate" and state == "RecoveryArmed" and attempts == 0:
+            elif op in ("prepare", "activate") and state == "RecoveryArmed" and attempts == 0:
                 attempts += 1
                 scope = {"boot": token, "generation": attempts,
                          "nonce": token + "-challenge", "process": token + ":injected"}
-                supervisor_process.stdin.write(json.dumps({"op": "apply", "scope": scope}) + "\n")
-                supervisor_process.stdin.flush()
-                if not supervisor_process.stdout.readline():
-                    restore("supervisor-died-during-apply")
+                result = rpc("prepare", scope=scope)
+                if result.get("refused"):
+                    restore("prepare-refused")
+                    continue
+                identity = result["identity"]
+                scope = result["scope"]
+                injected = ObservedChild(identity)
+                identities.append(identity)
+                if op == "prepare":
+                    state = "Prepared"
+                    report("prepared", scope=scope)
+                    continue
+                result = rpc("apply", scope=scope)
+                if result.get("refused"):
+                    restore("apply-refused")
                     continue
                 stop(stock)
-                injected, identity = child(root, token + "-injected", "runtime")
-                identities.append(identity)
-                supervisor_process.stdin.write(json.dumps({"op": "protect", "identity": identity}) + "\n")
-                supervisor_process.stdin.flush()
-                if not supervisor_process.stdout.readline():
-                    restore("supervisor-died-before-protection")
-                    continue
+                state = "Activating"
+                deadline = time.monotonic() + 5
+                report("activated", scope=scope)
+            elif op == "apply" and state == "Prepared":
+                result = rpc("apply", scope=scope)
+                if result.get("refused"):
+                    restore("apply-refused")
+                else:
+                    state = "Applied"
+                    report("applied", scope=scope)
+            elif op == "stop-stock" and state == "Applied":
+                stop(stock)
                 state = "Activating"
                 deadline = time.monotonic() + 5
                 report("activated", scope=scope)
@@ -286,16 +361,15 @@ def guard(root, token):
                               and time.monotonic() < deadline))
                 if valid:
                     # Challenge goes through actual owned child's pipe, not log inference.
-                    injected.stdin.write(json.dumps({"op": op, "scope": scope}) + "\n")
-                    injected.stdin.flush()
-                    response = json.loads(injected.stdout.readline())
+                    result = rpc("runtime-event", event=op, scope=scope)
+                    response = result.get("response")
                     valid = response == {"event": op, "scope": scope}
                 if valid:
                     state = "Ready"
                     heartbeat = time.monotonic()
                 report(op, accepted=valid)
             elif op == "kill-runtime" and injected:
-                stop(injected)
+                rpc("kill-target")
                 report("runtime-stopped")
             elif op == "begin-rollback":
                 state = "RestoringStock"
@@ -309,7 +383,8 @@ def guard(root, token):
             else:
                 report("refused", op=op)
     finally:
-        stop(injected)
+        if injected and supervisor_process.poll() is None:
+            rpc("disable")
         stop(stock)
         stop(supervisor_process)
 

@@ -141,6 +141,17 @@ class RealProcessTests(unittest.TestCase):
         self.assertFalse(captured[0].root.exists())
         self.assertTrue(captured[0].watchdog.finished.is_set())
 
+    def test_dead_child_identity_is_not_live_with_retained_handle(self):
+        p, identity = child(self.session.root, self.session.token + "-retained", "runtime")
+        try:
+            self.assertEqual(start_identity(p.pid), identity["os_start"])
+            stop(p)
+            self.assertIsNone(start_identity(p.pid))
+        finally:
+            stop(p)
+            for pipe in (p.stdin, p.stdout, p.stderr):
+                pipe.close()
+
     def test_child_malformed_absent_and_missing_identity_cleanup(self):
         real_popen = subprocess.Popen
         for failure in ("malformed", "absent", "identity"):
@@ -250,6 +261,39 @@ class RealProcessTests(unittest.TestCase):
         self.assertEqual(start_identity(r["stock"]["pid"]), r["stock"]["os_start"])
         self.session.identities.append(r["stock"])
         self.assertFalse(any((self.session.root / x).exists() for x in ("session", "config.partial", "session.partial")))
+
+    def test_guard_death_at_every_activation_barrier(self):
+        self.session.close()
+        for barrier in ("armed", "partial", "prepared", "applied", "stock-stopped"):
+            with self.subTest(barrier=barrier):
+                self.session = Session()
+                self.session.send("preflight")
+                self.session.send("arm", "armed")
+                if barrier == "partial":
+                    self.session.send("partial", "partial-applied")
+                if barrier in ("prepared", "applied", "stock-stopped"):
+                    self.session.send("prepare", "prepared")
+                if barrier in ("applied", "stock-stopped"):
+                    self.session.send("apply", "applied")
+                if barrier == "stock-stopped":
+                    self.session.send("stop-stock", "activated")
+                self.session.process.kill()
+                self.session.process.wait(timeout=3)
+                deadline = time.monotonic() + 6
+                receipt = self.session.root / "supervisor-recovery"
+                while not receipt.exists():
+                    self.assertLess(time.monotonic(), deadline)
+                    threading.Event().wait(0.01)
+                result = json.loads(receipt.read_bytes())
+                self.assertEqual(result["state"], "DisabledForSession")
+                self.assertTrue(result["injected_gone"] and result["unrelated_preserved"])
+                self.assertEqual(result["config_hash"], result["baseline_hash"])
+                self.assertEqual((self.session.root / "config").read_bytes(), b"stock\n")
+                self.assertEqual(start_identity(result["stock"]["pid"]), result["stock"]["os_start"])
+                self.session.identities.append(result["stock"])
+                self.assertFalse(any((self.session.root / x).exists() for x in ("session", "config.partial", "session.partial")))
+                self.session.close()
+        self.session = Session()
 
     def test_simultaneous_loss_cold_boot_ignores_leftover_payload(self):
         old_scope = self.session.activate()
