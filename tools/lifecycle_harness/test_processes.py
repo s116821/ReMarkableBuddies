@@ -295,6 +295,34 @@ class RealProcessTests(unittest.TestCase):
                 self.session.close()
         self.session = Session()
 
+    def test_lost_prepare_and_apply_ack_restore_before_cleanup(self):
+        self.session.close()
+        for operation in ("lose-prepare-ack", "lose-apply-ack"):
+            with self.subTest(operation=operation):
+                self.session = Session()
+                self.session.send("preflight")
+                self.session.send("arm", "armed")
+                if operation == "lose-apply-ack":
+                    self.session.send("prepare", "prepared")
+                self.session.send(operation, "ack-pipe-lost")
+                deadline = time.monotonic() + 6
+                receipt = self.session.root / "supervisor-recovery"
+                while not receipt.exists():
+                    self.assertLess(time.monotonic(), deadline)
+                    threading.Event().wait(0.01)
+                result = json.loads(receipt.read_bytes())
+                self.assertEqual(result["state"], "DisabledForSession")
+                self.assertTrue(result["injected_gone"] and result["unrelated_preserved"])
+                identity = result["injected_identity"]
+                self.assertIsNotNone(identity)
+                self.assertNotEqual(start_identity(identity["pid"]), identity["os_start"])
+                self.assertEqual((self.session.root / "config").read_bytes(), b"stock\n")
+                self.assertEqual(result["config_hash"], result["baseline_hash"])
+                self.assertEqual(start_identity(result["stock"]["pid"]), result["stock"]["os_start"])
+                self.session.identities.extend([identity, result["stock"]])
+                self.session.close()
+        self.session = Session()
+
     def test_simultaneous_loss_cold_boot_ignores_leftover_payload(self):
         old_scope = self.session.activate()
         self.session.process.stdin.write('{"op":"kill-both"}\n')

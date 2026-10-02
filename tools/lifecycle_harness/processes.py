@@ -104,43 +104,50 @@ def supervisor(root, token):
     injected_identity = None
     scope = None
     unrelated = digest(root / "user-config")
-    for line in sys.stdin:
-        command = json.loads(line)
-        op = command["op"]
-        if op == "arm":
-            armed = True
-        elif op == "prepare":
-            if not armed or disabled or injected is not None or start_identity(guard_pid) != guard_start:
-                emit({"ack": op, "refused": True})
+    try:
+        for line in sys.stdin:
+            command = json.loads(line)
+            op = command["op"]
+            if op == "arm":
+                armed = True
+            elif op == "prepare":
+                if not armed or disabled or injected is not None or start_identity(guard_pid) != guard_start:
+                    emit({"ack": op, "refused": True})
+                    continue
+                # Supervisor holds the Popen before any enabling configuration is written.
+                injected, injected_identity = child(root, token + "-injected", "runtime")
+                scope = dict(command["scope"], process={"pid": injected.pid, "os_start": injected_identity["os_start"]})
+                emit({"ack": op, "identity": injected_identity, "scope": scope})
                 continue
-            # Supervisor holds the Popen before any enabling configuration is written.
-            injected, injected_identity = child(root, token + "-injected", "runtime")
-            scope = dict(command["scope"], process={"pid": injected.pid, "os_start": injected_identity["os_start"]})
-            emit({"ack": op, "identity": injected_identity, "scope": scope})
-            continue
-        elif op == "apply":
-            if disabled or not armed or injected is None or command["scope"] != scope or start_identity(guard_pid) != guard_start:
-                emit({"ack": op, "refused": True})
+            elif op == "apply":
+                if disabled or not armed or injected is None or command["scope"] != scope or start_identity(guard_pid) != guard_start:
+                    emit({"ack": op, "refused": True})
+                    continue
+                atomic(root / "session", json.dumps(scope).encode())
+                atomic(root / "config", b"injected\n")
+            elif op == "partial":
+                (root / "config.partial").write_bytes(b"incom")
+            elif op == "disable":
+                disabled = True
+                stop(injected)
+            elif op == "kill-target":
+                stop(injected)
+            elif op == "runtime-event":
+                if disabled or injected is None or injected.poll() is not None or command["scope"] != scope:
+                    emit({"ack": op, "refused": True})
+                    continue
+                injected.stdin.write(json.dumps({"op": command["event"], "scope": scope}) + "\n")
+                injected.stdin.flush()
+                response = json.loads(read_line(injected.stdout, 2))
+                emit({"ack": op, "response": response})
                 continue
-            atomic(root / "session", json.dumps(scope).encode())
-            atomic(root / "config", b"injected\n")
-        elif op == "partial":
-            (root / "config.partial").write_bytes(b"incom")
-        elif op == "disable":
-            disabled = True
-            stop(injected)
-        elif op == "kill-target":
-            stop(injected)
-        elif op == "runtime-event":
-            if disabled or injected is None or injected.poll() is not None or command["scope"] != scope:
-                emit({"ack": op, "refused": True})
-                continue
-            injected.stdin.write(json.dumps({"op": command["event"], "scope": scope}) + "\n")
-            injected.stdin.flush()
-            response = json.loads(read_line(injected.stdout, 2))
-            emit({"ack": op, "response": response})
-            continue
-        emit({"ack": op})
+            emit({"ack": op})
+    except Exception:
+        # Any failed private command/acknowledgment channel withdraws protection.
+        # Redirect the broken stdout descriptor so interpreter flush cannot bypass
+        # the armed restoration path or produce a misleading late process exit.
+        with open(os.devnull, 'w') as sink:
+            os.dup2(sink.fileno(), sys.stdout.fileno())
     # Loss of the private guard pipe is an event, not a timer-based success claim.
     # Surviving Supervisor restores stock independently of the runner.
     stock = None
@@ -159,6 +166,7 @@ def supervisor(root, token):
                        "config_hash": digest(root / "config"),
                        "baseline_hash": digest(root / "stock-baseline"),
                        "unrelated_preserved": digest(root / "user-config") == unrelated,
+                       "injected_identity": injected_identity,
                        "injected_gone": injected is None or injected.poll() is not None}
         except (TimeoutError, queue.Empty, OSError, ValueError, RuntimeError):
             receipt = {"state": "RecoveryFailed"}
@@ -317,6 +325,23 @@ def guard(root, token):
                     restore("supervisor-died-during-partial")
                 else:
                     report("partial-applied")
+            elif op in ("lose-prepare-ack", "lose-apply-ack"):
+                if op == "lose-prepare-ack" and state == "RecoveryArmed":
+                    attempts += 1
+                    scope = {"boot": token, "generation": attempts,
+                             "nonce": token + "-challenge", "process": token + ":injected"}
+                    request = {"op": "prepare", "scope": scope}
+                elif op == "lose-apply-ack" and state == "Prepared":
+                    request = {"op": "apply", "scope": scope}
+                else:
+                    report("refused", op=op)
+                    continue
+                supervisor_process.stdout.close()
+                supervisor_process.stdin.write(json.dumps(request) + "\n")
+                supervisor_process.stdin.flush()
+                armed = False
+                state = "ChannelLost"
+                report("ack-pipe-lost")
             elif op in ("prepare", "activate") and state == "RecoveryArmed" and attempts == 0:
                 attempts += 1
                 scope = {"boot": token, "generation": attempts,
@@ -384,8 +409,12 @@ def guard(root, token):
                 report("refused", op=op)
     finally:
         if injected and supervisor_process.poll() is None:
-            rpc("disable")
-        stop(stock)
+            try:
+                rpc("disable")
+            except (OSError, ValueError, queue.Empty):
+                pass
+        if isinstance(stock, subprocess.Popen):
+            stop(stock)
         stop(supervisor_process)
 
 
