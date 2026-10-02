@@ -297,13 +297,16 @@ class RealProcessTests(unittest.TestCase):
 
     def test_lost_prepare_and_apply_ack_restore_before_cleanup(self):
         self.session.close()
-        for operation in ("lose-prepare-ack", "lose-apply-ack"):
+        for operation in ("lose-prepare-ack", "lose-apply-ack", "lose-restore-ack"):
             with self.subTest(operation=operation):
                 self.session = Session()
                 self.session.send("preflight")
                 self.session.send("arm", "armed")
                 if operation == "lose-apply-ack":
                     self.session.send("prepare", "prepared")
+                if operation == "lose-restore-ack":
+                    result = self.session.send("activate", "activated")
+                    self.session.send("ready", scope=result["scope"])
                 self.session.send(operation, "ack-pipe-lost")
                 deadline = time.monotonic() + 6
                 receipt = self.session.root / "supervisor-recovery"
@@ -312,6 +315,7 @@ class RealProcessTests(unittest.TestCase):
                     threading.Event().wait(0.01)
                 result = json.loads(receipt.read_bytes())
                 self.assertEqual(result["state"], "DisabledForSession")
+                self.assertEqual(result["restore_runs"], 1)
                 self.assertTrue(result["injected_gone"] and result["unrelated_preserved"])
                 identity = result["injected_identity"]
                 self.assertIsNotNone(identity)
@@ -322,6 +326,25 @@ class RealProcessTests(unittest.TestCase):
                 self.session.identities.extend([identity, result["stock"]])
                 self.session.close()
         self.session = Session()
+
+    def test_shared_restore_idempotent_and_late_writers_fenced(self):
+        scope = self.session.activate()
+        for field in ("nonce", "process"):
+            refused = self.session.send("foreign-restore", "restore-refused", field=field)
+            self.assertTrue(refused["refused"])
+            self.assertEqual((self.session.root / "config").read_bytes(), b"injected\n")
+            self.assertTrue(refused["injected_alive"])
+        restored = self.session.send("restore-race", "restored")
+        first, second = restored["receipts"]
+        self.assertEqual(first, second)
+        self.assertEqual(first["scope"], scope)
+        self.assertEqual(first["restore_runs"], 1)
+        self.assertTrue(first["injected_gone"])
+        self.session.restored(restored)
+        late = self.session.send("late-apply", "late-refused")
+        self.assertTrue(late["refused"] and late["partial_refused"])
+        self.assertEqual((self.session.root / "config").read_bytes(), b"stock\n")
+        self.assertFalse(any((self.session.root / x).exists() for x in ("session", "config.partial", "session.partial")))
 
     def test_simultaneous_loss_cold_boot_ignores_leftover_payload(self):
         old_scope = self.session.activate()

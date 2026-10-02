@@ -104,11 +104,44 @@ def supervisor(root, token):
     injected_identity = None
     scope = None
     unrelated = digest(root / "user-config")
+    stock = None
+    completion = None
+    restore_runs = 0
+    def restore_owned():
+        nonlocal stock, completion, disabled, restore_runs
+        if completion is not None:
+            return completion
+        disabled = True  # Fence this serialized activation writer before effects.
+        restore_runs += 1
+        deadline = time.monotonic() + 5
+        try:
+            stop(injected)
+            atomic(root / "config", (root / "stock-baseline").read_bytes())
+            for name in ("session", "config.partial", "session.partial"):
+                (root / name).unlink(missing_ok=True)
+            stock, identity = child(root, token + "-supervisor-stock", "runtime", deadline)
+            if time.monotonic() >= deadline:
+                raise TimeoutError("late recovery")
+            completion = {"state": "DisabledForSession", "stock": identity,
+                          "transaction": token, "scope": scope, "restore_runs": restore_runs,
+                          "config_hash": digest(root / "config"),
+                          "baseline_hash": digest(root / "stock-baseline"),
+                          "unrelated_preserved": digest(root / "user-config") == unrelated,
+                          "injected_identity": injected_identity,
+                          "injected_gone": injected is None or injected.poll() is not None}
+        except (TimeoutError, queue.Empty, OSError, ValueError, RuntimeError):
+            completion = {"state": "RecoveryFailed", "transaction": token,
+                          "scope": scope, "restore_runs": restore_runs}
+        atomic(root / "supervisor-recovery", json.dumps(completion).encode())
+        return completion
     try:
         for line in sys.stdin:
             command = json.loads(line)
             op = command["op"]
             if op == "arm":
+                if disabled:
+                    emit({"ack": op, "refused": True})
+                    continue
                 armed = True
             elif op == "prepare":
                 if not armed or disabled or injected is not None or start_identity(guard_pid) != guard_start:
@@ -126,10 +159,19 @@ def supervisor(root, token):
                 atomic(root / "session", json.dumps(scope).encode())
                 atomic(root / "config", b"injected\n")
             elif op == "partial":
+                if not armed or disabled:
+                    emit({"ack": op, "refused": True})
+                    continue
                 (root / "config.partial").write_bytes(b"incom")
             elif op == "disable":
                 disabled = True
                 stop(injected)
+            elif op == "restore":
+                if not armed or command.get("scope") != scope:
+                    emit({"ack": op, "refused": True})
+                else:
+                    emit({"ack": op, "receipt": restore_owned()})
+                continue
             elif op == "kill-target":
                 stop(injected)
             elif op == "runtime-event":
@@ -150,27 +192,8 @@ def supervisor(root, token):
             os.dup2(sink.fileno(), sys.stdout.fileno())
     # Loss of the private guard pipe is an event, not a timer-based success claim.
     # Surviving Supervisor restores stock independently of the runner.
-    stock = None
     if armed:
-        deadline = time.monotonic() + 5
-        try:
-            disabled = True
-            stop(injected)
-            atomic(root / "config", (root / "stock-baseline").read_bytes())
-            for name in ("session", "config.partial", "session.partial"):
-                (root / name).unlink(missing_ok=True)
-            stock, identity = child(root, token + "-supervisor-stock", "runtime", deadline)
-            if time.monotonic() >= deadline:
-                raise TimeoutError("late recovery")
-            receipt = {"state": "DisabledForSession", "stock": identity,
-                       "config_hash": digest(root / "config"),
-                       "baseline_hash": digest(root / "stock-baseline"),
-                       "unrelated_preserved": digest(root / "user-config") == unrelated,
-                       "injected_identity": injected_identity,
-                       "injected_gone": injected is None or injected.poll() is not None}
-        except (TimeoutError, queue.Empty, OSError, ValueError, RuntimeError):
-            receipt = {"state": "RecoveryFailed"}
-        atomic(root / "supervisor-recovery", json.dumps(receipt).encode())
+        restore_owned()
     while not (root / "stop-owned-children").exists():
         time.sleep(0.01)
     stop(stock)
@@ -257,15 +280,24 @@ def guard(root, token):
             return
         try:
             if supervisor_process.poll() is None:
-                rpc("disable")
-            atomic(root / "config", baseline)
-            if injected:
-                injected.wait(max(0.001, deadline - time.monotonic()))
-            for name in ("session", "config.partial", "session.partial"):
-                (root / name).unlink(missing_ok=True)
-            if stock.poll() is not None:
-                stock, identity = child(root, token + "-restored", "runtime", deadline)
+                if isinstance(stock, subprocess.Popen):
+                    stop(stock)
+                result = rpc("restore", scope=scope)
+                receipt = result.get("receipt", {})
+                if receipt.get("state") != "DisabledForSession":
+                    raise RuntimeError("Supervisor restoration refused or failed")
+                identity = receipt["stock"]
+                stock = ObservedChild(identity)
                 identities.append(identity)
+            else:
+                atomic(root / "config", baseline)
+                if injected:
+                    injected.wait(max(0.001, deadline - time.monotonic()))
+                for name in ("session", "config.partial", "session.partial"):
+                    (root / name).unlink(missing_ok=True)
+                if stock.poll() is not None:
+                    stock, identity = child(root, token + "-restored", "runtime", deadline)
+                    identities.append(identity)
             if time.monotonic() >= deadline:
                 raise TimeoutError("rollback completed too late")
         except (TimeoutError, queue.Empty, subprocess.TimeoutExpired, OSError, ValueError, RuntimeError):
@@ -342,6 +374,35 @@ def guard(root, token):
                 armed = False
                 state = "ChannelLost"
                 report("ack-pipe-lost")
+            elif op == "lose-restore-ack" and state == "Ready":
+                stop(stock)
+                supervisor_process.stdout.close()
+                supervisor_process.stdin.write(json.dumps({"op": "restore", "scope": scope}) + "\n")
+                supervisor_process.stdin.flush()
+                armed = False
+                state = "ChannelLost"
+                report("ack-pipe-lost")
+            elif op == "restore-race" and state == "Ready":
+                stop(stock)
+                request = json.dumps({"op": "restore", "scope": scope}) + "\n"
+                supervisor_process.stdin.write(request + request)
+                supervisor_process.stdin.flush()
+                receipts = [json.loads(read_line(supervisor_process.stdout, 2))["receipt"] for _ in range(2)]
+                stock = ObservedChild(receipts[0]["stock"])
+                identities.append(receipts[0]["stock"])
+                armed = False
+                state = "DisabledForSession"
+                report("restored", receipts=receipts)
+            elif op == "foreign-restore" and state == "Ready":
+                foreign = dict(scope, nonce="foreign")
+                if command.get("field") == "process":
+                    foreign = dict(scope, process={"pid": scope["process"]["pid"], "os_start": 0})
+                result = rpc("restore", scope=foreign)
+                report("restore-refused", refused=result.get("refused", False))
+            elif op == "late-apply" and state == "DisabledForSession":
+                result = rpc("apply", scope=scope)
+                partial = rpc("partial")
+                report("late-refused", refused=result.get("refused", False), partial_refused=partial.get("refused", False))
             elif op in ("prepare", "activate") and state == "RecoveryArmed" and attempts == 0:
                 attempts += 1
                 scope = {"boot": token, "generation": attempts,

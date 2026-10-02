@@ -41,6 +41,12 @@ configuration, applied configuration before stock stop, stock stop and Ready. Th
 Supervisor owns the child before configuration commit, closing the former apply-to-
 identity handoff gap. Restoration disables its serialized activation writer; no old
 command can reenable the completed transaction. Atomic temp files are actor-specific.
+The surviving Supervisor exposes one transaction-scoped idempotent restoration.
+Guard requests and its own channel-loss recovery reuse that receipt/stock process.
+Tests issue two requests before reading either reply and lose the restoration reply
+pipe: one restoration and one stock identity result. Foreign nonce/process scopes
+refuse, as do activation/partial-write requests after restoration. If Supervisor dies,
+the independent guard uses its own baseline restoration; no owner lock blocks it.
 simulated cold-boot reconstruction resets fake runtime-only state and preserves an
 inert payload. That reset is an explicit host model, not evidence of real boot recovery.
 Interrupted rollback preserves injected configuration and reports RecoveryFailed;
