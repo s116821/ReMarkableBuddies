@@ -46,6 +46,7 @@ static int e0t_command_encode(enum e0t_command_kind kind, unsigned start_role,
         output->argv[output->argc++] = "--plain";
         output->argv[output->argc++] = "--full";
         output->argv[output->argc++] = "list-jobs";
+        output->argv[output->argc++] = "--";
         for (unsigned i = 0; i < 12; ++i) output->argv[output->argc++] = output->units[i];
         for (size_t i = 0; i < baseline_count; ++i) {
             memcpy(output->units[12 + i], baseline[i].unit, 128);
@@ -59,6 +60,7 @@ static int e0t_command_encode(enum e0t_command_kind kind, unsigned start_role,
         output->argv[output->argc++] = "--all";
         output->argv[output->argc++] = "show";
         for (unsigned i = 0; i < 7; ++i) output->argv[output->argc++] = properties[i];
+        output->argv[output->argc++] = "--";
         for (unsigned i = 0; i < 12; ++i) output->argv[output->argc++] = output->units[i];
         strcpy(output->units[12], "xochitl.service");
         strcpy(output->units[13], "reader-buddy.service");
@@ -68,12 +70,14 @@ static int e0t_command_encode(enum e0t_command_kind kind, unsigned start_role,
     }
     case E0T_CANCEL_BATCH:
         output->argv[output->argc++] = "cancel";
+        output->argv[output->argc++] = "--";
         for (size_t i = 0; i < cancel_count; ++i) output->argv[output->argc++] = output->ids[i];
         break;
     case E0T_STOP_CASES:
     case E0T_STOP_CLEANUP:
         output->argv[output->argc++] = "--no-block";
         output->argv[output->argc++] = "stop";
+        output->argv[output->argc++] = "--";
         if (kind == E0T_STOP_CLEANUP) output->argv[output->argc++] = output->units[0];
         else for (unsigned i = 1; i < 12; ++i) output->argv[output->argc++] = output->units[i];
         break;
@@ -82,6 +86,7 @@ static int e0t_command_encode(enum e0t_command_kind kind, unsigned start_role,
         output->argv[output->argc++] = "--no-block";
         output->argv[output->argc++] = "--job-mode=fail";
         output->argv[output->argc++] = "start";
+        output->argv[output->argc++] = "--";
         output->argv[output->argc++] = output->units[start_role];
         break;
     case E0T_RELOAD:

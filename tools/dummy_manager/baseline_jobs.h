@@ -19,7 +19,8 @@ static int e0t_combined_decode(const char *data, size_t length,
     size_t name_sizes[2] = {0};
     for (size_t i = 0; i < name_count; ++i) {
         while (name_sizes[i] < 128 && names[i].unit[name_sizes[i]]) ++name_sizes[i];
-        if (!name_sizes[i] || name_sizes[i] == 128 || !strncmp(names[i].unit, "buddy-e0t-", 10)) return 0;
+        if (!name_sizes[i] || name_sizes[i] == 128 || names[i].unit[0] == '-'
+            || !strncmp(names[i].unit, "buddy-e0t-", 10)) return 0;
         for (size_t j = 0; j < name_sizes[i]; ++j) {
             unsigned char c = (unsigned char)names[i].unit[j];
             if (c < 33 || c > 126 || c == '*' || c == '?' || c == '[' || c == ']' || c == '/') return 0;

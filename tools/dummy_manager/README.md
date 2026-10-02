@@ -240,3 +240,11 @@ empty/maxcancel, full28-argument observer, invalidroles/kinds/unusedinputs, and
 readonlybaseline separation. No actual service command, cleanup protocol or device
 operation was performed; complete IPC/intent/deadline/resource/operator review
 remains open before any writable integration or packet freeze.
+
+Initial pure commandencoder178059e was review-held: an option-looking frozen
+baseline name could enter argv as --host=example. The correction rejects all
+leading-dash baseline names and inserts an explicit -- end-of-options marker
+before EVERY unit/ID target list. Strict compiled-C fixtures now reject --host=,
+--help, --all and -x.service and verify literal valid names/delimiters; maximum
+argv is29/32. The earlier28-argument description refers to the held revision.
+No codec is connected to dispatch and no service/remote command was executed.

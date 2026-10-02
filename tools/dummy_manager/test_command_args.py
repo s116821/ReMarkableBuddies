@@ -19,21 +19,26 @@ int main(void) {
     struct e0t_job jobs[12];
     for(unsigned i=0;i<12;++i) jobs[i]=(struct e0t_job){i+1,i,0,0};
     if(e0t_command_encode(E0T_CANCEL_BATCH,0,NULL,0,NULL,0,a)!=0 || a->argc || a->argv[0]) return 1;
-    if(e0t_command_encode(E0T_CANCEL_BATCH,0,jobs,12,NULL,0,a)!=1 || a->argc!=16 || strcmp(a->argv[3],"cancel") || strcmp(a->argv[15],"12") || a->argv[16]) return 2;
-    if(e0t_command_encode(E0T_STOP_CASES,0,NULL,0,NULL,0,a)!=1 || a->argc!=16 || strcmp(a->argv[4],"stop")) return 3;
-    for(size_t i=5;i<a->argc;++i) if(strstr(a->argv[i],"-cleanup.service") || !strstr(a->argv[i],"buddy-e0t-")) return 4;
-    if(e0t_command_encode(E0T_STOP_CLEANUP,0,NULL,0,NULL,0,a)!=1 || a->argc!=6 || !strstr(a->argv[5],"-cleanup.service")) return 5;
-    if(e0t_command_encode(E0T_START_OWNED,11,NULL,0,NULL,0,a)!=1 || a->argc!=7 || strcmp(a->argv[4],"--job-mode=fail") || !strstr(a->argv[6],"-queued.service")) return 6;
+    if(e0t_command_encode(E0T_CANCEL_BATCH,0,jobs,12,NULL,0,a)!=1 || a->argc!=17 || strcmp(a->argv[3],"cancel") || strcmp(a->argv[4],"--") || strcmp(a->argv[16],"12") || a->argv[17]) return 2;
+    if(e0t_command_encode(E0T_STOP_CASES,0,NULL,0,NULL,0,a)!=1 || a->argc!=17 || strcmp(a->argv[4],"stop") || strcmp(a->argv[5],"--")) return 3;
+    for(size_t i=6;i<a->argc;++i) if(strstr(a->argv[i],"-cleanup.service") || !strstr(a->argv[i],"buddy-e0t-")) return 4;
+    if(e0t_command_encode(E0T_STOP_CLEANUP,0,NULL,0,NULL,0,a)!=1 || a->argc!=7 || !strstr(a->argv[6],"-cleanup.service")) return 5;
+    if(e0t_command_encode(E0T_START_OWNED,11,NULL,0,NULL,0,a)!=1 || a->argc!=8 || strcmp(a->argv[4],"--job-mode=fail") || strcmp(a->argv[6],"--") || !strstr(a->argv[7],"-queued.service")) return 6;
     if(e0t_command_encode(E0T_START_OWNED,12,NULL,0,NULL,0,a)!=-1) return 7;
-    if(e0t_command_encode(E0T_UNIT_STATES,0,NULL,0,NULL,0,a)!=1 || a->argc!=28 || strcmp(a->argv[6],"--property=Id") || strcmp(a->argv[25],"xochitl.service") || strcmp(a->argv[27],"rm-sync.service") || a->argv[28]) return 8;
-    if(e0t_command_encode(E0T_OBSERVED_JOBS,0,NULL,0,baseline,2,a)!=1 || a->argc!=21 || strcmp(a->argv[19],baseline[0].unit) || strcmp(a->argv[20],baseline[1].unit)) return 9;
-    if(e0t_command_encode(E0T_OWNED_JOBS,0,NULL,0,NULL,0,a)!=1 || a->argc!=19) return 10;
+    if(e0t_command_encode(E0T_UNIT_STATES,0,NULL,0,NULL,0,a)!=1 || a->argc!=29 || strcmp(a->argv[6],"--property=Id") || strcmp(a->argv[13],"--") || strcmp(a->argv[26],"xochitl.service") || strcmp(a->argv[28],"rm-sync.service") || a->argv[29]) return 8;
+    if(e0t_command_encode(E0T_OBSERVED_JOBS,0,NULL,0,baseline,2,a)!=1 || a->argc!=22 || strcmp(a->argv[7],"--") || strcmp(a->argv[20],baseline[0].unit) || strcmp(a->argv[21],baseline[1].unit)) return 9;
+    if(e0t_command_encode(E0T_OWNED_JOBS,0,NULL,0,NULL,0,a)!=1 || a->argc!=20) return 10;
     if(e0t_command_encode(E0T_RELOAD,0,NULL,0,NULL,0,a)!=1 || a->argc!=4 || strcmp(a->argv[3],"daemon-reload")) return 11;
     if(e0t_command_encode(E0T_VERSION,0,NULL,0,NULL,0,a)!=1 || a->argc!=2 || strcmp(a->argv[1],"--version")) return 12;
     if(e0t_command_encode(E0T_CANCEL_BATCH,0,jobs,13,NULL,0,a)!=-1) return 13;
     if(e0t_command_encode(E0T_STOP_CASES,0,NULL,0,baseline,2,a)!=-1) return 14;
     if(e0t_command_encode(E0T_OWNED_JOBS,0,jobs,1,NULL,0,a)!=-1) return 15;
     if(e0t_command_encode((enum e0t_command_kind)99,0,NULL,0,NULL,0,a)!=-1) return 16;
+        const char *bad[]={"--host=example","--help","--all","-x.service"};
+    for(unsigned i=0;i<4;++i) {
+        strcpy(baseline[0].unit,bad[i]);
+        if(e0t_command_encode(E0T_OBSERVED_JOBS,0,NULL,0,baseline,2,a)!=-1) return 18;
+    }
     if(box.before!=123 || box.after!=456) return 17;
     puts("pure fixed argument checks passed"); return 0;
 }
