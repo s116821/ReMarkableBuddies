@@ -10,6 +10,8 @@ class CancelEncoderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="e0t-cancel-args-") as temp:
             source = Path(temp) / "fixture.c"
             source.write_text(r'''
+#include "jobs.h"
+#include "cancel_args.h"
 #include "cancel_args.h"
 int main(void) {
     struct e0t_job rows[13] = {{0}}; char arguments[12][11]; size_t count;

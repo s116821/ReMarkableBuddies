@@ -1,3 +1,5 @@
+#ifndef E0T_JOBS_H
+#define E0T_JOBS_H
 /* Pure preparatory decoder, no manager calls or cancellation authority.
  * Input is bounded --no-legend --plain --full output in locale C, no colors.
  * Rows are observations, never submission receipts or terminal-state proof.
@@ -55,3 +57,5 @@ static int e0t_jobs_decode(const char *data, size_t length, struct e0t_job rows[
     }
     return 1;
 }
+
+#endif

@@ -1,3 +1,5 @@
+#ifndef E0T_CANCEL_ARGS_H
+#define E0T_CANCEL_ARGS_H
 /* Pure encoding only, no executable action. Caller must freshly correlate every
  * tuple with the same manager/case instance under sole-writer fencing, then
  * recheck it immediately before any future reviewed dispatch. This function
@@ -17,3 +19,5 @@ static int e0t_cancel_encode(const struct e0t_job *jobs, size_t count, char numb
     }
     return 1;
 }
+
+#endif
