@@ -318,3 +318,17 @@ partial outcomes and no-command/start incompatibility; original intent preserved
 request_protocol.h shares its existing outcome compatibility rule with storage;
 no request-state semantics changed. Pending publisher conservatively returns
 UNKNOWN for completed files rather than granting new-publication authority.
+
+request_history.h reconstructs only the fixed96 historical files in ID order,
+checking each canonical ID/generation/operation/outcome against the pure model.
+Missing then later present IDs, partial/corrupt/unsafe records or held locks
+refuse without exposing a partial ledger. Output is always closed to new starts/
+advancement; pending duplicates remain reconciliation requests, never replay.
+It does not recreate a health lease, open actual dispatch, publish an actual
+fence or invent current manager observations. Caller must already fence queued
+effects/prove exclusive writer loss or orderly handoff; raw completion writers
+do not take the root slot, so no atomic snapshot claim follows from its locks.
+Manifest/foreign-path inventory remains a separate gate. The strict owned host
+fixture passed0.205s after actual writer child exit, historical advancement and
+pending-start reconstruction, held slot, ID gap and corrupt-record refusal.
+This remains unconnected to cleanup/operator/server/target execution.
