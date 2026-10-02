@@ -13,12 +13,23 @@ with nonce `f4851e410f62491da7302dd86c5a5b19`. It again acquired the engine but
 refused with module-missing. Missing-module identity remains unknown; original
 restoration/cleanup and independent saved evidence checks passed. Do not retry it.
 
-The next combined diagnostic pins SDK source
-`d241243fa1f9db2de7df9f581d1ef7aaf3159ad9`. Main independently reviewed it and
-reran all sixteen owned firmware-matched ARM-emulated fixtures successfully.
-Nonce is `806dd85591ff40268a11667768f0edd3`; payload SHA256 is
-`631950d84b85945f0325c5db43bd78a99a9f29bf286e4002a4976341755a7638`.
-It retains the same helper/imports/readiness and fixed public categories, adding
+The combined SDK `d241243` / Buddy `da5c2ff` packet ran once with nonce
+`806dd85591ff40268a11667768f0edd3`. The concrete private diagnostic identifies
+the native library import at fixed-helper line2. Public receipt is missing-library;
+original restoration/diagnostic collection/cleanup and independent evidence checks
+passed. It remains preserved and spent; access is still unproven.
+
+The next source pins `af9074071955867b6cbaa53e56758e5931b2b61a`. Main independently
+reviewed it and passed all twenty-three vendor-Qt ARM-emulated owned fixtures.
+Nonce is `63365c1db7dc4da9a49ceb813a0b8c35`; payload SHA256 is
+`c2d70b4ecec334aef7e9d2739e6cf603e82449ee57bc13d24067288f480bd5e6`.
+Only exact missing-library compilation failure may await a new window event
+after owned failed-component cleanup before another availability test on the same
+guarded engine. Each test rechecks uniqueness/thread, within eight total attempts
+and the original refusal-only deadline. No timer polling, cache clearing, new engine
+or stale-event retry. Only Ready plus the own availability boolean proves access.
+One helper creation ever; private last-failure diagnostics retain attempt context.
+It retains the fixed helper/imports and public categories, using
 one private `diagnostics.json`: at most eight descriptions of at most256 UTF16
 units, line/column and explicit truncation/redaction/overflow flags, no URLs.
 Known personal paths are redacted; system plugin details remain private.
