@@ -1,5 +1,12 @@
 # Development facts request source
 
+Latest source gate: [future refusal operator](future-refusal-operator.md) supports
+the accepted SDK b58a59b27-field refusal record. The future template is stopped
+before preparation/transport; no fresh nonce/build/trial is selected. The earlier
+b3e3/e3988 trial is spent: facts read refused, stock restored and all14 fixture
+hashes unchanged. Its executable operator/packet remain unchanged. Refusal evidence
+cannot pass or retrofit the successful23/private4/public validators.
+
 Current checkpoint: Main/Astra accepted SDK `4a35e32` and Buddy `cba54ec`.
 Main separately selected the reserved facts-only b3e3ca candidate for preparation.
 See [operator-packet.md](operator-packet.md) for that literal candidate's scope;
