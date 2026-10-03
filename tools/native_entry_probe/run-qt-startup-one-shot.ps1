@@ -1,10 +1,10 @@
 param([Parameter(Mandatory=$true)][string]$PayloadPath,
       [Parameter(Mandatory=$true)][string]$EvidenceDirectory, [switch]$PrepareOnly)
 $ErrorActionPreference = 'Stop'
-$nonce='c670c4e880304c1a91359005d8b96219'
+$nonce='719b74a2c4e54b3bbdbf9e389f03c2b1'
 $remote='/run/rmb-qt-probe-'+$nonce
 $rollback='rmb-qt-probe-'+$nonce+'-rollback'
-$payloadHash='05c1d36ce3a871287860cd71a54d6df95bfb82c8f573de75c349e8ad9aff3e82'
+$payloadHash='572647c391dd949a2f6b4dcafa5ff6b0e3d6a7fa3f17d69405776f8efdc987a6'
 if((Get-FileHash -LiteralPath $PayloadPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $payloadHash){throw 'Payload changed'}
 $packet=Join-Path $EvidenceDirectory ('qt-startup-packet-'+$nonce)
 if(-not(Test-Path -LiteralPath $packet)){[void](New-Item -ItemType Directory -Path $packet)}
@@ -23,7 +23,7 @@ foreach($item in @{owner=$nonce;'dropin.sha256'=$files['native-probe.conf']}.Get
     $files[$item.Key]=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 if($PrepareOnly){$files|ConvertTo-Json;return}
-$record=[ordered]@{nonce=$nonce;experiment='existing-engine-navigation-candidate-metadata-observer';payload_source='e86336efbc3035b63dd7e92018a6091a10dcb63f';payload_sha256=$payloadHash;operator_sha256=(Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant();files=$files;results=@();arm_intent=$false;armed=$false;callback_verified=$false;candidate_generation_verified=$false;qml_access_verified=$false;candidate_receipt=$null;restored=$false;cleanup_verified=$false;diagnostic_collected=$false;diagnostic_sha256=$null;final_callback_state='not-checked';final_callback_collected=$false;final_callback_sha256=$null}
+$record=[ordered]@{nonce=$nonce;experiment='explicit-fixture-native-page-creation';payload_source='bed8ac086b806272e08f33075e4835b86d70c514';payload_sha256=$payloadHash;operator_sha256=(Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant();files=$files;results=@();arm_intent=$false;armed=$false;callback_verified=$false;candidate_generation_verified=$false;qml_access_verified=$false;candidate_receipt=$null;restored=$false;cleanup_verified=$false;diagnostic_collected=$false;diagnostic_sha256=$null;final_callback_state='not-checked';final_callback_collected=$false;final_callback_sha256=$null}
 function Native([string]$program,[string[]]$arguments,[int]$timeoutMs=20000){
     $info=[Diagnostics.ProcessStartInfo]::new();$info.FileName=$program;$info.UseShellExecute=$false
     $info.RedirectStandardOutput=$true;$info.RedirectStandardError=$true
@@ -50,9 +50,9 @@ try{
 set -eu
 test "$(sed -n 's/^IMG_VERSION=//p' /etc/os-release)" = '"3.28.0.172"'
 test "$(cat /sys/devices/soc0/machine)" = 'reMarkable 2.0'
-test "$(pidof xochitl)" = 3653
-test "$(awk '{print $22}' /proc/3653/stat)" = 190358636
-test "$(sha256sum /proc/3653/exe | awk '{print $1}')" = 071d85beef3ef2d4cc0e11002140b27b82a2cc04a2ed740a5669f591069b77df
+test "$(pidof xochitl)" = 4349
+test "$(awk '{print $22}' /proc/4349/stat)" = 190863366
+test "$(sha256sum /proc/4349/exe | awk '{print $1}')" = 071d85beef3ef2d4cc0e11002140b27b82a2cc04a2ed740a5669f591069b77df
 test "$(sha256sum /usr/lib/libQt6Core.so.6.10.3 | awk '{print $1}')" = 43b0e210d64e59b534490d78c4c82cc1d2958999b0969aa0f77e11a082704e5d
 test "$(sha256sum /usr/lib/libQt6Qml.so.6.10.3 | awk '{print $1}')" = e9cfb062609972005470d048f75b68c749f0ccd3bf09de45916232845694c944
 test "$(sha256sum /usr/lib/libQt6Gui.so.6.10.3 | awk '{print $1}')" = 93fe582cc61673342ca49e12306d7f689860016582fa46ce135ffa280a972839
@@ -64,7 +64,7 @@ test "$(systemctl show --property=Restart --value xochitl.service)" = on-failure
 test "$(systemctl show --property=KillMode --value xochitl.service)" = control-group
 test "$(systemctl show --property=NRestarts --value xochitl.service)" = 0
 test -z "$(systemctl show --property=Job --value xochitl.service)"
-if awk 'BEGIN {RS="\0"} /^(LD_PRELOAD|LD_LIBRARY_PATH|XOVI_ROOT)=/ {found=1} END {exit !found}' /proc/3653/environ; then exit 90; fi
+if awk 'BEGIN {RS="\0"} /^(LD_PRELOAD|LD_LIBRARY_PATH|XOVI_ROOT)=/ {found=1} END {exit !found}' /proc/4349/environ; then exit 90; fi
 systemctl is-active xochitl.service reader-buddy.service rm-sync.service
 test ! -e '@ROOT@'
 test ! -e /run/systemd/system/xochitl.service.d
@@ -82,7 +82,7 @@ mkdir -m700 '@ROOT@'
     $record.arm_intent=$true
     Require (SSH (Expand @'
 set -eu
-test "$(sha256sum '@ROOT@/payload.so' | awk '{print $1}')" = 05c1d36ce3a871287860cd71a54d6df95bfb82c8f573de75c349e8ad9aff3e82
+test "$(sha256sum '@ROOT@/payload.so' | awk '{print $1}')" = 572647c391dd949a2f6b4dcafa5ff6b0e3d6a7fa3f17d69405776f8efdc987a6
 chmod 600 '@ROOT@/payload.so'
 # Prove actual target flags before arming or stopping any original service.
 exec 9>'@ROOT@/admission.lock'

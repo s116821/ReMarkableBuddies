@@ -2,8 +2,8 @@
 # Sole transient oneshot writer; main and timer start the SAME service.
 set -eu
 umask 077
-root=/run/rmb-qt-probe-c670c4e880304c1a91359005d8b96219
-nonce=c670c4e880304c1a91359005d8b96219
+root=/run/rmb-qt-probe-719b74a2c4e54b3bbdbf9e389f03c2b1
+nonce=719b74a2c4e54b3bbdbf9e389f03c2b1
 parent=/run/systemd/system/xochitl.service.d
 dropin="$parent/zz-rmb-qt-probe-$nonce.conf"
 test -d "$root" && test ! -L "$root"
