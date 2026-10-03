@@ -18,7 +18,7 @@ $budgetPath=Join-Path $PSScriptRoot 'development-budget.ps1'
 if((Hash $proofPath) -cne 'ea0736d4025ef1d929e888a5755a59c506a580e067bdb8a8bb4134b6e3cf6f73' -or
    (Hash $budgetPath) -cne 'a2956bc0f5073dc6eb69c2b87c5f7c99e2bdb8828c3ae410e73a295c8f0b4ba6'){throw 'Fixed proof/budget source changed'}
 $refusalProofPath=Join-Path $PSScriptRoot 'facts-refusal-proof.ps1'
-if((Hash $refusalProofPath) -cne '07cf12f677d3b92cf0bb6fb0c56fbcb9a00be4bffa32a9436c217ff5fe08b697'){throw 'Fixed refusal decoder changed'}
+if((Hash $refusalProofPath) -cne '44c786488a88fb249501bbcc0361fe53b561f9b5ac33e8f3ae1ea22b37732c66'){throw 'Fixed refusal decoder changed'}
 . $refusalProofPath
 . $proofPath
 . $budgetPath

@@ -31,11 +31,11 @@ and callback correlation are explicitly historical; they never update live flags
 Malformed JSON is preserved as bounded text with decoded=false. Unknown transport,
 framing, mode, type or size keeps recovery/stage uncertainty instead of claiming
 cleanup. Exact cleanup adds only refusal.json; an unknown extra file prevents rmdir.
-The remote reader uses head -c2049 rather than unrestricted cat; the host rejects
+The remote reader uses `dd bs=2049 count=1` rather than unrestricted cat; the host rejects
 the 2049th-byte oversize sentinel. Size/mode/path samples are sequential and do not
 establish hostile-file atomicity or general no-follow authority. The selected SDK
 writer/private-root contract still applies. A future preflight must verify the
-target's head -c behavior before arming; no target command is executed by this gate.
+target's dd byte-cap and short-file behavior before arming; no target command is executed by this gate.
 
 The fixed decoder requires UTF8<=2048, one JSON object, exactly27 unique case-sensitive
 keys, exact field types, kind/version, expected nonce/PID/start, allowed18 stage labels
@@ -49,7 +49,7 @@ The decoder does not establish the first failure, native ownership or live autho
 
 Owned checks: test-facts-refusal.ps1 has144 portable checks/145 with the actual
 owned C++27-field output; test-diagnostic-operator.ps1 has49 exact extracted
-live/recovery assertions with mocked transport; test-refusal-shell.py has12 exact
+live/recovery assertions with mocked transport; test-refusal-shell.py has13 exact
 Linux presence/read/cleanup cases against real owned files, no service calls.
 The growth regression mutates the file after the final size sample and proves
 actual read output remains capped at2049 bytes for host-side rejection.
@@ -62,3 +62,9 @@ headers, and the SDK pin must be b58a59b. Independently rebuild artifacts, refre
 Main's stock/fixture baseline, prepare/hash the complete new literal packet and
 review its refusal decoding/collection/exact cleanup. Those are future gates,
 not effects or artifacts produced by this source change.
+
+Collector portability correction after54b: Main reported the target BusyBox1.36.1
+head lacks -c. The bounded reader now uses dd with one2049-byte block, preserving
+the host oversize rejection. Main separately reported read-only target dd short-input
+and2049-byte cap checks passing. These reports are target capability evidence,
+not a native facts trial; this source gate performs no target commands.

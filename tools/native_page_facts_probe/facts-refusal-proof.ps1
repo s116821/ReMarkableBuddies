@@ -78,7 +78,7 @@ if test -f '@ROOT@/refusal.json'; then
     printf 'present\n'
     # Actual reader cap even if the file grows after size checks. Host rejects
     # the 2049th byte sentinel; path/mode checks remain sequential, not atomic.
-    head -c 2049 '@ROOT@/refusal.json'
+    dd if='@ROOT@/refusal.json' bs=2049 count=1 2>/dev/null
 else
     test ! -e '@ROOT@/refusal.json'
     test ! -L '@ROOT@/refusal.json'

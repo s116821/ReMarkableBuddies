@@ -32,7 +32,7 @@ with tempfile.TemporaryDirectory(prefix="refusal-shell-") as temporary:
     file = root / "refusal.json"
     assert run(READ, root, True, "absent") == "absent\n"
     for text, success, label in (("{}", True, "bounded file"), ("{partial", True, "malformed preserved"),
-                                 ("x" * 2048, True, "exact byte cap"), ("x" * 2049, False, "over cap"),
+                                 ("x" * 2048, True, "exact byte cap"), ("\0" * 2048, True, "binary byte cap"), ("x" * 2049, False, "over cap"),
                                  ("", False, "empty file")):
         file.write_text(text)
         file.chmod(0o600)
