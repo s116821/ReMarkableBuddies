@@ -64,7 +64,7 @@ try{
     }
     # Exact recovery body with transport mocks; historical diagnostic cannot alter live flags.
     $start=$source.IndexOf('}finally{')+10
-    $recovery=[scriptblock]::Create($source.Substring($start,$source.Length-$start-2))
+    $recovery=[scriptblock]::Create($source.Substring($start,$source.TrimEnd().Length-$start-1))
     function Start-Sleep {param($Seconds,$Milliseconds)}
     function Native {param($program,$arguments)
         $destination=$arguments[-1]
