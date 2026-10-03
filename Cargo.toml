@@ -11,6 +11,7 @@ repository = "https://github.com/s116821/ReMarkableBuddies"
 vergen-gitcl = { version = "=10.0.3", features = ["emit_and_set"] }
 
 [dependencies]
+remarkable-open-sdk = { git = "https://github.com/s116821/ReMarkableOpenSDK.git", rev = "f6b7dc8954ba9f5a284d56568765e05c38483924", default-features = false }
 tokio = { version = "1.28", features = ["full"] }
 ureq = { version = "3.0", features = ["json"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -37,6 +38,7 @@ name = "remarkable_reader_buddy"
 path = "src/lib.rs"
 
 [dev-dependencies]
+remarkable-open-sdk = { git = "https://github.com/s116821/ReMarkableOpenSDK.git", rev = "f6b7dc8954ba9f5a284d56568765e05c38483924", default-features = false, features = ["mock"] }
 # Explicit native-evidence example only; not linked into the installed runtime.
 sha2 = "0.10"
 

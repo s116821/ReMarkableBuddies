@@ -2,6 +2,7 @@ pub mod history;
 pub mod indicator;
 mod navigation;
 pub mod orchestrator;
+pub mod sdk_acquisition;
 pub mod symbol_pool;
 pub mod xochitl_integration;
 
