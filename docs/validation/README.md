@@ -9,6 +9,13 @@ Use the repository's reader-buddy-testing skill before running these fixtures on
 an authorized development tablet. JSON stroke fixtures and their Python generators
 exercise known question, shorthand, ambiguous-ink, and missing-question cases with
 `examples/hardware_probe.rs`. They are synthetic input, not a human handwriting study.
+
+`hardware_probe tap-only X Y` is an explicit development input-only command using
+the same virtual coordinates and100ms tap as `tap`. It returns after successful
+release without the common two-second wait, framebuffer capture or fixed PNG
+overwrite. Existing `tap` and `press` retain that capture tail. Exit0 does not prove
+document opening; input I/O remains externally bounded with no internal absolute
+deadline or guaranteed release after termination. Central change: `isolate-development-tap`.
 Inspect current UI state and adapt coordinates before replay; do not run blindly.
 
 The reference document is Gundlach and Merkowitz,

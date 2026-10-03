@@ -236,7 +236,7 @@ fn main() -> Result<()> {
             keyboard.key_cmd_body()?;
             keyboard.string_to_keypresses(&text)?;
         }
-        Some("tap") | Some("press") => {
+        Some("tap") | Some("tap-only") | Some("press") => {
             let x = args
                 .get(2)
                 .ok_or_else(|| anyhow::anyhow!("x required"))?
@@ -261,6 +261,9 @@ fn main() -> Result<()> {
             touch.touch_start((x, y))?;
             sleep(Duration::from_millis(duration));
             touch.touch_stop()?;
+            if args[1] == "tap-only" {
+                return Ok(());
+            }
         }
         Some("strokes") | Some("erase-strokes") => {
             let path = args
@@ -474,7 +477,7 @@ fn main() -> Result<()> {
                     .unwrap_or("Reader Buddy offline keyboard test"),
             )?;
         }
-        _ => bail!("Usage: hardware_probe tap X Y | line | text"),
+        _ => bail!("Usage: hardware_probe tap X Y | tap-only X Y | line | text"),
     }
     sleep(Duration::from_secs(2));
     let mut screenshot = Screenshot::new()?;
