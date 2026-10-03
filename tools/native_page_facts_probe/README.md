@@ -1,5 +1,12 @@
 # Development facts request source
 
+Current checkpoint: Main/Astra accepted SDK `4a35e32` and Buddy `cba54ec`.
+Main separately selected the reserved facts-only b3e3ca candidate for preparation.
+See [operator-packet.md](operator-packet.md) for that literal candidate's scope;
+artifact rebuild and exact operator review remain pending before any transfer/trial.
+`test-facts-operator.ps1` passes 17 owned live/recovery cases using mocked transport.
+The source-only qualification limits below still apply to publisher/validator checks.
+
 Source/owned fixtures only. This is not a native operator packet, selected binary,
 device authorization, native authority object or a timing feasibility result.
 It implements the fixed publisher and historical result validation for accepted
