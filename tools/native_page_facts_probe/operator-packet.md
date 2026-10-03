@@ -8,6 +8,8 @@ hashes and Main's fresh stock/fixture baseline. No native result is claimed.
 The fixed baseline binds Main's `precall-stock-fixture-v2.txt` (the earlier failed
 probe is not used), current PID/start and all 14 fixture file hashes. Initial live
 preflight compares those exact hashes before creating a stage or arming anything.
+The initial lock is exclusively created under umask077 and verified mode0600/root
+before timer arming; an existing file or link refuses rather than being repaired.
 
 The operator is a minimal fork of the accepted one-shot development launcher and
 singleton restore transaction. `restore.sh` changes only the nonce/root. `launch.sh`
@@ -57,6 +59,8 @@ five-second read interval with all authority flags false. The collector checks t
 same live generation and empty Job before and after collection and checks the
 original host deadline before setting live success. Final restored evidence cannot
 retrofit live flags. Main still separately verifies fixture preservation after trial.
+Success collection binds the durable consumed eight-field facts-request token.
+It does not require facts-waiting, which SDK finish removes before callback.
 
 Recovery always requests the SAME prearmed singleton service, verifies stock/empty
 Job/original services and attempted-process disappearance, collects bounded final
@@ -65,3 +69,7 @@ units. Cleanup includes facts-publisher, both helper scripts, facts-waiting,
 facts-request and facts-request.tmp. Any unknown extra file prevents rmdir and
 cleanup success. Restoration failure retains the path/timer duty. The 17 owned
 live/recovery branch tests use mocked transport and do not execute this packet.
+`test-operator-shell.py` additionally runs the exact extracted lock and collection
+shell against real owned files under initial umask022, with explicit mocks only
+for proc/service observations. Its completed-success fixture has callback and
+diagnostics present, facts-waiting absent and the exact durable request retained.

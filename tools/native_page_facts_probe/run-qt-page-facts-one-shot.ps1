@@ -123,10 +123,17 @@ set -eu
 test "$(sha256sum '@ROOT@/payload.so' | awk '{print $1}')" = a747186fb466b8947caf46a9629654f24743f090b0f7f3e27e764e2dbacdc226
 chmod 600 '@ROOT@/payload.so'
 # Prove actual target flags before arming or stopping any original service.
-exec 9>'@ROOT@/admission.lock'
+# BEGIN private initial lock (owned shell regression extracts this exact block).
+umask 077
+test ! -e '@ROOT@/admission.lock' && test ! -L '@ROOT@/admission.lock' || exit 90
+(set -C; : > '@ROOT@/admission.lock')
+test -f '@ROOT@/admission.lock' && test ! -L '@ROOT@/admission.lock' || exit 90
+test "$(stat -c '%a %u' '@ROOT@/admission.lock')" = '600 0'
+exec 9<>'@ROOT@/admission.lock'
 flock -n 9
 flock -u 9
 exec 9>&-
+# END private initial lock
 systemd-run --unit='@UNIT@' --on-active=180s --timer-property=AccuracySec=1s --property=Type=oneshot --property=RemainAfterExit=yes --property=Restart=no --property=TimeoutStartSec=240s --property=TimeoutStopSec=5s --property=KillMode=control-group --property=UMask=0077 /bin/sh '@ROOT@/restore.sh'
 test "$(systemctl show --property=ActiveState --value '@UNIT@.timer')" = active
 test "$(systemctl show --property=OnFailure --value '@UNIT@.service')" = ''
@@ -179,20 +186,21 @@ cat '@ROOT@/callback.json'
 set -eu
 test ! -e '@ROOT@/entry.closed'
 test ! -e '@ROOT@/restore.claim'
-test -f '@ROOT@/attempt.identity' && test ! -L '@ROOT@/attempt.identity'
+test -f '@ROOT@/attempt.identity' && test ! -L '@ROOT@/attempt.identity' || exit 90
 test "$(stat -c '%a %u' '@ROOT@/attempt.identity')" = '600 0'
 test "$(wc -c < '@ROOT@/attempt.identity')" -le 128
 read p started < '@ROOT@/attempt.identity'
 case "$p:$started" in *[!0-9:]*|:*|*:) exit 90;; esac
-test -f '@ROOT@/facts-waiting' && test ! -L '@ROOT@/facts-waiting'
-test "$(stat -c '%a %u' '@ROOT@/facts-waiting')" = '600 0'
-test "$(wc -c < '@ROOT@/facts-waiting')" -le 256
-read n wp ws dev ino stage ms setup profile extra < '@ROOT@/facts-waiting'
-test -z "$extra" && test "$n" = '@NONCE@' && test "$wp $ws" = "$p $started"
-case "$dev:$ino:$ms" in *[!0-9:]*|:*|*:|*::*) exit 90;; esac
-test "$stage" = waiting-facts && test "$setup" = 120000 && test "$profile" = main-dev-facts-120s
-test "$ms" -ge 0 && test "$ms" -lt 120000
-test -d '@ROOT@' && test ! -L '@ROOT@'
+# Waiting is removed by SDK finish BEFORE callback; the consumed request remains.
+test -f '@ROOT@/facts-request' && test ! -L '@ROOT@/facts-request' || exit 90
+test "$(stat -c '%a %u' '@ROOT@/facts-request')" = '600 0'
+test "$(wc -c < '@ROOT@/facts-request')" -le 128
+read n wp ws dev ino stage setup profile extra < '@ROOT@/facts-request'
+test -z "$extra" && test "$n" = '@NONCE@' && test "$wp $ws" = "$p $started" || exit 90
+case "$dev:$ino" in *[!0-9:]*|:*|*:|*::*) exit 90;; esac
+test "$stage" = read-facts && test "$setup" = 120000 && test "$profile" = main-dev-facts-120s || exit 90
+test "$(cat '@ROOT@/facts-request')" = "$n $wp $ws $dev $ino $stage $setup $profile"
+test -d '@ROOT@' && test ! -L '@ROOT@' || exit 90
 test "$(stat -c '%d %i %a %u' '@ROOT@')" = "$dev $ino 700 0"
 test "$(cat '@ROOT@/owner')" = '@NONCE@'
 test "$(systemctl show --property=MainPID --value xochitl.service)" = "$p"

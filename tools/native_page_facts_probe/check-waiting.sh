@@ -3,10 +3,10 @@
 set -eu
 root=/run/rmb-qt-probe-b3e3ca0475a84432a9b328218395de0c
 nonce=b3e3ca0475a84432a9b328218395de0c
-test -d "$root" && test ! -L "$root"
+test -d "$root" && test ! -L "$root" || exit 90
 test "$(stat -c '%a %u' "$root")" = '700 0'
 for name in owner attempt.identity facts-waiting payload.so; do
- test -f "$root/$name" && test ! -L "$root/$name"
+ test -f "$root/$name" && test ! -L "$root/$name" || exit 90
  test "$(stat -c '%a %u' "$root/$name")" = '600 0'
 done
 test "$(wc -c < "$root/owner")" = 32
@@ -14,15 +14,15 @@ test "$(cat "$root/owner")" = "$nonce"
 test "$(wc -c < "$root/facts-waiting")" -le 256
 test "$(wc -c < "$root/attempt.identity")" -le 128
 read n p started dev ino stage ms setup profile extra < "$root/facts-waiting"
-test -z "$extra" && test "$n" = "$nonce"
+test -z "$extra" && test "$n" = "$nonce" || exit 90
 case "$p:$started:$dev:$ino:$ms" in *[!0-9:]*|:*|*:|*::*) exit 90;; esac
-test "$p" -gt 1 && test "$started" -gt 0
-test "$stage" = waiting-facts && test "$setup" = 120000 && test "$profile" = main-dev-facts-120s
-test "$ms" -ge 0 && test "$ms" -lt 120000
+test "$p" -gt 1 && test "$started" -gt 0 || exit 90
+test "$stage" = waiting-facts && test "$setup" = 120000 && test "$profile" = main-dev-facts-120s || exit 90
+test "$ms" -ge 0 && test "$ms" -lt 120000 || exit 90
 test "$(stat -c '%d %i' "$root")" = "$dev $ino"
 test "$(cat "$root/attempt.identity")" = "$p $started"
 for name in entry.closed restore.claim callback.json facts-request facts-request.tmp; do
- test ! -e "$root/$name" && test ! -L "$root/$name"
+ test ! -e "$root/$name" && test ! -L "$root/$name" || exit 90
 done
 test "$(systemctl show --property=MainPID --value xochitl.service)" = "$p"
 test -z "$(systemctl show --property=Job --value xochitl.service)"
@@ -37,6 +37,6 @@ test "$(stat -c '%d %i %a %u' "$root")" = "$dev $ino 700 0"
 test "$(cat "$root/owner")" = "$nonce"
 test "$(cat "$root/facts-waiting")" = "$n $p $started $dev $ino $stage $ms $setup $profile"
 for name in entry.closed restore.claim callback.json facts-request facts-request.tmp; do
- test ! -e "$root/$name" && test ! -L "$root/$name"
+ test ! -e "$root/$name" && test ! -L "$root/$name" || exit 90
 done
 printf 'positive-waiting %s %s\n' "$p" "$started"

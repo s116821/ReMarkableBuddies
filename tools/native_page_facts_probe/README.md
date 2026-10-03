@@ -5,6 +5,10 @@ Main separately selected the reserved facts-only b3e3ca candidate for preparatio
 See [operator-packet.md](operator-packet.md) for that literal candidate's scope;
 artifact rebuild and exact operator review remain pending before any transfer/trial.
 `test-facts-operator.ps1` passes 17 owned live/recovery cases using mocked transport.
+`test-operator-shell.py` adds 17 source-exact Linux lock/lifecycle regressions:
+initial umask022 still creates0600, and completed callback collection uses the
+durable eight-field request with waiting absent. Proc/service observations are
+explicit mocks; private file lifecycle, modes, token shape and root binding are real.
 The source-only qualification limits below still apply to publisher/validator checks.
 
 Source/owned fixtures only. This is not a native operator packet, selected binary,
