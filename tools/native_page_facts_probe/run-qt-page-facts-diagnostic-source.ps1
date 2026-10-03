@@ -74,11 +74,11 @@ function Native([string]$program,[string[]]$arguments,[int]$timeoutMs=20000){
     $result=[ordered]@{program=$program;exit=$process.ExitCode;timeout=$timeout;stdout=$stdout.GetAwaiter().GetResult();stderr=$stderr.GetAwaiter().GetResult()}
     $process.Dispose();$record.results+=$result;return $result
 }
-function SSH([string]$command){Native 'ssh' @('-o','HostName=10.11.99.1','-o','StrictHostKeyChecking=yes','-o','BatchMode=yes','-o','ConnectTimeout=8','RM2',$command)}
+function SSH([string]$command){Native 'ssh' @('-o','HostName=10.11.99.1','-o','StrictHostKeyChecking=yes','-o','BatchMode=yes','-o','ConnectTimeout=8','RM2',$command.Replace("`r`n","`n"))}
 function ObservationSSH([string]$command){
     $remaining=$budget.LiveObservationMs-$observationClock.ElapsedMilliseconds
     if($remaining -le 0){throw 'Callback observation budget exhausted; restoration still required'}
-    $result=Native 'ssh' @('-o','HostName=10.11.99.1','-o','StrictHostKeyChecking=yes','-o','BatchMode=yes','-o','ConnectTimeout=2','RM2',$command) ([int][Math]::Min(3000,$remaining))
+    $result=Native 'ssh' @('-o','HostName=10.11.99.1','-o','StrictHostKeyChecking=yes','-o','BatchMode=yes','-o','ConnectTimeout=2','RM2',$command.Replace("`r`n","`n")) ([int][Math]::Min(3000,$remaining))
     if($observationClock.ElapsedMilliseconds -ge $budget.LiveObservationMs){throw 'Callback observation returned outside budget; restoration still required'}
     return $result
 }

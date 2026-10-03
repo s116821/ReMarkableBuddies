@@ -68,3 +68,19 @@ head lacks -c. The bounded reader now uses dd with one2049-byte block, preservin
 the host oversize rejection. Main separately reported read-only target dd short-input
 and2049-byte cap checks passing. These reports are target capability evidence,
 not a native facts trial; this source gate performs no target commands.
+
+The later Main-owned7866 candidate is spent. Its first SSH command failed with
+`set: -\r: invalid option` before arming; no native facts outcome was observed.
+The CRLF source here-string reached SSH with carriage returns even though the
+extracted shell-syntax fixtures had normalized their copies. Future source now
+normalizes CRLF to LF at both SSH argument boundaries, preserving transport
+options, results and the original observation clock. The spent private packet
+and its false lifecycle flags remain unchanged.
+
+`test-transport-lines.ps1 -FixturePath <owned-output.json>` evaluates the exact
+source transport functions with only Native mocked. It parses an actual CRLF
+literal here-string and captures the command passed to Native, checking both
+paths, unchanged LF input and pre/post transport deadline rejection (10 checks).
+`test-transport-shell.py <owned-output.json>` executes those captured arguments
+in an owned local Linux shell: raw CRLF refuses; both normalized commands pass
+with literal quoting preserved (3 cases). Neither test invokes SSH or a device.
