@@ -5,7 +5,7 @@ $nonce='0123456789abcdef0123456789abcdef'
 $document='00000000-0000-4000-8000-000000000001'
 $order=@(2..7 | ForEach-Object { '00000000-0000-4000-8000-{0:x12}' -f $_ })
 $callback=[pscustomobject]@{nonce=$nonce;stage='facts-observed-no-change-during-read';application_thread=$true;engine_thread=$true}
-$facts=[pscustomobject]@{kind='development-observed-facts';nonce=$nonce;attempt_pid='42';attempt_start='1234';required_metadata_validated=$true;required_connections_installed=$true;document_id=$document;current_page_id=$order[0];current_index=0;order=$order;instance='1';begin_epoch='0';end_epoch='0';begin_ms=1;end_ms=2;request_accepted_ms=100;delivered_ms=110;atomic_snapshot=$false;native_authority=$false;render_authority=$false}
+$facts=[pscustomobject]@{kind='development-observed-facts';development_setup_opt_in=$true;setup_budget_ms=120000;setup_selection='main-dev-facts-120s';nonce=$nonce;attempt_pid='42';attempt_start='1234';required_metadata_validated=$true;required_connections_installed=$true;document_id=$document;current_page_id=$order[0];current_index=0;order=$order;instance='1';begin_epoch='0';end_epoch='0';begin_ms=1;end_ms=2;request_accepted_ms=100;delivered_ms=110;atomic_snapshot=$false;native_authority=$false;render_authority=$false}
 $count=0
 function Check([bool]$Condition,[string]$Name) { if (-not $Condition) {throw "FAIL: $Name"}; $script:count++ }
 function Clone($Value) {return ($Value | ConvertTo-Json -Depth 10 -Compress | ConvertFrom-Json)}
@@ -39,7 +39,7 @@ foreach($field in @('current_index','begin_ms','end_ms','request_accepted_ms','d
 foreach($change in @(
  @{field='current_index';value=-1},@{field='current_index';value=6},@{field='current_page_id';value=$order[1]},
  @{field='begin_ms';value=-1},@{field='end_ms';value=0},@{field='end_ms';value=5000},
- @{field='request_accepted_ms';value=-1},@{field='request_accepted_ms';value=20000},
+ @{field='request_accepted_ms';value=-1},@{field='request_accepted_ms';value=120000},
  @{field='delivered_ms';value=99},@{field='delivered_ms';value=5100},
  @{field='nonce';value=('f'*32)},@{field='attempt_pid';value='43'},@{field='attempt_start';value='1235'},
  @{field='instance';value='0'},@{field='instance';value='18446744073709551616'},@{field='begin_epoch';value='01'},@{field='end_epoch';value='1'},
@@ -53,4 +53,23 @@ $value=Clone $facts; $value.order=$order[0..4]; Check (-not (Test-FactsDiagnosti
 Check (-not (Test-FactsDiagnostics $facts $nonce $document $order 1 '1234')) 'invalid expected pid'
 Check (-not (Test-FactsDiagnostics $facts $nonce $document $order 42 '01')) 'invalid expected start'
 $value=Clone $facts; $value | Add-Member unexpected $true; Check (-not (Test-FactsDiagnostics $value $nonce $document $order 42 '1234')) 'extra private field'
+foreach($change in @(@{field='development_setup_opt_in';value=$false},@{field='setup_budget_ms';value=20000},@{field='setup_budget_ms';value=120001},@{field='setup_selection';value='default-dev-20s'},@{field='setup_budget_ms';value='120000'})) {
+ $value=Clone $facts; $value.($change.field)=$change.value
+ Check (-not (Test-FactsDiagnostics $value $nonce $document $order 42 '1234')) "budget profile $($change.field)"
+}
+$value=Clone $facts; $value.request_accepted_ms=119999; $value.delivered_ms=120010
+Check (Test-FactsDiagnostics $value $nonce $document $order 42 '1234') 'setup boundary before expiry + separate 5s read'
+$value.delivered_ms=124999
+Check (-not (Test-FactsDiagnostics $value $nonce $document $order 42 '1234')) 'exact accepted request +5s refuses'
+. "$PSScriptRoot/development-budget.ps1"
+$profile=Get-FactsDevelopmentBudget
+Check ($profile.DevelopmentOptIn -and $profile.SetupSelection -ceq 'main-dev-facts-120s') 'explicit DEV profile'
+Check ($profile.SetupMs -eq 120000 -and $profile.ReadMs -eq 5000 -and $profile.LiveObservationMs -eq 150000) 'finite setup/read/live budgets'
+Check ($profile.RollbackInitiationSeconds -eq 180 -and $profile.RestorationTimeoutStartSeconds -eq 240) 'rollback initiation distinct from restoration bound'
+Check ($profile.LiveClockOrigin -ceq 'host-observation-before-arming') 'original live observation clock origin'
+Check (Test-FactsLiveObservationWindow 0) 'live window starts at original host origin'
+Check (Test-FactsLiveObservationWindow 149999) 'live boundary before expiry'
+Check (-not (Test-FactsLiveObservationWindow 150000)) 'exact live boundary refuses'
+Check (-not (Test-FactsLiveObservationWindow 150001)) 'exceeded live cap refuses'
+Check (-not (Test-FactsLiveObservationWindow -1)) 'negative live interval refuses'
 Write-Output "facts validator checks: $count PASS"

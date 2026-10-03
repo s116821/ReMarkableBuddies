@@ -22,7 +22,7 @@ facts. It does not establish live generation, preservation or completed restorat
 those remain separate duties of a later independently reviewed literal packet.
 
 Owned checks: `test-publisher.sh` builds only a fixture executable, syntax-checks the
-publisher CLI, and exercises 19 admission/publication cases. Its `payload.so` is
+publisher CLI, and exercises 23 admission/publication cases. Its `payload.so` is
 plain non-ELF data mapped read-only, not a built or executed preload extension.
 Loader warnings that this data is ignored are expected. This tests proc/file binding
 mechanics only. `test-facts-proof.ps1` tests strict fact/callback acceptance and
@@ -30,7 +30,12 @@ refusal locally, including missing/type/identity/order/deadline/authority failur
 The SDK fixture runner can mount this source read-only for an original-QML end-to-end
 publisher/request/entry/facts result check. No tablet or native extension is involved.
 
-Main alone chooses a later native build and packet after a supported manual timing
-procedure. Keep the 20-second setup, accepted-request plus five-second read, 35-second
-live observation and 45-second independent rollback initiation unchanged. The wider
+Main/parent selected the explicit finite DEV profile in development-budget.ps1 and
+operator-recipe.md: 120-second setup, accepted-request plus five-second read,
+150-second live observation from the original host clock before arming, and
+180-second independent rollback initiation from timer arming. Restoration's
+240-second unit bound stays separate. Waiting/request/private proof require the
+same opt-in budget/provenance; inherited 20/35/45 values are historical defaults,
+not firmware or product constraints. Main chooses a later native build/packet only
+after independent source review. No device outcome is implied. The wider
 native runtime/creation/gesture qualification remains unfinished.

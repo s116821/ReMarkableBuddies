@@ -23,7 +23,11 @@ function Test-FactsDiagnostics($Facts, [string]$ExpectedNonce, [string]$Expected
         $Facts.attempt_start -isnot [string] -or $Facts.attempt_start -cne $ExpectedStart -or
         $Facts.document_id -isnot [string] -or $Facts.document_id -cne $ExpectedDocument -or
         $Facts.order -isnot [array] -or $Facts.order.Count -ne 6 -or
-        @($Facts.PSObject.Properties).Count -ne 20) { return $false }
+        @($Facts.PSObject.Properties).Count -ne 23 -or
+        ($Facts.setup_budget_ms -isnot [int] -and $Facts.setup_budget_ms -isnot [long])) { return $false }
+    if ($Facts.development_setup_opt_in -isnot [bool] -or -not $Facts.development_setup_opt_in -or
+        $Facts.setup_budget_ms -ne 120000 -or $Facts.setup_selection -isnot [string] -or
+        $Facts.setup_selection -cne 'main-dev-facts-120s') { return $false }
     foreach ($field in @('required_metadata_validated','required_connections_installed')) {
         if ($Facts.$field -isnot [bool] -or -not $Facts.$field) { return $false }
     }
@@ -36,7 +40,7 @@ function Test-FactsDiagnostics($Facts, [string]$ExpectedNonce, [string]$Expected
     if ($Facts.current_index -lt 0 -or $Facts.current_index -ge 6 -or
         $Facts.current_page_id -isnot [string] -or $Facts.current_page_id -cne $ExpectedOrder[$Facts.current_index] -or
         $Facts.begin_ms -lt 0 -or $Facts.end_ms -lt $Facts.begin_ms -or $Facts.end_ms -ge 5000 -or
-        $Facts.request_accepted_ms -lt 0 -or $Facts.request_accepted_ms -ge 20000 -or
+        $Facts.request_accepted_ms -lt 0 -or $Facts.request_accepted_ms -ge 120000 -or
         $Facts.delivered_ms -lt $Facts.request_accepted_ms -or $Facts.delivered_ms -ge ($Facts.request_accepted_ms+5000)) { return $false }
     foreach ($field in @('atomic_snapshot','native_authority','render_authority')) {
         if ($Facts.$field -isnot [bool] -or $Facts.$field) { return $false }

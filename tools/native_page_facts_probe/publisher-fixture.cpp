@@ -19,9 +19,13 @@ int main(int argc,char **argv) {
  facts_request::Descriptor process(::open((QStringLiteral("/proc/")+QString::number(pid)).toUtf8().constData(),O_RDONLY|O_DIRECTORY|O_CLOEXEC));
  const QByteArray start=facts_request::startIdentity(process.value);
  const QByteArray identity=nonce.toLatin1()+' '+QByteArray::number(pid)+' '+start+' '+QByteArray::number(qulonglong(st.st_dev))+' '+QByteArray::number(qulonglong(st.st_ino));
- QByteArray waiting=identity+" waiting-facts 1 20000\n";
+ QByteArray waiting=identity+" waiting-facts 1 120000 main-dev-facts-120s\n";
  if (mode=="malformed") waiting.append('\n');
- if (mode=="late") waiting=identity+" waiting-facts 20000 20000\n";
+ if (mode=="late") waiting=identity+" waiting-facts 120000 120000 main-dev-facts-120s\n";
+ if (mode=="before-boundary") waiting=identity+" waiting-facts 119999 120000 main-dev-facts-120s\n";
+ if (mode=="budget-mismatch") waiting.replace("120000","20000");
+ if (mode=="budget-exceed") waiting.replace("120000","120001");
+ if (mode=="profile") waiting.replace("main-dev-facts-120s","unselected");
  if (!put(root+"/owner",nonce.toLatin1()) || !put(root+"/attempt.identity",QByteArray::number(pid)+' '+start+'\n') || !put(root+"/facts-waiting",waiting)) return 5;
  facts_request::Descriptor payload(::openat(directory.value,"payload.so",O_RDONLY|O_CLOEXEC));
  facts_request::Descriptor executable(::openat(process.value,"exe",O_RDONLY|O_CLOEXEC));
@@ -49,9 +53,9 @@ int main(int argc,char **argv) {
  facts_request::Descriptor heldLock(mode=="locked" ? ::openat(directory.value,"admission.lock",O_RDWR|O_CREAT|O_CLOEXEC,0600) : -1);
  if (mode=="locked" && (heldLock.value<0 || ::flock(heldLock.value,LOCK_EX|LOCK_NB)!=0)) return 8;
  const int result=facts_request::publish(root,nonce,executableHash,payloadHash);
- const bool expected=mode=="good" || mode=="duplicate";
+ const bool expected=mode=="good" || mode=="duplicate" || mode=="before-boundary";
  bool token=true;
- if (result==0) token=facts_request::privateFile(directory.value,"facts-request",128)==identity+" read-facts\n" && !QFileInfo::exists(root+"/facts-request.tmp");
+ if (result==0) token=facts_request::privateFile(directory.value,"facts-request",128)==identity+" read-facts 120000 main-dev-facts-120s\n" && !QFileInfo::exists(root+"/facts-request.tmp");
  bool duplicate=true;
  if (mode=="duplicate") duplicate=facts_request::publish(root,nonce,executableHash,payloadHash)!=0;
  const bool passed=(result==0)==expected && token && duplicate;

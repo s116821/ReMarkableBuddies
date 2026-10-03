@@ -83,8 +83,8 @@ inline int publish(const QString &directory,const QString &nonce,const QByteArra
         lockStat.st_uid!=::geteuid() || (lockStat.st_mode&0777)!=0600 || ::flock(lock.value,LOCK_EX|LOCK_NB)!=0) return 1;
     const auto waiting=privateFile(root.value,"facts-waiting",256);
     const auto fields=waiting.trimmed().split(' ');
-    if (fields.size()!=8 || fields[0]!=nonce.toLatin1() || fields[5]!="waiting-facts" ||
-        fields[7]!="20000" || waiting!=fields.join(' ')+'\n') return 1;
+    if (fields.size()!=9 || fields[0]!=nonce.toLatin1() || fields[5]!="waiting-facts" ||
+        fields[7]!="120000" || fields[8]!="main-dev-facts-120s" || waiting!=fields.join(' ')+'\n') return 1;
     for (int index:{1,2,3,4,6}) {
         if (fields[index].isEmpty()) return 1;
         for (const char digit:fields[index]) if (digit<'0' || digit>'9') return 1;
@@ -94,7 +94,7 @@ inline int publish(const QString &directory,const QString &nonce,const QByteArra
     const auto dev=fields[3].toULongLong(&devOk),ino=fields[4].toULongLong(&inoOk);
     const qint64 waitingAt=fields[6].toLongLong(&timeOk);
     if (!pidOk || pid<=1 || !devOk || !inoOk || dev!=qulonglong(rootStat.st_dev) || ino!=qulonglong(rootStat.st_ino) ||
-        !timeOk || waitingAt<0 || waitingAt>=20000) return 1;
+        !timeOk || waitingAt<0 || waitingAt>=120000) return 1;
     Descriptor process(::open((QStringLiteral("/proc/")+QString::number(pid)).toUtf8().constData(),O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC));
     if (process.value<0) return 1;
     const auto current=[&]{
@@ -123,7 +123,7 @@ inline int publish(const QString &directory,const QString &nonce,const QByteArra
     bool mapped=false;
     for (const auto &line:mapping.split('\n')) if (line.endsWith(' '+payloadPath)) mapped=true;
     if (!mapped || !env.split('\0').contains(QByteArray("LD_PRELOAD=")+payloadPath) || !current()) return 1;
-    const QByteArray token=fields.mid(0,5).join(' ')+" read-facts\n";
+    const QByteArray token=fields.mid(0,5).join(' ')+" read-facts "+fields[7]+' '+fields[8]+'\n';
     if (token.size()>128) return 1;
     Descriptor temporary(::openat(root.value,"facts-request.tmp",O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600));
     struct stat held{},named{};
