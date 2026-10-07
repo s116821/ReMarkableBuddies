@@ -130,6 +130,27 @@ fn main() -> Result<()> {
     env_logger::init();
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
+        #[cfg(feature = "development-input-diagnostics")]
+        Some("tap-echo") => {
+            let x: i32 = args
+                .get(2)
+                .ok_or_else(|| anyhow::anyhow!("x required"))?
+                .parse()?;
+            let y: i32 = args
+                .get(3)
+                .ok_or_else(|| anyhow::anyhow!("y required"))?
+                .parse()?;
+            anyhow::ensure!(
+                args.len() == 4 && (1..768).contains(&x) && (1..1024).contains(&y),
+                "Expected tap-echo X Y strictly inside the virtual screen"
+            );
+            let mut touch = Touch::new(false, TriggerCorner::LowerLeft);
+            touch.diagnostic_tap_echo((x, y))?;
+            println!(
+                "{{\"diagnostic\":\"tap-echo\",\"echo_observed\":true,\"ui_acknowledged\":false,\"native_navigation_qualified\":false}}"
+            );
+            return Ok(());
+        }
         Some("multi-hold") => {
             use evdev::{Device, EventType, InputEvent};
             anyhow::ensure!(

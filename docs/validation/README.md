@@ -1,5 +1,18 @@
 # Hardware fixtures
 
+`hardware_probe tap-echo X Y` requires the nondefault
+`development-input-diagnostics` feature and Linux. It accepts integer interior
+virtual coordinates (0 < X < 768, 0 < Y < 1024), RM2 and the exact existing
+firmware contract. It performs one existing100ms tap through the production owned
+InputObserver watch and returns before capture. Its fixed success receipt means
+positive evdev down/release echo with identity, inventory, released-state and
+other-input checks; UI acknowledgement and native navigation qualification remain
+false. Failure is inconclusive and does not select a retry or a protocol repair.
+The existing1s window,50ms drain and8192 event cap are cooperative bounds, not
+hard cancellation of blocking device I/O; interruption can still prevent release.
+Main coordinates any device gate separately. Source-only verification is
+`python tools/test_touch_echo.py` plus the production Linux observer/window tests.
+
 Source status ink is retired. Marker sections below preserve historical diagnostic
 procedures and evidence only; they are not normal Reader acceptance gates or
 authorization to draw new marks. The current hardware probe refuses retired marker

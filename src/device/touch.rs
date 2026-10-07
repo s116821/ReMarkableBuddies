@@ -106,6 +106,43 @@ pub struct Touch {
 
 #[cfg(target_os = "linux")]
 impl Touch {
+    /// One development contact observed through the production owned-touch watch.
+    /// Success is evdev echo evidence, never UI acknowledgement.
+    #[cfg(feature = "development-input-diagnostics")]
+    pub fn diagnostic_tap_echo(&mut self, point: (i32, i32)) -> Result<()> {
+        anyhow::ensure!(
+            (1..768).contains(&point.0) && (1..1024).contains(&point.1),
+            "Diagnostic point must be strictly inside the virtual screen"
+        );
+        let model = DeviceModel::detect();
+        anyhow::ensure!(
+            model == DeviceModel::Remarkable2
+                && self.device_model == model
+                && super::native_page::verified_contract(
+                    model,
+                    &std::fs::read_to_string("/etc/os-release")?
+                ),
+            "Unqualified touch diagnostic firmware/device/transform"
+        );
+        let writer = self.input_identity()?;
+        let mut input = super::input_observer::InputObserver::new(TriggerCorner::LowerLeft, None)?;
+        input.begin_owned_touch(writer, self.native_point(point))?;
+        let down = self.touch_start(point);
+        if down.is_ok() {
+            sleep(Duration::from_millis(100));
+        }
+        // Evaluate both cleanup operations even if down partially failed.
+        let release = self.touch_stop();
+        let finish = input.finish_owned_touch();
+        match (down.and(release), finish) {
+            (Err(error), Err(finish)) => {
+                Err(error.context(format!("Touch echo observation also failed: {finish:#}")))
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+            (Ok(()), Ok(())) => Ok(()),
+        }
+    }
+
     pub(super) fn input_identity(&self) -> Result<super::input_observer::DescriptorIdentity> {
         use std::os::fd::AsFd;
         super::input_observer::descriptor_identity(
