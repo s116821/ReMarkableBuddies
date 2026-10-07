@@ -67,7 +67,7 @@ $localBindings=[ordered]@{nonce=$nonce;operator_sha256=(Hash $PSCommandPath);sto
 [void](Freeze 'packet-bindings.json' ($localBindings|ConvertTo-Json -Depth 5))
 if($PrepareOnly){$localBindings|ConvertTo-Json -Depth 5;return}
 # Main alone executes after independent artifact/operator review and advance notice.
-$record=[ordered]@{nonce=$nonce;experiment='development-input-observation';payload_source='unselected-source-only';publisher_source='unselected-source-only';bindings=$localBindings;budget=$budget;results=@();arm_intent=$false;armed=$false;callback_verified=$false;candidate_generation_verified=$false;facts_verified=$false;observation_generation_verified=$false;gui_completion_verified=$false;qt_image_available=$false;heap_capture_succeeded=$false;heap_capture_transport_unknown=$false;paired_image_candidate_verified=$false;heap_capture_start_ms=$null;heap_capture_end_ms=$null;candidate_receipt=$null;restored=$false;cleanup_verified=$false;live_diagnostics_collected=$false;live_diagnostics_sha256=$null;gate_evidence=@{};diagnostic_collected=$false;diagnostic_sha256=$null;final_callback_state='not-checked';final_callback_collected=$false;final_callback_sha256=$null;live_observation_ms=$null;live_refusal=$null;live_refusal_callback_match=$false;final_refusal=$null;final_refusal_callback_match=$false}
+$record=[ordered]@{nonce=$nonce;experiment='development-input-observation';payload_source='unselected-source-only';publisher_source='unselected-source-only';bindings=$localBindings;budget=$budget;results=@();arm_intent=$false;armed=$false;callback_verified=$false;candidate_generation_verified=$false;facts_verified=$false;observation_generation_verified=$false;gui_completion_verified=$false;qt_image_available=$false;qt_saved_copy_verified=$false;qt_saved_copy_sha256=$null;heap_saved_copy_verified=$false;heap_saved_copy_sha256=$null;heap_capture_succeeded=$false;heap_capture_transport_unknown=$false;paired_image_candidate_verified=$false;heap_capture_start_ms=$null;heap_capture_end_ms=$null;candidate_receipt=$null;restored=$false;cleanup_verified=$false;live_diagnostics_collected=$false;live_diagnostics_sha256=$null;gate_evidence=@{};diagnostic_collected=$false;diagnostic_sha256=$null;final_callback_state='not-checked';final_callback_collected=$false;final_callback_sha256=$null;live_observation_ms=$null;live_refusal=$null;live_refusal_callback_match=$false;final_refusal=$null;final_refusal_callback_match=$false}
 function Native([string]$program,[string[]]$arguments,[int]$timeoutMs=20000){
     $info=[Diagnostics.ProcessStartInfo]::new();$info.FileName=$program;$info.UseShellExecute=$false
     $info.RedirectStandardOutput=$true;$info.RedirectStandardError=$true
@@ -99,6 +99,30 @@ function RequireSameObservationIdentity {
     $checked=ObservationSSH $identityCommand
     Require $checked
     if($checked.stdout -cne $identity.stdout){throw 'Same candidate generation lost; restoration required'}
+}
+function PreserveObservationImages {
+    # Fixed post-restoration deletion gate, with no image collection or live upgrade.
+    $preserved=$true;$record.image_preservation_errors=@()
+    foreach($image in @(
+        @{remote=($remote+'/input-window.png');local='input-window.png';verified=$record.qt_saved_copy_verified;sha=$record.qt_saved_copy_sha256},
+        @{remote=('/tmp/rem25-facts-'+$nonce+'-input-observation.png');local='heap-after-gui.png';verified=$record.heap_saved_copy_verified;sha=$record.heap_saved_copy_sha256})){
+        if($image.local -ceq 'heap-after-gui.png' -and $record.heap_capture_transport_unknown){
+            $preserved=$false;$record.image_preservation_errors+='heap capture may still be running; retain exact stage and external path';continue
+        }
+        try{
+            $path=$image.remote
+            $state=SSH ("set -eu; if test ! -e '$path' && test ! -L '$path'; then printf 'absent\n'; else test -f '$path'; test ! -L '$path'; bytes=`$(wc -c < '$path'); test `"`$bytes`" -le 8388608; hash=`$(sha256sum '$path' | awk '{print `$1}'); printf 'present %s %s\n' `"`$bytes`" `"`$hash`"; fi")
+            Require $state
+            if($state.stdout -ceq "absent`n"){continue}
+            if($state.stdout.Length -gt 128 -or $state.stdout -cnotmatch '^present ([0-9]{1,7}) ([0-9a-f]{64})\n$'){throw 'Historical image metadata refused'}
+            $bytes=[long]$Matches[1];$sha=$Matches[2];$local=Join-Path $packet $image.local
+            if(-not $image.verified -or $image.sha -cne $sha -or -not(Test-Path -LiteralPath $local) -or
+               (Get-Item -LiteralPath $local).Length -ne $bytes -or (Hash $local) -cne $sha){throw 'No verified saved image copy; retain exact stage/output path'}
+        }catch{
+            $preserved=$false;$record.image_preservation_errors+=($image.remote+': '+$_.Exception.Message)
+        }
+    }
+    return $preserved
 }
 function Expand([string]$text){$heapCleanup=if($record.heap_capture_transport_unknown){'# uncertain heap transport: preserve exact external path'}else{"rm -f '/tmp/rem25-facts-$nonce-input-observation.png'"};$text.Replace('@HEAPCLEANUP@',$heapCleanup).Replace('@PAYLOADHASH@',$payloadHash).Replace('@ROOT@',$remote).Replace('@NONCE@',$nonce).Replace('@UNIT@',$rollback).Replace('@STOCKPID@',[string]$stock.stock_pid).Replace('@STOCKSTART@',$stock.stock_start).Replace('@FIXTURECHECK@',$fixtureCheck)}
 try{
@@ -252,6 +276,7 @@ printf '%s %s %s %s\n' "$p" "$started" "$dev" "$ino"
                 $qtHash=$Matches[1];$qtImagePath=Join-Path $packet 'input-window.png'
                 Require (ObservationCopy ($remote+'/input-window.png') $qtImagePath)
                 if((Hash $qtImagePath) -cne $qtHash){throw 'Qt image bytes changed'}
+                $record.qt_saved_copy_verified=$true;$record.qt_saved_copy_sha256=$qtHash
                 RequireSameObservationIdentity
                 $record.qt_image_available=$true;$record.qt_image_sha256=$qtHash
             }
@@ -271,6 +296,7 @@ printf '%s %s %s %s\n' "$p" "$started" "$dev" "$ino"
             $heapImagePath=Join-Path $packet 'heap-after-gui.png'
             Require (ObservationCopy $heapRemote $heapImagePath)
             if((Hash $heapImagePath) -cne $heapHash -or -not(Test-InputObservationHeapPng $heapImagePath)){throw 'Heap image bytes/dimensions refused'}
+            $record.heap_saved_copy_verified=$true;$record.heap_saved_copy_sha256=$heapHash
             RequireSameObservationIdentity
             $record.heap_capture_succeeded=$true;$record.heap_image_sha256=$heapHash
             $record.paired_image_candidate_verified=$record.qt_image_available
@@ -332,6 +358,8 @@ fi
                 Require $diagnostic
                 if($diagnostic.stdout){[IO.File]::WriteAllText((Join-Path $packet $name),$diagnostic.stdout,[Text.UTF8Encoding]::new($false))}
             }
+            $imagesPreserved=PreserveObservationImages
+            if($imagesPreserved -and -not $record.heap_capture_transport_unknown){
             $cleaned=SSH (Expand @'
 set -eu
 /bin/sh '@ROOT@/restore.sh' --verify
@@ -351,6 +379,9 @@ systemctl is-active xochitl.service reader-buddy.service rm-sync.service
 printf 'stock-restored-and-exact-stage-removed\n'
 '@)
             $record.cleanup_verified=-not $cleaned.timeout -and $cleaned.exit -eq 0 -and -not $record.heap_capture_transport_unknown
+            }else{
+                $record.cleanup_verified=$false
+            }
         }
     }
     }finally{

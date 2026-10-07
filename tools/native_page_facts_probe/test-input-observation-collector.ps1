@@ -34,12 +34,13 @@ function ObservationSSH([string]$command){
     }
     if($command.Contains("sha256sum '$remote/input-window.png'")){return @{exit=0;timeout=$false;stdout=($pngHash+'  '+$remote+"/input-window.png`n")}}
     $script:identities++
-    if($case -ceq 'initial-generation-loss' -or ($case -ceq 'late-generation-loss' -and $captures -gt 0)){
+    if($case -ceq 'initial-generation-loss' -or ($case -ceq 'late-generation-loss' -and $captures -gt 0) -or ($case -ceq 'qt-postcopy-generation-loss' -and $identities -ge 3)){
         return @{exit=0;timeout=$false;stdout="1234 9999 11 22`n"}
     }
     return @{exit=0;timeout=$false;stdout="1234 5678 11 22`n"}
 }
 function ObservationCopy([string]$remotePath,[string]$localPath){
+    if($case -ceq 'qt-copy-timeout' -and $remotePath.StartsWith('/run/')){return @{exit=1;timeout=$true;stdout=''}}
     if($case -ceq 'heap-copy-timeout' -and $remotePath.StartsWith('/tmp/')){return @{exit=1;timeout=$true;stdout=''}}
     [IO.File]::WriteAllBytes($localPath,$png);return @{exit=0;timeout=$false;stdout=''}
 }
@@ -74,8 +75,8 @@ try{
     }
     $bad=New-Completion;$bad.events=@($event);$event.points=@(1,2,3,4,5)
     Check (-not(Test-InputObservationCompletion $bad $nonce '1234' '5678' '11' '22')) 'point cap'
-    foreach($case in @('good','empty-image','heap-timeout','heap-disconnect','heap-malformed','late-generation-loss','initial-generation-loss','heap-copy-timeout')){
-        $record=[ordered]@{facts_verified=$false;callback_verified=$false;candidate_generation_verified=$false;gui_completion_verified=$false;qt_image_available=$false;heap_capture_succeeded=$false;paired_image_candidate_verified=$false}
+    foreach($case in @('good','empty-image','qt-copy-timeout','qt-postcopy-generation-loss','heap-timeout','heap-disconnect','heap-malformed','late-generation-loss','initial-generation-loss','heap-copy-timeout')){
+        $record=[ordered]@{facts_verified=$false;callback_verified=$false;candidate_generation_verified=$false;gui_completion_verified=$false;qt_image_available=$false;qt_saved_copy_verified=$false;heap_saved_copy_verified=$false;heap_capture_succeeded=$false;paired_image_candidate_verified=$false}
         $captures=0;$identities=0;$observationClock=[pscustomobject]@{ElapsedMilliseconds=120}
         $value=New-Completion
         if($case -ceq 'empty-image'){$value.image_status='unsupported-empty';$value.image_width=0;$value.image_height=0;$value.png_bytes=0}
@@ -88,15 +89,16 @@ try{
         }else{
             Check ($failed -and -not $record.heap_capture_succeeded -and -not $record.paired_image_candidate_verified) "$case no pair"
             Check ($record.gui_completion_verified -eq ($case -cne 'initial-generation-loss')) "$case preserved GUI evidence"
-            Check ($captures -eq $(if($case -ceq 'initial-generation-loss'){0}else{1})) "$case no retry"
+            Check ($captures -eq $(if($case -in @('initial-generation-loss','qt-copy-timeout','qt-postcopy-generation-loss')){0}else{1})) "$case no retry"
             if($case -in @('heap-timeout','heap-disconnect','heap-malformed')){Check $record.heap_capture_transport_unknown "$case remote uncertain"}
+            if($case -in @('qt-copy-timeout','qt-postcopy-generation-loss')){Check ($record.qt_saved_copy_verified -eq ($case -ceq 'qt-postcopy-generation-loss')) "$case separate saved copy"}
         }
     }
     $loop=@($ast.FindAll({param($node)$node -is [Management.Automation.Language.WhileStatementAst]},$true))[0]
     $statusLoop=[scriptblock]::Create('$statusTimeoutUsed=$false;'+$loop.Extent.Text)
     foreach($statusCase in @('one-timeout','two-timeouts','disconnect','exception')){
         $polls=0;$observationClock.ElapsedMilliseconds=100
-        $record=[ordered]@{gui_completion_verified=$false;qt_image_available=$false;heap_capture_succeeded=$false;facts_verified=$false}
+        $record=[ordered]@{gui_completion_verified=$false;qt_image_available=$false;qt_saved_copy_verified=$false;heap_saved_copy_verified=$false;heap_capture_succeeded=$false;facts_verified=$false}
         function ObservationSSH([string]$command){
             $script:polls++
             if($statusCase -ceq 'exception'){throw 'fixture exception'}
@@ -122,26 +124,41 @@ try{
     Check (-not $source.Contains('--image-only')) 'old helper exact interface'
     Check ($source.Contains("throw 'SOURCE ONLY:")) 'source execution guard'
     # Execute the specialized existing finally block with transport stubs.
-    $outerTry=@($ast.FindAll({param($node)$node -is [Management.Automation.Language.TryStatementAst]},$true))[0]
+    $outerTry=@($ast.EndBlock.Statements|Where-Object {$_ -is [Management.Automation.Language.TryStatementAst]})[0]
     $finallyText=$outerTry.Finally.Extent.Text
     $recovery=[scriptblock]::Create($finallyText.Substring(1,$finallyText.Length-2))
     . ([scriptblock]::Create(($functions|Where-Object Name -ceq 'Expand').Extent.Text))
+    . ([scriptblock]::Create(($functions|Where-Object Name -ceq 'PreserveObservationImages').Extent.Text))
     $stock=[pscustomobject]@{stock_pid=8888;stock_start='9999'};$rollback='fixture-rollback';$fixtureCheck='fixture-only'
     function SSH([string]$command){
         if($command.Contains('for name in payload.so')){$script:cleanupCommand=$command}
+        if($command.Contains("printf 'absent\n'; else")){
+            if($preservationCase -ceq 'preservation-transport-failure'){return @{exit=255;timeout=$false;stdout=''}}
+            $qt=$command.Contains('/input-window.png')
+            $present=if($qt){$preservationCase -cne 'absent'}else{$preservationCase -in @('heap-copy-failure','saved-both')}
+            return @{exit=0;timeout=$false;stdout=$(if($present){"present 24 $pngHash`n"}else{"absent`n"})}
+        }
         return @{exit=0;timeout=$false;stdout=$(if($command.Contains("printf 'present")){"absent`n"}else{''})}
     }
-    foreach($unknown in @($false,$true)){
-        $record=[ordered]@{arm_intent=$true;restored=$false;cleanup_verified=$false;gui_completion_verified=$true;qt_image_available=$true;
+    foreach($preservationCase in @('absent','missed-completion','qt-copy-failure','qt-postcopy-guard-failure','heap-copy-failure','remote-unknown','saved-both','preservation-transport-failure')){
+        $unknown=$preservationCase -ceq 'remote-unknown'
+        $qtSaved=$preservationCase -in @('qt-postcopy-guard-failure','heap-copy-failure','remote-unknown','saved-both')
+        $heapSaved=$preservationCase -ceq 'saved-both'
+        $cleanupExpected=$preservationCase -in @('absent','qt-postcopy-guard-failure','saved-both')
+        $cleanupCommand=''
+        $record=[ordered]@{arm_intent=$true;restored=$false;cleanup_verified=$false;gui_completion_verified=($preservationCase -cne 'missed-completion');qt_image_available=$false;
+            qt_saved_copy_verified=$qtSaved;qt_saved_copy_sha256=$pngHash;heap_saved_copy_verified=$heapSaved;heap_saved_copy_sha256=$pngHash;
             heap_capture_succeeded=$false;heap_capture_transport_unknown=$unknown;paired_image_candidate_verified=$false;
             facts_verified=$false;callback_verified=$false;candidate_generation_verified=$false}
+        [IO.File]::WriteAllBytes((Join-Path $packet 'input-window.png'),$png)
+        [IO.File]::WriteAllBytes((Join-Path $packet 'heap-after-gui.png'),$png)
         $failed=$false;try{. $recovery}catch{$failed=$true}
-        Check $record.restored "finally restores unknown=$unknown"
-        Check ($record.cleanup_verified -eq (-not $unknown)) "finally cleanup certainty unknown=$unknown"
-        Check ($failed -eq $unknown) "finally preserves unresolved cleanup unknown=$unknown"
-        Check ($record.gui_completion_verified -and $record.qt_image_available -and -not $record.heap_capture_succeeded -and -not $record.paired_image_candidate_verified) "finally preserves separate fields unknown=$unknown"
-        Check (-not $record.facts_verified -and -not $record.callback_verified -and -not $record.candidate_generation_verified) "historical evidence grants no facts unknown=$unknown"
-        Check ($cleanupCommand.Contains("rm -f '/tmp/rem25-facts-$nonce-input-observation.png'") -eq (-not $unknown)) "uncertain external capture retained unknown=$unknown"
+        Check $record.restored "finally restores $preservationCase"
+        Check ($record.cleanup_verified -eq $cleanupExpected) "finally cleanup certainty $preservationCase"
+        Check ($failed -eq (-not $cleanupExpected)) "finally preserves unresolved cleanup $preservationCase"
+        Check ($record.gui_completion_verified -eq ($preservationCase -cne 'missed-completion') -and -not $record.qt_image_available -and -not $record.heap_capture_succeeded -and -not $record.paired_image_candidate_verified) "finally preserves live fields $preservationCase"
+        Check (-not $record.facts_verified -and -not $record.callback_verified -and -not $record.candidate_generation_verified) "historical evidence grants no facts $preservationCase"
+        Check ($cleanupCommand.Contains("rm -f '/tmp/rem25-facts-$nonce-input-observation.png'") -eq $cleanupExpected) "conditional deletion $preservationCase"
     }
     Write-Output "input-observation collector: PASS $count assertions (mock transport; no device)"
 }finally{
