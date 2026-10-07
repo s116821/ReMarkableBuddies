@@ -4,6 +4,7 @@ set -eu
 root=/run/rmb-qt-probe-b3e3ca0475a84432a9b328218395de0c
 nonce=b3e3ca0475a84432a9b328218395de0c
 previous_umask=$(umask)
+development_evdev_logging=0 # Future separately selected source packet only.
 stock() {
     exec 9>&-
     umask "$previous_umask"
@@ -28,4 +29,7 @@ flock -u 9
 exec 9>&-
 if test -e "$root/entry.closed" || test -e "$root/restore.claim"; then stock; fi
 umask "$previous_umask"
+if test "$development_evdev_logging" = 1; then
+    QT_QPA_EVDEV_DEBUG=1 QT_LOGGING_RULES='qt.qpa.input.events.debug=true' LD_PRELOAD="$root/payload.so" exec /usr/bin/xochitl --system
+fi
 LD_PRELOAD="$root/payload.so" exec /usr/bin/xochitl --system

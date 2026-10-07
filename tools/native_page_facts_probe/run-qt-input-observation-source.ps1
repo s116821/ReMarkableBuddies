@@ -5,6 +5,8 @@ param([Parameter(Mandatory=$true)][string]$PayloadPath,
       [Parameter(Mandatory=$true)][string]$EvidenceDirectory, [switch]$PrepareOnly)
 $ErrorActionPreference='Stop'
 throw 'SOURCE ONLY: requires a separately selected fresh nonce, artifacts, baseline and exact packet review; spent literals below are reference placeholders.'
+$developmentEvdevLogging=$false # Fixed source opt-in, no runtime parameter.
+$evdevBegin=$null;$evdevEnd=$null;$evdevEndpointReason='missing-endpoints'
 $nonce='b3e3ca0475a84432a9b328218395de0c'
 $remote='/run/rmb-qt-probe-'+$nonce
 $rollback='rmb-qt-probe-'+$nonce+'-rollback'
@@ -24,6 +26,9 @@ if((Hash $refusalProofPath) -cne '44c786488a88fb249501bbcc0361fe53b561f9b5ac33e8
 $observationProofPath=Join-Path $PSScriptRoot 'input-observation-proof.ps1'
 if((Hash $observationProofPath) -cne 'b1a7338fb816fc9891d5247c1f4e0c0c8d0ff94d08fb4dc98065b0357b455917'){throw 'Fixed observation decoder changed'}
 . $observationProofPath
+$evdevProofPath=Join-Path $PSScriptRoot 'input-evdev-journal.ps1'
+if((Hash $evdevProofPath) -cne '7d6f9e8ff6407f78fc0c97cbe3cce5c56957b3de2dd81dbe0f730443ab10c6f1'){throw 'Fixed evdev journal source changed'}
+. $evdevProofPath
 . $budgetPath
 $budget=Get-FactsDevelopmentBudget
 $budget.SetupSelection='main-dev-input-observation-120s'
@@ -58,12 +63,14 @@ function Freeze([string]$name,[string]$text){
 }
 $files=[ordered]@{}
 foreach($name in @('launch.sh','restore.sh','native-probe.conf','check-input-observation-ready.sh','publish-input-observation-end-once.sh')){
-    $files[$name]=Freeze $name ([IO.File]::ReadAllText((Join-Path $PSScriptRoot $name)).Replace("`r`n","`n"))
+    $fileText=[IO.File]::ReadAllText((Join-Path $PSScriptRoot $name)).Replace("`r`n","`n")
+    if($name -ceq 'launch.sh' -and $developmentEvdevLogging){$fileText=$fileText.Replace('development_evdev_logging=0','development_evdev_logging=1')}
+    $files[$name]=Freeze $name $fileText
 }
 $files.owner=Freeze 'owner' $nonce
 $files['dropin.sha256']=Freeze 'dropin.sha256' $files['native-probe.conf']
 $localBindings=[ordered]@{nonce=$nonce;operator_sha256=(Hash $PSCommandPath);stock_baseline_sha256=(Hash $StockBaselinePath);
- expected_sha256=$expectedHash;payload_sha256=$payloadHash;publisher_sha256=$publisherHash;proof_sha256=(Hash $proofPath);budget_sha256=(Hash $budgetPath);observation_proof_sha256=(Hash $observationProofPath);evidence_profile='device-frames-v1';heap_image_profile='legacy-df745-overview-768x1024';capture_helper_sha256='df745d56a2ef1834ea644b8859646972210c5e0247a3e6e75e9e245f5fa919b8';files=$files}
+ expected_sha256=$expectedHash;payload_sha256=$payloadHash;publisher_sha256=$publisherHash;proof_sha256=(Hash $proofPath);budget_sha256=(Hash $budgetPath);observation_proof_sha256=(Hash $observationProofPath);evidence_profile='device-frames-v1';heap_image_profile='legacy-df745-overview-768x1024';development_evdev_logging=$developmentEvdevLogging;evdev_journal_source_sha256=(Hash $evdevProofPath);capture_helper_sha256='df745d56a2ef1834ea644b8859646972210c5e0247a3e6e75e9e245f5fa919b8';files=$files}
 [void](Freeze 'packet-bindings.json' ($localBindings|ConvertTo-Json -Depth 5))
 if($PrepareOnly){$localBindings|ConvertTo-Json -Depth 5;return}
 # Main alone executes after independent artifact/operator review and advance notice.
@@ -124,8 +131,14 @@ function PreserveObservationImages {
     }
     return $preserved
 }
-function Expand([string]$text){$heapCleanup=if($record.heap_capture_transport_unknown){'# uncertain heap transport: preserve exact external path'}else{"rm -f '/tmp/rem25-facts-$nonce-input-observation.png'"};$text.Replace('@HEAPCLEANUP@',$heapCleanup).Replace('@PAYLOADHASH@',$payloadHash).Replace('@ROOT@',$remote).Replace('@NONCE@',$nonce).Replace('@UNIT@',$rollback).Replace('@STOCKPID@',[string]$stock.stock_pid).Replace('@STOCKSTART@',$stock.stock_start).Replace('@FIXTURECHECK@',$fixtureCheck)}
+function Expand([string]$text){$evdevMarker=if($developmentEvdevLogging){"printf 'EVDEV_BEGIN_$nonce '; "+$InputEvdevSnapshotCommand}else{''};$text=$text.Replace('@EVDEVBEGIN@',$evdevMarker);$heapCleanup=if($record.heap_capture_transport_unknown){'# uncertain heap transport: preserve exact external path'}else{"rm -f '/tmp/rem25-facts-$nonce-input-observation.png'"};$text.Replace('@HEAPCLEANUP@',$heapCleanup).Replace('@PAYLOADHASH@',$payloadHash).Replace('@ROOT@',$remote).Replace('@NONCE@',$nonce).Replace('@UNIT@',$rollback).Replace('@STOCKPID@',[string]$stock.stock_pid).Replace('@STOCKSTART@',$stock.stock_start).Replace('@FIXTURECHECK@',$fixtureCheck)}
 try{
+    if($developmentEvdevLogging){
+        Require (SSH (Expand @'
+set -eu
+if awk 'BEGIN {RS="\0"} /^(QT_QPA_EVDEV_DEBUG|QT_LOGGING_RULES|QT_MESSAGE_PATTERN)=/ {found=1} END {exit !found}' /proc/@STOCKPID@/environ; then exit 90; fi
+'@))
+    }
     Require (SSH (Expand @'
 set -eu
 test "$(sed -n 's/^IMG_VERSION=//p' /etc/os-release)" = '"3.28.0.172"'
@@ -185,7 +198,7 @@ test "$(systemctl show --property=OnFailure --value '@UNIT@.service')" = ''
 test "$(systemctl show --property=FailureAction --value '@UNIT@.service')" = none
 '@))
     $record.armed=$true
-    Require (SSH (Expand @'
+    $activation=SSH (Expand @'
 set -eu
 systemctl stop reader-buddy.service
 exec 9>'@ROOT@/admission.lock'
@@ -203,8 +216,14 @@ test "$(systemctl show --property=Restart --value xochitl.service)" = on-failure
 test "$(systemctl show --property=RestartMode --value xochitl.service)" = direct
 flock -u 9
 exec 9>&-
+@EVDEVBEGIN@
 systemctl restart xochitl.service
-'@))
+'@)
+    Require $activation
+    if($developmentEvdevLogging){
+        $matched=[regex]::Match($activation.stdout,'(?m)^EVDEV_BEGIN_'+$nonce+' ([^\r\n]*\n)')
+        if($matched.Success){$evdevBegin=Get-InputEvdevEndpoint $matched.Groups[1].Value}
+    }
     # Main performs positive observation readiness proof and the selected input interval,
     # and the fixed publisher once while this same host collector remains active.
     # Read-only observations are finite; no setup sleeps or physical retries.
@@ -269,6 +288,12 @@ printf '%s %s %s %s\n' "$p" "$started" "$dev" "$ino"
             $record.gui_completion_observed_ms=$observationClock.ElapsedMilliseconds
             RequireSameObservationIdentity
             $record.observation_generation_verified=$true
+            if($developmentEvdevLogging){
+                try{
+                    $endpoint=ObservationSSH $InputEvdevSnapshotCommand
+                    if(-not $endpoint.timeout -and $endpoint.exit -eq 0){$evdevEnd=Get-InputEvdevEndpoint $endpoint.stdout}
+                }catch{$evdevEndpointReason='endpoint-refused-or-original-deadline'}
+            }
             if($completion.image_status -ceq 'available'){
                 $imageCheck=ObservationSSH (Expand "set -eu; test -f '@ROOT@/input-window.png'; test ! -L '@ROOT@/input-window.png'; test `"`$(stat -c '%a %u' '@ROOT@/input-window.png')`" = '600 0'; test `"`$(wc -c < '@ROOT@/input-window.png')`" = '$($completion.png_bytes)'; sha256sum '@ROOT@/input-window.png'")
                 Require $imageCheck
@@ -383,6 +408,25 @@ printf 'stock-restored-and-exact-stage-removed\n'
                 $record.cleanup_verified=$false
             }
         }
+    }
+    if($developmentEvdevLogging -and $record.restored){
+        try{
+            $window=Get-InputEvdevWindow $evdevBegin $evdevEnd
+            $diagnostic=@{diagnostic_status='unknown';reason=$evdevEndpointReason;records=@()}
+            if($window -and $record.observation_completion){
+                $journalCommand=Get-InputEvdevJournalCommand $window ([string]$record.observation_completion.attempt_pid) $nonce
+                $capture=Invoke-InputEvdevCapture 'ssh' @('-o','HostName=10.11.99.1','-o','StrictHostKeyChecking=yes','-o','BatchMode=yes','-o','ConnectTimeout=2','RM2',$journalCommand.Replace("`r`n","`n"))
+                $diagnostic=Convert-InputEvdevJournal $capture $window ([string]$record.observation_completion.attempt_pid) $nonce
+                $diagnostic.transport=@{exit=$capture.exit;timeout=$capture.timeout;stdout_bytes=$capture.stdout_bytes.Length;stderr_bytes=$capture.stderr_bytes.Length;stdout_overflow=$capture.stdout_overflow;stderr_overflow=$capture.stderr_overflow;acquisition_error=$capture.acquisition_error;elapsed_ms=$capture.elapsed_ms}
+                $diagnostic.query_command=$journalCommand
+            }
+            $diagnostic.nonce=$nonce;$diagnostic.begin=$evdevBegin;$diagnostic.end=$evdevEnd;$diagnostic.window=$window
+            $diagnostic.candidate_tuple=$record.observation_completion|Select-Object attempt_pid,attempt_start,root_device,root_inode
+            $diagnostic.category_provenance='explicit prefix only; point coverage unqualified'
+            $diagnosticPath=Join-Path $packet 'evdev-journal-diagnostic.json'
+            [IO.File]::WriteAllText($diagnosticPath,($diagnostic|ConvertTo-Json -Depth 8),[Text.UTF8Encoding]::new($false))
+            $record.evdev_journal=@{diagnostic_status=$diagnostic.diagnostic_status;sha256=(Hash $diagnosticPath)}
+        }catch{$record.evdev_journal=@{diagnostic_status='unknown';reason='diagnostic-acquisition-or-persistence-failed'}}
     }
     }finally{
     [IO.File]::WriteAllText((Join-Path $packet 'operator-receipt.json'),($record|ConvertTo-Json -Depth 8),[Text.UTF8Encoding]::new($false))

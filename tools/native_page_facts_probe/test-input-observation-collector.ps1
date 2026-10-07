@@ -1,6 +1,7 @@
 $ErrorActionPreference='Stop'
 . "$PSScriptRoot/input-observation-proof.ps1"
 . "$PSScriptRoot/development-budget.ps1"
+. "$PSScriptRoot/input-evdev-journal.ps1"
 $source=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'run-qt-input-observation-source.ps1'))
 $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseInput($source,[ref]$tokens,[ref]$errors)
 if($errors.Count){throw ($errors|Out-String)}
@@ -45,7 +46,7 @@ function ObservationCopy([string]$remotePath,[string]$localPath){
     [IO.File]::WriteAllBytes($localPath,$(if($case -ceq 'heap-hash-mismatch' -and $remotePath.StartsWith('/tmp/')){[byte[]]@(0)}else{$png}));return @{exit=0;timeout=$false;stdout=''}
 }
 try{
-    Check ($source.Contains("heap_image_profile='legacy-df745-overview-768x1024';capture_helper_sha256='df745")) 'packet fixed profile/helper binding'
+    Check ($source.Contains("heap_image_profile='legacy-df745-overview-768x1024';development_evdev_logging=" ) -and $source.Contains("capture_helper_sha256='df745")) 'packet fixed profile/helper binding'
     Check ($source.Contains("experiment='development-input-observation';evidence_profile='device-frames-v1';heap_image_profile='legacy-df745-overview-768x1024'")) 'receipt fixed profile binding'
     Check ($source.Contains((Hash (Join-Path $PSScriptRoot 'input-observation-proof.ps1')))) 'frozen observation proof hash'
     $completion=New-Completion
@@ -255,6 +256,19 @@ try{
         Check (-not $record.facts_verified -and -not $record.callback_verified -and -not $record.candidate_generation_verified) "historical evidence grants no facts $preservationCase"
         Check ($cleanupCommand.Contains("rm -f '/tmp/rem25-facts-$nonce-input-observation.png'") -eq $cleanupExpected) "conditional deletion $preservationCase"
     }
+    # Execute the actual recovery block with selected logging, failing only diagnostics.
+    $developmentEvdevLogging=$true
+    $evdevBegin=Get-InputEvdevEndpoint "01234567-89ab-cdef-0123-456789abcdef 100 10.00`n"
+    $evdevEnd=Get-InputEvdevEndpoint "01234567-89ab-cdef-0123-456789abcdef 101 11.00`n"
+    $evdevEndpointReason='fixture';$preservationCase='saved-both';$journalCalls=0
+    function Invoke-InputEvdevCapture([string]$program,[string[]]$arguments){$script:journalCalls++;return @{timeout=$true;acquisition_error=$false;exit=$null;stdout_bytes=[byte[]]@();stderr_bytes=[byte[]]@();stdout_overflow=$false;stderr_overflow=$false;elapsed_ms=5000}}
+    $record=@{arm_intent=$true;restored=$false;cleanup_verified=$false;gui_completion_verified=$true;qt_image_available=$true;heap_capture_succeeded=$true;paired_image_candidate_verified=$true;
+        qt_saved_copy_verified=$true;qt_saved_copy_sha256=$pngHash;heap_saved_copy_verified=$true;heap_saved_copy_sha256=$pngHash;heap_capture_transport_unknown=$false;
+        facts_verified=$false;callback_verified=$false;candidate_generation_verified=$false;observation_completion=(New-Completion)}
+    . $recovery
+    Check ($journalCalls -eq 1 -and $record.evdev_journal.diagnostic_status -ceq 'unknown') 'logging timeout one call no retry'
+    Check ($record.gui_completion_verified -and $record.qt_image_available -and $record.heap_capture_succeeded -and $record.paired_image_candidate_verified -and $record.restored -and $record.cleanup_verified) 'logging unknown preserves successful live/recovery flags'
+    Check (-not $record.facts_verified -and -not $record.callback_verified -and -not $record.candidate_generation_verified) 'logging unknown grants no facts'
     Write-Output "input-observation collector: PASS $count assertions (mock transport; no device)"
 }finally{
     $resolved=[IO.Path]::GetFullPath($packet);$tempRoot=[IO.Path]::GetFullPath([IO.Path]::GetTempPath())
