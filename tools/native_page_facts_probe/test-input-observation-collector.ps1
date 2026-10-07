@@ -17,13 +17,13 @@ function New-Completion {
     [pscustomobject]@{kind='development-input-observation';nonce=$nonce;attempt_pid='1234';attempt_start='5678';root_device='11';root_inode='22';
         gui_callback_completed=$true;application_thread=$true;engine_thread=$true;scope_current=$true;native_authority=$false;render_authority=$false;ui_acknowledged=$false;
         accepted_ms=100;seal_ms=100;grab_start_ms=101;grab_end_ms=102;completed_ms=103;width=200;height=200;dpr=1;
-        image_status='available';image_width=200;image_height=200;png_bytes=24;counts=@(0,0,0,0,1,0,0);events=@();
+        image_status='available';image_width=200;image_height=200;png_bytes=$png.Length;counts=@(0,0,0,0,1,0,0);events=@();
         record_overflow=$false;point_overflow=$false;count_overflow=$false;output_truncated=$false}
 }
 function Expand([string]$text){$text.Replace('@ROOT@',$remote).Replace('@NONCE@',$nonce)}
 function Hash([string]$path){(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()}
-$png=[Convert]::FromHexString('89504E470D0A1A0A0000000D494844520000057C00000750')
-$pngPath=Join-Path $packet 'fixture-header.png';[IO.File]::WriteAllBytes($pngPath,$png);$pngHash=Hash $pngPath
+$png=[Convert]::FromBase64String('iVBORw0KGgoAAAANSUhEUgAAAwAAAAQAAQAAAAB+XQOtAAACpElEQVR4nO3SwQkAIBAEMbX/nrWEeYgPISngDoade7y1Ht8fHiSJkkRJoiRRkihJlCRKEiWJkkRJoiRRkihJlCRKEiWJkkRJoiRRkihJlCRKEiWJkkRJoiRRkihJlCRKEiWJkkRJoiRRkihJlCRKEiWJkkRJoiRRkihJlCRKEiWJkkRJoiRRkihJlCRKEiWJkkRJoiRRkihJlCRKEiWJkkRJoiRRkihJlCRKEiWJkkRJoiRRkihJlCRKEiWJkkRJoiRRkihJlCRKEiWJkkRJoiRRkihJlCRKEiWJkkRJoiRRkihJlCRKEiWJkkRJoiRRkihJlCRKEiWJkkRJoiRRkihJlCRKEiWJkkRJoiRRkihJlCRKEiWJkkRJoiRRkihJlCRKEiWJkkRJoiRRkihJlCRKEiWJkkRJoiRRkihJlCRKEiWJkkRJoiRRkihJlCRKEiWJkkRJoiRRkihJlCRKEiWJkkRJoiRRkihJlCRKEiWJkkRJoiRRkihJlCRKEiWJkkRJoiRRkihJlCRKEiWJkkRJoiRRkihJlCRKEiWJkkRJoiRRkihJlCRKEiWJkkRJoiRRkihJlCRKEiWJkkRJoiRRkihJlCSS6J4VJYmSREmiJFGSKEmUJEoSJYmSREmiJFGSKEmUJEoSJYmSREmiJFGSKEmUJEoSJYmSREmiJFGSKEmUJEoSJYmSREmiJFGSKEmUJEoSJYmSREmiJFGSKEmUJEoSJYmSREmiJFGSKEmUJEoSJYmSREmiJFGSKEmUJEoSJYmSREmiJFGSKEmUJEoSJYmSREmiJFGSKEmUJEoSJYmSREmiJFGSKEmUJEoSJYmSREmiJFGSKEmUJEoSJYmSREmiJFGSKEmUJEoSJYmSREmiJFGSKEmUJJLonhUlidL/iQ5wrQj/iA+lSgAAAABJRU5ErkJggg==')
+$pngPath=Join-Path $packet 'fixture-legacy-overview.png';[IO.File]::WriteAllBytes($pngPath,$png);$pngHash=Hash $pngPath
 function ObservationSSH([string]$command){
     if($command.Contains('/home/root/rem9-validation/screenshot')){
         $script:captures++
@@ -42,9 +42,12 @@ function ObservationSSH([string]$command){
 function ObservationCopy([string]$remotePath,[string]$localPath){
     if($case -ceq 'qt-copy-timeout' -and $remotePath.StartsWith('/run/')){return @{exit=1;timeout=$true;stdout=''}}
     if($case -ceq 'heap-copy-timeout' -and $remotePath.StartsWith('/tmp/')){return @{exit=1;timeout=$true;stdout=''}}
-    [IO.File]::WriteAllBytes($localPath,$png);return @{exit=0;timeout=$false;stdout=''}
+    [IO.File]::WriteAllBytes($localPath,$(if($case -ceq 'heap-hash-mismatch' -and $remotePath.StartsWith('/tmp/')){[byte[]]@(0)}else{$png}));return @{exit=0;timeout=$false;stdout=''}
 }
 try{
+    Check ($source.Contains("heap_image_profile='legacy-df745-overview-768x1024';capture_helper_sha256='df745")) 'packet fixed profile/helper binding'
+    Check ($source.Contains("experiment='development-input-observation';heap_image_profile='legacy-df745-overview-768x1024'")) 'receipt fixed profile binding'
+    Check ($source.Contains((Hash (Join-Path $PSScriptRoot 'input-observation-proof.ps1')))) 'frozen observation proof hash'
     $completion=New-Completion
     Check (Test-InputObservationCompletion $completion $nonce '1234' '5678' '11' '22') 'valid completion'
     foreach($field in @('native_authority','render_authority','ui_acknowledged')){
@@ -65,7 +68,30 @@ try{
     Check (-not(Test-InputObservationCompletion $bad $nonce '1234' '5678' '11' '22')) 'deadline exact'
     $bad=New-Completion;$bad.png_bytes=8388609
     Check (-not(Test-InputObservationCompletion $bad $nonce '1234' '5678' '11' '22')) 'PNG cap'
-    Check (Test-InputObservationHeapPng $pngPath) 'heap dimensions header'
+    Check (Test-InputObservationLegacyOverviewPng $pngPath 'legacy-df745-overview-768x1024') 'fixed legacy overview'
+    foreach($profile in @('', 'native-1404x1872', 'LEGACY-df745-overview-768x1024')){
+        Check (-not(Test-InputObservationLegacyOverviewPng $pngPath $profile)) 'wrong profile refused'
+    }
+    $badPngPath=Join-Path $packet 'refused.png'
+    foreach($shape in @(@(1404,1872),@(1024,768),@(767,1024))){
+        $bytes=$png.Clone()
+        foreach($pair in @(@(16,$shape[0]),@(20,$shape[1]))){
+            $encoded=[BitConverter]::GetBytes([int]$pair[1]);[Array]::Reverse($encoded);[Array]::Copy($encoded,0,$bytes,$pair[0],4)
+        }
+        [IO.File]::WriteAllBytes($badPngPath,$bytes)
+        Check (-not(Test-InputObservationLegacyOverviewPng $badPngPath 'legacy-df745-overview-768x1024')) 'wrong dimensions refused'
+    }
+    foreach($kind in @('signature','truncated','trailer','oversize')){
+        $bytes=$png.Clone()
+        switch($kind){
+            signature {$bytes[0]=0}
+            truncated {$bytes=$bytes[0..23]}
+            trailer {$bytes[-1]=0}
+            oversize {$bytes=[byte[]]::new(8388609)}
+        }
+        [IO.File]::WriteAllBytes($badPngPath,$bytes)
+        Check (-not(Test-InputObservationLegacyOverviewPng $badPngPath 'legacy-df745-overview-768x1024')) "$kind PNG refused"
+    }
     $event=[pscustomobject]@{ms=99;type=2;relationship=1;source=0;buttons=1;timestamp='0';points=@([pscustomobject]@{id=0;state=1;x=90.0;y=260.0})}
     $good=New-Completion;$good.events=@($event)
     Check (Test-InputObservationCompletion $good $nonce '1234' '5678' '11' '22') 'typed event coordinates'
@@ -75,7 +101,7 @@ try{
     }
     $bad=New-Completion;$bad.events=@($event);$event.points=@(1,2,3,4,5)
     Check (-not(Test-InputObservationCompletion $bad $nonce '1234' '5678' '11' '22')) 'point cap'
-    foreach($case in @('good','empty-image','qt-copy-timeout','qt-postcopy-generation-loss','heap-timeout','heap-disconnect','heap-malformed','late-generation-loss','initial-generation-loss','heap-copy-timeout')){
+    foreach($case in @('good','empty-image','qt-copy-timeout','qt-postcopy-generation-loss','heap-timeout','heap-disconnect','heap-malformed','late-generation-loss','initial-generation-loss','heap-copy-timeout','heap-hash-mismatch')){
         $record=[ordered]@{facts_verified=$false;callback_verified=$false;candidate_generation_verified=$false;gui_completion_verified=$false;qt_image_available=$false;qt_saved_copy_verified=$false;heap_saved_copy_verified=$false;heap_capture_succeeded=$false;paired_image_candidate_verified=$false}
         $captures=0;$identities=0;$observationClock=[pscustomobject]@{ElapsedMilliseconds=120}
         $value=New-Completion
@@ -90,6 +116,7 @@ try{
             Check ($failed -and -not $record.heap_capture_succeeded -and -not $record.paired_image_candidate_verified) "$case no pair"
             Check ($record.gui_completion_verified -eq ($case -cne 'initial-generation-loss')) "$case preserved GUI evidence"
             Check ($captures -eq $(if($case -in @('initial-generation-loss','qt-copy-timeout','qt-postcopy-generation-loss')){0}else{1})) "$case no retry"
+            if($case -ceq 'heap-hash-mismatch'){Check (-not $record.heap_saved_copy_verified) 'hash mismatch no saved-copy promotion'}
             if($case -in @('heap-timeout','heap-disconnect','heap-malformed')){Check $record.heap_capture_transport_unknown "$case remote uncertain"}
             if($case -in @('qt-copy-timeout','qt-postcopy-generation-loss')){Check ($record.qt_saved_copy_verified -eq ($case -ceq 'qt-postcopy-generation-loss')) "$case separate saved copy"}
         }
@@ -143,7 +170,7 @@ try{
             if($preservationCase -ceq 'preservation-transport-failure'){return @{exit=255;timeout=$false;stdout=''}}
             $qt=$command.Contains('/input-window.png')
             $present=if($qt){$preservationCase -cne 'absent'}else{$preservationCase -in @('heap-copy-failure','saved-both')}
-            return @{exit=0;timeout=$false;stdout=$(if($present){"present 24 $pngHash`n"}else{"absent`n"})}
+            return @{exit=0;timeout=$false;stdout=$(if($present){"present $($png.Length) $pngHash`n"}else{"absent`n"})}
         }
         return @{exit=0;timeout=$false;stdout=$(if($command.Contains("printf 'present")){"absent`n"}else{''})}
     }

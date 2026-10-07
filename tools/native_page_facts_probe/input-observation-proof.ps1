@@ -1,15 +1,20 @@
 # Source-only decoder. Completion proves a bounded GUI observation, never facts.
-function Test-InputObservationHeapPng([string]$path) {
+function Test-InputObservationLegacyOverviewPng([string]$path,[string]$profile) {
+    if($profile -cne 'legacy-df745-overview-768x1024'){return $false}
     $file=Get-Item -LiteralPath $path
-    if($file.Length -lt 24 -or $file.Length -gt 8388608){return $false}
+    if($file.Length -lt 45 -or $file.Length -gt 8388608){return $false}
     $stream=[IO.File]::OpenRead($path)
     try{
-        $header=[byte[]]::new(24)
-        if($stream.Read($header,0,24) -ne 24){return $false}
+        # Fixed profile header/trailer sanity, not a full PNG decoder.
+        $header=[byte[]]::new(33)
+        if($stream.Read($header,0,33) -ne 33){return $false}
         if([Convert]::ToHexString($header[0..15]) -cne '89504E470D0A1A0A0000000D49484452'){return $false}
         $width=([long]$header[16]*16777216)+([long]$header[17]*65536)+([long]$header[18]*256)+$header[19]
         $height=([long]$header[20]*16777216)+([long]$header[21]*65536)+([long]$header[22]*256)+$header[23]
-        return $width -eq 1404 -and $height -eq 1872
+        if($width -ne 768 -or $height -ne 1024){return $false}
+        $trailer=[byte[]]::new(12)
+        [void]$stream.Seek(-12,[IO.SeekOrigin]::End)
+        return $stream.Read($trailer,0,12) -eq 12 -and [Convert]::ToHexString($trailer) -ceq '0000000049454E44AE426082'
     }finally{$stream.Dispose()}
 }
 function Test-InputObservationCompletion($value,[string]$nonce,[string]$pidText,[string]$started,[string]$dev,[string]$ino) {

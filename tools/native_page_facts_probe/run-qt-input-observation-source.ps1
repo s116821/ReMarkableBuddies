@@ -22,7 +22,7 @@ if((Hash $refusalProofPath) -cne '44c786488a88fb249501bbcc0361fe53b561f9b5ac33e8
 . $refusalProofPath
 . $proofPath
 $observationProofPath=Join-Path $PSScriptRoot 'input-observation-proof.ps1'
-if((Hash $observationProofPath) -cne 'da8c233527b7cceb21cc1f11718d4925b13e802b67a0b7a7b8bd445864fbbb87'){throw 'Fixed observation decoder changed'}
+if((Hash $observationProofPath) -cne 'cb599c2370a9534d1e41a5452176017964ee062239986905738132bd37cbe3da'){throw 'Fixed observation decoder changed'}
 . $observationProofPath
 . $budgetPath
 $budget=Get-FactsDevelopmentBudget
@@ -63,11 +63,11 @@ foreach($name in @('launch.sh','restore.sh','native-probe.conf','check-input-obs
 $files.owner=Freeze 'owner' $nonce
 $files['dropin.sha256']=Freeze 'dropin.sha256' $files['native-probe.conf']
 $localBindings=[ordered]@{nonce=$nonce;operator_sha256=(Hash $PSCommandPath);stock_baseline_sha256=(Hash $StockBaselinePath);
- expected_sha256=$expectedHash;payload_sha256=$payloadHash;publisher_sha256=$publisherHash;proof_sha256=(Hash $proofPath);budget_sha256=(Hash $budgetPath);observation_proof_sha256=(Hash $observationProofPath);capture_helper_sha256='df745d56a2ef1834ea644b8859646972210c5e0247a3e6e75e9e245f5fa919b8';files=$files}
+ expected_sha256=$expectedHash;payload_sha256=$payloadHash;publisher_sha256=$publisherHash;proof_sha256=(Hash $proofPath);budget_sha256=(Hash $budgetPath);observation_proof_sha256=(Hash $observationProofPath);heap_image_profile='legacy-df745-overview-768x1024';capture_helper_sha256='df745d56a2ef1834ea644b8859646972210c5e0247a3e6e75e9e245f5fa919b8';files=$files}
 [void](Freeze 'packet-bindings.json' ($localBindings|ConvertTo-Json -Depth 5))
 if($PrepareOnly){$localBindings|ConvertTo-Json -Depth 5;return}
 # Main alone executes after independent artifact/operator review and advance notice.
-$record=[ordered]@{nonce=$nonce;experiment='development-input-observation';payload_source='unselected-source-only';publisher_source='unselected-source-only';bindings=$localBindings;budget=$budget;results=@();arm_intent=$false;armed=$false;callback_verified=$false;candidate_generation_verified=$false;facts_verified=$false;observation_generation_verified=$false;gui_completion_verified=$false;qt_image_available=$false;qt_saved_copy_verified=$false;qt_saved_copy_sha256=$null;heap_saved_copy_verified=$false;heap_saved_copy_sha256=$null;heap_capture_succeeded=$false;heap_capture_transport_unknown=$false;paired_image_candidate_verified=$false;heap_capture_start_ms=$null;heap_capture_end_ms=$null;candidate_receipt=$null;restored=$false;cleanup_verified=$false;live_diagnostics_collected=$false;live_diagnostics_sha256=$null;gate_evidence=@{};diagnostic_collected=$false;diagnostic_sha256=$null;final_callback_state='not-checked';final_callback_collected=$false;final_callback_sha256=$null;live_observation_ms=$null;live_refusal=$null;live_refusal_callback_match=$false;final_refusal=$null;final_refusal_callback_match=$false}
+$record=[ordered]@{nonce=$nonce;experiment='development-input-observation';heap_image_profile='legacy-df745-overview-768x1024';payload_source='unselected-source-only';publisher_source='unselected-source-only';bindings=$localBindings;budget=$budget;results=@();arm_intent=$false;armed=$false;callback_verified=$false;candidate_generation_verified=$false;facts_verified=$false;observation_generation_verified=$false;gui_completion_verified=$false;qt_image_available=$false;qt_saved_copy_verified=$false;qt_saved_copy_sha256=$null;heap_saved_copy_verified=$false;heap_saved_copy_sha256=$null;heap_capture_succeeded=$false;heap_capture_transport_unknown=$false;paired_image_candidate_verified=$false;heap_capture_start_ms=$null;heap_capture_end_ms=$null;candidate_receipt=$null;restored=$false;cleanup_verified=$false;live_diagnostics_collected=$false;live_diagnostics_sha256=$null;gate_evidence=@{};diagnostic_collected=$false;diagnostic_sha256=$null;final_callback_state='not-checked';final_callback_collected=$false;final_callback_sha256=$null;live_observation_ms=$null;live_refusal=$null;live_refusal_callback_match=$false;final_refusal=$null;final_refusal_callback_match=$false}
 function Native([string]$program,[string[]]$arguments,[int]$timeoutMs=20000){
     $info=[Diagnostics.ProcessStartInfo]::new();$info.FileName=$program;$info.UseShellExecute=$false
     $info.RedirectStandardOutput=$true;$info.RedirectStandardError=$true
@@ -295,7 +295,7 @@ printf '%s %s %s %s\n' "$p" "$started" "$dev" "$ino"
             RequireSameObservationIdentity
             $heapImagePath=Join-Path $packet 'heap-after-gui.png'
             Require (ObservationCopy $heapRemote $heapImagePath)
-            if((Hash $heapImagePath) -cne $heapHash -or -not(Test-InputObservationHeapPng $heapImagePath)){throw 'Heap image bytes/dimensions refused'}
+            if((Hash $heapImagePath) -cne $heapHash -or -not(Test-InputObservationLegacyOverviewPng $heapImagePath 'legacy-df745-overview-768x1024')){throw 'Heap image bytes/legacy overview profile refused'}
             $record.heap_saved_copy_verified=$true;$record.heap_saved_copy_sha256=$heapHash
             RequireSameObservationIdentity
             $record.heap_capture_succeeded=$true;$record.heap_image_sha256=$heapHash
