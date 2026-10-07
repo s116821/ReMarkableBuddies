@@ -96,6 +96,11 @@ try{
         $bad=New-Completion;$bad.evidence_profile=$profile
         Check (-not(Test-InputObservationCompletion $bad $nonce '1234' '5678' '11' '22')) 'wrong/missing evidence profile'
     }
+    foreach($profileJson in @('[]','["device-frames-v1"]','["device-frames-v1","other"]','true','1','{}')){
+        $bad=New-Completion;$bad.evidence_profile=ConvertFrom-Json -InputObject $profileJson -NoEnumerate
+        $bad=($bad|ConvertTo-Json -Depth 10 -Compress)|ConvertFrom-Json
+        Check (-not(Test-InputObservationCompletion $bad $nonce '1234' '5678' '11' '22')) "profile JSON type refused $profileJson"
+    }
     Check ($source.Contains("evidence_profile='device-frames-v1';heap_image_profile=")) 'fixed evidence profile binding'
     function New-FrameCompletion([int]$mask=7){
         $v=New-Completion

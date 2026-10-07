@@ -18,7 +18,7 @@ function Test-InputObservationLegacyOverviewPng([string]$path,[string]$profile) 
     }finally{$stream.Dispose()}
 }
 function Test-InputObservationCompletion($value,[string]$nonce,[string]$pidText,[string]$started,[string]$dev,[string]$ino) {
-    if($null -eq $value -or $value.evidence_profile -cne 'device-frames-v1' -or $value.kind -cne 'development-input-observation' -or $value.nonce -cne $nonce){return $false}
+    if($null -eq $value -or $value.evidence_profile -isnot [string] -or $value.evidence_profile -cne 'device-frames-v1' -or $value.kind -cne 'development-input-observation' -or $value.nonce -cne $nonce){return $false}
     foreach($name in @('attempt_pid','attempt_start','root_device','root_inode')){
         if($value.$name -isnot [string] -or $value.$name -cnotmatch '^[1-9][0-9]{0,19}$'){return $false}
         $parsed=[ulong]0;if(-not [ulong]::TryParse($value.$name,[ref]$parsed)){return $false}

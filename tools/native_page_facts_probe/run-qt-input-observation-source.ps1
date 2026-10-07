@@ -22,7 +22,7 @@ if((Hash $refusalProofPath) -cne '44c786488a88fb249501bbcc0361fe53b561f9b5ac33e8
 . $refusalProofPath
 . $proofPath
 $observationProofPath=Join-Path $PSScriptRoot 'input-observation-proof.ps1'
-if((Hash $observationProofPath) -cne '75f7e77daec31fd4897b6f8752a77b14c50bb4d9ab500d071114d81827e8f100'){throw 'Fixed observation decoder changed'}
+if((Hash $observationProofPath) -cne 'b1a7338fb816fc9891d5247c1f4e0c0c8d0ff94d08fb4dc98065b0357b455917'){throw 'Fixed observation decoder changed'}
 . $observationProofPath
 . $budgetPath
 $budget=Get-FactsDevelopmentBudget
