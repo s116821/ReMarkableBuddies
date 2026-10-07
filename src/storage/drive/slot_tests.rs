@@ -264,6 +264,8 @@ fn overlapping_clients_observe_one_modeled_provider_pointer() {
             let state = state.clone();
             let posts = posts.clone();
             workers.push(thread::spawn(move || {
+                // Accepted sockets can inherit the listener's nonblocking mode on Windows.
+                stream.set_nonblocking(false).unwrap();
                 stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
                 let mut bytes = Vec::new();
                 let mut buffer = [0; 8192];
