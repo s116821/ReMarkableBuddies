@@ -103,19 +103,39 @@ impl Evidence {
         })
     }
 
-    pub fn capture(&mut self, phase: u8, events: &[InputEvent]) -> Result<()> {
-        if !self.active || events.is_empty() {
-            return Ok(());
+    pub fn tee(
+        &mut self,
+        phase: u8,
+        events: impl Iterator<Item = InputEvent>,
+    ) -> Result<Vec<super::owned_pen_window::Event>> {
+        self.collect(phase, events, true)
+    }
+
+    fn collect(
+        &mut self,
+        phase: u8,
+        events: impl Iterator<Item = InputEvent>,
+        semantic_output: bool,
+    ) -> Result<Vec<super::owned_pen_window::Event>> {
+        let mut events = events.peekable();
+        if events.peek().is_none() {
+            return Ok(Vec::new());
         }
+        ensure!(self.active, "Raw evidence tee outside owned window");
         let start = self.bytes.len() / self.abi[0];
         if self.batches.len() == BATCHES {
             self.complete = false;
             anyhow::bail!("Raw evidence batch cap");
         }
         let available = EVENTS - start;
-        let retained = events.len().min(available);
-        self.batches.push((phase, start, retained));
-        for event in events.iter().take(retained) {
+        self.batches.push((phase, start, 0));
+        // This is the existing semantic output batch, not a second raw collection.
+        let mut semantic = Vec::new();
+        for (index, event) in events.take(EVENTS + 1).enumerate() {
+            if index == available {
+                self.complete = false;
+                anyhow::bail!("Raw evidence event cap");
+            }
             let raw: &libc::input_event = event.as_ref();
             self.bytes.extend_from_slice(&raw.time.tv_sec.to_le_bytes());
             self.bytes
@@ -123,12 +143,20 @@ impl Evidence {
             self.bytes.extend_from_slice(&raw.type_.to_le_bytes());
             self.bytes.extend_from_slice(&raw.code.to_le_bytes());
             self.bytes.extend_from_slice(&raw.value.to_le_bytes());
+            self.batches.last_mut().unwrap().2 += 1;
+            if semantic_output {
+                semantic.push((event.event_type().0, event.code(), event.value()));
+            }
         }
-        if retained != events.len() {
-            self.complete = false;
-            anyhow::bail!("Raw evidence event cap");
+        Ok(semantic)
+    }
+
+    pub fn capture(&mut self, phase: u8, events: &[InputEvent]) -> Result<()> {
+        if !self.active {
+            return Ok(());
         }
-        Ok(())
+        self.collect(phase, events.iter().copied(), false)
+            .map(|_| ())
     }
 
     pub fn persist(

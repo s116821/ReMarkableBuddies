@@ -485,20 +485,14 @@ impl InputObserver {
         }
         for index in 0..self.sources.len() {
             let source = &mut self.sources[index];
-            #[allow(unused_mut)]
-            let mut limit = usize::MAX;
-            #[cfg(feature = "development-input-diagnostics")]
-            if source.touch && self.raw_evidence.as_ref().is_some_and(|e| e.active) {
-                limit = 129;
-            }
             let events: Vec<_> = match source.device.fetch_events() {
-                Ok(events) => events.take(limit).collect(),
+                Ok(events) => events.collect(),
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
                 Err(e) => return Err(e.into()),
             };
             #[cfg(feature = "development-input-diagnostics")]
             if source.touch {
-                if let Some(evidence) = self.raw_evidence.as_mut() {
+                if let Some(evidence) = self.raw_evidence.as_mut().filter(|e| e.active) {
                     evidence.capture(2, &events)?;
                 }
             }
@@ -682,14 +676,7 @@ impl super::owned_pen_window::WindowIo for WindowAdapter<'_> {
             Ok(events) => {
                 #[cfg(feature = "development-input-diagnostics")]
                 if let Some(evidence) = self.observer.raw_evidence.as_mut() {
-                    let events: Vec<_> = events.take(129).collect();
-                    evidence.capture(1, &events)?;
-                    return Ok(Some(
-                        events
-                            .into_iter()
-                            .map(|event| (event.event_type().0, event.code(), event.value()))
-                            .collect(),
-                    ));
+                    return Ok(Some(evidence.tee(1, events)?));
                 }
                 Ok(Some(
                     events
