@@ -90,6 +90,13 @@ fn inventory() -> Result<BTreeMap<PathBuf, Identity>> {
 }
 
 fn seed(device: &RawDevice) -> Result<ContactFrames> {
+    Ok(seed_retained(device, None)?.0)
+}
+
+fn seed_retained(
+    device: &RawDevice,
+    mut retained: Option<&mut Vec<u8>>,
+) -> Result<(ContactFrames, (i32, i32, i32))> {
     let axes = device.get_abs_state()?;
     let axis = axes[AbsoluteAxisCode::ABS_MT_SLOT.0 as usize];
     ensure!(
@@ -99,14 +106,31 @@ fn seed(device: &RawDevice) -> Result<ContactFrames> {
         axis.maximum
     );
     let count = axis.maximum as usize + 1;
-    let read_axis = |code: i32| -> Result<Vec<i32>> {
+    if let Some(bytes) = retained.as_mut() {
+        for value in [
+            axis.value,
+            axis.minimum,
+            axis.maximum,
+            axis.fuzz,
+            axis.flat,
+            axis.resolution,
+        ] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        ensure!(24 + 4 * (count + 1) * 4 <= 1024, "Raw seed cap");
+    }
+    let mut read_axis = |code: i32| -> Result<Vec<i32>> {
         let mut values = vec![0i32; count + 1];
         values[0] = code;
         // SAFETY: owned live fd; ioctl writes at most the supplied initialized
         // i32 slice. nix constructs the architecture-specific request length.
-        unsafe {
-            mt_slots(device.as_raw_fd(), &mut values)?;
+        let result = unsafe { mt_slots(device.as_raw_fd(), &mut values) };
+        if let Some(bytes) = retained.as_mut() {
+            for value in &values {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
         }
+        result?;
         Ok(values[1..].to_vec())
     };
     let ids = read_axis(57)?;
@@ -120,6 +144,7 @@ fn seed(device: &RawDevice) -> Result<ContactFrames> {
         ids == read_axis(57)?,
         "Contacts changed during initial snapshot"
     );
+    let initial = (axis.value, xs[0], ys[0]);
     let slots = ids
         .iter()
         .zip(xs)
@@ -130,8 +155,11 @@ fn seed(device: &RawDevice) -> Result<ContactFrames> {
             y: Some(y),
         })
         .collect();
-    ContactFrames::seeded(slots, usize::try_from(axis.value)?)
-        .context("Incomplete initial touch state")
+    Ok((
+        ContactFrames::seeded(slots, usize::try_from(axis.value)?)
+            .context("Incomplete initial touch state")?,
+        initial,
+    ))
 }
 
 struct Source {
@@ -151,6 +179,8 @@ pub struct InputObserver {
     initial_input: bool,
     owned_pen: Option<OwnedPen>,
     owned_touch: Option<OwnedTouch>,
+    #[cfg(feature = "development-input-diagnostics")]
+    pub(super) raw_evidence: Option<super::tap_echo_raw::Evidence>,
     #[cfg(test)]
     scripted_polls: Option<std::collections::VecDeque<Result<Vec<Interaction>>>>,
     #[cfg(test)]
@@ -239,6 +269,8 @@ impl InputObserver {
             initial_input,
             owned_pen: None,
             owned_touch: None,
+            #[cfg(feature = "development-input-diagnostics")]
+            raw_evidence: None,
             #[cfg(test)]
             scripted_polls: None,
             #[cfg(test)]
@@ -373,6 +405,22 @@ impl InputObserver {
                 descriptor_identity(self.sources[index].device.as_fd())? == writer,
                 "Touch reader/writer descriptor mismatch"
             );
+            #[allow(unused_mut)]
+            let mut decoder = self.frames.clone();
+            #[cfg(feature = "development-input-diagnostics")]
+            if let Some(evidence) = self.raw_evidence.as_mut() {
+                evidence.source = Some((writer.inode, writer.device));
+                let (fresh, initial) =
+                    seed_retained(&self.sources[index].device, Some(&mut evidence.seed))?;
+                evidence.seed_point = Some(initial);
+                let fresh = super::tap_echo_raw::fresh_decoder(point, fresh, initial)?;
+                ensure!(
+                    descriptor_identity(self.sources[index].device.as_fd())? == writer,
+                    "Diagnostic reader changed during seed"
+                );
+                decoder = fresh;
+                evidence.active = true;
+            }
             self.owned_touch = Some(OwnedTouch {
                 window: OwnedPen {
                     index,
@@ -380,7 +428,7 @@ impl InputObserver {
                     started: self.clock.elapsed(),
                 },
                 point,
-                decoder: self.frames.clone(),
+                decoder,
             });
             Ok(())
         })();
@@ -437,11 +485,23 @@ impl InputObserver {
         }
         for index in 0..self.sources.len() {
             let source = &mut self.sources[index];
+            #[allow(unused_mut)]
+            let mut limit = usize::MAX;
+            #[cfg(feature = "development-input-diagnostics")]
+            if source.touch && self.raw_evidence.as_ref().is_some_and(|e| e.active) {
+                limit = 129;
+            }
             let events: Vec<_> = match source.device.fetch_events() {
-                Ok(events) => events.collect(),
+                Ok(events) => events.take(limit).collect(),
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
                 Err(e) => return Err(e.into()),
             };
+            #[cfg(feature = "development-input-diagnostics")]
+            if source.touch {
+                if let Some(evidence) = self.raw_evidence.as_mut() {
+                    evidence.capture(2, &events)?;
+                }
+            }
             ensure!(events.len() <= 8192, "Input observer event limit");
             let touch = source.touch;
             self.feed_events(
@@ -567,6 +627,8 @@ impl InputObserver {
             initial_input: false,
             owned_pen: None,
             owned_touch: None,
+            #[cfg(feature = "development-input-diagnostics")]
+            raw_evidence: None,
             scripted_polls: Some(polls.into()),
             replay: None,
         }
@@ -617,12 +679,25 @@ impl super::owned_pen_window::WindowIo for WindowAdapter<'_> {
         }
         let source = &mut self.observer.sources[self.window.index];
         match source.device.fetch_events() {
-            Ok(events) => Ok(Some(
-                events
-                    .take(super::owned_pen_window::MAX_EVENTS + 1)
-                    .map(|event| (event.event_type().0, event.code(), event.value()))
-                    .collect(),
-            )),
+            Ok(events) => {
+                #[cfg(feature = "development-input-diagnostics")]
+                if let Some(evidence) = self.observer.raw_evidence.as_mut() {
+                    let events: Vec<_> = events.take(129).collect();
+                    evidence.capture(1, &events)?;
+                    return Ok(Some(
+                        events
+                            .into_iter()
+                            .map(|event| (event.event_type().0, event.code(), event.value()))
+                            .collect(),
+                    ));
+                }
+                Ok(Some(
+                    events
+                        .take(super::owned_pen_window::MAX_EVENTS + 1)
+                        .map(|event| (event.event_type().0, event.code(), event.value()))
+                        .collect(),
+                ))
+            }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
             Err(error) => Err(error.into()),
         }

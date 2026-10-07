@@ -131,6 +131,18 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         #[cfg(feature = "development-input-diagnostics")]
+        Some("tap-echo-raw") => {
+            anyhow::ensure!(
+                args.len() == 5,
+                "Expected tap-echo-raw X Y PRIVATE_DIRECTORY"
+            );
+            let point = (args[2].parse()?, args[3].parse()?);
+            let mut touch = Touch::new(false, TriggerCorner::LowerLeft);
+            touch.diagnostic_tap_echo_raw(point, std::path::Path::new(&args[4]))?;
+            println!("{{\"diagnostic\":\"tap-echo-raw\",\"echo_observed\":true,\"ui_acknowledged\":false,\"native_navigation_qualified\":false}}");
+            return Ok(());
+        }
+        #[cfg(feature = "development-input-diagnostics")]
         Some("tap-echo") => {
             let x: i32 = args
                 .get(2)

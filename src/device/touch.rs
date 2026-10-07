@@ -106,6 +106,63 @@ pub struct Touch {
 
 #[cfg(target_os = "linux")]
 impl Touch {
+    /// Bounded complete-event diagnostic. Never proves UI acknowledgement.
+    #[cfg(feature = "development-input-diagnostics")]
+    pub fn diagnostic_tap_echo_raw(
+        &mut self,
+        point: (i32, i32),
+        directory: &std::path::Path,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            (1..768).contains(&point.0) && (1..1024).contains(&point.1),
+            "Diagnostic point must be strictly inside the virtual screen"
+        );
+        let model = DeviceModel::detect();
+        anyhow::ensure!(
+            model == DeviceModel::Remarkable2
+                && self.device_model == model
+                && super::native_page::verified_contract(
+                    model,
+                    &std::fs::read_to_string("/etc/os-release")?
+                ),
+            "Unqualified touch diagnostic firmware/device/transform"
+        );
+        let mut evidence = super::tap_echo_raw::Evidence::new(directory)?;
+        let native = self.native_point(point);
+        let mut input = super::input_observer::InputObserver::new(TriggerCorner::LowerLeft, None)?;
+        let writer = self.input_identity()?;
+        // Attach only after construction: its initial reads are not per-tap evidence.
+        input.raw_evidence = Some(evidence);
+        let result = (|| {
+            input.begin_owned_touch(writer, native)?;
+            let down = self.touch_start(point);
+            if down.is_ok() {
+                sleep(Duration::from_millis(100));
+            }
+            let release = self.touch_stop();
+            let finish = input.finish_owned_touch();
+            match (down.and(release), finish) {
+                (Err(error), Err(finish)) => {
+                    Err(error.context(format!("Touch echo observation also failed: {finish:#}")))
+                }
+                (Err(error), _) | (_, Err(error)) => Err(error),
+                (Ok(()), Ok(())) => Ok(()),
+            }
+        })();
+        evidence = input
+            .raw_evidence
+            .take()
+            .expect("diagnostic evidence retained");
+        let persistence = evidence.persist(point, native, &result);
+        match (result, persistence) {
+            (Err(error), Err(persist)) => {
+                Err(error.context(format!("Raw evidence persistence failed: {persist:#}")))
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+            (Ok(()), Ok(())) => Ok(()),
+        }
+    }
+
     /// One development contact observed through the production owned-touch watch.
     /// Success is evdev echo evidence, never UI acknowledgement.
     #[cfg(feature = "development-input-diagnostics")]
@@ -372,6 +429,17 @@ impl Touch {
 mod hold_tests {
     use super::{HoldTimer, TriggerCorner};
     use std::time::Duration;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn proposed_diagnostic_point_uses_exact_existing_f32_mapping() {
+        let touch = super::Touch {
+            device: None,
+            device_model: super::DeviceModel::Remarkable2,
+            trigger_corner: TriggerCorner::LowerLeft,
+        };
+        assert_eq!(touch.native_point((110, 280)), (201, 1360));
+    }
 
     #[test]
     fn stationary_contact_triggers_at_threshold_not_before() {
