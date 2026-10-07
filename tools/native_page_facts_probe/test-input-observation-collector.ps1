@@ -130,6 +130,13 @@ try{
     . ([scriptblock]::Create(($functions|Where-Object Name -ceq 'Expand').Extent.Text))
     . ([scriptblock]::Create(($functions|Where-Object Name -ceq 'PreserveObservationImages').Extent.Text))
     $stock=[pscustomobject]@{stock_pid=8888;stock_start='9999'};$rollback='fixture-rollback';$fixtureCheck='fixture-only'
+    $payloadHash='a'*64;$record=@{heap_capture_transport_unknown=$false}
+    $arming=@($ast.FindAll({param($node)$node -is [Management.Automation.Language.StringConstantExpressionAst] -and $node.Value.Contains('BEGIN private initial lock')},$true))[0].Value
+    $expandedArming=Expand $arming
+    $expectedArmingLine='test "$(sha256sum ''@ROOT@/payload.so'' | awk ''{print $1}'')" = ''@PAYLOADHASH@'''
+    $expectedArmingLine=$expectedArmingLine.Replace('@ROOT@',$remote).Replace('@PAYLOADHASH@',$payloadHash)
+    Check (($expandedArming.Replace("`r`n","`n").Split("`n")) -ccontains $expectedArmingLine) 'exact selected arming payload hash'
+    Check (-not $expandedArming.Contains('0'*64) -and -not $expandedArming.Contains('@PAYLOADHASH@')) 'no unresolved arming hash'
     function SSH([string]$command){
         if($command.Contains('for name in payload.so')){$script:cleanupCommand=$command}
         if($command.Contains("printf 'absent\n'; else")){

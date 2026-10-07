@@ -165,7 +165,7 @@ mkdir -m700 '@ROOT@'
     $record.arm_intent=$true
     Require (SSH (Expand @'
 set -eu
-test "$(sha256sum '@ROOT@/payload.so' | awk '{print $1}')" = 0000000000000000000000000000000000000000000000000000000000000000
+test "$(sha256sum '@ROOT@/payload.so' | awk '{print $1}')" = '@PAYLOADHASH@'
 chmod 600 '@ROOT@/payload.so'
 # Prove actual target flags before arming or stopping any original service.
 # BEGIN private initial lock (owned shell regression extracts this exact block).
