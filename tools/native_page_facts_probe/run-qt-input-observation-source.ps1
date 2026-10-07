@@ -136,7 +136,8 @@ try{
     if($developmentEvdevLogging){
         Require (SSH (Expand @'
 set -eu
-awk 'BEGIN {RS="\0"} /^(QT_QPA_EVDEV_DEBUG|QT_LOGGING_RULES|QT_MESSAGE_PATTERN)=/ {found=1} END {if(found) exit 90}' /proc/@STOCKPID@/environ
+env_records=$(set -o pipefail || exit 90; cat /proc/@STOCKPID@/environ | LC_ALL=C tr '\n' '\r' | LC_ALL=C tr '\000' '\n') || exit 90
+printf '%s\n' "$env_records" | LC_ALL=C awk '/^(QT_QPA_EVDEV_DEBUG|QT_LOGGING_RULES|QT_MESSAGE_PATTERN)=/ {found=1} END {if(found) exit 90}'
 '@))
     }
     Require (SSH (Expand @'
@@ -157,7 +158,8 @@ test "$(systemctl show --property=Restart --value xochitl.service)" = on-failure
 test "$(systemctl show --property=KillMode --value xochitl.service)" = control-group
 test "$(systemctl show --property=NRestarts --value xochitl.service)" = 0
 test -z "$(systemctl show --property=Job --value xochitl.service)"
-if awk 'BEGIN {RS="\0"} /^(LD_PRELOAD|LD_LIBRARY_PATH|XOVI_ROOT)=/ {found=1} END {exit !found}' /proc/@STOCKPID@/environ; then exit 90; fi
+env_records=$(set -o pipefail || exit 90; cat /proc/@STOCKPID@/environ | LC_ALL=C tr '\n' '\r' | LC_ALL=C tr '\000' '\n') || exit 90
+printf '%s\n' "$env_records" | LC_ALL=C awk '/^(LD_PRELOAD|LD_LIBRARY_PATH|XOVI_ROOT)=/ {found=1} END {if(found) exit 90}'
 systemctl is-active xochitl.service reader-buddy.service rm-sync.service
 @FIXTURECHECK@
 test ! -e '@ROOT@'
@@ -269,7 +271,8 @@ test "$(awk '{print $22}' "/proc/$p/stat")" = "$started"
 test "$(sha256sum "/proc/$p/exe" | awk '{print $1}')" = 071d85beef3ef2d4cc0e11002140b27b82a2cc04a2ed740a5669f591069b77df
 awk -v so='@ROOT@/payload.so' '$NF==so {found=1} END {exit !found}' "/proc/$p/maps"
 test "$(sha256sum '@ROOT@/payload.so' | awk '{print $1}')" = '@PAYLOADHASH@'
-awk -v so='@ROOT@/payload.so' 'BEGIN {RS="\0"} $0=="LD_PRELOAD="so {found=1} END {exit !found}' "/proc/$p/environ"
+env_records=$(set -o pipefail || exit 90; cat "/proc/$p/environ" | LC_ALL=C tr '\n' '\r' | LC_ALL=C tr '\000' '\n') || exit 90
+printf '%s\n' "$env_records" | LC_ALL=C awk -v so='@ROOT@/payload.so' '$0=="LD_PRELOAD="so {found=1} END {exit !found}'
 test -z "$(systemctl show --property=Job --value xochitl.service)"
 test "$(awk '{print $22}' "/proc/$p/stat")" = "$started"
 test "$(systemctl show --property=MainPID --value xochitl.service)" = "$p"
