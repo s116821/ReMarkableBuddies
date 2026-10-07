@@ -52,7 +52,7 @@ function Test-InputObservationCompletion($value,[string]$nonce,[string]$pidText,
         foreach($name in @('device_present','device_system_id','device_type')){if($null -eq $event.PSObject.Properties[$name]){return $false}}
         if($event.device_present -isnot [bool]){return $false}
         if($event.device_present){
-            if($event.device_system_id -isnot [string] -or $event.device_system_id -cnotmatch '^(0|-?[1-9][0-9]{0,18})$'){return $false}
+            if($event.device_system_id -isnot [string] -or $event.device_system_id -cnotmatch '\A(0|-?[1-9][0-9]{0,18})\z'){return $false}
             $deviceId=[long]0;if(-not [long]::TryParse($event.device_system_id,[ref]$deviceId)){return $false}
             if(($event.device_type -isnot [int] -and $event.device_type -isnot [long]) -or $event.device_type -lt 0 -or $event.device_type -gt 2147483647){return $false}
         }elseif($null -ne $event.device_system_id -or $null -ne $event.device_type){return $false}

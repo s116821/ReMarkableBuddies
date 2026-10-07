@@ -121,7 +121,7 @@ try{
         $v=($v|ConvertTo-Json -Depth 10 -Compress)|ConvertFrom-Json
         Check ((Test-InputObservationCompletion $v $nonce '1234' '5678' '11' '22') -and $v.events[0].device_system_id -ceq $sid) 'signed device exact string roundtrip'
     }
-    foreach($sid in @('-9223372036854775809','9223372036854775808','-0','+1','01','-01','1.0','',1,$null)){
+    foreach($sid in @('-9223372036854775809','9223372036854775808','-0','+1','01','-01','1.0','',"1`n","1`r`n","1`r",' 1','1 ',"1`t","`t1",1,$null)){
         $bad=New-FrameCompletion;$bad.events[0].device_system_id=$sid
         Check (-not(Test-InputObservationCompletion $bad $nonce '1234' '5678' '11' '22')) 'device ID refused'
     }
