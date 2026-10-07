@@ -27,7 +27,7 @@ $observationProofPath=Join-Path $PSScriptRoot 'input-observation-proof.ps1'
 if((Hash $observationProofPath) -cne 'b1a7338fb816fc9891d5247c1f4e0c0c8d0ff94d08fb4dc98065b0357b455917'){throw 'Fixed observation decoder changed'}
 . $observationProofPath
 $evdevProofPath=Join-Path $PSScriptRoot 'input-evdev-journal.ps1'
-if((Hash $evdevProofPath) -cne 'cc8d07608e925b9327e662bed1d836ca704061a00a6e31fed929b103b5fc3a21'){throw 'Fixed evdev journal source changed'}
+if((Hash $evdevProofPath) -cne 'e330756724b9ae978f41f3e375884175281fbc9305cdea8a203eff18e3b09a7c'){throw 'Fixed evdev journal source changed'}
 . $evdevProofPath
 . $budgetPath
 $budget=Get-FactsDevelopmentBudget
@@ -415,12 +415,13 @@ printf 'stock-restored-and-exact-stage-removed\n'
     if($developmentEvdevLogging -and $record.restored){
         try{
             $window=Get-InputEvdevWindow $evdevBegin $evdevEnd
-            $diagnostic=@{diagnostic_status='unknown';reason=$evdevEndpointReason;records=@()}
+            $diagnostic=@{diagnostic_status='unknown';reason=$evdevEndpointReason;records=@();acquisition_stage='not-attempted'}
             if($window -and $record.observation_completion){
                 $journalCommand=Get-InputEvdevJournalCommand $window ([string]$record.observation_completion.attempt_pid) $nonce
                 $capture=Invoke-InputEvdevCapture 'ssh' @('-o','HostName=10.11.99.1','-o','StrictHostKeyChecking=yes','-o','BatchMode=yes','-o','ConnectTimeout=2','RM2',$journalCommand.Replace("`r`n","`n"))
                 $diagnostic=Convert-InputEvdevJournal $capture $window ([string]$record.observation_completion.attempt_pid) $nonce
-                $diagnostic.transport=@{exit=$capture.exit;timeout=$capture.timeout;stdout_bytes=$capture.stdout_bytes.Length;stderr_bytes=$capture.stderr_bytes.Length;stdout_overflow=$capture.stdout_overflow;stderr_overflow=$capture.stderr_overflow;acquisition_error=$capture.acquisition_error;elapsed_ms=$capture.elapsed_ms}
+                $diagnostic.acquisition_stage='attempted'
+                $diagnostic.transport=@{exit=$capture.exit;timeout=$capture.timeout;stdout_bytes=$capture.stdout_bytes.Length;stderr_bytes=$capture.stderr_bytes.Length;stderr_base64=[Convert]::ToBase64String($capture.stderr_bytes);stdout_overflow=$capture.stdout_overflow;stderr_overflow=$capture.stderr_overflow;acquisition_error=$capture.acquisition_error;elapsed_ms=$capture.elapsed_ms}
                 $diagnostic.query_command=$journalCommand
             }
             $diagnostic.nonce=$nonce;$diagnostic.begin=$evdevBegin;$diagnostic.end=$evdevEnd;$diagnostic.window=$window

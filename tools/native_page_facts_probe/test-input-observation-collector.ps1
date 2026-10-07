@@ -269,6 +269,37 @@ try{
     Check ($journalCalls -eq 1 -and $record.evdev_journal.diagnostic_status -ceq 'unknown') 'logging timeout one call no retry'
     Check ($record.gui_completion_verified -and $record.qt_image_available -and $record.heap_capture_succeeded -and $record.paired_image_candidate_verified -and $record.restored -and $record.cleanup_verified) 'logging unknown preserves successful live/recovery flags'
     Check (-not $record.facts_verified -and -not $record.callback_verified -and -not $record.candidate_generation_verified) 'logging unknown grants no facts'
+    $successfulRecord=$record.Clone()
+    function Invoke-InputEvdevCapture([string]$program,[string[]]$arguments){$script:journalCalls++;return $script:journalFixture}
+    foreach($case in @('empty','binary','cap','overflow','timeout','acquisition-error')){
+        $journalFixture=@{timeout=$false;acquisition_error=$false;exit=1;stdout_bytes=[byte[]]@();stderr_bytes=[byte[]]@();stdout_overflow=$false;stderr_overflow=$false;elapsed_ms=100}
+        switch($case){
+            binary {$journalFixture.stderr_bytes=[byte[]]@(255,254)}
+            cap {$journalFixture.stderr_bytes=[byte[]]::new(1024)}
+            overflow {$journalFixture.stderr_bytes=[byte[]]::new(1024);$journalFixture.stderr_overflow=$true}
+            timeout {$journalFixture.timeout=$true;$journalFixture.exit=$null}
+            acquisition-error {$journalFixture.acquisition_error=$true;$journalFixture.stderr_bytes=[byte[]]@(255)}
+        }
+        $record=$successfulRecord.Clone();$record.restored=$false;$record.cleanup_verified=$false;$journalCalls=0
+        . $recovery
+        $saved=Get-Content (Join-Path $packet 'evdev-journal-diagnostic.json') -Raw|ConvertFrom-Json
+        $decoded=[Convert]::FromBase64String($saved.transport.stderr_base64)
+        Check ($journalCalls -eq 1 -and $saved.acquisition_stage -ceq 'attempted' -and $saved.diagnostic_status -ceq 'unknown') "one additive diagnostic $case"
+        Check ($saved.transport.stderr_base64.Length -le 1368 -and $saved.transport.stderr_bytes -eq $decoded.Length -and [Linq.Enumerable]::SequenceEqual[byte]($decoded,$journalFixture.stderr_bytes)) "lossless bounded stderr readback $case"
+        Check ($saved.transport.stderr_overflow -eq $journalFixture.stderr_overflow -and $saved.transport.timeout -eq $journalFixture.timeout -and $saved.transport.acquisition_error -eq $journalFixture.acquisition_error) "authoritative failure metadata $case"
+        Check ($record.gui_completion_verified -and $record.paired_image_candidate_verified -and $record.restored -and $record.cleanup_verified -and -not $record.facts_verified) "unchanged original flags $case"
+    }
+    $evdevEnd=$null;$record=$successfulRecord.Clone();$journalCalls=0
+    . $recovery
+    $saved=Get-Content (Join-Path $packet 'evdev-journal-diagnostic.json') -Raw|ConvertFrom-Json
+    Check ($journalCalls -eq 0 -and $saved.acquisition_stage -ceq 'not-attempted' -and $null -eq $saved.transport) 'no invented stderr without acquisition'
+    # Deliberately make the local diagnostic destination unwritable as a file.
+    $diagnosticPath=Join-Path $packet 'evdev-journal-diagnostic.json'
+    Remove-Item -LiteralPath $diagnosticPath
+    [void](New-Item -ItemType Directory -Path $diagnosticPath)
+    $record=$successfulRecord.Clone()
+    . $recovery
+    Check ($record.evdev_journal.reason -ceq 'diagnostic-acquisition-or-persistence-failed' -and $record.gui_completion_verified -and $record.paired_image_candidate_verified -and $record.restored -and $record.cleanup_verified -and -not $record.facts_verified) 'diagnostic persistence failure stays additive'
     Write-Output "input-observation collector: PASS $count assertions (mock transport; no device)"
 }finally{
     $resolved=[IO.Path]::GetFullPath($packet);$tempRoot=[IO.Path]::GetFullPath([IO.Path]::GetTempPath())

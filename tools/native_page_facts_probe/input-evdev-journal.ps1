@@ -23,13 +23,13 @@ function Get-InputEvdevJournalCommand($window,[string]$pidText,[string]$nonce) {
     if($window.boot -isnot [string] -or $window.boot -cnotmatch '\A[0-9a-f]{32}\z'){throw 'Fixed journal boot refused'}
     foreach($key in @('begin_s','end_s')){if(($window.$key -isnot [long] -and $window.$key -isnot [int]) -or $window.$key -lt 1 -or $window.$key -gt 10000000000){throw 'Fixed journal clock refused'}}
     if($window.end_s -le $window.begin_s -or $window.end_s-$window.begin_s -gt 150){throw 'Fixed journal interval refused'}
-    # No remote file. Explicit status survives caller errexit; head exit is irrelevant.
+    # No remote file. Producer status survives errexit; limiter status is separate.
     return @"
 (set +e
 LC_ALL=C TZ=UTC journalctl --quiet --no-pager --all --utc --output=json --output-fields=MESSAGE,_PID,_BOOT_ID,__REALTIME_TIMESTAMP,__MONOTONIC_TIMESTAMP --lines=257 --since=@$($window.begin_s) --until=@$($window.end_s) _BOOT_ID=$($window.boot) _PID=$pidText
 query_status=`$?
 printf 'QUERY_EXIT_$nonce %s\n' "`$query_status"
-) | head -c 65537
+) | dd bs=1 count=65537 2>/dev/null
 "@
 }
 function Invoke-InputEvdevCapture([string]$program,[string[]]$arguments) {

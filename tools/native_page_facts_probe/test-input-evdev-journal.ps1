@@ -106,5 +106,5 @@ $stock=$launch.Substring($launch.IndexOf('stock() {'),$launch.IndexOf('if ! test
 Check (-not $stock.Contains('QT_QPA') -and -not $stock.Contains('QT_LOGGING') -and $launch.Contains('development_evdev_logging=0')) 'stock fallback unchanged logging off'
 Check ($launch.Contains("QT_QPA_EVDEV_DEBUG=1 QT_LOGGING_RULES='qt.qpa.input.events.debug=true' LD_PRELOAD=")) 'candidate exec-only assignments'
 $command=Get-InputEvdevJournalCommand $window $pidText $nonce
-Check ($command.Contains('set +e') -and $command.Contains('query_status=$?') -and $command.Contains('head -c 65537') -and -not $command.Contains('--follow')) 'fixed status wrapper/no follow'
+Check ($command.Contains('set +e') -and $command.Contains('query_status=$?') -and $command.Contains('dd bs=1 count=65537 2>/dev/null') -and -not $command.Contains('--follow')) 'fixed status wrapper/dd-only stderr suppression/no follow'
 Write-Output "input-evdev journal: PASS $count assertions (owned local child streams; no device)"
