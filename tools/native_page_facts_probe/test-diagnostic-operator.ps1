@@ -62,6 +62,74 @@ try{
         Check ($record.facts_verified -eq ($mode -ceq 'success') -and $record.candidate_generation_verified -eq ($mode -ceq 'success')) "no refusal promotion $mode"
         Check ($record.live_refusal_callback_match -eq ($mode -cin @('refusal','context'))) "distinct diagnostic match $mode"
     }
+    # Exact initial collector loop and ObservationSSH; substitute only Native I/O.
+    $loopStart=$source.IndexOf('    $statusTimeoutUsed=$false')
+    $loopEnd=$source.IndexOf('}finally{',$loopStart)
+    if($loopStart -lt 0 -or $loopEnd -lt 0){throw 'Collector loop extraction failed'}
+    $collector=[scriptblock]::Create($source.Substring($loopStart,$loopEnd-$loopStart))
+    $transportStart=$source.IndexOf('function ObservationSSH(')
+    $transportEnd=$source.IndexOf('function Require(',$transportStart)
+    . ([scriptblock]::Create($source.Substring($transportStart,$transportEnd-$transportStart)))
+    $windowFunction=(Get-Command Test-FactsLiveObservationWindow).ScriptBlock
+    function Test-FactsLiveObservationWindow([long]$ElapsedMilliseconds){
+        $script:windowCalls++
+        if($script:loopMode -ceq 'expires-before-next-read' -and $script:windowCalls -eq 2){
+            $observationClock.ElapsedMilliseconds=150000
+            return $false
+        }
+        return $ElapsedMilliseconds -ge 0 -and $ElapsedMilliseconds -lt 150000
+    }
+    function Native([string]$program,[string[]]$arguments,[int]$timeoutMs=20000){
+        Check ($program -ceq 'ssh' -and $timeoutMs -eq [Math]::Min(3000,150000-$observationClock.ElapsedMilliseconds)) 'unchanged transport admission'
+        $script:loopCalls++
+        $command=$arguments[-1]
+        $result=@{timeout=$false;exit=0;stdout='';stderr=''}
+        if($command.Contains("cat '@ROOT@/callback.json'")){
+            $script:statusCalls++
+            if($script:loopMode -ceq 'uncertain-exit'){throw 'Local transport exit uncertain'}
+            if($script:statusCalls -eq 1 -or
+               ($script:loopMode -ceq 'second-timeout' -and $script:statusCalls -eq 2) -or
+               ($script:loopMode -ceq 'timeout-after-absent' -and $script:statusCalls -eq 3)){
+                $result.timeout=$true;$result.exit=-1;$result.stdout='PARTIAL MUST NOT BE PARSED'
+                $observationClock.ElapsedMilliseconds+=$timeoutMs
+                if($script:loopMode -ceq 'late-return'){$observationClock.ElapsedMilliseconds=150000}
+            }elseif($script:loopMode -cin @('absent-then-success','timeout-after-absent') -and $script:statusCalls -eq 2){
+                $result.exit=3
+            }elseif($script:loopMode -ceq 'unsafe-stage'){$result.exit=90}
+            elseif($script:loopMode -ceq 'malformed-callback'){$result.stdout='{'}
+            else{$result.stdout=([pscustomobject]@{nonce=$nonce;stage='facts-observed-no-change-during-read';application_thread=$true;engine_thread=$true}|ConvertTo-Json -Compress)}
+        }elseif($command.Contains('read p started')){
+            if($script:loopMode -ceq 'identity-timeout'){$result.timeout=$true;$result.stdout='PARTIAL IDENTITY'}
+            elseif($script:loopMode -ceq 'identity-refusal'){$result.exit=90}
+            else{$result.stdout="1234 5678 19 20`n"}
+        }elseif($command.Contains("cat '@ROOT@/diagnostics.json'")){
+            $result.stdout=(New-Facts)|ConvertTo-Json -Compress
+        }
+        $record.results+=,$result
+        return $result
+    }
+    $loopFailures=@()
+    foreach($loopMode in @('success','absent-then-success','second-timeout','timeout-after-absent','near-deadline','expires-before-next-read','late-return','uncertain-exit','unsafe-stage','malformed-callback','identity-timeout','identity-refusal')){
+        $script:loopMode=$loopMode;$script:loopCalls=0;$script:statusCalls=0;$script:windowCalls=0
+        $budget=Get-FactsDevelopmentBudget
+        $record=@{arm_intent=$true;results=@();callback_verified=$false;facts_verified=$false;candidate_generation_verified=$false;gate_evidence=@{}}
+        $observationClock=[pscustomobject]@{ElapsedMilliseconds=$(if($loopMode -ceq 'near-deadline'){149000}else{0})}
+        Remove-Item -LiteralPath (Join-Path $packet 'callback.json') -ErrorAction SilentlyContinue
+        $threw=$false;try{. $collector}catch{$threw=$true}
+        $success=$loopMode -cin @('success','absent-then-success')
+        Check ($record.facts_verified -eq $success -and $record.candidate_generation_verified -eq $success) "full live proof remains required $loopMode"
+        Check ($threw -eq ($loopMode -cnotin @('success','absent-then-success','expires-before-next-read'))) "collector refusal $loopMode"
+        $callbackSeen=$loopMode -cin @('success','absent-then-success','identity-timeout','identity-refusal')
+        Check ($record.callback_verified -eq $callbackSeen) "unchanged callback field semantics $loopMode"
+        $expectedReads=switch($loopMode){'absent-then-success'{3};'timeout-after-absent'{3};'near-deadline'{1};'expires-before-next-read'{1};'late-return'{1};'uncertain-exit'{1};default{2}}
+        Check ($script:statusCalls -eq $expectedReads) "single total allowance and no late read $loopMode"
+        if($loopMode -cne 'uncertain-exit'){
+            Check ($record.results[0].timeout -and $record.results[0].stdout -ceq 'PARTIAL MUST NOT BE PARSED') "timeout evidence retained $loopMode"
+        }
+        if($loopMode -ceq 'identity-timeout'){Check ($script:loopCalls -eq 3) 'identity timeout has no continuation'}
+        if(-not $success){$loopFailures+=@{mode=$loopMode;callback_verified=$record.callback_verified}}
+    }
+    Set-Item Function:Test-FactsLiveObservationWindow $windowFunction
     # Exact recovery body with transport mocks; historical diagnostic cannot alter live flags.
     $start=$source.IndexOf('}finally{')+10
     $recovery=[scriptblock]::Create($source.Substring($start,$source.TrimEnd().Length-$start-1))
@@ -99,5 +167,17 @@ try{
         Check (-not $record.facts_verified -and -not $record.candidate_generation_verified -and -not $record.callback_verified) "no historical upgrade $mode"
         Check ($record.final_refusal_callback_match -eq ($mode -ceq 'historical-only')) "historical diagnostic match $mode"
     }
-}finally{Remove-Item -LiteralPath $packet -Recurse -Force}
+    foreach($failure in $loopFailures){
+        $script:mode='historical-only';$script:cleanup=$false
+        $record=@{arm_intent=$true;restored=$false;cleanup_verified=$false;callback_verified=$failure.callback_verified;facts_verified=$false;
+            candidate_generation_verified=$false;gate_evidence=@{};final_callback_collected=$false;final_refusal=$null;final_refusal_callback_match=$false}
+        $threw=$false;try{. $recovery|Out-Null}catch{$threw=$true}
+        Check ($threw -and $record.restored -and $record.cleanup_verified -and $script:cleanup) "mandatory recovery after collector failure $($failure.mode)"
+        Check ($record.callback_verified -eq $failure.callback_verified -and -not $record.facts_verified -and -not $record.candidate_generation_verified) "recovery preserves field semantics $($failure.mode)"
+    }
+}finally{
+    $tempRoot=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([IO.Path]::DirectorySeparatorChar)+[IO.Path]::DirectorySeparatorChar
+    if(-not [IO.Path]::GetFullPath($packet).StartsWith($tempRoot,[StringComparison]::OrdinalIgnoreCase)){throw 'Owned test cleanup escaped temporary root'}
+    Remove-Item -LiteralPath $packet -Recurse -Force
+}
 Write-Output "PASS $count future exact live/recovery assertions; mocked transport only"

@@ -167,6 +167,7 @@ systemctl restart xochitl.service
     # Main performs positive waiting proof, one deliberate fixture open/capture,
     # and the fixed publisher once while this same host collector remains active.
     # Read-only observations are finite; no setup sleeps or physical retries.
+    $statusTimeoutUsed=$false
     while(Test-FactsLiveObservationWindow $observationClock.ElapsedMilliseconds){
         $observed=ObservationSSH (Expand @'
 set -eu
@@ -244,7 +245,11 @@ printf '%s %s %s %s\n' "$p" "$started" "$dev" "$ino"
             $record.facts_verified=$record.callback_verified -and (Test-FactsDiagnostics $diagnostics $nonce $expected.document $expected.order $livePid $liveStart)
             break
         }
-        if($observed.timeout){throw 'Facts observation transport unknown'}
+        if($observed.timeout){
+            if($statusTimeoutUsed){throw 'Facts observation transport unknown'}
+            $statusTimeoutUsed=$true
+            continue
+        }
         if($observed.exit -ne 3){throw 'Facts callback observation refused'}
     }
 }finally{
