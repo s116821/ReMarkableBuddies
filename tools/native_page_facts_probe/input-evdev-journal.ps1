@@ -4,18 +4,19 @@ printf '%s %s %s\n' "$(cat /proc/sys/kernel/random/boot_id)" "$(date -u +%s)" "$
 '@
 function Get-InputEvdevEndpoint([string]$text) {
     if($text.Length -gt 128 -or $text -cnotmatch '\A([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) ([1-9][0-9]{0,9}) (0|[1-9][0-9]{0,9})\.([0-9]{2})\n\z'){return $null}
-    return @{boot=$Matches[1].Replace('-','');realtime_s=[long]$Matches[2];monotonic_cs=([long]$Matches[3]*100+[int]$Matches[4])}
+    return @{boot=$Matches[1].Replace('-','');realtime_s=[long]$Matches[2];boottime_cs=([long]$Matches[3]*100+[int]$Matches[4])}
 }
 function Get-InputEvdevWindow($begin,$end) {
     foreach($point in @($begin,$end)){
         if($null -eq $point -or $point.boot -isnot [string] -or $point.boot -cnotmatch '\A[0-9a-f]{32}\z'){return $null}
-        foreach($key in @('realtime_s','monotonic_cs')){if(($point.$key -isnot [long] -and $point.$key -isnot [int]) -or $point.$key -lt 0){return $null}}
-        if($point.realtime_s -lt 1 -or $point.realtime_s -gt 9999999999 -or $point.monotonic_cs -gt 999999999999){return $null}
+        foreach($key in @('realtime_s','boottime_cs')){if(($point.$key -isnot [long] -and $point.$key -isnot [int]) -or $point.$key -lt 0){return $null}}
+        if($point.realtime_s -lt 1 -or $point.realtime_s -gt 9999999999 -or $point.boottime_cs -gt 999999999999){return $null}
     }
     if($null -eq $begin -or $null -eq $end -or $begin.boot -cne $end.boot){return $null}
-    $wall=$end.realtime_s-$begin.realtime_s;$mono=$end.monotonic_cs-$begin.monotonic_cs
-    if($wall -lt 0 -or $mono -lt 0 -or $wall+1 -gt 150 -or $mono -gt 15000 -or [Math]::Abs($wall*1000-$mono*10) -gt 1010){return $null}
-    return @{boot=$begin.boot;begin_s=$begin.realtime_s;end_s=$end.realtime_s+1;begin_cs=$begin.monotonic_cs;end_cs=$end.monotonic_cs}
+    $wall=$end.realtime_s-$begin.realtime_s;$boottimeElapsed=$end.boottime_cs-$begin.boottime_cs
+    if($wall -lt 0 -or $boottimeElapsed -lt 0 -or $wall+1 -gt 150 -or $boottimeElapsed -gt 15000 -or [Math]::Abs($wall*1000-$boottimeElapsed*10) -gt 1010){return $null}
+    # end_s already includes the one-second wall enclosure; never add again.
+    return @{boot=$begin.boot;begin_s=$begin.realtime_s;end_s=$end.realtime_s+1;begin_boottime_cs=$begin.boottime_cs;end_boottime_cs=$end.boottime_cs;clock_domains=@{endpoint_realtime='CLOCK_REALTIME epoch seconds';endpoint_uptime='CLOCK_BOOTTIME centisecond floor';journal_realtime='CLOCK_REALTIME microseconds, per-record enclosure';journal_monotonic='CLOCK_MONOTONIC microseconds, syntax/range only'}}
 }
 function Get-InputEvdevJournalCommand($window,[string]$pidText,[string]$nonce) {
     if($null -eq $window -or $nonce -cnotmatch '\A[0-9a-f]{32}\z' -or $pidText -cnotmatch '\A[1-9][0-9]{0,9}\z' -or [long]$pidText -gt 2147483647){throw 'Fixed journal metadata refused'}
@@ -104,10 +105,8 @@ function Convert-InputEvdevJournal($capture,$window,[string]$pidText,[string]$no
                 }
                 $us=[long]$fields.__REALTIME_TIMESTAMP
                 if($us -lt $window.begin_s*1000000 -or $us -gt $window.end_s*1000000){throw 'Outside clock enclosure'}
-                # Uptime endpoints have centisecond floor precision. A different
-                # journal monotonic origin (for example after suspend) is unknown.
-                $monoUs=[long]$fields.__MONOTONIC_TIMESTAMP
-                if($monoUs -lt $window.begin_cs*10000 -or $monoUs -gt ($window.end_cs+1)*10000-1){throw 'Outside monotonic enclosure'}
+                # Journal CLOCK_MONOTONIC is retained and validated above only.
+                # Uptime CLOCK_BOOTTIME includes suspend: no absolute comparison.
                 $tagged=$fields.MESSAGE -cmatch '\Aqt\.qpa\.input(?:\.events)?: '
                 $inputDiagnostic=$fields.MESSAGE.Contains('TouchPoint(') -or $fields.MESSAGE.Contains('evdevtouch') -or $fields.MESSAGE.Contains('pressure')
                 if($tagged -and $inputDiagnostic){

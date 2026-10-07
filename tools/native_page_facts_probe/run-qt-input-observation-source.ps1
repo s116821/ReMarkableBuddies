@@ -27,7 +27,7 @@ $observationProofPath=Join-Path $PSScriptRoot 'input-observation-proof.ps1'
 if((Hash $observationProofPath) -cne 'b1a7338fb816fc9891d5247c1f4e0c0c8d0ff94d08fb4dc98065b0357b455917'){throw 'Fixed observation decoder changed'}
 . $observationProofPath
 $evdevProofPath=Join-Path $PSScriptRoot 'input-evdev-journal.ps1'
-if((Hash $evdevProofPath) -cne '7d6f9e8ff6407f78fc0c97cbe3cce5c56957b3de2dd81dbe0f730443ab10c6f1'){throw 'Fixed evdev journal source changed'}
+if((Hash $evdevProofPath) -cne 'cc8d07608e925b9327e662bed1d836ca704061a00a6e31fed929b103b5fc3a21'){throw 'Fixed evdev journal source changed'}
 . $evdevProofPath
 . $budgetPath
 $budget=Get-FactsDevelopmentBudget
@@ -136,7 +136,7 @@ try{
     if($developmentEvdevLogging){
         Require (SSH (Expand @'
 set -eu
-if awk 'BEGIN {RS="\0"} /^(QT_QPA_EVDEV_DEBUG|QT_LOGGING_RULES|QT_MESSAGE_PATTERN)=/ {found=1} END {exit !found}' /proc/@STOCKPID@/environ; then exit 90; fi
+awk 'BEGIN {RS="\0"} /^(QT_QPA_EVDEV_DEBUG|QT_LOGGING_RULES|QT_MESSAGE_PATTERN)=/ {found=1} END {if(found) exit 90}' /proc/@STOCKPID@/environ
 '@))
     }
     Require (SSH (Expand @'

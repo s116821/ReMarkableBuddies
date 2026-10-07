@@ -20,7 +20,7 @@ $end=Get-InputEvdevEndpoint "01234567-89ab-cdef-0123-456789abcdef 101 11.00`n"
 $window=Get-InputEvdevWindow $begin $end
 Check ($window.boot -ceq $boot -and $window.begin_s -eq 100 -and $window.end_s -eq 102) 'fixed UTC enclosure'
 foreach($text in @('',"01234567-89ab-cdef-0123-456789abcdef 100 10.00`r`n","01234567-89ab-cdef-0123-456789abcdef 0100 10.00`n",('x'*129))){Check ($null -eq (Get-InputEvdevEndpoint $text)) 'endpoint format refused'}
-foreach($changed in @(@{boot='f'*32;realtime_s=101;monotonic_cs=1100},@{boot=$boot;realtime_s=99;monotonic_cs=1100},@{boot=$boot;realtime_s=101;monotonic_cs=999},@{boot=$boot;realtime_s=250;monotonic_cs=16000},@{boot=$boot;realtime_s=110;monotonic_cs=1100})){
+foreach($changed in @(@{boot='f'*32;realtime_s=101;boottime_cs=1100},@{boot=$boot;realtime_s=99;boottime_cs=1100},@{boot=$boot;realtime_s=101;boottime_cs=999},@{boot=$boot;realtime_s=250;boottime_cs=16000},@{boot=$boot;realtime_s=110;boottime_cs=1100})){
     Check ($null -eq (Get-InputEvdevWindow $begin $changed)) 'boot/clock/deadline refusal'
 }
 function Row([string]$message='qt.qpa.input.events: TouchPoint(1 @ area normalized point press 1 vel v state 1'){
@@ -55,14 +55,21 @@ $mixed=Decode (Capture @($row,(Row 'unrelated candidate body'|ConvertTo-Json -Co
 Check ($mixed.dropped_records -eq 1 -and $mixed.records.Count -eq 1) 'unrelated body discarded'
 $mixed=Decode (Capture @($row,(Row 'qt.qpa.input: keyboard unrelated body'|ConvertTo-Json -Compress)))
 Check ($mixed.diagnostic_status -ceq 'captured' -and $mixed.dropped_records -eq 1 -and $mixed.records.Count -eq 1) 'tagged unrelated body discarded'
-foreach($value in @('9999999','11010000','900000000')){
+foreach($value in @('-1','01','1.5',"10500000`n",'9223372036854775808')){
     $bad=Row;$bad.__MONOTONIC_TIMESTAMP=$value
-    Check ((Decode (Capture @(($bad|ConvertTo-Json -Compress)))).diagnostic_status -ceq 'unknown') 'wrong monotonic with correct wall refused'
+    Check ((Decode (Capture @(($bad|ConvertTo-Json -Compress)))).diagnostic_status -ceq 'unknown') 'malformed journal monotonic refused'
 }
-foreach($value in @('10000000','11009999')){
+foreach($value in @('0','10000000','11009999','900000000')){
     $boundary=Row;$boundary.__MONOTONIC_TIMESTAMP=$value
-    Check ((Decode (Capture @(($boundary|ConvertTo-Json -Compress)))).diagnostic_status -ceq 'captured') 'centisecond floor enclosure inclusive'
+    Check ((Decode (Capture @(($boundary|ConvertTo-Json -Compress)))).diagnostic_status -ceq 'captured') 'valid journal monotonic not compared to BOOTTIME'
 }
+$suspendedBegin=@{boot=$boot;realtime_s=100;boottime_cs=86401000}
+$suspendedEnd=@{boot=$boot;realtime_s=101;boottime_cs=86401100}
+$suspendedWindow=Get-InputEvdevWindow $suspendedBegin $suspendedEnd
+$afterSuspend=Convert-InputEvdevJournal (Capture @($row)) $suspendedWindow $pidText $nonce
+Check ($afterSuspend.diagnostic_status -ceq 'captured' -and $afterSuspend.records[0].Contains('10500000')) 'substantial prior suspend offset retained without false rejection'
+Check ($suspendedWindow.clock_domains.endpoint_uptime.Contains('CLOCK_BOOTTIME') -and $suspendedWindow.clock_domains.journal_monotonic.Contains('syntax/range only')) 'receipt clock domains explicit'
+Check ($window.end_s -eq $end.realtime_s+1 -and (Get-InputEvdevJournalCommand $window $pidText $nonce).Contains('--until=@102')) 'UTC upper bound includes exactly one second'
 foreach($message in @("qt.qpa.input.events: TouchPoint(é漢`nline`rvalue",('qt.qpa.input.events: TouchPoint('+('é'*8000)))){
     $decoded=Decode (Capture @((Row $message|ConvertTo-Json -Compress)))
     Check ($decoded.diagnostic_status -ceq 'captured' -and $decoded.records.Count -eq 1) 'multibyte/escaped multiline complete record'
