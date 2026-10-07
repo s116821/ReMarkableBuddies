@@ -5,6 +5,7 @@ pub mod migration;
 mod recovery;
 #[cfg(test)]
 mod selected_projection_tests;
+pub mod selection;
 pub mod sync;
 pub mod types;
 use anyhow::{ensure, Context, Result};
