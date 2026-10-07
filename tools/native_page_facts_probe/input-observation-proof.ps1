@@ -18,7 +18,7 @@ function Test-InputObservationLegacyOverviewPng([string]$path,[string]$profile) 
     }finally{$stream.Dispose()}
 }
 function Test-InputObservationCompletion($value,[string]$nonce,[string]$pidText,[string]$started,[string]$dev,[string]$ino) {
-    if($null -eq $value -or $value.kind -cne 'development-input-observation' -or $value.nonce -cne $nonce){return $false}
+    if($null -eq $value -or $value.evidence_profile -cne 'device-frames-v1' -or $value.kind -cne 'development-input-observation' -or $value.nonce -cne $nonce){return $false}
     foreach($name in @('attempt_pid','attempt_start','root_device','root_inode')){
         if($value.$name -isnot [string] -or $value.$name -cnotmatch '^[1-9][0-9]{0,19}$'){return $false}
         $parsed=[ulong]0;if(-not [ulong]::TryParse($value.$name,[ref]$parsed)){return $false}
@@ -49,6 +49,13 @@ function Test-InputObservationCompletion($value,[string]$nonce,[string]$pidText,
     foreach($count in $value.counts){if(($count -isnot [long] -and $count -isnot [int]) -or $count -lt 0 -or $count -gt 4294967295){return $false}}
     foreach($name in @('record_overflow','point_overflow','count_overflow','output_truncated')){if($value.$name -isnot [bool]){return $false}}
     foreach($event in $value.events){
+        foreach($name in @('device_present','device_system_id','device_type')){if($null -eq $event.PSObject.Properties[$name]){return $false}}
+        if($event.device_present -isnot [bool]){return $false}
+        if($event.device_present){
+            if($event.device_system_id -isnot [string] -or $event.device_system_id -cnotmatch '^(0|-?[1-9][0-9]{0,18})$'){return $false}
+            $deviceId=[long]0;if(-not [long]::TryParse($event.device_system_id,[ref]$deviceId)){return $false}
+            if(($event.device_type -isnot [int] -and $event.device_type -isnot [long]) -or $event.device_type -lt 0 -or $event.device_type -gt 2147483647){return $false}
+        }elseif($null -ne $event.device_system_id -or $null -ne $event.device_type){return $false}
         foreach($name in @('ms','type','relationship','source','buttons')){
             if(($event.$name -isnot [long] -and $event.$name -isnot [int]) -or $event.$name -lt 0){return $false}
         }
@@ -61,8 +68,14 @@ function Test-InputObservationCompletion($value,[string]$nonce,[string]$pidText,
             foreach($name in @('id','state')){
                 if(($point.$name -isnot [int] -and $point.$name -isnot [long]) -or $point.$name -lt -2147483648 -or $point.$name -gt 2147483647){return $false}
             }
-            foreach($name in @('x','y')){
-                if(($point.$name -isnot [int] -and $point.$name -isnot [long] -and $point.$name -isnot [double]) -or -not [double]::IsFinite([double]$point.$name)){return $false}
+            if($null -eq $point.PSObject.Properties['valid_mask'] -or ($point.valid_mask -isnot [int] -and $point.valid_mask -isnot [long]) -or $point.valid_mask -lt 0 -or $point.valid_mask -gt 7){return $false}
+            foreach($frame in @(@(1,'x','y'),@(2,'scene_x','scene_y'),@(4,'global_x','global_y'))){
+                foreach($name in $frame[1..2]){
+                    if($null -eq $point.PSObject.Properties[$name]){return $false}
+                    if($point.valid_mask -band $frame[0]){
+                        if(($point.$name -isnot [int] -and $point.$name -isnot [long] -and $point.$name -isnot [double]) -or -not [double]::IsFinite([double]$point.$name)){return $false}
+                    }elseif($null -ne $point.$name){return $false}
+                }
             }
         }
     }

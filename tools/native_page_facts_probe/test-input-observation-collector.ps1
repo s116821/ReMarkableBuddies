@@ -14,7 +14,7 @@ $packet=Join-Path ([IO.Path]::GetTempPath()) ('input-observation-test-'+[Guid]::
 $count=0
 function Check([bool]$ok,[string]$label){if(-not $ok){throw "FAIL $label"};$script:count++}
 function New-Completion {
-    [pscustomobject]@{kind='development-input-observation';nonce=$nonce;attempt_pid='1234';attempt_start='5678';root_device='11';root_inode='22';
+    [pscustomobject]@{kind='development-input-observation';evidence_profile='device-frames-v1';nonce=$nonce;attempt_pid='1234';attempt_start='5678';root_device='11';root_inode='22';
         gui_callback_completed=$true;application_thread=$true;engine_thread=$true;scope_current=$true;native_authority=$false;render_authority=$false;ui_acknowledged=$false;
         accepted_ms=100;seal_ms=100;grab_start_ms=101;grab_end_ms=102;completed_ms=103;width=200;height=200;dpr=1;
         image_status='available';image_width=200;image_height=200;png_bytes=$png.Length;counts=@(0,0,0,0,1,0,0);events=@();
@@ -46,7 +46,7 @@ function ObservationCopy([string]$remotePath,[string]$localPath){
 }
 try{
     Check ($source.Contains("heap_image_profile='legacy-df745-overview-768x1024';capture_helper_sha256='df745")) 'packet fixed profile/helper binding'
-    Check ($source.Contains("experiment='development-input-observation';heap_image_profile='legacy-df745-overview-768x1024'")) 'receipt fixed profile binding'
+    Check ($source.Contains("experiment='development-input-observation';evidence_profile='device-frames-v1';heap_image_profile='legacy-df745-overview-768x1024'")) 'receipt fixed profile binding'
     Check ($source.Contains((Hash (Join-Path $PSScriptRoot 'input-observation-proof.ps1')))) 'frozen observation proof hash'
     $completion=New-Completion
     Check (Test-InputObservationCompletion $completion $nonce '1234' '5678' '11' '22') 'valid completion'
@@ -92,11 +92,67 @@ try{
         [IO.File]::WriteAllBytes($badPngPath,$bytes)
         Check (-not(Test-InputObservationLegacyOverviewPng $badPngPath 'legacy-df745-overview-768x1024')) "$kind PNG refused"
     }
-    $event=[pscustomobject]@{ms=99;type=2;relationship=1;source=0;buttons=1;timestamp='0';points=@([pscustomobject]@{id=0;state=1;x=90.0;y=260.0})}
+    foreach($profile in @($null,'','old','DEVICE-frames-v1')){
+        $bad=New-Completion;$bad.evidence_profile=$profile
+        Check (-not(Test-InputObservationCompletion $bad $nonce '1234' '5678' '11' '22')) 'wrong/missing evidence profile'
+    }
+    Check ($source.Contains("evidence_profile='device-frames-v1';heap_image_profile=")) 'fixed evidence profile binding'
+    function New-FrameCompletion([int]$mask=7){
+        $v=New-Completion
+        $point=[pscustomobject]@{id=0;state=1;valid_mask=$mask;x=$null;y=$null;scene_x=$null;scene_y=$null;global_x=$null;global_y=$null}
+        foreach($frame in @(@(1,'x','y'),@(2,'scene_x','scene_y'),@(4,'global_x','global_y'))){if($mask -band $frame[0]){$point.($frame[1])=[double]::MaxValue;$point.($frame[2])=-8388608.0}}
+        $v.events=@([pscustomobject]@{device_present=$true;device_system_id='0';device_type=0;ms=99;type=2;relationship=1;source=0;buttons=1;timestamp='0';points=@($point)})
+        return $v
+    }
+    foreach($mask in 0..7){
+        $v=New-FrameCompletion $mask
+        Check (Test-InputObservationCompletion $v $nonce '1234' '5678' '11' '22') "valid frame mask $mask"
+        foreach($name in @('x','y','scene_x','scene_y','global_x','global_y')){
+            $bad=New-FrameCompletion $mask;$bad.events[0].points[0].PSObject.Properties.Remove($name)
+            Check (-not(Test-InputObservationCompletion $bad $nonce '1234' '5678' '11' '22')) "$mask missing $name"
+        }
+        foreach($frame in @(@(1,'x','y'),@(2,'scene_x','scene_y'),@(4,'global_x','global_y'))){
+            $bad=New-FrameCompletion $mask;$bad.events[0].points[0].($frame[1])=$(if($mask -band $frame[0]){$null}else{0.0})
+            Check (-not(Test-InputObservationCompletion $bad $nonce '1234' '5678' '11' '22')) "$mask contradictory frame"
+        }
+    }
+    foreach($sid in @('-9223372036854775808','9223372036854775807','-1','0','1')){
+        $v=New-FrameCompletion;$v.events[0].device_system_id=$sid
+        $v=($v|ConvertTo-Json -Depth 10 -Compress)|ConvertFrom-Json
+        Check ((Test-InputObservationCompletion $v $nonce '1234' '5678' '11' '22') -and $v.events[0].device_system_id -ceq $sid) 'signed device exact string roundtrip'
+    }
+    foreach($sid in @('-9223372036854775809','9223372036854775808','-0','+1','01','-01','1.0','',1,$null)){
+        $bad=New-FrameCompletion;$bad.events[0].device_system_id=$sid
+        Check (-not(Test-InputObservationCompletion $bad $nonce '1234' '5678' '11' '22')) 'device ID refused'
+    }
+    foreach($name in @('device_present','device_system_id','device_type')){
+        $bad=New-FrameCompletion;$bad.events[0].PSObject.Properties.Remove($name)
+        Check (-not(Test-InputObservationCompletion $bad $nonce '1234' '5678' '11' '22')) "missing $name"
+    }
+    foreach($type in @(-1,2147483648,'1',$true,1.5,$null)){
+        $bad=New-FrameCompletion;$bad.events[0].device_type=$type
+        Check (-not(Test-InputObservationCompletion $bad $nonce '1234' '5678' '11' '22')) 'device type refused'
+    }
+    $v=New-FrameCompletion;$v.events[0].device_present=$false;$v.events[0].device_system_id=$null;$v.events[0].device_type=$null
+    Check (Test-InputObservationCompletion $v $nonce '1234' '5678' '11' '22') 'null device explicit null'
+    foreach($name in @('device_system_id','device_type')){$bad=New-FrameCompletion;$bad.events[0].device_present=$false;$bad.events[0].device_system_id=$null;$bad.events[0].device_type=$null;$bad.events[0].$name=0;Check (-not(Test-InputObservationCompletion $bad $nonce '1234' '5678' '11' '22')) 'false device nonnull refused'}
+    foreach($present in @('true',1,$null)){$bad=New-FrameCompletion;$bad.events[0].device_present=$present;Check (-not(Test-InputObservationCompletion $bad $nonce '1234' '5678' '11' '22')) 'device present bool required'}
+    $v=New-FrameCompletion;$v.events[0].device_type=2147483647
+    Check (Test-InputObservationCompletion $v $nonce '1234' '5678' '11' '22') 'unknown bounded numeric device type retained'
+    $bad=New-Completion;$bad.PSObject.Properties.Remove('evidence_profile')
+    Check (-not(Test-InputObservationCompletion $bad $nonce '1234' '5678' '11' '22')) 'old payload without profile refused'
+    foreach($value in @('7',$true,-1,8,$null)){$bad=New-FrameCompletion;$bad.events[0].points[0].valid_mask=$value;Check (-not(Test-InputObservationCompletion $bad $nonce '1234' '5678' '11' '22')) 'mask type/range refused'}
+    foreach($name in @('x','y','scene_x','scene_y','global_x','global_y')){
+        foreach($invalid in @([double]::NaN,[double]::PositiveInfinity,[double]::NegativeInfinity,'1',$true,$null)){
+            $bad=New-FrameCompletion;$bad.events[0].points[0].$name=$invalid
+            Check (-not(Test-InputObservationCompletion $bad $nonce '1234' '5678' '11' '22')) "nonfinite/nonnumber $name refused"
+        }
+    }
+    $event=[pscustomobject]@{device_present=$false;device_system_id=$null;device_type=$null;ms=99;type=2;relationship=1;source=0;buttons=1;timestamp='0';points=@([pscustomobject]@{id=0;state=1;valid_mask=7;x=90.0;y=260.0;scene_x=190.0;scene_y=360.0;global_x=290.0;global_y=460.0})}
     $good=New-Completion;$good.events=@($event)
     Check (Test-InputObservationCompletion $good $nonce '1234' '5678' '11' '22') 'typed event coordinates'
     foreach($field in @('ms','type','relationship','source','buttons')){
-        $bad=New-Completion;$bad.events=@([pscustomobject]@{ms=99;type=2;relationship=1;source=0;buttons=1;timestamp='0';points=@()});$bad.events[0].$field='1'
+        $bad=New-Completion;$bad.events=@([pscustomobject]@{device_present=$false;device_system_id=$null;device_type=$null;ms=99;type=2;relationship=1;source=0;buttons=1;timestamp='0';points=@()});$bad.events[0].$field='1'
         Check (-not(Test-InputObservationCompletion $bad $nonce '1234' '5678' '11' '22')) "$field event type"
     }
     $bad=New-Completion;$bad.events=@($event);$event.points=@(1,2,3,4,5)
