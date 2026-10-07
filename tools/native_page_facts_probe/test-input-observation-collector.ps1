@@ -1,0 +1,151 @@
+$ErrorActionPreference='Stop'
+. "$PSScriptRoot/input-observation-proof.ps1"
+. "$PSScriptRoot/development-budget.ps1"
+$source=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'run-qt-input-observation-source.ps1'))
+$tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseInput($source,[ref]$tokens,[ref]$errors)
+if($errors.Count){throw ($errors|Out-String)}
+$functions=$ast.FindAll({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst]},$true)
+foreach($name in @('Require','RequireSameObservationIdentity')){. ([scriptblock]::Create(($functions|Where-Object Name -ceq $name).Extent.Text))}
+$begin=$source.IndexOf('            $identityCommand=Expand @''');$end=$source.IndexOf('            break',$begin)
+$branch=[scriptblock]::Create($source.Substring($begin,$end-$begin))
+$nonce='0123456789abcdef0123456789abcdef';$remote='/run/rmb-qt-probe-'+$nonce
+$packet=Join-Path ([IO.Path]::GetTempPath()) ('input-observation-test-'+[Guid]::NewGuid().ToString('N'))
+[void](New-Item -ItemType Directory -Path $packet)
+$count=0
+function Check([bool]$ok,[string]$label){if(-not $ok){throw "FAIL $label"};$script:count++}
+function New-Completion {
+    [pscustomobject]@{kind='development-input-observation';nonce=$nonce;attempt_pid='1234';attempt_start='5678';root_device='11';root_inode='22';
+        gui_callback_completed=$true;application_thread=$true;engine_thread=$true;scope_current=$true;native_authority=$false;render_authority=$false;ui_acknowledged=$false;
+        accepted_ms=100;seal_ms=100;grab_start_ms=101;grab_end_ms=102;completed_ms=103;width=200;height=200;dpr=1;
+        image_status='available';image_width=200;image_height=200;png_bytes=24;counts=@(0,0,0,0,1,0,0);events=@();
+        record_overflow=$false;point_overflow=$false;count_overflow=$false;output_truncated=$false}
+}
+function Expand([string]$text){$text.Replace('@ROOT@',$remote).Replace('@NONCE@',$nonce)}
+function Hash([string]$path){(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()}
+$png=[Convert]::FromHexString('89504E470D0A1A0A0000000D494844520000057C00000750')
+$pngPath=Join-Path $packet 'fixture-header.png';[IO.File]::WriteAllBytes($pngPath,$png);$pngHash=Hash $pngPath
+function ObservationSSH([string]$command){
+    if($command.Contains('/home/root/rem9-validation/screenshot')){
+        $script:captures++
+        if($case -ceq 'heap-timeout'){return @{exit=1;timeout=$true;stdout='partial'}}
+        if($case -ceq 'heap-disconnect'){return @{exit=255;timeout=$false;stdout='partial'}}
+        if($case -ceq 'heap-malformed'){return @{exit=0;timeout=$false;stdout='partial'}}
+        return @{exit=0;timeout=$false;stdout=($pngHash+'  /tmp/rem25-facts-'+$nonce+"-input-observation.png`n")}
+    }
+    if($command.Contains("sha256sum '$remote/input-window.png'")){return @{exit=0;timeout=$false;stdout=($pngHash+'  '+$remote+"/input-window.png`n")}}
+    $script:identities++
+    if($case -ceq 'initial-generation-loss' -or ($case -ceq 'late-generation-loss' -and $captures -gt 0)){
+        return @{exit=0;timeout=$false;stdout="1234 9999 11 22`n"}
+    }
+    return @{exit=0;timeout=$false;stdout="1234 5678 11 22`n"}
+}
+function ObservationCopy([string]$remotePath,[string]$localPath){
+    if($case -ceq 'heap-copy-timeout' -and $remotePath.StartsWith('/tmp/')){return @{exit=1;timeout=$true;stdout=''}}
+    [IO.File]::WriteAllBytes($localPath,$png);return @{exit=0;timeout=$false;stdout=''}
+}
+try{
+    $completion=New-Completion
+    Check (Test-InputObservationCompletion $completion $nonce '1234' '5678' '11' '22') 'valid completion'
+    foreach($field in @('native_authority','render_authority','ui_acknowledged')){
+        $bad=New-Completion;$bad.$field=$true
+        Check (-not(Test-InputObservationCompletion $bad $nonce '1234' '5678' '11' '22')) $field
+    }
+    foreach($field in @('attempt_pid','attempt_start','root_device','root_inode')){
+        foreach($value in @('0','01234','184467440737095516160')){
+            $bad=New-Completion;$bad.$field=$value
+            Check (-not(Test-InputObservationCompletion $bad $nonce '1234' '5678' '11' '22')) "$field $value"
+        }
+    }
+    foreach($field in @('accepted_ms','seal_ms','grab_start_ms','grab_end_ms','completed_ms')){
+        $bad=New-Completion;$bad.$field='100'
+        Check (-not(Test-InputObservationCompletion $bad $nonce '1234' '5678' '11' '22')) "$field type"
+    }
+    $bad=New-Completion;$bad.completed_ms=5100
+    Check (-not(Test-InputObservationCompletion $bad $nonce '1234' '5678' '11' '22')) 'deadline exact'
+    $bad=New-Completion;$bad.png_bytes=8388609
+    Check (-not(Test-InputObservationCompletion $bad $nonce '1234' '5678' '11' '22')) 'PNG cap'
+    Check (Test-InputObservationHeapPng $pngPath) 'heap dimensions header'
+    $event=[pscustomobject]@{ms=99;type=2;relationship=1;source=0;buttons=1;timestamp='0';points=@([pscustomobject]@{id=0;state=1;x=90.0;y=260.0})}
+    $good=New-Completion;$good.events=@($event)
+    Check (Test-InputObservationCompletion $good $nonce '1234' '5678' '11' '22') 'typed event coordinates'
+    foreach($field in @('ms','type','relationship','source','buttons')){
+        $bad=New-Completion;$bad.events=@([pscustomobject]@{ms=99;type=2;relationship=1;source=0;buttons=1;timestamp='0';points=@()});$bad.events[0].$field='1'
+        Check (-not(Test-InputObservationCompletion $bad $nonce '1234' '5678' '11' '22')) "$field event type"
+    }
+    $bad=New-Completion;$bad.events=@($event);$event.points=@(1,2,3,4,5)
+    Check (-not(Test-InputObservationCompletion $bad $nonce '1234' '5678' '11' '22')) 'point cap'
+    foreach($case in @('good','empty-image','heap-timeout','heap-disconnect','heap-malformed','late-generation-loss','initial-generation-loss','heap-copy-timeout')){
+        $record=[ordered]@{facts_verified=$false;callback_verified=$false;candidate_generation_verified=$false;gui_completion_verified=$false;qt_image_available=$false;heap_capture_succeeded=$false;paired_image_candidate_verified=$false}
+        $captures=0;$identities=0;$observationClock=[pscustomobject]@{ElapsedMilliseconds=120}
+        $value=New-Completion
+        if($case -ceq 'empty-image'){$value.image_status='unsupported-empty';$value.image_width=0;$value.image_height=0;$value.png_bytes=0}
+        $observed=@{stdout=($value|ConvertTo-Json -Depth 8 -Compress)}
+        $failed=$false;try{. $branch}catch{$failed=$true}
+        Check (-not $record.facts_verified -and -not $record.callback_verified -and -not $record.candidate_generation_verified) "$case no facts promotion"
+        if($case -in @('good','empty-image')){
+            Check (-not $failed -and $record.gui_completion_verified -and $record.heap_capture_succeeded -and $captures -eq 1) "$case one capture"
+            Check ($record.paired_image_candidate_verified -eq ($case -ceq 'good')) "$case pair availability"
+        }else{
+            Check ($failed -and -not $record.heap_capture_succeeded -and -not $record.paired_image_candidate_verified) "$case no pair"
+            Check ($record.gui_completion_verified -eq ($case -cne 'initial-generation-loss')) "$case preserved GUI evidence"
+            Check ($captures -eq $(if($case -ceq 'initial-generation-loss'){0}else{1})) "$case no retry"
+            if($case -in @('heap-timeout','heap-disconnect','heap-malformed')){Check $record.heap_capture_transport_unknown "$case remote uncertain"}
+        }
+    }
+    $loop=@($ast.FindAll({param($node)$node -is [Management.Automation.Language.WhileStatementAst]},$true))[0]
+    $statusLoop=[scriptblock]::Create('$statusTimeoutUsed=$false;'+$loop.Extent.Text)
+    foreach($statusCase in @('one-timeout','two-timeouts','disconnect','exception')){
+        $polls=0;$observationClock.ElapsedMilliseconds=100
+        $record=[ordered]@{gui_completion_verified=$false;qt_image_available=$false;heap_capture_succeeded=$false;facts_verified=$false}
+        function ObservationSSH([string]$command){
+            $script:polls++
+            if($statusCase -ceq 'exception'){throw 'fixture exception'}
+            if($statusCase -ceq 'disconnect'){return @{timeout=$false;exit=255;stdout='partial'}}
+            if($polls -eq 1 -or $statusCase -ceq 'two-timeouts'){return @{timeout=$true;exit=1;stdout='partial completion'}}
+            $observationClock.ElapsedMilliseconds=150000;return @{timeout=$false;exit=3;stdout=''}
+        }
+        $failed=$false;try{. $statusLoop}catch{$failed=$true}
+        Check ($failed -eq ($statusCase -cne 'one-timeout')) "$statusCase status allowance"
+        Check (-not $record.gui_completion_verified -and -not $record.qt_image_available -and -not $record.heap_capture_succeeded -and -not $record.facts_verified) "$statusCase partial status grants nothing"
+        Check ($polls -eq $(if($statusCase -in @('one-timeout','two-timeouts')){2}else{1})) "$statusCase finite polling"
+    }
+    # Execute original transport wrappers with a mock, proving remaining-clock caps.
+    foreach($name in @('ObservationSSH','ObservationCopy')){. ([scriptblock]::Create(($functions|Where-Object Name -ceq $name).Extent.Text))}
+    $budget=Get-FactsDevelopmentBudget
+    function Native([string]$program,[string[]]$arguments,[int]$timeoutMs){$script:lastTimeout=$timeoutMs;return @{exit=0;timeout=$false;stdout=''}}
+    $observationClock.ElapsedMilliseconds=149900
+    [void](ObservationSSH 'fixture');Check ($lastTimeout -eq 100) 'SSH original remaining budget'
+    [void](ObservationCopy '/fixture' 'fixture');Check ($lastTimeout -eq 100) 'SCP original remaining budget'
+    $observationClock.ElapsedMilliseconds=150000
+    $failed=$false;try{ObservationSSH 'fixture'}catch{$failed=$true};Check $failed 'no new live budget'
+    Check ($source.IndexOf('/home/root/rem9-validation/screenshot ''$heapRemote''') -lt $source.IndexOf('}finally{')) 'heap before restoration'
+    Check (-not $source.Contains('--image-only')) 'old helper exact interface'
+    Check ($source.Contains("throw 'SOURCE ONLY:")) 'source execution guard'
+    # Execute the specialized existing finally block with transport stubs.
+    $outerTry=@($ast.FindAll({param($node)$node -is [Management.Automation.Language.TryStatementAst]},$true))[0]
+    $finallyText=$outerTry.Finally.Extent.Text
+    $recovery=[scriptblock]::Create($finallyText.Substring(1,$finallyText.Length-2))
+    . ([scriptblock]::Create(($functions|Where-Object Name -ceq 'Expand').Extent.Text))
+    $stock=[pscustomobject]@{stock_pid=8888;stock_start='9999'};$rollback='fixture-rollback';$fixtureCheck='fixture-only'
+    function SSH([string]$command){
+        if($command.Contains('for name in payload.so')){$script:cleanupCommand=$command}
+        return @{exit=0;timeout=$false;stdout=$(if($command.Contains("printf 'present")){"absent`n"}else{''})}
+    }
+    foreach($unknown in @($false,$true)){
+        $record=[ordered]@{arm_intent=$true;restored=$false;cleanup_verified=$false;gui_completion_verified=$true;qt_image_available=$true;
+            heap_capture_succeeded=$false;heap_capture_transport_unknown=$unknown;paired_image_candidate_verified=$false;
+            facts_verified=$false;callback_verified=$false;candidate_generation_verified=$false}
+        $failed=$false;try{. $recovery}catch{$failed=$true}
+        Check $record.restored "finally restores unknown=$unknown"
+        Check ($record.cleanup_verified -eq (-not $unknown)) "finally cleanup certainty unknown=$unknown"
+        Check ($failed -eq $unknown) "finally preserves unresolved cleanup unknown=$unknown"
+        Check ($record.gui_completion_verified -and $record.qt_image_available -and -not $record.heap_capture_succeeded -and -not $record.paired_image_candidate_verified) "finally preserves separate fields unknown=$unknown"
+        Check (-not $record.facts_verified -and -not $record.callback_verified -and -not $record.candidate_generation_verified) "historical evidence grants no facts unknown=$unknown"
+        Check ($cleanupCommand.Contains("rm -f '/tmp/rem25-facts-$nonce-input-observation.png'") -eq (-not $unknown)) "uncertain external capture retained unknown=$unknown"
+    }
+    Write-Output "input-observation collector: PASS $count assertions (mock transport; no device)"
+}finally{
+    $resolved=[IO.Path]::GetFullPath($packet);$tempRoot=[IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+    if(-not $resolved.StartsWith($tempRoot,[StringComparison]::OrdinalIgnoreCase)){throw 'Test cleanup path escaped temp root'}
+    Remove-Item -LiteralPath $resolved -Recurse -Force
+}
