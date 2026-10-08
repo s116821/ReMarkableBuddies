@@ -223,13 +223,28 @@ impl Store {
         Ok(complete_media)
     }
 
+    /// Verify a complete format-1 or selected format-2 archive without opening a
+    /// live Store. Returns counts/completeness only; does not grant restore,
+    /// membership, native or effect authority. Unknown metadata and incomplete
+    /// archives refuse. Inventory/receipt counts are limited to 4096 and unique
+    /// encoded record bytes and selected metadata each to 8 MiB. These inspection
+    /// bounds can refuse a legacy archive accepted by the older restore path.
     pub fn inspect_backup(source: &Path) -> Result<BackupInspection> {
         files::safe_path(source)?;
         let backup = Backup::read(source)?;
         backup.inspect(source)
     }
 
-    /// Preserve selected history as non-authoritative evidence. Restore is separate.
+    /// Preserve selected history as non-authoritative evidence in format 2.
+    /// Copies reachable accepted history, retained evidence/media and unrelated
+    /// committed scopes, excluding configuration, credentials and runtime/native
+    /// trees. Does not change the source or serialize a live selection token.
+    /// The destination must be new and outside owned Store roots; `backup.json`
+    /// is published only after closure verification. If an error occurs after
+    /// publication, use [`Self::inspect_backup`] to determine whether the archive
+    /// completed before retrying. Partial staging is not a complete backup.
+    /// Inspection capacity applies; [`Self::restore`] refuses this format until
+    /// the separate selected restore activation policy is implemented.
     pub fn export_selected(&self, destination: &Path) -> Result<BackupInspection> {
         files::safe_path(destination)?;
         for owned in [&self.paths.data, &self.paths.cache, &self.paths.credentials] {
