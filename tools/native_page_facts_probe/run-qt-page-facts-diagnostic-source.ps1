@@ -277,6 +277,10 @@ printf '%s %s %s %s\n' "$p" "$started" "$dev" "$ino"
         }
         if($observed.exit -ne 3){throw 'Facts callback observation refused'}
     }
+}catch{
+    # Preserve the initiating source error before restoration can throw another.
+    $record.primary_error=[ordered]@{message=$_.Exception.Message;type=$_.Exception.GetType().FullName;script_stack=$_.ScriptStackTrace}
+    throw
 }finally{
     try{
     if($record.arm_intent){
@@ -408,14 +412,17 @@ printf 'stock-restored-and-exact-stage-removed\n'
             $record.cleanup_verified=-not $cleaned.timeout -and $cleaned.exit -eq 0
         }
     }
-    }finally{
-    [IO.File]::WriteAllText((Join-Path $packet 'operator-receipt.json'),($record|ConvertTo-Json -Depth 8),[Text.UTF8Encoding]::new($false))
-    Write-Output ('receipt='+ (Join-Path $packet 'operator-receipt.json'))
-    Write-Output ('restored='+$record.restored+' cleanup_verified='+$record.cleanup_verified)
-    }
     if(-not $record.cleanup_verified){throw 'Restoration/stage uncertain; preserve exact path and timer duty, no retry'}
     if($ReceiverSourceFacts){if(-not $record.receiver_source_facts_observed){throw 'Stock restored; unqualified source facts absent/refused; retain exact callback and raw evidence'}}else{
     if(-not $record.callback_verified){throw 'Stock restored; callback nonce/thread proof missing or failed'}
     if(-not $record.facts_verified){throw 'Stock restored; fixed facts proof refused or incomplete'}
+    }
+    }catch{
+        $record.restoration_error=[ordered]@{message=$_.Exception.Message;type=$_.Exception.GetType().FullName;script_stack=$_.ScriptStackTrace}
+        throw
+    }finally{
+    [IO.File]::WriteAllText((Join-Path $packet 'operator-receipt.json'),($record|ConvertTo-Json -Depth 8),[Text.UTF8Encoding]::new($false))
+    Write-Output ('receipt='+ (Join-Path $packet 'operator-receipt.json'))
+    Write-Output ('restored='+$record.restored+' cleanup_verified='+$record.cleanup_verified)
     }
 }
