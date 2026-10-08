@@ -195,6 +195,70 @@ if restore; then exit 99; fi
             self.assertEqual(events.count("query start --no-block xochitl.service"), 1)
             self.assertEqual(events.count("verified-stock"), 1)
 
+    def test_primary_failure_then_candidate_crash_restores_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parent = root / "dropins"
+            parent.mkdir()
+            for name, data in (("attempt.identity", "42 561\n"), ("guard.conf", "guard"), ("activation.conf", "activation")):
+                (root / name).write_text(data)
+                (root / name).chmod(0o600)
+            for name in ("guard", "activation"):
+                (parent / name).write_text(name)
+                (parent / name).chmod(0o600)
+            overrides = '''
+parent="$root/dropins"; guard="$parent/guard"; activation="$parent/activation"
+log() { printf '%s\n' "$*" >> "$root/events"; }
+validate_root() { :; }
+reserve() { return 0; }
+policy() { log policy; }
+query() { log "query $*"; printf 'Result=signal\n' > "$root/query.stdout"; }
+value() { VALUE='path=/usr/bin/xochitl ; argv[]=/usr/bin/xochitl --system ;'; }
+stop_unit() { test -f "$guard"; test -f "$activation"; log stop-under-guard; }
+process_gone() { log "gone $*"; }
+cgroup_gone() { log cgroup-gone; }
+hashes() { log hashes; }
+verify_stock() { test ! -e "$guard"; test ! -e "$activation"; log verified-stock; printf 'healthy\n' > "$root/stock.restored"; }
+'''
+            _, boundary = (HERE / "actor.sh.in").read_text().split("# Main-only execution boundary", 1)
+            child = SOURCE + overrides + "\n# Main-only execution boundary" + boundary
+            for key, value in (("@ROOT@", str(root)), ("@NONCE@", "1" * 32), ("@STOCKPID@", "42"), ("@STOCKSTART@", "561")):
+                child = child.replace(key, value)
+            (root / "actor.sh").write_text(child)
+            (root / "actor.sh").chmod(0o600)
+            body = '''
+: > "$root/actor.lock"; exec 9<> "$root/actor.lock"; flock -n 9
+for name in actor.claim stock-stop.claim guard.install-intent activation.install-intent candidate-start.claim; do claim "$name"; done
+phase=observe-first-render
+trap finish EXIT
+exit 93
+'''
+            shell(root, body, overrides, expected=93)
+            self.assertEqual((root / "diagnostic.failed").read_bytes(), b"1" * 32 + b"\n")
+            self.assertTrue((root / "stock.restored").exists())
+            self.assertFalse((root / "recovery.failed").exists())
+            events = (root / "events").read_text().splitlines()
+            self.assertEqual(events.count("query start --no-block xochitl.service"), 1)
+            self.assertEqual(events.count("verified-stock"), 1)
+            self.assertFalse(parent.exists())
+
+    def test_failure_marker_foreign_malformed_or_link_refuses_preservation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            marker = root / "diagnostic.failed"
+            for data in (b"2" * 32 + b"\n", b"1" * 32, b"1" * 32 + b"\n\n", b"1" * 32 + b"\0"):
+                marker.write_bytes(data)
+                marker.chmod(0o600)
+                shell(root, 'if preserve_failure; then exit 99; fi; test ! -e "$root/stock-start.claim"')
+                self.assertEqual(marker.read_bytes(), data)
+            marker.unlink()
+            target = root / "foreign"
+            target.write_bytes(b"1" * 32 + b"\n")
+            target.chmod(0o600)
+            marker.symlink_to(target)
+            shell(root, 'if preserve_failure; then exit 99; fi')
+            self.assertTrue(marker.is_symlink())
+
     def test_deadline_refuses_cleanup_and_retain_guard(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

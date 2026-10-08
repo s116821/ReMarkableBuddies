@@ -23,6 +23,17 @@ private() {
     test "$(stat -c '%a %u %h' "$1")" = '600 0 1' || return 90
 }
 claim() { (set -C; printf '%s\n' "$nonce" > "$root/$1") 2>/dev/null; }
+preserve_failure() {
+    # Failure evidence alone is idempotent; physical action claims never are.
+    if test -e "$root/diagnostic.failed" || test -L "$root/diagnostic.failed"; then
+        private "$root/diagnostic.failed" || return 90
+        test "$(wc -c < "$root/diagnostic.failed")" = 33 || return 90
+        test "$(tail -c 1 "$root/diagnostic.failed" | od -An -tu1 | tr -d ' ')" = 10 || return 90
+        test "$(cat "$root/diagnostic.failed")" = "$nonce" || return 90
+    else
+        claim diagnostic.failed || return 90
+    fi
+}
 start_of() {
     # /proc stat comm may contain spaces. Fields after the final ')' start at field3.
     sed 's/^.*) //' "/proc/$1/stat" | awk '{print $20}'
@@ -146,7 +157,7 @@ restore() {
             process_gone "$attempted" "$started"
             query show --property=Result,ExecMainCode,ExecMainStatus,ActiveState,SubState,MainPID,Job xochitl.service
             cp "$root/query.stdout" "$root/candidate.post-stop"
-            if ! grep -Fxq 'Result=success' "$root/candidate.post-stop"; then claim diagnostic.failed; fi
+            if ! grep -Fxq 'Result=success' "$root/candidate.post-stop"; then preserve_failure; fi
         fi
         # An initial stock STOP may have failed without candidate admission.
         cgroup_gone
@@ -210,7 +221,7 @@ finish() {
     primary=$?
     trap - EXIT HUP INT TERM
     printf '%s phase=%s primary_exit=%s\n' "$nonce" "$phase" "$primary" > "$root/diagnostic.outcome"
-    if test "$primary" -ne 0; then claim diagnostic.failed || :; fi
+    if test "$primary" -ne 0; then preserve_failure || exit 90; fi
     # Separate shell, not a function under `if`: set-e assertions remain effective.
     set +e
     /bin/sh "$root/actor.sh" --restore

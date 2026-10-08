@@ -53,12 +53,16 @@ compile provenance or that the nonce has never been used outside the known list.
 ## Local verification
 
 `test_actor.py` runs in an owned Linux fixture with no network or actual service
-manager. Eleven checks cover conditional query failure, restoration ordering and
+manager. Thirteen checks cover conditional query failure, restoration ordering and
 crash preservation, deadline refusal, failed process reads, bounded owned query
 children, trace identity/drop/sequence, request expiry and singleton claims/lock.
 They also exercise preparation with synthetic bytes, actual actor
 entry/recovery shells on missing host requests (including after guard install),
 and refusal to verify stock when only xochitl is active.
+The primary-failure followed by candidate-crash regression exercises the actual
+EXIT handler and separate recovery shell, preserving existing failure evidence
+while restoring stock once. Foreign, malformed or linked failure markers refuse.
+Only valid failure evidence is idempotent; every physical action claim is exclusive.
 The temporary fixture mount must permit its owned query stub to execute. These
 checks do not establish native correctness or recovery after an executing native
 candidate loses its host connection.
