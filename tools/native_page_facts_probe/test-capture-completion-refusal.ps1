@@ -20,6 +20,17 @@ $c.stage=@('capture-observation-completion-refused');Check ($null -eq (Get-Captu
 $d.kind=@('development-capture-completion-refusal');Check ($null -eq (Get-CaptureCompletionRefusal (Raw) $nonce)) 'array kind refused';$d.kind='development-capture-completion-refusal'
 $d.extra=$false;Check ($null -eq (Get-CaptureCompletionRefusal (Raw) $nonce)) 'unknown field refused';$d.Remove('extra')
 Check ($null -eq (Get-CaptureCompletionRefusal ($raw+' '*1024) $nonce)) 'oversize refused'
+# Historical v1 remains exact8; selected v2 is exact10 with fixed nullable labels.
+$d.version=2;$d.allowed_predicate='invalidated-before';$d.allowed_active_reason=$null
+Check ($null -ne (Get-CaptureCompletionRefusal (Raw) $nonce)) 'v2 cached invalidation/null accepted'
+$d.allowed_predicate='active-owner';$d.allowed_active_reason='capture-context'
+Check ($null -ne (Get-CaptureCompletionRefusal (Raw) $nonce)) 'v2 fixed cached labels accepted'
+$d.allowed_predicate='unknown';Check ($null -eq (Get-CaptureCompletionRefusal (Raw) $nonce)) 'v2 unknown predicate refused';$d.allowed_predicate='active-owner'
+$d.allowed_active_reason=@('capture-context');Check ($null -eq (Get-CaptureCompletionRefusal (Raw) $nonce)) 'v2 array active reason refused'
+$d.allowed_active_reason='unknown';Check ($null -eq (Get-CaptureCompletionRefusal (Raw) $nonce)) 'v2 unknown active reason refused';$d.allowed_active_reason=$null
+$d.Remove('allowed_predicate');Check ($null -eq (Get-CaptureCompletionRefusal (Raw) $nonce)) 'v2 missing nullable field refused';$d.allowed_predicate=$null
+$d.version=1;Check ($null -eq (Get-CaptureCompletionRefusal (Raw) $nonce)) 'v1 rejects extra v2 labels'
+$d.Remove('allowed_predicate');$d.Remove('allowed_active_reason');Check ($null -ne (Get-CaptureCompletionRefusal (Raw) $nonce)) 'historical exact8 v1 still accepted'
 $expected=@{nonce=$nonce;document='00000000-0000-4000-8000-000000000001';order=@(2..7|ForEach-Object {'00000000-0000-4000-8000-'+$_.ToString('000000000000')})}
 $old=Get-CaptureObservationBuildConfig $expected $false $true $false 4096 32 $true $true $true $true
 $new=Get-CaptureObservationBuildConfig $expected $false $true $false 4096 32 $true $true $true $true $true

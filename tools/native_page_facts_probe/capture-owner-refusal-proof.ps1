@@ -265,13 +265,19 @@ function Get-CaptureCompletionRefusal([string]$Raw,[string]$Nonce) {
         $nested=$root.GetProperty('completion_refusal')
         if($nested.ValueKind -ne [System.Text.Json.JsonValueKind]::Object){return $null}
         $fields=@('kind','version','reason','capture_accepted_ms','baseline_ms','post_read_ms','failure_ms','effective_deadline_ms')
+        $version=$nested.GetProperty('version').GetInt32()
+        if($version -eq 2){$fields+=@('allowed_predicate','allowed_active_reason')}elseif($version -ne 1){return $null}
         $names.Clear()
         foreach($property in $nested.EnumerateObject()){if(-not $names.Add($property.Name) -or $property.Name -cnotin $fields){return $null}}
-        if($names.Count -ne 8){return $null}
+        if($names.Count -ne $fields.Count){return $null}
         $value=ConvertFrom-Json -InputObject $Raw -ErrorAction Stop
         if($value.nonce -isnot [string] -or $value.nonce -cne $Nonce -or $Nonce -cnotmatch '\A[0-9a-f]{32}\z' -or $value.stage -isnot [string] -or $value.stage -cne 'capture-observation-completion-refused' -or $value.application_thread -isnot [bool] -or $value.engine_thread -isnot [bool]){return $null}
         $d=$value.completion_refusal
-        if($d.kind -isnot [string] -or $d.kind -cne 'development-capture-completion-refusal' -or ($d.version -isnot [int] -and $d.version -isnot [long]) -or $d.version -ne 1 -or $d.reason -isnot [string] -or $d.reason -cnotin @('allowed-deadline','allowed-refused','identity-refused','epoch-changed','token-refused','facts-request-present','facts-request-tmp-present')){return $null}
+        if($d.kind -isnot [string] -or $d.kind -cne 'development-capture-completion-refusal' -or ($d.version -isnot [int] -and $d.version -isnot [long]) -or $d.version -notin @(1,2) -or $d.reason -isnot [string] -or $d.reason -cnotin @('allowed-deadline','allowed-refused','identity-refused','epoch-changed','token-refused','facts-request-present','facts-request-tmp-present')){return $null}
+        if($version -eq 2){
+            $labels=@{allowed_predicate=@('reentrant-check','invalidated-before','context-before','lifetime-before','active-owner','invalidated-after','context-after','lifetime-after','owner-pointers','owner-threads','deadline');allowed_active_reason=@('capture-context','pointers-or-threads','window-focus-active-visible','engine-association','window-association','item-visible-enabled','receiver-ancestor','drawing-area-focused','receiver-document','scene-document','document-identity')}
+            foreach($name in @('allowed_predicate','allowed_active_reason')){if($null -ne $d.$name -and ($d.$name -isnot [string] -or $d.$name -cnotin $labels[$name])){return $null}}
+        }
         foreach($name in @('capture_accepted_ms','baseline_ms','post_read_ms','failure_ms','effective_deadline_ms')){if(($d.$name -isnot [int] -and $d.$name -isnot [long]) -or $d.$name -lt 0 -or $d.$name -gt 2147483647){return $null}}
         return $d
     } catch {return $null} finally {if($null -ne $document){$document.Dispose()}}
