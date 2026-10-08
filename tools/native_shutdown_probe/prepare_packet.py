@@ -90,25 +90,25 @@ def main():
         if re.search(r"@[A-Z]+@", text):
             raise ValueError("Unbound packet template")
         (output / name).write_text(text, encoding="utf-8", newline="\n")
-    shutil.copyfile(regular(HERE / "trace-stop-proof.awk"), output / "trace-stop-proof.awk")
+    (output / "trace-stop-proof.awk").write_text(regular(HERE / "trace-stop-proof.awk").read_text(), encoding="ascii", newline="\n")
     shutil.copyfile(payload, output / "payload.so")
-    (output / "owner").write_text(nonce, encoding="ascii")
-    (output / "guard.conf").write_text("[Unit]\nOnFailure=\nFailureAction=none\nStartLimitAction=none\n[Service]\nRestart=no\n", encoding="ascii")
-    (output / "activation.conf").write_text(f"[Service]\nExecStart=\nExecStart=/bin/sh {root}/launch.sh\n", encoding="ascii")
-    (output / "stock.policy").write_text("".join(f"{k}={v}\n" for k, v in POLICY.items()), encoding="ascii")
+    (output / "owner").write_text(nonce, encoding="ascii", newline="\n")
+    (output / "guard.conf").write_text("[Unit]\nOnFailure=\nFailureAction=none\nStartLimitAction=none\n[Service]\nRestart=no\n", encoding="ascii", newline="\n")
+    (output / "activation.conf").write_text(f"[Service]\nExecStart=\nExecStart=/bin/sh {root}/launch.sh\n", encoding="ascii", newline="\n")
+    (output / "stock.policy").write_text("".join(f"{k}={v}\n" for k, v in POLICY.items()), encoding="ascii", newline="\n")
     guarded = POLICY | {"OnFailure": "", "Restart": "no"}
-    (output / "guard.policy").write_text("".join(f"{k}={v}\n" for k, v in guarded.items()), encoding="ascii")
-    (output / "baseline.files").write_text("".join(f"{e['sha256']}  {e['path']}\n" for e in files), encoding="ascii")
-    (output / "service.files").write_text("".join(f"{digest}  {path}\n" for path, digest in SERVICE_HASHES.values()), encoding="ascii")
+    (output / "guard.policy").write_text("".join(f"{k}={v}\n" for k, v in guarded.items()), encoding="ascii", newline="\n")
+    (output / "baseline.files").write_text("".join(f"{e['sha256']}  {e['path']}\n" for e in files), encoding="ascii", newline="\n")
+    (output / "service.files").write_text("".join(f"{digest}  {path}\n" for path, digest in SERVICE_HASHES.values()), encoding="ascii", newline="\n")
     for file in output.iterdir():
         file.chmod(0o600)
     hashes = {p.name: sha(p) for p in sorted(output.iterdir())}
-    (output / "packet.files").write_text("".join(f"{v}  {k}\n" for k, v in hashes.items()), encoding="ascii")
+    (output / "packet.files").write_text("".join(f"{v}  {k}\n" for k, v in hashes.items()), encoding="ascii", newline="\n")
     (output / "packet.files").chmod(0o600)
     receipt = {"evidence_class": "prepared only; no native execution", "nonce": nonce, "remote_root": root,
                "absolute_budget_seconds": 360, "selection_sha256": sha(selection_file), "files": hashes,
                "packet_manifest_sha256": sha(output / "packet.files")}
-    (output / "preparation.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+    (output / "preparation.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8", newline="\n")
     (output / "preparation.json").chmod(0o600)
     print(json.dumps(receipt))
 

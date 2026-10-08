@@ -6,6 +6,9 @@ import os
 import importlib.util
 import json
 import hashlib
+import contextlib
+import io
+from unittest import mock
 from pathlib import Path
 import subprocess
 import tempfile
@@ -93,7 +96,7 @@ verify_stock() { test ! -e "$guard"; test ! -e "$activation"; printf 'healthy\n'
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             payload = root / "fixture.so"
-            payload.write_bytes(b"fixture only; never load")
+            payload.write_bytes(b"fixture only\r\n; never load")
             selection = {"nonce": "1" * 32, "budget_seconds": 360, "stock_pid": "42", "stock_start": "561",
                          "original_policy": module.POLICY, "executable_sha256": module.EXE_HASH,
                          "payload_sha256": hashlib.sha256(payload.read_bytes()).hexdigest(),
@@ -114,6 +117,28 @@ verify_stock() { test ! -e "$guard"; test ! -e "$activation"; printf 'healthy\n'
                 self.assertEqual(hashlib.sha256((output / name).read_bytes()).hexdigest(), digest)
             self.assertNotIn("@ROOT@", (output / "actor.sh").read_text())
             self.assertIn("  /usr/lib/libstdc++.so.6\n", (output / "baseline.files").read_text())
+            for generated in output.iterdir():
+                if generated.name != "payload.so":
+                    self.assertNotIn(b"\r", generated.read_bytes(), generated.name)
+            self.assertEqual((output / "payload.so").read_bytes(), payload.read_bytes())
+            # Simulate Windows default CRLF writes plus a CRLF source checkout.
+            # Explicit newline='\n' must produce byte-identical Linux packets.
+            crlf_source = root / "crlf-source"
+            crlf_source.mkdir()
+            for name in ("actor.sh.in", "launch.sh.in", "trace-stop-proof.awk"):
+                (crlf_source / name).write_bytes((HERE / name).read_text().replace("\n", "\r\n").encode("ascii"))
+            simulated = root / "windows-simulated"
+            original_open = Path.open
+            def windows_open(path, mode="r", buffering=-1, encoding=None, errors=None, newline=None):
+                if "w" in mode and "b" not in mode and newline is None:
+                    newline = "\r\n"
+                return original_open(path, mode, buffering, encoding, errors, newline)
+            arguments = ["prepare", "--selection", str(selected), "--payload", str(payload), "--output", str(simulated)]
+            with mock.patch.object(module, "HERE", crlf_source), mock.patch.object(os.sys, "argv", arguments), \
+                    mock.patch.object(Path, "open", windows_open), contextlib.redirect_stdout(io.StringIO()):
+                module.main()
+            for generated in output.iterdir():
+                self.assertEqual((simulated / generated.name).read_bytes(), generated.read_bytes(), generated.name)
             # Provider '+' is literal; shell metacharacters and traversal remain refused.
             for index, unsafe in enumerate(("/usr/lib/libstdc++;touch", "/usr/lib/$(id)",
                                              "/usr/lib/`id`", "/usr/lib/lib*.so", "/usr/lib/../escape",
