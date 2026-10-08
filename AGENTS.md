@@ -115,3 +115,13 @@ interfaces, native/file-format mechanisms, injected extensions and UI automation
 Evaluate safety, maintenance and scope costs; do not silently install invasive
 dependencies or treat saved preferences as actual UI state. Record promising
 alternatives and unresolved limits rather than conducting an endless survey.
+
+## Documentation layout
+
+Put documentation under `docs/`, including reusable technical findings, research,
+reference and tool guides. Genuine OpenSpec change-specific artifacts stay in the
+standard `openspec/` structure in the repository that owns that workflow. Root
+README/CONTRIBUTING/AGENTS, license/security files and conventional tool-discovery
+files (GitHub templates, skills) are exceptions. Test data remains fixtures, not
+documentation by default. Preserve evidence/provenance and link canonical bodies;
+do not sweep unrelated historical archives or private task outputs.

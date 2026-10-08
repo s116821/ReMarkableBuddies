@@ -222,7 +222,7 @@ messages fail visibly. Mixed and multi-commit history is evaluated in full.
 - `.github/workflows/release.yml` - Serialized immutable tag, exact-source builds,
   runtime/checksum verification and recoverable draft publication. No version commit.
 - `build.rs` - Tag-derived CLI version; strict official source checks, explicit dev fallback.
-- [Release tests and recovery](../release/README.md) - Public, isolated fixtures and retry commands.
+- [Release tests and recovery](release-workflow.md) - Public, isolated fixtures and retry commands.
 
 ## Testing Strategy
 
