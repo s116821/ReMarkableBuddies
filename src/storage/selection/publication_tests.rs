@@ -1134,6 +1134,68 @@ fn retained_settlement_process_death_preserves_receipt_media_and_unrelated_scope
     }
 }
 #[test]
+fn selected_snapshot_preserves_exact_noncanonical_refs_and_reference_order() {
+    let f = Fixture::new();
+    let store = f.store();
+    let s = scope();
+    let original = record(&store);
+    let head = edit(&original);
+    // Deliberately reverse causal order and store valid noncanonical JSON.
+    let records = [head, original];
+    let (mut change, _) = change(&records);
+    let mut objects = BTreeMap::new();
+    let mut references = Vec::new();
+    let mut namespaces = BTreeMap::new();
+    for record in &records {
+        let bytes = serde_json::to_vec_pretty(record).unwrap();
+        let hash = digest(&bytes);
+        assert_ne!(hash, digest(&serde_json::to_vec(record).unwrap()));
+        references.push(ObjectRef {
+            sha256: hash.clone(),
+            bytes: bytes.len() as u64,
+        });
+        namespaces.insert(hash.clone(), record.namespace);
+        objects.insert(hash, bytes);
+    }
+    change.selected.records = references.clone();
+    change.selected.record_namespaces = namespaces;
+    let publication = store
+        .initialize_selected(&s, change, objects.clone())
+        .unwrap();
+    drop(store);
+    let store = f.store();
+    let snapshot = selected(&store, &s);
+    assert_eq!(snapshot.token, publication.token);
+    assert!(snapshot.selected_records == records);
+    assert_eq!(snapshot.transaction.selected.records, references);
+    for (envelope, reference) in snapshot
+        .selected_records
+        .iter()
+        .zip(&snapshot.transaction.selected.records)
+    {
+        let bytes = store.read_object(reference).unwrap();
+        assert_eq!(&bytes, &objects[&reference.sha256]);
+        assert!(serde_json::from_slice::<Envelope>(&bytes).unwrap() == *envelope);
+        let canonical = serde_json::to_vec(envelope).unwrap();
+        assert!(store
+            .read_object(&ObjectRef {
+                sha256: digest(&canonical),
+                bytes: canonical.len() as u64
+            })
+            .is_err());
+    }
+    assert_eq!(
+        store
+            .selected_receipt(&s, publication.transaction.operation)
+            .unwrap()
+            .unwrap()
+            .selected
+            .records,
+        references
+    );
+}
+
+#[test]
 fn retained_settlement_racing_activation_cannot_use_one_token_twice() {
     let f = Fixture::new();
     let store = Arc::new(f.store());
