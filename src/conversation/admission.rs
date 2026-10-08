@@ -32,33 +32,7 @@ impl SelectedAdmission {
     /// Recover the original publication before allocating new preparation IDs.
     /// Replacement membership and lost acknowledgments never refresh authority.
     pub fn recover_original_intent(&self, operation: Uuid) -> Result<Option<HistoricalIntent>> {
-        self.mutate(|store| {
-            let Some(transaction)=store.selected_receipt(&self.scope,operation)? else { return Ok(None); };
-            ensure!(transaction.mutation == SelectionMutation::Commit, "operation is not an intent publication");
-            let mut envelopes=Vec::new();
-            let mut original_objects=BTreeMap::new();
-            for reference in &transaction.selected.records {
-                let bytes=store.read_object(reference)?;
-                envelopes.push(serde_json::from_slice::<Envelope>(&bytes)?);
-                original_objects.insert(reference.sha256.clone(),bytes);
-            }
-            let projection=SelectedDomainProjection::from_pinned_records(&envelopes,&transaction.selected.records)?;
-            let (envelope,Some(Record::Receipt(receipt)))=projection.head(Namespace::Conversation,Ledger::receipt_id(operation))
-                .context("original intent receipt missing")? else { anyhow::bail!("original intent receipt variant mismatch"); };
-            let intent=receipt.admitted_intent.as_ref().context("historical receipt has no admitted intent")?;
-            ensure!(intent.operation == operation, "original intent operation mismatch");
-            ensure!(matches!(projection.exact_reference(&intent.root_revision)?,Record::Root(root) if root.id == intent.conversation),
-                "original intent root mismatch");
-            ensure!(matches!(projection.exact_reference(&intent.turn_revision)?,Record::Turn(turn) if turn.id == intent.turn && turn.conversation == intent.conversation),
-                "original intent turn mismatch");
-            for reference in &intent.evidence { projection.exact_reference(reference)?; }
-            projection.document_ownership()?;
-            let index=envelopes.iter().position(|record| record.revision_id == envelope.revision_id).unwrap();
-            Ok(Some(HistoricalIntent { receipt:receipt.clone(),
-                receipt_reference:IntentRecordRef {namespace:envelope.namespace,record_id:envelope.record_id,
-                    revision_id:envelope.revision_id,object:transaction.selected.records[index].clone()},
-                transaction,original_objects }))
-        })
+        self.mutate(|store| recover_original(store, &self.scope, operation))
     }
     pub fn new(store: Arc<Store>, scope: SelectionScope) -> Result<Self> {
         scope.validate()?;
@@ -110,12 +84,15 @@ impl SelectedAdmission {
         operation(&snapshot)
     }
     /// Publication/activation must use the same gate as synchronous handoff.
-    fn mutate<T>(&self, operation: impl FnOnce(&Store) -> Result<T>) -> Result<T> {
+    pub(super) fn mutate<T>(&self, operation: impl FnOnce(&Store) -> Result<T>) -> Result<T> {
         let _admission = self
             .gate
             .lock()
             .map_err(|_| anyhow::anyhow!("domain admission unavailable"))?;
         operation(&self.store)
+    }
+    pub(super) fn scope(&self) -> &SelectionScope {
+        &self.scope
     }
     pub fn initialize(
         &self,
@@ -136,6 +113,70 @@ impl SelectedAdmission {
         );
         self.mutate(|store| store.activate_selected(accepted, change, objects))
     }
+}
+
+pub(super) fn recover_original(
+    store: &Store,
+    scope: &SelectionScope,
+    operation: Uuid,
+) -> Result<Option<HistoricalIntent>> {
+    let Some(transaction) = store.selected_receipt(scope, operation)? else {
+        return Ok(None);
+    };
+    ensure!(
+        transaction.mutation == SelectionMutation::Commit,
+        "operation is not an intent publication"
+    );
+    let mut envelopes = Vec::new();
+    let mut original_objects = BTreeMap::new();
+    for reference in &transaction.selected.records {
+        let bytes = store.read_object(reference)?;
+        envelopes.push(serde_json::from_slice::<Envelope>(&bytes)?);
+        original_objects.insert(reference.sha256.clone(), bytes);
+    }
+    let projection =
+        SelectedDomainProjection::from_pinned_records(&envelopes, &transaction.selected.records)?;
+    let (envelope, Some(Record::Receipt(receipt))) = projection
+        .head(Namespace::Conversation, Ledger::receipt_id(operation))
+        .context("original intent receipt missing")?
+    else {
+        anyhow::bail!("original intent receipt variant mismatch");
+    };
+    let intent = receipt
+        .admitted_intent
+        .as_ref()
+        .context("historical receipt has no admitted intent")?;
+    ensure!(
+        intent.operation == operation,
+        "original intent operation mismatch"
+    );
+    ensure!(
+        matches!(projection.exact_reference(&intent.root_revision)?,Record::Root(root) if root.id == intent.conversation),
+        "original intent root mismatch"
+    );
+    ensure!(
+        matches!(projection.exact_reference(&intent.turn_revision)?,Record::Turn(turn) if turn.id == intent.turn && turn.conversation == intent.conversation),
+        "original intent turn mismatch"
+    );
+    for reference in &intent.evidence {
+        projection.exact_reference(reference)?;
+    }
+    projection.document_ownership()?;
+    let index = envelopes
+        .iter()
+        .position(|record| record.revision_id == envelope.revision_id)
+        .unwrap();
+    Ok(Some(HistoricalIntent {
+        receipt: receipt.clone(),
+        receipt_reference: IntentRecordRef {
+            namespace: envelope.namespace,
+            record_id: envelope.record_id,
+            revision_id: envelope.revision_id,
+            object: transaction.selected.records[index].clone(),
+        },
+        transaction,
+        original_objects,
+    }))
 }
 
 #[cfg(test)]

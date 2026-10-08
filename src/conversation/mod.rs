@@ -3,6 +3,7 @@ mod admission;
 pub mod capture_facts;
 mod intent;
 mod legacy;
+mod pending;
 mod selected;
 mod types;
 use crate::storage::{
@@ -11,6 +12,7 @@ use crate::storage::{
 pub use admission::{HistoricalIntent, SelectedAdmission};
 use anyhow::{bail, ensure, Context, Result};
 pub use intent::*;
+pub use pending::{PendingIntentPublication, PendingIntentRequest, SourceAdmission};
 pub use selected::*;
 use serde::Serialize;
 use std::{

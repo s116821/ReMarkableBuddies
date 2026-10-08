@@ -365,7 +365,7 @@ impl SelectedDomainProjection {
             .context("intent reference is a tombstone")
     }
 }
-fn conversation_id(record: &Record) -> Uuid {
+pub(super) fn conversation_id(record: &Record) -> Uuid {
     match record {
         Record::Root(r) => r.id,
         Record::Turn(r) => r.conversation,
