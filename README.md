@@ -1,5 +1,8 @@
 # ReMarkableBuddies
 
+See [application documentation](docs/README.md) for development, technical, release
+and fixture guides.
+
 The [public ecosystem hub](https://github.com/s116821/RemarkableBuddiesDocs) owns
 all OpenSpec specs, active changes, archives, config and workflow skills.
 Start with its [contributor guide](https://github.com/s116821/RemarkableBuddiesDocs/blob/main/CONTRIBUTING.md)
@@ -704,7 +707,7 @@ pending work. Complete published releases are verified and skipped.
 
 Local/PR binaries report `dev.<git-description>` or `dev.unknown` if Git metadata is
 unavailable. Official builds reject missing/shallow history, dirty source, conflicting
-metadata overrides and tag/SHA mismatches. See [release testing](release/README.md)
+metadata overrides and tag/SHA mismatches. See [release testing](docs/release-workflow.md)
 for the public, isolated validation commands.
 
 ## Contributing

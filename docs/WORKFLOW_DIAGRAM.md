@@ -1,7 +1,7 @@
 # CI/CD workflow
 
 The scoped PR title becomes the squash commit message. See
-[release policy](../release/cliff.toml) and [public release tests](../release/README.md).
+[release policy](../release/cliff.toml) and [public release tests](release-workflow.md).
 
 ## Pull requests and main CI
 
