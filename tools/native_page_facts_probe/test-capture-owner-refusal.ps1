@@ -31,6 +31,32 @@ $bad=New-Refusal;$bad.branch='observer-install';$bad.predicate=$null;$bad.discov
 $bad.observer_member='runtimeName()';Check (-not(Valid $bad)) 'arbitrary member refused'
 $bad=New-Refusal;$bad.branch='owner-revalidation';$bad.predicate='active-owner';$bad.discovery_result='open-owner-observed';$bad.active_owner_rejection='drawing-area-focused';Check (Valid $bad) 'revalidation group'
 $bad.active_owner_rejection=$null;Check (-not(Valid $bad)) 'revalidation missing group'
+foreach($predicate in @('context','live','invalidated','token','deadline')){
+    $value=New-Refusal;$value.predicate=$predicate;if($predicate -ceq 'deadline'){$value.failure_ms=5100;$value.deadline_check_ms=5100}
+    Check (Valid $value) "progress registry $predicate"
+}
+foreach($predicate in @('reentrant-check','invalidated-before','context-before','lifetime-before','active-owner','invalidated-after','context-after','lifetime-after','owner-pointers','owner-threads','deadline')){
+    $value=New-Refusal;$value.branch='owner-revalidation';$value.discovery_result='open-owner-observed';$value.predicate=$predicate
+    if($predicate -ceq 'active-owner'){$value.active_owner_rejection='document-identity'}
+    if($predicate -ceq 'deadline'){$value.failure_ms=5100;$value.deadline_check_ms=5100}
+    Check (Valid $value) "allowed registry $predicate"
+}
+foreach($group in @('pointers-or-threads','window-focus-active-visible','engine-association','window-association','item-visible-enabled','scene-active-focus','receiver-ancestor','drawing-area-focused','receiver-document','scene-document','document-identity')){
+    $value=New-Refusal;$value.branch='owner-revalidation';$value.discovery_result='open-owner-observed';$value.predicate='active-owner';$value.active_owner_rejection=$group
+    Check (Valid $value) "active registry $group"
+}
+foreach($result in @('open-engine-thread','open-current-window-unavailable','open-context-lost','open-item-lost','open-topology-bound','open-candidate-bound','open-owner-ambiguous','open-owner-unavailable')){
+    $value=New-Refusal;$value.branch='owner-discovery';$value.predicate=$null;$value.discovery_result=$result
+    if($result -cin @('open-item-lost','open-topology-bound','open-candidate-bound')){$value.visited_items=4;$value.receiver_candidates=$(if($result -ceq 'open-candidate-bound'){9}else{1});$value.scene_candidates=1}
+    if($result -cin @('open-owner-ambiguous','open-owner-unavailable')){$value.visited_items=4;$value.receiver_candidates=2;$value.scene_candidates=1;$value.matched_pairs=$(if($result -ceq 'open-owner-ambiguous'){2}else{0})}
+    if($result -ceq 'open-owner-unavailable'){$value.first_pair_receiver=0;$value.first_pair_scene=0;$value.first_pair_rejection='receiver-document'}
+    Check (Valid $value) "discovery registry $result"
+}
+$members=@{document=@('pageCountChanged(int,int)','pageMapChanged()','pageAdded(int)','pagesAdded(QList<int>)','pageMoved(int,int)','pagesMoved()','pagesRemoved()','redirectionPageMapChanged()','pageUpdated(int)','documentMetadataChanged()','orientationChanged()');scene=@('pageIdChanged()','documentWrapperChanged()','workerChanged()','viewportChanged()');receiver=@('document','currentPage','currentPageId','drawingAreaFocused')}
+foreach($role in $members.Keys){foreach($member in $members[$role]){foreach($failure in @('object-missing','property-missing','notify-missing','signal-missing','slot-missing','return-type','connect-failed')){
+    $value=New-Refusal;$value.branch='observer-install';$value.predicate=$null;$value.discovery_result='open-owner-observed';$value.observer_role=$role;$value.observer_member=$member;$value.observer_failure=$failure
+    Check (Valid $value) "observer registry $role $member $failure"
+}}}
 $base=Join-Path ([IO.Path]::GetTempPath()) ('owner-refusal-'+[Guid]::NewGuid().ToString('N'))
 [void](New-Item -ItemType Directory -Path $base)
 try {

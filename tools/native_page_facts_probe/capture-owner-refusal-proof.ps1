@@ -51,12 +51,15 @@ function Test-CaptureOwnerRefusal($Value,[string]$Nonce,[string]$PidText,[string
         $visitedCount=@(@('visited_items','receiver_candidates','scene_candidates')|Where-Object {$null -ne $Value.$_}).Count
         if($visitedCount -notin @(0,3) -or ($visitedCount -eq 0 -and $null -ne $Value.matched_pairs)){return $false}
         if($Value.discovery_result -cin @('open-engine-thread','open-current-window-unavailable') -and $visitedCount){return $false}
+        if($Value.discovery_result -cin @('open-item-lost','open-topology-bound','open-candidate-bound') -and ($visitedCount -ne 3 -or $null -ne $Value.matched_pairs)){return $false}
+        if($Value.discovery_result -ceq 'open-candidate-bound' -and $Value.receiver_candidates -ne 9 -and $Value.scene_candidates -ne 9){return $false}
         if($Value.discovery_result -cin @('open-owner-unavailable','open-owner-ambiguous')){
             if($visitedCount -ne 3 -or $null -eq $Value.matched_pairs -or $Value.matched_pairs -ne $(if($Value.discovery_result -ceq 'open-owner-unavailable'){0}else{2})){return $false}
         }
         if($pairCount){
             if($Value.discovery_result -cne 'open-owner-unavailable' -or $Value.matched_pairs -ne 0 -or $Value.first_pair_rejection -cnotin $groups -or $Value.first_pair_receiver -ge $Value.receiver_candidates -or $Value.first_pair_scene -ge $Value.scene_candidates){return $false}
         }
+        if($Value.discovery_result -ceq 'open-owner-unavailable' -and $Value.receiver_candidates -gt 0 -and $Value.scene_candidates -gt 0 -and $pairCount -ne 3){return $false}
       }
       'observer-install' {
         if($null -ne $Value.predicate -or $Value.discovery_result -cne 'open-owner-observed' -or $observerCount -ne 3){return $false}

@@ -27,9 +27,9 @@ for this diagnostic; existing capture output size requirements remain intact.
 
 Validation on 2026-10-07:
 
-- owner diagnostic proof/collector: 111 checks passed, including malformed/empty
+- owner diagnostic proof/collector: 279 checks passed, including malformed/empty
   preservation, timeout and later loss, duplicate keys, branch tuples, identities,
-  historical deadline latch and cleanup eligibility;
+  historical deadline latch and cleanup eligibility, every finite progress/allowed/discovery/active-owner/observer registry, and reached-counter/pair requirements;
 - existing capture proof: 156 checks passed;
 - existing capture collector: 40 checks passed;
 - actual source block integration: 18 mocked checks passed, including restored
