@@ -11,7 +11,198 @@ pub struct SelectedDomainProjection {
     records: BTreeMap<Uuid, Record>,
     heads: BTreeMap<(Namespace, Uuid), Uuid>,
 }
+/// Historical document grouping only; no current-device qualification or token.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DocumentOwnership {
+    Document(Uuid),
+    DeferredMissing,
+    DeferredAmbiguous(BTreeSet<Uuid>),
+}
 impl SelectedDomainProjection {
+    pub fn document_ownership(&self) -> Result<BTreeMap<Uuid, DocumentOwnership>> {
+        let mut owners: BTreeMap<Uuid, BTreeSet<Uuid>> = BTreeMap::new();
+        for record in self.records.values() {
+            let conversation = conversation_id(record);
+            ensure!(
+                self.records
+                    .values()
+                    .any(|r| matches!(r, Record::Root(root) if root.id == conversation)),
+                "selected conversation root missing"
+            );
+            owners.entry(conversation).or_default();
+            let mut document = None;
+            match record {
+                Record::Root(root) => {
+                    if let Some(binding) = root.binding {
+                        self.require_binding(binding, conversation)?;
+                    }
+                }
+                Record::Turn(turn) => {
+                    if let Some(completion) = &turn.completion {
+                        document = Some(completion.observation.document);
+                    }
+                    for source in &turn.sources {
+                        ensure!(
+                            self.records.values().any(|r| match r {
+                                Record::Source(s) =>
+                                    s.id == *source
+                                        && s.conversation == conversation
+                                        && s.turn == turn.id,
+                                Record::Capture(s) =>
+                                    s.id == *source
+                                        && s.conversation == conversation
+                                        && s.turn == turn.id,
+                                Record::LegacyCapture(s) =>
+                                    s.id == *source
+                                        && s.conversation == conversation
+                                        && s.turn == turn.id,
+                                _ => false,
+                            }),
+                            "selected turn source closure missing or foreign"
+                        );
+                    }
+                    if let Some(prior) = turn.correction_of {
+                        ensure!(self.records.values().any(|r| matches!(r, Record::Turn(t)
+                            if t.id == prior && t.conversation == conversation && t.sequence < turn.sequence)),
+                            "selected correction chronology broken");
+                    }
+                }
+                Record::Source(source) => {
+                    self.require_turn(source.turn, conversation)?;
+                    document = Some(source.observation.document);
+                }
+                Record::Capture(capture) => {
+                    self.require_turn(capture.turn, conversation)?;
+                    document = Some(capture.facts.source.document.value());
+                }
+                Record::LegacyCapture(capture) => {
+                    self.require_turn(capture.turn, conversation)?;
+                }
+                Record::Binding(binding) => {
+                    ensure!(
+                        binding.receipt.observed_document == binding.receipt.source.document,
+                        "selected binding document mismatch"
+                    );
+                    document = Some(binding.receipt.source.document);
+                }
+                Record::Export(_) => {}
+                Record::Receipt(receipt) => {
+                    let ack = &receipt.acknowledgment;
+                    ensure!(
+                        matches!(self.records.get(&ack.applied_root_revision), Some(Record::Root(r)) if r.id == conversation),
+                        "selected receipt root revision missing or foreign"
+                    );
+                    if let Some(binding) = ack.binding {
+                        self.require_binding(binding, conversation)?;
+                    }
+                    for id in &ack.records {
+                        ensure!(
+                            self.records
+                                .iter()
+                                .any(|(revision, r)| self.ancestors[revision].record_id == *id
+                                    && conversation_id(r) == conversation),
+                            "selected receipt record missing or foreign"
+                        );
+                    }
+                    if let Some(intent) = &receipt.admitted_intent {
+                        ensure!(
+                            matches!(self.exact_reference(&intent.root_revision)?, Record::Root(r) if r.id == conversation),
+                            "intent root variant mismatch"
+                        );
+                        ensure!(
+                            matches!(self.exact_reference(&intent.turn_revision)?, Record::Turn(t) if t.id == intent.turn && t.conversation == conversation),
+                            "intent turn variant mismatch"
+                        );
+                        for reference in &intent.evidence {
+                            ensure!(
+                                conversation_id(self.exact_reference(reference)?) == conversation,
+                                "foreign intent evidence"
+                            );
+                        }
+                        document = Some(intent.source.document);
+                    }
+                }
+                Record::OutcomeFact(fact) => {
+                    self.require_turn(fact.turn, conversation)?;
+                    if let Some(settlement) = &fact.settlement {
+                        ensure!(
+                            matches!(self.exact_reference(&settlement.original_receipt)?, Record::Receipt(r)
+                            if r.acknowledgment.operation == settlement.operation && r.acknowledgment.conversation == conversation),
+                            "settlement receipt variant mismatch"
+                        );
+                        ensure!(
+                            matches!(self.exact_reference(&settlement.original_root)?, Record::Root(r) if r.id == conversation),
+                            "settlement root variant mismatch"
+                        );
+                        ensure!(
+                            matches!(self.exact_reference(&settlement.original_turn)?, Record::Turn(t) if t.id == fact.turn && t.conversation == conversation),
+                            "settlement turn variant mismatch"
+                        );
+                        for reference in &settlement.evidence {
+                            ensure!(
+                                conversation_id(self.exact_reference(reference)?) == conversation,
+                                "foreign settlement evidence"
+                            );
+                        }
+                    }
+                }
+            }
+            if let Some(document) = document {
+                ensure!(!document.is_nil(), "selected document identity is nil");
+                owners.get_mut(&conversation).unwrap().insert(document);
+            }
+        }
+        // Chronology concerns current causal heads, not older revisions of a turn.
+        let mut sequences = BTreeSet::new();
+        for revision in self.heads.values() {
+            if let Some(Record::Turn(turn)) = self.records.get(revision) {
+                ensure!(
+                    sequences.insert((turn.conversation, turn.sequence)),
+                    "selected turn sequence collision"
+                );
+                let (_, root) = self
+                    .head(Namespace::Conversation, turn.conversation)
+                    .context("selected root head absent")?;
+                if let Some(Record::Root(root)) = root {
+                    ensure!(
+                        turn.sequence < root.next_sequence,
+                        "selected root chronology broken"
+                    );
+                } else {
+                    ensure!(root.is_none(), "selected root head variant mismatch");
+                }
+            }
+        }
+        Ok(owners
+            .into_iter()
+            .map(|(id, documents)| {
+                let owner = match documents.len() {
+                    0 => DocumentOwnership::DeferredMissing,
+                    1 => DocumentOwnership::Document(*documents.first().unwrap()),
+                    _ => DocumentOwnership::DeferredAmbiguous(documents),
+                };
+                (id, owner)
+            })
+            .collect())
+    }
+    fn require_turn(&self, id: Uuid, conversation: Uuid) -> Result<()> {
+        ensure!(
+            self.records.values().any(
+                |r| matches!(r, Record::Turn(t) if t.id == id && t.conversation == conversation)
+            ),
+            "selected turn reference missing or foreign"
+        );
+        Ok(())
+    }
+    fn require_binding(&self, id: Uuid, conversation: Uuid) -> Result<()> {
+        ensure!(
+            self.records.values().any(
+                |r| matches!(r, Record::Binding(b) if b.id == id && b.conversation == conversation)
+            ),
+            "selected binding reference missing or foreign"
+        );
+        Ok(())
+    }
     /// Retained records deliberately do not enter current projection.
     pub fn from_snapshot(snapshot: &SelectedSnapshot) -> Result<Self> {
         Self::from_pinned_records(
@@ -169,6 +360,19 @@ impl SelectedDomainProjection {
         self.records
             .get(&reference.revision_id)
             .context("intent reference is a tombstone")
+    }
+}
+fn conversation_id(record: &Record) -> Uuid {
+    match record {
+        Record::Root(r) => r.id,
+        Record::Turn(r) => r.conversation,
+        Record::Source(r) => r.conversation,
+        Record::Capture(r) => r.conversation,
+        Record::LegacyCapture(r) => r.conversation,
+        Record::OutcomeFact(r) => r.conversation,
+        Record::Binding(r) => r.conversation,
+        Record::Export(r) => r.conversation,
+        Record::Receipt(r) => r.acknowledgment.conversation,
     }
 }
 
@@ -346,5 +550,108 @@ mod tests {
             .records
             .contains(&reference.object));
         assert!(view.exact_reference(&reference).is_err());
+    }
+    fn completed_turn(root: &Envelope, sequence: u64, document: Uuid) -> Envelope {
+        use crate::conversation::{
+            CompletionEvidence, Mode, Outcome, Role, SourceObservation, Turn,
+        };
+        let mut envelope = root.clone();
+        envelope.record_id = Uuid::new_v4();
+        envelope.revision_id = Uuid::new_v4();
+        envelope.operation_id = Uuid::new_v4();
+        envelope.payload = serde_json::to_value(Record::Turn(Turn {
+            id: envelope.record_id,
+            conversation: root.record_id,
+            exchange: Uuid::new_v4(),
+            sequence,
+            role: Role::Assistant,
+            mode: Mode::Reader,
+            outcome: Outcome::Completed,
+            text: Some("answer".into()),
+            sources: vec![],
+            correction_of: None,
+            created_ms: 1,
+            updated_ms: 2,
+            completion: Some(CompletionEvidence {
+                native_operation: Uuid::new_v4(),
+                exact_text: "answer".into(),
+                procedure: "synthetic domain fixture, no native authority".into(),
+                observation: SourceObservation {
+                    document,
+                    page: Uuid::new_v4(),
+                    session: "fixture".into(),
+                    visit: "fixture".into(),
+                    content_revision: None,
+                    order_revision: None,
+                    capability_revision: "fixture".into(),
+                    evidence_procedure: "fixture".into(),
+                },
+            }),
+        }))
+        .unwrap();
+        envelope
+    }
+    #[test]
+    fn ownership_defers_missing_and_ambiguous_documents_without_inventing_identity() {
+        let mut first = root();
+        let Record::Root(mut value) = Ledger::decode(&first).unwrap() else {
+            unreachable!()
+        };
+        value.next_sequence = 2;
+        first.payload = serde_json::to_value(Record::Root(value)).unwrap();
+        let missing = SelectedDomainProjection::from_records(std::slice::from_ref(&first)).unwrap();
+        assert_eq!(
+            missing.document_ownership().unwrap()[&first.record_id],
+            DocumentOwnership::DeferredMissing
+        );
+        let document = Uuid::new_v4();
+        let one = completed_turn(&first, 0, document);
+        let known = SelectedDomainProjection::from_records(&[first.clone(), one.clone()]).unwrap();
+        assert_eq!(
+            known.document_ownership().unwrap()[&first.record_id],
+            DocumentOwnership::Document(document)
+        );
+        let other_document = Uuid::new_v4();
+        let two = completed_turn(&first, 1, other_document);
+        let ambiguous = SelectedDomainProjection::from_records(&[first.clone(), one, two]).unwrap();
+        assert_eq!(
+            ambiguous.document_ownership().unwrap()[&first.record_id],
+            DocumentOwnership::DeferredAmbiguous(BTreeSet::from([document, other_document]))
+        );
+    }
+    #[test]
+    fn ownership_refuses_missing_root_broken_sources_and_current_chronology() {
+        let first = root();
+        let one = completed_turn(&first, 0, Uuid::new_v4());
+        assert!(
+            SelectedDomainProjection::from_records(std::slice::from_ref(&one))
+                .unwrap()
+                .document_ownership()
+                .is_err()
+        );
+        let mut bad = one.clone();
+        let Record::Turn(mut turn) = Ledger::decode(&bad).unwrap() else {
+            unreachable!()
+        };
+        turn.sources.push(Uuid::new_v4());
+        bad.payload = serde_json::to_value(Record::Turn(turn)).unwrap();
+        assert!(
+            SelectedDomainProjection::from_records(&[first.clone(), bad])
+                .unwrap()
+                .document_ownership()
+                .is_err()
+        );
+        let collision = completed_turn(&first, 0, Uuid::new_v4());
+        assert!(
+            SelectedDomainProjection::from_records(&[first.clone(), one, collision])
+                .unwrap()
+                .document_ownership()
+                .is_err()
+        );
+        let beyond = completed_turn(&first, 1, Uuid::new_v4());
+        assert!(SelectedDomainProjection::from_records(&[first, beyond])
+            .unwrap()
+            .document_ownership()
+            .is_err());
     }
 }
