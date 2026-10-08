@@ -90,7 +90,7 @@ function ObservationSSH([string]$command){
     return $result
 }
 function Require($result){if($result.timeout -or $result.exit -ne 0){throw 'One-shot stage failed; keep evidence and rollback duty'}}
-function Expand([string]$text){$text.Replace('@REQUEST@',$(if($ReceiverSourceFacts){'receiver-source-facts-request'}else{'facts-request'})).Replace('@PURPOSE@',$(if($ReceiverSourceFacts){'receiver-source-facts'}else{'read-facts'})).Replace('@REQUESTCAP@',$(if($ReceiverSourceFacts){'256'}else{'128'})).Replace('@CALLBACKCAP@',$(if($ReceiverSourceFacts){'512'}else{'256'})).Replace('@SOURCEFACTSCLEANUP@',$(if($ReceiverSourceFacts){"for name in receiver-source-facts-request receiver-source-facts-request.tmp receiver-source-facts.json capture-owner-refusal.json receiver-source-facts-publisher; do rm -f '@ROOT@/'`"`$name`"; done"}else{''})).Replace('@PUBLISHER@',$(if($ReceiverSourceFacts){'receiver-source-facts-publisher'}else{'facts-publisher'})).Replace('@ROOT@',$remote).Replace('@NONCE@',$nonce).Replace('@UNIT@',$rollback).Replace('@STOCKPID@',[string]$stock.stock_pid).Replace('@STOCKSTART@',$stock.stock_start).Replace('@FIXTURECHECK@',$fixtureCheck)}
+function Expand([string]$text){$text.Replace('@REQUEST@',$(if($ReceiverSourceFacts){'receiver-source-facts-request'}else{'facts-request'})).Replace('@PURPOSE@',$(if($ReceiverSourceFacts){'receiver-source-facts'}else{'read-facts'})).Replace('@REQUESTCAP@',$(if($ReceiverSourceFacts){'256'}else{'128'})).Replace('@CALLBACKCAP@',$(if($ReceiverSourceFacts){'512'}else{'256'})).Replace('@SOURCEFACTSCLEANUP@',$(if($ReceiverSourceFacts){"for name in receiver-source-facts-request receiver-source-facts-request.tmp receiver-source-facts.json capture-owner-refusal.json receiver-source-facts-publisher; do rm -f '@ROOT@/'`"`$name`"; done"}else{''})).Replace('@PUBLISHER@',$(if($ReceiverSourceFacts){'receiver-source-facts-publisher'}else{'facts-publisher'})).Replace('@PAYLOADSHA@',$payloadHash).Replace('@ROOT@',$remote).Replace('@NONCE@',$nonce).Replace('@UNIT@',$rollback).Replace('@STOCKPID@',[string]$stock.stock_pid).Replace('@STOCKSTART@',$stock.stock_start).Replace('@FIXTURECHECK@',$fixtureCheck)}
 try{
     Require (SSH (Expand @'
 set -eu
@@ -131,7 +131,7 @@ mkdir -m700 '@ROOT@'
     $record.arm_intent=$true
     Require (SSH (Expand @'
 set -eu
-test "$(sha256sum '@ROOT@/payload.so' | awk '{print $1}')" = a747186fb466b8947caf46a9629654f24743f090b0f7f3e27e764e2dbacdc226
+test "$(sha256sum '@ROOT@/payload.so' | awk '{print $1}')" = @PAYLOADSHA@
 chmod 600 '@ROOT@/payload.so'
 # Prove actual target flags before arming or stopping any original service.
 # BEGIN private initial lock (owned shell regression extracts this exact block).

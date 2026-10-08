@@ -26,6 +26,9 @@ $config=Get-ReceiverSourceFactsBuildConfig $e;$old=Get-CaptureObservationBuildCo
 Check ($config.Replace("    config.developmentReceiverSourceFacts=true;`n",'') -ceq $old) 'only sourcefacts flag config difference'
 $operator=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'run-qt-page-facts-diagnostic-source.ps1'));$line=($operator -split "`n"|Where-Object {$_ -like 'function Expand*'});. ([scriptblock]::Create($line))
 $remote='/run/owned';$nonce=$n;$rollback='owned';$stock=@{stock_pid=42;stock_start='100'};$fixtureCheck='true';$ReceiverSourceFacts=$false
+$payloadHash='0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+$payloadCheck=@($operator -split "`n"|Where-Object {$_.Contains("sha256sum '@ROOT@/payload.so'")})
+Check ($payloadCheck.Count -eq 1 -and (Expand $payloadCheck[0]).TrimEnd().EndsWith((' = '+$payloadHash),[StringComparison]::Ordinal)) 'actual prearm payload checksum binds selected hash'
 Check ((Expand '@REQUEST@ @PURPOSE@ @REQUESTCAP@ @CALLBACKCAP@ @PUBLISHER@') -ceq 'facts-request read-facts 128 256 facts-publisher') 'actual default protocol unchanged'
 $ReceiverSourceFacts=$true;Check ((Expand '@REQUEST@ @PURPOSE@ @REQUESTCAP@ @CALLBACKCAP@ @PUBLISHER@') -ceq 'receiver-source-facts-request receiver-source-facts 256 512 receiver-source-facts-publisher') 'actual sourcefacts protocol'
 Check ($operator.Contains('& $ManualActions $remote $nonce $publish')) 'Main manual action delegate before collection'
