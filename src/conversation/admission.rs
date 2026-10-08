@@ -160,6 +160,16 @@ pub(super) fn recover_original(
                 == transaction.previous_sha256.as_deref(),
         "original intent selection differs from publication"
     );
+    let predecessor = store
+        .selected_predecessor(scope, operation)?
+        .context("original intent predecessor absent")?;
+    ensure!(
+        intent.selection.aggregate_generation == predecessor.aggregate_generation
+            && predecessor.scope == transaction.scope
+            && predecessor.store_generation == transaction.store_generation
+            && predecessor.accepted_base_sha256 == transaction.accepted_base_sha256,
+        "original intent selection differs from predecessor"
+    );
     ensure!(
         matches!(projection.exact_reference(&intent.root_revision)?,Record::Root(root) if root.id == intent.conversation),
         "original intent root mismatch"
@@ -344,7 +354,7 @@ mod tests {
     }
     #[test]
     fn recovery_refuses_foreign_publication_pins_after_restart() {
-        for pin in 0..6 {
+        for pin in 0..7 {
             recovery_fixture(Some(pin));
         }
     }
@@ -515,7 +525,8 @@ mod tests {
                 2 => intent.selection.binding_sha256 = digest(b"foreign binding"),
                 3 => intent.selection.store_generation = Uuid::new_v4(),
                 4 => intent.selection.accepted_base_sha256 = digest(b"foreign base"),
-                _ => intent.selection.selection_sha256 = digest(b"foreign predecessor"),
+                5 => intent.selection.selection_sha256 = digest(b"foreign predecessor"),
+                _ => intent.selection.aggregate_generation = Uuid::new_v4(),
             }
         }
         let mut receipt = root.clone();
