@@ -1,11 +1,13 @@
 //! Local-first conversation ledger. Stored facts are not native effect permissions.
 pub mod capture_facts;
+mod intent;
 mod legacy;
 mod types;
 use crate::storage::{
     digest, Conflict, Envelope, Kind, Media, Namespace, ObjectRef, Store, Uuid, FORMAT, MAX_ITEMS,
 };
 use anyhow::{bail, ensure, Context, Result};
+pub use intent::*;
 use serde::Serialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -66,7 +68,11 @@ impl Ledger {
         let envelope = Envelope {
             envelope_version: FORMAT,
             namespace,
-            domain_schema_version: SCHEMA,
+            domain_schema_version: match &record {
+                Record::Receipt(receipt) if receipt.admitted_intent.is_some() => INTENT_SCHEMA,
+                Record::OutcomeFact(fact) if fact.settlement.is_some() => INTENT_SCHEMA,
+                _ => SCHEMA,
+            },
             record_id: id,
             revision_id: Uuid::new_v4(),
             parents: parents.0,
@@ -81,11 +87,18 @@ impl Ledger {
     }
     fn decode(envelope: &Envelope) -> Result<Record> {
         ensure!(
-            envelope.domain_schema_version == SCHEMA,
+            matches!(envelope.domain_schema_version, SCHEMA | INTENT_SCHEMA),
             "unsupported conversation schema"
         );
         ensure!(envelope.kind == Kind::Value, "deleted conversation record");
         let record: Record = serde_json::from_value(envelope.payload.clone())?;
+        if envelope.domain_schema_version == INTENT_SCHEMA {
+            ensure!(
+                envelope.namespace == Namespace::Conversation
+                    && matches!(&record, Record::Receipt(_) | Record::OutcomeFact(_)),
+                "schema 2 is restricted to intent/settlement records"
+            );
+        }
         let (id, namespace, conversation) = match &record {
             Record::Root(root) => (root.id, Namespace::Conversation, root.id),
             Record::Turn(turn) => {
@@ -109,6 +122,7 @@ impl Ledger {
                 (capture.id, Namespace::Source, capture.conversation)
             }
             Record::OutcomeFact(fact) => {
+                intent::validate_settlement_schema(envelope.domain_schema_version, fact)?;
                 ensure!(
                     !fact.id.is_nil()
                         && !fact.turn.is_nil()
@@ -137,6 +151,7 @@ impl Ledger {
                 (export.id, Namespace::ExportAssociation, export.conversation)
             }
             Record::Receipt(receipt) => {
+                intent::validate_receipt_schema(envelope.domain_schema_version, receipt)?;
                 ensure!(
                     crate::storage::valid_digest(&receipt.fingerprint)
                         && !receipt.acknowledgment.applied_root_revision.is_nil()
@@ -158,6 +173,16 @@ impl Ledger {
             Record::Source(source) => vec![source.image.clone()],
             Record::Capture(capture) => capture.facts.media()?,
             Record::LegacyCapture(capture) => capture.media()?,
+            Record::Receipt(receipt) => receipt
+                .admitted_intent
+                .as_ref()
+                .map(|i| i.media.clone())
+                .unwrap_or_default(),
+            Record::OutcomeFact(fact) => fact
+                .settlement
+                .as_ref()
+                .map(|s| s.media.clone())
+                .unwrap_or_default(),
             _ => vec![],
         };
         if let Record::Source(source) = &record {
@@ -256,6 +281,7 @@ impl Ledger {
             Record::Receipt(Receipt {
                 fingerprint: fingerprint.clone(),
                 acknowledgment: ack,
+                admitted_intent: None,
             }),
             vec![],
         )?;
@@ -978,6 +1004,7 @@ impl Ledger {
                     turn: turn_id,
                     outcome,
                     reason,
+                    settlement: None,
                 }),
                 vec![],
             )?);

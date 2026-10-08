@@ -126,6 +126,8 @@ pub struct OutcomeFact {
     pub turn: Uuid,
     pub outcome: Outcome,
     pub reason: AttemptReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settlement: Option<super::IntentSettlement>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -255,6 +257,8 @@ pub struct Acknowledgment {
 pub struct Receipt {
     pub fingerprint: String,
     pub acknowledgment: Acknowledgment,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admitted_intent: Option<super::AdmittedIntent>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(
