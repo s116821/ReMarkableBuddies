@@ -33,6 +33,17 @@ stat -c '%d %i' "$root"
     $before=& $Read $identityCommand
     if($before.timeout -or $before.exit -ne 0 -or $before.stdout -cnotmatch '\A([1-9][0-9]{0,19}) ([1-9][0-9]{0,19}) ([1-9][0-9]{0,19}) ([1-9][0-9]{0,19})\n\z'){throw 'Capture candidate unknown'}
     $identity=@($Matches[1],$Matches[2],$Matches[3],$Matches[4])
+    # Inspect raw names before PowerShell can collapse duplicate object keys.
+    if([Text.Encoding]::UTF8.GetByteCount($status.stdout) -gt 8192){throw 'Capture completion raw size refused'}
+    $rawDocument=$null
+    try{
+        $rawDocument=[System.Text.Json.JsonDocument]::Parse([string]$status.stdout)
+        if($rawDocument.RootElement.ValueKind -ne [System.Text.Json.JsonValueKind]::Object){throw 'Capture completion object refused'}
+        $rawNames=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach($property in $rawDocument.RootElement.EnumerateObject()){
+            if(-not $rawNames.Add($property.Name)){throw 'Capture completion duplicate key refused'}
+        }
+    }finally{if($null -ne $rawDocument){$rawDocument.Dispose()}}
     $value=$status.stdout|ConvertFrom-Json
     if(-not(Test-CaptureObservationCompletion $value $Nonce $identity[0] $identity[1] $identity[2] $identity[3] $Expected.document $Expected.order)){throw 'Capture completion refused'}
     $request=& $Read ("set -eu; test -f '$Root/capture-observation-request' && test ! -L '$Root/capture-observation-request'; test `"`$(stat -c '%a %u' '$Root/capture-observation-request')`" = '600 0'; test `"`$(wc -c < '$Root/capture-observation-request')`" -le 256; cat '$Root/capture-observation-request'")

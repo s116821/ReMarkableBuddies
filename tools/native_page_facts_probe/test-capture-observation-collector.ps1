@@ -13,10 +13,12 @@ function Check([bool]$ok,[string]$name){if(-not $ok){throw "FAIL $name"};$script
 $base=Join-Path ([IO.Path]::GetTempPath()) ('capture-collector-'+[Guid]::NewGuid().ToString('N'))
 [void](New-Item -ItemType Directory -Path $base)
 try{
-    foreach($case in @('good','not-ready','status-timeout','initial-loss','completion-malformed','request-mismatch','copy-timeout','image-mismatch','postcopy-loss','completion-replaced','final-loss')){
+    foreach($case in @('good','not-ready','status-timeout','initial-loss','completion-malformed','completion-duplicate','completion-escaped-duplicate','request-mismatch','copy-timeout','image-mismatch','postcopy-loss','completion-replaced','final-loss')){
         $packet=Join-Path $base $case;[void](New-Item -ItemType Directory -Path $packet)
         $record=[ordered]@{capture_verified=$false};$identityReads=0;$completionReads=0
         $completion=New-Completion;$json=$completion|ConvertTo-Json -Compress
+        if($case -ceq 'completion-duplicate'){$json=$json.Insert(1,'"version":1,')}
+        if($case -ceq 'completion-escaped-duplicate'){$json=$json.Insert(1,'"vers\u0069on":1,')}
         $read={param($command)
             if($command.Contains('capture-observation-complete.json')){
                 $script:completionReads++
@@ -41,6 +43,7 @@ try{
         try{$result=Receive-CaptureObservation $root $nonce $payload ([pscustomobject]@{document=$document;order=@($page)}) $packet $record $read $copy}catch{$failed=$true}
         Check ($failed -eq ($case -cnotin @('good','not-ready'))) "$case failure"
         Check ($result -eq ($case -ceq 'good') -and $record.capture_verified -eq ($case -ceq 'good')) "$case admission"
+        if($case -cin @('completion-duplicate','completion-escaped-duplicate')){Check (@(Get-ChildItem -LiteralPath $packet).Count -eq 0 -and -not $record.capture_completion_saved_copy_verified) "$case unknown outputs retained"}
         if($case -cin @('good','postcopy-loss','completion-replaced','final-loss')){Check ($record.capture_png_saved_copy_verified -and $record.capture_completion_saved_copy_verified -and $record.capture_request_saved_copy_verified) "$case preserved knowledge"}
         if($case -cin @('copy-timeout','image-mismatch')){Check ($record.capture_completion_saved_copy_verified -and -not $record.capture_png_saved_copy_verified) "$case partial evidence"}
         if($case -ceq 'good'){
