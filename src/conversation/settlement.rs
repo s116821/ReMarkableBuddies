@@ -498,7 +498,18 @@ mod tests {
             .selected_snapshot(handle.scope(), MAX_ITEMS)
             .unwrap()
             .unwrap();
-        let mut winner = snapshot.selected_records[0].clone();
+        let mut winner = snapshot
+            .selected_records
+            .iter()
+            .find(|record| {
+                record.namespace == Namespace::Conversation
+                    && matches!(
+                        serde_json::from_value::<Record>(record.payload.clone()),
+                        Ok(Record::Root(_))
+                    )
+            })
+            .expect("fixture selected root absent")
+            .clone();
         let id = Uuid::new_v4();
         winner.record_id = id;
         winner.revision_id = Uuid::new_v4();
