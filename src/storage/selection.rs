@@ -1,4 +1,5 @@
 //! Domain-opaque atomic selected references. No domain/native admission or worker.
+pub(crate) mod portable;
 mod publication;
 mod retained;
 pub use retained::RetainedCommit;

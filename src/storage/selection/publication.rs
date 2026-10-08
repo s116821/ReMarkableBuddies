@@ -63,6 +63,19 @@ pub(super) fn history(
     scope: &SelectionScope,
     transaction: SelectionTransaction,
 ) -> Result<Vec<SelectionTransaction>> {
+    history_directory(
+        &root.join("selection-history"),
+        generation,
+        scope,
+        transaction,
+    )
+}
+pub(super) fn history_directory(
+    directory: &Path,
+    generation: Uuid,
+    scope: &SelectionScope,
+    transaction: SelectionTransaction,
+) -> Result<Vec<SelectionTransaction>> {
     let mut chain = Vec::new();
     let mut seen = BTreeSet::new();
     let mut operations = BTreeSet::new();
@@ -92,10 +105,7 @@ pub(super) fn history(
         let Some(hash) = previous else {
             break;
         };
-        let encoded = files::read(
-            &root.join("selection-history").join(&hash),
-            MAX_METADATA as u64,
-        )?;
+        let encoded = files::read(&directory.join(&hash), MAX_METADATA as u64)?;
         ensure!(
             digest(&encoded) == hash,
             "selection history integrity failure"

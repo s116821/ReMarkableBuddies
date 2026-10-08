@@ -2,6 +2,9 @@ use super::*;
 use serde_json::json;
 use std::sync::{Arc, Barrier};
 
+#[path = "portable_tests.rs"]
+mod portable_tests;
+
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
