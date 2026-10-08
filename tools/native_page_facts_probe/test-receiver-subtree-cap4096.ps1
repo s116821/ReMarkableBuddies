@@ -25,6 +25,6 @@ foreach($profile in @(@($true,$false,4096,0),@($true,$false,4096,8),@($true,$tru
  Check (-not(Test-CaptureOwnerRefusal $over4096 $nonce '1234' '5678' '11' '22' $false $profile[0] $profile[1] $profile[2] $profile[3])) 'invalid4096 refusal'
 }
 $ReceiverSubtreeItemCap=4096;$ReceiverSubtreeDepthCap=16;$script:routed=$false
-& {function Receive-CaptureOwnerRefusalEvidence {param($a,$b,$c,$d,$e,$read,$copy,[bool]$focus,[bool]$subtree,[bool]$profile512,[int]$itemCap,[int]$depthCap,[bool]$allowUnfocused=$false,[bool]$detailedIdentity=$false) if($detailedIdentity -or $allowUnfocused -or $args.Count -or $focus -or -not $subtree -or $profile512 -or $itemCap -ne 4096 -or $depthCap -ne 16){throw 'Wrong4096 route'};$script:routed=$true}; & ([scriptblock]::Create($command))}
+& {function Receive-CaptureOwnerRefusalEvidence {param($a,$b,$c,$d,$e,$read,$copy,[bool]$focus,[bool]$subtree,[bool]$profile512,[int]$itemCap,[int]$depthCap,[bool]$allowUnfocused=$false,[bool]$detailedIdentity=$false,[bool]$documentType=$false) if($documentType -or $detailedIdentity -or $allowUnfocused -or $args.Count -or $focus -or -not $subtree -or $profile512 -or $itemCap -ne 4096 -or $depthCap -ne 16){throw 'Wrong4096 route'};$script:routed=$true}; & ([scriptblock]::Create($command))}
 Check $script:routed 'actual4096 collector route'
 Write-Output "PASS receiver subtree4096 focused consumer $($checks-$start4096) checks; historical bounds preserved"
