@@ -1,4 +1,5 @@
 //! Domain-opaque atomic selected references. No domain/native admission or worker.
+pub(crate) mod portable;
 mod publication;
 mod retained;
 pub use retained::RetainedCommit;
@@ -165,6 +166,8 @@ pub struct SelectedSnapshot {
     pub token: SelectionToken,
     pub transaction: SelectionTransaction,
     /// Exact immutable envelopes, never a later lookup of all-history heads.
+    /// Order matches transaction.selected.records. Pair with those Store-verified
+    /// ObjectRefs; reserializing an envelope cannot recover its original digest.
     pub selected_records: Vec<Envelope>,
     pub retained_records: Vec<Envelope>,
     pub media: BTreeMap<String, files::Source>,

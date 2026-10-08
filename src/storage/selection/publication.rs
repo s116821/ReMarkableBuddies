@@ -63,6 +63,19 @@ pub(super) fn history(
     scope: &SelectionScope,
     transaction: SelectionTransaction,
 ) -> Result<Vec<SelectionTransaction>> {
+    history_directory(
+        &root.join("selection-history"),
+        generation,
+        scope,
+        transaction,
+    )
+}
+pub(super) fn history_directory(
+    directory: &Path,
+    generation: Uuid,
+    scope: &SelectionScope,
+    transaction: SelectionTransaction,
+) -> Result<Vec<SelectionTransaction>> {
     let mut chain = Vec::new();
     let mut seen = BTreeSet::new();
     let mut operations = BTreeSet::new();
@@ -92,10 +105,7 @@ pub(super) fn history(
         let Some(hash) = previous else {
             break;
         };
-        let encoded = files::read(
-            &root.join("selection-history").join(&hash),
-            MAX_METADATA as u64,
-        )?;
+        let encoded = files::read(&directory.join(&hash), MAX_METADATA as u64)?;
         ensure!(
             digest(&encoded) == hash,
             "selection history integrity failure"
@@ -217,6 +227,45 @@ impl Store {
             validate_closure(&root, transaction)?;
         }
         Ok(original)
+    }
+    /// Read the immediate predecessor of an exact accepted original operation.
+    /// Returns historical evidence only: no token, membership mutation or wake.
+    /// An absent scope/operation returns None. A known first publication without
+    /// a predecessor, corrupt/foreign history, or unavailable original/parent
+    /// closure refuses. Later replacements never substitute their current head.
+    pub fn selected_predecessor(
+        &self,
+        scope: &SelectionScope,
+        original_operation: Uuid,
+    ) -> Result<Option<SelectionTransaction>> {
+        scope.validate()?;
+        ensure!(
+            !original_operation.is_nil(),
+            "nil original selection operation"
+        );
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        let root = self.generation(inner.generation);
+        let Some(current) = current(&root, inner.generation, scope)? else {
+            return Ok(None);
+        };
+        let chain = history(&root, inner.generation, scope, current)?;
+        let Some(position) = chain.iter().position(|t| t.operation == original_operation) else {
+            return Ok(None);
+        };
+        let original = &chain[position];
+        ensure!(
+            original.previous_sha256.is_some(),
+            "original selection publication has no predecessor"
+        );
+        let predecessor = chain
+            .get(position + 1)
+            .context("original predecessor missing")?;
+        validate_closure(&root, original)?;
+        validate_closure(&root, predecessor)?;
+        Ok(Some(predecessor.clone()))
     }
     /// Explicit bootstrap only. Snapshot absence does not authorize this call;
     /// the domain/coordinator must separately qualify the initial winner.

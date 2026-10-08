@@ -8,6 +8,149 @@ struct Backup {
     objects: Vec<ObjectRef>,
     complete_media: bool,
     config_snapshot: Option<crate::config::Config>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    selected_history: Option<selection::portable::SelectionArchive>,
+}
+
+const SELECTED_BACKUP_FORMAT: u32 = 2;
+
+/// Read-only archive evidence. This report grants no restore/native authority.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct BackupInspection {
+    pub format: u32,
+    pub manifests: usize,
+    pub objects: usize,
+    pub selected_scopes: usize,
+    pub selection_receipts: usize,
+    pub complete_media: bool,
+    pub configuration_included: bool,
+}
+
+impl Backup {
+    fn read(source: &Path) -> Result<Self> {
+        let bytes = files::read(&source.join("backup.json"), MAX_METADATA as u64)?;
+        let backup: Self = serde_json::from_slice(&bytes).context("unsupported backup metadata")?;
+        if backup.format == FORMAT {
+            let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+            ensure!(
+                value.get("selected_history").is_none(),
+                "legacy backup cannot carry selected metadata"
+            );
+        }
+        Ok(backup)
+    }
+    fn inspect(&self, source: &Path) -> Result<BackupInspection> {
+        ensure!(
+            (self.format == FORMAT && self.selected_history.is_none())
+                || (self.format == SELECTED_BACKUP_FORMAT
+                    && self.selected_history.is_some()
+                    && self.config_snapshot.is_none()),
+            "unsupported backup format/policy"
+        );
+        ensure!(
+            self.manifests.len() <= MAX_ITEMS && self.objects.len() <= MAX_ITEMS,
+            "backup inventory exceeds bound"
+        );
+        if let Some(config) = &self.config_snapshot {
+            config.validate_values()?;
+        }
+        let mut inventory = BTreeMap::new();
+        for item in &self.objects {
+            ensure!(
+                valid_digest(&item.sha256) && item.bytes <= MAX_MEDIA,
+                "invalid backup object"
+            );
+            ensure!(
+                inventory
+                    .insert(item.sha256.clone(), item.clone())
+                    .is_none(),
+                "duplicate backup object"
+            );
+            let _ = files::Source::open(&source.join("objects").join(&item.sha256), item)?;
+        }
+        let mut required = BTreeSet::new();
+        let mut descriptors = BTreeSet::new();
+        let mut manifests = BTreeMap::new();
+        let mut records: BTreeMap<Uuid, (Envelope, String)> = BTreeMap::new();
+        let mut record_bytes = 0u64;
+        for manifest in &self.manifests {
+            ensure!(
+                manifests
+                    .insert(manifest.transaction_id, manifest)
+                    .is_none(),
+                "duplicate backup manifest"
+            );
+            for item in manifest.records.iter().chain(&manifest.media) {
+                ensure!(
+                    inventory.get(&item.sha256) == Some(item),
+                    "backup inventory mismatch"
+                );
+                required.insert(item.sha256.clone());
+            }
+            for item in &manifest.records {
+                if !records.values().any(|(_, hash)| hash == &item.sha256) {
+                    record_bytes = record_bytes
+                        .checked_add(item.bytes)
+                        .context("backup size overflow")?;
+                    ensure!(
+                        record_bytes <= MAX_METADATA as u64,
+                        "backup inspection record metadata exceeds bound"
+                    );
+                }
+            }
+            for (record, hash) in Store::validate_objects(source, manifest)? {
+                if let Some((_, prior)) = records.get(&record.revision_id) {
+                    ensure!(prior == &hash, "backup revision identity collision");
+                }
+                records.insert(record.revision_id, (record, hash));
+            }
+            descriptors.extend(manifest.media_coverage.iter().map(|c| c.hash().to_owned()));
+        }
+        Store::can_apply(
+            &Index::default(),
+            &records.into_values().collect::<Vec<_>>(),
+        )?;
+        let (selected_scopes, selection_receipts) = if let Some(archive) = &self.selected_history {
+            let selected = archive.validate(source)?;
+            for (hash, bytes) in &selected.metadata {
+                ensure!(
+                    inventory.get(hash)
+                        == Some(&ObjectRef {
+                            sha256: hash.clone(),
+                            bytes: bytes.len() as u64
+                        }),
+                    "selection metadata missing from inventory"
+                );
+                required.insert(hash.clone());
+            }
+            for (id, manifest) in &selected.manifests {
+                ensure!(
+                    manifests.get(id).copied() == Some(manifest),
+                    "selected history manifest missing or changed"
+                );
+            }
+            (archive.heads.len(), selected.receipts)
+        } else {
+            (0, 0)
+        };
+        ensure!(
+            required.len() == inventory.len(),
+            "unexpected backup objects"
+        );
+        ensure!(
+            self.complete_media == descriptors.iter().all(|hash| inventory.contains_key(hash)),
+            "false media completeness"
+        );
+        Ok(BackupInspection {
+            format: self.format,
+            manifests: self.manifests.len(),
+            objects: inventory.len(),
+            selected_scopes,
+            selection_receipts,
+            complete_media: self.complete_media,
+            configuration_included: self.config_snapshot.is_some(),
+        })
+    }
 }
 
 impl Store {
@@ -60,6 +203,7 @@ impl Store {
             objects: inventory.values().cloned().collect(),
             complete_media,
             config_snapshot,
+            selected_history: None,
         };
         let backup_bytes = serde_json::to_vec(&backup)?;
         ensure!(
@@ -79,15 +223,112 @@ impl Store {
         Ok(complete_media)
     }
 
+    /// Verify a complete format-1 or selected format-2 archive without opening a
+    /// live Store. Returns counts/completeness only; does not grant restore,
+    /// membership, native or effect authority. Unknown metadata and incomplete
+    /// archives refuse. Inventory/receipt counts are limited to 4096 and unique
+    /// encoded record bytes and selected metadata each to 8 MiB. These inspection
+    /// bounds can refuse a legacy archive accepted by the older restore path.
+    pub fn inspect_backup(source: &Path) -> Result<BackupInspection> {
+        files::safe_path(source)?;
+        let backup = Backup::read(source)?;
+        backup.inspect(source)
+    }
+
+    /// Preserve selected history as non-authoritative evidence in format 2.
+    /// Copies reachable accepted history, retained evidence/media and unrelated
+    /// committed scopes, excluding configuration, credentials and runtime/native
+    /// trees. Does not change the source or serialize a live selection token.
+    /// The destination must be new and outside owned Store roots; `backup.json`
+    /// is published only after closure verification. If an error occurs after
+    /// publication, use [`Self::inspect_backup`] to determine whether the archive
+    /// completed before retrying. Partial staging is not a complete backup.
+    /// Inspection capacity applies; [`Self::restore`] refuses this format until
+    /// the separate selected restore activation policy is implemented.
+    pub fn export_selected(&self, destination: &Path) -> Result<BackupInspection> {
+        files::safe_path(destination)?;
+        for owned in [&self.paths.data, &self.paths.cache, &self.paths.credentials] {
+            ensure!(
+                !destination.starts_with(owned) && !owned.starts_with(destination),
+                "backup overlaps owned store roots"
+            );
+        }
+        ensure!(!destination.exists(), "export requires a new destination");
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        ensure!(
+            inner.index.unavailable == 0,
+            "unavailable commits prevent complete export"
+        );
+        let root = self.generation(inner.generation);
+        let selected = selection::portable::collect(&root, self.actor_id, inner.generation)?;
+        let manifests: Vec<_> = inner.index.manifests.values().cloned().collect();
+        let mut inventory = BTreeMap::new();
+        let mut descriptors = BTreeSet::new();
+        for manifest in &manifests {
+            Self::validate_objects(&root, manifest)?;
+            for item in manifest.records.iter().chain(&manifest.media) {
+                if let Some(prior) = inventory.insert(item.sha256.clone(), item.clone()) {
+                    ensure!(prior == *item, "backup object reference collision");
+                }
+            }
+            descriptors.extend(manifest.media_coverage.iter().map(|c| c.hash().to_owned()));
+        }
+        for (hash, bytes) in &selected.metadata {
+            let item = ObjectRef {
+                sha256: hash.clone(),
+                bytes: bytes.len() as u64,
+            };
+            if let Some(prior) = inventory.insert(hash.clone(), item.clone()) {
+                ensure!(prior == item, "backup metadata reference collision");
+            }
+        }
+        ensure!(
+            manifests.len() <= MAX_ITEMS && inventory.len() <= MAX_ITEMS,
+            "backup inventory exceeds bound"
+        );
+        let backup = Backup {
+            format: SELECTED_BACKUP_FORMAT,
+            manifests,
+            complete_media: descriptors.iter().all(|hash| inventory.contains_key(hash)),
+            objects: inventory.values().cloned().collect(),
+            config_snapshot: None,
+            selected_history: Some(selected.archive),
+        };
+        let bytes = serde_json::to_vec(&backup)?;
+        ensure!(bytes.len() <= MAX_METADATA, "backup metadata exceeds bound");
+        Self::trip(&mut inner, Fault::BeforeObjects)?;
+        files::directory(&destination.join("objects"))?;
+        for item in inventory.values() {
+            let target = destination.join("objects").join(&item.sha256);
+            if let Some(bytes) = selected.metadata.get(&item.sha256) {
+                files::object(&target, &item.sha256, bytes)?;
+            } else {
+                let source = root.join("objects").join(&item.sha256);
+                files::safe_path(&source)?;
+                files::copy_verified(&target, File::open(source)?, item)?;
+            }
+        }
+        Self::trip(&mut inner, Fault::AfterObjects)?;
+        let report = backup.inspect(destination)?;
+        Self::trip(&mut inner, Fault::BeforeCommit)?;
+        files::atomic(&destination.join("backup.json"), &bytes)?;
+        Self::trip(&mut inner, Fault::AfterCommit)?;
+        Ok(report)
+    }
+
     /// Additive staged restore. Old generation and source are retained for rollback.
     pub fn restore(&self, source: &Path) -> Result<()> {
         files::safe_path(source)?;
-        let backup: Backup = files::json(&source.join("backup.json"), MAX_METADATA as u64)?;
+        let backup = Backup::read(source)?;
         if let Some(config) = &backup.config_snapshot {
             config.validate_values()?;
         }
         ensure!(
             backup.format == FORMAT
+                && backup.selected_history.is_none()
                 && backup.manifests.len() <= MAX_ITEMS
                 && backup.objects.len() <= MAX_ITEMS,
             "unsupported or oversized backup"
