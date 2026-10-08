@@ -24,10 +24,11 @@ BEGIN { valid = positive(pid) && positive(start); installed = 0; before = 0; pre
     if (NR == 1) startup_tid = $5
     if ($3 == "startup" && NR != 1) valid = 0
     if ($3 == "entry-installed") {
-        if (NR == 1 || installed || "x" $5 != "x" startup_tid ||
+        if (NR == 1 || installed || prior_render || "x" $5 != "x" startup_tid ||
             $8 != "0" || $9 != "0" || $10 != "0") valid = 0
         installed = 1
     }
     if ($3 == "before-render" && installed && $10 + 0 >= 1) before = 1
+    if ($3 == "before-render" || $3 == "after-render") prior_render = 1
 }
 END { if (!valid || NR == 0) exit 90; if (!installed || !before) exit 1; exit 0 }

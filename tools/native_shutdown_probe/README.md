@@ -24,6 +24,8 @@ startup/GUI TID, quit=0, dropped=0, frames=0, followed by qualifying before-rend
 Window may precede or follow installation. Missing proof does not admit STOP;
 duplicate or invalid installation refuses the snapshot. All existing wire limits
 remain fixed. Installation does not prove the SDK hard request fence or Qt teardown.
+A prior normal before/after-render makes a later zero-frame installation invalid,
+even when another render follows: the actual frame counter cannot reset.
 The SDK setup cohort shares the existing root, so actor evidence creation may
 stimulate its watcher and queue callbacks. Interpret results as a coarse setup and
 timing discriminator; SDK source/fixtures separately prove no owner/getter/reader

@@ -347,6 +347,11 @@ verify_stock() { test ! -e "$guard"; test ! -e "$activation"; printf 'healthy\n'
                 with self.assertRaises(ValueError): prepare(rejected)
                 self.assertFalse(rejected.exists())
             del selection["diagnostic_kind"]
+            selection["nonce"] = "94774266c10f41e2aa8d410012fee601"
+            selected.write_text(json.dumps(selection))
+            with self.assertRaises(ValueError): prepare(root / "spent-9477")
+            self.assertFalse((root / "spent-9477").exists())
+            selection["nonce"] = "1" * 32
             # Provider '+' is literal; shell metacharacters and traversal remain refused.
             for index, unsafe in enumerate(("/usr/lib/libstdc++;touch", "/usr/lib/$(id)",
                                              "/usr/lib/`id`", "/usr/lib/lib*.so", "/usr/lib/../escape",
@@ -560,7 +565,9 @@ exit 93
         valid = trace([startup, window, installed, render])
         cases = [(valid, 0), (trace([startup, installed, window, render]), 0),
                  (trace([startup, render]), 1), (trace([startup, installed]), 1),
-                 (trace([startup, render, installed]), 1),
+                 (trace([startup, render, installed]), 90),
+                 (trace([startup, render, installed, render]), 90),
+                 (trace([startup, ("after-render", "77", "0", "0", "1"), installed, render]), 90),
                  (trace([startup, installed, installed, render]), 90),
                  (trace([installed, startup, render]), 90),
                  (trace([startup, installed, startup, render]), 90),
