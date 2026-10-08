@@ -18,6 +18,175 @@ pub(crate) trait ReaderSourceAdmission: SourceAdmission {
         -> Result<()>;
 }
 
+pub(crate) enum ReaderPreparation {
+    Fresh(Box<ReaderContext>),
+    Historical(Box<HistoricalIntent>),
+}
+
+pub(crate) struct ReaderContext {
+    admission: Arc<SelectedAdmission>,
+    token: SelectionToken,
+    request: PendingIntentRequest,
+    original: HistoricalIntent,
+    source: Rc<dyn ReaderSourceAdmission>,
+    plan: ReaderPlan,
+    dispatch: DispatchState,
+}
+
+impl ReaderContext {
+    pub(crate) fn matches_attempt(&self, conversation: Uuid, turn: Uuid, evidence: Uuid) -> bool {
+        self.request.conversation == conversation
+            && self.request.turn == turn
+            && self.request.evidence.iter().any(|reference| {
+                reference.namespace == Namespace::Conversation && reference.record_id == evidence
+            })
+    }
+
+    #[cfg(test)]
+    fn dispatch<T>(
+        &self,
+        ordinal: usize,
+        handoff: &ReaderHandoff,
+        submit: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        self.dispatch_composite(ordinal, handoff, |permit| permit.step(0, handoff, submit))
+    }
+    // Only the parent pending module can call this constructor.
+    pub(super) fn mint(
+        admission: Arc<SelectedAdmission>,
+        token: SelectionToken,
+        request: PendingIntentRequest,
+        original: HistoricalIntent,
+        source: Rc<dyn ReaderSourceAdmission>,
+        plan: ReaderPlan,
+    ) -> Self {
+        Self {
+            admission,
+            token,
+            request,
+            original,
+            source,
+            plan,
+            dispatch: DispatchState::default(),
+        }
+    }
+
+    /// Private composite seam; the future selected facade owns the callback.
+    /// No public backend or effect permission is exposed by this context.
+    pub(crate) fn dispatch_backend<T>(
+        &self,
+        admission: &Arc<SelectedAdmission>,
+        binding: &crate::workflow::selected_backend::ReaderBackendBinding,
+        ordinal: usize,
+        handoff: &ReaderHandoff,
+        submit: impl FnOnce(&mut ReaderPermit<'_>) -> Result<T>,
+    ) -> Result<T> {
+        if !Arc::ptr_eq(&self.admission, admission)
+            || !self.source.backend_binding().matches(binding)
+        {
+            self.dispatch.stop();
+            bail!("Reader context belongs to a foreign backend or admission");
+        }
+        self.dispatch_composite(ordinal, handoff, submit)
+    }
+    fn dispatch_composite<T>(
+        &self,
+        ordinal: usize,
+        handoff: &ReaderHandoff,
+        submit: impl FnOnce(&mut ReaderPermit<'_>) -> Result<T>,
+    ) -> Result<T> {
+        let reservation = self.dispatch.reserve(&self.plan, ordinal, handoff)?;
+        self.admission
+            .with_current_store(&self.token, |store, snapshot| {
+                crate::conversation::reader_uncertainty::validate(
+                    store,
+                    snapshot,
+                    &self.request,
+                    Some(&self.original),
+                )?;
+                self.source.verify_current(&self.request)?;
+                self.source.verify_handoff(&self.request, handoff)?;
+                let entered = reservation.enter()?;
+                let expected = match handoff {
+                    ReaderHandoff::SmartErase(input) => input
+                        .rectangles()
+                        .iter()
+                        .map(|&(from, to)| ReaderHandoff::Erase {
+                            bounds: [from.0, from.1, to.0 - from.0, to.1 - from.1],
+                        })
+                        .collect(),
+                    _ => vec![handoff.clone()],
+                };
+                let mut permit = ReaderPermit {
+                    context: self,
+                    store,
+                    outer: handoff,
+                    entered: &entered,
+                    expected,
+                    next: 0,
+                    failed: false,
+                };
+                let value = submit(&mut permit)?;
+                ensure!(
+                    !permit.failed && permit.next == permit.expected.len(),
+                    "Reader composite incomplete or refused"
+                );
+                drop(permit);
+                entered.submitted()?;
+                Ok(value)
+            })
+    }
+}
+
+/// Exists only during the held-gate outer composite; contains no backend handle.
+pub(crate) struct ReaderPermit<'a> {
+    context: &'a ReaderContext,
+    store: &'a Store,
+    outer: &'a ReaderHandoff,
+    entered: &'a Entered<'a>,
+    expected: Vec<ReaderHandoff>,
+    next: usize,
+    failed: bool,
+}
+impl ReaderPermit<'_> {
+    pub(crate) fn step<T>(
+        &mut self,
+        ordinal: usize,
+        lower: &ReaderHandoff,
+        submit: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let valid =
+            !self.failed && ordinal == self.next && self.expected.get(ordinal) == Some(lower);
+        self.failed = true;
+        ensure!(valid, "Reader lower call changed, duplicated or stopped");
+        self.entered.ensure_current()?;
+        let current = self
+            .store
+            .selected_snapshot(self.context.admission.scope(), MAX_ITEMS)?
+            .context("Reader lower selection absent")?;
+        ensure!(
+            current.token == self.context.token,
+            "Reader lower selection replaced or stale"
+        );
+        crate::conversation::reader_uncertainty::validate(
+            self.store,
+            &current,
+            &self.context.request,
+            Some(&self.context.original),
+        )?;
+        self.context.source.verify_current(&self.context.request)?;
+        self.context
+            .source
+            .verify_lower(&self.context.request, self.outer, ordinal, lower)?;
+        self.entered.ensure_current()?;
+        self.next += 1;
+        let value = submit()?;
+        self.entered.ensure_current()?;
+        self.failed = false;
+        Ok(value)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -658,174 +827,5 @@ mod tests {
             false,
         );
         assert_eq!(trace.borrow().len(), 1);
-    }
-}
-
-pub(crate) enum ReaderPreparation {
-    Fresh(ReaderContext),
-    Historical(HistoricalIntent),
-}
-
-pub(crate) struct ReaderContext {
-    admission: Arc<SelectedAdmission>,
-    token: SelectionToken,
-    request: PendingIntentRequest,
-    original: HistoricalIntent,
-    source: Rc<dyn ReaderSourceAdmission>,
-    plan: ReaderPlan,
-    dispatch: DispatchState,
-}
-
-impl ReaderContext {
-    pub(crate) fn matches_attempt(&self, conversation: Uuid, turn: Uuid, evidence: Uuid) -> bool {
-        self.request.conversation == conversation
-            && self.request.turn == turn
-            && self.request.evidence.iter().any(|reference| {
-                reference.namespace == Namespace::Conversation && reference.record_id == evidence
-            })
-    }
-
-    #[cfg(test)]
-    fn dispatch<T>(
-        &self,
-        ordinal: usize,
-        handoff: &ReaderHandoff,
-        submit: impl FnOnce() -> Result<T>,
-    ) -> Result<T> {
-        self.dispatch_composite(ordinal, handoff, |permit| permit.step(0, handoff, submit))
-    }
-    // Only the parent pending module can call this constructor.
-    pub(super) fn mint(
-        admission: Arc<SelectedAdmission>,
-        token: SelectionToken,
-        request: PendingIntentRequest,
-        original: HistoricalIntent,
-        source: Rc<dyn ReaderSourceAdmission>,
-        plan: ReaderPlan,
-    ) -> Self {
-        Self {
-            admission,
-            token,
-            request,
-            original,
-            source,
-            plan,
-            dispatch: DispatchState::default(),
-        }
-    }
-
-    /// Private composite seam; the future selected facade owns the callback.
-    /// No public backend or effect permission is exposed by this context.
-    pub(crate) fn dispatch_backend<T>(
-        &self,
-        admission: &Arc<SelectedAdmission>,
-        binding: &crate::workflow::selected_backend::ReaderBackendBinding,
-        ordinal: usize,
-        handoff: &ReaderHandoff,
-        submit: impl FnOnce(&mut ReaderPermit<'_>) -> Result<T>,
-    ) -> Result<T> {
-        if !Arc::ptr_eq(&self.admission, admission)
-            || !self.source.backend_binding().matches(binding)
-        {
-            self.dispatch.stop();
-            bail!("Reader context belongs to a foreign backend or admission");
-        }
-        self.dispatch_composite(ordinal, handoff, submit)
-    }
-    fn dispatch_composite<T>(
-        &self,
-        ordinal: usize,
-        handoff: &ReaderHandoff,
-        submit: impl FnOnce(&mut ReaderPermit<'_>) -> Result<T>,
-    ) -> Result<T> {
-        let reservation = self.dispatch.reserve(&self.plan, ordinal, handoff)?;
-        self.admission
-            .with_current_store(&self.token, |store, snapshot| {
-                crate::conversation::reader_uncertainty::validate(
-                    store,
-                    snapshot,
-                    &self.request,
-                    Some(&self.original),
-                )?;
-                self.source.verify_current(&self.request)?;
-                self.source.verify_handoff(&self.request, handoff)?;
-                let entered = reservation.enter()?;
-                let expected = match handoff {
-                    ReaderHandoff::SmartErase(input) => input
-                        .rectangles()
-                        .iter()
-                        .map(|&(from, to)| ReaderHandoff::Erase {
-                            bounds: [from.0, from.1, to.0 - from.0, to.1 - from.1],
-                        })
-                        .collect(),
-                    _ => vec![handoff.clone()],
-                };
-                let mut permit = ReaderPermit {
-                    context: self,
-                    store,
-                    outer: handoff,
-                    entered: &entered,
-                    expected,
-                    next: 0,
-                    failed: false,
-                };
-                let value = submit(&mut permit)?;
-                ensure!(
-                    !permit.failed && permit.next == permit.expected.len(),
-                    "Reader composite incomplete or refused"
-                );
-                drop(permit);
-                entered.submitted()?;
-                Ok(value)
-            })
-    }
-}
-
-/// Exists only during the held-gate outer composite; contains no backend handle.
-pub(crate) struct ReaderPermit<'a> {
-    context: &'a ReaderContext,
-    store: &'a Store,
-    outer: &'a ReaderHandoff,
-    entered: &'a Entered<'a>,
-    expected: Vec<ReaderHandoff>,
-    next: usize,
-    failed: bool,
-}
-impl ReaderPermit<'_> {
-    pub(crate) fn step<T>(
-        &mut self,
-        ordinal: usize,
-        lower: &ReaderHandoff,
-        submit: impl FnOnce() -> Result<T>,
-    ) -> Result<T> {
-        let valid =
-            !self.failed && ordinal == self.next && self.expected.get(ordinal) == Some(lower);
-        self.failed = true;
-        ensure!(valid, "Reader lower call changed, duplicated or stopped");
-        self.entered.ensure_current()?;
-        let current = self
-            .store
-            .selected_snapshot(self.context.admission.scope(), MAX_ITEMS)?
-            .context("Reader lower selection absent")?;
-        ensure!(
-            current.token == self.context.token,
-            "Reader lower selection replaced or stale"
-        );
-        crate::conversation::reader_uncertainty::validate(
-            self.store,
-            &current,
-            &self.context.request,
-            Some(&self.context.original),
-        )?;
-        self.context.source.verify_current(&self.context.request)?;
-        self.context
-            .source
-            .verify_lower(&self.context.request, self.outer, ordinal, lower)?;
-        self.entered.ensure_current()?;
-        self.next += 1;
-        let value = submit()?;
-        self.entered.ensure_current()?;
-        self.failed = false;
-        Ok(value)
     }
 }

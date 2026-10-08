@@ -132,7 +132,7 @@ impl SelectedAdmission {
         );
         self.mutate(|store| {
             if let Some(original) = recover_pending_request(store, self.scope(), &request)? {
-                return Ok(ReaderPreparation::Historical(original));
+                return Ok(ReaderPreparation::Historical(Box::new(original)));
             }
             let accepted = accepted.context("new Reader intent requires live token")?;
             let snapshot = store
@@ -168,7 +168,7 @@ impl SelectedAdmission {
             );
             let original = recover_pending_request(store, self.scope(), &request)?
                 .context("Reader actual publication missing")?;
-            Ok(ReaderPreparation::Fresh(
+            Ok(ReaderPreparation::Fresh(Box::new(
                 reader_context::ReaderContext::mint(
                     self.clone(),
                     publication.token,
@@ -177,7 +177,7 @@ impl SelectedAdmission {
                     source,
                     plan,
                 ),
-            ))
+            )))
         })
     }
     /// Look up an original operation before preparing new UUIDs/fingerprints.
