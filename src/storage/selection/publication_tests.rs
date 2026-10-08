@@ -859,3 +859,280 @@ fn racing_selected_commit_and_activation_do_not_both_accept_one_token() {
     assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
     assert_eq!(selected(&store, &s).transaction.history_depth, 2);
 }
+
+fn retained_fixture(
+    store: &Store,
+    s: &SelectionScope,
+) -> (
+    SelectionPublication,
+    SelectionPublication,
+    Envelope,
+    ObjectRef,
+) {
+    let base = initialize(store, s, &[record(store)]);
+    let mut intent = record(store);
+    let bytes = b"owned admitted evidence".to_vec();
+    let hash = digest(&bytes);
+    intent.media_descriptors.push(Media {
+        sha256: hash.clone(),
+        bytes: bytes.len() as u64,
+        media_type: "application/octet-stream".into(),
+    });
+    let original = store
+        .commit_selected(
+            &base.token,
+            Uuid::new_v4(),
+            vec![intent.clone()],
+            BTreeMap::from([(hash, bytes)]),
+        )
+        .unwrap();
+    let (mut change, mut objects) = change(&[record(store)]);
+    let (retained, evidence) = closure(std::slice::from_ref(&intent), BTreeMap::new());
+    let reference = retained.records[0].clone();
+    change.retained.push(retained);
+    objects.extend(evidence);
+    let replacement = store
+        .activate_selected(&original.token, change, objects)
+        .unwrap();
+    (original, replacement, intent, reference)
+}
+#[test]
+fn retained_settlement_faults_preserve_winner_and_original_evidence_atomically() {
+    for fault in [
+        Fault::BeforeObjects,
+        Fault::AfterObjects,
+        Fault::BeforeCommit,
+        Fault::BeforeActivation,
+        Fault::AfterCommit,
+        Fault::AfterActivation,
+        Fault::None,
+    ] {
+        let f = Fixture::new();
+        let store = f.store();
+        let s = scope();
+        let (original, replacement, intent, reference) = retained_fixture(&store, &s);
+        let mut fact = record(&store);
+        fact.domain_schema_version = 2;
+        fact.payload = json!({"fixture":"unverified late outcome; no native authority"});
+        let (facts, objects) = closure(std::slice::from_ref(&fact), BTreeMap::new());
+        let mut retained = replacement.transaction.retained.clone();
+        retained.push(facts);
+        let update = RetainedCommit {
+            operation: Uuid::new_v4(),
+            original_operation: original.transaction.operation,
+            intent: reference,
+            retained,
+        };
+        store.set_fault(fault).unwrap();
+        assert_eq!(
+            store
+                .commit_retained(&replacement.token, update.clone(), objects.clone())
+                .is_ok(),
+            fault == Fault::None
+        );
+        drop(store);
+        let store = f.store();
+        let snapshot = selected(&store, &s);
+        assert_eq!(
+            snapshot.transaction.selected.records,
+            replacement.transaction.selected.records
+        );
+        assert_eq!(
+            snapshot.transaction.selected.media,
+            replacement.transaction.selected.media
+        );
+        assert!(!snapshot
+            .selected_records
+            .iter()
+            .any(|r| r.record_id == fact.record_id));
+        assert!(snapshot
+            .retained_records
+            .iter()
+            .any(|r| r.revision_id == intent.revision_id));
+        let accepted = matches!(
+            fault,
+            Fault::AfterCommit | Fault::AfterActivation | Fault::None
+        );
+        assert_eq!(
+            snapshot
+                .retained_records
+                .iter()
+                .any(|r| r.revision_id == fact.revision_id),
+            accepted
+        );
+        let receipt = store
+            .commit_retained(&replacement.token, update.clone(), objects.clone())
+            .unwrap();
+        assert_eq!(receipt.replayed, accepted);
+        assert_eq!(receipt.transaction.mutation, SelectionMutation::Retained);
+        let (mut next, mut next_objects) = change(&[record(&store)]);
+        next.retained = receipt.transaction.retained.clone();
+        // Existing retained objects are immutable and need not be uploaded again.
+        next_objects.retain(|h, _| next.selected.records.iter().any(|r| &r.sha256 == h));
+        store
+            .activate_selected(&receipt.token, next, next_objects)
+            .unwrap();
+        let token = selected(&store, &s).token;
+        assert!(
+            store
+                .commit_retained(&replacement.token, update, objects)
+                .unwrap()
+                .replayed
+        );
+        assert_eq!(selected(&store, &s).token, token);
+    }
+}
+#[test]
+fn foreign_active_or_dropped_retained_intent_cannot_settle() {
+    let f = Fixture::new();
+    let store = f.store();
+    let s = scope();
+    let (original, replacement, _, reference) = retained_fixture(&store, &s);
+    let (facts, objects) = closure(&[record(&store)], BTreeMap::new());
+    let mut retained = replacement.transaction.retained.clone();
+    retained.push(facts);
+    let update = RetainedCommit {
+        operation: Uuid::new_v4(),
+        original_operation: original.transaction.operation,
+        intent: reference,
+        retained,
+    };
+    let mut foreign = update.clone();
+    foreign.original_operation = Uuid::new_v4();
+    assert!(store
+        .commit_retained(&replacement.token, foreign, objects.clone())
+        .is_err());
+    let mut omitted = update.clone();
+    omitted.retained.remove(0);
+    assert!(store
+        .commit_retained(&replacement.token, omitted, objects.clone())
+        .is_err());
+    let mut foreign = update.clone();
+    foreign.intent = replacement.transaction.selected.records[0].clone();
+    assert!(store
+        .commit_retained(&replacement.token, foreign, objects.clone())
+        .is_err());
+    let mut lost_media = update.clone();
+    lost_media.retained[0].media.clear();
+    lost_media.retained[0].media_coverage = lost_media.retained[0]
+        .media_coverage
+        .iter()
+        .map(|c| Coverage::Omitted {
+            sha256: c.hash().into(),
+            reason: Omission::PolicyDisabled,
+        })
+        .collect();
+    assert!(store
+        .commit_retained(&replacement.token, lost_media, objects.clone())
+        .is_err());
+    let active = selected(&store, &s).selected_records[0].clone();
+    let (fork, fork_objects) = closure(&[edit(&active)], BTreeMap::new());
+    let mut mutate_active = update.clone();
+    mutate_active.retained.push(fork);
+    let mut all_objects = objects.clone();
+    all_objects.extend(fork_objects);
+    assert!(store
+        .commit_retained(&replacement.token, mutate_active, all_objects)
+        .is_err());
+    assert_eq!(selected(&store, &s).token, replacement.token);
+    assert!(store
+        .commit_retained(&replacement.token, update, objects)
+        .is_ok());
+}
+
+#[test]
+fn selected_generation_feature_rejects_legacy_unknown_or_foreign_headers() {
+    let f = Fixture::new();
+    let store = f.store();
+    let s = scope();
+    let initial = initialize(&store, &s, &[record(&store)]);
+    let root = store.generation(initial.token.store_generation());
+    let feature = fs::read(root.join("selection-feature.json")).unwrap();
+    assert_eq!(
+        files::json::<u32>(&root.join("format.json"), 64).unwrap(),
+        SELECTED_STORE_FORMAT
+    );
+    drop(store);
+    for version in [FORMAT, 99] {
+        files::atomic_json(&root.join("format.json"), &version).unwrap();
+        assert!(Store::open(f.paths()).is_err());
+    }
+    files::atomic_json(&root.join("format.json"), &SELECTED_STORE_FORMAT).unwrap();
+    fs::remove_file(root.join("selection-feature.json")).unwrap();
+    assert!(Store::open(f.paths()).is_err());
+    for value in [
+        json!({"format":1,"actor":Uuid::new_v4(),"generation":initial.token.store_generation()}),
+        json!({"format":99,"actor":files::json::<serde_json::Value>(&f.paths().data.join("identity.json"), 1024).unwrap()["actor"],"generation":initial.token.store_generation()}),
+    ] {
+        files::atomic_json(&root.join("selection-feature.json"), &value).unwrap();
+        assert!(Store::open(f.paths()).is_err());
+    }
+    files::atomic(&root.join("selection-feature.json"), &feature).unwrap();
+    assert_eq!(selected(&f.store(), &s).token, initial.token);
+}
+
+#[test]
+fn selected_reader_qualification_fixture() {
+    let Some(root) = std::env::var_os("BUDDY_SELECTED_READER_QUALIFICATION") else {
+        return;
+    };
+    let f = Fixture(PathBuf::from(root));
+    let store = f.store();
+    let s = scope();
+    initialize(&store, &s, &[record(&store)]);
+    // The caller owns this disposable fixture and verifies an old reader against
+    // it. Preserve only on this explicitly selected fixture path, never user data.
+    std::mem::forget(f);
+}
+
+#[test]
+fn interrupted_feature_preparation_preserves_ordinary_history_and_refuses_unknown_markers() {
+    let f = Fixture::new();
+    let store = f.store();
+    let original = record(&store);
+    store
+        .commit(vec![original.clone()], BTreeMap::new())
+        .unwrap();
+    let generation = store.inner.lock().unwrap().generation;
+    let actor = store.actor_id;
+    let root = store.generation(generation);
+    files::atomic_json(
+        &root.join("selection-feature.json"),
+        &SelectionFeature {
+            format: FORMAT,
+            actor,
+            generation,
+        },
+    )
+    .unwrap();
+    drop(store);
+    let store = f.store();
+    assert!(store.heads(original.namespace, original.record_id).unwrap() == vec![original.clone()]);
+    drop(store);
+    files::atomic_json(
+        &root.join("selection-feature.json"),
+        &SelectionFeature {
+            format: 99,
+            actor,
+            generation,
+        },
+    )
+    .unwrap();
+    assert!(Store::open(f.paths()).is_err());
+    files::atomic_json(
+        &root.join("selection-feature.json"),
+        &SelectionFeature {
+            format: FORMAT,
+            actor,
+            generation,
+        },
+    )
+    .unwrap();
+    files::atomic_json(&root.join("format.json"), &SELECTED_STORE_FORMAT).unwrap();
+    let store = f.store();
+    assert!(store.heads(original.namespace, original.record_id).unwrap() == vec![original]);
+    let s = scope();
+    assert!(store.selected_snapshot(&s, MAX_ITEMS).unwrap().is_none());
+    initialize(&store, &s, &[record(&store)]);
+    assert_eq!(selected(&store, &s).transaction.history_depth, 1);
+}

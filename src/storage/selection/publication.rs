@@ -17,7 +17,7 @@ pub struct SelectionPublication {
     pub token: SelectionToken,
     pub replayed: bool,
 }
-fn token(transaction: &SelectionTransaction) -> Result<SelectionToken> {
+pub(super) fn token(transaction: &SelectionTransaction) -> Result<SelectionToken> {
     Ok(SelectionToken {
         scope: transaction.scope.clone(),
         store_generation: transaction.store_generation,
@@ -36,7 +36,7 @@ fn receipt(transaction: SelectionTransaction, replayed: bool) -> Result<Selectio
 fn path(root: &Path, scope: &SelectionScope) -> Result<PathBuf> {
     Ok(root.join("selections").join(scope.filename()?))
 }
-fn current(
+pub(super) fn current(
     root: &Path,
     generation: Uuid,
     scope: &SelectionScope,
@@ -162,7 +162,7 @@ pub(super) fn validate_closure(
     closure_index(&unique.into_values().collect::<Vec<_>>(), false)?;
     Ok(parts)
 }
-fn request(
+pub(super) fn request(
     kind: &str,
     scope: &SelectionScope,
     expected: Option<&SelectionToken>,
@@ -177,7 +177,7 @@ fn request(
         value,
     ))?))
 }
-fn replay(
+pub(super) fn replay(
     chain: &[SelectionTransaction],
     operation: Uuid,
     request: &str,
@@ -227,7 +227,13 @@ impl Store {
         objects: BTreeMap<String, Vec<u8>>,
     ) -> Result<SelectionPublication> {
         let fingerprint = request("initialize", scope, None, &change)?;
-        self.publish_selection(scope, None, change, objects, fingerprint)
+        self.publish_selection(
+            scope,
+            None,
+            change,
+            objects,
+            (fingerprint, SelectionMutation::Initialize),
+        )
     }
     pub fn activate_selected(
         &self,
@@ -241,7 +247,7 @@ impl Store {
             Some(expected),
             change,
             objects,
-            fingerprint,
+            (fingerprint, SelectionMutation::Activate),
         )
     }
     fn publish_selection(
@@ -250,7 +256,7 @@ impl Store {
         expected: Option<&SelectionToken>,
         change: SelectionChange,
         objects: BTreeMap<String, Vec<u8>>,
-        fingerprint: String,
+        fingerprint: (String, SelectionMutation),
     ) -> Result<SelectionPublication> {
         scope.validate()?;
         ensure!(!change.operation.is_nil(), "nil selection operation");
@@ -265,7 +271,7 @@ impl Store {
             .map(|t| history(&root, inner.generation, scope, t))
             .transpose()?
             .unwrap_or_default();
-        if let Some(receipt) = replay(&chain, change.operation, &fingerprint)? {
+        if let Some(receipt) = replay(&chain, change.operation, &fingerprint.0)? {
             return Ok(receipt);
         }
         if previous.is_none() {
@@ -299,13 +305,13 @@ impl Store {
             &chain,
         )
     }
-    fn next_selection(
+    pub(super) fn next_selection(
         &self,
         generation: Uuid,
         scope: &SelectionScope,
         previous: Option<&SelectionTransaction>,
         change: SelectionChange,
-        fingerprint: String,
+        fingerprint: (String, SelectionMutation),
     ) -> Result<SelectionTransaction> {
         let mut selected = change.selected;
         // A closure is not the source's all-history commit. Give each accepted
@@ -324,11 +330,12 @@ impl Store {
         let transaction = SelectionTransaction {
             format: FORMAT,
             operation: change.operation,
+            mutation: fingerprint.1,
             store_generation: generation,
             aggregate_generation: Uuid::new_v4(),
             scope: scope.clone(),
             accepted_base_sha256: change.accepted_base_sha256,
-            request_sha256: fingerprint,
+            request_sha256: fingerprint.0,
             previous_sha256: previous.map(token).transpose()?.map(|t| t.selection_sha256),
             history_depth: previous.map_or(1, |t| t.history_depth + 1),
             selected,
@@ -337,7 +344,7 @@ impl Store {
         transaction.validate(MAX_ITEMS)?;
         Ok(transaction)
     }
-    fn write_selection(
+    pub(super) fn write_selection(
         &self,
         inner: &mut Inner,
         root: &Path,
@@ -405,6 +412,7 @@ impl Store {
                 &bytes,
             )?;
         }
+        prepare_generation(root, self.actor_id, inner.generation)?;
         Self::trip(inner, Fault::BeforeCommit)?;
         Self::trip(inner, Fault::BeforeActivation)?;
         // One fsync/rename publication commits BOTH winner and retained closure.
@@ -526,7 +534,7 @@ impl Store {
                 selected,
                 retained: previous.retained.clone(),
             },
-            fingerprint,
+            (fingerprint, SelectionMutation::Commit),
         )?;
         self.write_selection(
             &mut inner,

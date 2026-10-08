@@ -1,5 +1,7 @@
 //! Domain-opaque atomic selected references. No domain/native admission or worker.
 mod publication;
+mod retained;
+pub use retained::RetainedCommit;
 #[cfg(test)]
 mod publication_tests;
 use super::*;
@@ -29,6 +31,15 @@ impl SelectionScope {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SelectionMutation {
+    Initialize,
+    Activate,
+    Commit,
+    Retained,
+}
+
 /// One durable transaction must reference winner AND unresolved evidence together.
 /// Domain owners validate ownership/intent state; storage keeps payloads opaque.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -36,6 +47,7 @@ impl SelectionScope {
 pub struct SelectionTransaction {
     pub format: u32,
     pub operation: Uuid,
+    pub mutation: SelectionMutation,
     pub store_generation: Uuid,
     pub aggregate_generation: Uuid,
     pub scope: SelectionScope,
@@ -67,6 +79,7 @@ impl SelectionTransaction {
         );
         ensure!(
             self.history_depth > 0
+                && (self.history_depth == 1) == (self.mutation == SelectionMutation::Initialize)
                 && self.history_depth <= MAX_ITEMS
                 && (self.history_depth == 1) == self.previous_sha256.is_none()
                 && self
@@ -239,6 +252,61 @@ impl Store {
     }
 }
 
+pub(crate) const SELECTED_STORE_FORMAT: u32 = 2;
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct SelectionFeature {
+    format: u32,
+    actor: Uuid,
+    generation: Uuid,
+}
+pub(crate) fn validate_generation(root: &Path, actor: Uuid, generation: Uuid) -> Result<()> {
+    ensure!(
+        !actor.is_nil() && !generation.is_nil(),
+        "nil selected store identity"
+    );
+    let version: u32 = files::json(&root.join("format.json"), 64)?;
+    ensure!(
+        matches!(version, FORMAT | SELECTED_STORE_FORMAT),
+        "unsupported generation format"
+    );
+    if version == FORMAT {
+        ensure!(
+            !has_selected(root)?,
+            "legacy generation contains unsupported selected metadata"
+        );
+    }
+    let feature = root.join("selection-feature.json");
+    files::safe_path(&feature)?;
+    if version == SELECTED_STORE_FORMAT || feature.exists() {
+        ensure!(
+            files::json::<SelectionFeature>(&feature, MAX_RECORD as u64)?
+                == SelectionFeature {
+                    format: FORMAT,
+                    actor,
+                    generation
+                },
+            "unsupported or foreign selected generation feature"
+        );
+    }
+    Ok(())
+}
+pub(crate) fn prepare_generation(root: &Path, actor: Uuid, generation: Uuid) -> Result<()> {
+    validate_generation(root, actor, generation)?;
+    if files::json::<u32>(&root.join("format.json"), 64)? == FORMAT {
+        files::atomic_json(
+            &root.join("selection-feature.json"),
+            &SelectionFeature {
+                format: FORMAT,
+                actor,
+                generation,
+            },
+        )?;
+        files::atomic_json(&root.join("format.json"), &SELECTED_STORE_FORMAT)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn has_selected(root: &Path) -> Result<bool> {
     let dir = root.join("selections");
     files::safe_path(&dir)?;
@@ -338,6 +406,7 @@ mod tests {
         SelectionTransaction {
             format: FORMAT,
             operation: Uuid::new_v4(),
+            mutation: SelectionMutation::Initialize,
             store_generation,
             aggregate_generation: Uuid::new_v4(),
             scope,
@@ -354,6 +423,12 @@ mod tests {
             .generation(transaction.store_generation)
             .join("selections")
             .join(transaction.scope.filename().unwrap());
+        prepare_generation(
+            &store.generation(transaction.store_generation),
+            store.actor_id,
+            transaction.store_generation,
+        )
+        .unwrap();
         files::directory(path.parent().unwrap()).unwrap();
         files::atomic_json(&path, transaction).unwrap();
     }

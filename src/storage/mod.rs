@@ -219,10 +219,7 @@ impl Store {
             }),
             wake: Mutex::new(None),
         };
-        ensure!(
-            files::json::<u32>(&store.generation(generation).join("format.json"), 64)? == FORMAT,
-            "unsupported generation format"
-        );
+        selection::validate_generation(&store.generation(generation), store.actor_id, generation)?;
         for directory in [
             store.paths.data.clone(),
             store.paths.credentials.clone(),
@@ -250,7 +247,7 @@ impl Store {
         files::atomic_json(
             &store.paths.data.join("capabilities.json"),
             &serde_json::json!({
-            "contract_version": 1, "schema_file":"contract-v1.json", "store_versions": [1], "envelope_versions": [1], "config_versions": [1],
+            "contract_version": 1, "schema_file":"contract-v1.json", "store_versions": [1, 2], "selected_store_feature": "actor-generation-bound-v1", "envelope_versions": [1], "config_versions": [1],
                 "paths": store.paths, "lock": "stable-inode-exclusive-os-lease", "linux_lock": "flock",
                 "maintenance": "stop-confirm-lock-stage-commit-release-restart", "namespaces": ["conversation","source","export-association","subject-memory","handwriting"], "sync": "optional-immutable-drive-v1"
             }),
