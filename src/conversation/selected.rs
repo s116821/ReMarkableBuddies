@@ -62,9 +62,12 @@ impl SelectedDomainProjection {
                         );
                     }
                     if let Some(prior) = turn.correction_of {
-                        ensure!(self.records.values().any(|r| matches!(r, Record::Turn(t)
-                            if t.id == prior && t.conversation == conversation && t.sequence < turn.sequence)),
-                            "selected correction chronology broken");
+                        ensure!(
+                            matches!(self.head(Namespace::Conversation, prior),
+                            Some((_, Some(Record::Turn(t))))
+                            if t.conversation == conversation && t.sequence < turn.sequence),
+                            "selected correction chronology broken"
+                        );
                     }
                 }
                 Record::Source(source) => {
@@ -125,6 +128,25 @@ impl SelectedDomainProjection {
                 Record::OutcomeFact(fact) => {
                     self.require_turn(fact.turn, conversation)?;
                     if let Some(settlement) = &fact.settlement {
+                        let Record::Receipt(original) =
+                            self.exact_reference(&settlement.original_receipt)?
+                        else {
+                            anyhow::bail!("settlement receipt variant mismatch");
+                        };
+                        let intent = original
+                            .admitted_intent
+                            .as_ref()
+                            .context("settlement receipt has no admitted intent")?;
+                        ensure!(
+                            intent.operation == settlement.operation
+                                && intent.conversation == conversation
+                                && intent.turn == fact.turn
+                                && intent.request_fingerprint == settlement.request_fingerprint
+                                && intent.root_revision == settlement.original_root
+                                && intent.turn_revision == settlement.original_turn
+                                && intent.selection == settlement.original_selection,
+                            "settlement differs from admitted intent"
+                        );
                         ensure!(
                             matches!(self.exact_reference(&settlement.original_receipt)?, Record::Receipt(r)
                             if r.acknowledgment.operation == settlement.operation && r.acknowledgment.conversation == conversation),
@@ -656,5 +678,44 @@ mod tests {
             .unwrap()
             .document_ownership()
             .is_err());
+    }
+    #[test]
+    fn correction_cannot_use_an_old_target_sequence() {
+        let mut base = root();
+        let Record::Root(mut value) = Ledger::decode(&base).unwrap() else {
+            unreachable!()
+        };
+        value.next_sequence = 3;
+        base.payload = serde_json::to_value(Record::Root(value)).unwrap();
+        let document = Uuid::new_v4();
+        let original = completed_turn(&base, 0, document);
+        let mut latest = original.clone();
+        latest.revision_id = Uuid::new_v4();
+        latest.parents.insert(original.revision_id);
+        let Record::Turn(mut target) = Ledger::decode(&latest).unwrap() else {
+            unreachable!()
+        };
+        target.sequence = 2;
+        latest.payload = serde_json::to_value(Record::Turn(target)).unwrap();
+        let mut correction = completed_turn(&base, 1, document);
+        let Record::Turn(mut turn) = Ledger::decode(&correction).unwrap() else {
+            unreachable!()
+        };
+        turn.correction_of = Some(original.record_id);
+        correction.payload = serde_json::to_value(Record::Turn(turn)).unwrap();
+        assert!(SelectedDomainProjection::from_records(&[
+            base.clone(),
+            original.clone(),
+            correction.clone()
+        ])
+        .unwrap()
+        .document_ownership()
+        .is_ok());
+        assert!(
+            SelectedDomainProjection::from_records(&[base, original, latest, correction])
+                .unwrap()
+                .document_ownership()
+                .is_err()
+        );
     }
 }

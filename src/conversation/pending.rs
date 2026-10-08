@@ -580,6 +580,109 @@ mod tests {
         }
     }
     #[test]
+    fn settlement_must_match_the_referenced_admitted_intent() {
+        use crate::conversation::{IntentSettlement, IntentSettlementState};
+        let fixture = Fixture::new();
+        let (store, handle, token, request) = fixture.setup();
+        let check = MockSource {
+            source: request.source.clone(),
+            calls: Cell::new(0),
+            refuse_at: None,
+        };
+        let PendingIntentPublication::Published {
+            receipt, reference, ..
+        } = handle
+            .publish_pending(Some(&token), request.clone(), Some(&check))
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        let intent = receipt.admitted_intent.unwrap();
+        let snapshot = store
+            .selected_snapshot(handle.scope(), MAX_ITEMS)
+            .unwrap()
+            .unwrap();
+        let settlement = IntentSettlement {
+            operation: intent.operation,
+            request_fingerprint: intent.request_fingerprint.clone(),
+            original_receipt: reference,
+            original_root: intent.root_revision.clone(),
+            original_turn: intent.turn_revision.clone(),
+            original_selection: intent.selection.clone(),
+            state: IntentSettlementState::Unknown,
+            procedure: "synthetic settlement projection".into(),
+            origin: "test only".into(),
+            evidence: vec![],
+            media: vec![],
+        };
+        for change in 0..6 {
+            let mut value = settlement.clone();
+            let mut records = snapshot.selected_records.clone();
+            if change == 5 {
+                let original = records
+                    .iter_mut()
+                    .find(|e| e.record_id == value.original_receipt.record_id)
+                    .unwrap();
+                let Record::Receipt(mut receipt) = Ledger::decode(original).unwrap() else {
+                    unreachable!()
+                };
+                receipt.admitted_intent = None;
+                original.domain_schema_version = SCHEMA;
+                original.payload = serde_json::to_value(Record::Receipt(receipt)).unwrap();
+                value.original_receipt = pin(original).unwrap();
+            }
+            match change {
+                1 => value.request_fingerprint = digest(b"different logical request"),
+                2 => value.original_selection.aggregate_generation = Uuid::new_v4(),
+                3 => {
+                    value.original_root = pin(snapshot
+                        .selected_records
+                        .iter()
+                        .find(|e| e.record_id == request.conversation && e.parents.is_empty())
+                        .unwrap())
+                    .unwrap()
+                }
+                4 => {
+                    value.original_turn = pin(snapshot
+                        .selected_records
+                        .iter()
+                        .find(|e| e.record_id == request.turn && e.parents.is_empty())
+                        .unwrap())
+                    .unwrap()
+                }
+                _ => {}
+            }
+            let id = Uuid::new_v4();
+            let mut fact = snapshot.selected_records[0].clone();
+            fact.record_id = id;
+            fact.revision_id = Uuid::new_v4();
+            fact.parents.clear();
+            fact.domain_schema_version = INTENT_SCHEMA;
+            fact.payload = serde_json::to_value(Record::OutcomeFact(OutcomeFact {
+                id,
+                conversation: request.conversation,
+                turn: request.turn,
+                outcome: Outcome::ReconcileRequired,
+                reason: AttemptReason::DeviceUncertain,
+                settlement: Some(value),
+            }))
+            .unwrap();
+            Ledger::decode(&fact).unwrap();
+            records.push(fact);
+            let objects = records
+                .iter()
+                .map(|e| pin(e).unwrap().object)
+                .collect::<Vec<_>>();
+            let projection =
+                SelectedDomainProjection::from_pinned_records(&records, &objects).unwrap();
+            assert_eq!(
+                projection.document_ownership().is_ok(),
+                change == 0,
+                "change {change}"
+            );
+        }
+    }
+    #[test]
     fn original_replay_uses_prepared_refs_before_current_heads_and_rejects_changed_payload_or_pins()
     {
         let fixture = Fixture::new();
