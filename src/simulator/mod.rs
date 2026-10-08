@@ -4,6 +4,8 @@ mod raster;
 #[cfg(test)]
 mod reader_persistence_tests;
 pub mod scenario;
+#[cfg(test)]
+mod smart_erase_tests;
 
 use crate::{LLMEngine, OpenAI, Orchestrator, Workflow};
 use anyhow::{ensure, Context, Result};

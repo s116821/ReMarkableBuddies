@@ -1,3 +1,4 @@
+mod erase_plan;
 pub mod history;
 pub mod indicator;
 mod navigation;
@@ -333,34 +334,8 @@ impl Workflow {
         let img = image::load_from_memory(screenshot_data)?;
         let gray_img = img.to_luma8();
 
-        // Define ink detection threshold (darker pixels are ink)
-        const INK_THRESHOLD: u8 = 200; // Pixels darker than this are considered ink
-        const MARGIN: i32 = 2; // Add margin around detected ink
-
-        // Scan the region and identify rows with ink
-        let mut rows_with_ink = Vec::new();
-        for y in region.y..(region.y + region.height).min(1024) {
-            if y < 0 || y >= gray_img.height() as i32 {
-                continue;
-            }
-
-            let mut has_ink = false;
-            for x in region.x..(region.x + region.width).min(768) {
-                if x < 0 || x >= gray_img.width() as i32 {
-                    continue;
-                }
-
-                let pixel = gray_img.get_pixel(x as u32, y as u32);
-                if pixel[0] < INK_THRESHOLD {
-                    has_ink = true;
-                    break;
-                }
-            }
-
-            if has_ink {
-                rows_with_ink.push(y);
-            }
-        }
+        let plan = erase_plan::smart_erase_plan(region, &gray_img);
+        let rows_with_ink = &plan.ink_rows;
 
         debug!(
             "Found {} rows with ink out of {} total rows",
@@ -385,7 +360,7 @@ impl Workflow {
                 }
             }
             // Highlight rows to be erased in yellow
-            for &y in &rows_with_ink {
+            for &y in rows_with_ink {
                 for x in region.x.max(0)..((region.x + region.width).min(768)) {
                     if x >= 0
                         && x < debug_img.width() as i32
@@ -407,16 +382,9 @@ impl Workflow {
             }
         }
 
-        // Erase rows with ink (with margin)
-        for &y in &rows_with_ink {
-            let erase_y_start = (y - MARGIN).max(region.y).max(0);
-            let erase_y_end = (y + MARGIN + 1).min(region.y + region.height).min(1024);
-
-            for erase_y in erase_y_start..erase_y_end {
-                let top_left = (region.x, erase_y);
-                let bottom_right = ((region.x + region.width).min(768), erase_y + 1);
-                self.device.erase(top_left, bottom_right)?;
-            }
+        // Keep repeated overlapping rectangles as distinct ordered calls.
+        for (from, to) in plan.rectangles {
+            self.device.erase(from, to)?;
         }
 
         Ok(())
