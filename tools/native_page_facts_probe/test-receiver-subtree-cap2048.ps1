@@ -36,6 +36,6 @@ $fits2048=$historic1024|ConvertTo-Json|ConvertFrom-Json;$fits2048.discovery_scop
 Check (-not(Refusal2048 $fits2048)) '1025 frontier cannot claim2048 overflow'
 Check (-not(Completion2048 $c1024)) '2048 refuses v3 completion'
 $ReceiverSubtreeCapture512=$false;$ReceiverSubtreeItemCap=2048;$script:routed=$false
-& {function Receive-CaptureOwnerRefusalEvidence {param($a,$b,$c,$d,$e,$read,$copy,[bool]$focus,[bool]$subtree,[bool]$profile512,[int]$itemCap) if($args.Count -or $focus -or -not $subtree -or $profile512 -or $itemCap -ne 2048){throw 'Wrong2048 profile route'};$script:routed=$true}; & ([scriptblock]::Create($command))}
+& {function Receive-CaptureOwnerRefusalEvidence {param($a,$b,$c,$d,$e,$read,$copy,[bool]$focus,[bool]$subtree,[bool]$profile512,[int]$itemCap,[int]$depthCap=0) if($depthCap -or $args.Count -or $focus -or -not $subtree -or $profile512 -or $itemCap -ne 2048){throw 'Wrong2048 profile route'};$script:routed=$true}; & ([scriptblock]::Create($command))}
 Check $script:routed 'actual2048 owner collector route'
 Write-Output "PASS receiver subtree2048 focused consumer $($checks-$start2048) checks; historical scope bounds preserved"

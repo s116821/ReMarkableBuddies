@@ -1,5 +1,6 @@
 # Main freezes the resulting config with the selected SDK source/artifact packet.
-function Get-CaptureObservationBuildConfig($Expected,[bool]$FocusAncestry=$false,[bool]$ReceiverSubtreeCapture=$false,[bool]$ReceiverSubtreeCapture512=$false,[int]$ReceiverSubtreeItemCap=0) {
+function Get-CaptureObservationBuildConfig($Expected,[bool]$FocusAncestry=$false,[bool]$ReceiverSubtreeCapture=$false,[bool]$ReceiverSubtreeCapture512=$false,[int]$ReceiverSubtreeItemCap=0,[int]$ReceiverSubtreeDepthCap=0) {
+    if($ReceiverSubtreeDepthCap -notin @(0,16) -or ($ReceiverSubtreeDepthCap -ne 0 -and (-not $ReceiverSubtreeCapture -or $ReceiverSubtreeItemCap -ne 2048 -or $ReceiverSubtreeCapture512))){throw 'Depth16 profile requires base receiver capture with itemcap2048 without512 flag'}
     if($ReceiverSubtreeItemCap -notin @(0,1024,2048) -or ($ReceiverSubtreeItemCap -ne 0 -and (-not $ReceiverSubtreeCapture -or $ReceiverSubtreeCapture512))){throw 'Explicit item cap requires1024/2048 receiver profile without512 flag'}
     if($ReceiverSubtreeCapture512 -and -not $ReceiverSubtreeCapture){throw '512 capture profile requires receiver selection'}
     if($FocusAncestry -and $ReceiverSubtreeCapture){throw 'Capture discovery selections are mutually exclusive'}
@@ -22,6 +23,7 @@ function Get-CaptureObservationBuildConfig($Expected,[bool]$FocusAncestry=$false
     if($ReceiverSubtreeCapture){$lines+='    config.developmentReceiverSubtreeCapture=true;'}
     if($ReceiverSubtreeCapture512){$lines+='    config.developmentReceiverSubtreeCapture512=true;'}
     if($ReceiverSubtreeItemCap -ne 0){$lines+=('    config.developmentReceiverSubtreeItemCap={0};' -f $ReceiverSubtreeItemCap)}
+    if($ReceiverSubtreeDepthCap -eq 16){$lines+='    config.developmentReceiverSubtreeDepthCap=16;'}
     foreach($page in $Expected.order){$lines+=('    config.facts.expectedOrder.append(QStringLiteral("{0}"));' -f $page)}
     $lines+=@('    return config;','}')
     return ($lines -join "`n")+"`n"
