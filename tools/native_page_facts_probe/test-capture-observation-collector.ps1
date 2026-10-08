@@ -52,7 +52,7 @@ try{
                 Check (@($review.PSObject.Properties).Count -eq 15 -and $review.visual_open_fixture -eq $positive -and $review.reviewer -ceq 'Main') 'explicit visual decision'
             }
             $metadata={param($command)
-                if($command.Contains('capture-visual-review.json') -or $command.Contains('capture-observation-request.tmp') -or $command.Contains('publish-captured-facts-source.sh')){return @{exit=0;timeout=$false;stdout="absent`n"}}
+                if($command.Contains('capture-owner-refusal.json') -or $command.Contains('capture-visual-review.json') -or $command.Contains('capture-observation-request.tmp') -or $command.Contains('publish-captured-facts-source.sh')){return @{exit=0;timeout=$false;stdout="absent`n"}}
                 $name=if($command.Contains('capture-window.png')){'capture-window.png'}elseif($command.Contains('capture-observation-complete.json')){'capture-observation-complete.json'}else{'capture-observation-request'}
                 $path=Join-Path $packet $name;$hash=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant();$bytes=(Get-Item -LiteralPath $path).Length
                 return @{exit=0;timeout=$false;stdout="present $bytes $hash`n"}

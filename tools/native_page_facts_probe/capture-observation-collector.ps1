@@ -84,6 +84,7 @@ function New-CaptureVisualReview($Completion,[string]$CompletionSha,[string]$Req
 function Test-CapturePreserved([string]$Root,[string]$Packet,[Collections.IDictionary]$Record,[scriptblock]$Read) {
     if($Root -cnotmatch '\A/run/rmb-qt-probe-[0-9a-f]{32}\z'){return $false}
     foreach($item in @(
+        @{name='capture-owner-refusal.json';local='capture-owner-refusal.json';cap=8192;flag='capture_owner_refusal_saved_copy_verified';sha='capture_owner_refusal_saved_copy_sha256'},
         @{name='capture-window.png';local='capture-window.png';cap=8388608;flag='capture_png_saved_copy_verified';sha='capture_png_saved_copy_sha256'},
         @{name='capture-observation-complete.json';local='capture-observation-complete.json';cap=8192;flag='capture_completion_saved_copy_verified';sha='capture_completion_saved_copy_sha256'},
         @{name='capture-observation-request';local='capture-observation-request';cap=256;flag='capture_request_saved_copy_verified';sha='capture_request_saved_copy_sha256'},
@@ -94,8 +95,9 @@ function Test-CapturePreserved([string]$Root,[string]$Packet,[Collections.IDicti
         $metadata=& $Read ("set -eu; if test ! -e '$remote' && test ! -L '$remote'; then printf 'absent\n'; else test -f '$remote' && test ! -L '$remote'; test `"`$(stat -c '%a %u' '$remote')`" = '600 0'; bytes=`$(wc -c < '$remote'); test `"`$bytes`" -le '$($item.cap)'; hash=`$(sha256sum '$remote' | awk '{print `$1}'); printf 'present %s %s\n' `"`$bytes`" `"`$hash`"; fi")
         if($metadata.timeout -or $metadata.exit -ne 0){return $false}
         if($metadata.stdout -ceq "absent`n"){continue}
-        if($metadata.stdout -cnotmatch '\Apresent ([1-9][0-9]{0,6}) ([0-9a-f]{64})\n\z'){return $false}
+        if($metadata.stdout -cnotmatch '\Apresent (0|[1-9][0-9]{0,6}) ([0-9a-f]{64})\n\z'){return $false}
         $bytes=[long]$Matches[1];$sha=$Matches[2];$path=Join-Path $Packet $item.local
+        if($bytes -eq 0 -and $item.name -cne 'capture-owner-refusal.json'){return $false}
         if(-not $Record[$item.flag] -or $Record[$item.sha] -cne $sha -or -not(Test-Path -LiteralPath $path -PathType Leaf) -or (Get-Item -LiteralPath $path).Length -ne $bytes -or (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $sha){return $false}
     }
     return $true

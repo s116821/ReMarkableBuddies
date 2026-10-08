@@ -27,6 +27,8 @@ if((Hash $refusalProofPath) -cne '44c786488a88fb249501bbcc0361fe53b561f9b5ac33e8
 . $budgetPath
 . "$PSScriptRoot/capture-observation-proof.ps1"
 . "$PSScriptRoot/capture-observation-collector.ps1"
+. "$PSScriptRoot/capture-owner-refusal-proof.ps1"
+. "$PSScriptRoot/capture-owner-refusal-collector.ps1"
 . "$PSScriptRoot/capture-observation-build-config.ps1"
 $budget=Get-FactsDevelopmentBudget
 if((Hash $PayloadPath) -cne $payloadHash -or (Hash $PublisherPath) -cne $publisherHash -or (Hash $ExpectedPath) -cne $expectedHash -or (Hash $StockBaselinePath) -cne $stockBaselineHash){throw 'Frozen candidate input changed'}
@@ -68,11 +70,11 @@ $files['dropin.sha256']=Freeze 'dropin.sha256' $files['native-probe.conf']
 # review, with a literal local visual SHA. It is not pre-enabled/transferred here.
 $factsRecipeTemplateHash=Hash (Join-Path $PSScriptRoot 'publish-captured-facts-source.sh')
 $localBindings=[ordered]@{nonce=$nonce;operator_sha256=(Hash $PSCommandPath);stock_baseline_sha256=(Hash $StockBaselinePath);
- expected_sha256=$expectedHash;payload_sha256=$payloadHash;publisher_sha256=$publisherHash;proof_sha256=(Hash $proofPath);budget_sha256=(Hash $budgetPath);capture_publisher_sha256=$capturePublisherHash;build_config_sha256=(Hash $BuildConfigPath);sdk_source='f0e6ff4ccb37b887f7f278b0b820a7d047de1559';developmentCaptureObservation=$true;facts_recipe_template_sha256=$factsRecipeTemplateHash;capture_proof_sha256=(Hash (Join-Path $PSScriptRoot 'capture-observation-proof.ps1'));capture_collector_sha256=(Hash (Join-Path $PSScriptRoot 'capture-observation-collector.ps1'));files=$files}
+ expected_sha256=$expectedHash;payload_sha256=$payloadHash;publisher_sha256=$publisherHash;proof_sha256=(Hash $proofPath);budget_sha256=(Hash $budgetPath);capture_publisher_sha256=$capturePublisherHash;build_config_sha256=(Hash $BuildConfigPath);sdk_source='1d221d73c8e2a2a19bfb2d1b37c09bca41d554ed';developmentCaptureObservation=$true;facts_recipe_template_sha256=$factsRecipeTemplateHash;capture_proof_sha256=(Hash (Join-Path $PSScriptRoot 'capture-observation-proof.ps1'));capture_owner_proof_sha256=(Hash (Join-Path $PSScriptRoot 'capture-owner-refusal-proof.ps1'));capture_owner_collector_sha256=(Hash (Join-Path $PSScriptRoot 'capture-owner-refusal-collector.ps1'));capture_collector_sha256=(Hash (Join-Path $PSScriptRoot 'capture-observation-collector.ps1'));files=$files}
 [void](Freeze 'packet-bindings.json' ($localBindings|ConvertTo-Json -Depth 5))
 if($PrepareOnly){$localBindings|ConvertTo-Json -Depth 5;return}
 # Main alone executes after independent artifact/operator review and advance notice.
-$record=[ordered]@{nonce=$nonce;experiment='development-capture-before-facts';payload_source='f0e6ff4ccb37b887f7f278b0b820a7d047de1559';publisher_source='unselected-consumer-source-checkpoint';bindings=$localBindings;budget=$budget;results=@();arm_intent=$false;armed=$false;callback_verified=$false;candidate_generation_verified=$false;facts_verified=$false;candidate_receipt=$null;restored=$false;cleanup_verified=$false;live_diagnostics_collected=$false;live_diagnostics_sha256=$null;gate_evidence=@{};diagnostic_collected=$false;diagnostic_sha256=$null;final_callback_state='not-checked';final_callback_collected=$false;final_callback_sha256=$null;live_observation_ms=$null;capture_verified=$false;capture_completion_saved_copy_verified=$false;capture_png_saved_copy_verified=$false;capture_request_saved_copy_verified=$false;capture_visual_saved_copy_verified=$false;capture_visual_saved_copy_sha256=$null;live_refusal=$null;live_refusal_callback_match=$false;final_refusal=$null;final_refusal_callback_match=$false}
+$record=[ordered]@{nonce=$nonce;experiment='development-capture-before-facts';payload_source='1d221d73c8e2a2a19bfb2d1b37c09bca41d554ed';publisher_source='unselected-consumer-source-checkpoint';bindings=$localBindings;budget=$budget;results=@();arm_intent=$false;armed=$false;callback_verified=$false;candidate_generation_verified=$false;facts_verified=$false;candidate_receipt=$null;restored=$false;cleanup_verified=$false;live_diagnostics_collected=$false;live_diagnostics_sha256=$null;gate_evidence=@{};diagnostic_collected=$false;diagnostic_sha256=$null;final_callback_state='not-checked';final_callback_collected=$false;final_callback_sha256=$null;live_observation_ms=$null;capture_verified=$false;capture_completion_saved_copy_verified=$false;capture_png_saved_copy_verified=$false;capture_request_saved_copy_verified=$false;capture_visual_saved_copy_verified=$false;capture_visual_saved_copy_sha256=$null;live_refusal=$null;live_refusal_callback_match=$false;final_refusal=$null;final_refusal_callback_match=$false}
 function Native([string]$program,[string[]]$arguments,[int]$timeoutMs=10000){
     if($program -ceq 'scp'){$timeoutMs=[int][Math]::Min(5000,$timeoutMs)}
     $info=[Diagnostics.ProcessStartInfo]::new();$info.FileName=$program;$info.UseShellExecute=$false
@@ -138,6 +140,12 @@ mkdir -m700 '@ROOT@'
     Require (Native 'scp' @('-o','HostName=10.11.99.1','-o','StrictHostKeyChecking=yes','-o','BatchMode=yes','-o','ConnectTimeout=8',$CapturePublisherPath,('RM2:'+$remote+'/capture-publisher')))
     Require (SSH ("set -eu; test `"`$(sha256sum '$remote/capture-publisher' | awk '{print `$1}')`" = '$capturePublisherHash'; chmod 700 '$remote/capture-publisher'"))
     foreach($name in $files.Keys){Require (SSH ("set -eu; test `"`$(sha256sum '$remote/$name' | awk '{print `$1}')`" = '$($files[$name])'; chmod 600 '$remote/$name'"))}
+    # Retain the original private root identity before any candidate is armed.
+    $originalRoot=SSH ("set -eu; test -d '$remote' && test ! -L '$remote'; test `"`$(stat -c '%a %u' '$remote')`" = '700 0'; test `"`$(cat '$remote/owner')`" = '$nonce'; stat -c '%d %i' '$remote'")
+    Require $originalRoot
+    if($originalRoot.stdout -cnotmatch '\A([1-9][0-9]{0,19}) ([1-9][0-9]{0,19})\n\z'){throw 'Original root identity refused'}
+    $originalRootDevice=$Matches[1];$originalRootInode=$Matches[2]
+    $record.original_root_device=$originalRootDevice;$record.original_root_inode=$originalRootInode
     # Observation admission budget starts before arming. Recovery and final
     # evidence collection keep their separate mandatory duty after this cutoff.
     $observationClock=[Diagnostics.Stopwatch]::StartNew()
@@ -367,6 +375,14 @@ fi
             $attemptText=[IO.File]::ReadAllText((Join-Path $packet 'attempt.identity'))
             if($attemptText -cnotmatch '^([1-9][0-9]*) ([1-9][0-9]*)\n$'){throw 'Final attempted identity refused'}
             $attemptPid=[long]$Matches[1];$attemptStart=$Matches[2]
+            $ownerIdentity=[pscustomobject]@{attempt_pid=$attemptPid.ToString([Globalization.CultureInfo]::InvariantCulture);attempt_start=$attemptStart;root_device=$originalRootDevice;root_inode=$originalRootInode}
+            # Independent historical preservation after restoration, even when
+            # capture completion never appeared. No live admission flags change.
+            Receive-CaptureOwnerRefusalEvidence $remote $nonce $ownerIdentity $packet $record {
+                param($command)
+                $restoreGuard="/bin/sh '$remote/restore.sh' --verify >/dev/null"
+                SSH ("set -eu; $restoreGuard`n"+$command+"`n"+$restoreGuard)
+            } {param($remotePath,$localPath)Native 'scp' @('-o','HostName=10.11.99.1','-o','StrictHostKeyChecking=yes','-o','BatchMode=yes','-o','ConnectTimeout=8',('RM2:'+$remotePath),$localPath)}
             $finalTransport=SSH (Expand (Get-FactsRefusalReadCommand))
             $record.final_refusal=Save-FactsRefusalEvidence $finalTransport (Join-Path $packet 'refusal-final.json') $nonce $attemptPid $attemptStart
             $finalRefusalCallback=$null
@@ -401,7 +417,7 @@ done
 test ! -e '/run/systemd/transient/@UNIT@.timer'
 test ! -e '/run/systemd/transient/@UNIT@.service'
 test ! -e '/run/systemd/system/xochitl.service.d/zz-rmb-qt-probe-@NONCE@.conf'
-for name in payload.so launch.sh restore.sh native-probe.conf owner dropin.sha256 callback.json attempt.claim attempt.identity restore.claim restored parent.signature admission.lock entry.closed restore.failure verification.first-refusal diagnostics.json refusal.json facts-publisher capture-publisher check-waiting.sh publish-captured-facts-source.sh publish-capture-observation-source.sh facts-waiting facts-request facts-request.tmp capture-observation-request capture-observation-request.tmp capture-observation-complete.json capture-window.png capture-visual-review.json; do rm -f '@ROOT@/'"$name"; done
+for name in payload.so launch.sh restore.sh native-probe.conf owner dropin.sha256 callback.json attempt.claim attempt.identity restore.claim restored parent.signature admission.lock entry.closed restore.failure verification.first-refusal diagnostics.json refusal.json facts-publisher capture-publisher check-waiting.sh publish-captured-facts-source.sh publish-capture-observation-source.sh facts-waiting facts-request facts-request.tmp capture-observation-request capture-observation-request.tmp capture-observation-complete.json capture-window.png capture-visual-review.json capture-owner-refusal.json; do rm -f '@ROOT@/'"$name"; done
 rmdir '@ROOT@'
 test ! -e '@ROOT@'
 systemctl is-active xochitl.service reader-buddy.service rm-sync.service

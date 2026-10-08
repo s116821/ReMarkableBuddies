@@ -31,11 +31,11 @@ $remote='/run/rmb-qt-probe-'+$nonce
 function Expand([string]$text){$text.Replace('@ROOT@',$remote)}
 function Hash([string]$path){(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()}
 try{
-    foreach($case in @('absent','unknown-image','unknown-json')){
+    foreach($case in @('absent','unknown-image','unknown-json','unknown-owner')){
         $record=[ordered]@{restored=$true;cleanup_verified=$false};$cleanupCalls=0
         function SSH([string]$command){
             if($command.Contains('rmdir ')){$script:cleanupCalls++;return @{exit=0;timeout=$false;stdout=''}}
-            if(($case -ceq 'unknown-image' -and $command.Contains('capture-window.png')) -or ($case -ceq 'unknown-json' -and $command.Contains('capture-observation-complete.json'))){return @{exit=1;timeout=$true;stdout=''}}
+            if(($case -ceq 'unknown-owner' -and $command.Contains('capture-owner-refusal.json')) -or ($case -ceq 'unknown-image' -and $command.Contains('capture-window.png')) -or ($case -ceq 'unknown-json' -and $command.Contains('capture-observation-complete.json'))){return @{exit=1;timeout=$true;stdout=''}}
             return @{exit=0;timeout=$false;stdout="absent`n"}
         }
         $refused=$false;try{. $cleanup}catch{$refused=$true}
@@ -50,6 +50,21 @@ try{
         switch($case){'wrong-document'{$diagnostics.document_id=$expected.order[0]};'wrong-page'{$diagnostics.current_page_id=$expected.order[1]};'wrong-index'{$diagnostics.current_index=1}}
         . $admit;Check ($record.facts_verified -eq ($case -ceq 'good')) "$case final facts agreement"
     }
+    # Execute the actual historical collection block with the real decoder and
+    # collector. Transport is mocked; no target operation is dispatched.
+    . "$PSScriptRoot/capture-owner-refusal-proof.ps1"
+    . "$PSScriptRoot/capture-owner-refusal-collector.ps1"
+    $begin=$source.IndexOf('            $ownerIdentity=');$end=$source.IndexOf('            $finalTransport=', $begin)
+    $historical=[scriptblock]::Create($source.Substring($begin,$end-$begin))
+    $attemptPid=[long]1234;$attemptStart='5678';$originalRootDevice='11';$originalRootInode='22'
+    $record=[ordered]@{capture_verified=$false;facts_verified=$false};$historicalReads=0
+    function SSH([string]$command){
+        $script:historicalReads++
+        Check ($command.Contains("/bin/sh '$remote/restore.sh' --verify >/dev/null") -and $command.Contains("11 22 700 0") -and $command.Contains("1234 5678")) 'actual historical restored original guards'
+        return @{exit=0;timeout=$false;stdout="absent`n"}
+    }
+    . $historical
+    Check ($historicalReads -eq 1 -and $record.capture_owner_refusal_state -ceq 'absent' -and -not $record.capture_verified -and -not $record.facts_verified) 'actual historical absent collection independent of completion'
     Write-Output "PASS capture source integration: $count checks (mocked source path only)"
 }finally{
     $resolved=[IO.Path]::GetFullPath($packet);$prefix=[IO.Path]::GetFullPath([IO.Path]::GetTempPath())
