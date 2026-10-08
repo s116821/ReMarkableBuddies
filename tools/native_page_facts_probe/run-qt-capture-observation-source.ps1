@@ -29,6 +29,7 @@ if((Hash $refusalProofPath) -cne '44c786488a88fb249501bbcc0361fe53b561f9b5ac33e8
 . "$PSScriptRoot/capture-observation-collector.ps1"
 . "$PSScriptRoot/capture-owner-refusal-proof.ps1"
 . "$PSScriptRoot/capture-owner-refusal-collector.ps1"
+. "$PSScriptRoot/capture-request-history-collector.ps1"
 . "$PSScriptRoot/capture-observation-build-config.ps1"
 $budget=Get-FactsDevelopmentBudget
 if((Hash $PayloadPath) -cne $payloadHash -or (Hash $PublisherPath) -cne $publisherHash -or (Hash $ExpectedPath) -cne $expectedHash -or (Hash $StockBaselinePath) -cne $stockBaselineHash){throw 'Frozen candidate input changed'}
@@ -70,7 +71,7 @@ $files['dropin.sha256']=Freeze 'dropin.sha256' $files['native-probe.conf']
 # review, with a literal local visual SHA. It is not pre-enabled/transferred here.
 $factsRecipeTemplateHash=Hash (Join-Path $PSScriptRoot 'publish-captured-facts-source.sh')
 $localBindings=[ordered]@{nonce=$nonce;operator_sha256=(Hash $PSCommandPath);stock_baseline_sha256=(Hash $StockBaselinePath);
- expected_sha256=$expectedHash;payload_sha256=$payloadHash;publisher_sha256=$publisherHash;proof_sha256=(Hash $proofPath);budget_sha256=(Hash $budgetPath);capture_publisher_sha256=$capturePublisherHash;build_config_sha256=(Hash $BuildConfigPath);sdk_source='1d221d73c8e2a2a19bfb2d1b37c09bca41d554ed';developmentCaptureObservation=$true;facts_recipe_template_sha256=$factsRecipeTemplateHash;capture_proof_sha256=(Hash (Join-Path $PSScriptRoot 'capture-observation-proof.ps1'));capture_owner_proof_sha256=(Hash (Join-Path $PSScriptRoot 'capture-owner-refusal-proof.ps1'));capture_owner_collector_sha256=(Hash (Join-Path $PSScriptRoot 'capture-owner-refusal-collector.ps1'));capture_collector_sha256=(Hash (Join-Path $PSScriptRoot 'capture-observation-collector.ps1'));files=$files}
+ expected_sha256=$expectedHash;payload_sha256=$payloadHash;publisher_sha256=$publisherHash;proof_sha256=(Hash $proofPath);budget_sha256=(Hash $budgetPath);capture_publisher_sha256=$capturePublisherHash;build_config_sha256=(Hash $BuildConfigPath);sdk_source='1d221d73c8e2a2a19bfb2d1b37c09bca41d554ed';developmentCaptureObservation=$true;facts_recipe_template_sha256=$factsRecipeTemplateHash;capture_proof_sha256=(Hash (Join-Path $PSScriptRoot 'capture-observation-proof.ps1'));capture_request_history_collector_sha256=(Hash (Join-Path $PSScriptRoot 'capture-request-history-collector.ps1'));capture_owner_proof_sha256=(Hash (Join-Path $PSScriptRoot 'capture-owner-refusal-proof.ps1'));capture_owner_collector_sha256=(Hash (Join-Path $PSScriptRoot 'capture-owner-refusal-collector.ps1'));capture_collector_sha256=(Hash (Join-Path $PSScriptRoot 'capture-observation-collector.ps1'));files=$files}
 [void](Freeze 'packet-bindings.json' ($localBindings|ConvertTo-Json -Depth 5))
 if($PrepareOnly){$localBindings|ConvertTo-Json -Depth 5;return}
 # Main alone executes after independent artifact/operator review and advance notice.
@@ -376,6 +377,11 @@ fi
             if($attemptText -cnotmatch '^([1-9][0-9]*) ([1-9][0-9]*)\n$'){throw 'Final attempted identity refused'}
             $attemptPid=[long]$Matches[1];$attemptStart=$Matches[2]
             $ownerIdentity=[pscustomobject]@{attempt_pid=$attemptPid.ToString([Globalization.CultureInfo]::InvariantCulture);attempt_start=$attemptStart;root_device=$originalRootDevice;root_inode=$originalRootInode}
+            Receive-CaptureRequestHistory $remote $nonce $ownerIdentity $packet $record {
+                param($command)
+                $restoreGuard="/bin/sh '$remote/restore.sh' --verify >/dev/null"
+                SSH ("set -eu; $restoreGuard`n"+$command+"`n"+$restoreGuard)
+            } {param($remotePath,$localPath)Native 'scp' @('-o','HostName=10.11.99.1','-o','StrictHostKeyChecking=yes','-o','BatchMode=yes','-o','ConnectTimeout=8',('RM2:'+$remotePath),$localPath)}
             # Independent historical preservation after restoration, even when
             # capture completion never appeared. No live admission flags change.
             Receive-CaptureOwnerRefusalEvidence $remote $nonce $ownerIdentity $packet $record {

@@ -88,7 +88,7 @@ function Test-CapturePreserved([string]$Root,[string]$Packet,[Collections.IDicti
         @{name='capture-window.png';local='capture-window.png';cap=8388608;flag='capture_png_saved_copy_verified';sha='capture_png_saved_copy_sha256'},
         @{name='capture-observation-complete.json';local='capture-observation-complete.json';cap=8192;flag='capture_completion_saved_copy_verified';sha='capture_completion_saved_copy_sha256'},
         @{name='capture-observation-request';local='capture-observation-request';cap=256;flag='capture_request_saved_copy_verified';sha='capture_request_saved_copy_sha256'},
-        @{name='capture-observation-request.tmp';local='capture-observation-request';cap=256;flag='capture_request_saved_copy_verified';sha='capture_request_saved_copy_sha256'},
+        @{name='capture-observation-request.tmp';local='capture-observation-request.tmp';cap=256;flag='capture_request_tmp_saved_copy_verified';sha='capture_request_tmp_saved_copy_sha256'},
         @{name='capture-visual-review.json';local='capture-visual-review.json';cap=4096;flag='capture_visual_saved_copy_verified';sha='capture_visual_saved_copy_sha256'},
         @{name='publish-captured-facts-source.sh';local='publish-captured-facts-source.sh';cap=4096;flag='capture_facts_recipe_saved_copy_verified';sha='capture_facts_recipe_saved_copy_sha256'})){
         $remote=$Root+'/'+$item.name
@@ -97,6 +97,10 @@ function Test-CapturePreserved([string]$Root,[string]$Packet,[Collections.IDicti
         if($metadata.stdout -ceq "absent`n"){continue}
         if($metadata.stdout -cnotmatch '\Apresent (0|[1-9][0-9]{0,6}) ([0-9a-f]{64})\n\z'){return $false}
         $bytes=[long]$Matches[1];$sha=$Matches[2];$path=Join-Path $Packet $item.local
+        if($item.name -cin @('capture-observation-request','capture-observation-request.tmp')){
+            $prefix=$(if($item.name -ceq 'capture-observation-request'){'capture_request'}else{'capture_request_tmp'})
+            if($Record.Contains($prefix+'_history_binding_verified') -and -not $Record[$prefix+'_history_binding_verified']){return $false}
+        }
         if($bytes -eq 0 -and $item.name -cne 'capture-owner-refusal.json'){return $false}
         if(-not $Record[$item.flag] -or $Record[$item.sha] -cne $sha -or -not(Test-Path -LiteralPath $path -PathType Leaf) -or (Get-Item -LiteralPath $path).Length -ne $bytes -or (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $sha){return $false}
     }

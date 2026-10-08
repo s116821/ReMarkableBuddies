@@ -36,5 +36,30 @@ Validation on 2026-10-07:
   original-identity collection without a completion and unknown-output cleanup
   refusal.
 
-These are host/mocked source results. Independent consumer review and native
-qualification remain open. The operator is an unselected source template.
+Main independently accepted consumer0860464; Astra independently accepted
+SDK117fd0e. Native qualification remains open. The operator is a source template.
+
+## Integrated restored request closeout extension
+
+Main accepted Docs5843ad8 before this bounded follow-up. The original live
+collector still requires completion before copying a request. The new historical
+collector independently preserves request and temporary request after restoration
+under original root/PID/start, owner nonce and attempted-process-gone guards. The
+operator supplies quiet restore verification before/after every metadata read.
+File size/hash/device/inode are bound before/copy/after; each local path is
+exclusive, and a previously verified exact canonical request can be reused.
+
+Complete verified raw copy knowledge survives later binding failure. Current
+binding eligibility is tracked separately and prevents cleanup after that failure.
+Only exact computed canonical tuple bytes can acquire request closeout flags.
+Malformed/partial bytes are saved historically but retain the stage. Temporary
+request has a separate local filename/flag/hash; it cannot borrow the consumed
+request's evidence. Capture/facts admission and all binary/clock logic are unchanged.
+
+Focused historical collector86 and actual source integration28 mocked checks
+passed, including no-PNG refusal closeout, both request names, successful-copy
+reuse, foreign local paths, malformed/empty/partial/wrong identities, differing
+temporary bytes, noisy/unknown/replaced metadata and copy/later binding loss.
+Owner292 and existing collector40 still pass. Independent extension source review
+remains pending; the original 51-file dce preparation remains held until the
+affected source/packet bindings are independently refreshed and reviewed.

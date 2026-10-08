@@ -54,6 +54,7 @@ try{
     # collector. Transport is mocked; no target operation is dispatched.
     . "$PSScriptRoot/capture-owner-refusal-proof.ps1"
     . "$PSScriptRoot/capture-owner-refusal-collector.ps1"
+    . "$PSScriptRoot/capture-request-history-collector.ps1"
     $begin=$source.IndexOf('            $ownerIdentity=');$end=$source.IndexOf('            $finalTransport=', $begin)
     $historical=[scriptblock]::Create($source.Substring($begin,$end-$begin))
     $attemptPid=[long]1234;$attemptStart='5678';$originalRootDevice='11';$originalRootInode='22'
@@ -64,7 +65,31 @@ try{
         return @{exit=0;timeout=$false;stdout="absent`n"}
     }
     . $historical
-    Check ($historicalReads -eq 1 -and $record.capture_owner_refusal_state -ceq 'absent' -and -not $record.capture_verified -and -not $record.facts_verified) 'actual historical absent collection independent of completion'
+    Check ($historicalReads -eq 3 -and $record.capture_owner_refusal_state -ceq 'absent' -and -not $record.capture_verified -and -not $record.facts_verified) 'actual historical absent collection independent of completion'
+    $record=[ordered]@{capture_verified=$false;facts_verified=$false;restored=$true;cleanup_verified=$false};$cleanupCalls=0;$historicalCopies=0
+    $historicalCanonical="$nonce 1234 5678 11 22 capture-observation 120000 main-dev-facts-120s`n"
+    $historicalBytes=[Text.Encoding]::UTF8.GetBytes($historicalCanonical)
+    $historicalSha=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($historicalBytes)).ToLowerInvariant()
+    function SSH([string]$command){
+        if($command.Contains('rmdir ')){$script:cleanupCalls++;return @{exit=0;timeout=$false;stdout=''}}
+        if($command.Contains('capture-observation-request')){
+            if($command.Contains('current_start=')){
+                Check ([regex]::Matches($command,'--verify >/dev/null').Count -eq 2 -and $command.Contains("11 22 700 0") -and $command.Contains("1234 5678")) 'actual history quiet restore/root/attempt guards before and after'
+                return @{exit=0;timeout=$false;stdout="present $($historicalBytes.Length) $historicalSha 11 99`n"}
+            }
+            return @{exit=0;timeout=$false;stdout="present $($historicalBytes.Length) $historicalSha`n"}
+        }
+        return @{exit=0;timeout=$false;stdout="absent`n"}
+    }
+    function Native([string]$program,[string[]]$arguments){
+        Check ($program -ceq 'scp' -and $arguments[-2].StartsWith('RM2:/run/rmb-qt-probe-')) 'actual history bounded copy path'
+        $script:historicalCopies++;[IO.File]::WriteAllBytes($arguments[-1],$historicalBytes)
+        return @{exit=0;timeout=$false;stdout=''}
+    }
+    . $historical
+    Check ($historicalCopies -eq 2 -and $record.capture_request_saved_copy_verified -and $record.capture_request_tmp_saved_copy_verified -and $record.capture_request_history_binding_verified -and $record.capture_request_tmp_history_binding_verified) 'actual no PNG request and tmp copies known separately'
+    . $cleanup
+    Check ($cleanupCalls -eq 1 -and -not $record.capture_verified -and -not $record.facts_verified -and -not(Test-Path -LiteralPath (Join-Path $packet 'capture-window.png'))) 'actual owner refusal closeout dispatch without image or admission'
     Write-Output "PASS capture source integration: $count checks (mocked source path only)"
 }finally{
     $resolved=[IO.Path]::GetFullPath($packet);$prefix=[IO.Path]::GetFullPath([IO.Path]::GetTempPath())
