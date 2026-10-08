@@ -1,4 +1,5 @@
 # Restored historical preservation only; this never grants capture/facts admission.
+. "$PSScriptRoot/capture-historical-transport.ps1"
 function Receive-CaptureRequestHistory([string]$Root,[string]$Nonce,$Identity,[string]$Packet,[Collections.IDictionary]$Record,[scriptblock]$Read,[scriptblock]$Copy) {
     if($Nonce -cnotmatch '\A[0-9a-f]{32}\z' -or $Root -cne ('/run/rmb-qt-probe-'+$Nonce)){throw 'Historical request root refused'}
     foreach($name in @('attempt_pid','attempt_start','root_device','root_inode')){
@@ -58,9 +59,8 @@ fi
         if(Test-Path -LiteralPath $path){
             if(-not $Record[$flag] -or $Record[$shaFlag] -cne $expectedSha -or $expectedSha -cne $canonicalSha -or -not(Test-Path -LiteralPath $path -PathType Leaf) -or (Get-Item -LiteralPath $path).Length -ne $canonicalBytes.Length -or (Get-FileHash -LiteralPath $path).Hash.ToLowerInvariant() -cne $canonicalSha){throw 'Historical request local path cannot be overwritten'}
         }else{
-            $copyDirectory=Join-Path $Packet ('request-history-copy-'+[Guid]::NewGuid().ToString('N'))
-            [void](New-Item -ItemType Directory -Path $copyDirectory -ErrorAction Stop)
-            $copyPath=Join-Path $copyDirectory 'returned-bytes'
+            $copyPath=New-CaptureHistoricalTransportPath
+            $Record[$item.prefix+'_history_transport_path']=$copyPath
             $copied=& $Copy ($Root+'/'+$item.name) $copyPath
             if($copied.timeout -or $copied.exit -ne 0 -or -not(Test-Path -LiteralPath $copyPath -PathType Leaf) -or (Get-Item -LiteralPath $copyPath).Length -ne $expectedBytes -or (Get-FileHash -LiteralPath $copyPath).Hash.ToLowerInvariant() -cne $expectedSha){throw 'Historical request copy unknown; retain stage'}
             $bytes=[IO.File]::ReadAllBytes($copyPath)

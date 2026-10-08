@@ -9,6 +9,8 @@ function Check([bool]$ok,[string]$name){if(-not $ok){throw "FAIL $name"};$script
 function Digest([byte[]]$value){[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($value)).ToLowerInvariant()}
 $base=Join-Path ([IO.Path]::GetTempPath()) ('request-history-'+[Guid]::NewGuid().ToString('N'))
 [void](New-Item -ItemType Directory -Path $base)
+$testTransportAllocator=${function:New-CaptureHistoricalTransportPath}
+function New-CaptureHistoricalTransportPath { & $testTransportAllocator $base }
 try{
  foreach($case in @('refusal-no-png','both','tmp-only','absent','known-request','foreign-local','empty','malformed','partial','wrong-identity','different-tmp','read-timeout','copy-timeout','copy-truncated','later-loss','replaced','noisy')){
     $packet=Join-Path $base $case;[void](New-Item -ItemType Directory -Path $packet)

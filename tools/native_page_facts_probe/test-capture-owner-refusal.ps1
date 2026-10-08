@@ -72,6 +72,8 @@ foreach($role in $members.Keys){foreach($member in $members[$role]){foreach($fai
 }}}
 $base=Join-Path ([IO.Path]::GetTempPath()) ('owner-refusal-'+[Guid]::NewGuid().ToString('N'))
 [void](New-Item -ItemType Directory -Path $base)
+$testTransportAllocator=${function:New-CaptureHistoricalTransportPath}
+function New-CaptureHistoricalTransportPath { & $testTransportAllocator $base }
 try {
  foreach($case in @('valid','malformed','empty','absent','read-timeout','copy-timeout','later-loss')){
     $packet=Join-Path $base $case;[void](New-Item -ItemType Directory -Path $packet)

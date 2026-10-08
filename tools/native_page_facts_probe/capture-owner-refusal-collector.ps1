@@ -1,4 +1,5 @@
 # Historical collection only; Main supplies bounded transports and restore guards.
+. "$PSScriptRoot/capture-historical-transport.ps1"
 function Receive-CaptureOwnerRefusalEvidence([string]$Root,[string]$Nonce,$Identity,[string]$Packet,[Collections.IDictionary]$Record,[scriptblock]$Read,[scriptblock]$Copy) {
     if($Nonce -cnotmatch '\A[0-9a-f]{32}\z' -or $Root -cne ('/run/rmb-qt-probe-'+$Nonce)){throw 'Owner refusal root refused'}
     foreach($name in @('attempt_pid','attempt_start','root_device','root_inode')){
@@ -42,9 +43,8 @@ fi
     if($expectedBytes -gt 8192){throw 'Owner refusal exceeds fixed bound'}
     $path=Join-Path $Packet 'capture-owner-refusal.json'
     if(Test-Path -LiteralPath $path){throw 'Owner refusal saved path already exists'}
-    $copyDirectory=Join-Path $Packet ('owner-refusal-copy-'+[Guid]::NewGuid().ToString('N'))
-    [void](New-Item -ItemType Directory -Path $copyDirectory -ErrorAction Stop)
-    $copyPath=Join-Path $copyDirectory 'returned-bytes'
+    $copyPath=New-CaptureHistoricalTransportPath
+    $Record.capture_owner_refusal_transport_path=$copyPath
     $copied=& $Copy ($Root+'/capture-owner-refusal.json') $copyPath
     if($copied.timeout -or $copied.exit -ne 0 -or -not(Test-Path -LiteralPath $copyPath -PathType Leaf) -or (Get-Item -LiteralPath $copyPath).Length -ne $expectedBytes -or (Get-FileHash -LiteralPath $copyPath).Hash.ToLowerInvariant() -cne $expectedSha){throw 'Owner refusal copy unknown; retain stage'}
     $returnedBytes=[IO.File]::ReadAllBytes($copyPath)

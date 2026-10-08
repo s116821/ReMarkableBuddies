@@ -55,6 +55,8 @@ try{
     . "$PSScriptRoot/capture-owner-refusal-proof.ps1"
     . "$PSScriptRoot/capture-owner-refusal-collector.ps1"
     . "$PSScriptRoot/capture-request-history-collector.ps1"
+    $testTransportAllocator=${function:New-CaptureHistoricalTransportPath}
+    function New-CaptureHistoricalTransportPath { & $testTransportAllocator $packet }
     $begin=$source.IndexOf('            $ownerIdentity=');$end=$source.IndexOf('            $finalTransport=', $begin)
     $historical=[scriptblock]::Create($source.Substring($begin,$end-$begin))
     $attemptPid=[long]1234;$attemptStart='5678';$originalRootDevice='11';$originalRootInode='22'
