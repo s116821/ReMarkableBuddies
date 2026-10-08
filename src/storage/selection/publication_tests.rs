@@ -1199,6 +1199,198 @@ fn selected_snapshot_preserves_exact_noncanonical_refs_and_reference_order() {
 }
 
 #[test]
+fn selected_predecessor_is_exact_original_history_after_replacement_and_reopen() {
+    let f = Fixture::new();
+    let store = f.store();
+    let s = scope();
+    let base = initialize(&store, &s, &[record(&store)]);
+    let next = edit(&selected(&store, &s).selected_records[0]);
+    let original = store
+        .commit_selected(&base.token, Uuid::new_v4(), vec![next], BTreeMap::new())
+        .unwrap();
+    let parent = store
+        .selected_predecessor(&s, original.transaction.operation)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&parent).unwrap(),
+        serde_json::to_value(&base.transaction).unwrap()
+    );
+    let (replacement, objects) = change(&[record(&store)]);
+    let replacement = store
+        .activate_selected(&original.token, replacement, objects)
+        .unwrap();
+    let other_scope = scope();
+    initialize(&store, &other_scope, &[record(&store)]);
+    let current = fs::read(store.paths.data.join("CURRENT")).unwrap();
+    assert!(store
+        .selected_predecessor(&s, Uuid::new_v4())
+        .unwrap()
+        .is_none());
+    assert!(store
+        .selected_predecessor(&other_scope, original.transaction.operation)
+        .unwrap()
+        .is_none());
+    assert!(store
+        .selected_predecessor(&scope(), original.transaction.operation)
+        .unwrap()
+        .is_none());
+    assert!(store.selected_predecessor(&s, Uuid::nil()).is_err());
+    assert!(store
+        .selected_predecessor(&s, base.transaction.operation)
+        .is_err());
+    let parent = store
+        .selected_predecessor(&s, original.transaction.operation)
+        .unwrap()
+        .unwrap();
+    assert_eq!(parent.operation, base.transaction.operation);
+    assert_ne!(
+        parent.aggregate_generation,
+        replacement.transaction.aggregate_generation
+    );
+    assert_eq!(selected(&store, &s).token, replacement.token);
+    assert_eq!(fs::read(store.paths.data.join("CURRENT")).unwrap(), current);
+    drop(store);
+    let reopened = f.store();
+    assert_eq!(
+        reopened
+            .selected_predecessor(&s, original.transaction.operation)
+            .unwrap()
+            .unwrap()
+            .operation,
+        base.transaction.operation
+    );
+    assert_eq!(selected(&reopened, &s).token, replacement.token);
+}
+
+#[test]
+fn selected_predecessor_validates_retained_media_and_preserves_original_operation_link() {
+    let f = Fixture::new();
+    let store = f.store();
+    let s = scope();
+    let (original, replacement, intent, reference) = retained_fixture(&store, &s);
+    let (manifest, objects) = closure(&[intent.clone(), edit(&intent)], BTreeMap::new());
+    let settled = store
+        .commit_retained(
+            &replacement.token,
+            RetainedCommit {
+                operation: Uuid::new_v4(),
+                original_operation: original.transaction.operation,
+                intent: reference,
+                retained: vec![manifest],
+            },
+            objects,
+        )
+        .unwrap();
+    let before = selected(&store, &s).token;
+    let parent = store
+        .selected_predecessor(&s, settled.transaction.operation)
+        .unwrap()
+        .unwrap();
+    assert_eq!(parent.operation, replacement.transaction.operation);
+    assert_eq!(
+        serde_json::to_value(&parent).unwrap(),
+        serde_json::to_value(&replacement.transaction).unwrap()
+    );
+    let media = &intent.media_descriptors[0];
+    assert!(parent
+        .retained
+        .iter()
+        .any(|m| m.media.iter().any(|r| r.sha256 == media.sha256)));
+    let root = store.generation(before.store_generation());
+    fs::remove_file(root.join("objects").join(&media.sha256)).unwrap();
+    assert!(store
+        .selected_predecessor(&s, settled.transaction.operation)
+        .is_err());
+    assert_eq!(
+        files::json::<SelectionTransaction>(
+            &root.join("selections").join(s.filename().unwrap()),
+            MAX_METADATA as u64
+        )
+        .unwrap()
+        .operation,
+        settled.transaction.operation
+    );
+}
+
+#[test]
+fn selected_predecessor_refuses_corrupt_missing_foreign_and_unavailable_parent_closure() {
+    for case in 0..7 {
+        let f = Fixture::new();
+        let store = f.store();
+        let s = scope();
+        let base = initialize(&store, &s, &[record(&store)]);
+        let original = if case == 5 {
+            // The original's winner deliberately excludes its parent's object,
+            // proving that the lookup validates the parent closure separately.
+            let (replacement, objects) = change(&[record(&store)]);
+            store
+                .activate_selected(&base.token, replacement, objects)
+                .unwrap()
+        } else {
+            store
+                .commit_selected(
+                    &base.token,
+                    Uuid::new_v4(),
+                    vec![record(&store)],
+                    BTreeMap::new(),
+                )
+                .unwrap()
+        };
+        let root = store.generation(original.token.store_generation());
+        let head_path = root.join("selections").join(s.filename().unwrap());
+        let previous = original.transaction.previous_sha256.as_ref().unwrap();
+        let path = root.join("selection-history").join(previous);
+        match case {
+            0 => fs::remove_file(&path).unwrap(),
+            1 => fs::write(&path, b"corrupt").unwrap(),
+            2..=4 => {
+                let mut parent = base.transaction.clone();
+                match case {
+                    2 => parent.scope = scope(),
+                    3 => parent.store_generation = Uuid::new_v4(),
+                    4 => parent.operation = original.transaction.operation,
+                    _ => unreachable!(),
+                }
+                let bytes = serde_json::to_vec(&parent).unwrap();
+                let hash = digest(&bytes);
+                fs::write(root.join("selection-history").join(&hash), bytes).unwrap();
+                let mut head = original.transaction.clone();
+                head.previous_sha256 = Some(hash);
+                files::atomic_json(&head_path, &head).unwrap();
+            }
+            5 => fs::remove_file(
+                root.join("objects")
+                    .join(&base.transaction.selected.records[0].sha256),
+            )
+            .unwrap(),
+            6 => fs::remove_file(
+                root.join("objects")
+                    .join(&original.transaction.selected.records.last().unwrap().sha256),
+            )
+            .unwrap(),
+            _ => unreachable!(),
+        }
+        let current = fs::read(store.paths.data.join("CURRENT")).unwrap();
+        let head = fs::read(&head_path).unwrap();
+        if case == 5 {
+            assert!(store
+                .selected_receipt(&s, original.transaction.operation)
+                .unwrap()
+                .is_some());
+        }
+        assert!(
+            store
+                .selected_predecessor(&s, original.transaction.operation)
+                .is_err(),
+            "case{case}"
+        );
+        assert_eq!(fs::read(store.paths.data.join("CURRENT")).unwrap(), current);
+        assert_eq!(fs::read(&head_path).unwrap(), head);
+    }
+}
+
+#[test]
 fn retained_settlement_racing_activation_cannot_use_one_token_twice() {
     let f = Fixture::new();
     let store = Arc::new(f.store());

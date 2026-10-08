@@ -228,6 +228,45 @@ impl Store {
         }
         Ok(original)
     }
+    /// Read the immediate predecessor of an exact accepted original operation.
+    /// Returns historical evidence only: no token, membership mutation or wake.
+    /// An absent scope/operation returns None. A known first publication without
+    /// a predecessor, corrupt/foreign history, or unavailable original/parent
+    /// closure refuses. Later replacements never substitute their current head.
+    pub fn selected_predecessor(
+        &self,
+        scope: &SelectionScope,
+        original_operation: Uuid,
+    ) -> Result<Option<SelectionTransaction>> {
+        scope.validate()?;
+        ensure!(
+            !original_operation.is_nil(),
+            "nil original selection operation"
+        );
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        let root = self.generation(inner.generation);
+        let Some(current) = current(&root, inner.generation, scope)? else {
+            return Ok(None);
+        };
+        let chain = history(&root, inner.generation, scope, current)?;
+        let Some(position) = chain.iter().position(|t| t.operation == original_operation) else {
+            return Ok(None);
+        };
+        let original = &chain[position];
+        ensure!(
+            original.previous_sha256.is_some(),
+            "original selection publication has no predecessor"
+        );
+        let predecessor = chain
+            .get(position + 1)
+            .context("original predecessor missing")?;
+        validate_closure(&root, original)?;
+        validate_closure(&root, predecessor)?;
+        Ok(Some(predecessor.clone()))
+    }
     /// Explicit bootstrap only. Snapshot absence does not authorize this call;
     /// the domain/coordinator must separately qualify the initial winner.
     pub fn initialize_selected(
