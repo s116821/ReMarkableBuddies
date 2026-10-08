@@ -4,9 +4,10 @@ param([Parameter(Mandatory=$true)][string]$PayloadPath,
       [Parameter(Mandatory=$true)][string]$BuildConfigPath,
       [Parameter(Mandatory=$true)][string]$ExpectedPath,
       [Parameter(Mandatory=$true)][string]$StockBaselinePath,
-      [Parameter(Mandatory=$true)][string]$EvidenceDirectory, [switch]$PrepareOnly,[switch]$FocusAncestry,[switch]$ReceiverSubtreeCapture,[switch]$ReceiverSubtreeCapture512,[int]$ReceiverSubtreeItemCap=0,[int]$ReceiverSubtreeDepthCap=0,[bool]$ReceiverSubtreeCaptureAllowUnfocusedArea=$false,[bool]$ReceiverSubtreeCaptureDetailedIdentityDiagnostics=$false,[bool]$ReceiverSubtreeCaptureDocumentIdTypeDiagnostics=$false,[bool]$ReceiverSubtreeCaptureEntryIdConversion=$false)
+      [Parameter(Mandatory=$true)][string]$EvidenceDirectory, [switch]$PrepareOnly,[switch]$FocusAncestry,[switch]$ReceiverSubtreeCapture,[switch]$ReceiverSubtreeCapture512,[int]$ReceiverSubtreeItemCap=0,[int]$ReceiverSubtreeDepthCap=0,[bool]$ReceiverSubtreeCaptureAllowUnfocusedArea=$false,[bool]$ReceiverSubtreeCaptureDetailedIdentityDiagnostics=$false,[bool]$ReceiverSubtreeCaptureDocumentIdTypeDiagnostics=$false,[bool]$ReceiverSubtreeCaptureEntryIdConversion=$false,[bool]$CaptureCompletionRefusalDiagnostics=$false)
 $ErrorActionPreference='Stop'
 throw 'SOURCE ONLY: requires a separately selected fresh nonce, artifacts, baseline and exact packet review; spent literals below are reference placeholders.'
+if($CaptureCompletionRefusalDiagnostics -and -not $ReceiverSubtreeCaptureEntryIdConversion){throw 'Completion refusal diagnostics require selected v11'}
 if($ReceiverSubtreeCaptureEntryIdConversion -and (-not $ReceiverSubtreeCaptureDocumentIdTypeDiagnostics -or -not $ReceiverSubtreeCaptureDetailedIdentityDiagnostics -or -not $ReceiverSubtreeCaptureAllowUnfocusedArea -or -not $ReceiverSubtreeCapture -or $ReceiverSubtreeItemCap -ne 4096 -or $ReceiverSubtreeDepthCap -ne 32 -or $ReceiverSubtreeCapture512 -or $FocusAncestry)){throw 'Entry ID conversion requires type/detailed/unfocused diagnostics and base4096/depth32 without512/focus'}
     if($ReceiverSubtreeCaptureDocumentIdTypeDiagnostics -and (-not $ReceiverSubtreeCaptureDetailedIdentityDiagnostics -or -not $ReceiverSubtreeCaptureAllowUnfocusedArea -or -not $ReceiverSubtreeCapture -or $ReceiverSubtreeItemCap -ne 4096 -or $ReceiverSubtreeDepthCap -ne 32 -or $ReceiverSubtreeCapture512 -or $FocusAncestry)){throw 'Document ID type diagnostics require detailed unfocused-area base4096/depth32 without512/focus'}
     if($ReceiverSubtreeCaptureDetailedIdentityDiagnostics -and (-not $ReceiverSubtreeCaptureAllowUnfocusedArea -or -not $ReceiverSubtreeCapture -or $ReceiverSubtreeItemCap -ne 4096 -or $ReceiverSubtreeDepthCap -ne 32 -or $ReceiverSubtreeCapture512 -or $FocusAncestry)){throw 'Detailed identity diagnostics require unfocused-area base4096/depth32 without512/focus'}
@@ -44,7 +45,7 @@ $budget=Get-FactsDevelopmentBudget
 if((Hash $PayloadPath) -cne $payloadHash -or (Hash $PublisherPath) -cne $publisherHash -or (Hash $ExpectedPath) -cne $expectedHash -or (Hash $StockBaselinePath) -cne $stockBaselineHash){throw 'Frozen candidate input changed'}
 $expected=Get-Content -LiteralPath $ExpectedPath -Raw|ConvertFrom-Json
 $stock=Get-Content -LiteralPath $StockBaselinePath -Raw|ConvertFrom-Json
-if((Hash $CapturePublisherPath) -cne $capturePublisherHash -or [IO.File]::ReadAllText($BuildConfigPath).Replace("`r`n","`n") -cne (Get-CaptureObservationBuildConfig $expected ([bool]$FocusAncestry) ([bool]$ReceiverSubtreeCapture) ([bool]$ReceiverSubtreeCapture512) $ReceiverSubtreeItemCap $ReceiverSubtreeDepthCap $ReceiverSubtreeCaptureAllowUnfocusedArea $ReceiverSubtreeCaptureDetailedIdentityDiagnostics $ReceiverSubtreeCaptureDocumentIdTypeDiagnostics $ReceiverSubtreeCaptureEntryIdConversion)){throw 'Capture publisher/build option binding refused'}
+if((Hash $CapturePublisherPath) -cne $capturePublisherHash -or [IO.File]::ReadAllText($BuildConfigPath).Replace("`r`n","`n") -cne (Get-CaptureObservationBuildConfig $expected ([bool]$FocusAncestry) ([bool]$ReceiverSubtreeCapture) ([bool]$ReceiverSubtreeCapture512) $ReceiverSubtreeItemCap $ReceiverSubtreeDepthCap $ReceiverSubtreeCaptureAllowUnfocusedArea $ReceiverSubtreeCaptureDetailedIdentityDiagnostics $ReceiverSubtreeCaptureDocumentIdTypeDiagnostics $ReceiverSubtreeCaptureEntryIdConversion $CaptureCompletionRefusalDiagnostics)){throw 'Capture publisher/build option binding refused'}
 if($expected.nonce -cne $nonce -or $stock.nonce -isnot [string] -or $stock.nonce -cne $nonce -or
    ($stock.stock_pid -isnot [long] -and $stock.stock_pid -isnot [int])){throw 'Stock baseline nonce/PID type refused'}
 if($stock.stock_pid -le 1 -or $stock.stock_start -isnot [string] -or $stock.stock_start -cnotmatch '^[1-9][0-9]*$' -or
@@ -81,6 +82,7 @@ $files['dropin.sha256']=Freeze 'dropin.sha256' $files['native-probe.conf']
 $factsRecipeTemplateHash=Hash (Join-Path $PSScriptRoot 'publish-captured-facts-source.sh')
 $localBindings=[ordered]@{nonce=$nonce;operator_sha256=(Hash $PSCommandPath);stock_baseline_sha256=(Hash $StockBaselinePath);
  expected_sha256=$expectedHash;payload_sha256=$payloadHash;publisher_sha256=$publisherHash;proof_sha256=(Hash $proofPath);budget_sha256=(Hash $budgetPath);capture_publisher_sha256=$capturePublisherHash;build_config_sha256=(Hash $BuildConfigPath);sdk_source='1d221d73c8e2a2a19bfb2d1b37c09bca41d554ed';developmentCaptureObservation=$true;facts_recipe_template_sha256=$factsRecipeTemplateHash;capture_proof_sha256=(Hash (Join-Path $PSScriptRoot 'capture-observation-proof.ps1'));capture_request_history_collector_sha256=(Hash (Join-Path $PSScriptRoot 'capture-request-history-collector.ps1'));capture_owner_proof_sha256=(Hash (Join-Path $PSScriptRoot 'capture-owner-refusal-proof.ps1'));capture_owner_collector_sha256=(Hash (Join-Path $PSScriptRoot 'capture-owner-refusal-collector.ps1'));capture_collector_sha256=(Hash (Join-Path $PSScriptRoot 'capture-observation-collector.ps1'));files=$files}
+$localBindings.capture_completion_refusal_diagnostics=$CaptureCompletionRefusalDiagnostics
 $localBindings.capture_historical_transport_sha256=Hash (Join-Path $PSScriptRoot 'capture-historical-transport.ps1')
 if($FocusAncestry){$localBindings.discovery_scope='window-focus-ancestry-v1'}
 if($ReceiverSubtreeCapture){$localBindings.discovery_scope=if($ReceiverSubtreeCaptureEntryIdConversion){'receiver-subtree-capture-unqualified-v11'}elseif($ReceiverSubtreeCaptureDocumentIdTypeDiagnostics){'receiver-subtree-capture-unqualified-v10'}elseif($ReceiverSubtreeCaptureDetailedIdentityDiagnostics){'receiver-subtree-capture-unqualified-v9'}elseif($ReceiverSubtreeCaptureAllowUnfocusedArea){'receiver-subtree-capture-unqualified-v8'}elseif($ReceiverSubtreeDepthCap -eq 32){'receiver-subtree-capture-unqualified-v7'}elseif($ReceiverSubtreeItemCap -eq 4096){'receiver-subtree-capture-unqualified-v6'}elseif($ReceiverSubtreeDepthCap -eq 16){'receiver-subtree-capture-unqualified-v5'}elseif($ReceiverSubtreeItemCap -eq 2048){'receiver-subtree-capture-unqualified-v4'}elseif($ReceiverSubtreeItemCap -eq 1024){'receiver-subtree-capture-unqualified-v3'}elseif($ReceiverSubtreeCapture512){'receiver-subtree-capture-unqualified-v2'}else{'receiver-subtree-capture-unqualified-v1'}}
@@ -116,7 +118,7 @@ function ObservationCopy([string]$remotePath,[string]$localPath){
     # Caller records verified returned bytes before its next fresh live-clock guard.
     return $result
 }
-function Expand([string]$text){$text.Replace('@ROOT@',$remote).Replace('@NONCE@',$nonce).Replace('@UNIT@',$rollback).Replace('@STOCKPID@',[string]$stock.stock_pid).Replace('@STOCKSTART@',$stock.stock_start).Replace('@FIXTURECHECK@',$fixtureCheck)}
+function Expand([string]$text){$text.Replace('@CALLBACKCAP@',$(if($CaptureCompletionRefusalDiagnostics){'1024'}else{'256'})).Replace('@ROOT@',$remote).Replace('@NONCE@',$nonce).Replace('@UNIT@',$rollback).Replace('@STOCKPID@',[string]$stock.stock_pid).Replace('@STOCKSTART@',$stock.stock_start).Replace('@FIXTURECHECK@',$fixtureCheck)}
 try{
     Require (SSH (Expand @'
 set -eu
@@ -227,7 +229,7 @@ test ! -e '@ROOT@/restore.claim' && test ! -L '@ROOT@/restore.claim' || exit 90
 if test ! -e '@ROOT@/callback.json' && test ! -L '@ROOT@/callback.json'; then exit 3; fi
 test -f '@ROOT@/callback.json' && test ! -L '@ROOT@/callback.json' || exit 90
 test "$(stat -c '%a %u' '@ROOT@/callback.json')" = '600 0' || exit 90
-test "$(wc -c < '@ROOT@/callback.json')" -le 256 || exit 90
+test "$(wc -c < '@ROOT@/callback.json')" -le @CALLBACKCAP@ || exit 90
 cat '@ROOT@/callback.json'
 '@)
         if(-not $observed.timeout -and $observed.exit -eq 0){
@@ -235,6 +237,7 @@ cat '@ROOT@/callback.json'
             $callback=$observed.stdout|ConvertFrom-Json
             $record.callback_verified=Test-FactsCallback $callback $nonce
             $record.candidate_receipt=$callback
+            if($CaptureCompletionRefusalDiagnostics){$record.capture_completion_refusal=Get-CaptureCompletionRefusal $observed.stdout $nonce}
             $identity=ObservationSSH (Expand @'
 set -eu
 test ! -e '@ROOT@/entry.closed'
@@ -323,7 +326,7 @@ set -eu
 if test -f '@ROOT@/callback.json'; then
     test ! -L '@ROOT@/callback.json'
     test "$(stat -c '%a %u' '@ROOT@/callback.json')" = '600 0'
-    test "$(wc -c < '@ROOT@/callback.json')" -le 256
+    test "$(wc -c < '@ROOT@/callback.json')" -le @CALLBACKCAP@
     printf 'present\n'
 else
     test ! -e '@ROOT@/callback.json'
@@ -338,6 +341,7 @@ fi
                 Require (Native 'scp' @('-o','HostName=10.11.99.1','-o','StrictHostKeyChecking=yes','-o','BatchMode=yes','-o','ConnectTimeout=8',('RM2:'+$remote+'/callback.json'),$finalCallbackPath))
                 $record.final_callback_sha256=(Get-FileHash -LiteralPath $finalCallbackPath -Algorithm SHA256).Hash.ToLowerInvariant()
                 $record.final_callback_collected=$true
+                if($CaptureCompletionRefusalDiagnostics){$record.final_capture_completion_refusal=Get-CaptureCompletionRefusal ([IO.File]::ReadAllText($finalCallbackPath)) $nonce}
             }elseif($record.final_callback_state -cne 'absent'){throw 'Final callback presence uncertain; retain exact stage'}
             $diagnosticState=SSH (Expand @'
 set -eu

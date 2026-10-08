@@ -249,3 +249,30 @@ function Test-ReceiverSubtreeCaptureRefusalFields($v,$progress,$allowed,$groups,
     }elseif($null -ne $v.deadline_check_ms){return $false}
     return $true
 }
+
+# Optional historical final-callback diagnostic; never a success/admission proof.
+function Get-CaptureCompletionRefusal([string]$Raw,[string]$Nonce) {
+    if([Text.Encoding]::UTF8.GetByteCount($Raw) -gt 1024){return $null}
+    $document=$null
+    try {
+        $document=[System.Text.Json.JsonDocument]::Parse($Raw)
+        $root=$document.RootElement
+        if($root.ValueKind -ne [System.Text.Json.JsonValueKind]::Object){return $null}
+        $fields=@('nonce','stage','application_thread','engine_thread','completion_refusal')
+        $names=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach($property in $root.EnumerateObject()){if(-not $names.Add($property.Name) -or $property.Name -cnotin $fields){return $null}}
+        if($names.Count -ne 5){return $null}
+        $nested=$root.GetProperty('completion_refusal')
+        if($nested.ValueKind -ne [System.Text.Json.JsonValueKind]::Object){return $null}
+        $fields=@('kind','version','reason','capture_accepted_ms','baseline_ms','post_read_ms','failure_ms','effective_deadline_ms')
+        $names.Clear()
+        foreach($property in $nested.EnumerateObject()){if(-not $names.Add($property.Name) -or $property.Name -cnotin $fields){return $null}}
+        if($names.Count -ne 8){return $null}
+        $value=ConvertFrom-Json -InputObject $Raw -ErrorAction Stop
+        if($value.nonce -isnot [string] -or $value.nonce -cne $Nonce -or $Nonce -cnotmatch '\A[0-9a-f]{32}\z' -or $value.stage -isnot [string] -or $value.stage -cne 'capture-observation-completion-refused' -or $value.application_thread -isnot [bool] -or $value.engine_thread -isnot [bool]){return $null}
+        $d=$value.completion_refusal
+        if($d.kind -isnot [string] -or $d.kind -cne 'development-capture-completion-refusal' -or ($d.version -isnot [int] -and $d.version -isnot [long]) -or $d.version -ne 1 -or $d.reason -isnot [string] -or $d.reason -cnotin @('allowed-deadline','allowed-refused','identity-refused','epoch-changed','token-refused','facts-request-present','facts-request-tmp-present')){return $null}
+        foreach($name in @('capture_accepted_ms','baseline_ms','post_read_ms','failure_ms','effective_deadline_ms')){if(($d.$name -isnot [int] -and $d.$name -isnot [long]) -or $d.$name -lt 0 -or $d.$name -gt 2147483647){return $null}}
+        return $d
+    } catch {return $null} finally {if($null -ne $document){$document.Dispose()}}
+}
