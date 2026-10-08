@@ -31,6 +31,6 @@ foreach($profile in @(@($false,$false,2048,16),@($true,$true,2048,16),@($true,$f
  Check (-not(Test-CaptureOwnerRefusal $depth16 $nonce '1234' '5678' '11' '22' $false $profile[0] $profile[1] $profile[2] $profile[3])) 'invaliddepth refusal'
 }
 $ReceiverSubtreeCapture512=$false;$ReceiverSubtreeItemCap=2048;$ReceiverSubtreeDepthCap=16;$script:routed=$false
-& {function Receive-CaptureOwnerRefusalEvidence {param($a,$b,$c,$d,$e,$read,$copy,[bool]$focus,[bool]$subtree,[bool]$profile512,[int]$itemCap,[int]$depthCap,[bool]$allowUnfocused=$false) if($allowUnfocused -or $args.Count -or $focus -or -not $subtree -or $profile512 -or $itemCap -ne 2048 -or $depthCap -ne 16){throw 'Wrongdepth16 route'};$script:routed=$true}; & ([scriptblock]::Create($command))}
+& {function Receive-CaptureOwnerRefusalEvidence {param($a,$b,$c,$d,$e,$read,$copy,[bool]$focus,[bool]$subtree,[bool]$profile512,[int]$itemCap,[int]$depthCap,[bool]$allowUnfocused=$false,[bool]$detailedIdentity=$false) if($detailedIdentity -or $allowUnfocused -or $args.Count -or $focus -or -not $subtree -or $profile512 -or $itemCap -ne 2048 -or $depthCap -ne 16){throw 'Wrongdepth16 route'};$script:routed=$true}; & ([scriptblock]::Create($command))}
 Check $script:routed 'actualdepth16 collector route'
 Write-Output "PASS receiver subtree depth16 focused consumer $($checks-$startDepth) checks; historical depths preserved"

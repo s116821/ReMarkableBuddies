@@ -24,7 +24,7 @@ foreach($profile in @(@($true,$false,2048,32),@($true,$false,1024,32),@($true,$f
  Check (-not(Test-CaptureOwnerRefusal $d32 $nonce '1234' '5678' '11' '22' $false $profile[0] $profile[1] $profile[2] $profile[3])) 'invalid32 refusal'
 }
 $ReceiverSubtreeItemCap=4096;$ReceiverSubtreeDepthCap=32;$script:routed=$false
-& {function Receive-CaptureOwnerRefusalEvidence {param($a,$b,$c,$d,$e,$read,$copy,[bool]$focus,[bool]$subtree,[bool]$profile512,[int]$itemCap,[int]$depthCap,[bool]$allowUnfocused=$false) if($allowUnfocused -or $args.Count -or $focus -or -not $subtree -or $profile512 -or $itemCap -ne 4096 -or $depthCap -ne 32){throw 'Wrongdepth32 route'};$script:routed=$true}; & ([scriptblock]::Create($command))}
+& {function Receive-CaptureOwnerRefusalEvidence {param($a,$b,$c,$d,$e,$read,$copy,[bool]$focus,[bool]$subtree,[bool]$profile512,[int]$itemCap,[int]$depthCap,[bool]$allowUnfocused=$false,[bool]$detailedIdentity=$false) if($detailedIdentity -or $allowUnfocused -or $args.Count -or $focus -or -not $subtree -or $profile512 -or $itemCap -ne 4096 -or $depthCap -ne 32){throw 'Wrongdepth32 route'};$script:routed=$true}; & ([scriptblock]::Create($command))}
 Check $script:routed 'actualdepth32 collector route'
 $operatorText=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'run-qt-capture-observation-source.ps1'))
 $guard=$operatorText.Substring($operatorText.IndexOf('if($ReceiverSubtreeItemCap -eq 4096'),$operatorText.IndexOf('if($ReceiverSubtreeItemCap -notin')-$operatorText.IndexOf('if($ReceiverSubtreeItemCap -eq 4096'))

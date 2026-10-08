@@ -1,5 +1,6 @@
 # Main freezes the resulting config with the selected SDK source/artifact packet.
-function Get-CaptureObservationBuildConfig($Expected,[bool]$FocusAncestry=$false,[bool]$ReceiverSubtreeCapture=$false,[bool]$ReceiverSubtreeCapture512=$false,[int]$ReceiverSubtreeItemCap=0,[int]$ReceiverSubtreeDepthCap=0,[bool]$ReceiverSubtreeCaptureAllowUnfocusedArea=$false) {
+function Get-CaptureObservationBuildConfig($Expected,[bool]$FocusAncestry=$false,[bool]$ReceiverSubtreeCapture=$false,[bool]$ReceiverSubtreeCapture512=$false,[int]$ReceiverSubtreeItemCap=0,[int]$ReceiverSubtreeDepthCap=0,[bool]$ReceiverSubtreeCaptureAllowUnfocusedArea=$false,[bool]$ReceiverSubtreeCaptureDetailedIdentityDiagnostics=$false) {
+    if($ReceiverSubtreeCaptureDetailedIdentityDiagnostics -and (-not $ReceiverSubtreeCaptureAllowUnfocusedArea -or -not $ReceiverSubtreeCapture -or $ReceiverSubtreeItemCap -ne 4096 -or $ReceiverSubtreeDepthCap -ne 32 -or $ReceiverSubtreeCapture512 -or $FocusAncestry)){throw 'Detailed identity diagnostics require unfocused-area base4096/depth32 without512/focus'}
     if($ReceiverSubtreeCaptureAllowUnfocusedArea -and (-not $ReceiverSubtreeCapture -or $ReceiverSubtreeItemCap -ne 4096 -or $ReceiverSubtreeDepthCap -ne 32 -or $ReceiverSubtreeCapture512 -or $FocusAncestry)){throw 'Unfocused-area capture requires base4096/depth32 without512/focus'}
     if($ReceiverSubtreeItemCap -eq 4096 -and $ReceiverSubtreeDepthCap -notin @(16,32)){throw '4096 profile requires depth16 or32'}
     if($ReceiverSubtreeDepthCap -notin @(0,16,32) -or ($ReceiverSubtreeDepthCap -eq 32 -and $ReceiverSubtreeItemCap -ne 4096) -or ($ReceiverSubtreeDepthCap -ne 0 -and (-not $ReceiverSubtreeCapture -or ($ReceiverSubtreeItemCap -notin @(2048,4096)) -or $ReceiverSubtreeCapture512))){throw 'Explicit depth requires base receiver capture without512; depth16 admits2048/4096 and depth32 only4096'}
@@ -27,6 +28,7 @@ function Get-CaptureObservationBuildConfig($Expected,[bool]$FocusAncestry=$false
     if($ReceiverSubtreeItemCap -ne 0){$lines+=('    config.developmentReceiverSubtreeItemCap={0};' -f $ReceiverSubtreeItemCap)}
     if($ReceiverSubtreeDepthCap -ne 0){$lines+=('    config.developmentReceiverSubtreeDepthCap='+$ReceiverSubtreeDepthCap+';')}
     if($ReceiverSubtreeCaptureAllowUnfocusedArea){$lines+='    config.developmentReceiverSubtreeCaptureAllowUnfocusedArea=true;'}
+    if($ReceiverSubtreeCaptureDetailedIdentityDiagnostics){$lines+='    config.developmentReceiverSubtreeCaptureDetailedIdentityDiagnostics=true;'}
     foreach($page in $Expected.order){$lines+=('    config.facts.expectedOrder.append(QStringLiteral("{0}"));' -f $page)}
     $lines+=@('    return config;','}')
     return ($lines -join "`n")+"`n"
