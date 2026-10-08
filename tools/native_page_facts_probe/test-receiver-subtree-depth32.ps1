@@ -26,4 +26,13 @@ foreach($profile in @(@($true,$false,2048,32),@($true,$false,1024,32),@($true,$f
 $ReceiverSubtreeItemCap=4096;$ReceiverSubtreeDepthCap=32;$script:routed=$false
 & {function Receive-CaptureOwnerRefusalEvidence {param($a,$b,$c,$d,$e,$read,$copy,[bool]$focus,[bool]$subtree,[bool]$profile512,[int]$itemCap,[int]$depthCap) if($args.Count -or $focus -or -not $subtree -or $profile512 -or $itemCap -ne 4096 -or $depthCap -ne 32){throw 'Wrongdepth32 route'};$script:routed=$true}; & ([scriptblock]::Create($command))}
 Check $script:routed 'actualdepth32 collector route'
+$operatorText=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'run-qt-capture-observation-source.ps1'))
+$guard=$operatorText.Substring($operatorText.IndexOf('if($ReceiverSubtreeItemCap -eq 4096'),$operatorText.IndexOf('if($ReceiverSubtreeItemCap -notin')-$operatorText.IndexOf('if($ReceiverSubtreeItemCap -eq 4096'))
+& ([scriptblock]::Create($guard))
+Check $true 'actualoperator selected32 guard'
+$ReceiverSubtreeItemCap=2048;$rejected=$false;try{& ([scriptblock]::Create($guard))}catch{$rejected=$true};Check $rejected 'actualoperator32 only4096'
+$ReceiverSubtreeItemCap=4096;$localBindings=@{}
+$mapping=($operatorText -split "`n"|Where-Object {$_ -like 'if($ReceiverSubtreeCapture){$localBindings.discovery_scope=*'})
+& ([scriptblock]::Create($mapping));Check ($localBindings.discovery_scope -ceq 'receiver-subtree-capture-unqualified-v7') 'actualoperator v7 binding'
+$ReceiverSubtreeDepthCap=16;& ([scriptblock]::Create($mapping));Check ($localBindings.discovery_scope -ceq 'receiver-subtree-capture-unqualified-v6') 'actualoperator historicv6 binding'
 Write-Output "PASS receiver subtree depth32 focused consumer $($checks-$start32) checks; historicalv6 preserved"
