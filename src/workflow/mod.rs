@@ -54,6 +54,7 @@ const BLANK_PAGE_SAMPLE_RATE: u32 = 2;
 pub struct Workflow {
     device: Box<dyn DeviceBackend>,
     selected: Option<selected_backend::SelectedBackendFacade>,
+    development_non_output: bool,
     frame: Frame,
     debug_dump: bool,
     iteration_count: u32,
@@ -78,6 +79,7 @@ impl Workflow {
         Self {
             device,
             selected: None,
+            development_non_output: false,
             frame: Frame::default(),
             debug_dump,
             iteration_count: 0,
@@ -110,6 +112,7 @@ impl Workflow {
             debug_dump,
         );
         workflow.selected = Some(facade);
+        workflow.development_non_output = true;
         workflow
     }
     pub(crate) fn is_selected(&self) -> bool {
@@ -121,6 +124,10 @@ impl Workflow {
         ordinal: usize,
         handoff: &crate::conversation::ReaderHandoff,
     ) -> Result<()> {
+        anyhow::ensure!(
+            !self.development_non_output,
+            "Development Workflow cannot dispatch Reader effects"
+        );
         let facade = self
             .selected
             .as_mut()
