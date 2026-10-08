@@ -69,6 +69,14 @@ Preserve discovered failure cases as regressions. Distinguish modeled behavior
 from hardware or vision proof; document specific limitations when a finding
 cannot be faithfully simulated. Unrelated changes need no artificial simulation.
 
+Keep simulator and SDK fixture improvements moving in parallel with bounded,
+authorized native experiments. Incomplete modeled coverage is not a prerequisite
+for exploratory hardware observations. Resolve concrete defects that threaten the
+exact experiment or its independent rollback first, then freeze and isolate its
+source, build and execution inputs from continuing fixture work. Preserve unfinished
+coverage and feed hardware findings back into the model. Report exploratory evidence
+as unqualified; required source, native, merge and release gates still apply.
+
 ## Tablet access
 
 For tablet compatibility, integration, or end-to-end Reader Buddy testing, when
