@@ -1,5 +1,5 @@
 # Fixed development collection helpers. Main supplies bounded existing transports.
-function Receive-CaptureObservation([string]$Root,[string]$Nonce,[string]$PayloadSha,$Expected,[string]$Packet,[Collections.IDictionary]$Record,[scriptblock]$Read,[scriptblock]$Copy,[bool]$ReceiverSubtreeCapture=$false,[bool]$ReceiverSubtreeCapture512=$false) {
+function Receive-CaptureObservation([string]$Root,[string]$Nonce,[string]$PayloadSha,$Expected,[string]$Packet,[Collections.IDictionary]$Record,[scriptblock]$Read,[scriptblock]$Copy,[bool]$ReceiverSubtreeCapture=$false,[bool]$ReceiverSubtreeCapture512=$false,[int]$ReceiverSubtreeItemCap=0) {
     if($Nonce -cnotmatch '\A[0-9a-f]{32}\z' -or $Root -cne ('/run/rmb-qt-probe-'+$Nonce) -or $PayloadSha -cnotmatch '\A[0-9a-f]{64}\z'){throw 'Capture bindings refused'}
     if($Record.capture_verified){return $true}
     $status=& $Read ("set -eu; if test ! -e '$Root/capture-observation-complete.json' && test ! -L '$Root/capture-observation-complete.json'; then exit 3; fi; test -f '$Root/capture-observation-complete.json' && test ! -L '$Root/capture-observation-complete.json'; test `"`$(stat -c '%a %u' '$Root/capture-observation-complete.json')`" = '600 0'; test `"`$(wc -c < '$Root/capture-observation-complete.json')`" -le 8192; cat '$Root/capture-observation-complete.json'")
@@ -45,7 +45,7 @@ stat -c '%d %i' "$root"
         }
     }finally{if($null -ne $rawDocument){$rawDocument.Dispose()}}
     $value=$status.stdout|ConvertFrom-Json
-    if(-not(Test-CaptureObservationCompletion $value $Nonce $identity[0] $identity[1] $identity[2] $identity[3] $Expected.document $Expected.order $ReceiverSubtreeCapture $ReceiverSubtreeCapture512)){throw 'Capture completion refused'}
+    if(-not(Test-CaptureObservationCompletion $value $Nonce $identity[0] $identity[1] $identity[2] $identity[3] $Expected.document $Expected.order $ReceiverSubtreeCapture $ReceiverSubtreeCapture512 $ReceiverSubtreeItemCap)){throw 'Capture completion refused'}
     $request=& $Read ("set -eu; test -f '$Root/capture-observation-request' && test ! -L '$Root/capture-observation-request'; test `"`$(stat -c '%a %u' '$Root/capture-observation-request')`" = '600 0'; test `"`$(wc -c < '$Root/capture-observation-request')`" -le 256; cat '$Root/capture-observation-request'")
     $requestBytes=$Nonce+' '+($identity -join ' ')+" capture-observation 120000 main-dev-facts-120s`n"
     if($request.timeout -or $request.exit -ne 0 -or $request.stdout -cne $requestBytes){throw 'Capture request binding refused'}

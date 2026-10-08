@@ -10,9 +10,10 @@ function ConvertFrom-CaptureOwnerRefusalRaw([string]$Raw) {
         return ConvertFrom-Json -InputObject $Raw -ErrorAction Stop
     }catch{return $null}finally{if($null -ne $document){$document.Dispose()}}
 }
-function Test-CaptureOwnerRefusal($Value,[string]$Nonce,[string]$PidText,[string]$Started,[string]$Dev,[string]$Ino,[bool]$FocusAncestry=$false,[bool]$ReceiverSubtreeCapture=$false,[bool]$ReceiverSubtreeCapture512=$false) {
+function Test-CaptureOwnerRefusal($Value,[string]$Nonce,[string]$PidText,[string]$Started,[string]$Dev,[string]$Ino,[bool]$FocusAncestry=$false,[bool]$ReceiverSubtreeCapture=$false,[bool]$ReceiverSubtreeCapture512=$false,[int]$ReceiverSubtreeItemCap=0) {
     if($null -eq $Value){return $false}
     $fields=@('kind','version','nonce','attempt_pid','attempt_start','root_device','root_inode','setup_profile','capture_accepted_ms','failure_ms','deadline_check_ms','effective_deadline_ms','branch','predicate','discovery_result','visited_items','receiver_candidates','scene_candidates','matched_pairs','first_pair_receiver','first_pair_scene','first_pair_rejection','active_owner_rejection','observer_role','observer_member','observer_failure','native_authority','render_authority','ui_acknowledged')
+    if($ReceiverSubtreeItemCap -notin @(0,1024) -or ($ReceiverSubtreeItemCap -ne 0 -and (-not $ReceiverSubtreeCapture -or $ReceiverSubtreeCapture512))){return $false}
     if($ReceiverSubtreeCapture512 -and -not $ReceiverSubtreeCapture){return $false}
     if($FocusAncestry -and $ReceiverSubtreeCapture){return $false}
     if(($Value.version -isnot [int] -and $Value.version -isnot [long]) -or $Value.version -notin @(1,2,3,4,5) -or ($Value.version -in @(3,4) -and -not $FocusAncestry) -or ($Value.version -eq 5 -and -not $ReceiverSubtreeCapture) -or ($ReceiverSubtreeCapture -and $Value.version -ne 5)){return $false}
@@ -42,7 +43,7 @@ function Test-CaptureOwnerRefusal($Value,[string]$Nonce,[string]$PidText,[string
     $counters=@('visited_items','receiver_candidates','scene_candidates','matched_pairs')
     $pair=@('first_pair_receiver','first_pair_scene','first_pair_rejection')
     $observer=@('observer_role','observer_member','observer_failure')
-    if($Value.version -eq 5){return Test-ReceiverSubtreeCaptureRefusalFields $Value $progress $allowed $groups $topologyFields $counters $pair $observer $ReceiverSubtreeCapture512}
+    if($Value.version -eq 5){return Test-ReceiverSubtreeCaptureRefusalFields $Value $progress $allowed $groups $topologyFields $counters $pair $observer $ReceiverSubtreeCapture512 $ReceiverSubtreeItemCap}
     if($Value.version -in @(3,4)){
         foreach($name in ($counters+@('first_pair_receiver','first_pair_scene'))){
             if($null -ne $Value.$name -and (($Value.$name -isnot [int] -and $Value.$name -isnot [long]) -or $Value.$name -lt 0)){return $false}
@@ -174,10 +175,10 @@ function Test-CaptureOwnerRefusal($Value,[string]$Nonce,[string]$PidText,[string
     }elseif($null -ne $Value.deadline_check_ms){return $false}
     return $true
 }
-function Test-ReceiverSubtreeCaptureRefusalFields($v,$progress,$allowed,$groups,$topologyFields,$counters,$pair,$observer,[bool]$ReceiverSubtreeCapture512=$false) {
-    if($v.discovery_scope -isnot [string] -or $v.discovery_scope -cne $(if($ReceiverSubtreeCapture512){'receiver-subtree-capture-unqualified-v2'}else{'receiver-subtree-capture-unqualified-v1'})){return $false}
+function Test-ReceiverSubtreeCaptureRefusalFields($v,$progress,$allowed,$groups,$topologyFields,$counters,$pair,$observer,[bool]$ReceiverSubtreeCapture512=$false,[int]$ReceiverSubtreeItemCap=0) {
+    if($v.discovery_scope -isnot [string] -or $v.discovery_scope -cne $(if($ReceiverSubtreeItemCap -eq 1024){'receiver-subtree-capture-unqualified-v3'}elseif($ReceiverSubtreeCapture512){'receiver-subtree-capture-unqualified-v2'}else{'receiver-subtree-capture-unqualified-v1'})){return $false}
     $groups=@($groups|Where-Object {$_ -cne 'scene-active-focus'})+@('capture-context','capture-identity')
-    $itemCap=if($ReceiverSubtreeCapture512){512}else{256}
+    $itemCap=if($ReceiverSubtreeItemCap -eq 1024){1024}elseif($ReceiverSubtreeCapture512){512}else{256}
     $bounds=@{visited_items=$itemCap;receiver_candidates=1;scene_candidates=9;matched_pairs=2;first_pair_receiver=0;first_pair_scene=7;topology_depth=8;topology_queue_size=$itemCap;topology_child_count=2147483647}
     foreach($name in $bounds.Keys){if($null -ne $v.$name -and (($v.$name -isnot [int] -and $v.$name -isnot [long]) -or $v.$name -lt 0 -or $v.$name -gt $bounds[$name])){return $false}}
     if($null -ne $v.active_owner_rejection -and $v.active_owner_rejection -cnotin $groups){return $false}
