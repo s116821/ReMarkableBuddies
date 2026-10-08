@@ -10,12 +10,13 @@ function ConvertFrom-CaptureOwnerRefusalRaw([string]$Raw) {
         return ConvertFrom-Json -InputObject $Raw -ErrorAction Stop
     }catch{return $null}finally{if($null -ne $document){$document.Dispose()}}
 }
-function Test-CaptureOwnerRefusal($Value,[string]$Nonce,[string]$PidText,[string]$Started,[string]$Dev,[string]$Ino) {
+function Test-CaptureOwnerRefusal($Value,[string]$Nonce,[string]$PidText,[string]$Started,[string]$Dev,[string]$Ino,[bool]$FocusAncestry=$false) {
     if($null -eq $Value){return $false}
     $fields=@('kind','version','nonce','attempt_pid','attempt_start','root_device','root_inode','setup_profile','capture_accepted_ms','failure_ms','deadline_check_ms','effective_deadline_ms','branch','predicate','discovery_result','visited_items','receiver_candidates','scene_candidates','matched_pairs','first_pair_receiver','first_pair_scene','first_pair_rejection','active_owner_rejection','observer_role','observer_member','observer_failure','native_authority','render_authority','ui_acknowledged')
-    if(($Value.version -isnot [int] -and $Value.version -isnot [long]) -or $Value.version -notin @(1,2)){return $false}
+    if(($Value.version -isnot [int] -and $Value.version -isnot [long]) -or $Value.version -notin @(1,2,3) -or ($Value.version -eq 3 -and -not $FocusAncestry)){return $false}
     $topologyFields=@('topology_limit','topology_depth','topology_queue_size','topology_child_count')
-    if($Value.version -eq 2){$fields+=$topologyFields}
+    if($Value.version -in @(2,3)){$fields+=$topologyFields}
+    if($Value.version -eq 3){$fields+=@('discovery_scope','chain_items','chain_complete','chain_failure')}
     $names=@($Value.PSObject.Properties.Name)
     if($names.Count -ne $fields.Count -or @($names|Where-Object {$_ -cnotin $fields}).Count){return $false}
     foreach($name in @('kind','nonce','setup_profile','branch')){if($Value.$name -isnot [string]){return $false}}
@@ -36,6 +37,40 @@ function Test-CaptureOwnerRefusal($Value,[string]$Nonce,[string]$PidText,[string
     $counters=@('visited_items','receiver_candidates','scene_candidates','matched_pairs')
     $pair=@('first_pair_receiver','first_pair_scene','first_pair_rejection')
     $observer=@('observer_role','observer_member','observer_failure')
+    if($Value.version -eq 3){
+        foreach($name in ($counters+@('first_pair_receiver','first_pair_scene'))){
+            if($null -ne $Value.$name -and (($Value.$name -isnot [int] -and $Value.$name -isnot [long]) -or $Value.$name -lt 0)){return $false}
+        }
+        if($Value.discovery_scope -isnot [string] -or $Value.discovery_scope -cne 'window-focus-ancestry-v1' -or $Value.chain_complete -isnot [bool]){return $false}
+        foreach($name in $topologyFields){if($null -ne $Value.$name){return $false}}
+        if($null -ne $Value.chain_items -and (($Value.chain_items -isnot [int] -and $Value.chain_items -isnot [long]) -or $Value.chain_items -lt 0 -or $Value.chain_items -gt 25)){return $false}
+        if($null -ne $Value.chain_failure -and ($Value.chain_failure -isnot [string] -or $Value.chain_failure -cnotin @('anchor-unavailable','item-context','root-unreached','depth-bound','cycle','observer-unavailable'))){return $false}
+        if($Value.branch -ceq 'initial-progress'){
+            if($null -ne $Value.chain_items -or $Value.chain_complete -or $null -ne $Value.chain_failure){return $false}
+        }elseif($Value.branch -ceq 'owner-discovery'){
+            if($null -eq $Value.chain_items){return $false}
+            if(-not $Value.chain_complete){
+                foreach($name in ($counters+$pair+$observer+@('active_owner_rejection'))){if($null -ne $Value.$name){return $false}}
+                if($Value.discovery_result -ceq 'open-focus-chain-refused'){
+                    if($null -eq $Value.chain_failure -or $null -ne $Value.predicate){return $false}
+                    switch -CaseSensitive ($Value.chain_failure){
+                        'anchor-unavailable' {if($Value.chain_items -ne 0){return $false}}
+                        'root-unreached' {if($Value.chain_items -lt 1){return $false}}
+                        'cycle' {if($Value.chain_items -lt 1){return $false}}
+                        'depth-bound' {if($Value.chain_items -ne 25){return $false}}
+                    }
+                    $discovery+=@('open-focus-chain-refused')
+                }elseif($Value.discovery_result -cne 'open-context-lost' -or $Value.predicate -cnotin $progress -or $null -ne $Value.chain_failure){return $false}
+            }else{
+                if($Value.chain_items -lt 1 -or $null -ne $Value.chain_failure -or $Value.discovery_result -cnotin @('open-context-lost','open-item-lost','open-candidate-bound','open-owner-unavailable','open-owner-ambiguous')){return $false}
+                foreach($name in @('visited_items','receiver_candidates','scene_candidates')){if($null -eq $Value.$name){return $false}}
+                if($Value.visited_items -gt $Value.chain_items){return $false}
+                if($null -ne $Value.matched_pairs -and ($Value.visited_items -ne $Value.chain_items -or $Value.receiver_candidates -gt 8 -or $Value.scene_candidates -gt 8)){return $false}
+            }
+        }elseif($Value.branch -cin @('observer-install','owner-revalidation')){
+            if(-not $Value.chain_complete -or $null -eq $Value.chain_items -or $Value.chain_items -lt 1 -or $null -ne $Value.chain_failure){return $false}
+        }else{return $false}
+    }
     $bounds=@{visited_items=4097;receiver_candidates=9;scene_candidates=9;matched_pairs=2;first_pair_receiver=7;first_pair_scene=7}
     foreach($name in $bounds.Keys){if($null -ne $Value.$name -and (($Value.$name -isnot [int] -and $Value.$name -isnot [long]) -or $Value.$name -lt 0 -or $Value.$name -gt $bounds[$name])){return $false}}
     if($null -ne $Value.active_owner_rejection -and $Value.active_owner_rejection -cnotin $groups){return $false}

@@ -1,5 +1,6 @@
 # Fixed diagnostic decoding only. A decoded refusal never grants facts/live authority.
-function Get-FactsRefusalStages {
+function Get-FactsRefusalStages([bool]$FocusAncestry=$false) {
+    if($FocusAncestry){'facts-retained-owner-refused'}
     @('facts-reentry-refused','facts-config-or-context-refused','open-engine-thread',
       'open-current-window-unavailable','open-context-lost','open-item-lost','open-topology-bound',
       'open-candidate-bound','open-owner-ambiguous','open-owner-unavailable','facts-metadata-or-context-refused',
@@ -13,7 +14,7 @@ function Test-FactsRefusalCallback($Callback,[string]$ExpectedNonce) {
         $Callback.stage -is [string] -and $Callback.stage -cin @('facts-entry-read-refused','facts-entry-delivery-refused') -and
         $Callback.application_thread -is [bool] -and $Callback.engine_thread -is [bool]
 }
-function ConvertFrom-FactsRefusal([string]$Text,[string]$ExpectedNonce,[long]$ExpectedPid,[string]$ExpectedStart) {
+function ConvertFrom-FactsRefusal([string]$Text,[string]$ExpectedNonce,[long]$ExpectedPid,[string]$ExpectedStart,[bool]$FocusAncestry=$false) {
     Set-StrictMode -Off
     if([Text.Encoding]::UTF8.GetByteCount($Text) -gt 2048 -or [string]::IsNullOrEmpty($Text) -or
        $ExpectedNonce -cnotmatch '^[0-9a-f]{32}$' -or $ExpectedPid -le 1 -or $ExpectedStart -cnotmatch '^[1-9][0-9]*$'){return $null}
@@ -47,11 +48,12 @@ function ConvertFrom-FactsRefusal([string]$Text,[string]$ExpectedNonce,[long]$Ex
     }
     if($value.kind -cne 'development-facts-refusal' -or $value.version -ne 1 -or $value.nonce -cne $ExpectedNonce -or
        $value.attempt_pid -cne [string]$ExpectedPid -or $value.attempt_start -cne $ExpectedStart -or
-       $value.reader_stage -cnotin (Get-FactsRefusalStages) -or $value.sample_phase -cne 'before-refusal-callback' -or
+       $value.reader_stage -cnotin (Get-FactsRefusalStages $FocusAncestry) -or $value.sample_phase -cne 'before-refusal-callback' -or
        $value.setup_clock_origin -cne 'entry-startup-monotonic' -or $value.read_clock_origin -cne 'accepted-request-monotonic' -or
        $value.setup_budget_ms -ne 120000 -or $value.read_budget_ms -ne 5000 -or
        $value.setup_selection -cne 'main-dev-facts-120s' -or -not $value.development_setup_opt_in -or
        $value.atomic_snapshot -or $value.native_authority -or $value.render_authority){return $null}
+    if($value.reader_stage -ceq 'facts-retained-owner-refused' -and ($value.entry_stage -cne 'facts-entry-read-refused' -or $value.reader_result_had_facts -or $value.refusal_path -cne 'reader-result')){return $null}
     if($value.entry_stage -ceq 'facts-entry-read-refused'){
         $path=if($value.reader_result_had_facts){'entry-read-boundary'}else{'reader-result'}
         if($value.refusal_path -cne $path){return $null}
@@ -86,7 +88,7 @@ else
 fi
 '@
 }
-function Save-FactsRefusalEvidence($Transport,[string]$Path,[string]$Nonce,[long]$AttemptPid,[string]$Start) {
+function Save-FactsRefusalEvidence($Transport,[string]$Path,[string]$Nonce,[long]$AttemptPid,[string]$Start,[bool]$FocusAncestry=$false) {
     # No transport/effect here. Preserve bounded raw bytes even when decoding fails.
     if($Transport.timeout -or $Transport.exit -ne 0){throw 'Refusal collection transport unknown'}
     if($Transport.stdout -ceq "absent`n"){return [pscustomobject]@{state='absent';collected=$false;sha256=$null;decoded=$false;evidence=$null}}
@@ -96,6 +98,6 @@ function Save-FactsRefusalEvidence($Transport,[string]$Path,[string]$Nonce,[long
     $text=$Transport.stdout.Substring(8)
     if([Text.Encoding]::UTF8.GetByteCount($text) -gt 2048 -or [string]::IsNullOrEmpty($text)){throw 'Refusal bytes outside cap'}
     [IO.File]::WriteAllText($Path,$text,[Text.UTF8Encoding]::new($false))
-    $value=ConvertFrom-FactsRefusal $text $Nonce $AttemptPid $Start
+    $value=ConvertFrom-FactsRefusal $text $Nonce $AttemptPid $Start $FocusAncestry
     return [pscustomobject]@{state='present';collected=$true;sha256=(Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant();decoded=($null -ne $value);evidence=$value}
 }

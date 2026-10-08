@@ -4,7 +4,7 @@ param([Parameter(Mandatory=$true)][string]$PayloadPath,
       [Parameter(Mandatory=$true)][string]$BuildConfigPath,
       [Parameter(Mandatory=$true)][string]$ExpectedPath,
       [Parameter(Mandatory=$true)][string]$StockBaselinePath,
-      [Parameter(Mandatory=$true)][string]$EvidenceDirectory, [switch]$PrepareOnly)
+      [Parameter(Mandatory=$true)][string]$EvidenceDirectory, [switch]$PrepareOnly,[switch]$FocusAncestry)
 $ErrorActionPreference='Stop'
 throw 'SOURCE ONLY: requires a separately selected fresh nonce, artifacts, baseline and exact packet review; spent literals below are reference placeholders.'
 $nonce='b3e3ca0475a84432a9b328218395de0c'
@@ -35,7 +35,7 @@ $budget=Get-FactsDevelopmentBudget
 if((Hash $PayloadPath) -cne $payloadHash -or (Hash $PublisherPath) -cne $publisherHash -or (Hash $ExpectedPath) -cne $expectedHash -or (Hash $StockBaselinePath) -cne $stockBaselineHash){throw 'Frozen candidate input changed'}
 $expected=Get-Content -LiteralPath $ExpectedPath -Raw|ConvertFrom-Json
 $stock=Get-Content -LiteralPath $StockBaselinePath -Raw|ConvertFrom-Json
-if((Hash $CapturePublisherPath) -cne $capturePublisherHash -or [IO.File]::ReadAllText($BuildConfigPath).Replace("`r`n","`n") -cne (Get-CaptureObservationBuildConfig $expected)){throw 'Capture publisher/build option binding refused'}
+if((Hash $CapturePublisherPath) -cne $capturePublisherHash -or [IO.File]::ReadAllText($BuildConfigPath).Replace("`r`n","`n") -cne (Get-CaptureObservationBuildConfig $expected ([bool]$FocusAncestry))){throw 'Capture publisher/build option binding refused'}
 if($expected.nonce -cne $nonce -or $stock.nonce -isnot [string] -or $stock.nonce -cne $nonce -or
    ($stock.stock_pid -isnot [long] -and $stock.stock_pid -isnot [int])){throw 'Stock baseline nonce/PID type refused'}
 if($stock.stock_pid -le 1 -or $stock.stock_start -isnot [string] -or $stock.stock_start -cnotmatch '^[1-9][0-9]*$' -or
@@ -73,6 +73,7 @@ $factsRecipeTemplateHash=Hash (Join-Path $PSScriptRoot 'publish-captured-facts-s
 $localBindings=[ordered]@{nonce=$nonce;operator_sha256=(Hash $PSCommandPath);stock_baseline_sha256=(Hash $StockBaselinePath);
  expected_sha256=$expectedHash;payload_sha256=$payloadHash;publisher_sha256=$publisherHash;proof_sha256=(Hash $proofPath);budget_sha256=(Hash $budgetPath);capture_publisher_sha256=$capturePublisherHash;build_config_sha256=(Hash $BuildConfigPath);sdk_source='1d221d73c8e2a2a19bfb2d1b37c09bca41d554ed';developmentCaptureObservation=$true;facts_recipe_template_sha256=$factsRecipeTemplateHash;capture_proof_sha256=(Hash (Join-Path $PSScriptRoot 'capture-observation-proof.ps1'));capture_request_history_collector_sha256=(Hash (Join-Path $PSScriptRoot 'capture-request-history-collector.ps1'));capture_owner_proof_sha256=(Hash (Join-Path $PSScriptRoot 'capture-owner-refusal-proof.ps1'));capture_owner_collector_sha256=(Hash (Join-Path $PSScriptRoot 'capture-owner-refusal-collector.ps1'));capture_collector_sha256=(Hash (Join-Path $PSScriptRoot 'capture-observation-collector.ps1'));files=$files}
 $localBindings.capture_historical_transport_sha256=Hash (Join-Path $PSScriptRoot 'capture-historical-transport.ps1')
+if($FocusAncestry){$localBindings.discovery_scope='window-focus-ancestry-v1'}
 [void](Freeze 'packet-bindings.json' ($localBindings|ConvertTo-Json -Depth 5))
 if($PrepareOnly){$localBindings|ConvertTo-Json -Depth 5;return}
 # Main alone executes after independent artifact/operator review and advance notice.
@@ -258,7 +259,7 @@ printf '%s %s %s %s\n' "$p" "$started" "$dev" "$ino"
             $liveDev=$Matches[3];$liveIno=$Matches[4]
             if(-not $record.callback_verified){
                 $collectedRefusal=ObservationSSH (Expand (Get-FactsRefusalReadCommand))
-                $savedRefusal=Save-FactsRefusalEvidence $collectedRefusal (Join-Path $packet 'refusal-live.json') $nonce $livePid $liveStart
+                $savedRefusal=Save-FactsRefusalEvidence $collectedRefusal (Join-Path $packet 'refusal-live.json') $nonce $livePid $liveStart ([bool]$FocusAncestry)
                 Require (ObservationSSH (Expand "set -eu; test -d '@ROOT@'; test ! -L '@ROOT@'; test `"`$(stat -c '%d %i %a %u' '@ROOT@')`" = '$liveDev $liveIno 700 0'; test `"`$(cat '@ROOT@/owner')`" = '@NONCE@'; test ! -e '@ROOT@/entry.closed'; test ! -L '@ROOT@/entry.closed'; test ! -e '@ROOT@/restore.claim'; test ! -L '@ROOT@/restore.claim'; test `"`$(systemctl show --property=MainPID --value xochitl.service)`" = '$livePid'; test `"`$(awk '{print `$22}' /proc/$livePid/stat)`" = '$liveStart'; test -z `"`$(systemctl show --property=Job --value xochitl.service)`""))
                 if(-not(Test-FactsLiveObservationWindow $observationClock.ElapsedMilliseconds)){throw 'Refusal collection outside original live clock'}
                 $record.live_refusal=$savedRefusal
@@ -383,7 +384,7 @@ fi
                 param($command)
                 $restoreGuard="/bin/sh '$remote/restore.sh' --verify >/dev/null"
                 SSH ("set -eu; $restoreGuard`n"+$command+"`n"+$restoreGuard)
-            } {param($remotePath,$localPath)Native 'scp' @('-o','HostName=10.11.99.1','-o','StrictHostKeyChecking=yes','-o','BatchMode=yes','-o','ConnectTimeout=8',('RM2:'+$remotePath),$localPath)}}catch{
+            } {param($remotePath,$localPath)Native 'scp' @('-o','HostName=10.11.99.1','-o','StrictHostKeyChecking=yes','-o','BatchMode=yes','-o','ConnectTimeout=8',('RM2:'+$remotePath),$localPath)} ([bool]$FocusAncestry)}catch{
                 $record.historical_collection_errors+=@{collector='request-history';message=$_.Exception.Message}
             }
             # Independent historical preservation after restoration, even when
@@ -397,7 +398,7 @@ fi
             }
             if($record.historical_collection_errors.Count){throw 'Historical collectors incomplete; preserve copies and retain stage'}
             $finalTransport=SSH (Expand (Get-FactsRefusalReadCommand))
-            $record.final_refusal=Save-FactsRefusalEvidence $finalTransport (Join-Path $packet 'refusal-final.json') $nonce $attemptPid $attemptStart
+            $record.final_refusal=Save-FactsRefusalEvidence $finalTransport (Join-Path $packet 'refusal-final.json') $nonce $attemptPid $attemptStart ([bool]$FocusAncestry)
             $finalRefusalCallback=$null
             if($record.final_callback_collected){
                 try{$finalRefusalCallback=Get-Content -LiteralPath (Join-Path $packet 'callback-final.json') -Raw|ConvertFrom-Json -ErrorAction Stop}catch{}
