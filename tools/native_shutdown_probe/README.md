@@ -12,6 +12,25 @@ preparer, and `protected_files` with 24 `{path, sha256}` entries. Main verifies
 that this inventory comprises the fresh 14 document and 10 provider baselines.
 Preparation verifies bytes and emits a receipt; it does not verify recorder
 compile provenance or that the nonce has never been used outside the known list.
+Optional `diagnostic_kind` is `lifecycle-only-v1` (also the historical missing-field
+default) or `pretoken-facts-entry-v1`; any present unsupported or malformed value
+refuses preparation before output creation. The latter selects the separate
+`trace-stop-pretoken-proof.awk`, copied to the packet's existing
+`trace-stop-proof.awk` filename and bound by its manifest hash. The receipt names
+the effective mode and canonical parser source. Main must independently verify
+matching SDK mode/source/build provenance; the preparer cannot establish it.
+Pretoken admission requires exactly one `entry-installed` after startup with
+startup/GUI TID, quit=0, dropped=0, frames=0, followed by qualifying before-render.
+Window may precede or follow installation. Missing proof does not admit STOP;
+duplicate or invalid installation refuses the snapshot. All existing wire limits
+remain fixed. Installation does not prove the SDK hard request fence or Qt teardown.
+The SDK setup cohort shares the existing root, so actor evidence creation may
+stimulate its watcher and queue callbacks. Interpret results as a coarse setup and
+timing discriminator; SDK source/fixtures separately prove no owner/getter/reader
+admission even for unexpected tokens. Actor, launcher, guard and budget are unchanged.
+SDK preserves ordinary observer connection ordering and records the actual frame
+counter. If rendering advances before installation, frames=0 eligibility fails
+closed and recovery follows; the counter must never be reset to obtain admission.
 Original unit/vendor bytes must match their pinned hashes. The packet retains the
 originals privately and derives shadows by removing exactly one Unit OnFailure
 assignment from each, preserving every other byte. Do not publish private source
@@ -59,7 +78,7 @@ dependencies on systemd 255; effective runtime provenance remains a native gate.
 ## Local verification
 
 `test_actor.py` runs in an owned Linux fixture with no network or actual service
-manager. Eighteen checks cover conditional query failure, restoration ordering and
+manager. Nineteen checks cover conditional query failure, restoration ordering and
 crash preservation, deadline refusal, failed process reads, bounded owned query
 children, trace identity/drop/sequence, request expiry and singleton claims/lock.
 They also exercise preparation with synthetic bytes, actual actor

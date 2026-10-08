@@ -301,7 +301,7 @@ verify_stock() { test ! -e "$guard"; test ! -e "$activation"; printf 'healthy\n'
             # Explicit newline='\n' must produce byte-identical Linux packets.
             crlf_source = root / "crlf-source"
             crlf_source.mkdir()
-            for name in ("actor.sh.in", "launch.sh.in", "trace-stop-proof.awk"):
+            for name in ("actor.sh.in", "launch.sh.in", "trace-stop-proof.awk", "trace-stop-pretoken-proof.awk"):
                 (crlf_source / name).write_bytes((HERE / name).read_text().replace("\n", "\r\n").encode("ascii"))
             simulated = root / "windows-simulated"
             original_open = Path.open
@@ -313,6 +313,40 @@ verify_stock() { test ! -e "$guard"; test ! -e "$activation"; printf 'healthy\n'
                 prepare(simulated)
             for generated in output.iterdir():
                 self.assertEqual((simulated / generated.name).read_bytes(), generated.read_bytes(), generated.name)
+            self.assertEqual(receipt["diagnostic_kind"], "lifecycle-only-v1")
+            self.assertEqual(receipt["proof_source"], "trace-stop-proof.awk")
+            legacy_bytes = (output / "trace-stop-proof.awk").read_bytes()
+            selection["diagnostic_kind"] = "lifecycle-only-v1"
+            selected.write_text(json.dumps(selection))
+            explicit_legacy = root / "explicit-legacy"
+            legacy_receipt = prepare(explicit_legacy)
+            self.assertEqual(legacy_receipt["files"], receipt["files"])
+            selection["diagnostic_kind"] = "pretoken-facts-entry-v1"
+            selected.write_text(json.dumps(selection))
+            pretoken = root / "pretoken"
+            pretoken_receipt = prepare(pretoken)
+            self.assertEqual(pretoken_receipt["diagnostic_kind"], "pretoken-facts-entry-v1")
+            self.assertEqual(pretoken_receipt["proof_source"], "trace-stop-pretoken-proof.awk")
+            expected_parser = (HERE / "trace-stop-pretoken-proof.awk").read_text().encode("ascii")
+            self.assertEqual((pretoken / "trace-stop-proof.awk").read_bytes(), expected_parser)
+            self.assertEqual(pretoken_receipt["files"]["trace-stop-proof.awk"], hashlib.sha256(expected_parser).hexdigest())
+            self.assertNotEqual(expected_parser, legacy_bytes)
+            for name, digest in receipt["files"].items():
+                if name != "trace-stop-proof.awk":
+                    self.assertEqual(pretoken_receipt["files"][name], digest, name)
+            self.assertIn(pretoken_receipt["files"]["trace-stop-proof.awk"] + "  trace-stop-proof.awk\n",
+                          (pretoken / "packet.files").read_text())
+            with mock.patch.object(module, "HERE", crlf_source), mock.patch.object(Path, "open", windows_open):
+                prepare(root / "pretoken-windows")
+            for generated in pretoken.iterdir():
+                self.assertEqual((root / "pretoken-windows" / generated.name).read_bytes(), generated.read_bytes(), generated.name)
+            for index, invalid_mode in enumerate((None, "", "pretoken-facts-entry-v2", "lifecycle", [], {})):
+                selection["diagnostic_kind"] = invalid_mode
+                selected.write_text(json.dumps(selection))
+                rejected = root / f"invalid-mode-{index}"
+                with self.assertRaises(ValueError): prepare(rejected)
+                self.assertFalse(rejected.exists())
+            del selection["diagnostic_kind"]
             # Provider '+' is literal; shell metacharacters and traversal remain refused.
             for index, unsafe in enumerate(("/usr/lib/libstdc++;touch", "/usr/lib/$(id)",
                                              "/usr/lib/`id`", "/usr/lib/lib*.so", "/usr/lib/../escape",
@@ -514,6 +548,46 @@ exit 93
             result = subprocess.run(["awk", "-v", "pid=42", "-v", "start=561", "-f", str(HERE / "trace-stop-proof.awk")],
                                     input=text, text=True, capture_output=True)
             self.assertEqual(result.returncode, expected)
+
+    def test_pretoken_installation_order_scalars_and_legacy_separation(self):
+        def trace(events):
+            return "".join(f"v1 {i} {event} {100+i} {tid} 42 561 {quit_seen} {dropped} {frames}\n"
+                           for i, (event, tid, quit_seen, dropped, frames) in enumerate(events, 1))
+        startup = ("startup", "42", "0", "0", "0")
+        installed = ("entry-installed", "42", "0", "0", "0")
+        render = ("before-render", "77", "0", "0", "1")
+        window = ("window", "42", "0", "0", "0")
+        valid = trace([startup, window, installed, render])
+        cases = [(valid, 0), (trace([startup, installed, window, render]), 0),
+                 (trace([startup, render]), 1), (trace([startup, installed]), 1),
+                 (trace([startup, render, installed]), 1),
+                 (trace([startup, installed, installed, render]), 90),
+                 (trace([installed, startup, render]), 90),
+                 (trace([startup, installed, startup, render]), 90),
+                 (trace([startup, installed, ("late-before-render", "77", "1", "0", "1")]), 1),
+                 (valid.replace(" 561 ", " 562 "), 90),
+                 (valid.replace("v1 3", "v1 4"), 90),
+                 (valid.replace("entry-installed", "entry-ready"), 90),
+                 (valid.replace("v1 3 entry-installed 103", "v1 3 entry-installed 99"), 90),
+                 (valid.replace("v1 3 ", "v1 03 "), 90),
+                 (valid.replace("v1 3 entry-installed", "v1  3 entry-installed"), 90),
+                 (trace([startup, installed, render] + [window] * 94), 90)]
+        for field, value in ((1, "77"), (1, "042"), (2, "1"), (3, "1"),
+                             (4, "1"), (4, "00"), (4, "18446744073709551616")):
+            invalid = list(installed)
+            invalid[field] = value
+            cases.append((trace([startup, tuple(invalid), render]), 90))
+        for content, expected in cases:
+            with self.subTest(content=content):
+                result = subprocess.run(["awk", "-v", "pid=42", "-v", "start=561", "-f",
+                                         str(HERE / "trace-stop-pretoken-proof.awk")],
+                                        input=content, text=True, capture_output=True)
+                self.assertEqual(result.returncode, expected, result.stderr)
+        # Old packets still admit observer-only records, and refuse the new enum.
+        for content, expected in ((trace([startup, render]), 0), (valid, 90)):
+            result = subprocess.run(["awk", "-v", "pid=42", "-v", "start=561", "-f",
+                                     str(HERE / "trace-stop-proof.awk")], input=content, text=True, capture_output=True)
+            self.assertEqual(result.returncode, expected, result.stderr)
 
 
 if __name__ == "__main__":

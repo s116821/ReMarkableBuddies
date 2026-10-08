@@ -65,6 +65,12 @@ def main():
     if selection_file.stat().st_size > 64 * 1024:
         raise ValueError("Selection exceeds bound")
     selected = json.loads(selection_file.read_text(encoding="utf-8-sig"))
+    diagnostic_kind = selected.get("diagnostic_kind", "lifecycle-only-v1")
+    proof_sources = {"lifecycle-only-v1": "trace-stop-proof.awk",
+                     "pretoken-facts-entry-v1": "trace-stop-pretoken-proof.awk"}
+    if not isinstance(diagnostic_kind, str) or diagnostic_kind not in proof_sources:
+        raise ValueError("Explicit supported diagnostic kind required; missing mode is legacy only")
+    proof_source = proof_sources[diagnostic_kind]
     nonce = selected.get("nonce", "")
     if not isinstance(nonce, str) or not re.fullmatch(r"[0-9a-f]{32}", nonce) or nonce == "0" * 32:
         raise ValueError("Fresh Main-selected nonce required; all-zero compile fixture is not native")
@@ -121,7 +127,7 @@ def main():
         if re.search(r"@[A-Z]+@", text):
             raise ValueError("Unbound packet template")
         (output / name).write_text(text, encoding="utf-8", newline="\n")
-    (output / "trace-stop-proof.awk").write_text(regular(HERE / "trace-stop-proof.awk").read_text(), encoding="ascii", newline="\n")
+    (output / "trace-stop-proof.awk").write_text(regular(HERE / proof_source).read_text(), encoding="ascii", newline="\n")
     shutil.copyfile(payload, output / "payload.so")
     (output / "stock-unit.original").write_bytes(original_unit)
     (output / "vendor-dropin.original").write_bytes(original_vendor)
@@ -141,6 +147,7 @@ def main():
     (output / "packet.files").write_text("".join(f"{v}  {k}\n" for k, v in hashes.items()), encoding="ascii", newline="\n")
     (output / "packet.files").chmod(0o600)
     receipt = {"evidence_class": "prepared only; no native execution", "nonce": nonce, "remote_root": root,
+               "diagnostic_kind": diagnostic_kind, "proof_source": proof_source,
                "absolute_budget_seconds": 360, "selection_sha256": sha(selection_file), "files": hashes,
                "packet_manifest_sha256": sha(output / "packet.files")}
     (output / "preparation.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8", newline="\n")
