@@ -13,8 +13,11 @@ function ConvertFrom-CaptureOwnerRefusalRaw([string]$Raw) {
 function Test-CaptureOwnerRefusal($Value,[string]$Nonce,[string]$PidText,[string]$Started,[string]$Dev,[string]$Ino) {
     if($null -eq $Value){return $false}
     $fields=@('kind','version','nonce','attempt_pid','attempt_start','root_device','root_inode','setup_profile','capture_accepted_ms','failure_ms','deadline_check_ms','effective_deadline_ms','branch','predicate','discovery_result','visited_items','receiver_candidates','scene_candidates','matched_pairs','first_pair_receiver','first_pair_scene','first_pair_rejection','active_owner_rejection','observer_role','observer_member','observer_failure','native_authority','render_authority','ui_acknowledged')
+    if(($Value.version -isnot [int] -and $Value.version -isnot [long]) -or $Value.version -notin @(1,2)){return $false}
+    $topologyFields=@('topology_limit','topology_depth','topology_queue_size','topology_child_count')
+    if($Value.version -eq 2){$fields+=$topologyFields}
     $names=@($Value.PSObject.Properties.Name)
-    if($names.Count -ne 29 -or @($names|Where-Object {$_ -cnotin $fields}).Count){return $false}
+    if($names.Count -ne $fields.Count -or @($names|Where-Object {$_ -cnotin $fields}).Count){return $false}
     foreach($name in @('kind','nonce','setup_profile','branch')){if($Value.$name -isnot [string]){return $false}}
     if($Value.kind -cne 'development-capture-owner-refusal' -or $Value.nonce -cne $Nonce -or $Nonce -cnotmatch '\A[0-9a-f]{32}\z' -or $Value.setup_profile -cne 'main-dev-facts-120s'){return $false}
     foreach($name in @('attempt_pid','attempt_start','root_device','root_inode')){
@@ -24,7 +27,7 @@ function Test-CaptureOwnerRefusal($Value,[string]$Nonce,[string]$PidText,[string
     if($Value.attempt_pid -cne $PidText -or $Value.attempt_start -cne $Started -or $Value.root_device -cne $Dev -or $Value.root_inode -cne $Ino){return $false}
     foreach($name in @('native_authority','render_authority','ui_acknowledged')){if($Value.$name -isnot [bool] -or $Value.$name){return $false}}
     foreach($name in @('version','capture_accepted_ms','failure_ms','effective_deadline_ms')){if(($Value.$name -isnot [int] -and $Value.$name -isnot [long]) -or $Value.$name -lt 0){return $false}}
-    if($Value.version -ne 1 -or $Value.capture_accepted_ms -ge 120000 -or $Value.failure_ms -lt $Value.capture_accepted_ms -or $Value.effective_deadline_ms -ne [Math]::Min(120000,$Value.capture_accepted_ms+5000)){return $false}
+    if($Value.capture_accepted_ms -ge 120000 -or $Value.failure_ms -lt $Value.capture_accepted_ms -or $Value.effective_deadline_ms -ne [Math]::Min(120000,$Value.capture_accepted_ms+5000)){return $false}
     $progress=@('context','live','invalidated','token','deadline')
     $allowed=@('reentrant-check','invalidated-before','context-before','lifetime-before','active-owner','invalidated-after','context-after','lifetime-after','owner-pointers','owner-threads','deadline')
     $discovery=@('open-engine-thread','open-current-window-unavailable','open-context-lost','open-item-lost','open-topology-bound','open-candidate-bound','open-owner-ambiguous','open-owner-unavailable')
@@ -91,6 +94,28 @@ function Test-CaptureOwnerRefusal($Value,[string]$Nonce,[string]$PidText,[string
         if(($Value.predicate -ceq 'active-owner') -ne ($null -ne $Value.active_owner_rejection)){return $false}
       }
       default{return $false}
+    }
+    if($Value.version -eq 2){
+        foreach($name in @('topology_depth','topology_queue_size','topology_child_count')){
+            if($null -ne $Value.$name -and (($Value.$name -isnot [int] -and $Value.$name -isnot [long]) -or $Value.$name -lt 0)){return $false}
+        }
+        if($Value.branch -cne 'owner-discovery' -or $Value.discovery_result -cne 'open-topology-bound'){
+            foreach($name in $topologyFields){if($null -ne $Value.$name){return $false}}
+        }else{
+            if($Value.topology_limit -isnot [string]){return $false}
+            switch -CaseSensitive ($Value.topology_limit){
+                'visited' {
+                    if($Value.visited_items -ne 4097 -or $null -ne $Value.topology_depth -or $null -ne $Value.topology_queue_size -or $null -ne $Value.topology_child_count){return $false}
+                }
+                'depth' {
+                    if($Value.visited_items -gt 4096 -or $Value.topology_depth -ne 25 -or $null -ne $Value.topology_queue_size -or $null -ne $Value.topology_child_count){return $false}
+                }
+                'queue-cap' {
+                    if($Value.visited_items -gt 4096 -or $null -eq $Value.topology_depth -or $Value.topology_depth -gt 24 -or $null -eq $Value.topology_queue_size -or $Value.topology_queue_size -lt 1 -or $Value.topology_queue_size -gt 4096 -or $Value.visited_items -gt $Value.topology_queue_size -or $null -eq $Value.topology_child_count -or $Value.topology_child_count -le (4096-$Value.topology_queue_size)){return $false}
+                }
+                default{return $false}
+            }
+        }
     }
     if($Value.predicate -ceq 'deadline'){
         if(($Value.deadline_check_ms -isnot [int] -and $Value.deadline_check_ms -isnot [long]) -or $Value.deadline_check_ms -lt $Value.effective_deadline_ms -or $Value.deadline_check_ms -gt $Value.failure_ms){return $false}
