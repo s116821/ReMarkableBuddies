@@ -2,12 +2,14 @@
 pub mod capture_facts;
 mod intent;
 mod legacy;
+mod selected;
 mod types;
 use crate::storage::{
     digest, Conflict, Envelope, Kind, Media, Namespace, ObjectRef, Store, Uuid, FORMAT, MAX_ITEMS,
 };
 use anyhow::{bail, ensure, Context, Result};
 pub use intent::*;
+pub use selected::*;
 use serde::Serialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
