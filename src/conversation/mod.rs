@@ -1,4 +1,5 @@
 //! Local-first conversation ledger. Stored facts are not native effect permissions.
+mod admission;
 pub mod capture_facts;
 mod intent;
 mod legacy;
@@ -7,6 +8,7 @@ mod types;
 use crate::storage::{
     digest, Conflict, Envelope, Kind, Media, Namespace, ObjectRef, Store, Uuid, FORMAT, MAX_ITEMS,
 };
+pub use admission::SelectedAdmission;
 use anyhow::{bail, ensure, Context, Result};
 pub use intent::*;
 pub use selected::*;
