@@ -4,9 +4,10 @@ param([Parameter(Mandatory=$true)][string]$PayloadPath,
       [Parameter(Mandatory=$true)][string]$BuildConfigPath,
       [Parameter(Mandatory=$true)][string]$ExpectedPath,
       [Parameter(Mandatory=$true)][string]$StockBaselinePath,
-      [Parameter(Mandatory=$true)][string]$EvidenceDirectory, [switch]$PrepareOnly,[switch]$FocusAncestry,[switch]$ReceiverSubtreeCapture)
+      [Parameter(Mandatory=$true)][string]$EvidenceDirectory, [switch]$PrepareOnly,[switch]$FocusAncestry,[switch]$ReceiverSubtreeCapture,[switch]$ReceiverSubtreeCapture512)
 $ErrorActionPreference='Stop'
 throw 'SOURCE ONLY: requires a separately selected fresh nonce, artifacts, baseline and exact packet review; spent literals below are reference placeholders.'
+if($ReceiverSubtreeCapture512 -and -not $ReceiverSubtreeCapture){throw '512 capture profile requires receiver selection'}
 if($FocusAncestry -and $ReceiverSubtreeCapture){throw 'Capture discovery selections are mutually exclusive'}
 $nonce='b3e3ca0475a84432a9b328218395de0c'
 $remote='/run/rmb-qt-probe-'+$nonce
@@ -36,7 +37,7 @@ $budget=Get-FactsDevelopmentBudget
 if((Hash $PayloadPath) -cne $payloadHash -or (Hash $PublisherPath) -cne $publisherHash -or (Hash $ExpectedPath) -cne $expectedHash -or (Hash $StockBaselinePath) -cne $stockBaselineHash){throw 'Frozen candidate input changed'}
 $expected=Get-Content -LiteralPath $ExpectedPath -Raw|ConvertFrom-Json
 $stock=Get-Content -LiteralPath $StockBaselinePath -Raw|ConvertFrom-Json
-if((Hash $CapturePublisherPath) -cne $capturePublisherHash -or [IO.File]::ReadAllText($BuildConfigPath).Replace("`r`n","`n") -cne (Get-CaptureObservationBuildConfig $expected ([bool]$FocusAncestry) ([bool]$ReceiverSubtreeCapture))){throw 'Capture publisher/build option binding refused'}
+if((Hash $CapturePublisherPath) -cne $capturePublisherHash -or [IO.File]::ReadAllText($BuildConfigPath).Replace("`r`n","`n") -cne (Get-CaptureObservationBuildConfig $expected ([bool]$FocusAncestry) ([bool]$ReceiverSubtreeCapture) ([bool]$ReceiverSubtreeCapture512))){throw 'Capture publisher/build option binding refused'}
 if($expected.nonce -cne $nonce -or $stock.nonce -isnot [string] -or $stock.nonce -cne $nonce -or
    ($stock.stock_pid -isnot [long] -and $stock.stock_pid -isnot [int])){throw 'Stock baseline nonce/PID type refused'}
 if($stock.stock_pid -le 1 -or $stock.stock_start -isnot [string] -or $stock.stock_start -cnotmatch '^[1-9][0-9]*$' -or
@@ -75,7 +76,7 @@ $localBindings=[ordered]@{nonce=$nonce;operator_sha256=(Hash $PSCommandPath);sto
  expected_sha256=$expectedHash;payload_sha256=$payloadHash;publisher_sha256=$publisherHash;proof_sha256=(Hash $proofPath);budget_sha256=(Hash $budgetPath);capture_publisher_sha256=$capturePublisherHash;build_config_sha256=(Hash $BuildConfigPath);sdk_source='1d221d73c8e2a2a19bfb2d1b37c09bca41d554ed';developmentCaptureObservation=$true;facts_recipe_template_sha256=$factsRecipeTemplateHash;capture_proof_sha256=(Hash (Join-Path $PSScriptRoot 'capture-observation-proof.ps1'));capture_request_history_collector_sha256=(Hash (Join-Path $PSScriptRoot 'capture-request-history-collector.ps1'));capture_owner_proof_sha256=(Hash (Join-Path $PSScriptRoot 'capture-owner-refusal-proof.ps1'));capture_owner_collector_sha256=(Hash (Join-Path $PSScriptRoot 'capture-owner-refusal-collector.ps1'));capture_collector_sha256=(Hash (Join-Path $PSScriptRoot 'capture-observation-collector.ps1'));files=$files}
 $localBindings.capture_historical_transport_sha256=Hash (Join-Path $PSScriptRoot 'capture-historical-transport.ps1')
 if($FocusAncestry){$localBindings.discovery_scope='window-focus-ancestry-v1'}
-if($ReceiverSubtreeCapture){$localBindings.discovery_scope='receiver-subtree-capture-unqualified-v1'}
+if($ReceiverSubtreeCapture){$localBindings.discovery_scope=if($ReceiverSubtreeCapture512){'receiver-subtree-capture-unqualified-v2'}else{'receiver-subtree-capture-unqualified-v1'}}
 [void](Freeze 'packet-bindings.json' ($localBindings|ConvertTo-Json -Depth 5))
 if($PrepareOnly){$localBindings|ConvertTo-Json -Depth 5;return}
 # Main alone executes after independent artifact/operator review and advance notice.
@@ -206,7 +207,7 @@ systemctl restart xochitl.service
     $statusTimeoutUsed=$false
     $record.capture_only_observed=$false
     while(Test-FactsLiveObservationWindow $observationClock.ElapsedMilliseconds){
-        [void](Receive-CaptureObservation $remote $nonce $payloadHash $expected $packet $record {param($command)ObservationSSH $command} {param($remotePath,$localPath)ObservationCopy $remotePath $localPath} ([bool]$ReceiverSubtreeCapture))
+        [void](Receive-CaptureObservation $remote $nonce $payloadHash $expected $packet $record {param($command)ObservationSSH $command} {param($remotePath,$localPath)ObservationCopy $remotePath $localPath} ([bool]$ReceiverSubtreeCapture) ([bool]$ReceiverSubtreeCapture512))
         if($record.capture_verified -and $record.capture_completion.page_index -ne 0){throw 'Selected first fixture page not captured; no facts publication'}
         if($ReceiverSubtreeCapture -and $record.capture_verified){$record.capture_only_observed=$true;break}
         $observed=ObservationSSH (Expand @'
@@ -397,7 +398,7 @@ fi
                 param($command)
                 $restoreGuard="/bin/sh '$remote/restore.sh' --verify >/dev/null"
                 SSH ("set -eu; $restoreGuard`n"+$command+"`n"+$restoreGuard)
-            } {param($remotePath,$localPath)Native 'scp' @('-o','HostName=10.11.99.1','-o','StrictHostKeyChecking=yes','-o','BatchMode=yes','-o','ConnectTimeout=8',('RM2:'+$remotePath),$localPath)} ([bool]$FocusAncestry) ([bool]$ReceiverSubtreeCapture)}catch{
+            } {param($remotePath,$localPath)Native 'scp' @('-o','HostName=10.11.99.1','-o','StrictHostKeyChecking=yes','-o','BatchMode=yes','-o','ConnectTimeout=8',('RM2:'+$remotePath),$localPath)} ([bool]$FocusAncestry) ([bool]$ReceiverSubtreeCapture) ([bool]$ReceiverSubtreeCapture512)}catch{
                 $record.historical_collection_errors+=@{collector='owner-refusal';message=$_.Exception.Message}
             }
             if($record.historical_collection_errors.Count){throw 'Historical collectors incomplete; preserve copies and retain stage'}

@@ -52,7 +52,7 @@ Check ($operator.EndBlock.Statements[1].Extent.Text -like "throw 'SOURCE ONLY:*"
 $call=@($operator.FindAll({param($node)$node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq 'Receive-CaptureOwnerRefusalEvidence'},$true))[0]
 $command=$call.Extent.Text
 foreach($block in @($call.CommandElements|Where-Object {$_ -is [Management.Automation.Language.ScriptBlockExpressionAst]})){$command=$command.Replace($block.Extent.Text,'{}')}
-$FocusAncestry=$false;$ReceiverSubtreeCapture=$true;$remote='inert';$packet='inert';$ownerIdentity=$null;$record=@{};$script:routed=$false
-& {function Receive-CaptureOwnerRefusalEvidence {param($a,$b,$c,$d,$e,$read,$copy,[bool]$focus,[bool]$subtree) if($args.Count -or $focus -or -not $subtree){throw 'Wrong scope route'};$script:routed=$true}; & ([scriptblock]::Create($command))}
+$FocusAncestry=$false;$ReceiverSubtreeCapture=$true;$ReceiverSubtreeCapture512=$false;$remote='inert';$packet='inert';$ownerIdentity=$null;$record=@{};$script:routed=$false
+& {function Receive-CaptureOwnerRefusalEvidence {param($a,$b,$c,$d,$e,$read,$copy,[bool]$focus,[bool]$subtree,[bool]$profile512) if($args.Count -or $focus -or -not $subtree -or $profile512){throw 'Wrong scope route'};$script:routed=$true}; & ([scriptblock]::Create($command))}
 Check $script:routed 'actual owner collector route'
 Write-Output "PASS receiver subtree scoped consumer $checks checks (synthetic wire/config; no native authority)"

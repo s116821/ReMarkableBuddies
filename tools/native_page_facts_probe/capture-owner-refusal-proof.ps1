@@ -10,9 +10,10 @@ function ConvertFrom-CaptureOwnerRefusalRaw([string]$Raw) {
         return ConvertFrom-Json -InputObject $Raw -ErrorAction Stop
     }catch{return $null}finally{if($null -ne $document){$document.Dispose()}}
 }
-function Test-CaptureOwnerRefusal($Value,[string]$Nonce,[string]$PidText,[string]$Started,[string]$Dev,[string]$Ino,[bool]$FocusAncestry=$false,[bool]$ReceiverSubtreeCapture=$false) {
+function Test-CaptureOwnerRefusal($Value,[string]$Nonce,[string]$PidText,[string]$Started,[string]$Dev,[string]$Ino,[bool]$FocusAncestry=$false,[bool]$ReceiverSubtreeCapture=$false,[bool]$ReceiverSubtreeCapture512=$false) {
     if($null -eq $Value){return $false}
     $fields=@('kind','version','nonce','attempt_pid','attempt_start','root_device','root_inode','setup_profile','capture_accepted_ms','failure_ms','deadline_check_ms','effective_deadline_ms','branch','predicate','discovery_result','visited_items','receiver_candidates','scene_candidates','matched_pairs','first_pair_receiver','first_pair_scene','first_pair_rejection','active_owner_rejection','observer_role','observer_member','observer_failure','native_authority','render_authority','ui_acknowledged')
+    if($ReceiverSubtreeCapture512 -and -not $ReceiverSubtreeCapture){return $false}
     if($FocusAncestry -and $ReceiverSubtreeCapture){return $false}
     if(($Value.version -isnot [int] -and $Value.version -isnot [long]) -or $Value.version -notin @(1,2,3,4,5) -or ($Value.version -in @(3,4) -and -not $FocusAncestry) -or ($Value.version -eq 5 -and -not $ReceiverSubtreeCapture) -or ($ReceiverSubtreeCapture -and $Value.version -ne 5)){return $false}
     $topologyFields=@('topology_limit','topology_depth','topology_queue_size','topology_child_count')
@@ -41,7 +42,7 @@ function Test-CaptureOwnerRefusal($Value,[string]$Nonce,[string]$PidText,[string
     $counters=@('visited_items','receiver_candidates','scene_candidates','matched_pairs')
     $pair=@('first_pair_receiver','first_pair_scene','first_pair_rejection')
     $observer=@('observer_role','observer_member','observer_failure')
-    if($Value.version -eq 5){return Test-ReceiverSubtreeCaptureRefusalFields $Value $progress $allowed $groups $topologyFields $counters $pair $observer}
+    if($Value.version -eq 5){return Test-ReceiverSubtreeCaptureRefusalFields $Value $progress $allowed $groups $topologyFields $counters $pair $observer $ReceiverSubtreeCapture512}
     if($Value.version -in @(3,4)){
         foreach($name in ($counters+@('first_pair_receiver','first_pair_scene'))){
             if($null -ne $Value.$name -and (($Value.$name -isnot [int] -and $Value.$name -isnot [long]) -or $Value.$name -lt 0)){return $false}
@@ -173,10 +174,11 @@ function Test-CaptureOwnerRefusal($Value,[string]$Nonce,[string]$PidText,[string
     }elseif($null -ne $Value.deadline_check_ms){return $false}
     return $true
 }
-function Test-ReceiverSubtreeCaptureRefusalFields($v,$progress,$allowed,$groups,$topologyFields,$counters,$pair,$observer) {
-    if($v.discovery_scope -isnot [string] -or $v.discovery_scope -cne 'receiver-subtree-capture-unqualified-v1'){return $false}
+function Test-ReceiverSubtreeCaptureRefusalFields($v,$progress,$allowed,$groups,$topologyFields,$counters,$pair,$observer,[bool]$ReceiverSubtreeCapture512=$false) {
+    if($v.discovery_scope -isnot [string] -or $v.discovery_scope -cne $(if($ReceiverSubtreeCapture512){'receiver-subtree-capture-unqualified-v2'}else{'receiver-subtree-capture-unqualified-v1'})){return $false}
     $groups=@($groups|Where-Object {$_ -cne 'scene-active-focus'})+@('capture-context','capture-identity')
-    $bounds=@{visited_items=256;receiver_candidates=1;scene_candidates=9;matched_pairs=2;first_pair_receiver=0;first_pair_scene=7;topology_depth=8;topology_queue_size=256;topology_child_count=2147483647}
+    $itemCap=if($ReceiverSubtreeCapture512){512}else{256}
+    $bounds=@{visited_items=$itemCap;receiver_candidates=1;scene_candidates=9;matched_pairs=2;first_pair_receiver=0;first_pair_scene=7;topology_depth=8;topology_queue_size=$itemCap;topology_child_count=2147483647}
     foreach($name in $bounds.Keys){if($null -ne $v.$name -and (($v.$name -isnot [int] -and $v.$name -isnot [long]) -or $v.$name -lt 0 -or $v.$name -gt $bounds[$name])){return $false}}
     if($null -ne $v.active_owner_rejection -and $v.active_owner_rejection -cnotin $groups){return $false}
     $pc=@($pair|Where-Object {$null -ne $v.$_}).Count;$oc=@($observer|Where-Object {$null -ne $v.$_}).Count
@@ -193,7 +195,7 @@ function Test-ReceiverSubtreeCaptureRefusalFields($v,$progress,$allowed,$groups,
         if($vc -ne 3 -or $v.visited_items -lt 1 -or $v.topology_queue_size -lt $v.visited_items -or $v.topology_child_count -lt 1 -or $null -eq $v.topology_depth -or $null -eq $v.topology_queue_size -or $null -eq $v.topology_child_count){return $false}
         switch -CaseSensitive ($v.topology_limit){
             'subtree-depth'{if($v.topology_depth -ne 8){return $false}}
-            'subtree-items'{if($v.topology_depth -ge 8 -or $v.topology_child_count -le 256-$v.topology_queue_size){return $false}}
+            'subtree-items'{if($v.topology_depth -ge 8 -or $v.topology_child_count -le $itemCap-$v.topology_queue_size){return $false}}
             default{return $false}
         }
     }
