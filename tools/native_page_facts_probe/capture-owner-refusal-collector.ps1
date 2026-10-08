@@ -1,6 +1,6 @@
 # Historical collection only; Main supplies bounded transports and restore guards.
 . "$PSScriptRoot/capture-historical-transport.ps1"
-function Receive-CaptureOwnerRefusalEvidence([string]$Root,[string]$Nonce,$Identity,[string]$Packet,[Collections.IDictionary]$Record,[scriptblock]$Read,[scriptblock]$Copy,[bool]$FocusAncestry=$false,[bool]$ReceiverSubtreeCapture=$false,[bool]$ReceiverSubtreeCapture512=$false,[int]$ReceiverSubtreeItemCap=0,[int]$ReceiverSubtreeDepthCap=0,[bool]$ReceiverSubtreeCaptureAllowUnfocusedArea=$false,[bool]$ReceiverSubtreeCaptureDetailedIdentityDiagnostics=$false,[bool]$ReceiverSubtreeCaptureDocumentIdTypeDiagnostics=$false) {
+function Receive-CaptureOwnerRefusalEvidence([string]$Root,[string]$Nonce,$Identity,[string]$Packet,[Collections.IDictionary]$Record,[scriptblock]$Read,[scriptblock]$Copy,[bool]$FocusAncestry=$false,[bool]$ReceiverSubtreeCapture=$false,[bool]$ReceiverSubtreeCapture512=$false,[int]$ReceiverSubtreeItemCap=0,[int]$ReceiverSubtreeDepthCap=0,[bool]$ReceiverSubtreeCaptureAllowUnfocusedArea=$false,[bool]$ReceiverSubtreeCaptureDetailedIdentityDiagnostics=$false,[bool]$ReceiverSubtreeCaptureDocumentIdTypeDiagnostics=$false,[bool]$ReceiverSubtreeCaptureEntryIdConversion=$false) {
     if($Nonce -cnotmatch '\A[0-9a-f]{32}\z' -or $Root -cne ('/run/rmb-qt-probe-'+$Nonce)){throw 'Owner refusal root refused'}
     foreach($name in @('attempt_pid','attempt_start','root_device','root_inode')){
         $parsed=[ulong]0
@@ -62,6 +62,6 @@ fi
     $Record.capture_owner_refusal_state='preserved'
     $value=$null
     try{$raw=[Text.UTF8Encoding]::new($false,$true).GetString([IO.File]::ReadAllBytes($path));$value=ConvertFrom-CaptureOwnerRefusalRaw $raw}catch{}
-    $Record.capture_owner_refusal_decoded=Test-CaptureOwnerRefusal $value $Nonce $Identity.attempt_pid $Identity.attempt_start $Identity.root_device $Identity.root_inode $FocusAncestry $ReceiverSubtreeCapture $ReceiverSubtreeCapture512 $ReceiverSubtreeItemCap $ReceiverSubtreeDepthCap $ReceiverSubtreeCaptureAllowUnfocusedArea $ReceiverSubtreeCaptureDetailedIdentityDiagnostics $ReceiverSubtreeCaptureDocumentIdTypeDiagnostics
+    $Record.capture_owner_refusal_decoded=Test-CaptureOwnerRefusal $value $Nonce $Identity.attempt_pid $Identity.attempt_start $Identity.root_device $Identity.root_inode $FocusAncestry $ReceiverSubtreeCapture $ReceiverSubtreeCapture512 $ReceiverSubtreeItemCap $ReceiverSubtreeDepthCap $ReceiverSubtreeCaptureAllowUnfocusedArea $ReceiverSubtreeCaptureDetailedIdentityDiagnostics $ReceiverSubtreeCaptureDocumentIdTypeDiagnostics $ReceiverSubtreeCaptureEntryIdConversion
     if($Record.capture_owner_refusal_decoded){$Record.capture_owner_refusal=$value}
 }
