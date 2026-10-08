@@ -2020,9 +2020,11 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 [[package]]
 name = "remarkable-open-sdk"
 version = "0.0.0"
-source = "git+https://github.com/s116821/ReMarkableOpenSDK?rev=2d473f0954120889f8a04c6294151241576ff8c3#2d473f0954120889f8a04c6294151241576ff8c3"
+source = "git+https://github.com/s116821/ReMarkableOpenSDK?rev=d01b4bdfbc4dc11673f84ff82bbc62c8dc77bbb1#d01b4bdfbc4dc11673f84ff82bbc62c8dc77bbb1"
 dependencies = [
  "image",
+ "serde",
+ "serde_json",
  "sha2",
 ]
 

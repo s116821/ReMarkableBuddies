@@ -31,6 +31,7 @@ pub enum AnswerPageType {
 pub enum AcquiredEvidence {
     Legacy { images: Vec<Vec<u8>> },
     Sdk(Box<remarkable_open_sdk::capture::CapturedBatch>),
+    Development(Box<remarkable_open_sdk::development_capture::ReadOnlyDevelopmentCapture>),
 }
 
 // Image comparison mask constants - skip UI elements that can change between screenshots
@@ -90,8 +91,24 @@ impl Workflow {
         facade: selected_backend::SelectedBackendFacade,
         debug_dump: bool,
     ) -> Self {
-        let mut workflow =
-            Self::with_device(Box::new(selected_backend::RefusingBackend), debug_dump);
+        let mut workflow = Self::with_device(
+            Box::new(selected_backend::RefusingBackend::new()),
+            debug_dump,
+        );
+        workflow.selected = Some(facade);
+        workflow
+    }
+    /// Source-only transport of an already-owned capture; no production bootstrap,
+    /// native freshness, trigger setup or output capability follows from this.
+    pub(crate) fn with_selected_development_capture(
+        facade: selected_backend::SelectedBackendFacade,
+        capture: remarkable_open_sdk::development_capture::ReadOnlyDevelopmentCapture,
+        debug_dump: bool,
+    ) -> Self {
+        let mut workflow = Self::with_device(
+            Box::new(selected_backend::RefusingBackend::with_capture(capture)),
+            debug_dump,
+        );
         workflow.selected = Some(facade);
         workflow
     }
@@ -194,6 +211,14 @@ impl Workflow {
                     images.push(bytes);
                 }
                 Ok(AcquiredEvidence::Legacy { images })
+            }
+            AcquisitionKind::Development => {
+                let capture = self.device.capture_development()?;
+                self.check_request_progress()?;
+                // The original PNG is not a legacy 768x1024 overview. Attempt prepares
+                // provider images once through the shared pure Reader recipe.
+                self.frame = Frame::default();
+                Ok(AcquiredEvidence::Development(Box::new(capture)))
             }
             AcquisitionKind::Sdk => {
                 let batch = self.device.capture_sdk()?;

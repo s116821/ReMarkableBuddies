@@ -28,6 +28,7 @@ pub enum AcquisitionKind {
     Unsupported,
     LegacyUnqualified,
     Sdk,
+    Development,
 }
 
 pub trait DeviceBackend {
@@ -37,6 +38,12 @@ pub trait DeviceBackend {
     }
     fn capture_sdk(&mut self) -> Result<remarkable_open_sdk::capture::CapturedBatch> {
         anyhow::bail!("SDK acquisition unavailable")
+    }
+    /// Separate development evidence; never a synthetic SDK batch or legacy fallback.
+    fn capture_development(
+        &mut self,
+    ) -> Result<remarkable_open_sdk::development_capture::ReadOnlyDevelopmentCapture> {
+        anyhow::bail!("Development capture unavailable")
     }
     /// Optional editing contract. Unsupported backends retain normal Reader
     /// behavior and cannot arm history. Expected text must be fully persisted.

@@ -273,6 +273,7 @@ pub enum Record {
     Source(ImageUse),
     Capture(Box<CaptureEvidence>),
     LegacyCapture(LegacyCapture),
+    DevelopmentCapture(Box<super::development::DevelopmentCaptureHistory>),
     OutcomeFact(OutcomeFact),
     Binding(Binding),
     Export(ExportAssociation),
@@ -315,6 +316,7 @@ pub struct ContextView {
     pub sources: Vec<ImageUse>,
     pub captures: Vec<CaptureEvidence>,
     pub legacy_captures: Vec<LegacyCapture>,
+    pub development_captures: Vec<super::development::DevelopmentCaptureHistory>,
     pub missing_media: Vec<Media>,
     pub selection: Option<TurnRange>,
 }

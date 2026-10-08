@@ -12,6 +12,7 @@ pub(super) struct Attempt {
     pub assistant: Option<Turn>,
     evidence: Uuid,
     pub legacy_output: bool,
+    development_evidence: bool,
     reader_preparation: Option<ReaderPreparation>,
 }
 fn now() -> Result<u64> {
@@ -41,6 +42,7 @@ pub(crate) fn assert_attachment_behavior(
         assistant: Some(assistant),
         evidence,
         legacy_output: false,
+        development_evidence: false,
         reader_preparation: None,
     };
     assert!(attempt
@@ -84,7 +86,7 @@ impl Attempt {
         };
         ledger.create(conversation, Uuid::new_v4(), timestamp)?;
         let expected = ledger.expected(Namespace::Conversation, conversation)?;
-        let (evidence, legacy_output) = match acquired {
+        let (evidence, legacy_output, development_evidence) = match acquired {
             AcquiredEvidence::Legacy { images } => {
                 let images = images
                     .into_iter()
@@ -126,12 +128,22 @@ impl Attempt {
                     None,
                     images,
                 )?;
-                (prepared.evidence.id, true)
+                (prepared.evidence.id, true, false)
+            }
+            AcquiredEvidence::Development(capture) => {
+                let prepared = ledger.prepare_development(
+                    Uuid::new_v4(),
+                    expected,
+                    user.clone(),
+                    Uuid::new_v4(),
+                    &capture,
+                )?;
+                (prepared.evidence.id, false, true)
             }
             AcquiredEvidence::Sdk(batch) => {
                 let prepared =
                     ledger.prepare_sdk_fixture(Uuid::new_v4(), expected, user.clone(), &batch)?;
-                (prepared.capture, false)
+                (prepared.capture, false, false)
             }
         };
         let mut attempt = Self {
@@ -139,6 +151,7 @@ impl Attempt {
             assistant: None,
             evidence,
             legacy_output,
+            development_evidence,
             reader_preparation: None,
         };
         attempt.user = attempt.load_turn(ledger, attempt.user.id)?;
@@ -151,8 +164,8 @@ impl Attempt {
         preparation: ReaderPreparation,
     ) -> Result<()> {
         anyhow::ensure!(
-            self.reader_preparation.is_none() && !self.legacy_output,
-            "Reader preparation already attached or legacy"
+            self.reader_preparation.is_none() && !self.legacy_output && !self.development_evidence,
+            "Reader preparation already attached, legacy or development"
         );
         let assistant = self
             .assistant
@@ -202,7 +215,9 @@ impl Attempt {
             .context("attempt turn absent")
     }
     pub fn images(&self, ledger: &Ledger) -> Result<Vec<Vec<u8>>> {
-        if self.legacy_output {
+        if self.development_evidence {
+            Ok(ledger.stored_development_images(self.evidence)?.images)
+        } else if self.legacy_output {
             Ok(ledger.stored_legacy_images(self.evidence)?.images)
         } else {
             Ok(ledger

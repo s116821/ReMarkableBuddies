@@ -26,22 +26,29 @@ impl LLMEngine for RecordingModel {
     fn execute(&mut self) -> Result<String> {
         let ledger = Ledger::new(self.store.clone());
         let records = records(&ledger);
-        let evidence = records
+        let stored = records
             .iter()
             .find_map(|r| match r {
-                Record::LegacyCapture(e) => Some(e),
+                Record::LegacyCapture(e) => {
+                    Some(ledger.stored_legacy_images(e.id).map(|v| v.images))
+                }
+                Record::DevelopmentCapture(e) => {
+                    Some(ledger.stored_development_images(e.id).map(|v| v.images))
+                }
+                Record::Capture(e) => Some(
+                    ledger
+                        .stored_sdk_images(e.id)
+                        .map(|v| v.images.into_iter().map(|i| i.bytes).collect()),
+                ),
                 _ => None,
             })
-            .context("no prepared evidence before provider")?;
+            .context("no prepared evidence before provider")??;
         let actual = self
             .images
             .iter()
             .map(|i| STANDARD.decode(i).map_err(Into::into))
             .collect::<Result<Vec<_>>>()?;
-        ensure!(
-            actual == ledger.stored_legacy_images(evidence.id)?.images,
-            "provider bytes differ from storage"
-        );
+        ensure!(actual == stored, "provider bytes differ from storage");
         self.calls.borrow_mut().push(actual);
         if self.fault_after_second && self.calls.borrow().len() == 2 {
             self.store.set_fault(StorageFault::BeforeCommit)?;
@@ -280,4 +287,296 @@ fn storage_failure_prevents_provider_or_output_and_provider_failure_is_durable()
                 .any(|r| matches!(r,Record::Turn(t) if t.outcome==Outcome::Failed)));
         }
     }
+}
+
+fn development_capture_fixture() -> (
+    remarkable_open_sdk::development_capture::ReadOnlyDevelopmentCapture,
+    Vec<u8>,
+    Vec<u8>,
+) {
+    use remarkable_open_sdk::development_capture::*;
+    let expected = ExpectedCaptureBinding {
+        nonce: "0123456789abcdef0123456789abcdef".into(),
+        attempt_pid: "42".into(),
+        attempt_start: "100".into(),
+        root_device: "19".into(),
+        root_inode: "200".into(),
+        document_id: "00000000-0000-4000-8000-000000000001".into(),
+        expected_order: vec!["00000000-0000-4000-8000-000000000002".into()],
+    };
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgba8(2, 3)
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .unwrap();
+    let png = encoded.into_inner();
+    let raw = serde_json::to_vec_pretty(&serde_json::json!({
+        "kind":"development-capture-observation", "version":2,
+        "nonce":expected.nonce, "attempt_pid":expected.attempt_pid, "attempt_start":expected.attempt_start,
+        "root_device":expected.root_device, "root_inode":expected.root_inode, "setup_profile":"main-dev-facts-120s",
+        "setup_budget_ms":120000, "capture_budget_ms":5000,
+        "accepted_ms":100, "baseline_ms":101, "grab_start_ms":102, "grab_end_ms":103, "post_read_ms":104, "completed_ms":105,
+        "document_id":expected.document_id, "page_id":expected.expected_order[0], "page_index":0,
+        "begin_epoch":"1", "end_epoch":"1", "width":2, "height":3, "dpr":1,
+        "image_width":2, "image_height":3, "png_bytes":png.len(), "png_sha256":crate::storage::digest(&png),
+        "image_status":"available", "gui_callback_completed":true, "scope_current":true,
+        "atomic_snapshot":false, "native_authority":false, "render_authority":false, "ui_acknowledged":false,
+        "observed_order":false, "discovery_scope":DISCOVERY_SCOPE
+    })).unwrap();
+    let capture =
+        ReadOnlyDevelopmentCapture::from_collected_v11(&expected, raw.clone(), png.clone())
+            .unwrap();
+    (capture, raw, png)
+}
+fn development_workflow(
+    store: Arc<Store>,
+    state: Shared,
+    capture: remarkable_open_sdk::development_capture::ReadOnlyDevelopmentCapture,
+) -> Workflow {
+    use crate::workflow::selected_backend::SelectedBackendFacade;
+    let admission = Arc::new(
+        SelectedAdmission::new(
+            store,
+            crate::storage::selection::SelectionScope {
+                group: crate::storage::Uuid::new_v4(),
+                key_sha256: "a".repeat(64),
+                binding_sha256: "b".repeat(64),
+            },
+        )
+        .unwrap(),
+    );
+    let facade = SelectedBackendFacade::new(admission, Box::new(SimDevice(state)));
+    Workflow::with_selected_development_capture(facade, capture, false)
+}
+#[test]
+fn development_owned_transport_persists_before_provider_and_reopens_exact_bytes_without_output() {
+    let fixture = SimulatorLedger::new();
+    let ledger = fixture.open().unwrap();
+    let store = ledger.store().clone();
+    let state = setup();
+    let source_before = state.borrow().pages[0].image();
+    let (capture, completion, png) = development_capture_fixture();
+    let calls = Rc::new(RefCell::new(vec![]));
+    let mut workflow = development_workflow(store.clone(), state.clone(), capture);
+    assert!(workflow.wait_for_trigger().is_err());
+    assert!(workflow
+        .dispatch_reader(None, 0, &ReaderHandoff::NextPage)
+        .is_err());
+    let mut orchestrator = Orchestrator::new(workflow, model(store.clone(), calls.clone()), ledger);
+    orchestrator.set_trigger_enabled(false);
+    orchestrator.run_iteration().unwrap();
+    let provider_images =
+        crate::device::screenshot::Screenshot::reader_images_from_owned_png(&png).unwrap();
+    assert_eq!(
+        *calls.borrow(),
+        vec![provider_images.clone(), provider_images.clone()]
+    );
+    assert_eq!(provider_images.len(), 4);
+    let overview = image::load_from_memory(&provider_images[0]).unwrap();
+    assert_eq!((overview.width(), overview.height()), (768, 1024));
+    // A consumed owned capture cannot reacquire or downgrade, and makes no third model call.
+    assert!(orchestrator.run_iteration().is_err());
+    assert_eq!(calls.borrow().len(), 2);
+    let recorded = records(&Ledger::new(store.clone()));
+    let evidence = recorded
+        .iter()
+        .find_map(|r| match r {
+            Record::DevelopmentCapture(e) => Some(e.as_ref()),
+            _ => None,
+        })
+        .unwrap()
+        .clone();
+    assert!(!recorded.iter().any(|r| matches!(
+        r,
+        Record::LegacyCapture(_) | Record::Capture(_) | Record::Binding(_)
+    )));
+    assert!(recorded.iter().any(
+        |r| matches!(r,Record::OutcomeFact(f) if f.reason == AttemptReason::NativeOutputUnavailable)
+    ));
+    assert!(!recorded
+        .iter()
+        .any(|r| matches!(r,Record::OutcomeFact(f) if f.reason == AttemptReason::OutputPending)));
+    assert!(!recorded.iter().any(|r| matches!(r,Record::Turn(t) if t.outcome == Outcome::Completed || t.outcome == Outcome::ReconcileRequired)));
+    assert_eq!(state.borrow().pages[0].image(), source_before);
+    assert!(state.borrow().counts.is_empty());
+    drop(orchestrator);
+    drop(store);
+    let reopened = fixture.open().unwrap();
+    let saved = reopened.stored_development_images(evidence.id).unwrap();
+    assert_eq!(saved.evidence, evidence);
+    assert_eq!(saved.completion, completion);
+    assert_eq!(saved.original_png, png);
+    assert_eq!(saved.images, provider_images);
+    assert!(
+        reopened
+            .retained_media(evidence.conversation)
+            .unwrap()
+            .len()
+            >= 3
+    );
+    assert_eq!(calls.borrow().len(), 2);
+    assert!(state.borrow().counts.is_empty());
+}
+#[test]
+fn development_preparation_storage_failure_makes_zero_provider_or_backend_calls() {
+    let fixture = SimulatorLedger::new();
+    let ledger = fixture.open().unwrap();
+    let store = ledger.store().clone();
+    let state = setup();
+    let (capture, _, _) = development_capture_fixture();
+    let calls = Rc::new(RefCell::new(vec![]));
+    store.set_fault(StorageFault::BeforeCommit).unwrap();
+    let mut orchestrator = Orchestrator::new(
+        development_workflow(store.clone(), state.clone(), capture),
+        model(store.clone(), calls.clone()),
+        ledger,
+    );
+    orchestrator.set_trigger_enabled(false);
+    assert!(orchestrator.run_iteration().is_err());
+    assert!(calls.borrow().is_empty());
+    assert!(state.borrow().counts.is_empty());
+    assert!(records(&Ledger::new(store)).is_empty());
+}
+
+/// Explicit saved-byte harness only. It never collects from or operates a tablet.
+/// Main supplies independently collected bytes and a fresh retained Store path.
+#[test]
+#[ignore = "requires Main-selected collected development bytes and retained Store path"]
+fn development_collected_bytes_actual_orchestrator_retained_store() {
+    use crate::conversation::development::HistoricalDevelopmentBinding;
+    use remarkable_open_sdk::development_capture::ReadOnlyDevelopmentCapture;
+    let fixture_root = std::path::PathBuf::from(
+        std::env::var("SDK_DEVELOPMENT_CAPTURE_FIXTURE").expect("selected fixture folder"),
+    )
+    .canonicalize()
+    .unwrap();
+    let requested_store = std::path::PathBuf::from(
+        std::env::var("SDK_DEVELOPMENT_CAPTURE_STORE").expect("fresh retained Store path"),
+    );
+    assert!(
+        requested_store.is_absolute() && !requested_store.exists(),
+        "Store must be a fresh absolute path"
+    );
+    let retained = requested_store
+        .parent()
+        .unwrap()
+        .canonicalize()
+        .unwrap()
+        .join(requested_store.file_name().unwrap());
+    assert!(
+        !retained.starts_with(&fixture_root),
+        "Store must remain outside collected fixture directory"
+    );
+    let binding: HistoricalDevelopmentBinding =
+        serde_json::from_slice(&std::fs::read(fixture_root.join("expected-binding.json")).unwrap())
+            .unwrap();
+    let completion = std::fs::read(fixture_root.join("capture-observation-complete.json")).unwrap();
+    let png = std::fs::read(fixture_root.join("capture-window.png")).unwrap();
+    let capture = ReadOnlyDevelopmentCapture::from_collected_v11(
+        &binding.expected(),
+        completion.clone(),
+        png.clone(),
+    )
+    .unwrap();
+    let open = || {
+        Ledger::new(Arc::new(
+            Store::open(crate::storage::StorePaths {
+                data: retained.join("data"),
+                cache: retained.join("cache"),
+                credentials: retained.join("secrets"),
+            })
+            .unwrap(),
+        ))
+    };
+    let ledger = open();
+    let store = ledger.store().clone();
+    let state = setup();
+    let calls = Rc::new(RefCell::new(vec![]));
+    let mut orchestrator = Orchestrator::new(
+        development_workflow(store.clone(), state.clone(), capture),
+        model(store.clone(), calls.clone()),
+        ledger,
+    );
+    orchestrator.set_trigger_enabled(false);
+    orchestrator.run_iteration().unwrap();
+    assert_eq!(calls.borrow().len(), 2);
+    assert_eq!(calls.borrow()[0], calls.borrow()[1]);
+    assert_eq!(calls.borrow()[0].len(), 4);
+    assert!(state.borrow().counts.is_empty());
+    let recorded = records(&Ledger::new(store.clone()));
+    let evidence = recorded
+        .iter()
+        .find_map(|r| match r {
+            Record::DevelopmentCapture(e) => Some(e.as_ref()),
+            _ => None,
+        })
+        .unwrap()
+        .clone();
+    assert_eq!(evidence.expected_binding, binding);
+    assert!(!recorded.iter().any(|r| matches!(
+        r,
+        Record::LegacyCapture(_) | Record::Capture(_) | Record::Binding(_)
+    )));
+    assert!(recorded.iter().any(
+        |r| matches!(r,Record::OutcomeFact(f) if f.reason == AttemptReason::NativeOutputUnavailable)
+    ));
+    assert!(!recorded
+        .iter()
+        .any(|r| matches!(r,Record::OutcomeFact(f) if f.reason == AttemptReason::OutputPending)));
+    let revisions = store
+        .snapshot_revisions_matching(&[Namespace::Conversation], 100, |e| {
+            e.payload["record"]["conversation"].as_str() == Some(&evidence.conversation.to_string())
+        })
+        .unwrap();
+    assert!(revisions.iter().any(|e| matches!(serde_json::from_value::<Record>(e.payload.clone()), Ok(Record::Turn(t)) if t.role == Role::Assistant && t.outcome == Outcome::Generated)));
+    assert!(!recorded.iter().any(|r| matches!(r,Record::Turn(t) if t.outcome == Outcome::Completed || t.outcome == Outcome::ReconcileRequired)));
+    // Independent pixel oracle checks prompt space and top/middle/bottom crops.
+    let original = image::load_from_memory(&png).unwrap();
+    let rgba = image::DynamicImage::ImageRgba8(original.to_rgba8());
+    let overview = image::load_from_memory(&calls.borrow()[0][0]).unwrap();
+    assert_eq!((overview.width(), overview.height()), (768, 1024));
+    assert_eq!(
+        overview.to_rgba8(),
+        rgba.resize_exact(768, 1024, image::imageops::FilterType::Nearest)
+            .to_rgba8()
+    );
+    let (w, h) = (rgba.width(), rgba.height());
+    let th = h * 2 / 5;
+    for (ordinal, y) in [0, (h - th) / 2, h - th].into_iter().enumerate() {
+        let actual = image::load_from_memory(&calls.borrow()[0][ordinal + 1]).unwrap();
+        assert_eq!(actual.to_rgba8(), rgba.crop_imm(0, y, w, th).to_rgba8());
+    }
+    drop(orchestrator);
+    drop(store);
+    let reopened = open();
+    let saved = reopened.stored_development_images(evidence.id).unwrap();
+    assert_eq!(saved.evidence, evidence);
+    assert_eq!(saved.completion, completion);
+    assert_eq!(saved.original_png, png);
+    assert_eq!(saved.images, calls.borrow()[0]);
+    assert!(state.borrow().counts.is_empty());
+    let report = serde_json::json!({
+        "kind":"development-collected-byte-reader-integration", "sdk_source":crate::conversation::development::DEVELOPMENT_SDK_SOURCE,
+        "reader_source":option_env!("VERGEN_GIT_SHA"), "collection_nonce":binding.nonce,
+        "conversation":evidence.conversation, "evidence":evidence.id,
+        "raw_completion_sha256":crate::storage::digest(&completion), "original_png_sha256":crate::storage::digest(&png),
+        "original_dimensions":evidence.original_dimensions, "decoded_original_format":format!("{:?}",original.color()),
+        "provider_images":evidence.images, "provider_calls":2,
+        "provider_bytes_match_durable_store":true, "reopened_exact_bytes":true,
+        "generated_before_native_output_unavailable":true, "pending_published":false,
+        "backend_entries":0, "historical_byte_import_only":true,
+        "live_collection_ownership_verified_by_harness":false, "live_provider":false,
+        "native_authority":false, "render_authority":false, "facts_published":false,
+        "retained_store":retained.to_string_lossy(),
+    });
+    let path = retained.join("integration-receipt.json");
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .unwrap();
+    file.write_all(&serde_json::to_vec_pretty(&report).unwrap())
+        .unwrap();
+    file.sync_all().unwrap();
+    println!("PASS development collected bytes: original PNG+receipt, four durable provider images twice, reopened exact bytes, zero effects; receipt={}",path.display());
 }

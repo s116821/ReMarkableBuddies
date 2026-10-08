@@ -677,16 +677,41 @@ impl Screenshot {
     pub fn detail_images_base64(&self) -> Result<Vec<String>> {
         let _timing = crate::measurement::Span::new("capture.detail_strips");
         let img = image::load_from_memory(&self.native_data)?;
+        Ok(Self::detail_pngs(&img)?
+            .into_iter()
+            .map(|bytes| general_purpose::STANDARD.encode(bytes))
+            .collect())
+    }
+
+    fn detail_pngs(img: &image::DynamicImage) -> Result<Vec<Vec<u8>>> {
         let (w, h) = (img.width(), img.height());
         let th = h * 2 / 5;
+        anyhow::ensure!(w > 0 && th > 0, "Empty reader detail strip");
         let mut tiles = Vec::new();
         for y in [0, (h - th) / 2, h - th] {
             let tile = img.crop_imm(0, y, w, th);
             let mut out = std::io::Cursor::new(Vec::new());
             tile.write_to(&mut out, image::ImageFormat::Png)?;
-            tiles.push(general_purpose::STANDARD.encode(out.into_inner()));
+            tiles.push(out.into_inner());
         }
         Ok(tiles)
+    }
+
+    /// Pure local preparation from a validated owned PNG; no framebuffer/device query.
+    /// Uses the same overview normalization and native detail-strip recipe as Reader.
+    pub(crate) fn reader_images_from_owned_png(png: &[u8]) -> Result<Vec<Vec<u8>>> {
+        let decoded = image::load_from_memory_with_format(png, image::ImageFormat::Png)?;
+        let native = match decoded {
+            image::DynamicImage::ImageLuma8(_) | image::DynamicImage::ImageRgba8(_) => decoded,
+            image::DynamicImage::ImageRgb8(_) => {
+                image::DynamicImage::ImageRgba8(decoded.to_rgba8())
+            }
+            _ => anyhow::bail!("Unsupported development Reader pixel format"),
+        };
+        let overview = Self::serialize(&Self::normalize_native(&native)?, "capture.overview_png")?;
+        let mut images = vec![overview];
+        images.extend(Self::detail_pngs(&native)?);
+        Ok(images)
     }
 
     pub fn get_image_data(&self) -> &[u8] {

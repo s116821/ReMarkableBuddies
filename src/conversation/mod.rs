@@ -1,8 +1,10 @@
 //! Local-first conversation ledger. Stored facts are not native effect permissions.
 mod admission;
 pub mod capture_facts;
+pub mod development;
 mod intent;
 mod legacy;
+pub use development::{DevelopmentCaptureHistory, PreparedDevelopmentCapture};
 mod pending;
 mod reader_dispatch;
 mod reader_plan;
@@ -130,6 +132,10 @@ impl Ledger {
                 );
                 (capture.id, Namespace::Source, capture.conversation)
             }
+            Record::DevelopmentCapture(capture) => {
+                capture.validate()?;
+                (capture.id, Namespace::Source, capture.conversation)
+            }
             Record::LegacyCapture(capture) => {
                 capture.validate()?;
                 (capture.id, Namespace::Source, capture.conversation)
@@ -190,6 +196,7 @@ impl Ledger {
             Record::Source(source) => vec![source.image.clone()],
             Record::Capture(capture) => capture.facts.media()?,
             Record::LegacyCapture(capture) => capture.media()?,
+            Record::DevelopmentCapture(capture) => capture.media()?,
             Record::Receipt(receipt) => receipt
                 .admitted_intent
                 .as_ref()
@@ -403,6 +410,7 @@ impl Ledger {
                 Record::Source(source) => source.conversation,
                 Record::Capture(capture) => capture.conversation,
                 Record::LegacyCapture(capture) => capture.conversation,
+                Record::DevelopmentCapture(capture) => capture.conversation,
                 _ => bail!("invalid existing source reference"),
             };
             ensure!(
@@ -1417,11 +1425,15 @@ impl Ledger {
         let mut sources = Vec::new();
         let mut captures = Vec::new();
         let mut legacy_captures = Vec::new();
+        let mut development_captures = Vec::new();
         for record in records {
             match record {
                 Record::Source(source) if source_ids.contains(&source.id) => sources.push(source),
                 Record::Capture(capture) if source_ids.contains(&capture.id) => {
                     captures.push(*capture)
+                }
+                Record::DevelopmentCapture(capture) if source_ids.contains(&capture.id) => {
+                    development_captures.push(*capture)
                 }
                 Record::LegacyCapture(capture) if source_ids.contains(&capture.id) => {
                     legacy_captures.push(capture)
@@ -1430,13 +1442,17 @@ impl Ledger {
             }
         }
         ensure!(
-            sources.len() + captures.len() + legacy_captures.len() == source_ids.len(),
+            sources.len() + captures.len() + legacy_captures.len() + development_captures.len()
+                == source_ids.len(),
             "source reference absent"
         );
         let mut missing_media = Vec::new();
         let mut capture_media = Vec::new();
         for capture in &captures {
             capture_media.extend(capture.facts.media()?);
+        }
+        for capture in &development_captures {
+            capture_media.extend(capture.media()?);
         }
         for capture in &legacy_captures {
             capture_media.extend(capture.media()?);
@@ -1474,6 +1490,7 @@ impl Ledger {
             sources,
             captures,
             legacy_captures,
+            development_captures,
             missing_media,
             selection,
         })
@@ -1495,6 +1512,7 @@ impl Ledger {
                 }
                 Record::Capture(capture) => capture.facts.media()?,
                 Record::LegacyCapture(capture) => capture.media()?,
+                Record::DevelopmentCapture(capture) => capture.media()?,
                 _ => vec![],
             };
             for item in references {
