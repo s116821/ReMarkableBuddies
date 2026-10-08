@@ -2,12 +2,12 @@
 use crate::analysis::BoundingBox;
 use image::GrayImage;
 
-pub(super) struct SmartErasePlan {
+pub(crate) struct SmartErasePlan {
     pub ink_rows: Vec<i32>,
     pub rectangles: Vec<((i32, i32), (i32, i32))>,
 }
 
-pub(super) fn smart_erase_plan(region: &BoundingBox, image: &GrayImage) -> SmartErasePlan {
+pub(crate) fn smart_erase_plan(region: &BoundingBox, image: &GrayImage) -> SmartErasePlan {
     const INK_THRESHOLD: u8 = 200;
     const MARGIN: i32 = 2;
     let mut ink_rows = Vec::new();
