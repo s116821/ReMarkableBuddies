@@ -110,6 +110,12 @@ impl ReaderPlan {
         );
         let mut lower_calls = 0usize;
         for step in &steps {
+            if let ReaderHandoff::Symbol { x, y, .. } = step {
+                ensure!(
+                    (0..768).contains(x) && (0..1024).contains(y),
+                    "Reader symbol outside virtual frame"
+                );
+            }
             if let ReaderHandoff::Erase { bounds } = step {
                 checked_region(*bounds)?;
             }

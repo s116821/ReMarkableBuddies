@@ -4,6 +4,9 @@ pub mod indicator;
 mod navigation;
 pub mod orchestrator;
 mod reader_attempt;
+#[cfg(test)]
+pub(crate) use reader_attempt::assert_attachment_behavior;
+pub(crate) mod selected_backend;
 pub mod symbol_pool;
 pub mod xochitl_integration;
 
@@ -49,6 +52,7 @@ const BLANK_PAGE_SAMPLE_RATE: u32 = 2;
 /// Main workflow coordinator
 pub struct Workflow {
     device: Box<dyn DeviceBackend>,
+    selected: Option<selected_backend::SelectedBackendFacade>,
     frame: Frame,
     debug_dump: bool,
     iteration_count: u32,
@@ -72,6 +76,7 @@ impl Workflow {
     pub fn with_device(device: Box<dyn DeviceBackend>, debug_dump: bool) -> Self {
         Self {
             device,
+            selected: None,
             frame: Frame::default(),
             debug_dump,
             iteration_count: 0,
@@ -79,6 +84,33 @@ impl Workflow {
             input_failed: false,
             history: history::History::default(),
         }
+    }
+
+    pub(crate) fn with_selected(
+        facade: selected_backend::SelectedBackendFacade,
+        debug_dump: bool,
+    ) -> Self {
+        let mut workflow =
+            Self::with_device(Box::new(selected_backend::RefusingBackend), debug_dump);
+        workflow.selected = Some(facade);
+        workflow
+    }
+    pub(crate) fn is_selected(&self) -> bool {
+        self.selected.is_some()
+    }
+    pub(crate) fn dispatch_reader(
+        &mut self,
+        context: Option<&crate::conversation::ReaderContext>,
+        ordinal: usize,
+        handoff: &crate::conversation::ReaderHandoff,
+    ) -> Result<()> {
+        let facade = self
+            .selected
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("Unbound Workflow cannot adopt selected context"))?;
+        let context =
+            context.ok_or_else(|| anyhow::anyhow!("Selected effect missing Reader context"))?;
+        facade.dispatch(context, ordinal, handoff)
     }
 
     pub fn delay(&mut self, duration: std::time::Duration) {
@@ -395,28 +427,7 @@ impl Workflow {
         self.invalidate_history();
         info!("Drawing reference symbol '{}' at ({}, {})", symbol, x, y);
 
-        // Convert symbol to bitmap - larger size for better visibility
-        let size = 40; // Symbol size in pixels (increased from 20)
-        let bitmap = symbol_pool::SymbolPool::symbol_to_bitmap(symbol, size);
-
-        // Draw the bitmap at the specified location
-        // Note: This draws the full bitmap starting at (x, y)
-        // For centered placement, we'd offset by -size/2
-        let offset_x = x - (size as i32 / 2);
-        let offset_y = y - (size as i32 / 2);
-
-        // Create a positioned bitmap by building a temporary full-size bitmap
-        // This is not optimal but works for MVP
-        let mut positioned_bitmap = vec![vec![false; 768]; 1024];
-        for (dy, row) in bitmap.iter().enumerate() {
-            for (dx, &pixel) in row.iter().enumerate() {
-                let px = offset_x + dx as i32;
-                let py = offset_y + dy as i32;
-                if (0..768).contains(&px) && (0..1024).contains(&py) {
-                    positioned_bitmap[py as usize][px as usize] = pixel;
-                }
-            }
-        }
+        let positioned_bitmap = selected_backend::positioned_symbol(x, y, symbol);
 
         self.device.bitmap(&positioned_bitmap)?;
 
@@ -467,6 +478,7 @@ impl Workflow {
 
     /// History failures never type error text, draw an X or retry a native edit.
     pub fn history_action(&mut self, action: history::Action) -> Result<bool> {
+        anyhow::ensure!(!self.is_selected(), "Selected native history unsupported");
         if self.history.state() == history::State::Empty {
             return Ok(false);
         }

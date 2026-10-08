@@ -3,6 +3,9 @@ use super::*;
 use crate::storage::selection::{SelectionPublication, SelectionToken};
 use crate::storage::{Kind, MAX_RECORD};
 use serde::{Deserialize, Serialize};
+mod reader_context;
+pub(crate) use reader_context::{ReaderContext, ReaderPreparation, ReaderSourceAdmission};
+use std::rc::Rc;
 pub(crate) mod sealed {
     pub trait Sealed {}
 }
@@ -112,6 +115,71 @@ fn new_record(
     Ok(envelope)
 }
 impl SelectedAdmission {
+    /// Only this controlled new publication can mint an executable context.
+    pub(crate) fn prepare_reader(
+        self: &Arc<Self>,
+        accepted: Option<&SelectionToken>,
+        request: PendingIntentRequest,
+        source: Rc<dyn ReaderSourceAdmission>,
+        plan: ReaderPlan,
+    ) -> Result<ReaderPreparation> {
+        ensure!(!request.operation.is_nil(), "nil pending operation");
+        ensure!(
+            request.evidence.len() <= MAX_ITEMS
+                && request.media.len() <= MAX_ITEMS
+                && serde_json::to_vec(&request)?.len() <= MAX_RECORD,
+            "pending request exceeds bound"
+        );
+        self.mutate(|store| {
+            if let Some(original) = recover_pending_request(store, self.scope(), &request)? {
+                return Ok(ReaderPreparation::Historical(original));
+            }
+            let accepted = accepted.context("new Reader intent requires live token")?;
+            let snapshot = store
+                .selected_snapshot(self.scope(), MAX_ITEMS)?
+                .context("Reader selection absent")?;
+            ensure!(
+                snapshot.token == *accepted,
+                "Reader selection replaced or stale"
+            );
+            // Recheck the immutable plan's bounds before publication, even though
+            // its sole public constructor already validates them.
+            ensure!(
+                !plan.steps().is_empty()
+                    && plan.steps().len() <= MAX_ITEMS
+                    && serde_json::to_vec(&plan)?.len() <= MAX_RECORD,
+                "Reader plan exceeds bound"
+            );
+            reader_uncertainty::validate(store, &snapshot, &request, None)?;
+            source.verify_plan(&request, &plan)?;
+            let publication = publish_in_store(
+                store,
+                self.scope(),
+                Some(accepted),
+                request.clone(),
+                Some(source.as_ref()),
+            )?;
+            let PendingIntentPublication::Published { publication, .. } = publication else {
+                bail!("Reader publication unexpectedly historical under held admission")
+            };
+            ensure!(
+                !publication.replayed,
+                "Reader publication replay cannot mint context"
+            );
+            let original = recover_pending_request(store, self.scope(), &request)?
+                .context("Reader actual publication missing")?;
+            Ok(ReaderPreparation::Fresh(
+                reader_context::ReaderContext::mint(
+                    self.clone(),
+                    publication.token,
+                    request,
+                    original,
+                    source,
+                    plan,
+                ),
+            ))
+        })
+    }
     /// Look up an original operation before preparing new UUIDs/fingerprints.
     /// None for `accepted` permits historical recovery only. No backend is called.
     pub fn publish_pending(
@@ -132,13 +200,11 @@ impl SelectedAdmission {
         })
     }
 }
-fn publish_in_store(
+fn recover_pending_request(
     store: &Store,
     scope: &crate::storage::selection::SelectionScope,
-    accepted: Option<&SelectionToken>,
-    request: PendingIntentRequest,
-    source_admission: Option<&dyn SourceAdmission>,
-) -> Result<PendingIntentPublication> {
+    request: &PendingIntentRequest,
+) -> Result<Option<HistoricalIntent>> {
     if let Some(original) = admission::recover_original(store, scope, request.operation)? {
         let intent = original
             .receipt
@@ -176,7 +242,7 @@ fn publish_in_store(
             media: intent.media.clone(),
         };
         ensure!(
-            request == original_request,
+            request == &original_request,
             "pending original payload or pins conflict"
         );
         let fact_id = pending_id(request.operation);
@@ -205,7 +271,7 @@ fn publish_in_store(
             object: fact.0.clone(),
         };
         let expected = fingerprint(
-            &request,
+            request,
             &intent.root_revision,
             &intent.turn_revision,
             &fact_pin,
@@ -214,6 +280,18 @@ fn publish_in_store(
             original.receipt.fingerprint == expected && intent.request_fingerprint == expected,
             "pending operation payload or pins conflict"
         );
+        return Ok(Some(original));
+    }
+    Ok(None)
+}
+fn publish_in_store(
+    store: &Store,
+    scope: &crate::storage::selection::SelectionScope,
+    accepted: Option<&SelectionToken>,
+    request: PendingIntentRequest,
+    source_admission: Option<&dyn SourceAdmission>,
+) -> Result<PendingIntentPublication> {
+    if let Some(original) = recover_pending_request(store, scope, &request)? {
         return Ok(PendingIntentPublication::Historical(original));
     }
     let accepted = accepted.context("new pending intent requires a live token")?;

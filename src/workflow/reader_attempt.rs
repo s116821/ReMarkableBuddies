@@ -12,6 +12,7 @@ pub(super) struct Attempt {
     pub assistant: Option<Turn>,
     evidence: Uuid,
     pub legacy_output: bool,
+    reader_preparation: Option<ReaderPreparation>,
 }
 fn now() -> Result<u64> {
     SystemTime::now()
@@ -19,6 +20,48 @@ fn now() -> Result<u64> {
         .as_millis()
         .try_into()
         .context("timestamp overflow")
+}
+
+/// Drives private Attempt methods with a persisted Generated draft supplied by
+/// the actual selected-store fixture. This does not model input acquisition.
+#[cfg(test)]
+pub(crate) fn assert_attachment_behavior(
+    preparation: ReaderPreparation,
+    assistant: Turn,
+    evidence: Uuid,
+    ledger: &Ledger,
+    workflow: &mut super::Workflow,
+    fresh: bool,
+) {
+    let mut user = assistant.clone();
+    user.id = Uuid::new_v4();
+    user.role = Role::User;
+    let mut attempt = Attempt {
+        user,
+        assistant: Some(assistant),
+        evidence,
+        legacy_output: false,
+        reader_preparation: None,
+    };
+    assert!(attempt
+        .dispatch_selected(workflow, 0, &ReaderHandoff::NextPage)
+        .is_err());
+    attempt.install_reader_preparation(preparation).unwrap();
+    assert!(attempt.interpret(ledger, "changed input").is_err());
+    assert!(attempt.generated(ledger, "changed plan".into()).is_err());
+    assert!(attempt
+        .outcome(
+            ledger,
+            true,
+            Outcome::Completed,
+            AttemptReason::SubmittedUnverified
+        )
+        .is_err());
+    let result = attempt.dispatch_selected(workflow, 0, &ReaderHandoff::NextPage);
+    assert_eq!(result.is_ok(), fresh);
+    assert!(attempt
+        .dispatch_selected(workflow, 0, &ReaderHandoff::NextPage)
+        .is_err());
 }
 impl Attempt {
     pub fn prepare(ledger: &Ledger, acquired: AcquiredEvidence) -> Result<Self> {
@@ -96,9 +139,57 @@ impl Attempt {
             assistant: None,
             evidence,
             legacy_output,
+            reader_preparation: None,
         };
         attempt.user = attempt.load_turn(ledger, attempt.user.id)?;
         Ok(attempt)
+    }
+    /// A live context arrives only from the controlled new Pending branch.
+    /// SDK fixture preparation supplies none and remains non-output.
+    pub(super) fn install_reader_preparation(
+        &mut self,
+        preparation: ReaderPreparation,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.reader_preparation.is_none() && !self.legacy_output,
+            "Reader preparation already attached or legacy"
+        );
+        let assistant = self
+            .assistant
+            .as_ref()
+            .context("Reader generated draft absent")?;
+        anyhow::ensure!(
+            assistant.outcome == Outcome::Generated,
+            "Reader draft is not Generated"
+        );
+        match &preparation {
+            ReaderPreparation::Fresh(context) => anyhow::ensure!(
+                context.matches_attempt(self.user.conversation, assistant.id, self.evidence),
+                "Reader context foreign to Attempt draft/evidence"
+            ),
+            ReaderPreparation::Historical(original) => anyhow::ensure!(
+                original.receipt.acknowledgment.conversation == self.user.conversation
+                    && original
+                        .receipt
+                        .admitted_intent
+                        .as_ref()
+                        .is_some_and(|intent| intent.turn == assistant.id),
+                "Reader historical preparation foreign to Attempt"
+            ),
+        }
+        self.reader_preparation = Some(preparation);
+        Ok(())
+    }
+    pub(super) fn dispatch_selected(
+        &self,
+        workflow: &mut super::Workflow,
+        ordinal: usize,
+        handoff: &ReaderHandoff,
+    ) -> Result<()> {
+        let Some(ReaderPreparation::Fresh(context)) = &self.reader_preparation else {
+            anyhow::bail!("Historical or unqualified Attempt cannot dispatch Reader output")
+        };
+        workflow.dispatch_reader(Some(context), ordinal, handoff)
     }
     fn load_turn(&self, ledger: &Ledger, id: Uuid) -> Result<Turn> {
         ledger
@@ -123,6 +214,10 @@ impl Attempt {
         }
     }
     pub fn interpret(&mut self, ledger: &Ledger, text: &str) -> Result<()> {
+        anyhow::ensure!(
+            self.reader_preparation.is_none(),
+            "Selected Reader preparation requires selected domain mutation/settlement"
+        );
         let mut turn = self.user.clone();
         turn.text = Some(text.into());
         turn.outcome = Outcome::Interpreted;
@@ -137,6 +232,10 @@ impl Attempt {
         Ok(())
     }
     pub fn generated(&mut self, ledger: &Ledger, text: String) -> Result<()> {
+        anyhow::ensure!(
+            self.reader_preparation.is_none(),
+            "Selected Reader preparation requires selected domain mutation/settlement"
+        );
         let timestamp = now()?;
         let turn = Turn {
             id: Uuid::new_v4(),
@@ -169,6 +268,10 @@ impl Attempt {
         outcome: Outcome,
         reason: AttemptReason,
     ) -> Result<()> {
+        anyhow::ensure!(
+            self.reader_preparation.is_none(),
+            "Selected Reader preparation requires selected domain mutation/settlement"
+        );
         let original = if assistant {
             self.assistant.as_ref().context("draft absent")?
         } else {

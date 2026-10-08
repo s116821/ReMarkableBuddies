@@ -508,6 +508,10 @@ impl<M: LLMEngine> Orchestrator<M> {
     /// 5. If not valid or didn't move → verify the source and record a non-ink failure
     /// 6. If valid → render Q&A on that page
     fn render_answer(&mut self, result: &AnalysisResult) -> Result<RenderOutcome> {
+        anyhow::ensure!(
+            !self.workflow.is_selected(),
+            "Selected branch-dependent answer rendering unsupported"
+        );
         info!("Attempting to render Q&A on next page");
 
         // Step 1: Store original page screenshot for comparison
