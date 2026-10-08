@@ -330,7 +330,7 @@ impl SelectedAdmission {
                 snapshot.token == *accepted,
                 "retained selection stale or replaced"
             );
-            let (prior, previous_fact, refs) = current_fact(store, &snapshot, &original)?;
+            let (prior, previous_fact, _) = current_fact(store, &snapshot, &original)?;
             ensure!(
                 previous_fact
                     .settlement
@@ -367,15 +367,8 @@ impl SelectedAdmission {
                 .iter_mut()
                 .find(|m| m.records.contains(&original.receipt_reference.object))
                 .context("original retained manifest absent")?;
-            // Include a prior fact chain held in another retained manifest too.
-            for item in refs {
-                if !manifest.records.contains(&item) {
-                    manifest
-                        .record_namespaces
-                        .insert(item.sha256.clone(), Namespace::Conversation);
-                    manifest.records.push(item);
-                }
-            }
+            // The validated closure is already retained across these manifests.
+            // Preserve its original namespaces, media and completeness metadata.
             manifest
                 .record_namespaces
                 .insert(reference.object.sha256.clone(), Namespace::Conversation);
@@ -434,7 +427,65 @@ mod tests {
         SelectionToken,
         RetainedSettlementRequest,
     ) {
-        let (store, handle, token, pending) = fixture.setup();
+        prepare_with_export(fixture, None)
+    }
+    fn prepare_with_export(
+        fixture: &Fixture,
+        split_export: Option<bool>,
+    ) -> (
+        Arc<Store>,
+        SelectedAdmission,
+        SelectionToken,
+        RetainedSettlementRequest,
+    ) {
+        let (store, handle, mut token, mut pending) = fixture.setup();
+        let mut export = None;
+        if split_export.is_some() {
+            let snapshot = store
+                .selected_snapshot(handle.scope(), MAX_ITEMS)
+                .unwrap()
+                .unwrap();
+            let mut envelope = snapshot.selected_records[0].clone();
+            envelope.namespace = Namespace::ExportAssociation;
+            envelope.record_id = Uuid::new_v4();
+            envelope.revision_id = Uuid::new_v4();
+            envelope.operation_id = Uuid::new_v4();
+            envelope.payload = serde_json::to_value(Record::Export(ExportAssociation {
+                id: envelope.record_id,
+                conversation: pending.conversation,
+                backend: "synthetic backend".into(),
+                native_note: None,
+                source_scope: "all-turns".into(),
+                source_revision: "synthetic source revision".into(),
+                operation: envelope.operation_id,
+                outcome: Outcome::ReconcileRequired,
+            }))
+            .unwrap();
+            let pin = pending::pin(&envelope).unwrap();
+            let mut selected = snapshot.transaction.selected;
+            selected.records.push(pin.object.clone());
+            selected
+                .record_namespaces
+                .insert(pin.object.sha256.clone(), Namespace::ExportAssociation);
+            token = handle
+                .activate(
+                    &token,
+                    SelectionChange {
+                        operation: Uuid::new_v4(),
+                        accepted_base_sha256: token.accepted_base_sha256().into(),
+                        selected,
+                        retained: snapshot.transaction.retained,
+                    },
+                    BTreeMap::from([(
+                        pin.object.sha256.clone(),
+                        serde_json::to_vec(&envelope).unwrap(),
+                    )]),
+                )
+                .unwrap()
+                .token;
+            pending.selection = IntentSelectionEvidence::from_token(&token);
+            export = Some(pin.object);
+        }
         let source = MockSource {
             source: pending.source.clone(),
             calls: Cell::new(0),
@@ -469,6 +520,17 @@ mod tests {
             BTreeMap::from([(pin.object.sha256.clone(), Namespace::Conversation)]);
         manifest.media.clear();
         manifest.media_coverage.clear();
+        let mut retained = vec![snapshot.transaction.selected];
+        if split_export == Some(true) {
+            let export = export.unwrap();
+            let mut export_manifest = retained[0].clone();
+            export_manifest.records = vec![export.clone()];
+            export_manifest.record_namespaces =
+                BTreeMap::from([(export.sha256.clone(), Namespace::ExportAssociation)]);
+            retained[0].records.retain(|reference| reference != &export);
+            retained[0].record_namespaces.remove(&export.sha256);
+            retained.push(export_manifest);
+        }
         let publication = handle
             .activate(
                 &snapshot.token,
@@ -476,7 +538,7 @@ mod tests {
                     operation: Uuid::new_v4(),
                     accepted_base_sha256: digest(b"synthetic replacement"),
                     selected: manifest,
-                    retained: vec![snapshot.transaction.selected],
+                    retained,
                 },
                 BTreeMap::from([(pin.object.sha256, serde_json::to_vec(&winner).unwrap())]),
             )
@@ -492,6 +554,72 @@ mod tests {
             media: pending.media,
         };
         (store, handle, publication.token, request)
+    }
+    #[test]
+    fn split_export_closure_settles_without_copying_or_retyping_original_records() {
+        for split in [false, true] {
+            let fixture = Fixture::new();
+            let (store, handle, token, request) = prepare_with_export(&fixture, Some(split));
+            assert_eq!(
+                handle
+                    .retained_intent_uncertainty(request.original_operation)
+                    .unwrap(),
+                IntentUncertainty::Unresolved
+            );
+            let before = store
+                .selected_snapshot(handle.scope(), MAX_ITEMS)
+                .unwrap()
+                .unwrap();
+            let export = before
+                .transaction
+                .retained
+                .iter()
+                .flat_map(|m| &m.records)
+                .find(|r| {
+                    before.transaction.retained.iter().any(|m| {
+                        m.record_namespaces.get(&r.sha256) == Some(&Namespace::ExportAssociation)
+                    })
+                })
+                .unwrap()
+                .clone();
+            let original_bytes = store.read_object(&export).unwrap();
+            handle
+                .settle_retained(Some(&token), request.clone(), None)
+                .unwrap();
+            let after = store
+                .selected_snapshot(handle.scope(), MAX_ITEMS)
+                .unwrap()
+                .unwrap();
+            assert_eq!(original_bytes, store.read_object(&export).unwrap());
+            assert_eq!(
+                after
+                    .transaction
+                    .retained
+                    .iter()
+                    .flat_map(|m| &m.records)
+                    .filter(|r| **r == export)
+                    .count(),
+                1
+            );
+            assert!(after
+                .transaction
+                .retained
+                .iter()
+                .any(|m| m.record_namespaces.get(&export.sha256)
+                    == Some(&Namespace::ExportAssociation)));
+            if split {
+                assert_eq!(
+                    serde_json::to_vec(&before.transaction.retained[1]).unwrap(),
+                    serde_json::to_vec(&after.transaction.retained[1]).unwrap()
+                );
+            }
+            assert_eq!(
+                handle
+                    .retained_intent_uncertainty(request.original_operation)
+                    .unwrap(),
+                IntentUncertainty::Unresolved
+            );
+        }
     }
     #[test]
     fn retained_unknown_verified_and_restart_keep_winner_bytes_and_exact_replay() {
