@@ -16,6 +16,8 @@ Check ($null -eq (Get-CaptureCompletionRefusal ($raw.Replace('"version":1','"ver
 Check ($null -eq (Get-CaptureCompletionRefusal ($raw.Replace('"nonce":','"nonce":"duplicate","nonce":')) $nonce)) 'outer duplicate refused'
 $d.failure_ms='3';Check ($null -eq (Get-CaptureCompletionRefusal (Raw) $nonce)) 'string clock refused';$d.failure_ms=3
 $c.stage='facts-entry-observed';Check ($null -eq (Get-CaptureCompletionRefusal (Raw) $nonce)) 'success stage refused';$c.stage='capture-observation-completion-refused'
+$c.stage=@('capture-observation-completion-refused');Check ($null -eq (Get-CaptureCompletionRefusal (Raw) $nonce)) 'array stage refused';$c.stage='capture-observation-completion-refused'
+$d.kind=@('development-capture-completion-refusal');Check ($null -eq (Get-CaptureCompletionRefusal (Raw) $nonce)) 'array kind refused';$d.kind='development-capture-completion-refusal'
 $d.extra=$false;Check ($null -eq (Get-CaptureCompletionRefusal (Raw) $nonce)) 'unknown field refused';$d.Remove('extra')
 Check ($null -eq (Get-CaptureCompletionRefusal ($raw+' '*1024) $nonce)) 'oversize refused'
 $expected=@{nonce=$nonce;document='00000000-0000-4000-8000-000000000001';order=@(2..7|ForEach-Object {'00000000-0000-4000-8000-'+$_.ToString('000000000000')})}
