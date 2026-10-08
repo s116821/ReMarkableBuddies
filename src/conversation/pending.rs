@@ -615,9 +615,54 @@ mod tests {
             evidence: vec![],
             media: vec![],
         };
-        for change in 0..6 {
+        for change in 0..7 {
             let mut value = settlement.clone();
             let mut records = snapshot.selected_records.clone();
+            let mut fact_turn = request.turn;
+            if change == 6 {
+                // A real second Turn in the same valid chronology must not
+                // borrow the first Turn's admitted operation/receipt.
+                let mut other = records
+                    .iter()
+                    .find(|e| e.revision_id == intent.turn_revision.revision_id)
+                    .unwrap()
+                    .clone();
+                let Record::Turn(mut turn) = Ledger::decode(&other).unwrap() else {
+                    unreachable!()
+                };
+                fact_turn = Uuid::new_v4();
+                turn.id = fact_turn;
+                turn.sequence = 1;
+                other.record_id = fact_turn;
+                other.revision_id = Uuid::new_v4();
+                other.parents.clear();
+                other.operation_id = Uuid::new_v4();
+                other.payload = serde_json::to_value(Record::Turn(turn)).unwrap();
+                value.original_turn = pin(&other).unwrap();
+                records.push(other);
+                let mut root = records
+                    .iter()
+                    .find(|e| e.revision_id == intent.root_revision.revision_id)
+                    .unwrap()
+                    .clone();
+                let Record::Root(mut contents) = Ledger::decode(&root).unwrap() else {
+                    unreachable!()
+                };
+                contents.next_sequence = 2;
+                root.parents = BTreeSet::from([root.revision_id]);
+                root.revision_id = Uuid::new_v4();
+                root.operation_id = Uuid::new_v4();
+                root.payload = serde_json::to_value(Record::Root(contents)).unwrap();
+                records.push(root);
+                let objects = records
+                    .iter()
+                    .map(|e| pin(e).unwrap().object)
+                    .collect::<Vec<_>>();
+                SelectedDomainProjection::from_pinned_records(&records, &objects)
+                    .unwrap()
+                    .document_ownership()
+                    .unwrap();
+            }
             if change == 5 {
                 let original = records
                     .iter_mut()
@@ -661,7 +706,7 @@ mod tests {
             fact.payload = serde_json::to_value(Record::OutcomeFact(OutcomeFact {
                 id,
                 conversation: request.conversation,
-                turn: request.turn,
+                turn: fact_turn,
                 outcome: Outcome::ReconcileRequired,
                 reason: AttemptReason::DeviceUncertain,
                 settlement: Some(value),
