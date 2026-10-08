@@ -31,6 +31,18 @@ $d.allowed_active_reason='unknown';Check ($null -eq (Get-CaptureCompletionRefusa
 $d.Remove('allowed_predicate');Check ($null -eq (Get-CaptureCompletionRefusal (Raw) $nonce)) 'v2 missing nullable field refused';$d.allowed_predicate=$null
 $d.version=1;Check ($null -eq (Get-CaptureCompletionRefusal (Raw) $nonce)) 'v1 rejects extra v2 labels'
 $d.Remove('allowed_predicate');$d.Remove('allowed_active_reason');Check ($null -ne (Get-CaptureCompletionRefusal (Raw) $nonce)) 'historical exact8 v1 still accepted'
+$d.version=3;$d.allowed_predicate='invalidated-before';$d.allowed_active_reason=$null
+$d.invalidation_cause='signal';$d.invalidation_role='scene';$d.invalidation_member='viewportChanged()'
+Check ($null -ne (Get-CaptureCompletionRefusal (Raw) $nonce)) 'v3 first signal labels accepted'
+$d.invalidation_cause='unknown';$d.invalidation_role=$null;$d.invalidation_member=$null
+Check ($null -ne (Get-CaptureCompletionRefusal (Raw) $nonce)) 'v3 generic unknown/null accepted'
+$d.invalidation_cause='private-name';Check ($null -eq (Get-CaptureCompletionRefusal (Raw) $nonce)) 'v3 unknown cause refused';$d.invalidation_cause='signal'
+$d.invalidation_role=@('scene');Check ($null -eq (Get-CaptureCompletionRefusal (Raw) $nonce)) 'v3 array role refused';$d.invalidation_role='scene'
+$d.invalidation_member='private-name';Check ($null -eq (Get-CaptureCompletionRefusal (Raw) $nonce)) 'v3 unknown member refused';$d.invalidation_member=$null
+$d.Remove('invalidation_member');Check ($null -eq (Get-CaptureCompletionRefusal (Raw) $nonce)) 'v3 missing nullable field refused';$d.invalidation_member=$null
+$d.version=2;Check ($null -eq (Get-CaptureCompletionRefusal (Raw) $nonce)) 'v2 rejects extra v3 fields'
+$d.Remove('invalidation_cause');$d.Remove('invalidation_role');$d.Remove('invalidation_member')
+Check ($null -ne (Get-CaptureCompletionRefusal (Raw) $nonce)) 'historical exact10 v2 still accepted'
 $expected=@{nonce=$nonce;document='00000000-0000-4000-8000-000000000001';order=@(2..7|ForEach-Object {'00000000-0000-4000-8000-'+$_.ToString('000000000000')})}
 $old=Get-CaptureObservationBuildConfig $expected $false $true $false 4096 32 $true $true $true $true
 $new=Get-CaptureObservationBuildConfig $expected $false $true $false 4096 32 $true $true $true $true $true
