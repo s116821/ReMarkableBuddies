@@ -1,5 +1,10 @@
-//! Domain-opaque selected references. No domain/native admission or publisher.
+//! Domain-opaque atomic selected references. No domain/native admission or worker.
+mod publication;
+#[cfg(test)]
+mod publication_tests;
 use super::*;
+type ValidatedManifest = (Manifest, Vec<(Envelope, String)>);
+pub use publication::{SelectionChange, SelectionPublication};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -35,6 +40,10 @@ pub struct SelectionTransaction {
     pub aggregate_generation: Uuid,
     pub scope: SelectionScope,
     pub accepted_base_sha256: String,
+    /// Storage publication identity, not a domain intent journal.
+    pub request_sha256: String,
+    pub previous_sha256: Option<String>,
+    pub history_depth: usize,
     pub selected: Manifest,
     pub retained: Vec<Manifest>,
 }
@@ -53,8 +62,18 @@ impl SelectionTransaction {
             "invalid selection transaction identity"
         );
         ensure!(
-            valid_digest(&self.accepted_base_sha256),
+            valid_digest(&self.accepted_base_sha256) && valid_digest(&self.request_sha256),
             "invalid accepted base digest"
+        );
+        ensure!(
+            self.history_depth > 0
+                && self.history_depth <= MAX_ITEMS
+                && (self.history_depth == 1) == self.previous_sha256.is_none()
+                && self
+                    .previous_sha256
+                    .as_ref()
+                    .is_none_or(|h| valid_digest(h)),
+            "invalid selection history"
         );
         ensure!(
             self.retained.len() <= limit,
@@ -90,8 +109,8 @@ impl SelectionTransaction {
                 manifest
                     .records
                     .iter()
-                    .all(|r| !selected.contains(&r.sha256)),
-                "retained evidence is also active membership"
+                    .any(|r| !selected.contains(&r.sha256)),
+                "retained closure has no historical evidence outside active membership"
             );
         }
         ensure!(
@@ -140,7 +159,7 @@ pub struct SelectedSnapshot {
 
 impl Store {
     /// Read an existing complete selection. Absence is not an empty winner or
-    /// permission to bootstrap/publish. No activation writer is enabled here.
+    /// permission to bootstrap/publish. Bootstrap is a separate explicit call.
     pub fn selected_snapshot(
         &self,
         scope: &SelectionScope,
@@ -178,13 +197,7 @@ impl Store {
         // follow a new CURRENT or new selection while opening the closure.
         drop(inner);
         let selected_records = Self::validate_objects(&root, &transaction.selected)?;
-        let mut selected_keys = BTreeSet::new();
-        for (record, _) in &selected_records {
-            ensure!(
-                selected_keys.insert((record.namespace, record.record_id)),
-                "conflicted selected record membership"
-            );
-        }
+        publication::closure_index(&selected_records, true)?;
         let mut retained_records = Vec::new();
         for manifest in &transaction.retained {
             retained_records.extend(
@@ -224,6 +237,44 @@ impl Store {
             media,
         }))
     }
+}
+
+pub(crate) fn has_selected(root: &Path) -> Result<bool> {
+    let dir = root.join("selections");
+    files::safe_path(&dir)?;
+    Ok(dir.exists() && fs::read_dir(dir)?.next().is_some())
+}
+pub(crate) fn refuse_selected_maintenance(root: &Path) -> Result<()> {
+    ensure!(
+        !has_selected(root)?,
+        "selected metadata requires an explicit portable maintenance policy"
+    );
+    Ok(())
+}
+
+pub(crate) fn recover_selected(root: &Path, generation: Uuid) -> Result<Vec<ValidatedManifest>> {
+    let mut pending = Vec::new();
+    let directory = root.join("selections");
+    files::safe_path(&directory)?;
+    if !directory.exists() {
+        return Ok(pending);
+    }
+    let mut scopes = 0;
+    for entry in fs::read_dir(&directory)? {
+        scopes += 1;
+        ensure!(scopes <= MAX_ITEMS, "selection count exceeds bound");
+        let path = entry?.path();
+        let current: SelectionTransaction = files::json(&path, MAX_METADATA as u64)?;
+        ensure!(
+            path.file_name().and_then(|n| n.to_str()) == Some(&current.scope.filename()?),
+            "selection filename mismatch"
+        );
+        let scope = current.scope.clone();
+        for transaction in publication::history(root, generation, &scope, current)? {
+            pending.extend(publication::validate_closure(root, &transaction)?);
+        }
+    }
+    Ok(pending)
 }
 
 #[cfg(test)]
@@ -291,6 +342,9 @@ mod tests {
             aggregate_generation: Uuid::new_v4(),
             scope,
             accepted_base_sha256: digest(b"accepted base"),
+            request_sha256: digest(b"fixture request"),
+            previous_sha256: None,
+            history_depth: 1,
             selected,
             retained: vec![retained],
         }
