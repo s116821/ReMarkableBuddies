@@ -93,6 +93,11 @@ pub(super) fn validate(
             continue;
         }
         let record = Ledger::decode(envelope)?;
+        match &record {
+            Record::Receipt(receipt) if receipt.admitted_intent.is_some() => {}
+            Record::OutcomeFact(fact) if fact.reason == AttemptReason::OutputPending => {}
+            _ => continue,
+        }
         let conversation = selected::conversation_id(&record);
         let owner = owners
             .get(&conversation)
@@ -157,6 +162,103 @@ mod tests {
     use super::*;
     use pending::tests::{Fixture, MockSource};
     use std::cell::Cell;
+    #[test]
+    fn unbound_pending_fact_still_refuses_unknown_ownership() {
+        let new_record = |actor_id, id, parents, record: Record, media| -> Result<Envelope> {
+            let envelope = Envelope {
+                envelope_version: FORMAT,
+                namespace: Namespace::Conversation,
+                domain_schema_version: SCHEMA,
+                record_id: id,
+                revision_id: Uuid::new_v4(),
+                parents,
+                operation_id: Uuid::new_v4(),
+                actor_id,
+                kind: Kind::Value,
+                payload: serde_json::to_value(record)?,
+                media_descriptors: media,
+            };
+            envelope.validate()?;
+            Ledger::decode(&envelope)?;
+            Ok(envelope)
+        };
+        let fixture = Fixture::new();
+        let (store, handle, token, mut request) = fixture.setup();
+        let conversation = Uuid::new_v4();
+        let root = new_record(
+            store.actor_id,
+            conversation,
+            BTreeSet::new(),
+            Record::Root(Root {
+                id: conversation,
+                next_sequence: 1,
+                binding: None,
+                created_ms: 1,
+                updated_ms: 1,
+            }),
+            vec![],
+        )
+        .unwrap();
+        let turn_id = Uuid::new_v4();
+        let turn = new_record(
+            store.actor_id,
+            turn_id,
+            BTreeSet::new(),
+            Record::Turn(Turn {
+                id: turn_id,
+                conversation,
+                exchange: Uuid::new_v4(),
+                sequence: 0,
+                role: Role::Assistant,
+                mode: Mode::Reader,
+                outcome: Outcome::ReconcileRequired,
+                text: Some("unbound pending draft".into()),
+                sources: vec![],
+                correction_of: None,
+                created_ms: 1,
+                updated_ms: 1,
+                completion: None,
+            }),
+            vec![],
+        )
+        .unwrap();
+        let fact_id = Uuid::new_v4();
+        let fact = new_record(
+            store.actor_id,
+            fact_id,
+            BTreeSet::new(),
+            Record::OutcomeFact(OutcomeFact {
+                id: fact_id,
+                conversation,
+                turn: turn_id,
+                outcome: Outcome::ReconcileRequired,
+                reason: AttemptReason::OutputPending,
+                settlement: None,
+            }),
+            vec![],
+        )
+        .unwrap();
+        let publication = store
+            .commit_selected(
+                &token,
+                Uuid::new_v4(),
+                vec![root, turn, fact],
+                BTreeMap::new(),
+            )
+            .unwrap();
+        request.selection = IntentSelectionEvidence::from_token(&publication.token);
+        let error = handle
+            .with_current_store(&publication.token, |store, snapshot| {
+                validate(store, snapshot, &request, None)
+            })
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("uncertainty document ownership unresolved"),
+            "{error:#}"
+        );
+    }
     #[test]
     fn actual_store_accepts_only_exact_own_pending_and_blocks_another_operation() {
         let fixture = Fixture::new();

@@ -151,6 +151,82 @@ mod tests {
     fn plan() -> ReaderPlan {
         ReaderPlan::new(vec![ReaderHandoff::NextPage, ReaderHandoff::PreviousPage]).unwrap()
     }
+    fn independent_unbound_root_case(add_unbound: bool) {
+        let fixture = super::super::tests::Fixture::new();
+        let (store, handle, mut token, mut request) = fixture.setup();
+        if add_unbound {
+            let id = Uuid::new_v4();
+            let root = new_record(
+                store.actor_id,
+                id,
+                BTreeSet::new(),
+                Record::Root(Root {
+                    id,
+                    next_sequence: 0,
+                    binding: None,
+                    created_ms: 1,
+                    updated_ms: 1,
+                }),
+                vec![],
+            )
+            .unwrap();
+            let publication = store
+                .commit_selected(&token, Uuid::new_v4(), vec![root], BTreeMap::new())
+                .unwrap();
+            token = publication.token;
+            request.selection = IntentSelectionEvidence::from_token(&token);
+            let snapshot = store
+                .selected_snapshot(handle.scope(), MAX_ITEMS)
+                .unwrap()
+                .unwrap();
+            let owners = SelectedDomainProjection::from_snapshot(&snapshot)
+                .unwrap()
+                .document_ownership()
+                .unwrap();
+            assert_eq!(
+                owners.get(&request.conversation),
+                Some(&DocumentOwnership::Document(request.source.document))
+            );
+            assert_eq!(owners.get(&id), Some(&DocumentOwnership::DeferredMissing));
+            assert!(!snapshot.selected_records.iter().any(|e| matches!(
+                Ledger::decode(e).unwrap(),
+                Record::Receipt(_) | Record::OutcomeFact(_)
+            )));
+        }
+        let source = Rc::new(RecordingSource {
+            source: request.source.clone(),
+            binding: crate::workflow::selected_backend::ReaderBackendBinding::for_test(),
+            revoked: Cell::new(false),
+            plan_checks: Cell::new(0),
+            lower_checks: Cell::new(0),
+            refuse_lower: None,
+        });
+        let admission = Arc::new(handle);
+        let result =
+            admission.prepare_reader(Some(&token), request.clone(), source.clone(), plan());
+        if result.is_err() {
+            assert!(matches!(
+                admission
+                    .publish_pending(Some(&token), request, Some(source.as_ref()))
+                    .unwrap(),
+                PendingIntentPublication::Published { .. }
+            ));
+            eprintln!("ordinary pending publication accepts the same unbound-root aggregate");
+        }
+        assert!(
+            matches!(result, Ok(ReaderPreparation::Fresh(_))),
+            "unbound_root={add_unbound}: {:?}",
+            result.err()
+        );
+    }
+    #[test]
+    fn independent_bound_only_control_mints() {
+        independent_unbound_root_case(false);
+    }
+    #[test]
+    fn independent_unbound_root_without_uncertainty_does_not_block_bound_reader() {
+        independent_unbound_root_case(true);
+    }
     #[test]
     fn actual_publication_mints_once_and_historical_retry_checks_no_live_plan() {
         let fixture = super::super::tests::Fixture::new();
