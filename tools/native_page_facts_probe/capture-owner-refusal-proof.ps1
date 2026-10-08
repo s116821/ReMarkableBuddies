@@ -10,15 +10,17 @@ function ConvertFrom-CaptureOwnerRefusalRaw([string]$Raw) {
         return ConvertFrom-Json -InputObject $Raw -ErrorAction Stop
     }catch{return $null}finally{if($null -ne $document){$document.Dispose()}}
 }
-function Test-CaptureOwnerRefusal($Value,[string]$Nonce,[string]$PidText,[string]$Started,[string]$Dev,[string]$Ino,[bool]$FocusAncestry=$false) {
+function Test-CaptureOwnerRefusal($Value,[string]$Nonce,[string]$PidText,[string]$Started,[string]$Dev,[string]$Ino,[bool]$FocusAncestry=$false,[bool]$ReceiverSubtreeCapture=$false) {
     if($null -eq $Value){return $false}
     $fields=@('kind','version','nonce','attempt_pid','attempt_start','root_device','root_inode','setup_profile','capture_accepted_ms','failure_ms','deadline_check_ms','effective_deadline_ms','branch','predicate','discovery_result','visited_items','receiver_candidates','scene_candidates','matched_pairs','first_pair_receiver','first_pair_scene','first_pair_rejection','active_owner_rejection','observer_role','observer_member','observer_failure','native_authority','render_authority','ui_acknowledged')
-    if(($Value.version -isnot [int] -and $Value.version -isnot [long]) -or $Value.version -notin @(1,2,3,4) -or ($Value.version -in @(3,4) -and -not $FocusAncestry)){return $false}
+    if($FocusAncestry -and $ReceiverSubtreeCapture){return $false}
+    if(($Value.version -isnot [int] -and $Value.version -isnot [long]) -or $Value.version -notin @(1,2,3,4,5) -or ($Value.version -in @(3,4) -and -not $FocusAncestry) -or ($Value.version -eq 5 -and -not $ReceiverSubtreeCapture) -or ($ReceiverSubtreeCapture -and $Value.version -ne 5)){return $false}
     $topologyFields=@('topology_limit','topology_depth','topology_queue_size','topology_child_count')
-    if($Value.version -in @(2,3,4)){$fields+=$topologyFields}
+    if($Value.version -in @(2,3,4,5)){$fields+=$topologyFields}
     if($Value.version -in @(3,4)){$fields+=@('discovery_scope','chain_items','chain_complete','chain_failure')}
     $sceneFields=@('scene_rejected_engine','scene_rejected_class','scene_rejected_page_id','scene_rejected_page_id_changed','scene_rejected_document_wrapper_changed','scene_passed')
     if($Value.version -eq 4){$fields+=$sceneFields}
+    if($Value.version -eq 5){$fields+='discovery_scope'}
     $names=@($Value.PSObject.Properties.Name)
     if($names.Count -ne $fields.Count -or @($names|Where-Object {$_ -cnotin $fields}).Count){return $false}
     foreach($name in @('kind','nonce','setup_profile','branch')){if($Value.$name -isnot [string]){return $false}}
@@ -39,6 +41,7 @@ function Test-CaptureOwnerRefusal($Value,[string]$Nonce,[string]$PidText,[string
     $counters=@('visited_items','receiver_candidates','scene_candidates','matched_pairs')
     $pair=@('first_pair_receiver','first_pair_scene','first_pair_rejection')
     $observer=@('observer_role','observer_member','observer_failure')
+    if($Value.version -eq 5){return Test-ReceiverSubtreeCaptureRefusalFields $Value $progress $allowed $groups $topologyFields $counters $pair $observer}
     if($Value.version -in @(3,4)){
         foreach($name in ($counters+@('first_pair_receiver','first_pair_scene'))){
             if($null -ne $Value.$name -and (($Value.$name -isnot [int] -and $Value.$name -isnot [long]) -or $Value.$name -lt 0)){return $false}
@@ -168,5 +171,68 @@ function Test-CaptureOwnerRefusal($Value,[string]$Nonce,[string]$PidText,[string
     if($Value.predicate -ceq 'deadline'){
         if(($Value.deadline_check_ms -isnot [int] -and $Value.deadline_check_ms -isnot [long]) -or $Value.deadline_check_ms -lt $Value.effective_deadline_ms -or $Value.deadline_check_ms -gt $Value.failure_ms){return $false}
     }elseif($null -ne $Value.deadline_check_ms){return $false}
+    return $true
+}
+function Test-ReceiverSubtreeCaptureRefusalFields($v,$progress,$allowed,$groups,$topologyFields,$counters,$pair,$observer) {
+    if($v.discovery_scope -isnot [string] -or $v.discovery_scope -cne 'receiver-subtree-capture-unqualified-v1'){return $false}
+    $groups=@($groups|Where-Object {$_ -cne 'scene-active-focus'})+@('capture-context','capture-identity')
+    $bounds=@{visited_items=256;receiver_candidates=1;scene_candidates=9;matched_pairs=2;first_pair_receiver=0;first_pair_scene=7;topology_depth=8;topology_queue_size=256;topology_child_count=2147483647}
+    foreach($name in $bounds.Keys){if($null -ne $v.$name -and (($v.$name -isnot [int] -and $v.$name -isnot [long]) -or $v.$name -lt 0 -or $v.$name -gt $bounds[$name])){return $false}}
+    if($null -ne $v.active_owner_rejection -and $v.active_owner_rejection -cnotin $groups){return $false}
+    $pc=@($pair|Where-Object {$null -ne $v.$_}).Count;$oc=@($observer|Where-Object {$null -ne $v.$_}).Count
+    $vc=@(@('visited_items','receiver_candidates','scene_candidates')|Where-Object {$null -ne $v.$_}).Count
+    if($pc -notin @(0,3) -or $oc -notin @(0,3) -or $vc -notin @(0,3)){return $false}
+    if($oc){
+        $members=@{document=@('pageCountChanged(int,int)','pageMapChanged()','pageAdded(int)','pagesAdded(QList<int>)','pageMoved(int,int)','pagesMoved()','pagesRemoved()','redirectionPageMapChanged()','pageUpdated(int)','documentMetadataChanged()','orientationChanged()');scene=@('pageIdChanged()','documentWrapperChanged()','workerChanged()','viewportChanged()');receiver=@('document','currentPage','currentPageId','drawingAreaFocused')}
+        if($v.observer_role -cnotin @('document','scene','receiver') -or $v.observer_member -cnotin $members[$v.observer_role] -or $v.observer_failure -cnotin @('object-missing','property-missing','notify-missing','signal-missing','slot-missing','return-type','connect-failed')){return $false}
+    }
+    if($v.branch -cne 'owner-discovery' -or $v.discovery_result -cne 'open-capture-subtree-bound'){
+        foreach($name in $topologyFields){if($null -ne $v.$name){return $false}}
+    }else{
+        if($v.topology_limit -isnot [string]){return $false}
+        if($vc -ne 3 -or $v.visited_items -lt 1 -or $v.topology_queue_size -lt $v.visited_items -or $v.topology_child_count -lt 1 -or $null -eq $v.topology_depth -or $null -eq $v.topology_queue_size -or $null -eq $v.topology_child_count){return $false}
+        switch -CaseSensitive ($v.topology_limit){
+            'subtree-depth'{if($v.topology_depth -ne 8){return $false}}
+            'subtree-items'{if($v.topology_depth -ge 8 -or $v.topology_child_count -le 256-$v.topology_queue_size){return $false}}
+            default{return $false}
+        }
+    }
+    switch -CaseSensitive ($v.branch){
+        'initial-progress'{
+            if($v.predicate -cnotin $progress -or $null -ne $v.discovery_result){return $false}
+            foreach($name in ($counters+$pair+$observer+@('active_owner_rejection'))){if($null -ne $v.$name){return $false}}
+        }
+        'owner-discovery'{
+            if($v.discovery_result -cnotin @('open-context-lost','open-item-lost','open-capture-scope-refused','open-capture-receiver-unavailable','open-capture-receiver-ambiguous','open-capture-subtree-bound','open-candidate-bound','open-owner-unavailable','open-owner-ambiguous')){return $false}
+            if($null -ne $v.predicate -and ($v.discovery_result -cne 'open-context-lost' -or $v.predicate -cnotin $progress)){return $false}
+            if($oc -and $v.discovery_result -cne 'open-capture-scope-refused'){return $false}
+            if($v.discovery_result -cin @('open-capture-receiver-unavailable','open-capture-receiver-ambiguous') -and ($vc -or $pc -or $oc -or $null -ne $v.matched_pairs)){return $false}
+            if($vc){
+                if($v.receiver_candidates -ne 1 -or $v.scene_candidates -gt $v.visited_items){return $false}
+                if($v.discovery_result -cne 'open-candidate-bound' -and $v.scene_candidates -gt 8){return $false}
+            }elseif($null -ne $v.matched_pairs){return $false}
+            if($v.discovery_result -cin @('open-capture-subtree-bound','open-candidate-bound') -and ($vc -ne 3 -or $null -ne $v.matched_pairs)){return $false}
+            if($v.discovery_result -ceq 'open-candidate-bound' -and $v.scene_candidates -ne 9){return $false}
+            if($v.discovery_result -cin @('open-owner-unavailable','open-owner-ambiguous')){
+                if($vc -ne 3 -or $v.visited_items -lt 1 -or $null -eq $v.matched_pairs -or $v.matched_pairs -ne $(if($v.discovery_result -ceq 'open-owner-unavailable'){0}else{2})){return $false}
+                if($v.discovery_result -ceq 'open-owner-ambiguous' -and $v.scene_candidates -lt 2){return $false}
+            }
+            if($v.discovery_result -ceq 'open-context-lost' -and $null -ne $v.matched_pairs -and ($v.matched_pairs -gt 1 -or $vc -ne 3 -or $v.visited_items -lt 1 -or ($v.matched_pairs -eq 1 -and $v.scene_candidates -lt 1))){return $false}
+            if($pc -and ($v.discovery_result -cne 'open-owner-unavailable' -or $v.first_pair_rejection -cnotin $groups -or $v.first_pair_scene -ge $v.scene_candidates)){return $false}
+            if($v.discovery_result -ceq 'open-owner-unavailable' -and $v.scene_candidates -gt 0 -and $pc -ne 3){return $false}
+            if($null -ne $v.active_owner_rejection -and ($v.discovery_result -cne 'open-context-lost' -or $v.matched_pairs -ne 1 -or $null -ne $v.predicate)){return $false}
+        }
+        'observer-install'{
+            if($v.discovery_result -cne 'open-capture-scene-correlated' -or $null -ne $v.predicate -or $oc -ne 3 -or $vc -or $pc -or $null -ne $v.matched_pairs -or $null -ne $v.active_owner_rejection){return $false}
+        }
+        'owner-revalidation'{
+            if($v.discovery_result -cne 'open-capture-scene-correlated' -or $v.predicate -cnotin $allowed -or $oc -or $vc -or $pc -or $null -ne $v.matched_pairs){return $false}
+            if(($v.predicate -ceq 'active-owner') -ne ($null -ne $v.active_owner_rejection)){return $false}
+        }
+        default{return $false}
+    }
+    if($v.predicate -ceq 'deadline'){
+        if(($v.deadline_check_ms -isnot [int] -and $v.deadline_check_ms -isnot [long]) -or $v.deadline_check_ms -lt $v.effective_deadline_ms -or $v.deadline_check_ms -gt $v.failure_ms){return $false}
+    }elseif($null -ne $v.deadline_check_ms){return $false}
     return $true
 }

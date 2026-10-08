@@ -1,7 +1,11 @@
 # Development correspondence only; this decoder grants no native/render authority.
-function Test-CaptureObservationCompletion($value,[string]$nonce,[string]$pidText,[string]$started,[string]$dev,[string]$ino,[string]$document,[string[]]$order) {
+function Test-CaptureObservationCompletion($value,[string]$nonce,[string]$pidText,[string]$started,[string]$dev,[string]$ino,[string]$document,[string[]]$order,[bool]$ReceiverSubtreeCapture=$false) {
     if($null -eq $value){return $false}
     $fields=@('kind','version','nonce','attempt_pid','attempt_start','root_device','root_inode','setup_profile','setup_budget_ms','capture_budget_ms','accepted_ms','baseline_ms','grab_start_ms','grab_end_ms','post_read_ms','completed_ms','document_id','page_id','page_index','begin_epoch','end_epoch','width','height','dpr','image_width','image_height','png_bytes','png_sha256','image_status','gui_callback_completed','scope_current','atomic_snapshot','native_authority','render_authority','ui_acknowledged','observed_order')
+    if($ReceiverSubtreeCapture){
+        $fields+='discovery_scope'
+        if($value.discovery_scope -isnot [string] -or $value.discovery_scope -cne 'receiver-subtree-capture-unqualified-v1'){return $false}
+    }
     $names=@($value.PSObject.Properties.Name)
     if($names.Count -ne $fields.Count -or @($names|Where-Object {$_ -cnotin $fields}).Count){return $false}
     foreach($name in @('kind','nonce','setup_profile','document_id','page_id','png_sha256','image_status')){if($value.$name -isnot [string]){return $false}}
@@ -14,7 +18,7 @@ function Test-CaptureObservationCompletion($value,[string]$nonce,[string]$pidTex
     foreach($name in @('version','setup_budget_ms','capture_budget_ms','accepted_ms','baseline_ms','grab_start_ms','grab_end_ms','post_read_ms','completed_ms','page_index','width','height','image_width','image_height','png_bytes')){
         if(($value.$name -isnot [int] -and $value.$name -isnot [long]) -or $value.$name -lt 0){return $false}
     }
-    if($value.version -ne 1 -or $value.setup_budget_ms -ne 120000 -or $value.capture_budget_ms -ne 5000){return $false}
+    if($value.version -ne $(if($ReceiverSubtreeCapture){2}else{1}) -or $value.setup_budget_ms -ne 120000 -or $value.capture_budget_ms -ne 5000){return $false}
     $last=$value.accepted_ms
     foreach($name in @('baseline_ms','grab_start_ms','grab_end_ms','post_read_ms','completed_ms')){if($value.$name -lt $last){return $false};$last=$value.$name}
     if($value.accepted_ms -ge 120000 -or $value.completed_ms -ge 120000 -or $value.completed_ms -ge $value.accepted_ms+5000){return $false}
