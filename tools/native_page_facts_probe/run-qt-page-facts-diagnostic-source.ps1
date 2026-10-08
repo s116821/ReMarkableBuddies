@@ -2,9 +2,12 @@ param([Parameter(Mandatory=$true)][string]$PayloadPath,
       [Parameter(Mandatory=$true)][string]$PublisherPath,
       [Parameter(Mandatory=$true)][string]$ExpectedPath,
       [Parameter(Mandatory=$true)][string]$StockBaselinePath,
-      [Parameter(Mandatory=$true)][string]$EvidenceDirectory, [switch]$PrepareOnly)
+      [Parameter(Mandatory=$true)][string]$EvidenceDirectory, [switch]$PrepareOnly,[switch]$ReceiverSourceFacts,[string]$BuildConfigPath,[scriptblock]$ManualActions)
 $ErrorActionPreference='Stop'
 throw 'SOURCE ONLY: requires a separately selected fresh nonce, artifacts, baseline and exact packet review; spent literals below are reference placeholders.'
+if($ReceiverSourceFacts -and (-not $BuildConfigPath -or (-not $PrepareOnly -and -not $ManualActions))){throw 'Source facts requires exact config and Main-owned manual actions'}
+. "$PSScriptRoot/receiver-source-facts-proof.ps1"
+. "$PSScriptRoot/receiver-source-facts-build-config.ps1"
 $nonce='b3e3ca0475a84432a9b328218395de0c'
 $remote='/run/rmb-qt-probe-'+$nonce
 $rollback='rmb-qt-probe-'+$nonce+'-rollback'
@@ -26,6 +29,7 @@ $budget=Get-FactsDevelopmentBudget
 if((Hash $PayloadPath) -cne $payloadHash -or (Hash $PublisherPath) -cne $publisherHash -or (Hash $ExpectedPath) -cne $expectedHash -or (Hash $StockBaselinePath) -cne $stockBaselineHash){throw 'Frozen candidate input changed'}
 $expected=Get-Content -LiteralPath $ExpectedPath -Raw|ConvertFrom-Json
 $stock=Get-Content -LiteralPath $StockBaselinePath -Raw|ConvertFrom-Json
+if($ReceiverSourceFacts -and [IO.File]::ReadAllText($BuildConfigPath).Replace("`r`n","`n") -cne (Get-ReceiverSourceFactsBuildConfig $expected)){throw 'Source facts build config refused'}
 if($expected.nonce -cne $nonce -or $stock.nonce -isnot [string] -or $stock.nonce -cne $nonce -or
    ($stock.stock_pid -isnot [long] -and $stock.stock_pid -isnot [int])){throw 'Stock baseline nonce/PID type refused'}
 if($stock.stock_pid -le 1 -or $stock.stock_start -isnot [string] -or $stock.stock_start -cnotmatch '^[1-9][0-9]*$' -or
@@ -52,13 +56,16 @@ function Freeze([string]$name,[string]$text){
     return Hash $path
 }
 $files=[ordered]@{}
-foreach($name in @('launch.sh','restore.sh','native-probe.conf','check-waiting.sh','publish-facts-once.sh')){
+$stageFiles=@('launch.sh','restore.sh','native-probe.conf','check-waiting.sh')
+if(-not $ReceiverSourceFacts){$stageFiles+='publish-facts-once.sh'}
+foreach($name in $stageFiles){
     $files[$name]=Freeze $name ([IO.File]::ReadAllText((Join-Path $PSScriptRoot $name)).Replace("`r`n","`n"))
 }
 $files.owner=Freeze 'owner' $nonce
 $files['dropin.sha256']=Freeze 'dropin.sha256' $files['native-probe.conf']
 $localBindings=[ordered]@{nonce=$nonce;operator_sha256=(Hash $PSCommandPath);stock_baseline_sha256=(Hash $StockBaselinePath);
  expected_sha256=$expectedHash;payload_sha256=$payloadHash;publisher_sha256=$publisherHash;proof_sha256=(Hash $proofPath);budget_sha256=(Hash $budgetPath);files=$files}
+if($ReceiverSourceFacts){$localBindings.receiver_source_facts=$true;$localBindings.source_facts_build_config_sha256=Hash $BuildConfigPath;$localBindings.source_facts_proof_sha256=Hash (Join-Path $PSScriptRoot 'receiver-source-facts-proof.ps1')}
 [void](Freeze 'packet-bindings.json' ($localBindings|ConvertTo-Json -Depth 5))
 if($PrepareOnly){$localBindings|ConvertTo-Json -Depth 5;return}
 # Main alone executes after independent artifact/operator review and advance notice.
@@ -83,7 +90,7 @@ function ObservationSSH([string]$command){
     return $result
 }
 function Require($result){if($result.timeout -or $result.exit -ne 0){throw 'One-shot stage failed; keep evidence and rollback duty'}}
-function Expand([string]$text){$text.Replace('@ROOT@',$remote).Replace('@NONCE@',$nonce).Replace('@UNIT@',$rollback).Replace('@STOCKPID@',[string]$stock.stock_pid).Replace('@STOCKSTART@',$stock.stock_start).Replace('@FIXTURECHECK@',$fixtureCheck)}
+function Expand([string]$text){$text.Replace('@REQUEST@',$(if($ReceiverSourceFacts){'receiver-source-facts-request'}else{'facts-request'})).Replace('@PURPOSE@',$(if($ReceiverSourceFacts){'receiver-source-facts'}else{'read-facts'})).Replace('@REQUESTCAP@',$(if($ReceiverSourceFacts){'256'}else{'128'})).Replace('@CALLBACKCAP@',$(if($ReceiverSourceFacts){'512'}else{'256'})).Replace('@SOURCEFACTSCLEANUP@',$(if($ReceiverSourceFacts){"for name in receiver-source-facts-request receiver-source-facts-request.tmp receiver-source-facts.json capture-owner-refusal.json receiver-source-facts-publisher; do rm -f '@ROOT@/'`"`$name`"; done"}else{''})).Replace('@PUBLISHER@',$(if($ReceiverSourceFacts){'receiver-source-facts-publisher'}else{'facts-publisher'})).Replace('@ROOT@',$remote).Replace('@NONCE@',$nonce).Replace('@UNIT@',$rollback).Replace('@STOCKPID@',[string]$stock.stock_pid).Replace('@STOCKSTART@',$stock.stock_start).Replace('@FIXTURECHECK@',$fixtureCheck)}
 try{
     Require (SSH (Expand @'
 set -eu
@@ -115,8 +122,8 @@ mkdir -m700 '@ROOT@'
 '@))
     foreach($name in $files.Keys){Require (Native 'scp' @('-o','HostName=10.11.99.1','-o','StrictHostKeyChecking=yes','-o','BatchMode=yes','-o','ConnectTimeout=8',(Join-Path $packet $name),('RM2:'+$remote+'/'+$name)))}
     Require (Native 'scp' @('-o','HostName=10.11.99.1','-o','StrictHostKeyChecking=yes','-o','BatchMode=yes','-o','ConnectTimeout=8',$PayloadPath,('RM2:'+$remote+'/payload.so')))
-    Require (Native 'scp' @('-o','HostName=10.11.99.1','-o','StrictHostKeyChecking=yes','-o','BatchMode=yes','-o','ConnectTimeout=8',$PublisherPath,('RM2:'+$remote+'/facts-publisher')))
-    Require (SSH ("set -eu; test `"`$(sha256sum '$remote/facts-publisher' | awk '{print `$1}')`" = '$publisherHash'; chmod 700 '$remote/facts-publisher'"))
+    Require (Native 'scp' @('-o','HostName=10.11.99.1','-o','StrictHostKeyChecking=yes','-o','BatchMode=yes','-o','ConnectTimeout=8',$PublisherPath,('RM2:'+$remote+'/'+$(if($ReceiverSourceFacts){'receiver-source-facts-publisher'}else{'facts-publisher'}))))
+    Require (SSH (Expand ("set -eu; test `"`$(sha256sum '@ROOT@/@PUBLISHER@' | awk '{print `$1}')`" = '$publisherHash'; chmod 700 '@ROOT@/@PUBLISHER@'")))
     foreach($name in $files.Keys){Require (SSH ("set -eu; test `"`$(sha256sum '$remote/$name' | awk '{print `$1}')`" = '$($files[$name])'; chmod 600 '$remote/$name'"))}
     # Observation admission budget starts before arming. Recovery and final
     # evidence collection keep their separate mandatory duty after this cutoff.
@@ -167,6 +174,12 @@ systemctl restart xochitl.service
     # Main performs positive waiting proof, one deliberate fixture open/capture,
     # and the fixed publisher once while this same host collector remains active.
     # Read-only observations are finite; no setup sleeps or physical retries.
+    if($ReceiverSourceFacts){
+        $publish={if($script:sourceFactsPublished){throw 'Source facts publication already attempted'};$script:sourceFactsPublished=$true;Require (ObservationSSH (Expand ("set -eu; '@ROOT@/receiver-source-facts-publisher' '@ROOT@' '@NONCE@' '071d85beef3ef2d4cc0e11002140b27b82a2cc04a2ed740a5669f591069b77df' '$payloadHash'")))}
+        $script:sourceFactsPublished=$false
+        & $ManualActions $remote $nonce $publish
+        if(-not $script:sourceFactsPublished){throw 'Main did not publish source facts request'}
+    }
     $statusTimeoutUsed=$false
     while(Test-FactsLiveObservationWindow $observationClock.ElapsedMilliseconds){
         $observed=ObservationSSH (Expand @'
@@ -179,13 +192,13 @@ test ! -e '@ROOT@/restore.claim' && test ! -L '@ROOT@/restore.claim' || exit 90
 if test ! -e '@ROOT@/callback.json' && test ! -L '@ROOT@/callback.json'; then exit 3; fi
 test -f '@ROOT@/callback.json' && test ! -L '@ROOT@/callback.json' || exit 90
 test "$(stat -c '%a %u' '@ROOT@/callback.json')" = '600 0' || exit 90
-test "$(wc -c < '@ROOT@/callback.json')" -le 256 || exit 90
+test "$(wc -c < '@ROOT@/callback.json')" -le @CALLBACKCAP@ || exit 90
 cat '@ROOT@/callback.json'
 '@)
         if(-not $observed.timeout -and $observed.exit -eq 0){
             [IO.File]::WriteAllText((Join-Path $packet 'callback.json'),$observed.stdout,[Text.UTF8Encoding]::new($false))
             $callback=$observed.stdout|ConvertFrom-Json
-            $record.callback_verified=Test-FactsCallback $callback $nonce
+            $record.callback_verified=if($ReceiverSourceFacts){$false}else{Test-FactsCallback $callback $nonce}
             $record.candidate_receipt=$callback
             $identity=ObservationSSH (Expand @'
 set -eu
@@ -197,14 +210,14 @@ test "$(wc -c < '@ROOT@/attempt.identity')" -le 128
 read p started < '@ROOT@/attempt.identity'
 case "$p:$started" in *[!0-9:]*|:*|*:) exit 90;; esac
 # Waiting is removed by SDK finish BEFORE callback; the consumed request remains.
-test -f '@ROOT@/facts-request' && test ! -L '@ROOT@/facts-request' || exit 90
-test "$(stat -c '%a %u' '@ROOT@/facts-request')" = '600 0'
-test "$(wc -c < '@ROOT@/facts-request')" -le 128
-read n wp ws dev ino stage setup profile extra < '@ROOT@/facts-request'
+test -f '@ROOT@/@REQUEST@' && test ! -L '@ROOT@/@REQUEST@' || exit 90
+test "$(stat -c '%a %u' '@ROOT@/@REQUEST@')" = '600 0'
+test "$(wc -c < '@ROOT@/@REQUEST@')" -le @REQUESTCAP@
+read n wp ws dev ino stage setup profile extra < '@ROOT@/@REQUEST@'
 test -z "$extra" && test "$n" = '@NONCE@' && test "$wp $ws" = "$p $started" || exit 90
 case "$dev:$ino" in *[!0-9:]*|:*|*:|*::*) exit 90;; esac
-test "$stage" = read-facts && test "$setup" = 120000 && test "$profile" = main-dev-facts-120s || exit 90
-test "$(cat '@ROOT@/facts-request')" = "$n $wp $ws $dev $ino $stage $setup $profile"
+test "$stage" = @PURPOSE@ && test "$setup" = 120000 && test "$profile" = main-dev-facts-120s || exit 90
+test "$(cat '@ROOT@/@REQUEST@')" = "$n $wp $ws $dev $ino $stage $setup $profile"
 test -d '@ROOT@' && test ! -L '@ROOT@' || exit 90
 test "$(stat -c '%d %i %a %u' '@ROOT@')" = "$dev $ino 700 0"
 test "$(cat '@ROOT@/owner')" = '@NONCE@'
@@ -221,6 +234,18 @@ printf '%s %s %s %s\n' "$p" "$started" "$dev" "$ino"
             if($identity.stdout -cnotmatch '^([1-9][0-9]*) ([1-9][0-9]*) ([0-9]+) ([0-9]+)\n$'){throw 'Live process tuple refused'}
             $livePid=[long]$Matches[1];$liveStart=$Matches[2]
             $liveDev=$Matches[3];$liveIno=$Matches[4]
+            if($ReceiverSourceFacts){
+                $record.source_facts_callback_verified=Test-ReceiverSourceFactsCallback (ConvertFrom-ReceiverSourceFactsRaw $observed.stdout) $nonce
+                $sourceFacts=ObservationSSH (Expand (Get-ReceiverSourceFactsReadCommand))
+                if($sourceFacts.exit -eq 0 -and -not $sourceFacts.timeout){
+                    $record.source_facts_raw_sha256=Save-ReceiverSourceFactsRaw $sourceFacts (Join-Path $packet 'receiver-source-facts-live.json')
+                    $sourceIdentity=@{attempt_pid=[string]$livePid;attempt_start=$liveStart;root_device=$liveDev;root_inode=$liveIno}
+                    Require (ObservationSSH (Expand "set -eu; test -d '@ROOT@'; test ! -L '@ROOT@'; test `"`$(stat -c '%d %i %a %u' '@ROOT@')`" = '$liveDev $liveIno 700 0'; test `"`$(cat '@ROOT@/owner')`" = '@NONCE@'; test ! -e '@ROOT@/entry.closed'; test ! -L '@ROOT@/entry.closed'; test ! -e '@ROOT@/restore.claim'; test ! -L '@ROOT@/restore.claim'; test `"`$(systemctl show --property=MainPID --value xochitl.service)`" = '$livePid'; test `"`$(awk '{print `$22}' /proc/$livePid/stat)`" = '$liveStart'; test -z `"`$(systemctl show --property=Job --value xochitl.service)`""))
+                    if(-not(Test-FactsLiveObservationWindow $observationClock.ElapsedMilliseconds)){throw 'Source facts outside original observation clock'}
+                    $record.receiver_source_facts_observed=$record.source_facts_callback_verified -and (Test-ReceiverSourceFacts (ConvertFrom-ReceiverSourceFactsRaw $sourceFacts.stdout) $nonce $sourceIdentity $expected)
+                }elseif($sourceFacts.timeout -or $sourceFacts.exit -ne 3){throw 'Source facts collection unknown; preserve stage'}
+                break
+            }
             if(-not $record.callback_verified){
                 $collectedRefusal=ObservationSSH (Expand (Get-FactsRefusalReadCommand))
                 $savedRefusal=Save-FactsRefusalEvidence $collectedRefusal (Join-Path $packet 'refusal-live.json') $nonce $livePid $liveStart
@@ -271,7 +296,7 @@ set -eu
 if test -f '@ROOT@/callback.json'; then
     test ! -L '@ROOT@/callback.json'
     test "$(stat -c '%a %u' '@ROOT@/callback.json')" = '600 0'
-    test "$(wc -c < '@ROOT@/callback.json')" -le 256
+    test "$(wc -c < '@ROOT@/callback.json')" -le @CALLBACKCAP@
     printf 'present\n'
 else
     test ! -e '@ROOT@/callback.json'
@@ -345,6 +370,18 @@ fi
                 try{$finalRefusalCallback=Get-Content -LiteralPath (Join-Path $packet 'callback-final.json') -Raw|ConvertFrom-Json -ErrorAction Stop}catch{}
             }
             $record.final_refusal_callback_match=(Test-FactsRefusalCallback $finalRefusalCallback $nonce) -and $record.final_refusal.decoded -and $record.final_refusal.evidence.entry_stage -ceq $finalRefusalCallback.stage
+            if($ReceiverSourceFacts){
+                foreach($name in @('receiver-source-facts-request','receiver-source-facts-request.tmp','receiver-source-facts.json','capture-owner-refusal.json')){
+                    $readCommand="set -eu; if test ! -e '$remote/$name' && test ! -L '$remote/$name'; then exit 3; fi; test -f '$remote/$name' && test ! -L '$remote/$name'; test `"`$(stat -c '%a %u' '$remote/$name')`" = '600 0'; test `"`$(wc -c < '$remote/$name')`" -le 8192; cat '$remote/$name'"
+                    $raw=SSH $readCommand
+                    if($raw.exit -eq 0 -and -not $raw.timeout){
+                        $savedHash=Save-ReceiverSourceFactsRaw $raw (Join-Path $packet ($name+'-final'))
+                        Require (SSH ("set -eu; test `"`$(sha256sum '$remote/$name' | awk '{print `$1}')`" = '$savedHash'"))
+                        $record[('final_'+$name.Replace('.','_').Replace('-','_')+'_sha256')]=$savedHash
+                    }
+                    elseif($raw.timeout -or $raw.exit -ne 3){throw 'Source facts final preservation unknown; retain exact root'}
+                }
+            }
             foreach($name in @('restore.failure','verification.first-refusal')){
                 $diagnostic=SSH ("if test -f '$remote/$name'; then test `"`$(wc -c < '$remote/$name')`" -le 128 && cat '$remote/$name'; fi")
                 Require $diagnostic
@@ -361,6 +398,7 @@ done
 test ! -e '/run/systemd/transient/@UNIT@.timer'
 test ! -e '/run/systemd/transient/@UNIT@.service'
 test ! -e '/run/systemd/system/xochitl.service.d/zz-rmb-qt-probe-@NONCE@.conf'
+@SOURCEFACTSCLEANUP@
 for name in payload.so launch.sh restore.sh native-probe.conf owner dropin.sha256 callback.json attempt.claim attempt.identity restore.claim restored parent.signature admission.lock entry.closed restore.failure verification.first-refusal diagnostics.json refusal.json facts-publisher check-waiting.sh publish-facts-once.sh facts-waiting facts-request facts-request.tmp; do rm -f '@ROOT@/'"$name"; done
 rmdir '@ROOT@'
 test ! -e '@ROOT@'
@@ -376,6 +414,8 @@ printf 'stock-restored-and-exact-stage-removed\n'
     Write-Output ('restored='+$record.restored+' cleanup_verified='+$record.cleanup_verified)
     }
     if(-not $record.cleanup_verified){throw 'Restoration/stage uncertain; preserve exact path and timer duty, no retry'}
+    if($ReceiverSourceFacts){if(-not $record.receiver_source_facts_observed){throw 'Stock restored; unqualified source facts absent/refused; retain exact callback and raw evidence'}}else{
     if(-not $record.callback_verified){throw 'Stock restored; callback nonce/thread proof missing or failed'}
     if(-not $record.facts_verified){throw 'Stock restored; fixed facts proof refused or incomplete'}
+    }
 }
