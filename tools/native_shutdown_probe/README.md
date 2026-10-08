@@ -1,0 +1,64 @@
+# Experimental shutdown diagnostic packet
+
+Source-only preparation and focused Linux fixtures. Main alone selects the fresh
+nonce, compiles the matching SDK recorder, transfers the packet, announces device
+changes, and operates the tablet. Nothing here grants native execution authority.
+
+`prepare_packet.py --selection FILE --payload FILE --output NEW_DIRECTORY`
+requires a JSON selection containing `nonce`, `budget_seconds` (360), canonical
+string `stock_pid`/`stock_start`, `payload_sha256`, `executable_sha256`,
+`stock_unit_sha256`, `vendor_dropin_sha256`, exact `original_policy` from the
+preparer, and `protected_files` with 24 `{path, sha256}` entries. Main verifies
+that this inventory comprises the fresh 14 document and 10 provider baselines.
+Preparation verifies bytes and emits a receipt; it does not verify recorder
+compile provenance or that the nonce has never been used outside the known list.
+
+## Main review and arming recipe
+
+1. Review exact source, SDK commit/build receipt, selected artifact, preparation
+   receipt and every protected path. Refresh original PID/start, unit/vendor and
+   executable hashes, policy, service health and absent jobs. Reject any drift.
+2. Verify the tablet has `/bin/sh`, `/usr/bin/systemctl`, `flock`, `sha256sum`,
+   `stat`, `awk`, `sed`, `cat`, `cp`, `grep`, `sleep`, `kill`, `dd`, `wc`, `tail`,
+   `od`, `tr`, `mkdir`, `rm` and `rmdir`. No timeout utility is required.
+3. Transfer into the initially absent receipt-selected `/run` root, root-owned
+   0700, with all packet files regular, single-link, root-owned 0600. Verify
+   `packet.files` against the preparation receipt and its contents remotely.
+   The runtime xochitl drop-in directory must be initially absent.
+4. Persist `deadline` exclusively as `armed_at deadline\n`, using integer
+   `/proc/uptime` seconds and deadline exactly armed_at+360, mode 0600. Do this
+   before starting the actor; never rewrite it or reuse a spent root/nonce.
+5. Independently start a unique transient service named for this nonce, invoking
+   `/bin/sh ROOT/actor.sh`, with Type=oneshot, TimeoutStartSec=360,
+   Restart=no, OnFailure empty, FailureAction=none, StartLimitAction=none,
+   KillMode=control-group and no dependency on the host connection. Verify its
+   effective properties, owned process, running state and private `actor.ready`
+   before requesting any guard or activation change. A disconnect must not stop
+   this unit. Do not use an SSH foreground actor or a tied host job.
+6. Exclusively write private `guard.request` containing the nonce. Verify actor
+   `guard.ready`, the exact owned drop-in and effective OnFailure empty,
+   Restart=no and unchanged remaining guard policy. Only then exclusively write
+   `start.request`. Requests have a ten-second window each; a missed window is a
+   spent attempt, never permission to restart the actor.
+7. The actor owns STOP, activation, observation and restoration. Do not issue
+   competing systemctl operations. Capture initial/candidate STOP records,
+   trace, `diagnostic.outcome`, `diagnostic.failed`, query evidence and either
+   `stock.restored` or `recovery.failed`. Preserve failure even when stock is
+   healthy. Missing terminal lifecycle records remain unknown.
+8. Independently verify original hashes/policy, no owned overrides or payload
+   mappings, empty job and all three services healthy. If termination or query
+   state is uncertain, retain the guard and evidence for Main's recovery review;
+   do not blindly retry, remove policy protection or start competing stock.
+
+## Local verification
+
+`test_actor.py` runs in an owned Linux fixture with no network or actual service
+manager. Eleven checks cover conditional query failure, restoration ordering and
+crash preservation, deadline refusal, failed process reads, bounded owned query
+children, trace identity/drop/sequence, request expiry and singleton claims/lock.
+They also exercise preparation with synthetic bytes, actual actor
+entry/recovery shells on missing host requests (including after guard install),
+and refusal to verify stock when only xochitl is active.
+The temporary fixture mount must permit its owned query stub to execute. These
+checks do not establish native correctness or recovery after an executing native
+candidate loses its host connection.

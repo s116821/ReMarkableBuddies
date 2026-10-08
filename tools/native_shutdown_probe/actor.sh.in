@@ -1,0 +1,349 @@
+#!/bin/sh
+# Experimental one-attempt actor. Main reviews/selects the rendered private packet.
+set -eu
+umask 077
+root='@ROOT@'
+nonce='@NONCE@'
+parent=/run/systemd/system/xochitl.service.d
+guard="$parent/zz-rmb-shutdown-$nonce-guard.conf"
+activation="$parent/zz-rmb-shutdown-$nonce-activation.conf"
+original_pid='@STOCKPID@'
+original_start='@STOCKSTART@'
+deadline=0
+phase=admission
+stock_stopped=no
+candidate_started=no
+guard_installed=no
+activation_installed=no
+now() { awk '{print int($1)}' /proc/uptime; }
+remaining() { printf '%s\n' "$((deadline - $(now)))"; }
+reserve() { test "$(remaining)" -ge "$1"; }
+private() {
+    test -f "$1" && test ! -L "$1" || return 90
+    test "$(stat -c '%a %u %h' "$1")" = '600 0 1' || return 90
+}
+claim() { (set -C; printf '%s\n' "$nonce" > "$root/$1") 2>/dev/null; }
+start_of() {
+    # /proc stat comm may contain spaces. Fields after the final ')' start at field3.
+    sed 's/^.*) //' "/proc/$1/stat" | awk '{print $20}'
+}
+same_process() {
+    test -d "/proc/$1" && test "$(start_of "$1")" = "$2"
+}
+process_gone() {
+    test -d "/proc/$1" || return 0
+    current_start=$(start_of "$1") || return 90
+    case "$current_start" in ''|*[!0-9]*) return 90;; esac
+    test "$current_start" != "$2" || return 90
+}
+query() {
+    # Fixed systemctl client only, no generic command runner or external timeout.
+    test ! -e "$root/query.unconfirmed" || return 94
+    reserve 1 || return 90
+    q_limit=$(($(now) + 3))
+    test "$q_limit" -le "$deadline" || q_limit=$deadline
+    (exec /usr/bin/systemctl --no-pager "$@") > "$root/query.stdout" 2> "$root/query.stderr" &
+    q_pid=$!
+    q_start=''
+    if test -d "/proc/$q_pid"; then q_start=$(start_of "$q_pid") || :; fi
+    while kill -0 "$q_pid" 2>/dev/null; do
+        # A zombie is finished; wait reaps and retains the actual exit status.
+        if test -f "/proc/$q_pid/stat" &&
+           test "$(sed 's/^.*) //' "/proc/$q_pid/stat" | awk '{print $1}')" = Z; then break; fi
+        if test "$(now)" -ge "$q_limit"; then
+            if test -n "$q_start" && same_process "$q_pid" "$q_start"; then kill -KILL "$q_pid" || :; fi
+            # Never block in wait unless child exit/zombie is proved; failed reap is uncertainty.
+            if kill -0 "$q_pid" 2>/dev/null &&
+               test "$(sed 's/^.*) //' "/proc/$q_pid/stat" | awk '{print $1}')" != Z; then
+                claim query.unconfirmed || :
+                return 94
+            fi
+            wait "$q_pid" 2>/dev/null || :
+            return 91
+        fi
+        sleep 1
+    done
+    wait "$q_pid"
+}
+value() {
+    VALUE=''
+    query show --property="$1" --value xochitl.service || return $?
+    VALUE=$(cat "$root/query.stdout") || return 90
+}
+policy() {
+    query show --property=OnFailure,OnFailureJobMode,FailureAction,StartLimitAction,Restart,RestartMode,TimeoutStopUSec,WatchdogUSec,KillMode,KillSignal,FinalKillSignal,SendSIGKILL xochitl.service || return $?
+    cp "$root/query.stdout" "$root/policy.observed" || return 90
+    while IFS= read -r expected; do
+        test "$(grep -Fxc "$expected" "$root/policy.observed")" = 1 || return 90
+    done < "$1"
+}
+hashes() {
+    (cd "$root"; sha256sum -c packet.files) > "$root/packet-check"
+    sha256sum -c "$root/baseline.files" > "$root/hash-check"
+    sha256sum -c "$root/service.files" > "$root/service-check"
+}
+cgroup_gone() {
+    value Job || return $?
+    test -z "$VALUE" || return 90
+    value MainPID || return $?
+    test "$VALUE" = 0 || return 90
+    value ControlGroup || return $?
+    cg=$VALUE
+    test -z "$cg" || test "$cg" = /system.slice/xochitl.service || return 90
+    file=/sys/fs/cgroup/systemd/system.slice/xochitl.service/cgroup.procs
+    if test -n "$cg"; then test -f "$file" || return 90; fi
+    if test -e "$file"; then
+        test -f "$file" || return 90
+        members=$(cat "$file") || return 90
+        test -z "$members" || return 90
+    fi
+    return 0
+}
+stop_unit() {
+    phase="$1"
+    stop_end=$(($(now) + 95))
+    test "$stop_end" -le "$deadline" || stop_end=$deadline
+    query stop --no-block xochitl.service
+    while :; do
+        if (cgroup_gone); then break; fi
+        test ! -e "$root/query.unconfirmed" || return 94
+        test "$(now)" -lt "$stop_end"
+        reserve 1
+        sleep 1
+    done
+    test "$(now)" -lt "$stop_end"
+}
+wait_request() {
+    request_end=$(($(now) + 10))
+    while ! test -e "$root/$1"; do
+        test "$(now)" -lt "$request_end"
+        reserve 1
+        sleep 1
+    done
+    private "$root/$1"
+    test "$(cat "$root/$1")" = "$nonce"
+}
+owned_remove() {
+    private "$1"
+    test "$(sha256sum "$1" | awk '{print $1}')" = "$(sha256sum "$2" | awk '{print $1}')"
+    rm "$1"
+}
+restore() {
+    test ! -e "$root/query.unconfirmed" || return 90
+    phase=restore-claim
+    claim restore.claim || return 90
+    if test "$stock_stopped" = yes; then
+        policy "$root/guard.policy"
+        if test "$candidate_started" = yes; then
+            private "$root/attempt.identity"
+            read attempted started extra < "$root/attempt.identity"
+            test -z "${extra-}"
+            case "$attempted:$started" in *[!0-9:]*|:*|*:) return 90;; esac
+            test "$attempted" -gt 1 && test "$started" -gt 0
+            query show --property=Result,ExecMainCode,ExecMainStatus,ActiveState,SubState,MainPID,Job xochitl.service
+            cp "$root/query.stdout" "$root/candidate.pre-stop"
+            stop_unit candidate-stop-under-guard
+            process_gone "$attempted" "$started"
+            query show --property=Result,ExecMainCode,ExecMainStatus,ActiveState,SubState,MainPID,Job xochitl.service
+            cp "$root/query.stdout" "$root/candidate.post-stop"
+            if ! grep -Fxq 'Result=success' "$root/candidate.post-stop"; then claim diagnostic.failed; fi
+        fi
+        # An initial stock STOP may have failed without candidate admission.
+        cgroup_gone
+        process_gone "$original_pid" "$original_start"
+    fi
+    phase=owned-cleanup
+    reserve 90
+    if test "$activation_installed" = yes; then owned_remove "$activation" "$root/activation.conf"; fi
+    if test "$guard_installed" = yes; then owned_remove "$guard" "$root/guard.conf"; fi
+    if test "$guard_installed" = yes; then rmdir "$parent"; query daemon-reload; fi
+    policy "$root/stock.policy"
+    value ExecStart
+    case "$VALUE" in *'path=/usr/bin/xochitl ; argv[]=/usr/bin/xochitl --system ;'*) :;; *) return 90;; esac
+    hashes
+    if test "$stock_stopped" = yes; then
+        phase=stock-start-once
+        claim stock-start.claim
+        query start --no-block xochitl.service
+    fi
+    verify_stock
+}
+verify_stock() {
+    phase=stock-verification
+    verify_end=$(($(now) + 80))
+    test "$verify_end" -le "$deadline" || verify_end=$deadline
+    while :; do
+        ready=no
+        if query is-active --quiet xochitl.service &&
+           query is-active --quiet reader-buddy.service &&
+           query is-active --quiet rm-sync.service &&
+           value Job && test -z "$VALUE"; then ready=yes; fi
+        test "$(now)" -lt "$verify_end"
+        if test "$ready" = yes; then break; fi
+        sleep 1
+    done
+    value MainPID
+    stock_pid=$VALUE
+    case "$stock_pid" in ''|*[!0-9]*) return 90;; esac
+    test "$stock_pid" -gt 1
+    stock_start=$(start_of "$stock_pid")
+    test "$(sha256sum "/proc/$stock_pid/exe" | awk '{print $1}')" = '@EXEHASH@'
+    awk -v payload="$root/payload.so" '$NF==payload {found=1} END {exit found}' "/proc/$stock_pid/maps"
+    policy "$root/stock.policy"
+    hashes
+    value MainPID
+    test "$VALUE" = "$stock_pid"
+    same_process "$stock_pid" "$stock_start"
+    test ! -e "$guard" && test ! -e "$activation"
+    value DropInPaths
+    test "$VALUE" = /usr/lib/systemd/system/xochitl.service.d/xochitl-service-override.conf
+    members=$(awk 'NR>32 {exit 1} {print}' /sys/fs/cgroup/systemd/system.slice/xochitl.service/cgroup.procs)
+    for member in $members; do
+        case "$member" in ''|*[!0-9]*) return 90;; esac
+        test "$member" -gt 1
+        awk -v payload="$root/payload.so" '$NF==payload {found=1} END {exit found}' "/proc/$member/maps"
+    done
+    reserve 1
+    printf '%s %s %s stock-verified\n' "$nonce" "$stock_pid" "$stock_start" > "$root/stock.restored"
+}
+finish() {
+    primary=$?
+    trap - EXIT HUP INT TERM
+    printf '%s phase=%s primary_exit=%s\n' "$nonce" "$phase" "$primary" > "$root/diagnostic.outcome"
+    if test "$primary" -ne 0; then claim diagnostic.failed || :; fi
+    # Separate shell, not a function under `if`: set-e assertions remain effective.
+    set +e
+    /bin/sh "$root/actor.sh" --restore
+    recovery=$?
+    set -e
+    if test "$recovery" -ne 0; then
+        printf '%s phase=%s recovery-failed guard-may-remain\n' "$nonce" "$phase" > "$root/recovery.failed"
+        exit 90
+    fi
+    exit "$primary"
+}
+validate_root() {
+    test -d "$root" && test ! -L "$root"
+    test "$(stat -c '%a %u' "$root")" = '700 0'
+    private "$root/owner"
+    test "$(cat "$root/owner")" = "$nonce"
+    private "$root/deadline"
+    read armed_at deadline extra < "$root/deadline"
+    test -z "${extra-}"
+    case "$armed_at:$deadline" in *[!0-9:]*|:*|*:) return 90;; esac
+    test "$((deadline - armed_at))" = 360
+    test "$(now)" -ge "$armed_at"
+    reserve 1
+}
+main() {
+    test "$#" = 0
+    validate_root
+    reserve 340
+    if ! test -e "$root/actor.lock"; then (set -C; : > "$root/actor.lock") || :; fi
+    private "$root/actor.lock"
+    exec 9<> "$root/actor.lock"
+    flock -n 9
+    claim actor.claim
+    trap finish EXIT
+    trap 'exit 92' HUP INT TERM
+    hashes
+    policy "$root/stock.policy"
+    value MainPID
+    test "$VALUE" = "$original_pid"
+    same_process "$original_pid" "$original_start"
+    test "$(sha256sum "/proc/$original_pid/exe" | awk '{print $1}')" = '@EXEHASH@'
+    value ExecStart
+    case "$VALUE" in *'path=/usr/bin/xochitl ; argv[]=/usr/bin/xochitl --system ;'*) :;; *) return 90;; esac
+    value DropInPaths
+    test "$VALUE" = /usr/lib/systemd/system/xochitl.service.d/xochitl-service-override.conf
+    value ControlGroup
+    test "$VALUE" = /system.slice/xochitl.service
+    test -f /sys/fs/cgroup/systemd/system.slice/xochitl.service/cgroup.procs
+    value Job
+    test -z "$VALUE"
+    test ! -e "$parent" && test ! -L "$parent"
+    claim actor.ready
+    phase=prearm-request
+    wait_request guard.request
+    phase=install-guard
+    claim guard.install-intent
+    mkdir -m700 "$parent"
+    cp "$root/guard.conf" "$guard"
+    guard_installed=yes
+    query daemon-reload
+    policy "$root/guard.policy"
+    claim guard.ready
+    phase=activation-request
+    wait_request start.request
+    reserve 310
+    claim activation.claim
+    claim stock-stop.claim
+    stock_stopped=yes
+    stop_unit initial-stock-stop-under-guard
+    process_gone "$original_pid" "$original_start"
+    query show --property=Result,ExecMainCode,ExecMainStatus xochitl.service
+    cp "$root/query.stdout" "$root/initial-stock-stop"
+    grep -Fxq 'Result=success' "$root/initial-stock-stop"
+    reserve 195
+    phase=install-activation
+    claim activation.install-intent
+    cp "$root/activation.conf" "$activation"
+    activation_installed=yes
+    query daemon-reload
+    policy "$root/guard.policy"
+    value ExecStart
+    case "$VALUE" in *"$root/launch.sh"*) :;; *) return 90;; esac
+    candidate_started=yes
+    claim candidate-start.claim
+    query start --no-block xochitl.service
+    observe_end=$(($(now) + 30))
+    reserve_cutoff=$((deadline - 185))
+    test "$observe_end" -le "$reserve_cutoff" || observe_end=$reserve_cutoff
+    phase=observe-first-render
+    while :; do
+        if test -f "$root/attempt.identity" && test -f "$root/shutdown-trace.log"; then
+            private "$root/attempt.identity"
+            private "$root/shutdown-trace.log"
+            read attempted started extra < "$root/attempt.identity"
+            test -z "${extra-}"
+            if ! same_process "$attempted" "$started"; then return 93; fi
+            # Parse a capped stable local copy; a live append cannot change the parser's EOF.
+            dd if="$root/shutdown-trace.log" of="$root/trace.snapshot" bs=18433 count=1 2> "$root/trace-copy.stderr"
+            test "$(wc -c < "$root/trace.snapshot")" -le 18432
+            last=$(tail -c 1 "$root/trace.snapshot" | od -An -tu1 | tr -d ' ')
+            if test "$last" = 10; then
+                if awk -v pid="$attempted" -v start="$started" -f "$root/trace-stop-proof.awk" "$root/trace.snapshot"; then
+                    claim stop.admitted
+                    return 0
+                else
+                    trace_result=$?
+                    if test "$trace_result" != 1; then claim trace.invalid; return 94; fi
+                fi
+            fi
+        fi
+        test "$(now)" -lt "$observe_end"
+        sleep 1
+    done
+}
+# Main-only execution boundary; fixtures source exact functions, never this line.
+case "${1-}" in
+    '') main;;
+    --restore)
+        test "$#" = 1
+        validate_root
+        # Recovery is the child of the singleton actor, retaining its locked FD.
+        private "$root/actor.lock"
+        private "$root/actor.claim"
+        test "$(cat "$root/actor.claim")" = "$nonce"
+        test "$(stat -Lc '%d %i' /proc/self/fd/9)" = "$(stat -c '%d %i' "$root/actor.lock")"
+        flock -n 9
+        for name in stock-stop.claim guard.install-intent activation.install-intent candidate-start.claim; do
+            if test -e "$root/$name"; then private "$root/$name"; test "$(cat "$root/$name")" = "$nonce"; fi
+        done
+        test ! -e "$root/stock-stop.claim" || stock_stopped=yes
+        test ! -e "$root/guard.install-intent" || guard_installed=yes
+        test ! -e "$root/activation.install-intent" || activation_installed=yes
+        test ! -e "$root/candidate-start.claim" || candidate_started=yes
+        restore;;
+    *) exit 90;;
+esac
