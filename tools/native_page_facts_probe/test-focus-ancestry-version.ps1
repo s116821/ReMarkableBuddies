@@ -81,4 +81,29 @@ try{
     $absolute=[IO.Path]::GetFullPath($tmp);if(-not $absolute.StartsWith([IO.Path]::GetFullPath([IO.Path]::GetTempPath()),[StringComparison]::OrdinalIgnoreCase)){throw 'Fixture cleanup boundary'}
     Remove-Item -LiteralPath $absolute -Recurse -Force
 }
-Write-Output "PASS focus version3/refusal/actual mocked collector $checks checks"
+# Extract only the actual operator command AST; transport callbacks are replaced
+# with inert mocks. Never execute the source-only operator or its SSH/SCP bodies.
+$tokens=$null;$errors=$null
+$operator=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'run-qt-capture-observation-source.ps1'),[ref]$tokens,[ref]$errors)
+Check ($errors.Count -eq 0) 'operator parses'
+Check ($operator.EndBlock.Statements[1].Extent.Text -like "throw 'SOURCE ONLY:*") 'operator source-only guard remains'
+foreach($name in @('Receive-CaptureRequestHistory','Receive-CaptureOwnerRefusalEvidence')){
+    $calls=@($operator.FindAll({param($n)$n -is [Management.Automation.Language.CommandAst] -and $n.GetCommandName() -ceq $name},$true))
+    Check ($calls.Count -eq 1) "operator single call $name"
+    $call=$calls[0];$expected=if($name -eq 'Receive-CaptureOwnerRefusalEvidence'){9}else{8}
+    Check ($call.CommandElements.Count -eq $expected) "operator arity $name"
+    $command=$call.Extent.Text
+    foreach($block in @($call.CommandElements | Where-Object {$_ -is [Management.Automation.Language.ScriptBlockExpressionAst]})){$command=$command.Replace($block.Extent.Text,'{}')}
+    foreach($selected in @($false,$true)){
+        $FocusAncestry=$selected;$remote='inert';$packet='inert';$ownerIdentity=$null;$record=@{}
+        $script:routed=$null
+        & {
+            function Receive-CaptureRequestHistory {param($a,$b,$c,$d,$e,$read,$copy) if($args.Count){throw 'Extra history argument'};$script:routed=@{name='history';selected=$null}}
+            function Receive-CaptureOwnerRefusalEvidence {param($a,$b,$c,$d,$e,$read,$copy,[bool]$FocusAncestry=$false) if($args.Count){throw 'Extra owner argument'};$script:routed=@{name='owner';selected=$FocusAncestry}}
+            & ([scriptblock]::Create($command))
+        }
+        Check ($null -ne $script:routed) "actual operator mock called $name/$selected"
+        if($name -eq 'Receive-CaptureOwnerRefusalEvidence'){Check ($script:routed.selected -eq $selected) "actual operator owner selection $selected"}else{Check ($null -eq $script:routed.selected) "actual operator history no selection $selected"}
+    }
+}
+Write-Output "PASS focus version3/refusal/actual mocked collector/operator $checks checks"

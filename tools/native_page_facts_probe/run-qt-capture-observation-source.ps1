@@ -384,7 +384,7 @@ fi
                 param($command)
                 $restoreGuard="/bin/sh '$remote/restore.sh' --verify >/dev/null"
                 SSH ("set -eu; $restoreGuard`n"+$command+"`n"+$restoreGuard)
-            } {param($remotePath,$localPath)Native 'scp' @('-o','HostName=10.11.99.1','-o','StrictHostKeyChecking=yes','-o','BatchMode=yes','-o','ConnectTimeout=8',('RM2:'+$remotePath),$localPath)} ([bool]$FocusAncestry)}catch{
+            } {param($remotePath,$localPath)Native 'scp' @('-o','HostName=10.11.99.1','-o','StrictHostKeyChecking=yes','-o','BatchMode=yes','-o','ConnectTimeout=8',('RM2:'+$remotePath),$localPath)}}catch{
                 $record.historical_collection_errors+=@{collector='request-history';message=$_.Exception.Message}
             }
             # Independent historical preservation after restoration, even when
@@ -393,7 +393,7 @@ fi
                 param($command)
                 $restoreGuard="/bin/sh '$remote/restore.sh' --verify >/dev/null"
                 SSH ("set -eu; $restoreGuard`n"+$command+"`n"+$restoreGuard)
-            } {param($remotePath,$localPath)Native 'scp' @('-o','HostName=10.11.99.1','-o','StrictHostKeyChecking=yes','-o','BatchMode=yes','-o','ConnectTimeout=8',('RM2:'+$remotePath),$localPath)}}catch{
+            } {param($remotePath,$localPath)Native 'scp' @('-o','HostName=10.11.99.1','-o','StrictHostKeyChecking=yes','-o','BatchMode=yes','-o','ConnectTimeout=8',('RM2:'+$remotePath),$localPath)} ([bool]$FocusAncestry)}catch{
                 $record.historical_collection_errors+=@{collector='owner-refusal';message=$_.Exception.Message}
             }
             if($record.historical_collection_errors.Count){throw 'Historical collectors incomplete; preserve copies and retain stage'}
