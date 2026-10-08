@@ -99,6 +99,7 @@ verify_stock() { test ! -e "$guard"; test ! -e "$activation"; printf 'healthy\n'
                          "payload_sha256": hashlib.sha256(payload.read_bytes()).hexdigest(),
                          "protected_files": [{"path": f"/fixture/{i}", "sha256": "a" * 64} for i in range(24)]}
             selection.update({key: value[1] for key, value in module.SERVICE_HASHES.items()})
+            selection["protected_files"][0]["path"] = "/usr/lib/libstdc++.so.6"
             selected = root / "selection.json"
             selected.write_text(json.dumps(selection))
             output = root / "packet"
@@ -112,6 +113,19 @@ verify_stock() { test ! -e "$guard"; test ! -e "$activation"; printf 'healthy\n'
             for name, digest in receipt["files"].items():
                 self.assertEqual(hashlib.sha256((output / name).read_bytes()).hexdigest(), digest)
             self.assertNotIn("@ROOT@", (output / "actor.sh").read_text())
+            self.assertIn("  /usr/lib/libstdc++.so.6\n", (output / "baseline.files").read_text())
+            # Provider '+' is literal; shell metacharacters and traversal remain refused.
+            for index, unsafe in enumerate(("/usr/lib/libstdc++;touch", "/usr/lib/$(id)",
+                                             "/usr/lib/`id`", "/usr/lib/lib*.so", "/usr/lib/../escape",
+                                             "/usr/lib/lib stdc++.so", "/usr/lib/lib.so\n/escape")):
+                selection["protected_files"][0]["path"] = unsafe
+                selected.write_text(json.dumps(selection))
+                rejected = root / f"rejected-{index}"
+                result = subprocess.run([os.sys.executable, "-B", str(HERE / "prepare_packet.py"),
+                                         "--selection", str(selected), "--payload", str(payload),
+                                         "--output", str(rejected)], capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0, unsafe)
+                self.assertFalse(rejected.exists())
 
     def test_prearm_host_loss_expires_without_policy_mutation(self):
         with tempfile.TemporaryDirectory() as directory:

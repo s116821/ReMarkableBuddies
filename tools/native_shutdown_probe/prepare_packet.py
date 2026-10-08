@@ -71,7 +71,7 @@ def main():
     for entry in files:
         path = entry.get("path", "")
         digest = entry.get("sha256", "")
-        if not re.fullmatch(r"/[A-Za-z0-9_./-]+", path) or ".." in Path(path).parts or path in paths:
+        if not re.fullmatch(r"/[A-Za-z0-9_./+-]+", path) or ".." in Path(path).parts or path in paths:
             raise ValueError("Protected path refused")
         if not re.fullmatch(r"[0-9a-f]{64}", digest):
             raise ValueError("Protected hash refused")
