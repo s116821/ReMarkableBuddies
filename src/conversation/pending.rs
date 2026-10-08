@@ -47,13 +47,13 @@ impl IntentSelectionEvidence {
         }
     }
 }
-fn pending_id(operation: Uuid) -> Uuid {
+pub(super) fn pending_id(operation: Uuid) -> Uuid {
     Uuid::new_v5(
         &Uuid::NAMESPACE_URL,
         format!("urn:remarkable-buddies:outcome:v1:{operation}").as_bytes(),
     )
 }
-fn pin(envelope: &Envelope) -> Result<IntentRecordRef> {
+pub(super) fn pin(envelope: &Envelope) -> Result<IntentRecordRef> {
     let bytes = serde_json::to_vec(envelope)?;
     ensure!(
         bytes.len() <= MAX_RECORD,
@@ -399,24 +399,24 @@ fn root_envelope_binding(envelope: &Envelope) -> Result<Option<Uuid>> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::conversation) mod tests {
     use super::*;
     use crate::storage::selection::{SelectionChange, SelectionScope};
     use crate::storage::{Manifest, Scope, StorePaths};
     use std::cell::Cell;
-    struct Fixture(std::path::PathBuf);
+    pub(in crate::conversation) struct Fixture(std::path::PathBuf);
     impl Fixture {
-        fn new() -> Self {
+        pub(in crate::conversation) fn new() -> Self {
             Self(std::env::temp_dir().join(format!("buddy-pending-{}", Uuid::new_v4())))
         }
-        fn paths(&self) -> StorePaths {
+        pub(in crate::conversation) fn paths(&self) -> StorePaths {
             StorePaths {
                 data: self.0.join("data"),
                 cache: self.0.join("cache"),
                 credentials: self.0.join("secrets"),
             }
         }
-        fn setup(
+        pub(in crate::conversation) fn setup(
             &self,
         ) -> (
             Arc<Store>,
@@ -563,10 +563,10 @@ mod tests {
         }
     }
     // Test-only live-check simulation. There is no production native implementer.
-    struct MockSource {
-        source: SourceObservation,
-        calls: Cell<usize>,
-        refuse_at: Option<usize>,
+    pub(in crate::conversation) struct MockSource {
+        pub(in crate::conversation) source: SourceObservation,
+        pub(in crate::conversation) calls: Cell<usize>,
+        pub(in crate::conversation) refuse_at: Option<usize>,
     }
     impl sealed::Sealed for MockSource {}
     impl SourceAdmission for MockSource {

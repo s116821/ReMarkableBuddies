@@ -5,6 +5,7 @@ mod intent;
 mod legacy;
 mod pending;
 mod selected;
+mod settlement;
 mod types;
 use crate::storage::{
     digest, Conflict, Envelope, Kind, Media, Namespace, ObjectRef, Store, Uuid, FORMAT, MAX_ITEMS,
@@ -15,6 +16,7 @@ pub use intent::*;
 pub use pending::{PendingIntentPublication, PendingIntentRequest, SourceAdmission};
 pub use selected::*;
 use serde::Serialize;
+pub use settlement::*;
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::Read,
@@ -132,10 +134,14 @@ impl Ledger {
                 ensure!(
                     !fact.id.is_nil()
                         && !fact.turn.is_nil()
-                        && matches!(
+                        && (matches!(
                             fact.outcome,
                             Outcome::Failed | Outcome::Canceled | Outcome::ReconcileRequired
-                        ),
+                        ) || (fact.outcome == Outcome::Completed
+                            && envelope.domain_schema_version == 2
+                            && fact.settlement.as_ref().is_some_and(|settlement| {
+                                settlement.state == IntentSettlementState::VerifiedSubmitted
+                            }))),
                     "invalid attempt outcome fact"
                 );
                 (fact.id, Namespace::Conversation, fact.conversation)
