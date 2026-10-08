@@ -10,6 +10,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+/// Experimental REM-52 pointer transport; not connected to the sync worker.
+pub mod slot;
+
 pub const APP_SCOPE: &str = "https://www.googleapis.com/auth/drive.appdata";
 const CHUNK: usize = 256 * 1024;
 

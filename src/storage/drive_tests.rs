@@ -81,6 +81,10 @@ impl Fixture {
                     .lock()
                     .unwrap()
                     .push(String::from_utf8_lossy(&bytes).into_owned());
+                // Accepted request with acknowledgement lost after submission.
+                if reply.status == 0 {
+                    continue;
+                }
                 write!(
                     stream,
                     "HTTP/1.1 {} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n",
@@ -360,3 +364,6 @@ fn wrong_409_content_identity_and_untrusted_session_locations_fail_closed() {
         .safe_session("https://example.invalid/upload/drive/v3/private")
         .is_err());
 }
+
+#[path = "drive/slot_tests.rs"]
+mod slot_tests;

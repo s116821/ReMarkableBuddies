@@ -30,6 +30,7 @@ impl Store {
         );
         let root = self.generation(inner.generation);
         files::directory(&destination.join("objects"))?;
+        selection::refuse_selected_maintenance(&root)?;
         let manifests: Vec<_> = inner.index.manifests.values().cloned().collect();
         let mut inventory = BTreeMap::new();
         let mut descriptors = BTreeSet::new();
@@ -134,6 +135,7 @@ impl Store {
             inner.index.unavailable == 0,
             "repair unavailable local commits before restore"
         );
+        selection::refuse_selected_maintenance(&self.generation(inner.generation))?;
         let next = Uuid::new_v4();
         Self::create_generation(&self.paths.data, next)?;
         let next_root = self.generation(next);
