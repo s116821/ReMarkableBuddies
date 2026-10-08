@@ -54,6 +54,32 @@ def fixture_guard_shadows(root, parent):
 
 
 class Actor(unittest.TestCase):
+    def test_minimal_busybox_od_failure_and_portable_actual_admission_boundary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            valid = "v1 1 startup 28510482417625 6758 6758 2850967 0 0 0\nv1 2 before-render 28511734507625 6758 6758 2850967 0 0 1\n"
+            (root / "trace.snapshot").write_text(valid)
+            (root / "trace-stop-proof.awk").write_bytes((HERE / "trace-stop-proof.awk").read_bytes())
+            overrides = '''
+od() { printf "od: invalid option -- 'A'\n" >&2; return 1; }
+'''
+            shell(root, '''
+old=$(tail -c 1 "$root/trace.snapshot" | od -An -tu1 | tr -d ' ')
+test -z "$old"
+final_lf "$root/trace.snapshot"
+awk -v pid=6758 -v start=2850967 -f "$root/trace-stop-proof.awk" "$root/trace.snapshot"
+claim stop.admitted
+claim diagnostic.failed
+preserve_failure
+''', overrides)
+            self.assertTrue((root / "stop.admitted").exists())
+            self.assertEqual((root / "diagnostic.failed").read_bytes(), b"1" * 32 + b"\n")
+            for data in (b"", b"x", b"\r"):
+                (root / "partial").write_bytes(data)
+                shell(root, 'if final_lf "$root/partial"; then exit 99; fi')
+            shell(root, 'if final_lf "$root/trace.snapshot"; then exit 99; fi', 'tail() { printf "\\n"; return 1; }')
+            shell(root, 'if final_lf "$root/trace.snapshot"; then exit 99; fi', 'wc() { printf "1\\n"; return 1; }')
+
     def test_partial_shadow_installation_cleanup_and_foreign_refusal(self):
         for stage in range(5):
             with tempfile.TemporaryDirectory() as directory:

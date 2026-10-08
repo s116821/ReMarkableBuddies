@@ -59,7 +59,7 @@ dependencies on systemd 255; effective runtime provenance remains a native gate.
 ## Local verification
 
 `test_actor.py` runs in an owned Linux fixture with no network or actual service
-manager. Seventeen checks cover conditional query failure, restoration ordering and
+manager. Eighteen checks cover conditional query failure, restoration ordering and
 crash preservation, deadline refusal, failed process reads, bounded owned query
 children, trace identity/drop/sequence, request expiry and singleton claims/lock.
 They also exercise preparation with synthetic bytes, actual actor
@@ -73,6 +73,8 @@ Additional cases preserve failed guard snapshots across stock proof, verify exac
 shadow derivation/provenance and partial-install cleanup or foreign-content refusal.
 Preparation uses synthetic source hashes as an injected input boundary; it does
 not claim private native source or live systemd validation.
+A minimal-BusyBox-od regression preserves the actual unsupported-option failure
+and verifies checked tail/wc LF proof, parser admission and failure-marker retention.
 The temporary fixture mount must permit its owned query stub to execute. These
 checks do not establish native correctness or recovery after an executing native
 candidate loses its host connection.

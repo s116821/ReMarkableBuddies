@@ -70,7 +70,7 @@ def main():
         raise ValueError("Fresh Main-selected nonce required; all-zero compile fixture is not native")
     if nonce in {"0404ebf9b5794196a85bfba7ee6859ba", "301a86a1a18d48d885c5ddcec0af549c",
                  "b3e3ca0475a84432a9b328218395de0c", "4459cae2f852426b8262f658c6aa59ed",
-                 "a22fc58d4c9948098f7d2ccc8a9de8c4"}:
+                 "a22fc58d4c9948098f7d2ccc8a9de8c4", "94f4037a4f3c40b881fe491b9b404bc3"}:
         raise ValueError("Historical nonce refused")
     if selected.get("budget_seconds") != 360 or selected.get("original_policy") != POLICY:
         raise ValueError("Exact selected budget/original policy required")

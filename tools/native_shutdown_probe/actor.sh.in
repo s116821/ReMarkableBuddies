@@ -25,12 +25,18 @@ private() {
     test "$(stat -c '%a %u %h' "$1")" = '600 0 1' || return 90
 }
 claim() { (set -C; printf '%s\n' "$nonce" > "$root/$1") 2>/dev/null; }
+final_lf() {
+    # Minimal BusyBox od lacks -A/-t. Check the read separately, then count LF.
+    tail -c 1 "$1" > "$root/final-byte" || return 90
+    lf_count=$(wc -l < "$root/final-byte") || return 90
+    test "$lf_count" -eq 1 || return 90
+}
 preserve_failure() {
     # Failure evidence alone is idempotent; physical action claims never are.
     if test -e "$root/diagnostic.failed" || test -L "$root/diagnostic.failed"; then
         private "$root/diagnostic.failed" || return 90
         test "$(wc -c < "$root/diagnostic.failed")" = 33 || return 90
-        test "$(tail -c 1 "$root/diagnostic.failed" | od -An -tu1 | tr -d ' ')" = 10 || return 90
+        final_lf "$root/diagnostic.failed" || return 90
         test "$(cat "$root/diagnostic.failed")" = "$nonce" || return 90
     else
         claim diagnostic.failed || return 90
@@ -400,8 +406,7 @@ main() {
             # Parse a capped stable local copy; a live append cannot change the parser's EOF.
             dd if="$root/shutdown-trace.log" of="$root/trace.snapshot" bs=18433 count=1 2> "$root/trace-copy.stderr"
             test "$(wc -c < "$root/trace.snapshot")" -le 18432
-            last=$(tail -c 1 "$root/trace.snapshot" | od -An -tu1 | tr -d ' ')
-            if test "$last" = 10; then
+            if final_lf "$root/trace.snapshot"; then
                 if awk -v pid="$attempted" -v start="$started" -f "$root/trace-stop-proof.awk" "$root/trace.snapshot"; then
                     claim stop.admitted
                     return 0
