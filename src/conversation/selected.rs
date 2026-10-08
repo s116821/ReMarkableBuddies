@@ -224,7 +224,10 @@ impl SelectedDomainProjection {
             .collect::<Result<Vec<_>>>()?;
         Self::from_pinned_records(records, &objects)
     }
-    fn from_pinned_records(records: &[Envelope], references: &[ObjectRef]) -> Result<Self> {
+    pub(super) fn from_pinned_records(
+        records: &[Envelope],
+        references: &[ObjectRef],
+    ) -> Result<Self> {
         // Store::selected_snapshot preserves validate_objects' manifest order.
         // These are identities of stored bytes, not reserialized envelopes.
         ensure!(

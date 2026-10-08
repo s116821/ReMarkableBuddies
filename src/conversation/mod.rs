@@ -8,7 +8,7 @@ mod types;
 use crate::storage::{
     digest, Conflict, Envelope, Kind, Media, Namespace, ObjectRef, Store, Uuid, FORMAT, MAX_ITEMS,
 };
-pub use admission::SelectedAdmission;
+pub use admission::{HistoricalIntent, SelectedAdmission};
 use anyhow::{bail, ensure, Context, Result};
 pub use intent::*;
 pub use selected::*;
