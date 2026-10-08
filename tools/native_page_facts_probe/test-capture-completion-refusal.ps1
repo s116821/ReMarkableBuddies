@@ -26,7 +26,7 @@ Check ($new.Replace("    config.developmentCaptureCompletionRefusalDiagnostics=t
 $threw=$false;try{Get-CaptureObservationBuildConfig $expected $false $false $false 0 0 $false $false $false $false $true|Out-Null}catch{$threw=$true};Check $threw 'requires selected v11'
 $operator=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'run-qt-capture-observation-source.ps1'))
 $line=($operator -split "`n"|Where-Object {$_ -like 'function Expand*'})
-& ([scriptblock]::Create($line))
+. ([scriptblock]::Create($line))
 $remote='/run/owned-fixture';$rollback='owned';$stock=@{stock_pid=1;stock_start='2'};$fixtureCheck='true'
 $CaptureCompletionRefusalDiagnostics=$false;Check ((Expand '-le @CALLBACKCAP@') -ceq '-le 256') 'actual default callback cap'
 $CaptureCompletionRefusalDiagnostics=$true;Check ((Expand '-le @CALLBACKCAP@') -ceq '-le 1024') 'actual selected callback cap'
