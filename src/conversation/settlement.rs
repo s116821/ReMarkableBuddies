@@ -229,16 +229,7 @@ impl SelectedAdmission {
             let snapshot = store
                 .selected_snapshot(self.scope(), MAX_ITEMS)?
                 .context("selected scope absent")?;
-            let (_, fact, _) = current_fact(store, &snapshot, &original)?;
-            Ok(match fact.settlement.map(|s| s.state) {
-                None | Some(IntentSettlementState::Unknown) => IntentUncertainty::Unresolved,
-                Some(IntentSettlementState::VerifiedSubmitted) => {
-                    IntentUncertainty::VerifiedSubmitted
-                }
-                Some(IntentSettlementState::VerifiedNoEffect) => {
-                    IntentUncertainty::VerifiedNoEffect
-                }
-            })
+            retained_uncertainty_in_store(store, &snapshot, &original)
         })
     }
     pub fn settle_retained(
@@ -387,6 +378,22 @@ impl SelectedAdmission {
             Ok(RetainedSettlementPublication::Published(publication))
         })
     }
+}
+
+/// Caller already owns canonical domain admission. Preserve the same original
+/// retained closure, causal head, publication and local-verification checks as
+/// the public reader, without recursively acquiring that admission gate.
+pub(super) fn retained_uncertainty_in_store(
+    store: &Store,
+    snapshot: &crate::storage::selection::SelectedSnapshot,
+    original: &HistoricalIntent,
+) -> Result<IntentUncertainty> {
+    let (_, fact, _) = current_fact(store, snapshot, original)?;
+    Ok(match fact.settlement.map(|s| s.state) {
+        None | Some(IntentSettlementState::Unknown) => IntentUncertainty::Unresolved,
+        Some(IntentSettlementState::VerifiedSubmitted) => IntentUncertainty::VerifiedSubmitted,
+        Some(IntentSettlementState::VerifiedNoEffect) => IntentUncertainty::VerifiedNoEffect,
+    })
 }
 
 #[cfg(test)]

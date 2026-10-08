@@ -65,6 +65,16 @@ impl SelectedAdmission {
         accepted: &SelectionToken,
         operation: impl FnOnce(&SelectedSnapshot) -> Result<T>,
     ) -> Result<T> {
+        self.with_current_store(accepted, |_, snapshot| operation(snapshot))
+    }
+    /// Private locked read seam for Reader closure/uncertainty validation.
+    /// The callback must not reacquire admission. Store reads finish before
+    /// synchronous backend I/O; admission remains held through that I/O.
+    pub(super) fn with_current_store<T>(
+        &self,
+        accepted: &SelectionToken,
+        operation: impl FnOnce(&Store, &SelectedSnapshot) -> Result<T>,
+    ) -> Result<T> {
         let _admission = self
             .gate
             .lock()
@@ -81,7 +91,7 @@ impl SelectedAdmission {
             &snapshot.token == accepted,
             "selected admission replaced or stale"
         );
-        operation(&snapshot)
+        operation(&self.store, &snapshot)
     }
     /// Publication/activation must use the same gate as synchronous handoff.
     pub(super) fn mutate<T>(&self, operation: impl FnOnce(&Store) -> Result<T>) -> Result<T> {
