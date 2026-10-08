@@ -151,6 +151,16 @@ pub(super) fn recover_original(
         "original intent operation mismatch"
     );
     ensure!(
+        intent.selection.group == transaction.scope.group
+            && intent.selection.key_sha256 == transaction.scope.key_sha256
+            && intent.selection.binding_sha256 == transaction.scope.binding_sha256
+            && intent.selection.store_generation == transaction.store_generation
+            && intent.selection.accepted_base_sha256 == transaction.accepted_base_sha256
+            && Some(intent.selection.selection_sha256.as_str())
+                == transaction.previous_sha256.as_deref(),
+        "original intent selection differs from publication"
+    );
+    ensure!(
         matches!(projection.exact_reference(&intent.root_revision)?,Record::Root(root) if root.id == intent.conversation),
         "original intent root mismatch"
     );
@@ -330,6 +340,15 @@ mod tests {
     }
     #[test]
     fn lost_ack_recovery_preserves_original_ids_and_bytes_after_restart_and_replacement() {
+        recovery_fixture(None);
+    }
+    #[test]
+    fn recovery_refuses_foreign_publication_pins_after_restart() {
+        for pin in 0..6 {
+            recovery_fixture(Some(pin));
+        }
+    }
+    fn recovery_fixture(foreign_pin: Option<usize>) {
         use super::super::{
             Acknowledgment, AdmittedIntent, IntentSelectionEvidence, Mode, Outcome, Role, Root,
             SourceObservation, Turn,
@@ -460,7 +479,7 @@ mod tests {
         turn.payload = serde_json::to_value(Record::Turn(updated_turn)).unwrap();
         let operation = Uuid::new_v4();
         let fingerprint = digest(b"mechanical fixture request; no native qualification");
-        let intent = AdmittedIntent {
+        let mut intent = AdmittedIntent {
             operation,
             request_fingerprint: fingerprint.clone(),
             conversation,
@@ -489,6 +508,16 @@ mod tests {
             evidence: vec![evidence],
             media: vec![],
         };
+        if let Some(pin) = foreign_pin {
+            match pin {
+                0 => intent.selection.group = Uuid::new_v4(),
+                1 => intent.selection.key_sha256 = digest(b"foreign key"),
+                2 => intent.selection.binding_sha256 = digest(b"foreign binding"),
+                3 => intent.selection.store_generation = Uuid::new_v4(),
+                4 => intent.selection.accepted_base_sha256 = digest(b"foreign base"),
+                _ => intent.selection.selection_sha256 = digest(b"foreign predecessor"),
+            }
+        }
         let mut receipt = root.clone();
         receipt.record_id = Ledger::receipt_id(operation);
         receipt.revision_id = Uuid::new_v4();
@@ -522,6 +551,10 @@ mod tests {
         drop(store);
         let store = Arc::new(Store::open(fixture.paths()).unwrap());
         let handle = SelectedAdmission::new(store.clone(), scope.clone()).unwrap();
+        if foreign_pin.is_some() {
+            assert!(handle.recover_original_intent(operation).is_err());
+            return;
+        }
         let recovered = handle.recover_original_intent(operation).unwrap().unwrap();
         assert_eq!(recovered.receipt_reference, saved);
         assert_eq!(
