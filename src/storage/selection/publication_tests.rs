@@ -600,6 +600,29 @@ fn selection_crash_child() {
     } else {
         Fault::AfterActivation
     };
+    if std::env::var("BUDDY_SELECTION_CRASH_MUTATION").as_deref() == Ok("retained") {
+        let (operation, original_operation, intent, retained, objects): (
+            Uuid,
+            Uuid,
+            ObjectRef,
+            Vec<Manifest>,
+            BTreeMap<String, Vec<u8>>,
+        ) = files::json(&f.0.join("retained.json"), MAX_METADATA as u64).unwrap();
+        store.set_fault(fault).unwrap();
+        assert!(store
+            .commit_retained(
+                &snapshot.token,
+                RetainedCommit {
+                    operation,
+                    original_operation,
+                    intent,
+                    retained,
+                },
+                objects,
+            )
+            .is_err());
+        std::process::exit(73);
+    }
     let encoded = files::read(&f.0.join("winner.json"), MAX_RECORD as u64).unwrap();
     let winner: Envelope = serde_json::from_slice(&encoded).unwrap();
     let (change, objects) = change(&[winner]);
@@ -982,6 +1005,194 @@ fn retained_settlement_faults_preserve_winner_and_original_evidence_atomically()
         assert_eq!(selected(&store, &s).token, token);
     }
 }
+
+#[test]
+fn retained_settlement_process_death_preserves_receipt_media_and_unrelated_scope() {
+    for point in ["before", "after"] {
+        let f = Fixture::new();
+        let store = f.store();
+        let s = scope();
+        let (original, replacement, intent, reference) = retained_fixture(&store, &s);
+        let unrelated_scope = scope();
+        let unrelated = initialize(&store, &unrelated_scope, &[record(&store)]);
+        let mut fact = record(&store);
+        fact.domain_schema_version = 2;
+        fact.payload = json!({"fixture":"opaque historical settlement"});
+        let (facts, objects) = closure(std::slice::from_ref(&fact), BTreeMap::new());
+        let mut retained = replacement.transaction.retained.clone();
+        retained.push(facts);
+        let update = RetainedCommit {
+            operation: Uuid::new_v4(),
+            original_operation: original.transaction.operation,
+            intent: reference,
+            retained,
+        };
+        files::atomic_json(&f.0.join("scope.json"), &s).unwrap();
+        files::atomic_json(
+            &f.0.join("retained.json"),
+            &(
+                update.operation,
+                update.original_operation,
+                &update.intent,
+                &update.retained,
+                &objects,
+            ),
+        )
+        .unwrap();
+        drop(store);
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "storage::selection::publication_tests::selection_crash_child",
+            ])
+            .env("BUDDY_SELECTION_CRASH_FIXTURE", &f.0)
+            .env("BUDDY_SELECTION_CRASH_POINT", point)
+            .env("BUDDY_SELECTION_CRASH_MUTATION", "retained")
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("retained publication child exceeded deadline");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert_eq!(status.code(), Some(73));
+        let store = f.store();
+        let mut snapshot = selected(&store, &s);
+        // Each accepted publication has its own manifest transaction ID. Winner
+        // membership/coverage must stay identical, not that publication identity.
+        assert_eq!(
+            snapshot.transaction.selected.records,
+            replacement.transaction.selected.records
+        );
+        assert_eq!(
+            snapshot.transaction.selected.record_namespaces,
+            replacement.transaction.selected.record_namespaces
+        );
+        assert_eq!(
+            snapshot.transaction.selected.media,
+            replacement.transaction.selected.media
+        );
+        assert_eq!(
+            snapshot.transaction.selected.media_coverage,
+            replacement.transaction.selected.media_coverage
+        );
+        assert_eq!(
+            snapshot.transaction.accepted_base_sha256,
+            replacement.transaction.accepted_base_sha256
+        );
+        assert!(snapshot
+            .retained_records
+            .iter()
+            .any(|r| r.revision_id == intent.revision_id));
+        let media = &intent.media_descriptors[0];
+        assert_eq!(
+            snapshot
+                .media
+                .get_mut(&media.sha256)
+                .unwrap()
+                .chunk(0, media.bytes as usize)
+                .unwrap(),
+            b"owned admitted evidence"
+        );
+        let accepted = point == "after";
+        assert_eq!(
+            snapshot
+                .retained_records
+                .iter()
+                .any(|r| r.revision_id == fact.revision_id),
+            accepted
+        );
+        assert_eq!(
+            store
+                .selected_receipt(&s, update.operation)
+                .unwrap()
+                .is_some(),
+            accepted
+        );
+        assert_eq!(selected(&store, &unrelated_scope).token, unrelated.token);
+        let receipt = store
+            .commit_retained(&replacement.token, update.clone(), objects.clone())
+            .unwrap();
+        assert_eq!(receipt.replayed, accepted);
+        assert_eq!(receipt.transaction.mutation, SelectionMutation::Retained);
+        let token = selected(&store, &s).token;
+        assert!(
+            store
+                .commit_retained(&replacement.token, update, objects)
+                .unwrap()
+                .replayed
+        );
+        assert_eq!(selected(&store, &s).token, token);
+        assert_eq!(selected(&store, &unrelated_scope).token, unrelated.token);
+    }
+}
+#[test]
+fn retained_settlement_racing_activation_cannot_use_one_token_twice() {
+    let f = Fixture::new();
+    let store = Arc::new(f.store());
+    let s = scope();
+    let (original, replacement, intent, reference) = retained_fixture(&store, &s);
+    let fact = record(&store);
+    let (facts, objects) = closure(std::slice::from_ref(&fact), BTreeMap::new());
+    let mut retained = replacement.transaction.retained.clone();
+    retained.push(facts);
+    let update = RetainedCommit {
+        operation: Uuid::new_v4(),
+        original_operation: original.transaction.operation,
+        intent: reference,
+        retained,
+    };
+    let (mut next, next_objects) = change(&[record(&store)]);
+    next.retained = replacement.transaction.retained.clone();
+    let barrier = Arc::new(Barrier::new(3));
+    let settled_store = store.clone();
+    let settled_token = replacement.token.clone();
+    let settled_barrier = barrier.clone();
+    let settlement = std::thread::spawn(move || {
+        settled_barrier.wait();
+        settled_store.commit_retained(&settled_token, update, objects)
+    });
+    let replaced_store = store.clone();
+    let replaced_barrier = barrier.clone();
+    let activation = std::thread::spawn(move || {
+        replaced_barrier.wait();
+        replaced_store.activate_selected(&replacement.token, next, next_objects)
+    });
+    barrier.wait();
+    let results = [settlement.join().unwrap(), activation.join().unwrap()];
+    assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+    assert!(results
+        .iter()
+        .find_map(|r| r.as_ref().err())
+        .unwrap()
+        .to_string()
+        .contains("stale selection token"));
+    let snapshot = selected(&store, &s);
+    assert_eq!(snapshot.transaction.history_depth, 4);
+    assert!(snapshot
+        .retained_records
+        .iter()
+        .any(|r| r.revision_id == intent.revision_id));
+    let settled = snapshot.transaction.mutation == SelectionMutation::Retained;
+    assert_eq!(
+        snapshot
+            .retained_records
+            .iter()
+            .any(|r| r.revision_id == fact.revision_id),
+        settled
+    );
+    drop(store);
+    let reopened = f.store();
+    assert_eq!(selected(&reopened, &s).token, snapshot.token);
+}
+
 #[test]
 fn foreign_active_or_dropped_retained_intent_cannot_settle() {
     let f = Fixture::new();
