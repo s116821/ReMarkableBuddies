@@ -47,12 +47,25 @@ foreach($group in @('pointers-or-threads','window-focus-active-visible','engine-
 }
 foreach($result in @('open-engine-thread','open-current-window-unavailable','open-context-lost','open-item-lost','open-topology-bound','open-candidate-bound','open-owner-ambiguous','open-owner-unavailable')){
     $value=New-Refusal;$value.branch='owner-discovery';$value.predicate=$null;$value.discovery_result=$result
-    if($result -cin @('open-item-lost','open-topology-bound','open-candidate-bound')){$value.visited_items=4;$value.receiver_candidates=$(if($result -ceq 'open-candidate-bound'){9}else{1});$value.scene_candidates=1}
+    if($result -cin @('open-item-lost','open-topology-bound','open-candidate-bound')){$value.visited_items=10;$value.receiver_candidates=$(if($result -ceq 'open-candidate-bound'){9}else{1});$value.scene_candidates=1}
     if($result -cin @('open-owner-ambiguous','open-owner-unavailable')){$value.visited_items=4;$value.receiver_candidates=2;$value.scene_candidates=1;$value.matched_pairs=$(if($result -ceq 'open-owner-ambiguous'){2}else{0})}
     if($result -ceq 'open-owner-unavailable'){$value.first_pair_receiver=0;$value.first_pair_scene=0;$value.first_pair_rejection='receiver-document'}
     Check (Valid $value) "discovery registry $result"
 }
 $members=@{document=@('pageCountChanged(int,int)','pageMapChanged()','pageAdded(int)','pagesAdded(QList<int>)','pageMoved(int,int)','pagesMoved()','pagesRemoved()','redirectionPageMapChanged()','pageUpdated(int)','documentMetadataChanged()','orientationChanged()');scene=@('pageIdChanged()','documentWrapperChanged()','workerChanged()','viewportChanged()');receiver=@('document','currentPage','currentPageId','drawingAreaFocused')}
+foreach($result in @('open-owner-unavailable','open-owner-ambiguous','open-context-lost')){
+ foreach($overflow in @('visited_items','receiver_candidates','scene_candidates')){
+    $value=New-Refusal;$value.branch='owner-discovery';$value.predicate=$null;$value.discovery_result=$result;$value.visited_items=4;$value.receiver_candidates=2;$value.scene_candidates=1;$value.matched_pairs=$(if($result -ceq 'open-owner-ambiguous'){2}elseif($result -ceq 'open-context-lost'){1}else{0})
+    if($result -ceq 'open-owner-unavailable'){$value.first_pair_receiver=0;$value.first_pair_scene=0;$value.first_pair_rejection='receiver-document'}
+    $value.$overflow=$(if($overflow -ceq 'visited_items'){4097}else{9})
+    Check (-not(Valid $value)) "post traversal overflow refused $result $overflow"
+ }
+}
+$value=New-Refusal;$value.branch='owner-discovery';$value.predicate=$null;$value.discovery_result='open-owner-ambiguous';$value.visited_items=3;$value.receiver_candidates=1;$value.scene_candidates=1;$value.matched_pairs=2
+Check (-not(Valid $value)) 'ambiguity requires two candidate pairs'
+$value.discovery_result='open-context-lost';Check (-not(Valid $value)) 'context cannot follow immediate ambiguity'
+$value.matched_pairs=0;$value.active_owner_rejection='document-identity';Check (-not(Valid $value)) 'final active rejection requires selected match'
+$value.active_owner_rejection=$null;$value.receiver_candidates=0;Check (-not(Valid $value)) 'pair progress requires both roles'
 foreach($role in $members.Keys){foreach($member in $members[$role]){foreach($failure in @('object-missing','property-missing','notify-missing','signal-missing','slot-missing','return-type','connect-failed')){
     $value=New-Refusal;$value.branch='observer-install';$value.predicate=$null;$value.discovery_result='open-owner-observed';$value.observer_role=$role;$value.observer_member=$member;$value.observer_failure=$failure
     Check (Valid $value) "observer registry $role $member $failure"

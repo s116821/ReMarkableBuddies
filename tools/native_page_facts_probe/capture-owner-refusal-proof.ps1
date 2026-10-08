@@ -53,8 +53,22 @@ function Test-CaptureOwnerRefusal($Value,[string]$Nonce,[string]$PidText,[string
         if($Value.discovery_result -cin @('open-engine-thread','open-current-window-unavailable') -and $visitedCount){return $false}
         if($Value.discovery_result -cin @('open-item-lost','open-topology-bound','open-candidate-bound') -and ($visitedCount -ne 3 -or $null -ne $Value.matched_pairs)){return $false}
         if($Value.discovery_result -ceq 'open-candidate-bound' -and $Value.receiver_candidates -ne 9 -and $Value.scene_candidates -ne 9){return $false}
+        # Overflow is observed only at its immediate original refusal. No later
+        # traversal/pair/final-owner outcome can inherit those counts.
+        if($visitedCount -eq 3){
+            if($Value.receiver_candidates -gt $Value.visited_items -or $Value.scene_candidates -gt $Value.visited_items){return $false}
+            if($Value.discovery_result -cne 'open-topology-bound' -and $Value.visited_items -gt 4096){return $false}
+            if($Value.discovery_result -cne 'open-candidate-bound' -and ($Value.receiver_candidates -gt 8 -or $Value.scene_candidates -gt 8)){return $false}
+        }
+        if($Value.discovery_result -ceq 'open-topology-bound' -and $Value.visited_items -lt 1){return $false}
+        if($Value.discovery_result -ceq 'open-context-lost'){
+            if($null -ne $Value.matched_pairs -and ($Value.matched_pairs -gt 1 -or $Value.visited_items -lt 1 -or $Value.receiver_candidates -lt 1 -or $Value.scene_candidates -lt 1)){return $false}
+            if($null -ne $Value.active_owner_rejection -and $Value.matched_pairs -ne 1){return $false}
+        }
         if($Value.discovery_result -cin @('open-owner-unavailable','open-owner-ambiguous')){
             if($visitedCount -ne 3 -or $null -eq $Value.matched_pairs -or $Value.matched_pairs -ne $(if($Value.discovery_result -ceq 'open-owner-unavailable'){0}else{2})){return $false}
+            if($Value.visited_items -lt 1){return $false}
+            if($Value.discovery_result -ceq 'open-owner-ambiguous' -and ($Value.receiver_candidates*$Value.scene_candidates) -lt 2){return $false}
         }
         if($pairCount){
             if($Value.discovery_result -cne 'open-owner-unavailable' -or $Value.matched_pairs -ne 0 -or $Value.first_pair_rejection -cnotin $groups -or $Value.first_pair_receiver -ge $Value.receiver_candidates -or $Value.first_pair_scene -ge $Value.scene_candidates){return $false}
