@@ -1,7 +1,8 @@
 # Main freezes the resulting config with the selected SDK source/artifact packet.
 function Get-CaptureObservationBuildConfig($Expected,[bool]$FocusAncestry=$false,[bool]$ReceiverSubtreeCapture=$false,[bool]$ReceiverSubtreeCapture512=$false,[int]$ReceiverSubtreeItemCap=0,[int]$ReceiverSubtreeDepthCap=0) {
-    if($ReceiverSubtreeDepthCap -notin @(0,16) -or ($ReceiverSubtreeDepthCap -ne 0 -and (-not $ReceiverSubtreeCapture -or $ReceiverSubtreeItemCap -ne 2048 -or $ReceiverSubtreeCapture512))){throw 'Depth16 profile requires base receiver capture with itemcap2048 without512 flag'}
-    if($ReceiverSubtreeItemCap -notin @(0,1024,2048) -or ($ReceiverSubtreeItemCap -ne 0 -and (-not $ReceiverSubtreeCapture -or $ReceiverSubtreeCapture512))){throw 'Explicit item cap requires1024/2048 receiver profile without512 flag'}
+    if($ReceiverSubtreeItemCap -eq 4096 -and $ReceiverSubtreeDepthCap -ne 16){throw '4096 profile requires depth16'}
+    if($ReceiverSubtreeDepthCap -notin @(0,16) -or ($ReceiverSubtreeDepthCap -ne 0 -and (-not $ReceiverSubtreeCapture -or ($ReceiverSubtreeItemCap -notin @(2048,4096)) -or $ReceiverSubtreeCapture512))){throw 'Depth16 profile requires base receiver capture with itemcap2048/4096 without512 flag'}
+    if($ReceiverSubtreeItemCap -notin @(0,1024,2048,4096) -or ($ReceiverSubtreeItemCap -ne 0 -and (-not $ReceiverSubtreeCapture -or $ReceiverSubtreeCapture512))){throw 'Explicit item cap requires1024/2048/4096 receiver profile without512 flag'}
     if($ReceiverSubtreeCapture512 -and -not $ReceiverSubtreeCapture){throw '512 capture profile requires receiver selection'}
     if($FocusAncestry -and $ReceiverSubtreeCapture){throw 'Capture discovery selections are mutually exclusive'}
     $id='\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z'

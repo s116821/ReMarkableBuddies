@@ -13,8 +13,9 @@ function ConvertFrom-CaptureOwnerRefusalRaw([string]$Raw) {
 function Test-CaptureOwnerRefusal($Value,[string]$Nonce,[string]$PidText,[string]$Started,[string]$Dev,[string]$Ino,[bool]$FocusAncestry=$false,[bool]$ReceiverSubtreeCapture=$false,[bool]$ReceiverSubtreeCapture512=$false,[int]$ReceiverSubtreeItemCap=0,[int]$ReceiverSubtreeDepthCap=0) {
     if($null -eq $Value){return $false}
     $fields=@('kind','version','nonce','attempt_pid','attempt_start','root_device','root_inode','setup_profile','capture_accepted_ms','failure_ms','deadline_check_ms','effective_deadline_ms','branch','predicate','discovery_result','visited_items','receiver_candidates','scene_candidates','matched_pairs','first_pair_receiver','first_pair_scene','first_pair_rejection','active_owner_rejection','observer_role','observer_member','observer_failure','native_authority','render_authority','ui_acknowledged')
-    if($ReceiverSubtreeDepthCap -notin @(0,16) -or ($ReceiverSubtreeDepthCap -ne 0 -and (-not $ReceiverSubtreeCapture -or $ReceiverSubtreeItemCap -ne 2048 -or $ReceiverSubtreeCapture512))){return $false}
-    if($ReceiverSubtreeItemCap -notin @(0,1024,2048) -or ($ReceiverSubtreeItemCap -ne 0 -and (-not $ReceiverSubtreeCapture -or $ReceiverSubtreeCapture512))){return $false}
+    if($ReceiverSubtreeItemCap -eq 4096 -and $ReceiverSubtreeDepthCap -ne 16){return $false}
+    if($ReceiverSubtreeDepthCap -notin @(0,16) -or ($ReceiverSubtreeDepthCap -ne 0 -and (-not $ReceiverSubtreeCapture -or ($ReceiverSubtreeItemCap -notin @(2048,4096)) -or $ReceiverSubtreeCapture512))){return $false}
+    if($ReceiverSubtreeItemCap -notin @(0,1024,2048,4096) -or ($ReceiverSubtreeItemCap -ne 0 -and (-not $ReceiverSubtreeCapture -or $ReceiverSubtreeCapture512))){return $false}
     if($ReceiverSubtreeCapture512 -and -not $ReceiverSubtreeCapture){return $false}
     if($FocusAncestry -and $ReceiverSubtreeCapture){return $false}
     if(($Value.version -isnot [int] -and $Value.version -isnot [long]) -or $Value.version -notin @(1,2,3,4,5) -or ($Value.version -in @(3,4) -and -not $FocusAncestry) -or ($Value.version -eq 5 -and -not $ReceiverSubtreeCapture) -or ($ReceiverSubtreeCapture -and $Value.version -ne 5)){return $false}
@@ -177,7 +178,7 @@ function Test-CaptureOwnerRefusal($Value,[string]$Nonce,[string]$PidText,[string
     return $true
 }
 function Test-ReceiverSubtreeCaptureRefusalFields($v,$progress,$allowed,$groups,$topologyFields,$counters,$pair,$observer,[bool]$ReceiverSubtreeCapture512=$false,[int]$ReceiverSubtreeItemCap=0,[int]$ReceiverSubtreeDepthCap=0) {
-    if($v.discovery_scope -isnot [string] -or $v.discovery_scope -cne $(if($ReceiverSubtreeDepthCap -eq 16){'receiver-subtree-capture-unqualified-v5'}elseif($ReceiverSubtreeItemCap -eq 2048){'receiver-subtree-capture-unqualified-v4'}elseif($ReceiverSubtreeItemCap -eq 1024){'receiver-subtree-capture-unqualified-v3'}elseif($ReceiverSubtreeCapture512){'receiver-subtree-capture-unqualified-v2'}else{'receiver-subtree-capture-unqualified-v1'})){return $false}
+    if($v.discovery_scope -isnot [string] -or $v.discovery_scope -cne $(if($ReceiverSubtreeItemCap -eq 4096){'receiver-subtree-capture-unqualified-v6'}elseif($ReceiverSubtreeDepthCap -eq 16){'receiver-subtree-capture-unqualified-v5'}elseif($ReceiverSubtreeItemCap -eq 2048){'receiver-subtree-capture-unqualified-v4'}elseif($ReceiverSubtreeItemCap -eq 1024){'receiver-subtree-capture-unqualified-v3'}elseif($ReceiverSubtreeCapture512){'receiver-subtree-capture-unqualified-v2'}else{'receiver-subtree-capture-unqualified-v1'})){return $false}
     $groups=@($groups|Where-Object {$_ -cne 'scene-active-focus'})+@('capture-context','capture-identity')
     $itemCap=if($ReceiverSubtreeItemCap -ne 0){$ReceiverSubtreeItemCap}elseif($ReceiverSubtreeCapture512){512}else{256}
     $depthCap=if($ReceiverSubtreeDepthCap -eq 16){16}else{8}
