@@ -828,4 +828,97 @@ mod tests {
         );
         assert_eq!(trace.borrow().len(), 1);
     }
+    fn development_capture_fixture() -> (
+        remarkable_open_sdk::development_capture::ReadOnlyDevelopmentCapture,
+        Vec<u8>,
+        Vec<u8>,
+    ) {
+        use remarkable_open_sdk::development_capture::*;
+        let expected = ExpectedCaptureBinding {
+            nonce: "0123456789abcdef0123456789abcdef".into(),
+            attempt_pid: "42".into(),
+            attempt_start: "100".into(),
+            root_device: "19".into(),
+            root_inode: "200".into(),
+            document_id: "00000000-0000-4000-8000-000000000001".into(),
+            expected_order: vec!["00000000-0000-4000-8000-000000000002".into()],
+        };
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(2, 3)
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .unwrap();
+        let png = encoded.into_inner();
+        let raw = serde_json::to_vec_pretty(&serde_json::json!({
+        "kind":"development-capture-observation", "version":2,
+        "nonce":expected.nonce, "attempt_pid":expected.attempt_pid, "attempt_start":expected.attempt_start,
+        "root_device":expected.root_device, "root_inode":expected.root_inode, "setup_profile":"main-dev-facts-120s",
+        "setup_budget_ms":120000, "capture_budget_ms":5000,
+        "accepted_ms":100, "baseline_ms":101, "grab_start_ms":102, "grab_end_ms":103, "post_read_ms":104, "completed_ms":105,
+        "document_id":expected.document_id, "page_id":expected.expected_order[0], "page_index":0,
+        "begin_epoch":"1", "end_epoch":"1", "width":2, "height":3, "dpr":1,
+        "image_width":2, "image_height":3, "png_bytes":png.len(), "png_sha256":crate::storage::digest(&png),
+        "image_status":"available", "gui_callback_completed":true, "scope_current":true,
+        "atomic_snapshot":false, "native_authority":false, "render_authority":false, "ui_acknowledged":false,
+        "observed_order":false, "discovery_scope":DISCOVERY_SCOPE
+    })).unwrap();
+        let capture =
+            ReadOnlyDevelopmentCapture::from_collected_v11(&expected, raw.clone(), png.clone())
+                .unwrap();
+        (capture, raw, png)
+    }
+
+    fn independent_development_transport_case(development: bool) {
+        use crate::workflow::{selected_backend::SelectedBackendFacade, Workflow};
+        let fixture = super::super::tests::Fixture::new();
+        let (_store, handle, token, request) = fixture.setup();
+        let admission = Arc::new(handle);
+        let trace = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let facade = SelectedBackendFacade::new(
+            admission.clone(),
+            Box::new(BackendRecorder {
+                trace: trace.clone(),
+                panic_navigation: false,
+            }),
+        );
+        let source = Rc::new(RecordingSource {
+            source: request.source.clone(),
+            binding: facade.binding(),
+            revoked: Cell::new(false),
+            plan_checks: Cell::new(0),
+            lower_checks: Cell::new(0),
+            refuse_lower: None,
+        });
+        let ReaderPreparation::Fresh(context) = admission
+            .prepare_reader(Some(&token), request, source, plan())
+            .unwrap()
+        else {
+            panic!("fresh context expected")
+        };
+        let (capture, _, _) = development_capture_fixture();
+        let mut workflow = if development {
+            Workflow::with_selected_development_capture(facade, capture, false)
+        } else {
+            Workflow::with_selected(facade, false)
+        };
+        let result = workflow.dispatch_reader(Some(&context), 0, &ReaderHandoff::NextPage);
+        if development {
+            assert!(
+                result.is_err() && trace.borrow().is_empty(),
+                "development path entered effect: result={:?}, trace={:?}",
+                result,
+                trace.borrow()
+            );
+        } else {
+            assert!(result.is_ok());
+            assert_eq!(*trace.borrow(), vec!["navigate:Next"]);
+        }
+    }
+    #[test]
+    fn independent_development_normal_selected_context_control() {
+        independent_development_transport_case(false);
+    }
+    #[test]
+    fn independent_development_transport_refuses_existing_matching_effect_context() {
+        independent_development_transport_case(true);
+    }
 }
