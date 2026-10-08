@@ -1,21 +1,46 @@
 //! Causal projection of one pinned selected closure. No all-history lookup.
 use super::{IntentRecordRef, Ledger, Record};
 use crate::storage::selection::SelectedSnapshot;
-use crate::storage::{digest, Envelope, Kind, Namespace, Uuid, MAX_ITEMS, MAX_METADATA};
+use crate::storage::{Envelope, Kind, Namespace, ObjectRef, Uuid, MAX_ITEMS, MAX_METADATA};
 use anyhow::{ensure, Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub struct SelectedDomainProjection {
     ancestors: BTreeMap<Uuid, Envelope>,
+    objects: BTreeMap<Uuid, ObjectRef>,
     records: BTreeMap<Uuid, Record>,
     heads: BTreeMap<(Namespace, Uuid), Uuid>,
 }
 impl SelectedDomainProjection {
     /// Retained records deliberately do not enter current projection.
     pub fn from_snapshot(snapshot: &SelectedSnapshot) -> Result<Self> {
-        Self::from_records(&snapshot.selected_records)
+        Self::from_pinned_records(
+            &snapshot.selected_records,
+            &snapshot.transaction.selected.records,
+        )
     }
+    #[cfg(test)]
     fn from_records(records: &[Envelope]) -> Result<Self> {
+        let objects = records
+            .iter()
+            .map(|record| {
+                let bytes = serde_json::to_vec(record)?;
+                Ok(ObjectRef {
+                    sha256: crate::storage::digest(&bytes),
+                    bytes: bytes.len() as u64,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Self::from_pinned_records(records, &objects)
+    }
+    fn from_pinned_records(records: &[Envelope], references: &[ObjectRef]) -> Result<Self> {
+        // Store::selected_snapshot preserves validate_objects' manifest order.
+        // These are identities of stored bytes, not reserialized envelopes.
+        ensure!(
+            records.len() == references.len(),
+            "selected reference count mismatch"
+        );
+        let mut objects = BTreeMap::new();
         ensure!(
             !records.is_empty() && records.len() <= MAX_ITEMS,
             "invalid selected domain bound"
@@ -24,8 +49,15 @@ impl SelectedDomainProjection {
         let mut decoded = BTreeMap::new();
         let mut candidates: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
         let mut bytes = 0usize;
-        for envelope in records {
+        for (envelope, reference) in records.iter().zip(references) {
             envelope.validate()?;
+            ensure!(
+                crate::storage::valid_digest(&reference.sha256)
+                    && reference.bytes > 0
+                    && reference.bytes <= crate::storage::MAX_RECORD as u64,
+                "invalid selected object reference"
+            );
+            objects.insert(envelope.revision_id, reference.clone());
             ensure!(
                 matches!(
                     envelope.namespace,
@@ -34,7 +66,7 @@ impl SelectedDomainProjection {
                 "unsupported selected domain namespace; preserve and defer"
             );
             bytes = bytes
-                .checked_add(serde_json::to_vec(envelope)?.len())
+                .checked_add(usize::try_from(reference.bytes)?)
                 .context("selected domain size overflow")?;
             ensure!(bytes <= MAX_METADATA, "selected domain exceeds bound");
             ensure!(
@@ -113,6 +145,7 @@ impl SelectedDomainProjection {
         );
         Ok(Self {
             ancestors,
+            objects,
             records: decoded,
             heads,
         })
@@ -127,12 +160,10 @@ impl SelectedDomainProjection {
             .ancestors
             .get(&reference.revision_id)
             .context("intent revision outside selected closure")?;
-        let bytes = serde_json::to_vec(envelope)?;
         ensure!(
             envelope.namespace == reference.namespace
                 && envelope.record_id == reference.record_id
-                && bytes.len() as u64 == reference.object.bytes
-                && digest(&bytes) == reference.object.sha256,
+                && self.objects.get(&reference.revision_id) == Some(&reference.object),
             "intent immutable reference mismatch"
         );
         self.records
@@ -145,7 +176,7 @@ impl SelectedDomainProjection {
 mod tests {
     use super::*;
     use crate::conversation::{Root, SCHEMA};
-    use crate::storage::{ObjectRef, FORMAT};
+    use crate::storage::{digest, FORMAT};
     fn root() -> Envelope {
         let id = Uuid::new_v4();
         Envelope {
@@ -240,5 +271,80 @@ mod tests {
         let tail = edit(&second);
         first.parents.insert(second.revision_id);
         assert!(SelectedDomainProjection::from_records(&[first, second, tail]).is_err());
+    }
+    #[test]
+    fn real_store_preserves_noncanonical_selected_identity_and_rejects_unstored_identity() {
+        use crate::storage::selection::{SelectionChange, SelectionScope};
+        use crate::storage::{Manifest, Scope, Store, StorePaths};
+        struct Fixture(std::path::PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let directory =
+            Fixture(std::env::temp_dir().join(format!("buddy-selected-domain-{}", Uuid::new_v4())));
+        let store = Store::open(StorePaths {
+            data: directory.0.join("data"),
+            cache: directory.0.join("cache"),
+            credentials: directory.0.join("secrets"),
+        })
+        .unwrap();
+        let mut envelope = root();
+        envelope.actor_id = store.actor_id;
+        let bytes = serde_json::to_vec_pretty(&envelope).unwrap();
+        let stored = ObjectRef {
+            sha256: digest(&bytes),
+            bytes: bytes.len() as u64,
+        };
+        let scope = SelectionScope {
+            group: Uuid::new_v4(),
+            key_sha256: digest(b"domain selected regression"),
+            binding_sha256: digest(b"binding"),
+        };
+        store
+            .initialize_selected(
+                &scope,
+                SelectionChange {
+                    operation: Uuid::new_v4(),
+                    accepted_base_sha256: digest(b"base"),
+                    retained: vec![],
+                    selected: Manifest {
+                        format: FORMAT,
+                        transaction_id: Uuid::new_v4(),
+                        scope: Scope::SelectedRecords,
+                        records: vec![stored.clone()],
+                        record_namespaces: BTreeMap::from([(
+                            stored.sha256.clone(),
+                            envelope.namespace,
+                        )]),
+                        media: vec![],
+                        media_coverage: vec![],
+                    },
+                },
+                BTreeMap::from([(stored.sha256.clone(), bytes)]),
+            )
+            .unwrap();
+        let snapshot = store.selected_snapshot(&scope, MAX_ITEMS).unwrap().unwrap();
+        let view = SelectedDomainProjection::from_snapshot(&snapshot).unwrap();
+        let mut reference = IntentRecordRef {
+            namespace: envelope.namespace,
+            record_id: envelope.record_id,
+            revision_id: envelope.revision_id,
+            object: stored.clone(),
+        };
+        assert!(view.exact_reference(&reference).is_ok());
+        let canonical = serde_json::to_vec(&envelope).unwrap();
+        reference.object = ObjectRef {
+            sha256: digest(&canonical),
+            bytes: canonical.len() as u64,
+        };
+        assert_ne!(reference.object, stored);
+        assert!(!snapshot
+            .transaction
+            .selected
+            .records
+            .contains(&reference.object));
+        assert!(view.exact_reference(&reference).is_err());
     }
 }
