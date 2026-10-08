@@ -4,7 +4,7 @@ Source-only preparation and focused Linux fixtures. Main alone selects the fresh
 nonce, compiles the matching SDK recorder, transfers the packet, announces device
 changes, and operates the tablet. Nothing here grants native execution authority.
 
-`prepare_packet.py --selection FILE --payload FILE --output NEW_DIRECTORY`
+`prepare_packet.py --selection FILE --payload FILE --stock-unit ORIGINAL_UNIT --vendor-dropin ORIGINAL_VENDOR --output NEW_DIRECTORY`
 requires a JSON selection containing `nonce`, `budget_seconds` (360), canonical
 string `stock_pid`/`stock_start`, `payload_sha256`, `executable_sha256`,
 `stock_unit_sha256`, `vendor_dropin_sha256`, exact `original_policy` from the
@@ -12,6 +12,11 @@ preparer, and `protected_files` with 24 `{path, sha256}` entries. Main verifies
 that this inventory comprises the fresh 14 document and 10 provider baselines.
 Preparation verifies bytes and emits a receipt; it does not verify recorder
 compile provenance or that the nonce has never been used outside the known list.
+Original unit/vendor bytes must match their pinned hashes. The packet retains the
+originals privately and derives shadows by removing exactly one Unit OnFailure
+assignment from each, preserving every other byte. Do not publish private source
+captures. Empty dependency assignments in drop-ins do not clear prior OnFailure
+dependencies on systemd 255; effective runtime provenance remains a native gate.
 
 ## Main review and arming recipe
 
@@ -24,7 +29,7 @@ compile provenance or that the nonce has never been used outside the known list.
 3. Transfer into the initially absent receipt-selected `/run` root, root-owned
    0700, with all packet files regular, single-link, root-owned 0600. Verify
    `packet.files` against the preparation receipt and its contents remotely.
-   The runtime xochitl drop-in directory must be initially absent.
+   The runtime xochitl full unit and drop-in directory must be initially absent.
 4. Persist `deadline` exclusively as `armed_at deadline\n`, using integer
    `/proc/uptime` seconds and deadline exactly armed_at+360, mode 0600. Do this
    before starting the actor; never rewrite it or reuse a spent root/nonce.
@@ -36,7 +41,8 @@ compile provenance or that the nonce has never been used outside the known list.
    before requesting any guard or activation change. A disconnect must not stop
    this unit. Do not use an SSH foreground actor or a tied host job.
 6. Exclusively write private `guard.request` containing the nonce. Verify actor
-   `guard.ready`, the exact owned drop-in and effective OnFailure empty,
+   `guard.ready`, the exact owned full unit, same-basename vendor shadow and guard
+   drop-in, effective FragmentPath/DropInPaths/ExecStart and OnFailure empty,
    Restart=no and unchanged remaining guard policy. Only then exclusively write
    `start.request`. Requests have a ten-second window each; a missed window is a
    spent attempt, never permission to restart the actor.
@@ -53,7 +59,7 @@ compile provenance or that the nonce has never been used outside the known list.
 ## Local verification
 
 `test_actor.py` runs in an owned Linux fixture with no network or actual service
-manager. Thirteen checks cover conditional query failure, restoration ordering and
+manager. Seventeen checks cover conditional query failure, restoration ordering and
 crash preservation, deadline refusal, failed process reads, bounded owned query
 children, trace identity/drop/sequence, request expiry and singleton claims/lock.
 They also exercise preparation with synthetic bytes, actual actor
@@ -63,6 +69,10 @@ The primary-failure followed by candidate-crash regression exercises the actual
 EXIT handler and separate recovery shell, preserving existing failure evidence
 while restoring stock once. Foreign, malformed or linked failure markers refuse.
 Only valid failure evidence is idempotent; every physical action claim is exclusive.
+Additional cases preserve failed guard snapshots across stock proof, verify exact
+shadow derivation/provenance and partial-install cleanup or foreign-content refusal.
+Preparation uses synthetic source hashes as an injected input boundary; it does
+not claim private native source or live systemd validation.
 The temporary fixture mount must permit its owned query stub to execute. These
 checks do not establish native correctness or recovery after an executing native
 candidate loses its host connection.

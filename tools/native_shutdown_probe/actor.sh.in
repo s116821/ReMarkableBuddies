@@ -7,6 +7,8 @@ nonce='@NONCE@'
 parent=/run/systemd/system/xochitl.service.d
 guard="$parent/zz-rmb-shutdown-$nonce-guard.conf"
 activation="$parent/zz-rmb-shutdown-$nonce-activation.conf"
+unit_shadow=/run/systemd/system/xochitl.service
+vendor_shadow="$parent/xochitl-service-override.conf"
 original_pid='@STOCKPID@'
 original_start='@STOCKSTART@'
 deadline=0
@@ -82,11 +84,41 @@ value() {
     VALUE=$(cat "$root/query.stdout") || return 90
 }
 policy() {
-    query show --property=OnFailure,OnFailureJobMode,FailureAction,StartLimitAction,Restart,RestartMode,TimeoutStopUSec,WatchdogUSec,KillMode,KillSignal,FinalKillSignal,SendSIGKILL xochitl.service || return $?
-    cp "$root/query.stdout" "$root/policy.observed" || return 90
+    case "$1" in "$root/stock.policy"|"$root/guard.policy") observed="$1.observed";; *) return 90;; esac
+    query show --property=OnFailure,OnFailureJobMode,FailureAction,StartLimitAction,Restart,RestartMode,TimeoutStopUSec,WatchdogUSec,KillMode,KillSignal,FinalKillSignal,SendSIGKILL,FragmentPath,DropInPaths,ExecStart xochitl.service || return $?
+    cp "$root/query.stdout" "$observed" || return 90
     while IFS= read -r expected; do
-        test "$(grep -Fxc "$expected" "$root/policy.observed")" = 1 || return 90
+        test "$(grep -Fxc "$expected" "$observed")" = 1 || return 90
     done < "$1"
+    if test "$1" = "$root/guard.policy"; then
+        guard_owned || return 90
+        expected_dropins="$vendor_shadow $guard"
+        if test -e "$activation"; then expected_dropins="$vendor_shadow $activation $guard"; fi
+        test "$(grep -Fxc "FragmentPath=$unit_shadow" "$observed")" = 1 || return 90
+        test "$(grep -Fxc "DropInPaths=$expected_dropins" "$observed")" = 1 || return 90
+        if test -e "$activation"; then
+            grep -Fq "path=/bin/sh ; argv[]=/bin/sh $root/launch.sh ;" "$observed" || return 90
+        else
+            grep -Fq 'path=/usr/bin/xochitl ; argv[]=/usr/bin/xochitl --system ;' "$observed" || return 90
+        fi
+    else
+        test "$(grep -Fxc 'FragmentPath=/usr/lib/systemd/system/xochitl.service' "$observed")" = 1 || return 90
+        test "$(grep -Fxc 'DropInPaths=/usr/lib/systemd/system/xochitl.service.d/xochitl-service-override.conf' "$observed")" = 1 || return 90
+    fi
+}
+matches_owned() {
+    private "$1" || return 90
+    test "$(sha256sum "$1" | awk '{print $1}')" = "$(sha256sum "$2" | awk '{print $1}')" || return 90
+}
+guard_owned() {
+    matches_owned "$unit_shadow" "$root/unit-shadow.service" || return 90
+    matches_owned "$vendor_shadow" "$root/vendor-shadow.conf" || return 90
+    matches_owned "$guard" "$root/guard.conf" || return 90
+}
+install_owned() {
+    test ! -e "$2" && test ! -L "$2" || return 90
+    (set -C; cat "$1" > "$2") || return 90
+    matches_owned "$2" "$1" || return 90
 }
 hashes() {
     (cd "$root"; sha256sum -c packet.files) > "$root/packet-check"
@@ -135,9 +167,21 @@ wait_request() {
     test "$(cat "$root/$1")" = "$nonce"
 }
 owned_remove() {
-    private "$1"
-    test "$(sha256sum "$1" | awk '{print $1}')" = "$(sha256sum "$2" | awk '{print $1}')"
-    rm "$1"
+    matches_owned "$1" "$2" || return 90
+    rm "$1" || return 90
+}
+validate_guard_piece() {
+    if test -e "$1" || test -L "$1"; then
+        private "$root/$3" || return 90
+        test "$(cat "$root/$3")" = "$nonce" || return 90
+        matches_owned "$1" "$2" || return 90
+    else
+        test "$stock_stopped" = no && test ! -e "$root/guard.ready" || return 90
+    fi
+}
+remove_guard_piece() {
+    validate_guard_piece "$@" || return 90
+    if test -e "$1"; then owned_remove "$1" "$2" || return 90; fi
 }
 restore() {
     test ! -e "$root/query.unconfirmed" || return 90
@@ -165,9 +209,35 @@ restore() {
     fi
     phase=owned-cleanup
     reserve 90
-    if test "$activation_installed" = yes; then owned_remove "$activation" "$root/activation.conf"; fi
-    if test "$guard_installed" = yes; then owned_remove "$guard" "$root/guard.conf"; fi
-    if test "$guard_installed" = yes; then rmdir "$parent"; query daemon-reload; fi
+    # Validate the entire cleanup set before removing any protection.
+    if test "$activation_installed" = yes && (test -e "$activation" || test -L "$activation"); then matches_owned "$activation" "$root/activation.conf"; fi
+    if test "$guard_installed" = yes; then
+        validate_guard_piece "$guard" "$root/guard.conf" guard-file.install-intent
+        validate_guard_piece "$vendor_shadow" "$root/vendor-shadow.conf" vendor-shadow.install-intent
+        validate_guard_piece "$unit_shadow" "$root/unit-shadow.service" unit-shadow.install-intent
+        if test -e "$parent" || test -L "$parent"; then
+            test -d "$parent" && test ! -L "$parent"
+            test "$(stat -c '%a %u' "$parent")" = '700 0'
+            private "$root/guard.directory-created"
+            test "$(cat "$root/guard.directory-created")" = "$nonce"
+            for file in "$parent"/* "$parent"/.[!.]* "$parent"/..?*; do
+                if ! test -e "$file" && ! test -L "$file"; then continue; fi
+                test "$file" = "$guard" || test "$file" = "$activation" || test "$file" = "$vendor_shadow"
+            done
+        fi
+    fi
+    if test "$activation_installed" = yes && (test -e "$activation" || test -L "$activation"); then owned_remove "$activation" "$root/activation.conf"; fi
+    if test "$guard_installed" = yes; then
+        remove_guard_piece "$guard" "$root/guard.conf" guard-file.install-intent
+        remove_guard_piece "$vendor_shadow" "$root/vendor-shadow.conf" vendor-shadow.install-intent
+        remove_guard_piece "$unit_shadow" "$root/unit-shadow.service" unit-shadow.install-intent
+        if test -e "$parent" || test -L "$parent"; then
+            test -d "$parent" && test ! -L "$parent"
+            test "$(stat -c '%a %u' "$parent")" = '700 0'
+            rmdir "$parent"
+        fi
+        query daemon-reload
+    fi
     policy "$root/stock.policy"
     value ExecStart
     case "$VALUE" in *'path=/usr/bin/xochitl ; argv[]=/usr/bin/xochitl --system ;'*) :;; *) return 90;; esac
@@ -206,6 +276,8 @@ verify_stock() {
     test "$VALUE" = "$stock_pid"
     same_process "$stock_pid" "$stock_start"
     test ! -e "$guard" && test ! -e "$activation"
+    test ! -e "$unit_shadow" && test ! -L "$unit_shadow"
+    test ! -e "$vendor_shadow" && test ! -L "$vendor_shadow"
     value DropInPaths
     test "$VALUE" = /usr/lib/systemd/system/xochitl.service.d/xochitl-service-override.conf
     members=$(awk 'NR>32 {exit 1} {print}' /sys/fs/cgroup/systemd/system.slice/xochitl.service/cgroup.procs)
@@ -273,13 +345,20 @@ main() {
     value Job
     test -z "$VALUE"
     test ! -e "$parent" && test ! -L "$parent"
+    test ! -e "$unit_shadow" && test ! -L "$unit_shadow"
     claim actor.ready
     phase=prearm-request
     wait_request guard.request
     phase=install-guard
     claim guard.install-intent
     mkdir -m700 "$parent"
-    cp "$root/guard.conf" "$guard"
+    claim guard.directory-created
+    claim unit-shadow.install-intent
+    install_owned "$root/unit-shadow.service" "$unit_shadow"
+    claim vendor-shadow.install-intent
+    install_owned "$root/vendor-shadow.conf" "$vendor_shadow"
+    claim guard-file.install-intent
+    install_owned "$root/guard.conf" "$guard"
     guard_installed=yes
     query daemon-reload
     policy "$root/guard.policy"
@@ -348,7 +427,7 @@ case "${1-}" in
         test "$(cat "$root/actor.claim")" = "$nonce"
         test "$(stat -Lc '%d %i' /proc/self/fd/9)" = "$(stat -c '%d %i' "$root/actor.lock")"
         flock -n 9
-        for name in stock-stop.claim guard.install-intent activation.install-intent candidate-start.claim; do
+        for name in stock-stop.claim guard.install-intent guard.directory-created unit-shadow.install-intent vendor-shadow.install-intent guard-file.install-intent activation.install-intent candidate-start.claim; do
             if test -e "$root/$name"; then private "$root/$name"; test "$(cat "$root/$name")" = "$nonce"; fi
         done
         test ! -e "$root/stock-stop.claim" || stock_stopped=yes

@@ -31,10 +31,34 @@ def regular(path):
     return path.resolve()
 
 
+def remove_owned_onfailure(data):
+    """Remove exactly the pinned dependency line; preserve every other source byte."""
+    if not data or len(data) > 16384 or b"\r" in data or b"\0" in data:
+        raise ValueError("Bounded canonical original unit text required")
+    section = b""
+    removed = 0
+    kept = []
+    for line in data.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped.startswith(b"[") and stripped.endswith(b"]"):
+            section = stripped
+        if stripped.partition(b"=")[0].strip() == b"OnFailure":
+            if section != b"[Unit]" or line != b"OnFailure=remarkable-fail.service\n":
+                raise ValueError("Exact scoped dependency assignment required")
+            removed += 1
+            continue
+        kept.append(line)
+    if removed != 1:
+        raise ValueError("Exactly one original Unit OnFailure assignment required")
+    return b"".join(kept)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--selection", type=Path, required=True)
     parser.add_argument("--payload", type=Path, required=True)
+    parser.add_argument("--stock-unit", type=Path, required=True)
+    parser.add_argument("--vendor-dropin", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     selection_file, payload = map(regular, [args.selection, args.payload])
@@ -45,12 +69,19 @@ def main():
     if not isinstance(nonce, str) or not re.fullmatch(r"[0-9a-f]{32}", nonce) or nonce == "0" * 32:
         raise ValueError("Fresh Main-selected nonce required; all-zero compile fixture is not native")
     if nonce in {"0404ebf9b5794196a85bfba7ee6859ba", "301a86a1a18d48d885c5ddcec0af549c",
-                 "b3e3ca0475a84432a9b328218395de0c"}:
+                 "b3e3ca0475a84432a9b328218395de0c", "4459cae2f852426b8262f658c6aa59ed",
+                 "a22fc58d4c9948098f7d2ccc8a9de8c4"}:
         raise ValueError("Historical nonce refused")
     if selected.get("budget_seconds") != 360 or selected.get("original_policy") != POLICY:
         raise ValueError("Exact selected budget/original policy required")
     if any(selected.get(key) != value[1] for key, value in SERVICE_HASHES.items()):
         raise ValueError("Exact original unit/vendor source hashes required")
+    unit_file, vendor_file = map(regular, [args.stock_unit, args.vendor_dropin])
+    if sha(unit_file) != SERVICE_HASHES["stock_unit_sha256"][1] or sha(vendor_file) != SERVICE_HASHES["vendor_dropin_sha256"][1]:
+        raise ValueError("Original unit/vendor input bytes mismatch")
+    original_unit, original_vendor = unit_file.read_bytes(), vendor_file.read_bytes()
+    unit_shadow = remove_owned_onfailure(original_unit)
+    vendor_shadow = remove_owned_onfailure(original_vendor)
     for key in ("stock_pid", "stock_start"):
         if not isinstance(selected.get(key), str) or not re.fullmatch(r"[1-9][0-9]*", selected[key]):
             raise ValueError("Canonical original process identity required")
@@ -92,6 +123,10 @@ def main():
         (output / name).write_text(text, encoding="utf-8", newline="\n")
     (output / "trace-stop-proof.awk").write_text(regular(HERE / "trace-stop-proof.awk").read_text(), encoding="ascii", newline="\n")
     shutil.copyfile(payload, output / "payload.so")
+    (output / "stock-unit.original").write_bytes(original_unit)
+    (output / "vendor-dropin.original").write_bytes(original_vendor)
+    (output / "unit-shadow.service").write_bytes(unit_shadow)
+    (output / "vendor-shadow.conf").write_bytes(vendor_shadow)
     (output / "owner").write_text(nonce, encoding="ascii", newline="\n")
     (output / "guard.conf").write_text("[Unit]\nOnFailure=\nFailureAction=none\nStartLimitAction=none\n[Service]\nRestart=no\n", encoding="ascii", newline="\n")
     (output / "activation.conf").write_text(f"[Service]\nExecStart=\nExecStart=/bin/sh {root}/launch.sh\n", encoding="ascii", newline="\n")

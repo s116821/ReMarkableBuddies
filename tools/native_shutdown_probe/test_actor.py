@@ -19,10 +19,17 @@ HERE = Path(__file__).resolve().parent
 SOURCE = (HERE / "actor.sh.in").read_text().split("# Main-only execution boundary", 1)[0]
 
 
-def shell(root, body, overrides="", expected=0):
-    text = SOURCE.replace("@ROOT@", str(root)).replace("@NONCE@", "1" * 32)
+def render_fixture(root, text):
+    text = text.replace("@ROOT@", str(root)).replace("@NONCE@", "1" * 32)
     text = text.replace("@STOCKPID@", "42").replace("@STOCKSTART@", "561")
     text = text.replace("/sys/fs/cgroup/systemd/system.slice/xochitl.service/cgroup.procs", str(root / "cgroup.procs"))
+    text = text.replace("parent=/run/systemd/system/xochitl.service.d", 'parent="$root/dropins"')
+    text = text.replace("unit_shadow=/run/systemd/system/xochitl.service", 'unit_shadow="$root/unit-shadow"')
+    return text
+
+
+def shell(root, body, overrides="", expected=0):
+    text = render_fixture(root, SOURCE)
     result = subprocess.run(["/bin/sh", "-c", text + "\n" + overrides + "\n" + body],
                             capture_output=True, text=True, timeout=8)
     if result.returncode != expected:
@@ -30,7 +37,131 @@ def shell(root, body, overrides="", expected=0):
     return result
 
 
+def fixture_guard_shadows(root, parent):
+    (root / "guard.directory-created").write_text("1" * 32 + "\n")
+    (root / "guard.directory-created").chmod(0o600)
+    for source, destination, data, intent in (
+            ("unit-shadow.service", root / "unit-shadow", "unit", "unit-shadow.install-intent"),
+            ("vendor-shadow.conf", parent / "xochitl-service-override.conf", "vendor", "vendor-shadow.install-intent")):
+        (root / source).write_text(data)
+        destination.write_text(data)
+        (root / source).chmod(0o600)
+        destination.chmod(0o600)
+        (root / intent).write_text("1" * 32 + "\n")
+        (root / intent).chmod(0o600)
+    (root / "guard-file.install-intent").write_text("1" * 32 + "\n")
+    (root / "guard-file.install-intent").chmod(0o600)
+
+
 class Actor(unittest.TestCase):
+    def test_partial_shadow_installation_cleanup_and_foreign_refusal(self):
+        for stage in range(5):
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                parent = root / "dropins"
+                if stage >= 1:
+                    parent.mkdir(mode=0o700)
+                    (root / "guard.directory-created").write_text("1" * 32 + "\n")
+                    (root / "guard.directory-created").chmod(0o600)
+                for source, destination, data, intent, threshold in (
+                        ("unit-shadow.service", root / "unit-shadow", "unit", "unit-shadow.install-intent", 2),
+                        ("vendor-shadow.conf", parent / "xochitl-service-override.conf", "vendor", "vendor-shadow.install-intent", 3),
+                        ("guard.conf", parent / "guard", "guard", "guard-file.install-intent", 4)):
+                    (root / source).write_text(data)
+                    (root / source).chmod(0o600)
+                    # Persisted intent with absent file simulates interruption before creation.
+                    if stage >= threshold - 1:
+                        (root / intent).write_text("1" * 32 + "\n")
+                        (root / intent).chmod(0o600)
+                    if stage >= threshold:
+                        destination.write_text(data)
+                        destination.chmod(0o600)
+                overrides = '''
+guard="$parent/guard"
+reserve() { return 0; }
+query() { printf '%s\n' "$*" >> "$root/events"; }
+policy() { :; }
+value() { VALUE='path=/usr/bin/xochitl ; argv[]=/usr/bin/xochitl --system ;'; }
+hashes() { :; }
+verify_stock() { test ! -e "$unit_shadow"; test ! -e "$parent"; printf healthy > "$root/stock.restored"; }
+'''
+                shell(root, 'guard_installed=yes; restore', overrides)
+                self.assertTrue((root / "stock.restored").exists())
+                self.assertNotIn("start", (root / "events").read_text())
+                self.assertNotIn("stop", (root / "events").read_text())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parent = root / "dropins"
+            parent.mkdir(mode=0o700)
+            fixture_guard_shadows(root, parent)
+            (root / "guard.conf").write_text("guard")
+            (parent / "guard").write_text("guard")
+            (parent / "guard").chmod(0o600)
+            (parent / "xochitl-service-override.conf").write_text("foreign")
+            shell(root, 'guard="$parent/guard"; guard_installed=yes; restore', 'reserve() { return 0; }', expected=90)
+            self.assertTrue((parent / "guard").exists())
+            self.assertTrue((root / "unit-shadow").exists())
+            self.assertFalse((root / "stock-start.claim").exists())
+
+    def test_guard_policy_requires_exact_fragment_dropins_and_owned_files(self):
+        for mode in ("valid", "wrong-fragment", "vendor-leak", "missing-unit", "wrong-exec"):
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                parent = root / "dropins"
+                parent.mkdir(mode=0o700)
+                fixture_guard_shadows(root, parent)
+                (root / "guard.conf").write_text("guard")
+                (parent / "guard").write_text("guard")
+                (parent / "guard").chmod(0o600)
+                (root / "guard.policy").write_text("OnFailure=\nRestart=no\n")
+                overrides = '''
+guard="$parent/guard"
+query() {
+ fragment=$unit_shadow; dropins="$vendor_shadow $guard"; execution='path=/usr/bin/xochitl ; argv[]=/usr/bin/xochitl --system ;'
+ if test "$mode" = wrong-fragment; then fragment=/usr/lib/systemd/system/xochitl.service; fi
+ if test "$mode" = vendor-leak; then dropins="/usr/lib/systemd/system/xochitl.service.d/xochitl-service-override.conf $guard"; fi
+ if test "$mode" = wrong-exec; then execution='path=/bin/false ; argv[]=/bin/false ;'; fi
+ printf 'OnFailure=\nRestart=no\nFragmentPath=%s\nDropInPaths=%s\nExecStart={ %s }\n' "$fragment" "$dropins" "$execution" > "$root/query.stdout"
+}
+'''
+                body = f'''mode={mode}
+if test "$mode" = missing-unit; then rm "$unit_shadow"; fi
+if policy "$root/guard.policy"; then test "$mode" = valid; else test "$mode" != valid; fi
+test ! -e "$root/stock-stop.claim"
+'''
+                shell(root, body, overrides)
+
+    def test_shadow_derivation_removes_only_exact_scoped_dependency(self):
+        spec = importlib.util.spec_from_file_location("prepare", HERE / "prepare_packet.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        original = b"[Unit]\nOnFailure=remarkable-fail.service\nOnFailureJobMode=replace\nDefaultDependencies=no\n[Service]\nRestartMode=direct\nWatchdogSec=60\n"
+        self.assertEqual(module.remove_owned_onfailure(original), original.replace(b"OnFailure=remarkable-fail.service\n", b""))
+        for invalid in (original.replace(b"[Unit]", b"[Service]"), original.replace(b"remarkable-fail", b"foreign"),
+                        original.replace(b"OnFailure=remarkable-fail.service\n", b""),
+                        original.replace(b"[Service]", b"OnFailure=remarkable-fail.service\n[Service]")):
+            with self.assertRaises(ValueError): module.remove_owned_onfailure(invalid)
+
+    def test_failed_guard_policy_snapshot_survives_stock_recovery_policy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "guard.policy").write_text("OnFailure=\nRestart=no\n")
+            (root / "stock.policy").write_text("OnFailure=remarkable-fail.service\nRestart=on-failure\n")
+            overrides = '''
+query() {
+ if test "$mode" = guard; then printf 'OnFailure=remarkable-fail.service\nRestart=no\n';
+ else printf 'OnFailure=remarkable-fail.service\nRestart=on-failure\nFragmentPath=/usr/lib/systemd/system/xochitl.service\nDropInPaths=/usr/lib/systemd/system/xochitl.service.d/xochitl-service-override.conf\n'; fi > "$root/query.stdout"
+}
+'''
+            shell(root, '''
+mode=guard
+if policy "$root/guard.policy"; then exit 99; fi
+mode=stock
+policy "$root/stock.policy"
+''', overrides)
+            self.assertEqual((root / "guard.policy.observed").read_text(), "OnFailure=remarkable-fail.service\nRestart=no\n")
+            self.assertIn("OnFailure=remarkable-fail.service\nRestart=on-failure\n", (root / "stock.policy.observed").read_text())
+
     def test_one_active_two_failed_cannot_verify_stock(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -53,6 +184,9 @@ value() { VALUE=''; }
                 (root / "cgroup.procs").write_text("42\n")
                 (root / "guard.conf").write_text("guard")
                 (root / "guard.conf").chmod(0o600)
+                for name, data in (("unit-shadow.service", "unit"), ("vendor-shadow.conf", "vendor")):
+                    (root / name).write_text(data)
+                    (root / name).chmod(0o600)
                 if request_guard:
                     (root / "guard.request").write_text("1" * 32)
                     (root / "guard.request").chmod(0o600)
@@ -76,6 +210,7 @@ verify_stock() { test ! -e "$guard"; test ! -e "$activation"; printf 'healthy\n'
                                          ("@STOCKPID@", "42"), ("@STOCKSTART@", "561")):
                     text = text.replace(key, replacement)
                 text = text.replace("/sys/fs/cgroup/systemd/system.slice/xochitl.service/cgroup.procs", str(root / "cgroup.procs"))
+                text = render_fixture(root, text)
                 (root / "actor.sh").write_text(text)
                 (root / "actor.sh").chmod(0o600)
                 result = subprocess.run(["/bin/sh", str(root / "actor.sh")], capture_output=True, text=True, timeout=8)
@@ -97,19 +232,32 @@ verify_stock() { test ! -e "$guard"; test ! -e "$activation"; printf 'healthy\n'
             root = Path(directory)
             payload = root / "fixture.so"
             payload.write_bytes(b"fixture only\r\n; never load")
+            original_unit = b"[Unit]\nDescription=fixture\nOnFailure=remarkable-fail.service\n[Service]\nWatchdogSec=60\n"
+            original_vendor = b"[Unit]\nOnFailure=remarkable-fail.service\n[Service]\nRestartMode=direct\n"
+            unit_input, vendor_input = root / "unit-input", root / "vendor-input"
+            unit_input.write_bytes(original_unit)
+            vendor_input.write_bytes(original_vendor)
+            # Original-byte inputs are synthetic; native source hashes are not claimed.
+            fixture_hashes = {key: (value[0], hashlib.sha256(data).hexdigest()) for key, value, data in
+                              (("stock_unit_sha256", module.SERVICE_HASHES["stock_unit_sha256"], original_unit),
+                               ("vendor_dropin_sha256", module.SERVICE_HASHES["vendor_dropin_sha256"], original_vendor))}
             selection = {"nonce": "1" * 32, "budget_seconds": 360, "stock_pid": "42", "stock_start": "561",
                          "original_policy": module.POLICY, "executable_sha256": module.EXE_HASH,
                          "payload_sha256": hashlib.sha256(payload.read_bytes()).hexdigest(),
                          "protected_files": [{"path": f"/fixture/{i}", "sha256": "a" * 64} for i in range(24)]}
-            selection.update({key: value[1] for key, value in module.SERVICE_HASHES.items()})
+            selection.update({key: value[1] for key, value in fixture_hashes.items()})
             selection["protected_files"][0]["path"] = "/usr/lib/libstdc++.so.6"
             selected = root / "selection.json"
             selected.write_text(json.dumps(selection))
             output = root / "packet"
-            result = subprocess.run([os.sys.executable, "-B", str(HERE / "prepare_packet.py"), "--selection", str(selected),
-                                     "--payload", str(payload), "--output", str(output)], capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            receipt = json.loads(result.stdout)
+            def prepare(destination):
+                arguments = ["prepare", "--selection", str(selected), "--payload", str(payload),
+                             "--stock-unit", str(unit_input), "--vendor-dropin", str(vendor_input), "--output", str(destination)]
+                captured = io.StringIO()
+                with mock.patch.object(module, "SERVICE_HASHES", fixture_hashes), mock.patch.object(os.sys, "argv", arguments), contextlib.redirect_stdout(captured):
+                    module.main()
+                return json.loads(captured.getvalue())
+            receipt = prepare(output)
             self.assertEqual(receipt["evidence_class"], "prepared only; no native execution")
             self.assertFalse((output / "deadline").exists())
             self.assertEqual((output / "owner").read_bytes(), b"1" * 32)
@@ -121,6 +269,8 @@ verify_stock() { test ! -e "$guard"; test ! -e "$activation"; printf 'healthy\n'
                 if generated.name != "payload.so":
                     self.assertNotIn(b"\r", generated.read_bytes(), generated.name)
             self.assertEqual((output / "payload.so").read_bytes(), payload.read_bytes())
+            self.assertEqual((output / "unit-shadow.service").read_bytes(), original_unit.replace(b"OnFailure=remarkable-fail.service\n", b""))
+            self.assertEqual((output / "vendor-shadow.conf").read_bytes(), original_vendor.replace(b"OnFailure=remarkable-fail.service\n", b""))
             # Simulate Windows default CRLF writes plus a CRLF source checkout.
             # Explicit newline='\n' must produce byte-identical Linux packets.
             crlf_source = root / "crlf-source"
@@ -133,10 +283,8 @@ verify_stock() { test ! -e "$guard"; test ! -e "$activation"; printf 'healthy\n'
                 if "w" in mode and "b" not in mode and newline is None:
                     newline = "\r\n"
                 return original_open(path, mode, buffering, encoding, errors, newline)
-            arguments = ["prepare", "--selection", str(selected), "--payload", str(payload), "--output", str(simulated)]
-            with mock.patch.object(module, "HERE", crlf_source), mock.patch.object(os.sys, "argv", arguments), \
-                    mock.patch.object(Path, "open", windows_open), contextlib.redirect_stdout(io.StringIO()):
-                module.main()
+            with mock.patch.object(module, "HERE", crlf_source), mock.patch.object(Path, "open", windows_open):
+                prepare(simulated)
             for generated in output.iterdir():
                 self.assertEqual((simulated / generated.name).read_bytes(), generated.read_bytes(), generated.name)
             # Provider '+' is literal; shell metacharacters and traversal remain refused.
@@ -146,10 +294,7 @@ verify_stock() { test ! -e "$guard"; test ! -e "$activation"; printf 'healthy\n'
                 selection["protected_files"][0]["path"] = unsafe
                 selected.write_text(json.dumps(selection))
                 rejected = root / f"rejected-{index}"
-                result = subprocess.run([os.sys.executable, "-B", str(HERE / "prepare_packet.py"),
-                                         "--selection", str(selected), "--payload", str(payload),
-                                         "--output", str(rejected)], capture_output=True, text=True)
-                self.assertNotEqual(result.returncode, 0, unsafe)
+                with self.assertRaises(ValueError): prepare(rejected)
                 self.assertFalse(rejected.exists())
 
     def test_prearm_host_loss_expires_without_policy_mutation(self):
@@ -208,6 +353,8 @@ query() {
             (parent / "activation").write_text("activation")
             for file in parent.iterdir():
                 file.chmod(0o600)
+            parent.chmod(0o700)
+            fixture_guard_shadows(root, parent)
             overrides = '''
 log() { printf '%s\n' "$*" >> "$root/events"; }
 reserve() { return 0; }
@@ -239,12 +386,14 @@ if restore; then exit 99; fi
             root = Path(directory)
             parent = root / "dropins"
             parent.mkdir()
+            parent.chmod(0o700)
             for name, data in (("attempt.identity", "42 561\n"), ("guard.conf", "guard"), ("activation.conf", "activation")):
                 (root / name).write_text(data)
                 (root / name).chmod(0o600)
             for name in ("guard", "activation"):
                 (parent / name).write_text(name)
                 (parent / name).chmod(0o600)
+            fixture_guard_shadows(root, parent)
             overrides = '''
 parent="$root/dropins"; guard="$parent/guard"; activation="$parent/activation"
 log() { printf '%s\n' "$*" >> "$root/events"; }
@@ -263,6 +412,7 @@ verify_stock() { test ! -e "$guard"; test ! -e "$activation"; log verified-stock
             child = SOURCE + overrides + "\n# Main-only execution boundary" + boundary
             for key, value in (("@ROOT@", str(root)), ("@NONCE@", "1" * 32), ("@STOCKPID@", "42"), ("@STOCKSTART@", "561")):
                 child = child.replace(key, value)
+            child = render_fixture(root, child)
             (root / "actor.sh").write_text(child)
             (root / "actor.sh").chmod(0o600)
             body = '''
