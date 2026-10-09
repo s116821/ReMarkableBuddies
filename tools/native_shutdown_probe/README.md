@@ -21,6 +21,8 @@ the effective mode and canonical parser source. Main must independently verify
 matching SDK mode/source/build provenance; the preparer cannot establish it.
 Pretoken admission requires exactly one `entry-installed` after startup with
 startup/GUI TID, quit=0, dropped=0, frames=0, followed by qualifying before-render.
+The qualifying before-render must have quit=0 and frames>=1; an ordinary
+before-render after quit begins does not qualify, including alongside late render.
 Window may precede or follow installation. Missing proof does not admit STOP;
 duplicate or invalid installation refuses the snapshot. All existing wire limits
 remain fixed. Installation does not prove the SDK hard request fence or Qt teardown.
