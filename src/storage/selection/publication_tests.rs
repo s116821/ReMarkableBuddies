@@ -1604,3 +1604,73 @@ fn interrupted_feature_preparation_preserves_ordinary_history_and_refuses_unknow
     initialize(&store, &s, &[record(&store)]);
     assert_eq!(selected(&store, &s).transaction.history_depth, 1);
 }
+
+#[test]
+fn selected_snapshot_refuses_post_open_required_history_corruption_and_recovers_exact_bytes() {
+    for case in 0..4 {
+        let f = Fixture::new();
+        let store = f.store();
+        let s = scope();
+        let mut historical = record(&store);
+        let media = b"required historical media".to_vec();
+        let media_hash = digest(&media);
+        historical.media_descriptors.push(Media {
+            sha256: media_hash.clone(),
+            bytes: media.len() as u64,
+            media_type: "application/octet-stream".into(),
+        });
+        let (initial_change, mut objects) = change(&[historical]);
+        objects.insert(media_hash.clone(), media);
+        let initial = store
+            .initialize_selected(&s, initial_change, objects)
+            .unwrap();
+        // The replacement intentionally excludes its parent's records/media.
+        // Validating only the current winner cannot establish history completeness.
+        let (replacement, objects) = change(&[record(&store)]);
+        let active = store
+            .activate_selected(&initial.token, replacement, objects)
+            .unwrap();
+        assert_eq!(selected(&store, &s).token, active.token);
+        let root = store.generation(active.token.store_generation());
+        let head_path = root.join("selections").join(s.filename().unwrap());
+        let history_path = root
+            .join("selection-history")
+            .join(active.transaction.previous_sha256.as_ref().unwrap());
+        let damaged = match case {
+            0 | 1 => history_path,
+            2 => root
+                .join("objects")
+                .join(&initial.transaction.selected.records[0].sha256),
+            3 => root.join("objects").join(&media_hash),
+            _ => unreachable!(),
+        };
+        let bytes = fs::read(&damaged).unwrap();
+        if case == 1 {
+            fs::write(&damaged, b"corrupt parent metadata").unwrap();
+        } else {
+            fs::remove_file(&damaged).unwrap();
+        }
+        let current = fs::read(store.paths.data.join("CURRENT")).unwrap();
+        let head = fs::read(&head_path).unwrap();
+        assert!(
+            store.selected_snapshot(&s, MAX_ITEMS).is_err(),
+            "case {case}"
+        );
+        assert_eq!(fs::read(store.paths.data.join("CURRENT")).unwrap(), current);
+        assert_eq!(fs::read(&head_path).unwrap(), head);
+        // Repair the exact fixture bytes: a valid selection is not globally disabled.
+        fs::write(&damaged, &bytes).unwrap();
+        assert_eq!(selected(&store, &s).token, active.token);
+        drop(store);
+        if case == 1 {
+            fs::write(&damaged, b"corrupt parent metadata").unwrap();
+        } else {
+            fs::remove_file(&damaged).unwrap();
+        }
+        assert!(Store::open(f.paths()).is_err(), "reopen case {case}");
+        assert_eq!(fs::read(f.paths().data.join("CURRENT")).unwrap(), current);
+        assert_eq!(fs::read(&head_path).unwrap(), head);
+        fs::write(&damaged, bytes).unwrap();
+        assert_eq!(selected(&f.store(), &s).token, active.token);
+    }
+}

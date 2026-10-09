@@ -176,6 +176,8 @@ pub struct SelectedSnapshot {
 impl Store {
     /// Read an existing complete selection. Absence is not an empty winner or
     /// permission to bootstrap/publish. Bootstrap is a separate explicit call.
+    /// Reachable accepted history and required historical closures must remain
+    /// valid, including when corruption occurs after the Store was opened.
     pub fn selected_snapshot(
         &self,
         scope: &SelectionScope,
@@ -212,6 +214,16 @@ impl Store {
         // Pin one immutable generation path before disk/media validation. Do not
         // follow a new CURRENT or new selection while opening the closure.
         drop(inner);
+        // A complete snapshot cannot issue authority after losing accepted
+        // lineage, even if the current winner's own objects are still readable.
+        for accepted in publication::history(
+            &root,
+            transaction.store_generation,
+            scope,
+            transaction.clone(),
+        )? {
+            publication::validate_closure(&root, &accepted)?;
+        }
         let selected_records = Self::validate_objects(&root, &transaction.selected)?;
         publication::closure_index(&selected_records, true)?;
         let mut retained_records = Vec::new();
