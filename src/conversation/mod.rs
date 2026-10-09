@@ -10,6 +10,8 @@ mod reader_dispatch;
 mod reader_plan;
 mod reader_uncertainty;
 mod selected;
+#[cfg(test)]
+mod selected_context_tests;
 mod settlement;
 mod types;
 use crate::storage::{
@@ -1373,6 +1375,21 @@ impl Ledger {
         budget: &ContextBudget,
         token_count: impl Fn(&[Turn]) -> Result<usize>,
     ) -> Result<ContextView> {
+        Self::context_token_limit(selection, budget)?;
+        let records = self.inspect(conversation, false)?;
+        Self::context_from_records(records, selection, budget, token_count, |media| {
+            self.store
+                .open_object(&ObjectRef {
+                    sha256: media.sha256.clone(),
+                    bytes: media.bytes,
+                })
+                .is_ok()
+        })
+    }
+    pub(super) fn context_token_limit(
+        selection: Option<TurnRange>,
+        budget: &ContextBudget,
+    ) -> Result<usize> {
         if let Some(range) = selection {
             ensure!(
                 range.start < range.end_exclusive,
@@ -1382,7 +1399,16 @@ impl Ledger {
         let token_limit = budget
             .provider_token_limit
             .ok_or(ContextRefusal::UnknownProviderBudget)?;
-        let records = self.inspect(conversation, false)?;
+        Ok(token_limit)
+    }
+    pub(super) fn context_from_records(
+        records: Vec<Record>,
+        selection: Option<TurnRange>,
+        budget: &ContextBudget,
+        token_count: impl Fn(&[Turn]) -> Result<usize>,
+        media_available: impl Fn(&Media) -> bool,
+    ) -> Result<ContextView> {
+        let token_limit = Self::context_token_limit(selection, budget)?;
         let turns: Vec<Turn> = records
             .iter()
             .filter_map(|r| match r {
@@ -1458,29 +1484,13 @@ impl Ledger {
             capture_media.extend(capture.media()?);
         }
         for media in &capture_media {
-            if self
-                .store
-                .open_object(&ObjectRef {
-                    sha256: media.sha256.clone(),
-                    bytes: media.bytes,
-                })
-                .is_err()
-                && !missing_media.contains(media)
-            {
+            if !media_available(media) && !missing_media.contains(media) {
                 missing_media.push(media.clone());
             }
         }
         for source in &sources {
             for media in std::iter::once(&source.image).chain(source.parent.iter()) {
-                if self
-                    .store
-                    .open_object(&ObjectRef {
-                        sha256: media.sha256.clone(),
-                        bytes: media.bytes,
-                    })
-                    .is_err()
-                    && !missing_media.contains(media)
-                {
+                if !media_available(media) && !missing_media.contains(media) {
                     missing_media.push(media.clone());
                 }
             }

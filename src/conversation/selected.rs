@@ -373,6 +373,36 @@ impl SelectedDomainProjection {
             heads,
         })
     }
+    /// Current causal heads only; retained ancestors never become visible turns.
+    pub fn inspect(&self, conversation: Uuid) -> Result<Vec<Record>> {
+        self.document_ownership()?;
+        let (_, root) = self
+            .head(Namespace::Conversation, conversation)
+            .context("selected conversation root absent")?;
+        let Some(Record::Root(root)) = root else {
+            anyhow::bail!("selected conversation root deleted or invalid")
+        };
+        let mut records: Vec<_> = self
+            .heads
+            .values()
+            .filter_map(|revision| self.records.get(revision))
+            .filter(|record| conversation_id(record) == conversation)
+            .cloned()
+            .collect();
+        let turns = records
+            .iter()
+            .filter(|r| matches!(r, Record::Turn(_)))
+            .count();
+        ensure!(
+            turns as u64 == root.next_sequence,
+            "selected allocated conversation chronology is incomplete"
+        );
+        records.sort_by_key(|record| match record {
+            Record::Turn(turn) => (0, turn.sequence),
+            _ => (1, 0),
+        });
+        Ok(records)
+    }
     pub fn head(&self, namespace: Namespace, id: Uuid) -> Option<(&Envelope, Option<&Record>)> {
         let revision = self.heads.get(&(namespace, id))?;
         Some((&self.ancestors[revision], self.records.get(revision)))

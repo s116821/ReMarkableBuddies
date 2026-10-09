@@ -29,6 +29,38 @@ pub struct SelectedAdmission {
     gate: Arc<Mutex<()>>,
 }
 impl SelectedAdmission {
+    /// Read evidence from one current selection; never returns effect authority.
+    /// Token counting happens after admission is released, so replacement cannot
+    /// mix new heads into this view or deadlock a caller reading another handle.
+    pub fn context_range(
+        &self,
+        accepted: &SelectionToken,
+        conversation: Uuid,
+        selection: Option<super::TurnRange>,
+        budget: &super::ContextBudget,
+        token_count: impl Fn(&[super::Turn]) -> Result<usize>,
+    ) -> Result<super::ContextView> {
+        Ledger::context_token_limit(selection, budget)?;
+        let (records, media) = self.with_current(accepted, |snapshot| {
+            let projection = SelectedDomainProjection::from_snapshot(snapshot)?;
+            let records = projection.inspect(conversation)?;
+            // The selected inventory alone supplies availability; retained media
+            // handles cannot make an intentionally omitted winner sample present.
+            let media: BTreeMap<_, _> = snapshot
+                .transaction
+                .selected
+                .media
+                .iter()
+                .map(|reference| (reference.sha256.clone(), reference.clone()))
+                .collect();
+            Ok((records, media))
+        })?;
+        Ledger::context_from_records(records, selection, budget, token_count, |item| {
+            media
+                .get(&item.sha256)
+                .is_some_and(|reference| reference.bytes == item.bytes)
+        })
+    }
     /// Recover the original publication before allocating new preparation IDs.
     /// Replacement membership and lost acknowledgments never refresh authority.
     pub fn recover_original_intent(&self, operation: Uuid) -> Result<Option<HistoricalIntent>> {
