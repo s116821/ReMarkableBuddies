@@ -799,3 +799,64 @@ fn namespace_labels_cannot_smuggle_a_disabled_domain_into_selected_records() {
     assert!(b.store.manifests().unwrap().is_empty());
     assert_eq!(cloud.0.lock().unwrap().uploads, uploads);
 }
+
+#[test]
+fn legacy_worker_and_selected_namespace_cannot_overlap_or_publish_retained_history() {
+    use remarkable_reader_buddy::storage::selection::{SelectionChange, SelectionScope};
+    let device = Device::new();
+    let cloud = Fake::default();
+    let collection = Uuid::new_v4();
+    let original = record(&device.store, Namespace::Conversation);
+    device
+        .store
+        .commit(vec![original], BTreeMap::new())
+        .unwrap();
+    let mut manifest = device.store.manifests().unwrap()[0].clone();
+    manifest.scope = Scope::SelectedRecords;
+    let scope = SelectionScope {
+        group: Uuid::new_v4(),
+        key_sha256: digest(b"owned document"),
+        binding_sha256: digest(b"owned binding"),
+    };
+    let change = SelectionChange {
+        operation: Uuid::new_v4(),
+        accepted_base_sha256: digest(b"base"),
+        selected: manifest,
+        retained: vec![],
+    };
+    let mut engine = device.engine(cloud.clone(), policy(collection, true));
+    assert!(device
+        .store
+        .initialize_selected(&scope, change.clone(), BTreeMap::new())
+        .is_err());
+    assert!(device
+        .store
+        .selected_snapshot(&scope, MAX_ITEMS)
+        .unwrap()
+        .is_none());
+    engine.policy.enabled = false;
+    assert_eq!(engine.step().unwrap(), Status::Disabled);
+    device
+        .store
+        .initialize_selected(&scope, change, BTreeMap::new())
+        .unwrap();
+    engine.policy.enabled = true;
+    assert!(engine.step().is_err());
+    assert!(SyncEngine::new(
+        device.store.clone(),
+        policy(collection, true),
+        cloud.clone(),
+        Arc::new(AtomicBool::new(false))
+    )
+    .is_err());
+    let mut disabled = policy(collection, true);
+    disabled.enabled = false;
+    assert_eq!(
+        device.engine(cloud.clone(), disabled).step().unwrap(),
+        Status::Disabled
+    );
+    let c = cloud.0.lock().unwrap();
+    assert_eq!(c.allocated, 0);
+    assert_eq!(c.uploads, 0);
+    assert!(c.files.is_empty());
+}
