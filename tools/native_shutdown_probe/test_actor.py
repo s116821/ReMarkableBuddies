@@ -301,7 +301,7 @@ verify_stock() { test ! -e "$guard"; test ! -e "$activation"; printf 'healthy\n'
             # Explicit newline='\n' must produce byte-identical Linux packets.
             crlf_source = root / "crlf-source"
             crlf_source.mkdir()
-            for name in ("actor.sh.in", "launch.sh.in", "trace-stop-proof.awk", "trace-stop-pretoken-proof.awk"):
+            for name in ("actor.sh.in", "launch.sh.in", "trace-stop-proof.awk", "trace-stop-pretoken-proof.awk", "trace-stop-engine-ready-proof.awk"):
                 (crlf_source / name).write_bytes((HERE / name).read_text().replace("\n", "\r\n").encode("ascii"))
             simulated = root / "windows-simulated"
             original_open = Path.open
@@ -340,6 +340,24 @@ verify_stock() { test ! -e "$guard"; test ! -e "$activation"; printf 'healthy\n'
                 prepare(root / "pretoken-windows")
             for generated in pretoken.iterdir():
                 self.assertEqual((root / "pretoken-windows" / generated.name).read_bytes(), generated.read_bytes(), generated.name)
+            selection["diagnostic_kind"] = "pretoken-engine-ready-v1"
+            selected.write_text(json.dumps(selection))
+            engine_packet = root / "engine-ready"
+            engine_receipt = prepare(engine_packet)
+            self.assertEqual(engine_receipt["diagnostic_kind"], "pretoken-engine-ready-v1")
+            self.assertEqual(engine_receipt["proof_source"], "trace-stop-engine-ready-proof.awk")
+            engine_parser = (HERE / "trace-stop-engine-ready-proof.awk").read_text().encode("ascii")
+            self.assertEqual((engine_packet / "trace-stop-proof.awk").read_bytes(), engine_parser)
+            self.assertEqual(engine_receipt["files"]["trace-stop-proof.awk"], hashlib.sha256(engine_parser).hexdigest())
+            self.assertEqual(set(engine_receipt["files"]), set(pretoken_receipt["files"]))
+            for name, digest in pretoken_receipt["files"].items():
+                if name != "trace-stop-proof.awk": self.assertEqual(engine_receipt["files"][name], digest, name)
+            self.assertIn(engine_receipt["files"]["trace-stop-proof.awk"] + "  trace-stop-proof.awk\n",
+                          (engine_packet / "packet.files").read_text())
+            with mock.patch.object(module, "HERE", crlf_source), mock.patch.object(Path, "open", windows_open):
+                prepare(root / "engine-windows")
+            for generated in engine_packet.iterdir():
+                self.assertEqual((root / "engine-windows" / generated.name).read_bytes(), generated.read_bytes(), generated.name)
             for index, invalid_mode in enumerate((None, "", "pretoken-facts-entry-v2", "lifecycle", [], {})):
                 selection["diagnostic_kind"] = invalid_mode
                 selected.write_text(json.dumps(selection))
@@ -598,6 +616,58 @@ exit 93
             result = subprocess.run(["awk", "-v", "pid=42", "-v", "start=561", "-f",
                                      str(HERE / "trace-stop-proof.awk")], input=content, text=True, capture_output=True)
             self.assertEqual(result.returncode, expected, result.stderr)
+
+    def test_engine_ready_order_greater_frame_and_old_parser_separation(self):
+        def trace(events):
+            return "".join(f"v1 {i} {event} {100+i} {tid} 42 561 {quit_seen} {dropped} {frames}\n"
+                           for i, (event, tid, quit_seen, dropped, frames) in enumerate(events, 1))
+        startup=("startup", "42", "0", "0", "0")
+        installed=("entry-installed", "42", "0", "0", "0")
+        ready=("entry-engine-ready", "42", "0", "0", "0")
+        render=("before-render", "77", "0", "0", "1")
+        render2=("before-render", "77", "0", "0", "2")
+        ready1=("entry-engine-ready", "42", "0", "0", "1")
+        window=("window", "42", "0", "0", "0")
+        cases=[(trace([startup, installed, ready, render]),0),
+               (trace([startup, window, installed, ready, render]),0),
+               (trace([startup, installed, render, ready1, render2]),0),
+               (trace([startup, installed, render]),1),
+               (trace([startup, installed, ready]),1),
+               (trace([startup, installed, render, ready1]),1),
+               (trace([startup, installed, render, ready1, render]),1),
+               (trace([startup, installed, ready, ("before-render","77","1","0","1"),
+                       ("late-before-render","77","1","0","1")]),1),
+               (trace([startup, ready, installed, render]),90),
+               (trace([startup, installed, ready, ready, render]),90),
+               (trace([startup, installed, render, ready, render2]),90),
+               (trace([startup, installed, render2, window, ready1, render2]),90),
+               (trace([startup, installed, ready1, window, render2]),90),
+               (trace([startup, installed, render, installed, ready1, render2]),90)]
+        for field,value in ((1,"77"),(1,"042"),(2,"1"),(3,"1"),(4,"00"),(4,"18446744073709551616")):
+            invalid=list(ready); invalid[field]=value
+            cases.append((trace([startup,installed,tuple(invalid),render]),90))
+        # Adjacent counters above double precision must remain distinct.
+        for ready_count,render_count,expected in (("9007199254740992","9007199254740993",0),
+                                                   ("18446744073709551614","18446744073709551615",0),
+                                                   ("18446744073709551615","18446744073709551615",1),
+                                                   ("9007199254740993","9007199254740992",90)):
+            cases.append((trace([startup,installed,("entry-engine-ready","42","0","0",ready_count),
+                                ("before-render","77","0","0",render_count)]),expected))
+        valid=cases[0][0]
+        cases.extend([(valid.replace(" 561 "," 562 "),90),
+                      (valid.replace("entry-engine-ready","entry-ready"),90),
+                      (valid.replace("v1 3 ","v1 03 "),90),
+                      (valid.replace("entry-engine-ready 103","entry-engine-ready 99"),90),
+                      (trace([startup,installed,ready,render]+[("after-render","77","0","0","1")]*93),90)])
+        for content,expected in cases:
+            with self.subTest(content=content):
+                result=subprocess.run(["awk","-v","pid=42","-v","start=561","-f",
+                                       str(HERE/"trace-stop-engine-ready-proof.awk")],input=content,text=True,capture_output=True)
+                self.assertEqual(result.returncode,expected,result.stderr)
+        for parser in ("trace-stop-proof.awk","trace-stop-pretoken-proof.awk"):
+            result=subprocess.run(["awk","-v","pid=42","-v","start=561","-f",str(HERE/parser)],
+                                  input=valid,text=True,capture_output=True)
+            self.assertEqual(result.returncode,90,result.stderr)
 
 
 if __name__ == "__main__":

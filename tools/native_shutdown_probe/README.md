@@ -35,6 +35,19 @@ admission even for unexpected tokens. Actor, launcher, guard and budget are unch
 SDK preserves ordinary observer connection ordering and records the actual frame
 counter. If rendering advances before installation, frames=0 eligibility fails
 closed and recovery follows; the counter must never be reset to obtain admission.
+
+Explicit `diagnostic_kind=pretoken-engine-ready-v1` selects the separate
+`trace-stop-engine-ready-proof.awk`, recorded as receipt proof_source and bound
+at the same runtime parser name. It requires one valid installation, then one
+`entry-engine-ready` on startup/GUI TID with quit0/drop0 and actual frames, then
+pre-quit before-render with strictly greater frames. SDK emits readiness only
+after the original successful facts-waiting write and original engine-destroyed
+connection, before existing queueRequest. Missing ready/later sample is incomplete;
+duplicate/order/scalar contradictions or frame regression refuse. Uint64 frame
+comparisons are exact. Original facts-waiting is corroborating evidence and may
+be removed by SDK finish; it adds no actor observation branch. Main verifies the
+paired SDK source/build emission and unchanged fences. Old selected parsers,
+actor/launcher/root/guard/claims/budgets remain unchanged.
 Original unit/vendor bytes must match their pinned hashes. The packet retains the
 originals privately and derives shadows by removing exactly one Unit OnFailure
 assignment from each, preserving every other byte. Do not publish private source
@@ -82,7 +95,7 @@ dependencies on systemd 255; effective runtime provenance remains a native gate.
 ## Local verification
 
 `test_actor.py` runs in an owned Linux fixture with no network or actual service
-manager. Nineteen checks cover conditional query failure, restoration ordering and
+manager. Focused checks cover conditional query failure, restoration ordering and
 crash preservation, deadline refusal, failed process reads, bounded owned query
 children, trace identity/drop/sequence, request expiry and singleton claims/lock.
 They also exercise preparation with synthetic bytes, actual actor

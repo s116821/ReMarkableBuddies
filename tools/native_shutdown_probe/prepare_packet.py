@@ -67,7 +67,8 @@ def main():
     selected = json.loads(selection_file.read_text(encoding="utf-8-sig"))
     diagnostic_kind = selected.get("diagnostic_kind", "lifecycle-only-v1")
     proof_sources = {"lifecycle-only-v1": "trace-stop-proof.awk",
-                     "pretoken-facts-entry-v1": "trace-stop-pretoken-proof.awk"}
+                     "pretoken-facts-entry-v1": "trace-stop-pretoken-proof.awk",
+                     "pretoken-engine-ready-v1": "trace-stop-engine-ready-proof.awk"}
     if not isinstance(diagnostic_kind, str) or diagnostic_kind not in proof_sources:
         raise ValueError("Explicit supported diagnostic kind required; missing mode is legacy only")
     proof_source = proof_sources[diagnostic_kind]
