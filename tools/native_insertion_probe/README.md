@@ -1,5 +1,32 @@
 # Caller-selected insertion recovery (source only)
 
+## Open-document source utilities (not executable integration)
+
+The new `open-document-insertion-v1` partition validator protects the exact
+current seven-page order and 26 paths: sixteen document files (fourteen immutable,
+two mutable) plus ten providers. It includes the intentionally stroked 5aef page
+and thumbnail. `prepare_packet.main` and the coordinator still reject this mode;
+no new packet can run through these utilities. The legacy six-page mode retains
+its existing admission and behavior.
+
+`open_document_timing.py` is a pure proposed timing prerequisite, not wired into
+the actor. It preserves the original 360-second absolute deadline and 185-second
+recovery reserve, requires 255 seconds before candidate start, and caps observation
+at 70 seconds. Stages expire at candidate +20/+35/+40/+55/+60 seconds (ready,
+ordinary open/verification, trigger, result, stop), leaving ten seconds of margin.
+Creation additionally needs at least 215 seconds until the absolute deadline and
+a verified candidate-bound SDK gate expiry. Unknown SDK expiry refuses. Neither
+waiting-file mtime nor a readiness/token event renews any limit.
+
+Actual prior setup was 27 seconds, Library readiness 12.608 seconds, observation
+timeout exactly 30 seconds after candidate start, and recovery 29 seconds later.
+Those measurements support conditional feasibility, not a guarantee of finishing
+ordinary opening or validation inside these caps. The future bounded host sequence
+must decide without chat, prove its declared observations, intersect SDK and host
+expiry, and refuse/restore on uncertainty. Runtime gate/host/actor integration,
+focused independent review, artifact/current-state/budget gates, and actual hardware
+selection remain pending. These pure tests never open SSH or touch a device.
+
 This distinct experiment uses the original creation Probe and optional sixth
 caller-selected UUID argument. It does not invoke shutdown/FactsEntry/engine-ready
 diagnostics. No target artifact, nonce, packet or device execution is selected by

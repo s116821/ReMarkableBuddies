@@ -54,15 +54,30 @@ def remove_owned_onfailure(data):
 
 
 def partition(selected, files):
+    # Source-only new-mode inventory validation. main() still refuses this mode
+    # until the SDK gate and bounded host/actor integration are independently
+    # reviewed; this function alone cannot prepare or execute its packet.
+    open_mode = selected.get("experiment_kind") == "open-document-insertion-v1"
     document = selected.get("document_id", "")
     uuid = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
     target = selected.get("target_page_id", "")
     pages = selected.get("before_page_ids")
     if not isinstance(document, str) or not re.fullmatch(uuid, document):
         raise ValueError("Canonical fixture document required")
-    if (not isinstance(pages, list) or len(pages) != 6 or
-        any(not isinstance(p, str) or not re.fullmatch(uuid, p) for p in pages) or len(set(pages)) != 6):
-        raise ValueError("Exact six distinct original page IDs required")
+    page_count = 7 if open_mode else 6
+    if (not isinstance(pages, list) or len(pages) != page_count or
+        any(not isinstance(p, str) or not re.fullmatch(uuid, p) for p in pages) or len(set(pages)) != page_count):
+        raise ValueError("Exact distinct original page inventory required")
+    if open_mode and pages != [
+        "a7181850-3f03-4bb0-8b9e-01acfc20032e",
+        "5aef884d-d3fc-4635-895a-28237568823d",
+        "d1261cb9-a8c0-4e15-ab24-7a9172b2027b",
+        "f39ae285-3e0c-43dd-b27c-866dff7a24cd",
+        "028b118f-474a-4886-a469-7273b290320c",
+        "fd5afbe2-a79c-461b-8b15-96907d181ab7",
+        "1692961d-ec5c-4f0f-9635-8e6081111dab",
+    ]:
+        raise ValueError("Exact current seven-page order including stroked target required")
     if (not isinstance(target, str) or not re.fullmatch(uuid, target) or
         target == "00000000-0000-0000-0000-000000000000" or target == document or target in pages):
         raise ValueError("Fresh distinct canonical target required")
@@ -74,11 +89,13 @@ def partition(selected, files):
     mutable_files = [e for e in document_files if e["path"] in mutable_paths]
     # The original 24 records are retained, not silently redefined. New-file
     # absence and full before/after content semantics remain Main admission.
-    if len(document_files) != 14 or len(runtime_files) != 10 or {e["path"] for e in mutable_files} != mutable_paths:
-        raise ValueError("Exact 14-document/10-runtime partition and two mutable paths required")
-    expected_document = {prefix + "." + ext for ext in ("content", "metadata", "local", "pagedata", "pdf")} | {prefix + "/" + p + ".rm" for p in pages[:3]} | {prefix + ".thumbnails/" + p + ".png" for p in pages}
+    document_count = 16 if open_mode else 14
+    if len(document_files) != document_count or len(runtime_files) != 10 or {e["path"] for e in mutable_files} != mutable_paths:
+        raise ValueError("Exact document/runtime partition and two mutable paths required")
+    ink_count = 4 if open_mode else 3
+    expected_document = {prefix + "." + ext for ext in ("content", "metadata", "local", "pagedata", "pdf")} | {prefix + "/" + p + ".rm" for p in pages[:ink_count]} | {prefix + ".thumbnails/" + p + ".png" for p in pages}
     if {e["path"] for e in document_files} != expected_document:
-        raise ValueError("Exact fourteen fixture paths required; no substitute preservation files")
+        raise ValueError("Exact fixture paths required; no substitute preservation files")
     expected_runtime = {"/usr/lib/libQt6" + name + ".so.6.10.3" for name in ("Core", "Qml", "Gui", "Quick", "Network")} | {"/usr/lib/libstdc++.so.6", "/lib/libc.so.6", "/lib/libm.so.6", "/lib/libgcc_s.so.1", "/lib/ld-linux-armhf.so.3"}
     if {e["path"] for e in runtime_files} != expected_runtime:
         raise ValueError("Exact ten reviewed provider paths required")
