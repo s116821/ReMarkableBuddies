@@ -321,3 +321,162 @@ fn selected_context_reports_omitted_winner_media_even_if_retained_bytes_exist() 
     assert_eq!(view.legacy_captures.len(), 1);
     assert_eq!(view.turns[0].text.as_deref(), Some("question"));
 }
+
+fn png_bytes(value: u8) -> Vec<u8> {
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+        2,
+        3,
+        image::Rgba([value, 0, 0, 255]),
+    ))
+    .write_to(&mut encoded, image::ImageFormat::Png)
+    .unwrap();
+    encoded.into_inner()
+}
+fn legacy_values(store: &Store) -> (Vec<Envelope>, Vec<Vec<u8>>) {
+    let mut values = records(store, &["selected question"]);
+    let id = Uuid::new_v4();
+    values[1].payload["record"]["sources"] = serde_json::json!([id]);
+    let bytes = vec![png_bytes(1), png_bytes(2), png_bytes(3)];
+    let image = |ordinal: usize, role, provider_ordinal| LegacyImage {
+        media: Media {
+            sha256: digest(&bytes[ordinal]),
+            bytes: bytes[ordinal].len() as u64,
+            media_type: "image/png".into(),
+        },
+        dimensions: [2, 3],
+        role,
+        provider_ordinal,
+    };
+    let evidence = LegacyCapture {
+        schema: 1,
+        id,
+        conversation: values[0].record_id,
+        turn: values[1].record_id,
+        origin: LegacyOrigin::LegacyUnqualified,
+        identity: (),
+        qualification: (),
+        parent: Some(image(0, LegacyImageRole::AcquisitionParent, None)),
+        images: vec![
+            image(1, LegacyImageRole::Overview, Some(0)),
+            image(2, LegacyImageRole::Detail, Some(1)),
+        ],
+    };
+    let mut value = envelope(store, Record::LegacyCapture(evidence.clone()));
+    value.media_descriptors = evidence.media().unwrap();
+    values.push(value);
+    (values, bytes)
+}
+fn included_legacy_change(
+    values: &[Envelope],
+    bytes: &[Vec<u8>],
+) -> (SelectionChange, BTreeMap<String, Vec<u8>>) {
+    let (mut update, mut objects) = change(values);
+    for bytes in bytes {
+        let hash = digest(bytes);
+        update.selected.media.push(ObjectRef {
+            sha256: hash.clone(),
+            bytes: bytes.len() as u64,
+        });
+        update.selected.media_coverage.push(Coverage::Included {
+            sha256: hash.clone(),
+        });
+        objects.insert(hash, bytes.clone());
+    }
+    (update, objects)
+}
+#[test]
+fn selected_capture_images_preserve_parent_order_and_refuse_loser_stale_and_invalid_png() {
+    let f = Fixture::new();
+    let store = f.store();
+    let admission = SelectedAdmission::new(store.clone(), scope()).unwrap();
+    let (values, bytes) = legacy_values(&store);
+    let id = values[2].record_id;
+    let (update, objects) = included_legacy_change(&values, &bytes);
+    // All-history fork has the identical capture ID and different valid bytes.
+    let mut loser = values[2].clone();
+    loser.revision_id = Uuid::new_v4();
+    loser.operation_id = Uuid::new_v4();
+    let mut losing_record = match Ledger::decode(&loser).unwrap() {
+        Record::LegacyCapture(c) => c,
+        _ => unreachable!(),
+    };
+    let losing_png = png_bytes(9);
+    losing_record.images[0].media = Media {
+        sha256: digest(&losing_png),
+        bytes: losing_png.len() as u64,
+        media_type: "image/png".into(),
+    };
+    loser.payload = serde_json::to_value(Record::LegacyCapture(losing_record.clone())).unwrap();
+    loser.media_descriptors = losing_record.media().unwrap();
+    let mut ordinary_media = BTreeMap::from([(digest(&losing_png), losing_png)]);
+    ordinary_media.extend(bytes.iter().map(|b| (digest(b), b.clone())));
+    store
+        .commit(
+            vec![values[0].clone(), values[1].clone(), loser],
+            ordinary_media,
+        )
+        .unwrap();
+    let original = admission.initialize(update, objects).unwrap();
+    let SelectedCaptureImages::Legacy(actual) =
+        admission.capture_images(&original.token, id).unwrap()
+    else {
+        panic!("legacy origin lost")
+    };
+    assert_eq!(actual.parent, Some(bytes[0].clone()));
+    assert_eq!(actual.images, bytes[1..]);
+    assert_eq!(actual.evidence.origin, LegacyOrigin::LegacyUnqualified);
+    assert!(Ledger::new(store.clone()).stored_legacy_images(id).is_err());
+    let SelectedCaptureImages::Legacy(again) =
+        admission.capture_images(&original.token, id).unwrap()
+    else {
+        panic!("wrong origin")
+    };
+    assert_eq!(again.images, bytes[1..]);
+    // Replace with internally valid metadata but false PNG dimensions. Store
+    // validates objects, and the domain byte decoder must refuse those facts.
+    let mut bad = values.clone();
+    bad[2].revision_id = Uuid::new_v4();
+    bad[2].operation_id = Uuid::new_v4();
+    bad[2].payload["record"]["images"][0]["dimensions"] = serde_json::json!([3, 3]);
+    let (update, objects) = included_legacy_change(&bad, &bytes);
+    let replacement = admission
+        .activate(&original.token, update, objects)
+        .unwrap();
+    assert!(admission.capture_images(&original.token, id).is_err());
+    let error = admission
+        .capture_images(&replacement.token, id)
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("dimension"), "{error:#}");
+}
+#[test]
+fn selected_capture_images_refuse_omission_even_with_retained_valid_pngs() {
+    let f = Fixture::new();
+    let store = f.store();
+    let admission = SelectedAdmission::new(store.clone(), scope()).unwrap();
+    let (values, bytes) = legacy_values(&store);
+    let (mut update, objects) = included_legacy_change(&values, &bytes);
+    let mut historical = values.clone();
+    historical[1].revision_id = Uuid::new_v4();
+    historical[1].operation_id = Uuid::new_v4();
+    historical[1].payload["record"]["text"] = serde_json::json!("retained historical question");
+    let (retained_change, retained_objects) = included_legacy_change(&historical, &bytes);
+    update.retained.push(retained_change.selected);
+    let mut objects = objects;
+    objects.extend(retained_objects);
+    update.selected.media.clear();
+    update.selected.media_coverage = bytes
+        .iter()
+        .map(|b| Coverage::Omitted {
+            sha256: digest(b),
+            reason: crate::storage::Omission::PolicyDisabled,
+        })
+        .collect();
+    let selected = admission.initialize(update, objects).unwrap();
+    let error = admission
+        .capture_images(&selected.token, values[2].record_id)
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("omitted"));
+}

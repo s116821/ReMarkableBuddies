@@ -66,6 +66,12 @@ pub struct PreparedLegacyCapture {
     pub parent: Option<Vec<u8>>,
     pub images: Vec<Vec<u8>>,
 }
+/// Owned historical bytes only, preserving the source variant's qualification.
+pub enum SelectedCaptureImages {
+    Sdk(PreparedSdkCapture),
+    Legacy(PreparedLegacyCapture),
+    Development(Box<super::PreparedDevelopmentCapture>),
+}
 #[derive(Clone, Debug)]
 pub struct PreparedSdkImage {
     /// Native parent has no provider ordinal; derivatives keep original order.

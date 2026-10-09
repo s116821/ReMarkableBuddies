@@ -3,7 +3,7 @@ use crate::{
     conversation::*,
     storage::{Fault as StorageFault, Namespace, Store},
 };
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 type Calls = Rc<RefCell<Vec<Vec<Vec<u8>>>>>;
 struct RecordingModel {
@@ -579,4 +579,114 @@ fn development_collected_bytes_actual_orchestrator_retained_store() {
         .unwrap();
     file.sync_all().unwrap();
     println!("PASS development collected bytes: original PNG+receipt, four durable provider images twice, reopened exact bytes, zero effects; receipt={}",path.display());
+}
+
+#[test]
+fn selected_development_capture_retrieval_preserves_completion_original_and_derivatives() {
+    use crate::storage::selection::{SelectionChange, SelectionScope};
+    use crate::storage::{digest, Coverage, Manifest, ObjectRef, Scope, Uuid, FORMAT};
+    let fixture = SimulatorLedger::new();
+    let ledger = fixture.open().unwrap();
+    let store = ledger.store().clone();
+    let conversation = Uuid::new_v4();
+    ledger.create(conversation, Uuid::new_v4(), 1).unwrap();
+    let (capture, completion, png) = development_capture_fixture();
+    let turn = Turn {
+        id: Uuid::new_v4(),
+        conversation,
+        exchange: Uuid::new_v4(),
+        sequence: 0,
+        role: Role::User,
+        mode: Mode::Reader,
+        outcome: Outcome::Prepared,
+        text: None,
+        sources: vec![],
+        correction_of: None,
+        created_ms: 1,
+        updated_ms: 1,
+        completion: None,
+    };
+    let original = ledger
+        .prepare_development(
+            Uuid::new_v4(),
+            ledger
+                .expected(Namespace::Conversation, conversation)
+                .unwrap(),
+            turn,
+            Uuid::new_v4(),
+            &capture,
+        )
+        .unwrap();
+    let mut objects = BTreeMap::new();
+    let mut records = BTreeMap::new();
+    let mut media: BTreeMap<String, ObjectRef> = BTreeMap::new();
+    let mut namespaces = BTreeMap::new();
+    for manifest in store.manifests().unwrap() {
+        for reference in manifest.records {
+            namespaces.insert(
+                reference.sha256.clone(),
+                manifest.record_namespaces[&reference.sha256],
+            );
+            objects.insert(
+                reference.sha256.clone(),
+                store.read_object(&reference).unwrap(),
+            );
+            records.insert(reference.sha256.clone(), reference);
+        }
+        for reference in manifest.media {
+            objects.insert(
+                reference.sha256.clone(),
+                store.read_object(&reference).unwrap(),
+            );
+            media.insert(reference.sha256.clone(), reference);
+        }
+    }
+    let selected = Manifest {
+        format: FORMAT,
+        transaction_id: Uuid::new_v4(),
+        scope: Scope::SelectedRecords,
+        records: records.into_values().collect(),
+        record_namespaces: namespaces,
+        media_coverage: media
+            .keys()
+            .map(|sha256| Coverage::Included {
+                sha256: sha256.clone(),
+            })
+            .collect(),
+        media: media.into_values().collect(),
+    };
+    let admission = SelectedAdmission::new(
+        store,
+        SelectionScope {
+            group: Uuid::new_v4(),
+            key_sha256: digest(b"development selected document"),
+            binding_sha256: digest(b"historical unqualified"),
+        },
+    )
+    .unwrap();
+    let publication = admission
+        .initialize(
+            SelectionChange {
+                operation: Uuid::new_v4(),
+                accepted_base_sha256: digest(b"fixture base"),
+                selected,
+                retained: vec![],
+            },
+            objects,
+        )
+        .unwrap();
+    let SelectedCaptureImages::Development(actual) = admission
+        .capture_images(&publication.token, original.evidence.id)
+        .unwrap()
+    else {
+        panic!("development origin lost")
+    };
+    assert_eq!(actual.evidence, original.evidence);
+    assert_eq!(actual.completion, completion);
+    assert_eq!(actual.original_png, png);
+    assert_eq!(actual.images, original.images);
+    assert_eq!(
+        actual.evidence.origin,
+        crate::conversation::development::DevelopmentOrigin::DevelopmentUnqualified
+    );
 }

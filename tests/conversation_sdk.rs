@@ -621,3 +621,96 @@ fn nil_operation_refuses_before_any_domain_publication() {
         .is_err());
     assert_eq!(ledger.inspect(conversation, false).unwrap().len(), 2);
 }
+
+#[test]
+fn selected_sdk_capture_retrieval_keeps_exact_parent_ordinals_and_no_native_guard() {
+    use remarkable_reader_buddy::storage::selection::{SelectionChange, SelectionScope};
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    let ledger = Ledger::new(store.clone());
+    let conversation = create(&ledger);
+    let batch = batch(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let original = ledger
+        .prepare_sdk_fixture(
+            Uuid::new_v4(),
+            root(&ledger, conversation),
+            request(conversation),
+            &batch,
+        )
+        .unwrap();
+    let mut objects = BTreeMap::new();
+    let mut records = BTreeMap::new();
+    let mut media = BTreeMap::new();
+    let mut namespaces = BTreeMap::new();
+    for manifest in store.manifests().unwrap() {
+        for reference in manifest.records {
+            namespaces.insert(
+                reference.sha256.clone(),
+                manifest.record_namespaces[&reference.sha256],
+            );
+            objects.insert(
+                reference.sha256.clone(),
+                store.read_object(&reference).unwrap(),
+            );
+            records.insert(reference.sha256.clone(), reference);
+        }
+        for reference in manifest.media {
+            objects.insert(
+                reference.sha256.clone(),
+                store.read_object(&reference).unwrap(),
+            );
+            media.insert(reference.sha256.clone(), reference);
+        }
+    }
+    let selected = Manifest {
+        format: FORMAT,
+        transaction_id: Uuid::new_v4(),
+        scope: Scope::SelectedRecords,
+        records: records.into_values().collect(),
+        record_namespaces: namespaces,
+        media_coverage: media
+            .keys()
+            .map(|sha256| Coverage::Included {
+                sha256: sha256.clone(),
+            })
+            .collect(),
+        media: media.into_values().collect(),
+    };
+    let admission = SelectedAdmission::new(
+        store.clone(),
+        SelectionScope {
+            group: Uuid::new_v4(),
+            key_sha256: digest(b"sdk selected document"),
+            binding_sha256: digest(b"historical only"),
+        },
+    )
+    .unwrap();
+    let publication = admission
+        .initialize(
+            SelectionChange {
+                operation: Uuid::new_v4(),
+                accepted_base_sha256: digest(b"fixture base"),
+                selected,
+                retained: vec![],
+            },
+            objects,
+        )
+        .unwrap();
+    let SelectedCaptureImages::Sdk(actual) = admission
+        .capture_images(&publication.token, original.capture)
+        .unwrap()
+    else {
+        panic!("SDK historical origin lost")
+    };
+    assert_eq!(actual.capture, original.capture);
+    assert_eq!(actual.turn, original.turn);
+    assert_eq!(actual.native_parent.ordinal, None);
+    assert_eq!(actual.native_parent.bytes, original.native_parent.bytes);
+    for (ordinal, (actual, expected)) in actual.images.iter().zip(&original.images).enumerate() {
+        assert_eq!(actual.ordinal, Some(ordinal as u32));
+        assert_eq!(actual.media, expected.media);
+        assert_eq!(actual.bytes, expected.bytes);
+    }
+    // The result contains bytes and IDs only: no live capture batch, observation,
+    // qualification guard or Reader effect context is reconstructed.
+}

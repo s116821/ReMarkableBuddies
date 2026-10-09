@@ -166,17 +166,30 @@ impl Ledger {
             turn.conversation == evidence.conversation && turn.sources.contains(&id),
             "legacy evidence link mismatch"
         );
-        let load = |image: &LegacyImage| -> Result<Vec<u8>> {
-            let bytes = self.store.read_object(&ObjectRef {
-                sha256: image.media.sha256.clone(),
-                bytes: image.media.bytes,
-            })?;
+        Self::legacy_images_from_evidence(evidence, |media| {
+            self.store.read_object(&ObjectRef {
+                sha256: media.sha256.clone(),
+                bytes: media.bytes,
+            })
+        })
+    }
+    pub(super) fn legacy_images_from_evidence(
+        evidence: LegacyCapture,
+        mut load: impl FnMut(&Media) -> Result<Vec<u8>>,
+    ) -> Result<PreparedLegacyCapture> {
+        evidence.validate()?;
+        let mut image_bytes = |image: &LegacyImage| -> Result<Vec<u8>> {
+            let bytes = load(&image.media)?;
             let [width, height] = image.dimensions;
             Self::validate_image_bytes(&image.media, &bytes, width, height)?;
             Ok(bytes)
         };
-        let parent = evidence.parent.as_ref().map(load).transpose()?;
-        let images = evidence.images.iter().map(load).collect::<Result<_>>()?;
+        let parent = evidence.parent.as_ref().map(&mut image_bytes).transpose()?;
+        let images = evidence
+            .images
+            .iter()
+            .map(&mut image_bytes)
+            .collect::<Result<_>>()?;
         Ok(PreparedLegacyCapture {
             evidence,
             parent,

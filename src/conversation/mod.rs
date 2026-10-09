@@ -572,12 +572,22 @@ impl Ledger {
                 && matches!(turn.outcome, Outcome::Prepared | Outcome::Interpreted),
             "capture request is unavailable or terminal"
         );
-        let load = |image: &capture_facts::HistoricalImage, ordinal| -> Result<PreparedSdkImage> {
-            let media = image.media();
-            let bytes = self.store.read_object(&ObjectRef {
+        Self::sdk_images_from_evidence(*capture, |media| {
+            self.store.read_object(&ObjectRef {
                 sha256: media.sha256.clone(),
                 bytes: media.bytes,
-            })?;
+            })
+        })
+    }
+    pub(super) fn sdk_images_from_evidence(
+        capture: CaptureEvidence,
+        mut load: impl FnMut(&Media) -> Result<Vec<u8>>,
+    ) -> Result<PreparedSdkCapture> {
+        let mut image_bytes = |image: &capture_facts::HistoricalImage,
+                               ordinal|
+         -> Result<PreparedSdkImage> {
+            let media = image.media();
+            let bytes = load(&media)?;
             Self::validate_image_bytes(&media, &bytes, image.dimensions[0], image.dimensions[1])?;
             Ok(PreparedSdkImage {
                 ordinal,
@@ -585,13 +595,13 @@ impl Ledger {
                 bytes,
             })
         };
-        let native_parent = load(&capture.facts.native_parent, None)?;
+        let native_parent = image_bytes(&capture.facts.native_parent, None)?;
         let images = capture
             .facts
             .images
             .iter()
             .enumerate()
-            .map(|(ordinal, image)| load(image, Some(ordinal as u32)))
+            .map(|(ordinal, image)| image_bytes(image, Some(ordinal as u32)))
             .collect::<Result<Vec<_>>>()?;
         Ok(PreparedSdkCapture {
             turn: capture.turn,

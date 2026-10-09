@@ -313,12 +313,18 @@ impl Ledger {
             turn.conversation == evidence.conversation && turn.sources.contains(&id),
             "development evidence link mismatch"
         );
-        let load = |media: &Media| {
+        Self::development_images_from_evidence(*evidence, |media| {
             self.store.read_object(&ObjectRef {
                 sha256: media.sha256.clone(),
                 bytes: media.bytes,
             })
-        };
+        })
+    }
+    pub(super) fn development_images_from_evidence(
+        evidence: DevelopmentCaptureHistory,
+        mut load: impl FnMut(&Media) -> Result<Vec<u8>>,
+    ) -> Result<PreparedDevelopmentCapture> {
+        evidence.validate()?;
         let completion = load(&evidence.completion)?;
         let original_png = load(&evidence.original_png)?;
         let images = evidence
@@ -341,7 +347,7 @@ impl Ledger {
             "development dimensions mismatch"
         );
         Ok(PreparedDevelopmentCapture {
-            evidence: *evidence,
+            evidence,
             completion,
             original_png,
             images,
