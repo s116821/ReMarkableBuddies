@@ -46,9 +46,9 @@ read-only monitoring. Main's eventual stop request is separately selected once.
 
 ## Focused verification
 
-Nine owned actor/schema Linux unittest methods pass: expected metadata mutation,
+Ten owned actor/schema Linux unittest methods pass: expected metadata mutation,
 damaged original ink, runtime-safety refusal, missing launch identity, failed
-primary evidence storage, complete synthetic 24-path partition/refusals, and exact/stale/missing/replayed stop-request handling. Nine insertion coordinator fixtures also pass, including bounded actor/guard admission, pinned USB transport, packet tamper refusal and default render-only behavior.
+primary evidence storage, abnormal candidate exit with failed evidence marker, complete synthetic 24-path partition/refusals, and exact/stale/missing/replayed stop-request handling. Nine insertion coordinator fixtures also pass, including bounded actor/guard admission, pinned USB transport, packet tamper refusal and default render-only behavior.
 They mock service/process observations and do not prove hardware or lifecycle.
 No historical private packet is required by these reusable fixtures.
 

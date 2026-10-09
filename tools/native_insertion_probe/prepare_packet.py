@@ -76,9 +76,9 @@ def partition(selected, files):
     # absence and full before/after content semantics remain Main admission.
     if len(document_files) != 14 or len(runtime_files) != 10 or {e["path"] for e in mutable_files} != mutable_paths:
         raise ValueError("Exact 14-document/10-runtime partition and two mutable paths required")
-    required_originals = {prefix + ".pdf", *(prefix + "/" + p + ".rm" for p in pages[:3])}
-    if not required_originals.issubset({e["path"] for e in immutable_files}):
-        raise ValueError("Original PDF and three existing ink files required")
+    expected_document = {prefix + "." + ext for ext in ("content", "metadata", "local", "pagedata", "pdf")} | {prefix + "/" + p + ".rm" for p in pages[:3]} | {prefix + ".thumbnails/" + p + ".png" for p in pages}
+    if {e["path"] for e in document_files} != expected_document:
+        raise ValueError("Exact fourteen fixture paths required; no substitute preservation files")
     expected_runtime = {"/usr/lib/libQt6" + name + ".so.6.10.3" for name in ("Core", "Qml", "Gui", "Quick", "Network")} | {"/usr/lib/libstdc++.so.6", "/lib/libc.so.6", "/lib/libm.so.6", "/lib/libgcc_s.so.1", "/lib/ld-linux-armhf.so.3"}
     if {e["path"] for e in runtime_files} != expected_runtime:
         raise ValueError("Exact ten reviewed provider paths required")

@@ -214,6 +214,7 @@ remove_guard_piece() {
     if test -e "$1"; then owned_remove "$1" "$2" || return 90; fi
 }
 restore() {
+    recovery_evidence_failed=no
     test ! -e "$root/query.unconfirmed" || return 90
     phase=restore-claim
     claim restore.claim || return 90
@@ -234,15 +235,21 @@ restore() {
             if test "$candidate_identity_known" = no; then
                 # The exact guard/activation policy owns this unit even when
                 # exec never reaches launch identity. Never invent a PID.
-                preserve_failure || :
+                preserve_failure || recovery_evidence_failed=yes
             fi
             query show --property=Result,ExecMainCode,ExecMainStatus,ActiveState,SubState,MainPID,Job xochitl.service
-            cp "$root/query.stdout" "$root/candidate.pre-stop"
+            if ! cp "$root/query.stdout" "$root/candidate.pre-stop"; then
+                recovery_evidence_failed=yes
+                preserve_failure || :
+            fi
             stop_unit candidate-stop-under-guard
             if test "$candidate_identity_known" = yes; then process_gone "$attempted" "$started"; fi
             query show --property=Result,ExecMainCode,ExecMainStatus,ActiveState,SubState,MainPID,Job xochitl.service
-            cp "$root/query.stdout" "$root/candidate.post-stop"
-            if ! grep -Fxq 'Result=success' "$root/candidate.post-stop"; then preserve_failure; fi
+            if ! cp "$root/query.stdout" "$root/candidate.post-stop"; then
+                recovery_evidence_failed=yes
+                preserve_failure || :
+            fi
+            if ! grep -Fxq 'Result=success' "$root/candidate.post-stop"; then preserve_failure || recovery_evidence_failed=yes; fi
         fi
         # An initial stock STOP may have failed without candidate admission.
         cgroup_gone
@@ -290,6 +297,7 @@ restore() {
     fi
     verify_stock
     record_document_preservation
+    test "$recovery_evidence_failed" = no || return 90
 }
 verify_stock() {
     phase=stock-verification

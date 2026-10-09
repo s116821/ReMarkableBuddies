@@ -52,6 +52,26 @@ verify_stock() { printf healthy > "$root/stock.restored"; }
             (root / "actor.sh").write_text('#!/bin/sh\nprintf healthy > "' + str(root / "stock.restored") + '"\n')
             fixture.shell(root, 'set +e; false; finish', 'preserve_failure() { return 90; }', expected=90)
             self.assertEqual((root / "stock.restored").read_text(), "healthy")
+    def test_abnormal_exit_and_failed_failure_marker_still_restore(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            overrides = """
+reserve() { return 0; }
+policy() { :; }
+cgroup_gone() { :; }
+process_gone() { :; }
+query() { printf 'Result=signal\n' > "$root/query.stdout"; }
+stop_unit() { printf stopped > "$root/stopped"; }
+value() { VALUE='path=/usr/bin/xochitl ; argv[]=/usr/bin/xochitl --system ;'; }
+preserve_failure() { return 90; }
+recovery_hashes() { :; }
+verify_stock() { printf restored > "$root/stock.restored"; }
+record_document_preservation() { :; }
+"""
+            fixture.shell(root,'stock_stopped=yes; candidate_started=yes; restore',overrides,expected=90)
+            self.assertTrue((root/'stopped').exists())
+            self.assertTrue((root/'stock-start.claim').exists())
+            self.assertTrue((root/'stock.restored').exists())
 
 class StopRequest(unittest.TestCase):
     def test_exact_request_admits_once_and_replay_refuses(self):
@@ -93,6 +113,8 @@ class Partition(unittest.TestCase):
         for bad in ({**selection,"target_page_id":pages[0]}, {**selection,"before_page_ids":pages[:5]}, {**selection,"target_page_id":"00000000-0000-0000-0000-000000000000"}):
             with self.assertRaises(ValueError): prepare.partition(bad,files)
         with self.assertRaises(ValueError): prepare.partition(selection, files[1:])
+        document_substitute = [dict(e) for e in files]; document_substitute[4]["path"] = prefix + ".unreviewed"
+        with self.assertRaises(ValueError): prepare.partition(selection, document_substitute)
         substituted = [dict(e) for e in files]; substituted[-1]["path"] = "/usr/lib/unreviewed.so"
         with self.assertRaises(ValueError): prepare.partition(selection, substituted)
 
