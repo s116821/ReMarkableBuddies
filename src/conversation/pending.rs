@@ -151,6 +151,7 @@ impl SelectedAdmission {
                 "Reader plan exceeds bound"
             );
             reader_uncertainty::validate(store, &snapshot, &request, None)?;
+            validate_selected_media(&snapshot, &request)?;
             source.verify_plan(&request, &plan)?;
             let publication = publish_in_store(
                 store,
@@ -366,27 +367,7 @@ fn publish_in_store(
         source_link,
         "pending exact source observation evidence absent"
     );
-    for media in &request.media {
-        media.validate()?;
-        ensure!(
-            snapshot
-                .media
-                .get(&media.sha256)
-                .is_some_and(|source| source.reference()
-                    == ObjectRef {
-                        sha256: media.sha256.clone(),
-                        bytes: media.bytes
-                    }),
-            "pending media outside pinned closure"
-        );
-        ensure!(
-            snapshot
-                .selected_records
-                .iter()
-                .any(|record| record.media_descriptors.contains(media)),
-            "pending media descriptor differs from immutable provenance"
-        );
-    }
+    validate_selected_media(&snapshot, &request)?;
     source_admission.verify_current(&request)?;
     let mut root = root.clone();
     root.updated_ms = request.updated_ms;
@@ -467,6 +448,39 @@ fn publish_in_store(
         receipt,
         reference,
     })
+}
+
+fn validate_selected_media(
+    snapshot: &crate::storage::selection::SelectedSnapshot,
+    request: &PendingIntentRequest,
+) -> Result<()> {
+    for media in &request.media {
+        media.validate()?;
+        ensure!(
+            snapshot.transaction.selected.media.iter().any(|reference|
+                reference.sha256 == media.sha256 && reference.bytes == media.bytes),
+            "pending media omitted or unavailable in selected manifest"
+        );
+        ensure!(
+            snapshot
+                .media
+                .get(&media.sha256)
+                .is_some_and(|source| source.reference()
+                    == ObjectRef {
+                        sha256: media.sha256.clone(),
+                        bytes: media.bytes
+                    }),
+            "pending media outside pinned closure"
+        );
+        ensure!(
+            snapshot
+                .selected_records
+                .iter()
+                .any(|record| record.media_descriptors.contains(media)),
+            "pending media descriptor differs from immutable provenance"
+        );
+    }
+    Ok(())
 }
 
 fn root_envelope_binding(envelope: &Envelope) -> Result<Option<Uuid>> {
@@ -1009,5 +1023,232 @@ pub(in crate::conversation) mod tests {
                 .token,
             replaced.token
         );
+    }
+}
+#[cfg(test)]
+mod selected_media_admission_tests {
+    struct PlanCheckSource {
+        source: MockSource,
+        binding: crate::workflow::selected_backend::ReaderBackendBinding,
+        plan_calls: Cell<usize>,
+    }
+    impl sealed::Sealed for PlanCheckSource {}
+    impl SourceAdmission for PlanCheckSource {
+        fn verify_current(&self, request: &PendingIntentRequest) -> Result<()> {
+            self.source.verify_current(request)
+        }
+    }
+    impl ReaderSourceAdmission for PlanCheckSource {
+        fn backend_binding(&self) -> &crate::workflow::selected_backend::ReaderBackendBinding {
+            &self.binding
+        }
+        fn verify_lower(
+            &self,
+            request: &PendingIntentRequest,
+            _: &ReaderHandoff,
+            _: usize,
+            _: &ReaderHandoff,
+        ) -> Result<()> {
+            self.verify_current(request)
+        }
+        fn verify_plan(&self, request: &PendingIntentRequest, _: &ReaderPlan) -> Result<()> {
+            self.plan_calls.set(self.plan_calls.get() + 1);
+            self.verify_current(request)
+        }
+        fn verify_handoff(&self, request: &PendingIntentRequest, _: &ReaderHandoff) -> Result<()> {
+            self.verify_current(request)
+        }
+    }
+
+    use super::tests::{Fixture, MockSource};
+    use super::*;
+    use crate::storage::selection::SelectionChange;
+    use crate::storage::{Coverage, ObjectRef, Omission};
+    use std::cell::Cell;
+    #[test]
+    fn omitted_selected_media_refuses_before_source_checks_and_included_control_publishes() {
+        for included in [false, true] {
+            let fixture = Fixture::new();
+            let (store, handle, token, mut request) = fixture.setup();
+            let handle = Arc::new(handle);
+            let snapshot = store
+                .selected_snapshot(handle.scope(), MAX_ITEMS)
+                .unwrap()
+                .unwrap();
+            let mut encoded = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::new_rgba8(2, 3)
+                .write_to(&mut encoded, image::ImageFormat::Png)
+                .unwrap();
+            let bytes = encoded.into_inner();
+            let media = Media {
+                sha256: digest(&bytes),
+                bytes: bytes.len() as u64,
+                media_type: "image/png".into(),
+            };
+            let id = Uuid::new_v4();
+            let source = Record::Source(ImageUse {
+                id,
+                conversation: request.conversation,
+                turn: request.turn,
+                image: media.clone(),
+                observation: request.source.clone(),
+                width: 2,
+                height: 3,
+                purpose: "synthetic omission check".into(),
+                ordinal: 0,
+                parent: None,
+                parent_dimensions: None,
+                crop: None,
+                transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                target: None,
+                captured_ms: 1,
+            });
+            let value = Envelope {
+                envelope_version: FORMAT,
+                namespace: Namespace::Source,
+                domain_schema_version: SCHEMA,
+                record_id: id,
+                revision_id: Uuid::new_v4(),
+                parents: BTreeSet::new(),
+                operation_id: Uuid::new_v4(),
+                actor_id: store.actor_id,
+                kind: Kind::Value,
+                payload: serde_json::to_value(source).unwrap(),
+                media_descriptors: vec![media.clone()],
+            };
+            Ledger::decode(&value).unwrap();
+            let reference = pin(&value).unwrap();
+            let mut selected = snapshot.transaction.selected.clone();
+            selected.transaction_id = Uuid::new_v4();
+            selected.records.push(reference.object.clone());
+            selected
+                .record_namespaces
+                .insert(reference.object.sha256.clone(), Namespace::Source);
+            if included {
+                selected.media = vec![ObjectRef {
+                    sha256: media.sha256.clone(),
+                    bytes: media.bytes,
+                }];
+                selected.media_coverage.push(Coverage::Included {
+                    sha256: media.sha256.clone(),
+                });
+            } else {
+                selected.media_coverage.push(Coverage::Omitted {
+                    sha256: media.sha256.clone(),
+                    reason: Omission::PolicyDisabled,
+                });
+            }
+            // Distinct historical source membership provides retained evidence
+            // without introducing a causal fork into Reader uncertainty validation.
+            let mut historical = value.clone();
+            historical.record_id = Uuid::new_v4();
+            historical.revision_id = Uuid::new_v4();
+            historical.operation_id = Uuid::new_v4();
+            historical.payload["record"]["id"] = serde_json::json!(historical.record_id);
+            historical.payload["record"]["purpose"] =
+                serde_json::json!("retained historical source");
+            let historical_ref = pin(&historical).unwrap();
+            let mut retained = selected.clone();
+            retained.transaction_id = Uuid::new_v4();
+            retained.records.push(historical_ref.object.clone());
+            retained
+                .record_namespaces
+                .insert(historical_ref.object.sha256.clone(), Namespace::Source);
+            retained.media = vec![ObjectRef {
+                sha256: media.sha256.clone(),
+                bytes: media.bytes,
+            }];
+            retained.media_coverage = vec![Coverage::Included {
+                sha256: media.sha256.clone(),
+            }];
+            let objects = BTreeMap::from([
+                (
+                    reference.object.sha256.clone(),
+                    serde_json::to_vec(&value).unwrap(),
+                ),
+                (
+                    historical_ref.object.sha256,
+                    serde_json::to_vec(&historical).unwrap(),
+                ),
+                (media.sha256.clone(), bytes),
+            ]);
+            let publication = handle
+                .activate(
+                    &token,
+                    SelectionChange {
+                        operation: Uuid::new_v4(),
+                        accepted_base_sha256: selected_base(&snapshot),
+                        selected,
+                        retained: vec![retained],
+                    },
+                    objects,
+                )
+                .unwrap();
+            request.selection = IntentSelectionEvidence::from_token(&publication.token);
+            request.evidence.push(reference);
+            request.media.push(media);
+            let check = MockSource {
+                source: request.source.clone(),
+                calls: Cell::new(0),
+                refuse_at: None,
+            };
+            let operation = request.operation;
+            let reader_request = request.clone();
+            let result = handle.publish_pending(Some(&publication.token), request, Some(&check));
+            let snapshot = store
+                .selected_snapshot(handle.scope(), MAX_ITEMS)
+                .unwrap()
+                .unwrap();
+            if included {
+                let PendingIntentPublication::Published {
+                    publication: accepted,
+                    receipt,
+                    ..
+                } = result.unwrap()
+                else {
+                    panic!("unexpected historical retry")
+                };
+                assert_eq!(snapshot.token, accepted.token);
+                assert_eq!(snapshot.transaction.selected.media.len(), 1);
+                assert!(!receipt.admitted_intent.unwrap().media.is_empty());
+                assert_eq!(check.calls.get(), 2);
+            } else {
+                let error = result.err().expect("omitted selected media must refuse");
+                assert!(error.to_string().contains("omitted"), "{error:#}");
+                assert_eq!(check.calls.get(), 0);
+                let plan_check = Rc::new(PlanCheckSource {
+                    source: MockSource {
+                        source: reader_request.source.clone(),
+                        calls: Cell::new(0),
+                        refuse_at: None,
+                    },
+                    binding: crate::workflow::selected_backend::ReaderBackendBinding::for_test(),
+                    plan_calls: Cell::new(0),
+                });
+                let plan = ReaderPlan::new(vec![ReaderHandoff::NextPage]).unwrap();
+                let error = handle
+                    .prepare_reader(
+                        Some(&publication.token),
+                        reader_request,
+                        plan_check.clone(),
+                        plan,
+                    )
+                    .err()
+                    .expect("omitted Reader media must refuse");
+                assert!(error.to_string().contains("omitted"), "{error:#}");
+                assert_eq!(plan_check.plan_calls.get(), 0);
+                assert_eq!(plan_check.source.calls.get(), 0);
+                assert_eq!(snapshot.token, publication.token);
+                assert!(snapshot.transaction.selected.media.is_empty());
+                assert!(store
+                    .selected_receipt(handle.scope(), operation)
+                    .unwrap()
+                    .is_none());
+            }
+        }
+    }
+
+    fn selected_base(snapshot: &crate::storage::selection::SelectedSnapshot) -> String {
+        snapshot.transaction.accepted_base_sha256.clone()
     }
 }
