@@ -1,0 +1,487 @@
+#!/bin/sh
+# Experimental one-attempt insertion actor; source-only, not a selected packet. Main reviews/selects the rendered private packet.
+set -eu
+umask 077
+root='@ROOT@'
+nonce='@NONCE@'
+parent=/run/systemd/system/xochitl.service.d
+guard="$parent/zz-rmb-insertion-$nonce-guard.conf"
+activation="$parent/zz-rmb-insertion-$nonce-activation.conf"
+unit_shadow=/run/systemd/system/xochitl.service
+vendor_shadow="$parent/xochitl-service-override.conf"
+original_pid='@STOCKPID@'
+original_start='@STOCKSTART@'
+deadline=0
+phase=admission
+stock_stopped=no
+candidate_started=no
+guard_installed=no
+activation_installed=no
+now() { awk '{print int($1)}' /proc/uptime; }
+remaining() { printf '%s\n' "$((deadline - $(now)))"; }
+reserve() { test "$(remaining)" -ge "$1"; }
+private() {
+    test -f "$1" && test ! -L "$1" || return 90
+    test "$(stat -c '%a %u %h' "$1")" = '600 0 1' || return 90
+}
+claim() { (set -C; printf '%s\n' "$nonce" > "$root/$1") 2>/dev/null; }
+final_lf() {
+    # Minimal BusyBox od lacks -A/-t. Check the read separately, then count LF.
+    tail -c 1 "$1" > "$root/final-byte" || return 90
+    lf_count=$(wc -l < "$root/final-byte") || return 90
+    test "$lf_count" -eq 1 || return 90
+}
+preserve_failure() {
+    # Failure evidence alone is idempotent; physical action claims never are.
+    if test -e "$root/insertion.failed" || test -L "$root/insertion.failed"; then
+        private "$root/insertion.failed" || return 90
+        test "$(wc -c < "$root/insertion.failed")" = 33 || return 90
+        final_lf "$root/insertion.failed" || return 90
+        test "$(cat "$root/insertion.failed")" = "$nonce" || return 90
+    else
+        claim insertion.failed || return 90
+    fi
+}
+start_of() {
+    # /proc stat comm may contain spaces. Fields after the final ')' start at field3.
+    sed 's/^.*) //' "/proc/$1/stat" | awk '{print $20}'
+}
+same_process() {
+    test -d "/proc/$1" && test "$(start_of "$1")" = "$2"
+}
+process_gone() {
+    test -d "/proc/$1" || return 0
+    current_start=$(start_of "$1") || return 90
+    case "$current_start" in ''|*[!0-9]*) return 90;; esac
+    test "$current_start" != "$2" || return 90
+}
+query() {
+    # Fixed systemctl client only, no generic command runner or external timeout.
+    test ! -e "$root/query.unconfirmed" || return 94
+    reserve 1 || return 90
+    q_limit=$(($(now) + 3))
+    test "$q_limit" -le "$deadline" || q_limit=$deadline
+    (exec /usr/bin/systemctl --no-pager "$@") > "$root/query.stdout" 2> "$root/query.stderr" &
+    q_pid=$!
+    q_start=''
+    if test -d "/proc/$q_pid"; then q_start=$(start_of "$q_pid") || :; fi
+    while kill -0 "$q_pid" 2>/dev/null; do
+        # A zombie is finished; wait reaps and retains the actual exit status.
+        if test -f "/proc/$q_pid/stat" &&
+           test "$(sed 's/^.*) //' "/proc/$q_pid/stat" | awk '{print $1}')" = Z; then break; fi
+        if test "$(now)" -ge "$q_limit"; then
+            if test -n "$q_start" && same_process "$q_pid" "$q_start"; then kill -KILL "$q_pid" || :; fi
+            # Never block in wait unless child exit/zombie is proved; failed reap is uncertainty.
+            if kill -0 "$q_pid" 2>/dev/null &&
+               test "$(sed 's/^.*) //' "/proc/$q_pid/stat" | awk '{print $1}')" != Z; then
+                claim query.unconfirmed || :
+                return 94
+            fi
+            wait "$q_pid" 2>/dev/null || :
+            return 91
+        fi
+        sleep 1
+    done
+    wait "$q_pid"
+}
+value() {
+    VALUE=''
+    query show --property="$1" --value xochitl.service || return $?
+    VALUE=$(cat "$root/query.stdout") || return 90
+}
+policy() {
+    case "$1" in "$root/stock.policy"|"$root/guard.policy") observed="$1.observed";; *) return 90;; esac
+    query show --property=OnFailure,OnFailureJobMode,FailureAction,StartLimitAction,Restart,RestartMode,TimeoutStopUSec,WatchdogUSec,KillMode,KillSignal,FinalKillSignal,SendSIGKILL,FragmentPath,DropInPaths,ExecStart xochitl.service || return $?
+    cp "$root/query.stdout" "$observed" || return 90
+    while IFS= read -r expected; do
+        test "$(grep -Fxc "$expected" "$observed")" = 1 || return 90
+    done < "$1"
+    if test "$1" = "$root/guard.policy"; then
+        guard_owned || return 90
+        expected_dropins="$vendor_shadow $guard"
+        if test -e "$activation"; then expected_dropins="$vendor_shadow $activation $guard"; fi
+        test "$(grep -Fxc "FragmentPath=$unit_shadow" "$observed")" = 1 || return 90
+        test "$(grep -Fxc "DropInPaths=$expected_dropins" "$observed")" = 1 || return 90
+        if test -e "$activation"; then
+            grep -Fq "path=/bin/sh ; argv[]=/bin/sh $root/launch.sh ;" "$observed" || return 90
+        else
+            grep -Fq 'path=/usr/bin/xochitl ; argv[]=/usr/bin/xochitl --system ;' "$observed" || return 90
+        fi
+    else
+        test "$(grep -Fxc 'FragmentPath=/usr/lib/systemd/system/xochitl.service' "$observed")" = 1 || return 90
+        test "$(grep -Fxc 'DropInPaths=/usr/lib/systemd/system/xochitl.service.d/xochitl-service-override.conf' "$observed")" = 1 || return 90
+    fi
+}
+matches_owned() {
+    private "$1" || return 90
+    test "$(sha256sum "$1" | awk '{print $1}')" = "$(sha256sum "$2" | awk '{print $1}')" || return 90
+}
+guard_owned() {
+    matches_owned "$unit_shadow" "$root/unit-shadow.service" || return 90
+    matches_owned "$vendor_shadow" "$root/vendor-shadow.conf" || return 90
+    matches_owned "$guard" "$root/guard.conf" || return 90
+}
+install_owned() {
+    test ! -e "$2" && test ! -L "$2" || return 90
+    (set -C; cat "$1" > "$2") || return 90
+    matches_owned "$2" "$1" || return 90
+}
+hashes() {
+    (cd "$root"; sha256sum -c packet.files) > "$root/packet-check"
+    sha256sum -c "$root/baseline.files" > "$root/hash-check"
+    sha256sum -c "$root/service.files" > "$root/service-check"
+}
+recovery_hashes() {
+    # Recovery safety is independent of document outcome. The complete 24-file
+    # baseline remains mandatory during admission; no document file is omitted.
+    (cd "$root"; sha256sum -c packet.files) > "$root/recovery-packet-check"
+    sha256sum -c "$root/runtime.files" > "$root/recovery-runtime-check"
+    sha256sum -c "$root/service.files" > "$root/recovery-service-check"
+}
+record_document_preservation() {
+    # This is evidence only, not a semantic insertion verdict. Exact intended
+    # content/metadata changes require Main's full backup/order/UUID readback.
+    if sha256sum -c "$root/document-immutable.files" > "$root/document-immutable-check" 2>&1; then
+        printf '%s immutable-document-hashes-pass\n' "$nonce" > "$root/document.preservation"
+    else
+        printf '%s immutable-document-hashes-fail\n' "$nonce" > "$root/document.preservation"
+        preserve_failure
+    fi
+    # Expected-mutable hashes are recorded even when unchanged, never approved.
+    if sha256sum -c "$root/document-mutable.files" > "$root/document-mutable-check" 2>&1; then
+        printf '%s mutable-prehashes-unchanged\n' "$nonce" > "$root/document.mutation"
+    else
+        printf '%s mutable-prehashes-differ-or-unreadable\n' "$nonce" > "$root/document.mutation"
+    fi
+}
+
+cgroup_gone() {
+    value Job || return $?
+    test -z "$VALUE" || return 90
+    value MainPID || return $?
+    test "$VALUE" = 0 || return 90
+    value ControlGroup || return $?
+    cg=$VALUE
+    test -z "$cg" || test "$cg" = /system.slice/xochitl.service || return 90
+    file=/sys/fs/cgroup/systemd/system.slice/xochitl.service/cgroup.procs
+    if test -n "$cg"; then test -f "$file" || return 90; fi
+    if test -e "$file"; then
+        test -f "$file" || return 90
+        members=$(cat "$file") || return 90
+        test -z "$members" || return 90
+    fi
+    return 0
+}
+stop_unit() {
+    phase="$1"
+    stop_end=$(($(now) + 95))
+    test "$stop_end" -le "$deadline" || stop_end=$deadline
+    query stop --no-block xochitl.service
+    while :; do
+        if (cgroup_gone); then break; fi
+        test ! -e "$root/query.unconfirmed" || return 94
+        test "$(now)" -lt "$stop_end"
+        reserve 1
+        sleep 1
+    done
+    test "$(now)" -lt "$stop_end"
+}
+wait_request() {
+    request_end=$(($(now) + 10))
+    while ! test -e "$root/$1"; do
+        test "$(now)" -lt "$request_end"
+        reserve 1
+        sleep 1
+    done
+    private "$root/$1"
+    test "$(cat "$root/$1")" = "$nonce"
+}
+owned_remove() {
+    matches_owned "$1" "$2" || return 90
+    rm "$1" || return 90
+}
+validate_guard_piece() {
+    if test -e "$1" || test -L "$1"; then
+        private "$root/$3" || return 90
+        test "$(cat "$root/$3")" = "$nonce" || return 90
+        matches_owned "$1" "$2" || return 90
+    else
+        test "$stock_stopped" = no && test ! -e "$root/guard.ready" || return 90
+    fi
+}
+remove_guard_piece() {
+    validate_guard_piece "$@" || return 90
+    if test -e "$1"; then owned_remove "$1" "$2" || return 90; fi
+}
+restore() {
+    test ! -e "$root/query.unconfirmed" || return 90
+    phase=restore-claim
+    claim restore.claim || return 90
+    if test "$stock_stopped" = yes; then
+        policy "$root/guard.policy"
+        if test "$candidate_started" = yes; then
+            candidate_identity_known=no
+            if test -e "$root/attempt.identity" || test -L "$root/attempt.identity"; then
+                if private "$root/attempt.identity" &&
+                   read attempted started extra < "$root/attempt.identity" &&
+                   test -z "${extra-}"; then
+                    case "$attempted:$started" in
+                        *[!0-9:]*|:*|*:) :;;
+                        *) if test "$attempted" -gt 1 && test "$started" -gt 0; then candidate_identity_known=yes; fi;;
+                    esac
+                fi
+            fi
+            if test "$candidate_identity_known" = no; then
+                # The exact guard/activation policy owns this unit even when
+                # exec never reaches launch identity. Never invent a PID.
+                preserve_failure || :
+            fi
+            query show --property=Result,ExecMainCode,ExecMainStatus,ActiveState,SubState,MainPID,Job xochitl.service
+            cp "$root/query.stdout" "$root/candidate.pre-stop"
+            stop_unit candidate-stop-under-guard
+            if test "$candidate_identity_known" = yes; then process_gone "$attempted" "$started"; fi
+            query show --property=Result,ExecMainCode,ExecMainStatus,ActiveState,SubState,MainPID,Job xochitl.service
+            cp "$root/query.stdout" "$root/candidate.post-stop"
+            if ! grep -Fxq 'Result=success' "$root/candidate.post-stop"; then preserve_failure; fi
+        fi
+        # An initial stock STOP may have failed without candidate admission.
+        cgroup_gone
+        process_gone "$original_pid" "$original_start"
+    fi
+    phase=owned-cleanup
+    reserve 90
+    # Validate the entire cleanup set before removing any protection.
+    if test "$activation_installed" = yes && (test -e "$activation" || test -L "$activation"); then matches_owned "$activation" "$root/activation.conf"; fi
+    if test "$guard_installed" = yes; then
+        validate_guard_piece "$guard" "$root/guard.conf" guard-file.install-intent
+        validate_guard_piece "$vendor_shadow" "$root/vendor-shadow.conf" vendor-shadow.install-intent
+        validate_guard_piece "$unit_shadow" "$root/unit-shadow.service" unit-shadow.install-intent
+        if test -e "$parent" || test -L "$parent"; then
+            test -d "$parent" && test ! -L "$parent"
+            test "$(stat -c '%a %u' "$parent")" = '700 0'
+            private "$root/guard.directory-created"
+            test "$(cat "$root/guard.directory-created")" = "$nonce"
+            for file in "$parent"/* "$parent"/.[!.]* "$parent"/..?*; do
+                if ! test -e "$file" && ! test -L "$file"; then continue; fi
+                test "$file" = "$guard" || test "$file" = "$activation" || test "$file" = "$vendor_shadow"
+            done
+        fi
+    fi
+    if test "$activation_installed" = yes && (test -e "$activation" || test -L "$activation"); then owned_remove "$activation" "$root/activation.conf"; fi
+    if test "$guard_installed" = yes; then
+        remove_guard_piece "$guard" "$root/guard.conf" guard-file.install-intent
+        remove_guard_piece "$vendor_shadow" "$root/vendor-shadow.conf" vendor-shadow.install-intent
+        remove_guard_piece "$unit_shadow" "$root/unit-shadow.service" unit-shadow.install-intent
+        if test -e "$parent" || test -L "$parent"; then
+            test -d "$parent" && test ! -L "$parent"
+            test "$(stat -c '%a %u' "$parent")" = '700 0'
+            rmdir "$parent"
+        fi
+        query daemon-reload
+    fi
+    policy "$root/stock.policy"
+    value ExecStart
+    case "$VALUE" in *'path=/usr/bin/xochitl ; argv[]=/usr/bin/xochitl --system ;'*) :;; *) return 90;; esac
+    recovery_hashes
+    if test "$stock_stopped" = yes; then
+        phase=stock-start-once
+        claim stock-start.claim
+        query start --no-block xochitl.service
+    fi
+    verify_stock
+    record_document_preservation
+}
+verify_stock() {
+    phase=stock-verification
+    verify_end=$(($(now) + 80))
+    test "$verify_end" -le "$deadline" || verify_end=$deadline
+    while :; do
+        ready=no
+        if query is-active --quiet xochitl.service &&
+           query is-active --quiet reader-buddy.service &&
+           query is-active --quiet rm-sync.service &&
+           value Job && test -z "$VALUE"; then ready=yes; fi
+        test "$(now)" -lt "$verify_end"
+        if test "$ready" = yes; then break; fi
+        sleep 1
+    done
+    value MainPID
+    stock_pid=$VALUE
+    case "$stock_pid" in ''|*[!0-9]*) return 90;; esac
+    test "$stock_pid" -gt 1
+    stock_start=$(start_of "$stock_pid")
+    test "$(sha256sum "/proc/$stock_pid/exe" | awk '{print $1}')" = '@EXEHASH@'
+    awk -v payload="$root/payload.so" '$NF==payload {found=1} END {exit found}' "/proc/$stock_pid/maps"
+    policy "$root/stock.policy"
+    recovery_hashes
+    value MainPID
+    test "$VALUE" = "$stock_pid"
+    same_process "$stock_pid" "$stock_start"
+    test ! -e "$guard" && test ! -e "$activation"
+    test ! -e "$unit_shadow" && test ! -L "$unit_shadow"
+    test ! -e "$vendor_shadow" && test ! -L "$vendor_shadow"
+    value DropInPaths
+    test "$VALUE" = /usr/lib/systemd/system/xochitl.service.d/xochitl-service-override.conf
+    members=$(awk 'NR>32 {exit 1} {print}' /sys/fs/cgroup/systemd/system.slice/xochitl.service/cgroup.procs)
+    for member in $members; do
+        case "$member" in ''|*[!0-9]*) return 90;; esac
+        test "$member" -gt 1
+        awk -v payload="$root/payload.so" '$NF==payload {found=1} END {exit found}' "/proc/$member/maps"
+    done
+    reserve 1
+    printf '%s %s %s stock-verified\n' "$nonce" "$stock_pid" "$stock_start" > "$root/stock.restored"
+}
+finish() {
+    primary=$?
+    trap - EXIT HUP INT TERM
+    # Result storage can fail (e.g. full filesystem). It must not skip the
+    # independently validated recovery child; keep evidence best-effort here.
+    set +e
+    printf '%s phase=%s primary_exit=%s\n' "$nonce" "$phase" "$primary" > "$root/insertion.outcome"
+    evidence=$?
+    if test "$primary" -ne 0; then preserve_failure; failure_evidence=$?; else failure_evidence=0; fi
+    /bin/sh "$root/actor.sh" --restore
+    recovery=$?
+    set -e
+    if test "$recovery" -ne 0; then
+        printf '%s phase=%s recovery-failed guard-may-remain\n' "$nonce" "$phase" > "$root/recovery.failed"
+        exit 90
+    fi
+    if test "$evidence" -ne 0 || test "$failure_evidence" -ne 0; then exit 90; fi
+    exit "$primary"
+}
+validate_root() {
+    test -d "$root" && test ! -L "$root"
+    test "$(stat -c '%a %u' "$root")" = '700 0'
+    private "$root/owner"
+    test "$(cat "$root/owner")" = "$nonce"
+    private "$root/deadline"
+    read armed_at deadline extra < "$root/deadline"
+    test -z "${extra-}"
+    case "$armed_at:$deadline" in *[!0-9:]*|:*|*:) return 90;; esac
+    test "$((deadline - armed_at))" = 360
+    test "$(now)" -ge "$armed_at"
+    reserve 1
+}
+wait_insertion_stop() {
+    phase=observe-insertion-stop-request
+    while :; do
+        if test -e "$root/stop.request" || test -L "$root/stop.request"; then
+            # Main writes this only after bounded original creation result
+            # observation. It authorizes stopping, not successful insertion.
+            private "$root/stop.request"
+            test "$(wc -c < "$root/stop.request")" = 33
+            final_lf "$root/stop.request"
+            test "$(cat "$root/stop.request")" = "$nonce"
+            private "$root/attempt.identity"
+            read attempted started extra < "$root/attempt.identity"
+            test -z "${extra-}"
+            case "$attempted:$started" in *[!0-9:]*|:*|*:) return 90;; esac
+            test "$attempted" -gt 1 && test "$started" -gt 0
+            same_process "$attempted" "$started" || return 93
+            claim stop.admitted
+            return 0
+        fi
+        # Host loss or missing callback/request reaches the existing deadline
+        # reserve and exits into the same independent guarded restoration.
+        test "$(now)" -lt "$observe_end"
+        sleep 1
+    done
+}
+
+main() {
+    test "$#" = 0
+    validate_root
+    reserve 340
+    if ! test -e "$root/actor.lock"; then (set -C; : > "$root/actor.lock") || :; fi
+    private "$root/actor.lock"
+    exec 9<> "$root/actor.lock"
+    flock -n 9
+    claim actor.claim
+    trap finish EXIT
+    trap 'exit 92' HUP INT TERM
+    hashes
+    policy "$root/stock.policy"
+    value MainPID
+    test "$VALUE" = "$original_pid"
+    same_process "$original_pid" "$original_start"
+    test "$(sha256sum "/proc/$original_pid/exe" | awk '{print $1}')" = '@EXEHASH@'
+    value ExecStart
+    case "$VALUE" in *'path=/usr/bin/xochitl ; argv[]=/usr/bin/xochitl --system ;'*) :;; *) return 90;; esac
+    value DropInPaths
+    test "$VALUE" = /usr/lib/systemd/system/xochitl.service.d/xochitl-service-override.conf
+    value ControlGroup
+    test "$VALUE" = /system.slice/xochitl.service
+    test -f /sys/fs/cgroup/systemd/system.slice/xochitl.service/cgroup.procs
+    value Job
+    test -z "$VALUE"
+    test ! -e "$parent" && test ! -L "$parent"
+    test ! -e "$unit_shadow" && test ! -L "$unit_shadow"
+    claim actor.ready
+    phase=prearm-request
+    wait_request guard.request
+    phase=install-guard
+    claim guard.install-intent
+    mkdir -m700 "$parent"
+    claim guard.directory-created
+    claim unit-shadow.install-intent
+    install_owned "$root/unit-shadow.service" "$unit_shadow"
+    claim vendor-shadow.install-intent
+    install_owned "$root/vendor-shadow.conf" "$vendor_shadow"
+    claim guard-file.install-intent
+    install_owned "$root/guard.conf" "$guard"
+    guard_installed=yes
+    query daemon-reload
+    policy "$root/guard.policy"
+    claim guard.ready
+    phase=activation-request
+    wait_request start.request
+    reserve 310
+    claim activation.claim
+    claim stock-stop.claim
+    stock_stopped=yes
+    stop_unit initial-stock-stop-under-guard
+    process_gone "$original_pid" "$original_start"
+    query show --property=Result,ExecMainCode,ExecMainStatus xochitl.service
+    cp "$root/query.stdout" "$root/initial-stock-stop"
+    grep -Fxq 'Result=success' "$root/initial-stock-stop"
+    reserve 195
+    phase=install-activation
+    claim activation.install-intent
+    cp "$root/activation.conf" "$activation"
+    activation_installed=yes
+    query daemon-reload
+    policy "$root/guard.policy"
+    value ExecStart
+    case "$VALUE" in *"$root/launch.sh"*) :;; *) return 90;; esac
+    candidate_started=yes
+    claim candidate-start.claim
+    query start --no-block xochitl.service
+    observe_end=$(($(now) + 30))
+    reserve_cutoff=$((deadline - 185))
+    test "$observe_end" -le "$reserve_cutoff" || observe_end=$reserve_cutoff
+    wait_insertion_stop
+
+}
+# Main-only execution boundary; fixtures source exact functions, never this line.
+case "${1-}" in
+    '') main;;
+    --restore)
+        test "$#" = 1
+        validate_root
+        # Recovery is the child of the singleton actor, retaining its locked FD.
+        private "$root/actor.lock"
+        private "$root/actor.claim"
+        test "$(cat "$root/actor.claim")" = "$nonce"
+        test "$(stat -Lc '%d %i' /proc/self/fd/9)" = "$(stat -c '%d %i' "$root/actor.lock")"
+        flock -n 9
+        for name in stock-stop.claim guard.install-intent guard.directory-created unit-shadow.install-intent vendor-shadow.install-intent guard-file.install-intent activation.install-intent candidate-start.claim; do
+            if test -e "$root/$name"; then private "$root/$name"; test "$(cat "$root/$name")" = "$nonce"; fi
+        done
+        test ! -e "$root/stock-stop.claim" || stock_stopped=yes
+        test ! -e "$root/guard.install-intent" || guard_installed=yes
+        test ! -e "$root/activation.install-intent" || activation_installed=yes
+        test ! -e "$root/candidate-start.claim" || candidate_started=yes
+        restore;;
+    *) exit 90;;
+esac
