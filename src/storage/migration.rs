@@ -41,6 +41,7 @@ impl Store {
             inner.index.unavailable == 0,
             "cannot migrate unavailable committed data"
         );
+        selection::refuse_selected_maintenance(&source)?;
         let next = Uuid::new_v4();
         Self::create_generation(&self.paths.data, next)?;
         let staged = self.generation(next);

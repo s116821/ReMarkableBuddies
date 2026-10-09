@@ -1,7 +1,12 @@
+pub(crate) mod erase_plan;
 pub mod history;
 pub mod indicator;
 mod navigation;
 pub mod orchestrator;
+mod reader_attempt;
+#[cfg(test)]
+pub(crate) use reader_attempt::assert_attachment_behavior;
+pub(crate) mod selected_backend;
 pub mod symbol_pool;
 pub mod xochitl_integration;
 
@@ -23,6 +28,11 @@ pub enum AnswerPageType {
     /// Page is not valid for answers
     Invalid,
 }
+pub enum AcquiredEvidence {
+    Legacy { images: Vec<Vec<u8>> },
+    Sdk(Box<remarkable_open_sdk::capture::CapturedBatch>),
+    Development(Box<remarkable_open_sdk::development_capture::ReadOnlyDevelopmentCapture>),
+}
 
 // Image comparison mask constants - skip UI elements that can change between screenshots
 // These are in virtual coordinates (768x1024) and work for all devices since screenshots are normalized
@@ -43,6 +53,8 @@ const BLANK_PAGE_SAMPLE_RATE: u32 = 2;
 /// Main workflow coordinator
 pub struct Workflow {
     device: Box<dyn DeviceBackend>,
+    selected: Option<selected_backend::SelectedBackendFacade>,
+    development_non_output: bool,
     frame: Frame,
     debug_dump: bool,
     iteration_count: u32,
@@ -66,6 +78,8 @@ impl Workflow {
     pub fn with_device(device: Box<dyn DeviceBackend>, debug_dump: bool) -> Self {
         Self {
             device,
+            selected: None,
+            development_non_output: false,
             frame: Frame::default(),
             debug_dump,
             iteration_count: 0,
@@ -73,6 +87,54 @@ impl Workflow {
             input_failed: false,
             history: history::History::default(),
         }
+    }
+
+    pub(crate) fn with_selected(
+        facade: selected_backend::SelectedBackendFacade,
+        debug_dump: bool,
+    ) -> Self {
+        let mut workflow = Self::with_device(
+            Box::new(selected_backend::RefusingBackend::new()),
+            debug_dump,
+        );
+        workflow.selected = Some(facade);
+        workflow
+    }
+    /// Source-only transport of an already-owned capture; no production bootstrap,
+    /// native freshness, trigger setup or output capability follows from this.
+    pub(crate) fn with_selected_development_capture(
+        facade: selected_backend::SelectedBackendFacade,
+        capture: remarkable_open_sdk::development_capture::ReadOnlyDevelopmentCapture,
+        debug_dump: bool,
+    ) -> Self {
+        let mut workflow = Self::with_device(
+            Box::new(selected_backend::RefusingBackend::with_capture(capture)),
+            debug_dump,
+        );
+        workflow.selected = Some(facade);
+        workflow.development_non_output = true;
+        workflow
+    }
+    pub(crate) fn is_selected(&self) -> bool {
+        self.selected.is_some()
+    }
+    pub(crate) fn dispatch_reader(
+        &mut self,
+        context: Option<&crate::conversation::ReaderContext>,
+        ordinal: usize,
+        handoff: &crate::conversation::ReaderHandoff,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            !self.development_non_output,
+            "Development Workflow cannot dispatch Reader effects"
+        );
+        let facade = self
+            .selected
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("Unbound Workflow cannot adopt selected context"))?;
+        let context =
+            context.ok_or_else(|| anyhow::anyhow!("Selected effect missing Reader context"))?;
+        facade.dispatch(context, ordinal, handoff)
     }
 
     pub fn delay(&mut self, duration: std::time::Duration) {
@@ -130,6 +192,59 @@ impl Workflow {
 
     pub fn detail_images_base64(&self) -> Result<Vec<String>> {
         self.device.detail_images()
+    }
+    /// Select first, acquire once, freeze all actual provider bytes under the guard.
+    pub fn acquire_reader_evidence(&mut self) -> Result<AcquiredEvidence> {
+        use crate::device::backend::AcquisitionKind;
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        self.check_request_progress()?;
+        match self.device.acquisition_kind() {
+            AcquisitionKind::Unsupported => anyhow::bail!("Reader acquisition unsupported"),
+            AcquisitionKind::LegacyUnqualified => {
+                let (_, png) = self.capture_screenshot_with_data()?;
+                let details = self.device.detail_images()?;
+                self.check_request_progress()?;
+                anyhow::ensure!(details.len() < 15, "legacy provider-image bound");
+                let mut images = vec![png];
+                let mut total = images[0].len();
+                for detail in details {
+                    anyhow::ensure!(detail.len() <= 44_739_244, "legacy encoded detail bound");
+                    let bytes = STANDARD.decode(detail)?;
+                    anyhow::ensure!(bytes.len() <= 32 * 1024 * 1024, "legacy image bound");
+                    total = total
+                        .checked_add(bytes.len())
+                        .ok_or_else(|| anyhow::anyhow!("legacy batch overflow"))?;
+                    anyhow::ensure!(total <= 64 * 1024 * 1024, "legacy batch bound");
+                    images.push(bytes);
+                }
+                Ok(AcquiredEvidence::Legacy { images })
+            }
+            AcquisitionKind::Development => {
+                let capture = self.device.capture_development()?;
+                self.check_request_progress()?;
+                // The original PNG is not a legacy 768x1024 overview. Attempt prepares
+                // provider images once through the shared pure Reader recipe.
+                self.frame = Frame::default();
+                Ok(AcquiredEvidence::Development(Box::new(capture)))
+            }
+            AcquisitionKind::Sdk => {
+                let batch = self.device.capture_sdk()?;
+                self.check_request_progress()?;
+                let overview = batch
+                    .images()
+                    .first()
+                    .ok_or_else(|| anyhow::anyhow!("SDK overview absent"))?;
+                anyhow::ensure!(
+                    overview.role() == remarkable_open_sdk::capture::ImageRole::Overview,
+                    "SDK provider order mismatch"
+                );
+                self.frame = Frame {
+                    png: overview.bytes().to_vec(),
+                    details: vec![],
+                };
+                Ok(AcquiredEvidence::Sdk(Box::new(batch)))
+            }
+        }
     }
 
     pub fn current_image_base64(&self) -> String {
@@ -283,34 +398,8 @@ impl Workflow {
         let img = image::load_from_memory(screenshot_data)?;
         let gray_img = img.to_luma8();
 
-        // Define ink detection threshold (darker pixels are ink)
-        const INK_THRESHOLD: u8 = 200; // Pixels darker than this are considered ink
-        const MARGIN: i32 = 2; // Add margin around detected ink
-
-        // Scan the region and identify rows with ink
-        let mut rows_with_ink = Vec::new();
-        for y in region.y..(region.y + region.height).min(1024) {
-            if y < 0 || y >= gray_img.height() as i32 {
-                continue;
-            }
-
-            let mut has_ink = false;
-            for x in region.x..(region.x + region.width).min(768) {
-                if x < 0 || x >= gray_img.width() as i32 {
-                    continue;
-                }
-
-                let pixel = gray_img.get_pixel(x as u32, y as u32);
-                if pixel[0] < INK_THRESHOLD {
-                    has_ink = true;
-                    break;
-                }
-            }
-
-            if has_ink {
-                rows_with_ink.push(y);
-            }
-        }
+        let plan = erase_plan::smart_erase_plan(region, &gray_img);
+        let rows_with_ink = &plan.ink_rows;
 
         debug!(
             "Found {} rows with ink out of {} total rows",
@@ -335,7 +424,7 @@ impl Workflow {
                 }
             }
             // Highlight rows to be erased in yellow
-            for &y in &rows_with_ink {
+            for &y in rows_with_ink {
                 for x in region.x.max(0)..((region.x + region.width).min(768)) {
                     if x >= 0
                         && x < debug_img.width() as i32
@@ -357,16 +446,9 @@ impl Workflow {
             }
         }
 
-        // Erase rows with ink (with margin)
-        for &y in &rows_with_ink {
-            let erase_y_start = (y - MARGIN).max(region.y).max(0);
-            let erase_y_end = (y + MARGIN + 1).min(region.y + region.height).min(1024);
-
-            for erase_y in erase_y_start..erase_y_end {
-                let top_left = (region.x, erase_y);
-                let bottom_right = ((region.x + region.width).min(768), erase_y + 1);
-                self.device.erase(top_left, bottom_right)?;
-            }
+        // Keep repeated overlapping rectangles as distinct ordered calls.
+        for (from, to) in plan.rectangles {
+            self.device.erase(from, to)?;
         }
 
         Ok(())
@@ -377,28 +459,7 @@ impl Workflow {
         self.invalidate_history();
         info!("Drawing reference symbol '{}' at ({}, {})", symbol, x, y);
 
-        // Convert symbol to bitmap - larger size for better visibility
-        let size = 40; // Symbol size in pixels (increased from 20)
-        let bitmap = symbol_pool::SymbolPool::symbol_to_bitmap(symbol, size);
-
-        // Draw the bitmap at the specified location
-        // Note: This draws the full bitmap starting at (x, y)
-        // For centered placement, we'd offset by -size/2
-        let offset_x = x - (size as i32 / 2);
-        let offset_y = y - (size as i32 / 2);
-
-        // Create a positioned bitmap by building a temporary full-size bitmap
-        // This is not optimal but works for MVP
-        let mut positioned_bitmap = vec![vec![false; 768]; 1024];
-        for (dy, row) in bitmap.iter().enumerate() {
-            for (dx, &pixel) in row.iter().enumerate() {
-                let px = offset_x + dx as i32;
-                let py = offset_y + dy as i32;
-                if (0..768).contains(&px) && (0..1024).contains(&py) {
-                    positioned_bitmap[py as usize][px as usize] = pixel;
-                }
-            }
-        }
+        let positioned_bitmap = selected_backend::positioned_symbol(x, y, symbol);
 
         self.device.bitmap(&positioned_bitmap)?;
 
@@ -449,6 +510,7 @@ impl Workflow {
 
     /// History failures never type error text, draw an X or retry a native edit.
     pub fn history_action(&mut self, action: history::Action) -> Result<bool> {
+        anyhow::ensure!(!self.is_selected(), "Selected native history unsupported");
         if self.history.state() == history::State::Empty {
             return Ok(false);
         }

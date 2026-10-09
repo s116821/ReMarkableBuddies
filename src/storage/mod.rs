@@ -3,15 +3,19 @@ pub mod drive;
 pub mod files;
 pub mod migration;
 mod recovery;
+#[cfg(test)]
+mod selected_projection_tests;
+pub mod selection;
 pub mod sync;
 pub mod types;
 use anyhow::{ensure, Context, Result};
+pub use recovery::BackupInspection;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
-    sync::{mpsc::SyncSender, Mutex},
+    sync::{mpsc::SyncSender, Arc, Mutex},
 };
 pub use types::*;
 pub const CONTRACT_V1: &str = include_str!("contract-v1.json");
@@ -89,6 +93,7 @@ struct Inner {
     generation: Uuid,
     index: Index,
     fault: Fault,
+    legacy_sync_handles: usize,
 }
 pub struct Store {
     pub paths: StorePaths,
@@ -98,7 +103,39 @@ pub struct Store {
     wake: Mutex<Option<SyncSender<()>>>,
 }
 
+pub(crate) struct LegacySyncLease(Arc<Store>);
+impl Drop for LegacySyncLease {
+    fn drop(&mut self) {
+        if let Ok(mut inner) = self.0.inner.lock() {
+            inner.legacy_sync_handles -= 1;
+        }
+    }
+}
+
+impl Drop for Store {
+    fn drop(&mut self) {
+        // A concurrent subprocess fork can temporarily inherit this descriptor.
+        // Closing our copy alone would retain flock until that child execs.
+        let _ = self._lease.unlock();
+    }
+}
+
 impl Store {
+    pub(crate) fn legacy_sync_lease(self: &Arc<Self>) -> Result<LegacySyncLease> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        ensure!(
+            !selection::has_selected(&self.generation(inner.generation))?,
+            "selected storage requires coordinated sync, not the legacy all-history worker"
+        );
+        inner.legacy_sync_handles = inner
+            .legacy_sync_handles
+            .checked_add(1)
+            .context("sync lease overflow")?;
+        Ok(LegacySyncLease(self.clone()))
+    }
     pub fn open(paths: StorePaths) -> Result<Self> {
         paths.validate()?;
         let identity_path = paths.data.join("identity.json");
@@ -179,13 +216,11 @@ impl Store {
                 generation,
                 index: Index::default(),
                 fault: Fault::None,
+                legacy_sync_handles: 0,
             }),
             wake: Mutex::new(None),
         };
-        ensure!(
-            files::json::<u32>(&store.generation(generation).join("format.json"), 64)? == FORMAT,
-            "unsupported generation format"
-        );
+        selection::validate_generation(&store.generation(generation), store.actor_id, generation)?;
         for directory in [
             store.paths.data.clone(),
             store.paths.credentials.clone(),
@@ -194,6 +229,8 @@ impl Store {
             store.generation(generation),
             store.generation(generation).join("objects"),
             store.generation(generation).join("commits"),
+            store.generation(generation).join("selections"),
+            store.generation(generation).join("selection-history"),
         ] {
             files::cleanup_staging(&directory)?;
         }
@@ -211,7 +248,7 @@ impl Store {
         files::atomic_json(
             &store.paths.data.join("capabilities.json"),
             &serde_json::json!({
-            "contract_version": 1, "schema_file":"contract-v1.json", "store_versions": [1], "envelope_versions": [1], "config_versions": [1],
+            "contract_version": 1, "schema_file":"contract-v1.json", "store_versions": [1, 2], "selected_store_feature": "actor-generation-bound-v1", "envelope_versions": [1], "config_versions": [1],
                 "paths": store.paths, "lock": "stable-inode-exclusive-os-lease", "linux_lock": "flock",
                 "maintenance": "stop-confirm-lock-stage-commit-release-restart", "namespaces": ["conversation","source","export-association","subject-memory","handwriting"], "sync": "optional-immutable-drive-v1"
             }),
@@ -255,6 +292,7 @@ impl Store {
                 Err(_) => index.unavailable += 1,
             }
         }
+        pending.extend(selection::recover_selected(&root, generation)?);
         while !pending.is_empty() {
             let before = pending.len();
             pending.retain(|(manifest, records)| {
@@ -403,6 +441,91 @@ impl Store {
         }
         Ok(heads.pop().filter(|e| e.kind == Kind::Value))
     }
+    /// One bounded snapshot of heads, including conflicts and tombstones.
+    /// Refuses an oversized result instead of returning a partial history.
+    pub fn snapshot_heads_matching(
+        &self,
+        namespaces: &[Namespace],
+        limit: usize,
+        matches: impl Fn(&Envelope) -> bool,
+    ) -> Result<Vec<Envelope>> {
+        ensure!((1..=MAX_ITEMS).contains(&limit), "invalid inspection bound");
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        let selected = inner.index.heads.iter().filter(|((ns, _), heads)| {
+            namespaces.contains(ns)
+                && heads.iter().any(|revision| {
+                    inner
+                        .index
+                        .records
+                        .get(revision)
+                        .is_some_and(|(record, _)| matches(record))
+                })
+        });
+        let mut result = Vec::new();
+        let mut metadata_bytes = 0usize;
+        for (_, heads) in selected {
+            ensure!(
+                result
+                    .len()
+                    .checked_add(heads.len())
+                    .is_some_and(|n| n <= limit),
+                "inspection exceeds explicit bound"
+            );
+            for revision in heads {
+                let record = &inner
+                    .index
+                    .records
+                    .get(revision)
+                    .context("head record unavailable")?
+                    .0;
+                metadata_bytes = metadata_bytes
+                    .checked_add(serde_json::to_vec(record)?.len())
+                    .context("inspection byte overflow")?;
+                ensure!(
+                    metadata_bytes <= MAX_METADATA,
+                    "inspection exceeds metadata byte bound"
+                );
+                result.push(record.clone());
+            }
+        }
+        Ok(result)
+    }
+    /// Bounded retained revisions, including superseded facts; never a live lookup.
+    pub fn snapshot_revisions_matching(
+        &self,
+        namespaces: &[Namespace],
+        limit: usize,
+        matches: impl Fn(&Envelope) -> bool,
+    ) -> Result<Vec<Envelope>> {
+        ensure!((1..=MAX_ITEMS).contains(&limit), "invalid inspection bound");
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        let mut result = Vec::new();
+        let mut metadata_bytes = 0usize;
+        for (record, _) in inner.index.records.values() {
+            if !namespaces.contains(&record.namespace) || !matches(record) {
+                continue;
+            }
+            ensure!(
+                result.len() < limit,
+                "retained inspection exceeds explicit bound"
+            );
+            metadata_bytes = metadata_bytes
+                .checked_add(serde_json::to_vec(record)?.len())
+                .context("retained inspection byte overflow")?;
+            ensure!(
+                metadata_bytes <= MAX_METADATA,
+                "retained inspection exceeds metadata byte bound"
+            );
+            result.push(record.clone());
+        }
+        Ok(result)
+    }
     pub fn unavailable_commits(&self) -> Result<usize> {
         Ok(self
             .inner
@@ -410,6 +533,24 @@ impl Store {
             .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?
             .index
             .unavailable)
+    }
+    /// Count retained revision references; this is inspection, never garbage collection.
+    pub fn media_references(&self, media: &Media) -> Result<usize> {
+        media.validate()?;
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        Ok(inner
+            .index
+            .records
+            .values()
+            .filter(|(e, _)| {
+                e.media_descriptors
+                    .iter()
+                    .any(|m| m.sha256 == media.sha256 && m.bytes == media.bytes)
+            })
+            .count())
     }
     pub fn set_fault(&self, fault: Fault) -> Result<()> {
         self.inner

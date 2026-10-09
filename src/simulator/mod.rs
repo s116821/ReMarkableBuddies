@@ -1,7 +1,11 @@
 //! Deterministic Reader scenarios through the production orchestrator.
 mod device;
 mod raster;
+#[cfg(test)]
+mod reader_persistence_tests;
 pub mod scenario;
+#[cfg(test)]
+mod smart_erase_tests;
 
 use crate::{LLMEngine, OpenAI, Orchestrator, Workflow};
 use anyhow::{ensure, Context, Result};
@@ -15,6 +19,37 @@ use std::{
     path::Path,
     rc::Rc,
 };
+struct SimulatorLedger(std::path::PathBuf);
+impl SimulatorLedger {
+    fn new() -> Self {
+        Self(std::env::temp_dir().join(format!(
+            "rmb-simulator-ledger-{}",
+            crate::storage::Uuid::new_v4()
+        )))
+    }
+    fn open(&self) -> Result<crate::conversation::Ledger> {
+        Ok(crate::conversation::Ledger::new(std::sync::Arc::new(
+            crate::storage::Store::open(crate::storage::StorePaths {
+                data: self.0.join("data"),
+                cache: self.0.join("cache"),
+                credentials: self.0.join("secrets"),
+            })?,
+        )))
+    }
+}
+impl Drop for SimulatorLedger {
+    fn drop(&mut self) {
+        // Only the exact UUID-named directory created by this fixture is owned.
+        if self.0.parent() == Some(std::env::temp_dir().as_path())
+            && self
+                .0
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("rmb-simulator-ledger-"))
+        {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+}
 
 struct ScriptedModel {
     state: Shared,
@@ -175,7 +210,8 @@ fn execute_with_model<M: LLMEngine>(
     model_mode: &'static str,
 ) -> Result<Run> {
     let workflow = Workflow::with_device(Box::new(SimDevice(state.clone())), false);
-    let mut orchestrator = Orchestrator::new(workflow, model);
+    let ledger_fixture = SimulatorLedger::new();
+    let mut orchestrator = Orchestrator::new(workflow, model, ledger_fixture.open()?);
     let mut errors = Vec::new();
     for (index, iteration) in scenario.iterations.iter().enumerate() {
         if let Some(page) = iteration.page {
@@ -530,7 +566,9 @@ mod request_retirement_tests {
                 state: state.clone(),
                 change,
             };
-            let mut orchestrator = Orchestrator::new(workflow, model);
+            let ledger_fixture = SimulatorLedger::new();
+            let mut orchestrator =
+                Orchestrator::new(workflow, model, ledger_fixture.open().unwrap());
             orchestrator.set_trigger_enabled(false);
             assert!(orchestrator.run_iteration().is_err());
             assert!(orchestrator.run_iteration().is_err());
