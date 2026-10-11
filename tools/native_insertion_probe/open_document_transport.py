@@ -24,6 +24,7 @@ class SSHAdapter:
         self.identity = None
         self.root_inode = None
         self.counter = 0
+        self.open_frames = 0
         self.tap_attempted = False
         self.arm_attempted = False
         self.stop_attempted = False
@@ -117,6 +118,11 @@ b64() { /usr/bin/openssl base64 -A -in "$1"; }
             raise Refused("Unknown snapshot stage")
         script = self.prelude(cutoff, self.identity)
         prefix = "host-" + stage
+        if stage == "open":
+            if self.open_frames >= 16:
+                raise Refused("Bounded open observation frame count exhausted")
+            prefix += f"-{self.open_frames:03}"
+            self.open_frames += 1
         # Every output is nonce-root-owned and exclusive. Snapshot failure cannot
         # renew a stage or lead to a tap/arm retry.
         script += f'test ! -e "$root/{prefix}.png" && test ! -L "$root/{prefix}.png"\n'

@@ -111,7 +111,7 @@ def main():
     parser.add_argument("--stock-unit", type=Path, required=True)
     parser.add_argument("--vendor-dropin", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    for option in ("tap-guardian", "observe-input", "creation-publisher", "library-reference", "source-reference"):
+    for option in ("tap-guardian", "observe-input", "creation-publisher", "library-reference", "source-body-reference", "source-footer-reference"):
         parser.add_argument("--" + option, type=Path)
     args = parser.parse_args()
     selection_file, payload = map(regular, [args.selection, args.payload])
@@ -184,7 +184,8 @@ def main():
             raise ValueError("Reviewed references and transitive SDK/publisher source binding required")
         inputs = {"owned_tap_guardian": args.tap_guardian, "observe_input": args.observe_input,
                   "publish_creation_arm": args.creation_publisher, "library-reference.png": args.library_reference,
-                  "source-reference.png": args.source_reference}
+                  "source-body-reference.png": args.source_body_reference,
+                  "source-footer-reference.png": args.source_footer_reference}
         declared = selected.get("host_artifacts", {})
         if set(declared) != set(inputs) or any(path is None for path in inputs.values()):
             raise ValueError("All exact host tools and approved reference artifacts required")
@@ -221,7 +222,8 @@ def main():
                    "publisher_source_sha256": selected["publisher_source_sha256"],
                    "encoder_hashes": selected["encoder_hashes"],
                    "sdk_creation_deadline_sha256": selected["sdk_source_hashes"]["tools/qt_creation_deadline.h"],
-                   "host_sequence_contract": "bounded-host-v3",
+                   "host_sequence_contract": "bounded-host-v4",
+                   "references": {name: selected["host_artifacts"][name] for name in ("library-reference.png", "source-body-reference.png", "source-footer-reference.png")},
                    "source_sha256": {name: sha(HERE / name) for name in (
                        "open_document_host.py", "open_document_transport.py", "open_document_protocol.py",
                        "open_document_timing.py", "publish_creation_arm.c", "coordinator.py",

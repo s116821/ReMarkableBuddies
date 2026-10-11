@@ -87,6 +87,27 @@ class AdapterTests(unittest.TestCase):
             adapter.stop_once(("boot", 2, 3), 100)
             self.assertEqual(len(calls), 1)
 
+    def test_open_frames_are_exclusive_bounded_and_do_not_renew_cutoff(self):
+        encode = lambda value: base64.b64encode(value).decode()
+        raw = {"pid": 2, "start_ticks": 3, "root_inode": "1 2", "window": encode(("1" * 32 + " 1 361 50 120\n").encode()),
+               "waiting": encode(b"waiting"), "uptime": encode(b"51.00 0.00\n"), "last_open": encode(b"unknown"),
+               "content": encode(b"{}"), "metadata": encode(b"{}"), "png": encode(b"raw image"),
+               "hashes": encode(b""), "idle": encode(b""), "diagnostics": ""}
+        with tempfile.TemporaryDirectory() as root:
+            adapter, calls = self.adapter(root, {"timeout": False, "exit": 0, "stdout": json.dumps(raw)})
+            adapter.profile.update(immutable_hashes={}, screenshot_path="/fixture/capture", screenshot_sha256="0" * 64)
+            for _ in range(16):
+                adapter.raw_snapshot("open", 100, False)
+            with self.assertRaisesRegex(Refused, "frame count exhausted"):
+                adapter.raw_snapshot("open", 200, False)
+            self.assertEqual(len(calls), 16)
+            for index, script in enumerate(calls):
+                self.assertIn(f'host-open-{index:03}.png', script)
+                self.assertIn("cutoff=100\n", script)
+                self.assertNotIn("cutoff=200\n", script)
+            self.assertFalse(adapter.tap_attempted)
+            self.assertFalse(adapter.arm_attempted)
+
     def test_partial_diagnostic_read_waits_without_replaying_action(self):
         with tempfile.TemporaryDirectory() as root:
             adapter, calls = self.adapter(root, {})

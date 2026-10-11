@@ -5,12 +5,14 @@ No retries of input, permission publication, or stop publication are allowed.
 """
 import hashlib
 import io
+import re
 from PIL import Image
 from open_document_protocol import parse_waiting
 from open_document_timing import OpenDocumentTiming, upper_uptime_ms
 
 BODY = (64, 0, 720, 980)
 FOOTER = (280, 986, 488, 1024)
+MAX_OPEN_FRAMES = 16
 
 
 class Refused(ValueError):
@@ -36,12 +38,16 @@ def same_pixels(a, b, box=None):
 
 
 class HostSequence:
-    def __init__(self, adapter, selected, library_png, source_png):
+    def __init__(self, adapter, selected, library_png, source_body_png, source_footer_png):
         self.adapter = adapter
         self.selected = selected
         self.library_png = library_png
-        self.source_png = source_png
-        pixels(library_png); pixels(source_png)
+        self.source_body_png = source_body_png
+        self.source_footer_png = source_footer_png
+        pixels(library_png); pixels(source_body_png); pixels(source_footer_png)
+        self.candidate_window = None
+        self.last_completed_ms = None
+        self.source_sidecars = None
         self.trace = []
         self.identity = None
         self.timing = None
@@ -68,6 +74,7 @@ class HostSequence:
             raise Refused("Boot changed")
         self.waiting = parse_waiting(raw["waiting"], s["nonce"], identity[1], identity[2])
         self.identity = identity
+        self.candidate_window = tuple(window)
 
     def admit(self, raw, stage):
         if (raw["boot_id"], raw["pid"], raw["start_ticks"]) != self.identity:
@@ -75,6 +82,10 @@ class HostSequence:
         if raw["closed"] is not False:
             raise Refused("Admission closed or unknown")
         now_ms = upper_uptime_ms(raw["uptime"])
+        if tuple(raw["window"]) != self.candidate_window:
+            raise Refused("Fixed candidate window changed")
+        if self.last_completed_ms is not None and now_ms <= self.last_completed_ms:
+            raise Refused("Completed observation time did not advance")
         if not self.timing.admit(stage, (now_ms + 999) // 1000):
             raise Refused("Stage expired before completed observation")
         if parse_waiting(raw["waiting"], self.selected["nonce"], raw["pid"], raw["start_ticks"]) != self.waiting:
@@ -82,9 +93,10 @@ class HostSequence:
         for path, digest in self.selected["immutable_hashes"].items():
             if raw["hashes"].get(path) != digest:
                 raise Refused("Immutable ink/provider/file changed or unobserved")
+        self.last_completed_ms = now_ms
         return now_ms
 
-    def document(self, raw):
+    def document_context(self, raw):
         content, metadata = raw["content"], raw["metadata"]
         pages = content["cPages"]["pages"]
         ids = [p["id"] for p in pages]
@@ -94,8 +106,40 @@ class HostSequence:
                 metadata["lastOpenedPage"] != 0 or
                 content["cPages"]["lastOpened"]["value"] != ids[0]):
             raise Refused("Exact source document/current page not observed")
-        if not same_pixels(raw["png"], self.source_png, BODY):
+    def document(self, raw):
+        self.document_context(raw)
+        if not same_pixels(raw["png"], self.source_body_png, BODY):
             raise Refused("Source page pixels ambiguous")
+
+    def sidecars(self, raw):
+        values = tuple(raw.get(key) for key in ("content_raw_sha256", "metadata_raw_sha256"))
+        if any(type(value) is not str or not re.fullmatch("[0-9a-f]{64}", value) for value in values):
+            raise Refused("Exact raw sidecar hashes missing")
+        if self.source_sidecars is not None and values != self.source_sidecars:
+            raise Refused("Raw source sidecars changed across observations")
+        return values
+
+    def observe_open(self):
+        # Read-only capture polling never renews the fixed open deadline. The
+        # footer can precede loaded body pixels, but every frame retains exact
+        # identity/document context and every later frame preserves raw sidecars.
+        footer_seen = False
+        for index in range(MAX_OPEN_FRAMES):
+            raw = self.adapter.snapshot("open", self.timing.stage_end("open"), False)
+            self.record(f"open-frame-{index:03}", raw)
+            self.admit(raw, "open")
+            self.document_context(raw)
+            hashes = self.sidecars(raw)
+            if not footer_seen:
+                if same_pixels(raw["png"], self.source_footer_png, FOOTER):
+                    self.source_sidecars = hashes
+                    footer_seen = True
+                    self.record("source-footer-observed", raw)
+                continue
+            if same_pixels(raw["png"], self.source_body_png, BODY):
+                self.record("source-body-ready", raw)
+                return
+        raise Refused("Actual source footer then fresh loaded body not observed within bounded frames")
 
     def idle(self, raw):
         idle = raw["idle"]
@@ -125,12 +169,7 @@ class HostSequence:
             # Adapter rechecks candidate identity/closing/time before this one
             # reviewed 768x1024 tap. Sorting alone never selects the tile.
             self.adapter.open_once(self.identity, self.timing.stage_end("open"))
-            opened = self.adapter.snapshot("open", self.timing.stage_end("open"), False)
-            self.record("opened", opened)
-            self.admit(opened, "open")
-            self.document(opened)
-            if not same_pixels(opened["png"], self.source_png, FOOTER):
-                raise Refused("Visible source Page 1 of 7 footer not observed")
+            self.observe_open()
             # Full idle interval follows tap/release and observed source. No
             # intervening input is permitted. A disappearing footer is retained
             # above, while the final body/current-page evidence must still match.
@@ -138,6 +177,7 @@ class HostSequence:
             self.record("pre-arm", ready)
             now_ms = self.admit(ready, "trigger")
             self.document(ready)
+            self.sidecars(ready)
             self.idle(ready)
             if not self.timing.admit_creation_ms(now_ms, self.waiting.expiry_ms):
                 raise Refused("SDK/recovery publication expiry reached")
@@ -156,8 +196,8 @@ class HostSequence:
                 "observed_page_ids": ids,
                 "observed_target_presence": self.selected["target_id"] in ids,
                 "expected_inserted_order": [self.selected["page_ids"][0], self.selected["target_id"]] + self.selected["page_ids"][1:],
-                "source_pixels_match": same_pixels(result["png"], self.source_png, BODY),
-                "source_footer_pixels_match": same_pixels(result["png"], self.source_png, FOOTER),
+                "source_pixels_match": same_pixels(result["png"], self.source_body_png, BODY),
+                "source_footer_pixels_match": same_pixels(result["png"], self.source_footer_png, FOOTER),
                 "observed_page_count": result["content"].get("pageCount"),
                 "observed_current_page_id": result["content"].get("cPages", {}).get("lastOpened", {}).get("value"),
                 "metadata_page_index": result["metadata"].get("lastOpenedPage"),

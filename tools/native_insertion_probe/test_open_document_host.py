@@ -1,16 +1,18 @@
 """Offline sequencing, pixels, context and uncertainty cases. No transport."""
 import copy
 import io
+import hashlib
+import json
 import unittest
 from PIL import Image, ImageDraw
 from open_document_host import HostSequence, Refused
 
 
-def png(library=False):
+def png(library=False, body=True, footer=True):
     image = Image.new("RGB", (768, 1024), "white")
     d = ImageDraw.Draw(image)
-    d.rectangle((90, 100, 600, 900), fill="gray" if library else "black")
-    d.rectangle((300, 997, 470, 1005), fill="black")
+    if body: d.rectangle((90, 100, 600, 900), fill="gray" if library else "black")
+    if footer: d.rectangle((300, 997, 470, 1005), fill="black")
     out = io.BytesIO(); image.save(out, format="PNG"); return out.getvalue()
 
 
@@ -21,6 +23,7 @@ class Adapter:
         self.change = None
         self.arm_error = False
         self.native_pages = False
+        self.open_frames = 0
 
     def raw(self, stage):
         s = self.selected
@@ -34,13 +37,20 @@ class Adapter:
                "last_open": s["document_id"], "content": content, "metadata": {"lastOpenedPage": 0},
                "png": png(stage == "ready"), "idle": {"interval_ms": 2000, "invalidated": False, "touch_active": False, "pen_contact": 0, "pen_tool": 0},
                "diagnostics": {"creation_trial": {"returned_bool": True, "callback_count": 1}}}
+        raw["content_raw_sha256"] = hashlib.sha256(json.dumps(content).encode()).hexdigest()
+        raw["metadata_raw_sha256"] = hashlib.sha256(json.dumps(raw["metadata"]).encode()).hexdigest()
+        if stage == "open":
+            raw["uptime"] = f"150.{self.open_frames:02} 0.00\n"
         if self.change: self.change(stage, raw)
         return raw
 
     def retain(self, stage, evidence): self.calls.append("retain:" + stage)
     def wait_library(self): self.calls.append("wait"); return self.raw("ready")
     def open_once(self, identity, cutoff): self.calls.append("tap")
-    def snapshot(self, stage, cutoff, idle): self.calls.append("snapshot:" + stage); return self.raw(stage)
+    def snapshot(self, stage, cutoff, idle):
+        self.calls.append("snapshot:" + stage)
+        if stage == "open": self.open_frames += 1
+        return self.raw(stage)
     def arm_once(self, waiting, timing, ready):
         self.calls.append("arm")
         if self.arm_error: raise OSError("transport outcome uncertain")
@@ -54,7 +64,7 @@ class HostTests(unittest.TestCase):
                           "page_ids": ["source", "stroked", "third", "fourth", "fifth", "sixth", "seventh"],
                           "target_id": "new", "immutable_hashes": {"stroked.rm": "sha"}}
         self.adapter = Adapter(self.selection)
-        self.host = HostSequence(self.adapter, self.selection, png(True), png())
+        self.host = HostSequence(self.adapter, self.selection, png(True), png(footer=False), png(body=False))
 
     def test_one_open_arm_and_stop_collect_same_candidate_before_stop(self):
         self.adapter.native_pages = True
@@ -97,7 +107,7 @@ class HostTests(unittest.TestCase):
             with self.subTest(mutate=mutate):
                 adapter = Adapter(self.selection)
                 adapter.change = lambda stage, raw: mutate(raw) if stage == "trigger" else None
-                host = HostSequence(adapter, self.selection, png(True), png())
+                host = HostSequence(adapter, self.selection, png(True), png(footer=False), png(body=False))
                 with self.assertRaises(Refused): host.run()
                 self.assertNotIn("arm", adapter.calls)
                 self.assertEqual(adapter.calls.count("stop"), 1)
@@ -109,7 +119,7 @@ class HostTests(unittest.TestCase):
         for mutate in mutations:
             adapter = Adapter(self.selection)
             adapter.change = lambda stage, raw: mutate(raw) if stage == "trigger" else None
-            with self.assertRaises(Refused): HostSequence(adapter, self.selection, png(True), png()).run()
+            with self.assertRaises(Refused): HostSequence(adapter, self.selection, png(True), png(footer=False), png(body=False)).run()
             self.assertNotIn("arm", adapter.calls)
 
     def test_uncertain_publication_is_never_replayed_and_requests_stop(self):
@@ -120,7 +130,56 @@ class HostTests(unittest.TestCase):
         self.assertNotIn("result", self.adapter.calls)
 
     def test_unknown_or_nonportrait_pixels_refuse(self):
-        with self.assertRaises(Refused): HostSequence(self.adapter, self.selection, b"unknown", png())
+        with self.assertRaises(Refused): HostSequence(self.adapter, self.selection, b"unknown", png(), png())
+
+    def test_loading_footer_then_loaded_body_without_footer(self):
+        def change(stage, raw):
+            if stage == "open": raw["png"] = png(body=False) if self.adapter.open_frames==1 else png(footer=False)
+            if stage == "trigger": raw["png"] = png(footer=False)
+        self.adapter.change=change
+        self.host.run()
+        self.assertEqual(self.adapter.open_frames,2)
+        self.assertLess(self.adapter.calls.index("retain:source-footer-observed"),self.adapter.calls.index("retain:source-body-ready"))
+        self.assertLess(self.adapter.calls.index("retain:source-body-ready"),self.adapter.calls.index("arm"))
+        self.assertEqual(self.adapter.calls.count("tap"),1)
+
+    def test_missing_footer_or_body_stops_after_bounded_frames(self):
+        for missing in ("footer","body"):
+            adapter=Adapter(self.selection)
+            adapter.change=lambda stage,raw: raw.update(png=png(footer=False) if missing=="footer" else png(body=False)) if stage=="open" else None
+            with self.assertRaises(Refused): HostSequence(adapter,self.selection,png(True),png(footer=False),png(body=False)).run()
+            self.assertEqual(adapter.open_frames,16)
+            self.assertNotIn("arm",adapter.calls)
+            self.assertEqual(adapter.calls.count("tap"),1)
+
+    def test_open_poll_continuity_and_fixed_deadline_failures(self):
+        mutations=[lambda r:r.update(uptime="150.01 0.00\n"),
+                   lambda r:r.update(uptime="162.00 0.00\n"),
+                   lambda r:r.update(start_ticks=562),lambda r:r.update(closed=True),
+                   lambda r:r["window"].__setitem__(3,128),
+                   lambda r:r.update(content_raw_sha256="a"*64),
+                   lambda r:r.update(metadata_raw_sha256="b"*64),
+                   lambda r:r["hashes"].update({"stroked.rm":"changed"}),
+                   lambda r:r.update(waiting=(self.selection["nonce"]+" 42 561 waiting 168000\n").encode())]
+        for mutate in mutations:
+            adapter=Adapter(self.selection)
+            adapter.change=lambda stage,raw: mutate(raw) if stage=="open" and adapter.open_frames==2 else None
+            with self.assertRaises(Refused): HostSequence(adapter,self.selection,png(True),png(footer=False),png(body=False)).run()
+            self.assertNotIn("arm",adapter.calls)
+            self.assertEqual(adapter.calls.count("tap"),1)
+
+    def test_trigger_sidecar_drift_and_frame_retention_failure_refuse(self):
+        self.adapter.change=lambda stage,raw: raw.update(metadata_raw_sha256="a"*64) if stage=="trigger" else None
+        with self.assertRaises(Refused): self.host.run()
+        self.assertNotIn("arm",self.adapter.calls)
+        adapter=Adapter(self.selection)
+        def fail_retain(stage,evidence):
+            adapter.calls.append("retain:"+stage)
+            if stage=="open-frame-000": raise OSError("retention unavailable")
+        adapter.retain=fail_retain
+        with self.assertRaises(OSError): HostSequence(adapter,self.selection,png(True),png(footer=False),png(body=False)).run()
+        self.assertEqual(adapter.open_frames,1)
+        self.assertNotIn("arm",adapter.calls)
 
 
 if __name__ == "__main__": unittest.main()

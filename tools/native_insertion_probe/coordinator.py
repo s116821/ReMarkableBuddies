@@ -14,7 +14,7 @@ ALIAS = "rem25-usb-rm2"
 FILES = {"actor.sh", "launch.sh", "runtime.files", "document-immutable.files", "document-mutable.files", "payload.so", "owner",
          "guard.conf", "activation.conf", "stock.policy", "guard.policy", "baseline.files", "service.files",
          "stock-unit.original", "vendor-dropin.original", "unit-shadow.service", "vendor-shadow.conf"}
-HOST_FILES = {"host-profile.json", "owned_tap_guardian", "observe_input", "publish_creation_arm", "library-reference.png", "source-reference.png"}
+HOST_FILES = {"host-profile.json", "owned_tap_guardian", "observe_input", "publish_creation_arm", "library-reference.png", "source-body-reference.png", "source-footer-reference.png"}
 
 
 def packet_files(receipt):
@@ -27,7 +27,7 @@ def load_host_profile(packet, receipt):
         sources = {"open_document_host.py", "open_document_transport.py", "open_document_protocol.py",
                    "open_document_timing.py", "publish_creation_arm.c", "coordinator.py",
                    "prepare_packet.py", "actor.sh.in", "arm.sh.in", "owned_tap_guardian.c"}
-        if profile.get("host_sequence_contract") != "bounded-host-v3" or set(profile.get("source_sha256", {})) != sources:
+        if profile.get("host_sequence_contract") != "bounded-host-v4" or set(profile.get("source_sha256", {})) != sources:
             raise ValueError("Host source contract incomplete")
         if any(sha(regular(HERE / name).read_bytes()) != digest for name, digest in profile["source_sha256"].items()):
             raise ValueError("Reviewed host source changed")
@@ -60,8 +60,14 @@ def load_host_profile(packet, receipt):
         if not re.fullmatch("[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", profile["boot_id"]):
             raise ValueError("Canonical boot identity required")
         from open_document_host import pixels
-        pixels(regular(Path(packet) / "library-reference.png").read_bytes())
-        pixels(regular(Path(packet) / "source-reference.png").read_bytes())
+        reference_names = {"library-reference.png", "source-body-reference.png", "source-footer-reference.png"}
+        if profile["references"] != {name: receipt["files"][name] for name in reference_names}:
+            raise ValueError("Complete separate reference bindings required")
+        for name in reference_names:
+            data = regular(Path(packet) / name).read_bytes()
+            if sha(data) != profile["references"][name]:
+                raise ValueError("Reference bytes changed")
+            pixels(data)
         return profile
     except (KeyError, ValueError, OSError) as error:
         raise ValueError("Open-document execution refused: exact host/profile/reference contract missing") from error
@@ -234,7 +240,8 @@ def main():
                              regular(args.packet / "library-reference.png").read_bytes())
         try:
             report = HostSequence(adapter, profile, regular(args.packet / "library-reference.png").read_bytes(),
-                                  regular(args.packet / "source-reference.png").read_bytes()).run()
+                                  regular(args.packet / "source-body-reference.png").read_bytes(),
+                                  regular(args.packet / "source-footer-reference.png").read_bytes()).run()
             (output / "host-report.json").write_text(json.dumps(report, indent=2) + "\n")
         except Exception as error:
             # Permission/input uncertainty never triggers a second attempt.
