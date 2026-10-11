@@ -44,7 +44,9 @@ class GuardianFaultTests(unittest.TestCase):
                  "close-foreign-contact", "supervisor-close", "close-takeover", "supervisor-close-stopped",
                  "pidfd-open-unavailable", "pidfd-zero-denied",
                  "actual-os-release", "canonical-os-release-symlink",
-                 "check-input-released", "check-input-x-unsupported", "check-input-contact")
+                 "check-input-released", "check-input-x-unsupported", "check-input-contact",
+                 "check-input-pen-touch", "check-input-pen-tool", "check-input-pen-rubber", "check-input-pen-query-error",
+                 "check-input-pen-short")
         for mode in modes:
             with self.subTest(mode=mode):
                 result = subprocess.run([str(self.fixture), mode], text=True, capture_output=True, timeout=3)
@@ -63,8 +65,25 @@ class GuardianFaultTests(unittest.TestCase):
                     elif mode == "check-input-contact":
                         self.assertFalse(checks["touch-released"]["ok"])
                         self.assertEqual(diagnostic["tracking_ids"][1], 23)
+                    elif mode.startswith("check-input-pen-"):
+                        self.assertFalse(checks["pen-key-released"]["ok"])
+                        pen = diagnostic["pen_keys"]
+                        if mode == "check-input-pen-query-error":
+                            self.assertEqual(pen["ioctl_return"], -1)
+                            self.assertEqual(pen["errno"], 5)
+                            self.assertEqual([pen[key] for key in ("BTN_TOUCH", "BTN_TOOL_PEN", "BTN_TOOL_RUBBER")], [-1]*3)
+                        elif mode == "check-input-pen-short":
+                            self.assertEqual(pen["ioctl_return"], 41)
+                            self.assertEqual(pen["errno"], 90)
+                            self.assertEqual([pen[key] for key in ("BTN_TOUCH", "BTN_TOOL_PEN", "BTN_TOOL_RUBBER")], [-1]*3)
+                        else:
+                            selected = {"touch": "BTN_TOUCH", "tool": "BTN_TOOL_PEN", "rubber": "BTN_TOOL_RUBBER"}[mode.rsplit("-", 1)[1]]
+                            self.assertGreater(pen["ioctl_return"], 0)
+                            self.assertEqual(pen[selected], 1)
                     else:
                         self.assertTrue(all(item["ok"] for item in diagnostic["checks"]))
+                        self.assertGreater(diagnostic["pen_keys"]["ioctl_return"], 0)
+                        self.assertEqual([diagnostic["pen_keys"][key] for key in ("BTN_TOUCH", "BTN_TOOL_PEN", "BTN_TOOL_RUBBER")], [0]*3)
                 if mode.startswith("pidfd-") and mode != "pidfd-fence":
                     receipt = json.loads(result.stdout.splitlines()[0])
                     self.assertEqual(receipt["status"], "pidfd-self-check-unavailable")

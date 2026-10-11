@@ -207,18 +207,32 @@ static int snapshot(struct context *c,struct contact_state *state) {
         axis_values(c->input,ABS_MT_POSITION_X,state->x) && axis_values(c->input,ABS_MT_POSITION_Y,state->y) &&
         axis_values(c->input,ABS_MT_TRACKING_ID,again) && !memcmp(state->id,again,sizeof again);
 }
-static int pen_released(struct context *c) {
+struct pen_observation { int query_return, query_errno, touch, tool_pen, tool_rubber; };
+static int pen_released_observed(struct context *c,struct pen_observation *observed) {
+    struct pen_observation result={-1,0,-1,-1,-1};
+    if(observed)*observed=result;
     unsigned char keys[(KEY_MAX+8)/8]={0};
     struct stat held,path;
     if(fstat(c->pen,&held) || stat("/dev/input/event1",&path) || !S_ISCHR(held.st_mode) ||
         held.st_dev!=path.st_dev || held.st_ino!=path.st_ino || held.st_rdev!=path.st_rdev ||
         (uint64_t)held.st_dev!=c->lease.pen_dev || (uint64_t)held.st_ino!=c->lease.pen_ino ||
         (uint64_t)held.st_rdev!=c->lease.pen_rdev)return 0;
-    if(ioctl(c->pen,EVIOCGKEY(sizeof keys),keys))return 0;
+    /* Linux evdev returns the copied bitmap byte count on success. */
+    result.query_return=ioctl(c->pen,EVIOCGKEY(sizeof keys),keys);
+    if(result.query_return<0){result.query_errno=errno;if(observed)*observed=result;return 0;}
     int codes[]={BTN_TOUCH,BTN_TOOL_PEN,BTN_TOOL_RUBBER};
+    for(size_t i=0;i<sizeof codes/sizeof(*codes);++i)
+        if(result.query_return>(int)sizeof keys || codes[i]/8>=result.query_return) {
+            errno=EMSGSIZE;result.query_errno=errno;if(observed)*observed=result;return 0;
+        }
+    result.touch=!!(keys[BTN_TOUCH/8]&(1u<<(BTN_TOUCH%8)));
+    result.tool_pen=!!(keys[BTN_TOOL_PEN/8]&(1u<<(BTN_TOOL_PEN%8)));
+    result.tool_rubber=!!(keys[BTN_TOOL_RUBBER/8]&(1u<<(BTN_TOOL_RUBBER%8)));
+    if(observed)*observed=result;
     for(size_t i=0;i<sizeof codes/sizeof(*codes);++i)if(keys[codes[i]/8]&(1u<<(codes[i]%8)))return 0;
     return 1;
 }
+static int pen_released(struct context *c) {return pen_released_observed(c,NULL);}
 /* -1 ambiguous/error, 0 completely released, 1 exact owned tagged contact. */
 static int owned_state(const struct lease *l,const struct contact_state *s) {
     int active=0;
@@ -618,6 +632,7 @@ static int check_input(void) {
     struct input_absinfo slot={0},tracking={0},x={0},y={0};
     struct contact_state state={0};int32_t again[SLOT_COUNT];
     int first=1,all=1,keys=0,ids=0,xs=0,ys=0,stable=0;
+    struct pen_observation pen_state;
     printf("{\"checks\":[");
 #define INPUT_CHECK(name,expression) do { errno=0;int passed=(expression);int error=errno; \
     all=diagnostic_check(name,passed,error,&first)&&all; } while(0)
@@ -632,7 +647,7 @@ static int check_input(void) {
     c.lease.pen_dev=pen.st_dev;c.lease.pen_ino=pen.st_ino;c.lease.pen_rdev=pen.st_rdev;
     INPUT_CHECK("touch-id",ioctl(c.input,EVIOCGID,&c.lease.input_id)==0);
     INPUT_CHECK("touch-identity",same_input(&c));
-    INPUT_CHECK("pen-key-released",(keys=pen_released(&c)));
+    INPUT_CHECK("pen-key-released",(keys=pen_released_observed(&c,&pen_state)));
     INPUT_CHECK("slot-range",ioctl(c.input,EVIOCGABS(ABS_MT_SLOT),&slot)==0 &&
         slot.minimum==0 && slot.maximum==SLOT_COUNT-1 && slot.value>=0 && slot.value<SLOT_COUNT);
     INPUT_CHECK("tracking-range",ioctl(c.input,EVIOCGABS(ABS_MT_TRACKING_ID),&tracking)==0 &&
@@ -651,8 +666,11 @@ static int check_input(void) {
     printf("],\"status\":\"%s\",\"selected_slot\":%d,\"tracking_ids\":[",
         good?"input-readonly-check-released":"input-readonly-check-refused",slot.value);
     for(int i=0;i<SLOT_COUNT;++i)printf("%s%d",i?",":"",ids?state.id[i]:-2);
-    printf("],\"axis_ranges\":{\"tracking\":[%d,%d],\"x\":[%d,%d],\"y\":[%d,%d]},\"input_events\":0,\"event_reads\":0,\"tap_ready\":false}\n",
-        tracking.minimum,tracking.maximum,x.minimum,x.maximum,y.minimum,y.maximum);
+    printf("],\"axis_ranges\":{\"tracking\":[%d,%d],\"x\":[%d,%d],\"y\":[%d,%d]},"
+        "\"pen_keys\":{\"ioctl_return\":%d,\"errno\":%d,\"BTN_TOUCH\":%d,\"BTN_TOOL_PEN\":%d,\"BTN_TOOL_RUBBER\":%d},"
+        "\"input_events\":0,\"event_reads\":0,\"tap_ready\":false}\n",
+        tracking.minimum,tracking.maximum,x.minimum,x.maximum,y.minimum,y.maximum,
+        pen_state.query_return,pen_state.query_errno,pen_state.touch,pen_state.tool_pen,pen_state.tool_rubber);
     if(c.input>=0)close(c.input);
     if(c.pen>=0)close(c.pen);
     return good && !ferror(stdout) && fflush(stdout)==0?0:90;

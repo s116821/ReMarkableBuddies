@@ -61,6 +61,7 @@ static struct context *flow_context;
 static int delayed_go, stop_on_down, crash_after_release, late_supervisor;
 static int pidfd_fault, self_signal_calls;
 static int diagnostic_mode, diagnostic_axis_failure, event_reads;
+static int pen_key_code=BTN_TOUCH,pen_query_failure,pen_query_short;
 static long fake_syscall(long number,...) {
     va_list args;va_start(args,number);long result=-1;
     if(number==SYS_pidfd_open) {
@@ -158,7 +159,9 @@ static int fake_ioctl(int fd,unsigned long request,...) {
         return 0;
     }
     if(fd==101 && _IOC_NR(request)==_IOC_NR(EVIOCGKEY(1))) {
-        memset(p,0,_IOC_SIZE(request));if(pen_active)((unsigned char *)p)[BTN_TOUCH/8]|=1u<<(BTN_TOUCH%8);return 0;
+        if(pen_query_failure){errno=EIO;return -1;}
+        memset(p,0,_IOC_SIZE(request));if(pen_active)((unsigned char *)p)[pen_key_code/8]|=1u<<(pen_key_code%8);
+        return pen_query_short?BTN_TOUCH/8:(int)_IOC_SIZE(request);
     }
     errno=EINVAL;return -1;
 }
@@ -234,7 +237,9 @@ int main(int argc,char **argv) {
     struct context c=make_context(path);const char *mode=argv[1];
     if(!strcmp(mode,"actual-os-release")||!strcmp(mode,"canonical-os-release-symlink")||
        !strcmp(mode,"check-input-released")||!strcmp(mode,"check-input-x-unsupported")||
-       !strcmp(mode,"check-input-contact")) {
+       !strcmp(mode,"check-input-contact")||!strcmp(mode,"check-input-pen-touch")||
+       !strcmp(mode,"check-input-pen-tool")||!strcmp(mode,"check-input-pen-rubber")||!strcmp(mode,"check-input-pen-query-error")||
+       !strcmp(mode,"check-input-pen-short")) {
         flow_context=&c;assert(exclusive_record(&c,"model","reMarkable2 1.0\n",15));
         /* Exact bytes of Main's captured target-os-release, including LF quotes.
          * os-release is metadata; it is never evaluated as shell code. */
@@ -247,6 +252,11 @@ int main(int argc,char **argv) {
             diagnostic_mode=1;assert(exclusive_record(&c,"release",actual,strlen(actual)));
             diagnostic_axis_failure=!strcmp(mode,"check-input-x-unsupported");
             if(!strcmp(mode,"check-input-contact"))kernel.id[1]=23;
+            if(!strcmp(mode,"check-input-pen-touch"))pen_active=1;
+            if(!strcmp(mode,"check-input-pen-tool")){pen_active=1;pen_key_code=BTN_TOOL_PEN;}
+            if(!strcmp(mode,"check-input-pen-rubber")){pen_active=1;pen_key_code=BTN_TOOL_RUBBER;}
+            pen_query_failure=!strcmp(mode,"check-input-pen-query-error");
+            pen_query_short=!strcmp(mode,"check-input-pen-short");
             char *args[]={"fixture","--check-input",NULL};int result=guardian_main(2,args);
             assert(result==(!strcmp(mode,"check-input-released")?0:90));
             assert(writes==0 && event_reads==0);
