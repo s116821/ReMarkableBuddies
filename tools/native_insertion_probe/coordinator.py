@@ -8,13 +8,14 @@ from pathlib import Path
 import re
 import subprocess
 import time
+from owned_frame_capture import CONTRACT as CAPTURE_CONTRACT, TOOLS as CAPTURE_TOOLS
 
 HERE = Path(__file__).resolve().parent
 ALIAS = "rem25-usb-rm2"
 FILES = {"actor.sh", "launch.sh", "runtime.files", "document-immutable.files", "document-mutable.files", "payload.so", "owner",
          "guard.conf", "activation.conf", "stock.policy", "guard.policy", "baseline.files", "service.files",
          "stock-unit.original", "vendor-dropin.original", "unit-shadow.service", "vendor-shadow.conf"}
-HOST_FILES = {"host-profile.json", "owned_tap_guardian", "observe_input", "publish_creation_arm", "library-reference.png", "source-body-reference.png", "source-footer-reference.png"}
+HOST_FILES = {"host-profile.json", "native_frame_acquire", "owned_frame", "owned_frame_alarm", "owned_tap_guardian", "observe_input", "publish_creation_arm", "library-reference.png", "source-body-reference.png", "source-footer-reference.png"}
 
 
 def packet_files(receipt):
@@ -26,8 +27,8 @@ def load_host_profile(packet, receipt):
         profile = json.loads(regular(Path(packet) / "host-profile.json").read_bytes())
         sources = {"open_document_host.py", "open_document_transport.py", "open_document_protocol.py",
                    "open_document_timing.py", "publish_creation_arm.c", "coordinator.py",
-                   "prepare_packet.py", "actor.sh.in", "arm.sh.in", "owned_tap_guardian.c"}
-        if profile.get("host_sequence_contract") != "bounded-host-v4" or set(profile.get("source_sha256", {})) != sources:
+                   "prepare_packet.py", "actor.sh.in", "arm.sh.in", "owned_tap_guardian.c", "owned_frame_capture.py"}
+        if profile.get("host_sequence_contract") != "bounded-host-v5" or set(profile.get("source_sha256", {})) != sources:
             raise ValueError("Host source contract incomplete")
         if any(sha(regular(HERE / name).read_bytes()) != digest for name, digest in profile["source_sha256"].items()):
             raise ValueError("Reviewed host source changed")
@@ -49,14 +50,14 @@ def load_host_profile(packet, receipt):
                 expected[path] = digest
         if profile["immutable_hashes"] != expected:
             raise ValueError("Host immutable baseline differs from actor")
-        tool_names = {"owned_tap_guardian", "observe_input", "publish_creation_arm"}
+        tool_names = {"owned_tap_guardian", "observe_input", "publish_creation_arm"} | set(CAPTURE_TOOLS)
         if profile["tools"] != {name: receipt["files"][name] for name in tool_names}:
             raise ValueError("Host helper hashes differ from packet")
         from prepare_packet import ENCODER_HASHES
         if profile["encoder_hashes"] != ENCODER_HASHES:
             raise ValueError("Exact reviewed target encoder/provider closure required")
-        if profile["screenshot_path"] != "/home/root/rem9-validation/screenshot" or profile["screenshot_sha256"] != "df745d56a2ef1834ea644b8859646972210c5e0247a3e6e75e9e245f5fa919b8":
-            raise ValueError("Reviewed screenshot helper required")
+        if profile.get("capture_contract") != CAPTURE_CONTRACT or any(profile["tools"][name] != digest for name, digest in CAPTURE_TOOLS.items()):
+            raise ValueError("Reviewed native owned-frame capture artifacts required")
         if not re.fullmatch("[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", profile["boot_id"]):
             raise ValueError("Canonical boot identity required")
         from open_document_host import pixels
@@ -149,7 +150,7 @@ def ssh_args(known_hosts, identity=None):
 
 def render(receipt, receipt_hash):
     text = regular(HERE / "arm.sh.in").read_text()
-    replacements = {"@ROOT@": receipt["remote_root"], "@NONCE@": receipt["nonce"],
+    replacements = {"@ROOT@": receipt["remote_root"], "@CAPTURESPACE@": 'test "$(df -Pk /run | awk \'NR==2 {print $4}\')" -ge 196608' if receipt.get("experiment_kind") == "open-document-insertion-v1" else ":", "@NONCE@": receipt["nonce"],
                     "@GUARDHASH@": receipt["files"]["guard.conf"], "@MANIFESTHASH@": receipt["packet_manifest_sha256"],
                     "@UNITSHADOWHASH@": receipt["files"]["unit-shadow.service"],
                     "@VENDORSHADOWHASH@": receipt["files"]["vendor-shadow.conf"],
@@ -157,7 +158,7 @@ def render(receipt, receipt_hash):
                     "@ALLOWEDFILES@": "|".join(sorted(packet_files(receipt) | {"packet.files", "preparation.json"})),
                     "@PRIVATEFILES@": "\n    ".join(
                         f'test -f "$root/{name}" && test ! -L "$root/{name}"\n    test "$(stat -c \'%a %u %h\' \"$root/{name}\")" = \'700 0 1\''
-                        if name in {"owned_tap_guardian", "observe_input", "publish_creation_arm"} else f'private "$root/{name}"'
+                        if name in ({"owned_tap_guardian", "observe_input", "publish_creation_arm"} | set(CAPTURE_TOOLS)) else f'private "$root/{name}"'
                         for name in sorted(packet_files(receipt)))}
     for key, value in replacements.items():
         text = text.replace(key, value)

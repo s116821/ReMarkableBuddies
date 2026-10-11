@@ -8,6 +8,7 @@ import shlex
 import time
 from open_document_host import Refused, same_pixels
 from open_document_timing import upper_uptime_ms
+from owned_frame_capture import TOOLS as CAPTURE_TOOLS, capture_script, validate_receipt, hash_tool_checks
 
 
 def q(value):
@@ -85,29 +86,16 @@ test "$(cat /proc/sys/kernel/random/boot_id)" = {q(self.profile["boot_id"])}
             text += 'read selected_nonce armed deadline candidate cutoff < "$root/candidate.window"\n'
         text += r"""now_upper() { awk '{n=int($1); if($1>n)n++; print n}' /proc/uptime; }
 test "$(now_upper)" -lt "$cutoff"
-bounded() {
- "$@" & child=$!
- while kill -0 "$child" 2>/dev/null; do
-  if test "$(now_upper)" -ge "$cutoff"; then
-   kill -TERM "$child" 2>/dev/null || :
-   kill -KILL "$child" 2>/dev/null || :
-   wait "$child" 2>/dev/null || :
-   return 90
-  fi
-  sleep 0.1
- done
- wait "$child"
- test "$(now_upper)" -lt "$cutoff"
-}
 b64() { /usr/bin/openssl base64 -A -in "$1"; }
 """
+        text += hash_tool_checks()
         for path, digest in self.profile.get("encoder_hashes", {}).items():
             if path not in {"/usr/bin/openssl", "/usr/lib/libssl.so.3", "/usr/lib/libcrypto.so.3"} or not re.fullmatch("[0-9a-f]{64}", digest):
                 raise Refused("Exact encoder/provider path and digest required")
             text += f'test -f {q(path)} && test ! -L {q(path)}\ntest "$(stat -c \'%u %h\' {q(path)})" = \'0 1\'\n'
             text += f'test "$(sha256sum {q(path)} | cut -d " " -f 1)" = {q(digest)}\n'
         for name, digest in self.profile["tools"].items():
-            if name not in {"owned_tap_guardian", "observe_input", "publish_creation_arm"} or not re.fullmatch("[0-9a-f]{64}", digest):
+            if name not in ({"owned_tap_guardian", "observe_input", "publish_creation_arm"} | set(CAPTURE_TOOLS)) or not re.fullmatch("[0-9a-f]{64}", digest):
                 raise Refused("Bounded exact tool identity required")
             text += f'test -f "$root/{name}" && test ! -L "$root/{name}"\ntest "$(stat -c \'%a %u %h\' "$root/{name}")" = \'700 0 1\'\n'
             text += f'test "$(sha256sum "$root/{name}" | cut -d " " -f 1)" = {q(digest)}\n'
@@ -119,25 +107,26 @@ b64() { /usr/bin/openssl base64 -A -in "$1"; }
         script = self.prelude(cutoff, self.identity)
         prefix = "host-" + stage
         if stage == "open":
-            if self.open_frames >= 16:
+            if self.open_frames >= 7:
                 raise Refused("Bounded open observation frame count exhausted")
             prefix += f"-{self.open_frames:03}"
             self.open_frames += 1
+        # Claim precedes every prefix output, including idle observations.
+        script += f'(set -C; printf %s {q(self.profile["nonce"])} > "$root/{prefix}.claim")\n'
         # Every output is nonce-root-owned and exclusive. Snapshot failure cannot
         # renew a stage or lead to a tap/arm retry.
         script += f'test ! -e "$root/{prefix}.png" && test ! -L "$root/{prefix}.png"\n'
-        script += f'test "$(sha256sum {q(self.profile["screenshot_path"])} | cut -d " " -f 1)" = {q(self.profile["screenshot_sha256"])}\n'
         if idle:
-            script += f'bounded "$root/observe_input" 2 > "$root/{prefix}.idle" 2>&1\n'
+            script += f'test "$(now_upper)" -le $((cutoff-4))\n"$root/owned_frame_alarm" --observe "$root/observe_input" 2 > "$root/{prefix}.idle" 2>&1\n'
             script += '/usr/bin/evtest --query /dev/input/event1 EV_KEY BTN_TOUCH\n/usr/bin/evtest --query /dev/input/event1 EV_KEY BTN_TOOL_PEN\n'
         else:
             script += f': > "$root/{prefix}.idle"\n'
-        script += f'bounded {q(self.profile["screenshot_path"])} "$root/{prefix}.png" > "$root/{prefix}.capture" 2>&1\n'
+        script += capture_script(prefix, self.profile["nonce"], self.profile["boot_id"])
         for ext in ("content", "metadata"):
             script += f'before=$(sha256sum "$doc.{ext}" | cut -d " " -f 1)\ncp "$doc.{ext}" "$root/{prefix}.{ext}"\n'
             script += f'test "$(sha256sum "$root/{prefix}.{ext}" | cut -d " " -f 1)" = "$before"\ntest "$(sha256sum "$doc.{ext}" | cut -d " " -f 1)" = "$before"\n'
         paths = " ".join(q(p) for p in self.profile["immutable_hashes"])
-        script += f'bounded sha256sum {paths} > "$root/{prefix}.hashes"\n'
+        script += f'test "$(now_upper)" -le $((cutoff-4))\n"$root/owned_frame_alarm" --hashes /usr/bin/sha256sum {paths} > "$root/{prefix}.hashes"\n'
         script += 'test "$(sed \'s/^.*) //\' /proc/$pid/stat | awk \'{print $20}\')" = "$start"\n'
         script += 'test "$(now_upper)" -lt "$cutoff"\n'
         script += 'test "$(systemctl show xochitl.service -p MainPID --value)" = "$pid"\n'
@@ -148,6 +137,7 @@ b64() { /usr/bin/openssl base64 -A -in "$1"; }
             script += f'test "$(stat -c \'%d %i\' "$root")" = {q(self.root_inode)}\n'
         script += r"""printf '{"pid":%s,"start_ticks":%s,"root_inode":"%s","window":"%s","waiting":"%s","capture_uptime":"%s","last_open":"%s",' "$pid" "$start" "$(stat -c '%d %i' "$root")" "$(b64 "$root/candidate.window")" "$(b64 "$root/creation-waiting")" "$(b64 /proc/uptime)" "$(grep '^LastOpen' /home/root/.config/remarkable/xochitl.conf | /usr/bin/openssl base64 -A)"
 """
+        script += f'printf \'"frame_hash":"%s","native_hash":"%s","capture_receipt":"%s",\' "$frame_hash" "$native_hash" "$(b64 "$root/{prefix}.capture")"\n'
         for key in ("content", "metadata", "png", "hashes", "idle"):
             script += f'printf \'"{key}":"%s",\' "$(b64 "$root/{prefix}.{key}")"\n'
         script += r"""if test -f "$root/diagnostics.json" && test ! -L "$root/diagnostics.json"; then
@@ -163,6 +153,10 @@ printf '"uptime":"%s"}\n' "$(b64 /proc/uptime)"
 """
         raw = json.loads(self.call(script, 10))
         decode = lambda key: base64.b64decode(raw[key], validate=True)
+        try:
+            capture_evidence = validate_receipt(decode("capture_receipt").decode("ascii"), self.profile["nonce"], raw["frame_hash"], decode("png"), raw["native_hash"])
+        except (KeyError, ValueError, UnicodeError) as error:
+            raise Refused("Native owned-frame receipt binding failed") from error
         window = decode("window").decode("ascii").strip().split()
         if len(window) != 5 or any(not re.fullmatch("[0-9]+", v) for v in window[1:]):
             raise Refused("Malformed fixed actor window")
@@ -184,7 +178,7 @@ printf '"uptime":"%s"}\n' "$(b64 /proc/uptime)"
                     "content_raw_sha256": hashlib.sha256(decode("content")).hexdigest(),
                     "metadata_raw_sha256": hashlib.sha256(decode("metadata")).hexdigest(),
                     "idle": {"interval_ms": 2000 if idle else None, "invalidated": not idle_ok, "touch_active": not idle_ok, "pen_contact": 0 if idle else None, "pen_tool": 0 if idle else None},
-                    "diagnostics": json.loads(decode("diagnostics")) if raw["diagnostics"] else {}}
+                    "capture": capture_evidence, "diagnostics": json.loads(decode("diagnostics")) if raw["diagnostics"] else {}}
         if self.root_inode is not None and self.root_inode != raw["root_inode"]:
             raise Refused("Private root inode changed")
         self.root_inode = raw["root_inode"]
@@ -313,7 +307,7 @@ printf '{"released":"%s","supervisor":"%s","lease":"%s","publication":"%s"}\n' "
         for name in ("runtime.files", "document-immutable.files"):
             script += f'private "$root/{name}"\n'
             script += f'test "$(sha256sum "$root/{name}" | cut -d " " -f 1)" = {q(self.receipt["files"][name])}\n'
-            script += f'bounded sha256sum -c "$root/{name}" > "$root/host-prepublication-{name}.check" 2>&1\n'
+            script += f'test "$(now_upper)" -le $((cutoff-4))\n"$root/owned_frame_alarm" --check /usr/bin/sha256sum -c "$root/{name}" > "$root/host-prepublication-{name}.check" 2>&1\n'
         for ext in ("content", "metadata"):
             # Compare exact captured remote bytes, not reserialized JSON. The
             # previously retained stage file is tied to this host observation.
@@ -330,7 +324,7 @@ printf '{"released":"%s","supervisor":"%s","lease":"%s","publication":"%s"}\n' "
         script += f'test "$(sha256sum "$root/tap.supervisor-complete" | cut -d " " -f 1)" = {q(self.tap_supervisor_sha256)}\n'
         script += 'for name in tap.unresolved tap.empty tap.cleaned tap.recovered tap.supervisor-spent; do test ! -e "$root/$name" && test ! -L "$root/$name"; done\n'
         args = [waiting.nonce, waiting.pid, waiting.start_ticks, waiting.expiry_ms, timing.armed_at, timing.deadline, timing.candidate_at, self.profile["document_id"]]
-        script += 'bounded "$root/publish_creation_arm" ' + " ".join(q(v) for v in args) + ' > "$root/host-publication.json" 2> "$root/host-publication.stderr"\ncat "$root/host-publication.json"\n'
+        script += 'test "$(now_upper)" -le $((cutoff-4))\n"$root/owned_frame_alarm" --publish "$root/publish_creation_arm" ' + " ".join(q(v) for v in args) + ' > "$root/host-publication.json" 2> "$root/host-publication.stderr"\ncat "$root/host-publication.json"\n'
         result = json.loads(self.call(script, 4))
         if result.get("published") is not True or result.get("retry_permitted") is not False:
             raise Refused("Publication uncertain; never replay")

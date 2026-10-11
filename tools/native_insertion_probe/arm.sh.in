@@ -110,7 +110,7 @@ main() {
         case "${file##*/}" in
             @ALLOWEDFILES@)
                 case "${file##*/}" in
-                    owned_tap_guardian|observe_input|publish_creation_arm)
+                    owned_tap_guardian|observe_input|publish_creation_arm|native_frame_acquire|owned_frame|owned_frame_alarm)
                         test -f "$file" && test ! -L "$file"
                         test "$(stat -c '%a %u %h' "$file")" = '700 0 1';;
                     *) private "$file";;
@@ -125,6 +125,7 @@ main() {
     (cd "$root"; sha256sum -c packet.files)
     sha256sum -c "$root/baseline.files"
     sha256sum -c "$root/service.files"
+    @CAPTURESPACE@
     claim host-arm.claim
     armed_at=$(now); deadline=$((armed_at+360))
     (set -C; printf '%s %s\n' "$armed_at" "$deadline" > "$root/deadline")

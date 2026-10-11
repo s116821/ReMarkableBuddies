@@ -13,7 +13,7 @@ HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location("coordinator", HERE / "coordinator.py")
 coordinator = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(coordinator)
-SOURCE = (HERE / "arm.sh.in").read_text().split("# Fixture source boundary", 1)[0]
+SOURCE = (HERE / "arm.sh.in").read_text().split("# Fixture source boundary", 1)[0].replace("@CAPTURESPACE@", ":")
 
 
 def run(root, body, overrides="", expected=0):
@@ -27,7 +27,7 @@ def run(root, body, overrides="", expected=0):
 
 class Coordinator(unittest.TestCase):
     def test_rendered_open_packet_inventory_requires_exact_helper_and_record_modes(self):
-        helpers = {"owned_tap_guardian", "observe_input", "publish_creation_arm"}
+        helpers = {"owned_tap_guardian", "observe_input", "publish_creation_arm", "native_frame_acquire", "owned_frame", "owned_frame_alarm"}
         variants = [(None, "valid")]
         for helper in sorted(helpers):
             variants += [(helper, mode) for mode in ("600", "755", "symlink", "hardlink", "wrong-owner")]

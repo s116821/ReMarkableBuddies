@@ -2,6 +2,7 @@
 from pathlib import Path
 import base64
 import json
+import hashlib
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -92,7 +93,7 @@ class AdapterTests(unittest.TestCase):
             with self.assertRaises(Refused): adapter.open_once(("boot", 2, 3), 100)
             with self.assertRaises(Refused): adapter.open_once(("boot", 2, 3), 100)
             self.assertEqual(len(calls), 1)
-            self.assertIn('kill -KILL "$child"', calls[0])
+            self.assertNotIn('kill -KILL "$child"', calls[0])
             self.assertIn('nohup "$root/owned_tap_guardian" --tap', calls[0])
             self.assertNotIn('bounded "$root/owned_tap_guardian"', calls[0])
             self.assertTrue((Path(root) / "transport-001.json").exists())
@@ -118,15 +119,16 @@ class AdapterTests(unittest.TestCase):
         raw = {"pid": 2, "start_ticks": 3, "root_inode": "1 2", "window": encode(("1" * 32 + " 1 361 50 120\n").encode()),
                "waiting": encode(b"waiting"), "uptime": encode(b"51.00 0.00\n"), "last_open": encode(b"unknown"),
                "content": encode(b"{}"), "metadata": encode(b"{}"), "png": encode(b"raw image"),
-               "hashes": encode(b""), "idle": encode(b""), "diagnostics": ""}
+               "hashes": encode(b""), "idle": encode(b""), "diagnostics": "",
+               "frame_hash": "a" * 64, "native_hash": "b" * 64, "capture_receipt": encode(("nonce=" + "1" * 32 + " frame_sha256=" + "a" * 64 + " native_sha256=" + "b" * 64 + " overview_sha256=" + hashlib.sha256(b"raw image").hexdigest() + " conversion_complete=true native_authority=false\n").encode())}
         with tempfile.TemporaryDirectory() as root:
             adapter, calls = self.adapter(root, {"timeout": False, "exit": 0, "stdout": json.dumps(raw)})
-            adapter.profile.update(immutable_hashes={}, screenshot_path="/fixture/capture", screenshot_sha256="0" * 64)
-            for _ in range(16):
+            adapter.profile.update(immutable_hashes={}, boot_id="02b2347b-03aa-4a85-8dd7-d731aabf6f3e")
+            for _ in range(7):
                 adapter.raw_snapshot("open", 100, False)
             with self.assertRaisesRegex(Refused, "frame count exhausted"):
                 adapter.raw_snapshot("open", 200, False)
-            self.assertEqual(len(calls), 16)
+            self.assertEqual(len(calls), 7)
             for index, script in enumerate(calls):
                 self.assertIn(f'host-open-{index:03}.png', script)
                 self.assertIn("cutoff=100\n", script)

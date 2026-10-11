@@ -1,14 +1,36 @@
-# Caller-selected insertion recovery (source only)
+# Experimental insertion recovery
 
-## Open-document source utilities (not executable integration)
+## Experimental open-document host path
 
-The new `open-document-insertion-v1` partition validator protects the exact
-current seven-page order and 26 paths: sixteen document files (fourteen immutable,
-two mutable) plus ten providers. It includes the intentionally stroked 5aef page
-and thumbnail. Preparation now supports a separate gated-source mode pinned to
-SDK clock repair 485ac1a; coordinator execution still refuses this mode before
-transport. No new packet can run through the coordinator. The legacy six-page mode retains
-its existing admission and behavior.
+`open-document-insertion-v1` protects the exact seven-page order and 26 paths:
+sixteen document files (fourteen immutable, two mutable) plus ten providers.
+The intentionally stroked existing page and its thumbnail remain protected.
+Main alone selects packets and operates the tablet; every action identity is
+single use. The original spent trial stopped at ambiguous screenshot discovery
+before input or native insertion. Insertion remains unqualified.
+
+The reviewed `bounded-host-v5` packet uses the exact experimental capture
+contract in `owned_frame_capture.py`: a private native-backed one-plane reader,
+pure public owned-frame converter, and same-process own-alarm launcher. The
+producer must exit successfully and close a complete hashed frame before
+conversion; converter exit, receipt and both PNG hashes bind acceptance. An
+atomic exclusive capture claim precedes all observation files. Keep full wrapper
+maps and raw frames for evidence; samples do not pin lifetime, exclude tearing,
+or establish native page/render/panel authority.
+
+Pinned stock capture and actual ARM conversion of the same frame produced the
+approved Library image with unchanged fixture hashes and exact owned cleanup.
+That qualifies this exploratory capture path, not insertion. Target /run capacity
+limits opening observations to seven (ten captures total); initial free-space
+admission is 192 MiB, per-frame admission 32 MiB, with explicit PNG and map
+acceptance caps. Stream evidence to the host rather than duplicating a full
+remote capture archive. The 35-second opening deadline and independent recovery
+remain unchanged. Every helper requires sufficient remaining stage time before
+launch; no numeric-PID watchdog is used in the host adapter.
+
+The central change is
+[qualify-open-pdf-capture](https://github.com/s116821/ReMarkableBuddiesDocs/tree/docs/rem-25-shutdown-recovery-guard/openspec/changes/qualify-open-pdf-capture).
+The legacy six-page mode retains its existing admission and behavior.
 
 `open_document_timing.py` is a pure timing prerequisite. The actor's distinct
 mode now enforces the 255-second startup reserve and publishes one immutable
