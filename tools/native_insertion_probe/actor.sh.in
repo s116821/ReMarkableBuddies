@@ -4,6 +4,7 @@ set -eu
 umask 077
 root='@ROOT@'
 nonce='@NONCE@'
+experiment='@EXPERIMENT@'
 parent=/run/systemd/system/xochitl.service.d
 guard="$parent/zz-rmb-insertion-$nonce-guard.conf"
 activation="$parent/zz-rmb-insertion-$nonce-activation.conf"
@@ -397,6 +398,24 @@ wait_insertion_stop() {
     done
 }
 
+observation_window() {
+    candidate_window_start=$(now)
+    if test "$experiment" = open-document-insertion-v1; then
+        # Refuse late startup rather than shorten declared observations. This
+        # uses the original independent actor BOOTTIME deadline, never a signal.
+        reserve 255
+        observe_end=$((candidate_window_start + 70))
+    else
+        observe_end=$((candidate_window_start + 30))
+    fi
+    reserve_cutoff=$((deadline - 185))
+    test "$observe_end" -le "$reserve_cutoff" || observe_end=$reserve_cutoff
+    if test "$experiment" = open-document-insertion-v1; then
+        (set -C; printf '%s %s %s %s %s\n' "$nonce" "$armed_at" "$deadline" "$candidate_window_start" "$observe_end" > "$root/candidate.window")
+        private "$root/candidate.window"
+    fi
+}
+
 main() {
     test "$#" = 0
     validate_root
@@ -464,10 +483,9 @@ main() {
     case "$VALUE" in *"$root/launch.sh"*) :;; *) return 90;; esac
     candidate_started=yes
     claim candidate-start.claim
+    if test "$experiment" = open-document-insertion-v1; then observation_window; fi
     query start --no-block xochitl.service
-    observe_end=$(($(now) + 30))
-    reserve_cutoff=$((deadline - 185))
-    test "$observe_end" -le "$reserve_cutoff" || observe_end=$reserve_cutoff
+    if test "$experiment" != open-document-insertion-v1; then observation_window; fi
     wait_insertion_stop
 
 }

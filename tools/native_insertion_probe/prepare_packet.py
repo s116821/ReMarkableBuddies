@@ -54,9 +54,8 @@ def remove_owned_onfailure(data):
 
 
 def partition(selected, files):
-    # Source-only new-mode inventory validation. main() still refuses this mode
-    # until the SDK gate and bounded host/actor integration are independently
-    # reviewed; this function alone cannot prepare or execute its packet.
+    # The coordinator still refuses executing this new mode until the complete
+    # bounded host sequence is integrated and independently reviewed.
     open_mode = selected.get("experiment_kind") == "open-document-insertion-v1"
     document = selected.get("document_id", "")
     uuid = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
@@ -114,15 +113,22 @@ def main():
     if selection_file.stat().st_size > 64 * 1024:
         raise ValueError("Selection exceeds bound")
     selected = json.loads(selection_file.read_text(encoding="utf-8-sig"))
-    if selected.get("experiment_kind") != "caller-selected-insertion-v1":
+    kind = selected.get("experiment_kind")
+    if kind not in {"caller-selected-insertion-v1", "open-document-insertion-v1"}:
         raise ValueError("Explicit insertion experiment required; no diagnostic alias")
+    if kind == "open-document-insertion-v1" and (
+        selected.get("development_after_open") is not True or
+        selected.get("sdk_revision") != "485ac1a46367bfdf203abe140a8b764728cdf54d"
+    ):
+        raise ValueError("Explicit gated SDK clock-repair source selection required")
     nonce = selected.get("nonce", "")
     if not isinstance(nonce, str) or not re.fullmatch(r"[0-9a-f]{32}", nonce) or nonce == "0" * 32:
         raise ValueError("Fresh Main-selected nonce required; all-zero compile fixture is not native")
     if nonce in {"0404ebf9b5794196a85bfba7ee6859ba", "301a86a1a18d48d885c5ddcec0af549c",
                  "b3e3ca0475a84432a9b328218395de0c", "4459cae2f852426b8262f658c6aa59ed",
                  "a22fc58d4c9948098f7d2ccc8a9de8c4", "94f4037a4f3c40b881fe491b9b404bc3",
-                 "94774266c10f41e2aa8d410012fee601", "2b34ff126957497285b66f77311df07e", "8287c096cca84cf6a0998b8d5f178c0d"}:
+                 "94774266c10f41e2aa8d410012fee601", "2b34ff126957497285b66f77311df07e", "8287c096cca84cf6a0998b8d5f178c0d",
+                 "026e74d06f7248ae809bf1b1d6a417ba", "ff497d18868042319864c82bb34c0e5e"}:
         raise ValueError("Historical nonce refused")
     if selected.get("budget_seconds") != 360 or selected.get("original_policy") != POLICY:
         raise ValueError("Exact selected budget/original policy required")
@@ -148,8 +154,9 @@ def main():
     if sha(payload) != payload_hash:
         raise ValueError("Selected payload mismatch")
     files = selected.get("protected_files")
-    if not isinstance(files, list) or len(files) != 24:
-        raise ValueError("Exact fresh 14-document/10-baseline hash inventory required")
+    count = 26 if kind == "open-document-insertion-v1" else 24
+    if not isinstance(files, list) or len(files) != count:
+        raise ValueError("Exact fresh mode-specific baseline hash inventory required")
     paths = set()
     for entry in files:
         path = entry.get("path", "")
@@ -166,7 +173,8 @@ def main():
     output.mkdir(mode=0o700, parents=True)
     root = "/run/rmb-qt-probe-" + nonce
     substitutions = {"@ROOT@": root, "@NONCE@": nonce, "@STOCKPID@": selected["stock_pid"],
-                     "@STOCKSTART@": selected["stock_start"], "@PAYLOADHASH@": payload_hash, "@EXEHASH@": exe_hash}
+                     "@STOCKSTART@": selected["stock_start"], "@PAYLOADHASH@": payload_hash, "@EXEHASH@": exe_hash,
+                     "@EXPERIMENT@": kind}
     for name in ("actor.sh", "launch.sh"):
         text = regular(HERE / (name + ".in")).read_text()
         for key, value in substitutions.items():
@@ -195,7 +203,7 @@ def main():
     (output / "packet.files").write_text("".join(f"{v}  {k}\n" for k, v in hashes.items()), encoding="ascii", newline="\n")
     (output / "packet.files").chmod(0o600)
     receipt = {"evidence_class": "prepared only; no native execution", "nonce": nonce, "remote_root": root,
-               "experiment_kind": "caller-selected-insertion-v1", "document_id": document, "target_page_id": target, "before_page_ids": pages,
+               "experiment_kind": kind, "document_id": document, "target_page_id": target, "before_page_ids": pages,
                "absolute_budget_seconds": 360, "selection_sha256": sha(selection_file), "files": hashes,
                "packet_manifest_sha256": sha(output / "packet.files")}
     (output / "preparation.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8", newline="\n")

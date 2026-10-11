@@ -5,12 +5,17 @@
 The new `open-document-insertion-v1` partition validator protects the exact
 current seven-page order and 26 paths: sixteen document files (fourteen immutable,
 two mutable) plus ten providers. It includes the intentionally stroked 5aef page
-and thumbnail. `prepare_packet.main` and the coordinator still reject this mode;
-no new packet can run through these utilities. The legacy six-page mode retains
+and thumbnail. Preparation now supports a separate gated-source mode pinned to
+SDK clock repair 485ac1a; coordinator execution still refuses this mode before
+transport. No new packet can run through the coordinator. The legacy six-page mode retains
 its existing admission and behavior.
 
-`open_document_timing.py` is a pure proposed timing prerequisite, not wired into
-the actor. It preserves the original 360-second absolute deadline and 185-second
+`open_document_timing.py` is a pure timing prerequisite. The actor's distinct
+mode now enforces the 255-second startup reserve and publishes one immutable
+`candidate.window` (nonce, actor arming, absolute deadline, window start, cutoff)
+before candidate start. Its seventy-second cap never renews; the old mode keeps
+its thirty-second post-start observer. The timing contract preserves the
+original 360-second absolute deadline and 185-second
 recovery reserve, requires 255 seconds before candidate start, and caps observation
 at 70 seconds. Stages expire at candidate +20/+35/+40/+55/+60 seconds (ready,
 ordinary open/verification, trigger, result, stop), leaving ten seconds of margin.
@@ -23,7 +28,7 @@ timeout exactly 30 seconds after candidate start, and recovery 29 seconds later.
 Those measurements support conditional feasibility, not a guarantee of finishing
 ordinary opening or validation inside these caps. The future bounded host sequence
 must decide without chat, prove its declared observations, intersect SDK and host
-expiry, and refuse/restore on uncertainty. Runtime gate/host/actor integration,
+expiry, and refuse/restore on uncertainty. Complete bounded host integration,
 focused independent review, artifact/current-state/budget gates, and actual hardware
 selection remain pending. These pure tests never open SSH or touch a device.
 

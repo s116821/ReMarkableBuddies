@@ -15,7 +15,8 @@ FILES = {"actor.sh", "launch.sh", "runtime.files", "document-immutable.files", "
          "guard.conf", "activation.conf", "stock.policy", "guard.policy", "baseline.files", "service.files",
          "stock-unit.original", "vendor-dropin.original", "unit-shadow.service", "vendor-shadow.conf"}
 SPENT = {"0" * 32, "2b34ff126957497285b66f77311df07e", "8287c096cca84cf6a0998b8d5f178c0d", "0404ebf9b5794196a85bfba7ee6859ba", "301a86a1a18d48d885c5ddcec0af549c", "b3e3ca0475a84432a9b328218395de0c",
-         "4459cae2f852426b8262f658c6aa59ed", "a22fc58d4c9948098f7d2ccc8a9de8c4", "94f4037a4f3c40b881fe491b9b404bc3", "94774266c10f41e2aa8d410012fee601"}
+         "4459cae2f852426b8262f658c6aa59ed", "a22fc58d4c9948098f7d2ccc8a9de8c4", "94f4037a4f3c40b881fe491b9b404bc3", "94774266c10f41e2aa8d410012fee601",
+         "026e74d06f7248ae809bf1b1d6a417ba", "ff497d18868042319864c82bb34c0e5e"}
 
 
 def sha(data):
@@ -40,7 +41,7 @@ def load_packet(packet, receipt_hash):
         raise ValueError("Fresh selected nonce required")
     if receipt.get("remote_root") != "/run/rmb-qt-probe-" + nonce or receipt.get("absolute_budget_seconds") != 360:
         raise ValueError("Receipt root/budget refused")
-    if receipt.get("experiment_kind") != "caller-selected-insertion-v1":
+    if receipt.get("experiment_kind") not in {"caller-selected-insertion-v1", "open-document-insertion-v1"}:
         raise ValueError("Insertion-specific receipt required")
     if receipt.get("evidence_class") != "prepared only; no native execution" or set(receipt.get("files", {})) != FILES:
         raise ValueError("Complete prepared packet required")
@@ -143,6 +144,8 @@ def main():
     parser.add_argument("--execute-main", action="store_true")
     args = parser.parse_args()
     receipt = load_packet(args.packet, args.receipt_sha256)
+    if args.execute_main and receipt.get("experiment_kind") == "open-document-insertion-v1":
+        raise ValueError("Open-document execution refused: bounded host observations/publication not integrated")
     known_hosts = pin_hosts(args.known_hosts, args.known_hosts_sha256)
     identity = regular(args.identity_file)
     output = args.output.absolute()
