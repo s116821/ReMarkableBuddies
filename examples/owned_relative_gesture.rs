@@ -119,7 +119,7 @@ mod owned {
         }
         let mut slot = Abs::default();
         ensure!(
-            unsafe { libc::ioctl(fd, ior(0x20 + 47, std::mem::size_of::<Abs>()), &mut slot) } == 0
+            unsafe { libc::ioctl(fd, ior(0x40 + 47, std::mem::size_of::<Abs>()), &mut slot) } == 0
                 && slot.min == 0
                 && slot.max == 31
                 && (0..32).contains(&slot.value),
@@ -144,7 +144,7 @@ mod owned {
             unsafe {
                 libc::ioctl(
                     fd,
-                    ior(0x20 + 47, std::mem::size_of::<Abs>()),
+                    ior(0x40 + 47, std::mem::size_of::<Abs>()),
                     &mut selected,
                 )
             } == 0
@@ -159,6 +159,23 @@ mod owned {
             y,
             selected: slot.value,
         })
+    }
+    fn tracking_range(fd: RawFd) -> Result<(i32, i32)> {
+        let mut ids = [0i32; 6];
+        ensure!(
+            unsafe {
+                libc::ioctl(
+                    fd,
+                    ior(0x40 + 57, std::mem::size_of_val(&ids)),
+                    ids.as_mut_ptr(),
+                )
+            } == 0,
+            "Tracking range unavailable"
+        );
+        let low = ids[1].max(1);
+        let high = ids[2];
+        ensure!(low <= high && high <= 65535, "Tracking range refused");
+        Ok((low, high))
     }
     fn bounded(p: &Path, cap: u64) -> Result<Vec<u8>> {
         let mut f = OpenOptions::new()
@@ -1094,20 +1111,7 @@ mod owned {
         ensure!(snapshot(inputs.fd())? == seed, "Setup seed changed");
         let mut random = [0u8; 4];
         File::open("/dev/urandom")?.read_exact(&mut random)?;
-        let mut ids = [0i32; 6];
-        ensure!(
-            unsafe {
-                libc::ioctl(
-                    inputs.fd(),
-                    ior(0x20 + 57, std::mem::size_of_val(&ids)),
-                    ids.as_mut_ptr(),
-                )
-            } == 0,
-            "Tracking range unavailable"
-        );
-        let low = ids[1].max(1);
-        let high = ids[2];
-        ensure!(low <= high && high <= 65535, "Tracking range refused");
+        let (low, high) = tracking_range(inputs.fd())?;
         let tag = low + (u32::from_ne_bytes(random) % (high - low + 1) as u32) as i32;
         let mut policy = Policy::new(tag, path(&c), seed)?;
         let limits = Limits::fixed(now()?, &c)?;
@@ -1362,6 +1366,45 @@ mod owned {
                 recovery: 2600,
                 overall: 5100,
             }
+        }
+        #[test]
+        #[ignore = "Requires isolated C-header ioctl fixture; see examples/fixtures/owned_gesture_ioctl_fixture.c"]
+        fn actual_snapshot_and_tracking_requests_match_linux_header() {
+            let reset = unsafe {
+                libc::dlsym(libc::RTLD_DEFAULT, b"owned_fixture_reset\0".as_ptr().cast())
+            };
+            assert!(
+                !reset.is_null(),
+                "Run with the compiled isolated C-header fixture in LD_PRELOAD"
+            );
+            let reset: unsafe extern "C" fn(i32) = unsafe { std::mem::transmute(reset) };
+            unsafe { reset(0) };
+            let s = snapshot(-137).unwrap();
+            assert_eq!(s.selected, 0);
+            assert!(s.released());
+            for i in 0..32 {
+                assert_eq!(s.x[i], 100 + i as i32);
+                assert_eq!(s.y[i], 936 + i as i32);
+            }
+            assert_eq!(tracking_range(-137).unwrap(), (1, 65535));
+            // Authoritative C header rejects the old slot/range request numbers.
+            let mut a = [0i32; 6];
+            for axis in [47, 57] {
+                assert_eq!(
+                    unsafe { libc::ioctl(-137, ior(0x20 + axis, 24), a.as_mut_ptr()) },
+                    -1
+                );
+            }
+            for (mode, error) in [
+                (1, "Unknown MT layout"),
+                (2, "Unknown MT layout"),
+                (3, "Selected slot changed during query"),
+                (4, "Contact changed during query"),
+            ] {
+                unsafe { reset(mode) };
+                assert_eq!(snapshot(-137).unwrap_err().to_string(), error);
+            }
+            unsafe { reset(0) };
         }
         #[test]
         fn exact_sequence_and_suppressed_axes_release() {
