@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 import subprocess
 import time
-from owned_frame_capture import CONTRACT as CAPTURE_CONTRACT, TOOLS as CAPTURE_TOOLS
+from owned_frame_capture import CONTRACT as CAPTURE_CONTRACT, TOOLS as CAPTURE_TOOLS, HOST_KINDS, OBSERVATION_KIND
 
 HERE = Path(__file__).resolve().parent
 ALIAS = "rem25-usb-rm2"
@@ -19,12 +19,22 @@ HOST_FILES = {"host-profile.json", "native_frame_acquire", "owned_frame", "owned
 
 
 def packet_files(receipt):
-    return FILES | (HOST_FILES if receipt.get("experiment_kind") == "open-document-insertion-v1" else set())
+    return FILES | (HOST_FILES if receipt.get("experiment_kind") in HOST_KINDS else set())
+
+
+def run_host_sequence(sequence, purpose):
+    if purpose == OBSERVATION_KIND:
+        return sequence.run_diagnostic()
+    if purpose == 'open-document-insertion-v1':
+        return sequence.run()
+    raise ValueError('Unknown host purpose refused')
 
 
 def load_host_profile(packet, receipt):
     try:
         profile = json.loads(regular(Path(packet) / "host-profile.json").read_bytes())
+        if profile.get('experiment_kind') != receipt.get('experiment_kind') or profile.get('experiment_kind') not in HOST_KINDS:
+            raise ValueError('Explicit matching host purpose required')
         sources = {"open_document_host.py", "open_document_transport.py", "open_document_protocol.py",
                    "open_document_timing.py", "publish_creation_arm.c", "coordinator.py",
                    "prepare_packet.py", "actor.sh.in", "arm.sh.in", "owned_tap_guardian.c", "owned_frame_capture.py"}
@@ -102,7 +112,7 @@ def load_packet(packet, receipt_hash):
         raise ValueError("Fresh selected nonce required")
     if receipt.get("remote_root") != "/run/rmb-qt-probe-" + nonce or receipt.get("absolute_budget_seconds") != 360:
         raise ValueError("Receipt root/budget refused")
-    if receipt.get("experiment_kind") not in {"caller-selected-insertion-v1", "open-document-insertion-v1"}:
+    if receipt.get("experiment_kind") not in ({"caller-selected-insertion-v1"} | HOST_KINDS):
         raise ValueError("Insertion-specific receipt required")
     if receipt.get("evidence_class") != "prepared only; no native execution" or set(receipt.get("files", {})) != packet_files(receipt):
         raise ValueError("Complete prepared packet required")
@@ -151,7 +161,7 @@ def ssh_args(known_hosts, identity=None):
 
 def render(receipt, receipt_hash):
     text = regular(HERE / "arm.sh.in").read_text()
-    replacements = {"@ROOT@": receipt["remote_root"], "@CAPTURESPACE@": 'test "$(df -Pk /run | awk \'NR==2 {print $4}\')" -ge 196608' if receipt.get("experiment_kind") == "open-document-insertion-v1" else ":", "@NONCE@": receipt["nonce"],
+    replacements = {"@ROOT@": receipt["remote_root"], "@CAPTURESPACE@": 'test "$(df -Pk /run | awk \'NR==2 {print $4}\')" -ge 196608' if receipt.get("experiment_kind") in HOST_KINDS else ":", "@NONCE@": receipt["nonce"],
                     "@GUARDHASH@": receipt["files"]["guard.conf"], "@MANIFESTHASH@": receipt["packet_manifest_sha256"],
                     "@UNITSHADOWHASH@": receipt["files"]["unit-shadow.service"],
                     "@VENDORSHADOWHASH@": receipt["files"]["vendor-shadow.conf"],
@@ -212,7 +222,7 @@ def main():
     parser.add_argument("--execute-main", action="store_true")
     args = parser.parse_args()
     receipt = load_packet(args.packet, args.receipt_sha256)
-    profile = load_host_profile(args.packet, receipt) if receipt["experiment_kind"] == "open-document-insertion-v1" else None
+    profile = load_host_profile(args.packet, receipt) if receipt["experiment_kind"] in HOST_KINDS else None
     known_hosts = pin_hosts(args.known_hosts, args.known_hosts_sha256)
     identity = regular(args.identity_file)
     output = args.output.absolute()
@@ -244,9 +254,10 @@ def main():
         adapter = SSHAdapter(arguments, receipt, profile, output, transport,
                              regular(args.packet / "library-reference.png").read_bytes())
         try:
-            report = HostSequence(adapter, profile, regular(args.packet / "library-reference.png").read_bytes(),
-                                  regular(args.packet / "source-body-reference.png").read_bytes(),
-                                  regular(args.packet / "source-footer-reference.png").read_bytes()).run()
+            sequence = HostSequence(adapter, profile, regular(args.packet / "library-reference.png").read_bytes(),
+                                    regular(args.packet / "source-body-reference.png").read_bytes(),
+                                    regular(args.packet / "source-footer-reference.png").read_bytes())
+            report = run_host_sequence(sequence, profile['experiment_kind'])
             (output / "host-report.json").write_text(json.dumps(report, indent=2) + "\n")
         except Exception as error:
             # Permission/input uncertainty never triggers a second attempt.

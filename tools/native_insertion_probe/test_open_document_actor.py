@@ -8,6 +8,13 @@ from test_actor import fixture
 
 
 class ObservationWindow(unittest.TestCase):
+    def test_diagnostic_window_keeps_original_70_seconds_and_no_input_recovery(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d)
+            fixture.shell(root, 'armed_at=100; deadline=460; experiment=open-document-readiness-observation-v1; observation_window; test "$observe_end" = 275; recover_owned_input',
+                          'now() { printf "205\\n"; }')
+            self.assertEqual((root/'candidate.window').read_text(),'1'*32+' 100 460 205 275\n')
+
     def test_latest_start_preserves_185_seconds_and_never_renews(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)

@@ -7,8 +7,9 @@ import re
 import shlex
 import time
 from open_document_host import Refused, same_pixels
-from open_document_timing import upper_uptime_ms
-from owned_frame_capture import CONTRACT as CAPTURE_CONTRACT, TOOLS as CAPTURE_TOOLS, capture_script, validate_receipt, hash_tool_checks, ordered_hash_checks
+from open_document_timing import upper_uptime_ms, OpenDocumentTiming, diagnostic_cutoff
+from open_document_protocol import parse_waiting
+from owned_frame_capture import CONTRACT as CAPTURE_CONTRACT, TOOLS as CAPTURE_TOOLS, OBSERVATION_KIND, PHASE_LABELS, capture_script, validate_receipt, hash_tool_checks, ordered_hash_checks
 
 
 def q(value):
@@ -29,6 +30,9 @@ class SSHAdapter:
         self.ready_frames = 0
         self.ready_cutoff = None
         self.capture_failed = False
+        self.diagnostic_frames = 0
+        self.diagnostic_context = None
+        self.diagnostic_end = None
         self.tap_attempted = False
         self.arm_attempted = False
         self.stop_attempted = False
@@ -44,12 +48,42 @@ class SSHAdapter:
         (self.output / (stage + ".json")).write_text(json.dumps(evidence, default=encode, indent=2) + "\n")
 
     def call(self, script, timeout=4):
+        started = time.monotonic() if self.is_diagnostic() else None
         result = self.transport(self.arguments, script, timeout)
+        if started is not None:
+            result = result | {'local_monotonic_started': started,
+                               'local_monotonic_completed': time.monotonic()}
         self.counter += 1
         (self.output / f"transport-{self.counter:03}.json").write_text(json.dumps(result, indent=2) + "\n")
         if result["timeout"] or result["exit"] != 0:
             raise Refused("Remote action failed or uncertain; never replay an action")
         return result["stdout"]
+
+    def is_diagnostic(self):
+        return self.profile.get('experiment_kind') == OBSERVATION_KIND
+
+    def require_publication(self):
+        if self.profile.get('experiment_kind', 'open-document-insertion-v1') != 'open-document-insertion-v1':
+            raise Refused('Observation purpose cannot publish input or creation permission')
+
+    def diagnostic_closure_checks(self):
+        return ''.join(f'test ! -e "$root/{name}"\ntest ! -L "$root/{name}"\n'
+                       for name in ('entry.closed', 'restore.claim', 'stop.request', 'stop.admitted',
+                                    'diagnostics.json', 'callback.json', 'tap-start.claim', 'tap.go', 'creation-arm', 'creation-arm.tmp'))
+
+    def diagnostic_phase_setup(self, prefix):
+        return f'''test ! -e "$root/{prefix}.phases"
+test ! -L "$root/{prefix}.phases"
+(set -C; : > "$root/{prefix}.phases")
+private "$root/{prefix}.phases"
+diagnostic_phase() {{
+ read diagnostic_uptime diagnostic_idle diagnostic_extra < /proc/uptime || return 90
+ test -z "$diagnostic_extra" || return 90
+ test "${{#diagnostic_uptime}}" -le 16 || return 90
+ printf '%s %s\\n' "$1" "$diagnostic_uptime" >> "$root/{prefix}.phases"
+}}
+diagnostic_phase record_start || exit 90
+'''
 
     def prelude(self, cutoff=None, identity=None, snapshot=False):
         text = f"""set -eu
@@ -158,10 +192,19 @@ b64() { /usr/bin/openssl base64 -A -in "$1"; }
         return deadline - now, deadline
 
     def _raw_snapshot(self, stage, cutoff, idle):
-        if stage not in {"ready", "open", "trigger", "result"}:
+        diagnostic = stage == 'diagnostic'
+        if self.is_diagnostic() != diagnostic:
+            raise Refused('Snapshot stage does not match explicit purpose')
+        if stage not in {"ready", "open", "trigger", "result", 'diagnostic'}:
             raise Refused("Unknown snapshot stage")
         script = self.prelude(cutoff, self.identity, snapshot=True)
         prefix = "host-" + stage
+        if diagnostic:
+            if not idle or self.diagnostic_context is None or cutoff != self.diagnostic_end or self.diagnostic_frames >= 3:
+                raise Refused('Bounded diagnostic context, cutoff and full idle required')
+            prefix += f'-{self.diagnostic_frames:03}'
+            self.diagnostic_frames += 1
+            script += self.diagnostic_closure_checks()
         if stage == "ready":
             if not idle or self.ready_frames >= CAPTURE_CONTRACT['maximum_ready_frames']:
                 raise Refused("Bounded ready observation with full idle required")
@@ -177,8 +220,14 @@ b64() { /usr/bin/openssl base64 -A -in "$1"; }
             self.open_frames += 1
         # Claim precedes every prefix output, including idle observations.
         script += f'(set -C; printf %s {q(self.profile["nonce"])} > "$root/{prefix}.claim")\n'
+        mark = lambda label: f'diagnostic_phase {label} || exit 90\n' if diagnostic else ''
+        if diagnostic:
+            script += self.diagnostic_phase_setup(prefix)
+        script += mark('artifact_begin')
         script += self.snapshot_artifact_checks(prefix)
+        script += mark('artifact_end') + mark('sidecar_prepare_begin')
         script += self.sidecar_prepare(prefix)
+        script += mark('sidecar_prepare_end') + mark('idle_begin')
         # Every output is nonce-root-owned and exclusive. Snapshot failure cannot
         # renew a stage or lead to a tap/arm retry.
         script += f'test ! -e "$root/{prefix}.png" && test ! -L "$root/{prefix}.png"\n'
@@ -187,10 +236,14 @@ b64() { /usr/bin/openssl base64 -A -in "$1"; }
             script += '/usr/bin/evtest --query /dev/input/event1 EV_KEY BTN_TOUCH\n/usr/bin/evtest --query /dev/input/event1 EV_KEY BTN_TOOL_PEN\n'
         else:
             script += f': > "$root/{prefix}.idle"\n'
-        script += capture_script(prefix, self.profile["nonce"], self.profile["boot_id"])
+        script += mark('idle_end')
+        script += capture_script(prefix, self.profile["nonce"], self.profile["boot_id"], diagnostic=diagnostic)
+        script += mark('sidecar_close_begin')
         script += self.sidecar_close(prefix)
+        script += mark('sidecar_close_end') + mark('immutable_begin')
         paths = " ".join(q(p) for p in self.profile["immutable_hashes"])
         script += f'test "$(now_upper)" -le $((cutoff-4))\n"$root/owned_frame_alarm" --hashes /usr/bin/sha256sum {paths} > "$root/{prefix}.hashes"\n'
+        script += mark('immutable_end')
         script += 'test "$(sed \'s/^.*) //\' /proc/$pid/stat | awk \'{print $20}\')" = "$start"\n'
         script += 'test "$(now_upper)" -lt "$cutoff"\n'
         script += 'test "$(systemctl show xochitl.service -p MainPID --value)" = "$pid"\n'
@@ -199,6 +252,9 @@ b64() { /usr/bin/openssl base64 -A -in "$1"; }
         script += f'test "$(cat "$root/owner")" = {q(self.profile["nonce"])}\n'
         if self.root_inode:
             script += f'test "$(stat -c \'%d %i\' "$root")" = {q(self.root_inode)}\n'
+        if diagnostic:
+            script += self.diagnostic_closure_checks()
+        script += mark('response_begin')
         script += r"""printf '{"pid":%s,"start_ticks":%s,"root_inode":"%s","window":"%s","waiting":"%s","capture_uptime":"%s","last_open":"%s",' "$pid" "$start" "$(stat -c '%d %i' "$root")" "$(b64 "$root/candidate.window")" "$(b64 "$root/creation-waiting")" "$(b64 /proc/uptime)" "$(grep '^LastOpen' /home/root/.config/remarkable/xochitl.conf | /usr/bin/openssl base64 -A)"
 """
         script += f'printf \'"frame_hash":"%s","native_hash":"%s","capture_receipt":"%s",\' "$frame_hash" "$native_hash" "$(b64 "$root/{prefix}.capture")"\n'
@@ -213,8 +269,12 @@ test "$(sed 's/^.*) //' /proc/$pid/stat | awk '{print $20}')" = "$start"
 test "$(systemctl show xochitl.service -p MainPID --value)" = "$pid"
 for name in entry.closed restore.claim stop.request stop.admitted; do test ! -e "$root/$name" && test ! -L "$root/$name"; done
 test "$(now_upper)" -lt "$cutoff"
-printf '"uptime":"%s"}\n' "$(b64 /proc/uptime)"
 """
+        if diagnostic:
+            script += self.diagnostic_closure_checks() + mark('response_tail')
+            script += f'private "$root/{prefix}.phases"\ntest "$(stat -c \'%s\' "$root/{prefix}.phases")" -le 1024\n'
+            script += f'printf \'"phases":"%s",\' "$(b64 "$root/{prefix}.phases")"\n'
+        script += 'printf \'"uptime":"%s"}\\n\' "$(b64 /proc/uptime)"\n'
         timeout, response_deadline = self.snapshot_timeout(cutoff)
         response = self.call(script, timeout)
         if time.monotonic() >= response_deadline:
@@ -248,6 +308,9 @@ printf '"uptime":"%s"}\n' "$(b64 /proc/uptime)"
                     "metadata_raw_sha256": hashlib.sha256(decode("metadata")).hexdigest(),
                     "idle": {"interval_ms": 2000 if idle else None, "invalidated": not idle_ok, "touch_active": not idle_ok, "pen_contact": 0 if idle else None, "pen_tool": 0 if idle else None},
                     "capture": capture_evidence, "diagnostics": json.loads(decode("diagnostics")) if raw["diagnostics"] else {}}
+        if diagnostic:
+            observed['phases'] = decode('phases')
+            observed['diagnostic_cutoff'] = self.diagnostic_end
         if self.root_inode is not None and self.root_inode != raw["root_inode"]:
             raise Refused("Private root inode changed")
         if time.monotonic() >= response_deadline:
@@ -256,6 +319,8 @@ printf '"uptime":"%s"}\n' "$(b64 /proc/uptime)"
         return observed
 
     def wait_library(self):
+        if self.is_diagnostic():
+            raise Refused('Diagnostic purpose cannot enter production readiness')
         # This loop only waits for existing actor/SDK markers. No capture/input
         # retry and no deadline renewal. Unknown timing never permits mutation.
         end = time.monotonic() + 110
@@ -277,7 +342,79 @@ if test -f "$root/candidate.window" && test -f "$root/creation-waiting" && test 
             time.sleep(0.2)
         raise Refused("Candidate waiting markers not observed in fixed setup allowance")
 
+    def wait_diagnostic_context(self):
+        if self.capture_failed:
+            raise Refused('Prior diagnostic failure; no repeated setup')
+        try:
+            return self._wait_diagnostic_context()
+        except Exception:
+            self.capture_failed = True
+            raise
+
+    def _wait_diagnostic_context(self):
+        if not self.is_diagnostic() or self.diagnostic_context is not None:
+            raise Refused('Fresh explicit diagnostic context required')
+        end = time.monotonic() + 110
+        while time.monotonic() < end:
+            script = f'''set -eu
+root={q(self.root)}
+test ! -e "$root/restore.claim"
+test ! -L "$root/restore.claim"
+test ! -e "$root/stock.restored"
+test ! -e "$root/recovery.failed"
+'''
+            script += self.diagnostic_closure_checks()
+            script += f'''
+if test -f "$root/candidate.window" && test -f "$root/creation-waiting" && test -f "$root/attempt.identity"; then
+ test -d "$root"
+ test ! -L "$root"
+ test "$(stat -c '%a %u' "$root")" = '700 0'
+ test "$(cat "$root/owner")" = {q(self.profile['nonce'])}
+ test "$(cat /proc/sys/kernel/random/boot_id)" = {q(self.profile['boot_id'])}
+'''
+            script += self.diagnostic_closure_checks()
+            script += ''' cat "$root/candidate.window"
+ cat "$root/creation-waiting"
+ stat -c '%d %i' "$root"
+ cat "$root/attempt.identity"
+ cat /proc/uptime
+fi
+'''
+            response = self.call(script, 3)
+            if response:
+                if len(response.encode('ascii')) > 1024:
+                    raise Refused('Diagnostic context exceeds bound')
+                lines = response.splitlines()
+                if len(lines) != 5:
+                    raise Refused('Complete bounded diagnostic context required')
+                window = lines[0].split()
+                identity = lines[3].split()
+                if len(window) != 5 or window[0] != self.profile['nonce'] or any(not re.fullmatch('[0-9]+', v) for v in window[1:]):
+                    raise Refused('Fixed diagnostic window refused')
+                if len(identity) != 2 or any(not re.fullmatch('[1-9][0-9]*', v) for v in identity) or int(identity[0]) <= 1 or not re.fullmatch('[0-9]+ [0-9]+', lines[2]):
+                    raise Refused('Diagnostic process/root identity refused')
+                waiting = (lines[1] + '\n').encode('ascii')
+                parsed = parse_waiting(waiting, self.profile['nonce'], int(identity[0]), int(identity[1]))
+                timing = OpenDocumentTiming(*map(int, window[1:4]))
+                if int(window[4]) != timing.observation_end:
+                    raise Refused('Diagnostic actor observation end changed')
+                cutoff = diagnostic_cutoff(timing, parsed.expiry_ms)
+                uptime = lines[4] + '\n'
+                if upper_uptime_ms(uptime) >= cutoff * 1000:
+                    raise Refused('Diagnostic fixed interval already expired')
+                context = {'window': [window[0]] + list(map(int, window[1:])), 'boot_id': self.profile['boot_id'],
+                           'pid': int(identity[0]), 'start_ticks': int(identity[1]), 'root_inode': lines[2],
+                           'waiting': waiting, 'uptime': uptime, 'closed': False}
+                self.identity = (context['boot_id'], context['pid'], context['start_ticks'])
+                self.root_inode = context['root_inode']
+                self.diagnostic_context = context
+                self.diagnostic_end = cutoff
+                return context
+            time.sleep(0.2)  # Existing marker setup wait, never a render delay.
+        raise Refused('Diagnostic context absent within original setup allowance')
+
     def open_once(self, identity, cutoff):
+        self.require_publication()
         if self.tap_attempted: raise Refused("Ordinary open already attempted")
         self.tap_attempted = True
         script = self.prelude(cutoff, identity)
@@ -369,6 +506,7 @@ printf '{"released":"%s","supervisor":"%s","lease":"%s","publication":"%s"}\n' "
         return self.raw_snapshot(stage, cutoff, idle)
 
     def arm_once(self, waiting, timing, ready):
+        self.require_publication()
         if self.arm_attempted: raise Refused("Creation publication already attempted")
         if not self.tap_released: raise Refused("Positive guardian release required before creation")
         self.arm_attempted = True
@@ -401,6 +539,7 @@ printf '{"released":"%s","supervisor":"%s","lease":"%s","publication":"%s"}\n' "
             raise Refused("Publication uncertain; never replay")
 
     def result_snapshot(self, identity, cutoff):
+        self.require_publication()
         # SDK access window is at most five seconds. Poll diagnostics only, then
         # collect exactly one same-candidate frame/files snapshot before stopping.
         for _ in range(30):

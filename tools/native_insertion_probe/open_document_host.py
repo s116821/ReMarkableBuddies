@@ -9,8 +9,8 @@ import re
 import time
 from PIL import Image
 from open_document_protocol import parse_waiting
-from open_document_timing import OpenDocumentTiming, upper_uptime_ms
-from owned_frame_capture import CONTRACT as CAPTURE_CONTRACT
+from open_document_timing import OpenDocumentTiming, upper_uptime_ms, diagnostic_cutoff
+from owned_frame_capture import CONTRACT as CAPTURE_CONTRACT, OBSERVATION_KIND, PHASE_LABELS
 
 BODY = (64, 0, 720, 980)
 FOOTER = (280, 986, 488, 1024)
@@ -57,6 +57,7 @@ class HostSequence:
         self.waiting = None
         self.arm_attempted = False
         self.stop_attempted = False
+        self.diagnostic_end = None
 
     def record(self, stage, evidence):
         self.trace.append((stage, evidence))
@@ -90,7 +91,11 @@ class HostSequence:
             raise Refused("Fixed candidate window changed")
         if self.last_completed_ms is not None and now_ms <= self.last_completed_ms:
             raise Refused("Completed observation time did not advance")
-        if not self.timing.admit(stage, (now_ms + 999) // 1000):
+        if stage == 'diagnostic':
+            admitted = self.diagnostic_end is not None and self.timing.candidate_at * 1000 <= now_ms < self.diagnostic_end * 1000
+        else:
+            admitted = self.timing.admit(stage, (now_ms + 999) // 1000)
+        if not admitted:
             raise Refused("Stage expired before completed observation")
         if parse_waiting(raw["waiting"], self.selected["nonce"], raw["pid"], raw["start_ticks"]) != self.waiting:
             raise Refused("Waiting identity or fixed expiry changed")
@@ -169,6 +174,8 @@ class HostSequence:
         self.adapter.stop_once(self.identity, self.timing.stage_end("stop"))
 
     def run(self):
+        if self.selected.get('experiment_kind', 'open-document-insertion-v1') != 'open-document-insertion-v1':
+            raise Refused('Observation purpose cannot enter production sequence')
         try:
             library = self.adapter.wait_library()
             for index in range(MAX_READY_FRAMES):
@@ -225,6 +232,62 @@ class HostSequence:
                 "authority": "bounded operator observation, not atomic native active-page authority",
             }
             self.record("report", report)
+            return report
+        finally:
+            self.stop_once()
+
+    def diagnostic_phases(self, raw):
+        data = raw.get('phases')
+        if type(data) is not bytes or len(data) > 1024 or not data.endswith(b'\n'):
+            raise Refused('Complete bounded diagnostic phase record required')
+        lines = data.decode('ascii').splitlines()
+        if len(lines) != len(PHASE_LABELS):
+            raise Refused('Diagnostic phase count refused')
+        previous = self.timing.candidate_at * 1000
+        result = []
+        completed = upper_uptime_ms(raw['uptime'])
+        for label, line in zip(PHASE_LABELS, lines):
+            match = re.fullmatch(re.escape(label) + r' ([0-9]{1,12}\.[0-9]{1,3})', line)
+            if not match:
+                raise Refused('Diagnostic phase label or uptime refused')
+            upper = upper_uptime_ms(match[1] + ' 0.00\n')
+            if upper < previous or upper >= self.diagnostic_end * 1000 or upper > completed:
+                raise Refused('Diagnostic phase time outside fixed interval')
+            previous = upper
+            result.append({'phase': label, 'uptime': match[1], 'upper_ms_since_candidate': upper - self.timing.candidate_at * 1000})
+        return result
+
+    def run_diagnostic(self):
+        if self.selected.get('experiment_kind') != OBSERVATION_KIND:
+            raise Refused('Explicit observation-only purpose required')
+        try:
+            context = self.adapter.wait_diagnostic_context()
+            self.record('diagnostic-context', context)
+            self.bind(context)
+            self.diagnostic_end = diagnostic_cutoff(self.timing, self.waiting.expiry_ms)
+            observations = []
+            for index in range(3):
+                raw = self.adapter.snapshot('diagnostic', self.diagnostic_end, True)
+                self.record(f'diagnostic-frame-{index:03}', raw)
+                self.admit(raw, 'diagnostic')
+                self.idle(raw)
+                if raw.get('diagnostics') or raw.get('diagnostic_cutoff') != self.diagnostic_end:
+                    raise Refused('Diagnostic SDK closure or cutoff mismatch')
+                phases = self.diagnostic_phases(raw)
+                matches = same_pixels(raw['png'], self.library_png)
+                self.response_time(raw)
+                observations.append({'index': index, 'library_pixels_match': matches, 'phases': phases,
+                                     'completed_uptime': raw['uptime'],
+                                     'completed_upper_ms_since_candidate': upper_uptime_ms(raw['uptime']) - self.timing.candidate_at * 1000})
+                if matches:
+                    break
+            report = {'purpose': OBSERVATION_KIND, 'production_ready': False, 'publication_permitted': False,
+                      'fixed_cutoff': self.diagnostic_end, 'candidate_at': self.timing.candidate_at,
+                      'library_observed': observations[-1]['library_pixels_match'], 'observations': observations,
+                      'terminal_reason': 'library-observed' if observations[-1]['library_pixels_match'] else 'frame-cap',
+                      'authority': 'sampled visual timing only; producer interval does not identify plane-read instant'}
+            self.record('diagnostic-report', report)
+            self.response_time(raw)
             return report
         finally:
             self.stop_once()

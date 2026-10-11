@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import re
 import shutil
-from owned_frame_capture import CONTRACT as CAPTURE_CONTRACT, TOOLS as CAPTURE_TOOLS
+from owned_frame_capture import CONTRACT as CAPTURE_CONTRACT, TOOLS as CAPTURE_TOOLS, HOST_KINDS, OBSERVATION_KIND
 
 HERE = Path(__file__).resolve().parent
 POLICY = {"OnFailure": "remarkable-fail.service", "OnFailureJobMode": "replace",
@@ -60,7 +60,7 @@ def remove_owned_onfailure(data):
 def partition(selected, files):
     # The coordinator still refuses executing this new mode until the complete
     # bounded host sequence is integrated and independently reviewed.
-    open_mode = selected.get("experiment_kind") == "open-document-insertion-v1"
+    open_mode = selected.get("experiment_kind") in HOST_KINDS
     document = selected.get("document_id", "")
     uuid = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
     target = selected.get("target_page_id", "")
@@ -120,14 +120,14 @@ def main():
         raise ValueError("Selection exceeds bound")
     selected = json.loads(selection_file.read_text(encoding="utf-8-sig"))
     kind = selected.get("experiment_kind")
-    if kind not in {"caller-selected-insertion-v1", "open-document-insertion-v1"}:
+    if kind not in ({"caller-selected-insertion-v1"} | HOST_KINDS):
         raise ValueError("Explicit insertion experiment required; no diagnostic alias")
-    if kind == "open-document-insertion-v1" and (
+    if kind in HOST_KINDS and (
         selected.get("development_after_open") is not True or
         selected.get("sdk_revision") != "485ac1a46367bfdf203abe140a8b764728cdf54d"
     ):
         raise ValueError("Explicit gated SDK clock-repair source selection required")
-    if kind == "open-document-insertion-v1" and not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", selected.get("boot_id", "")):
+    if kind in HOST_KINDS and not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", selected.get("boot_id", "")):
         raise ValueError("Canonical selected boot identity required")
     nonce = selected.get("nonce", "")
     if not isinstance(nonce, str) or not re.fullmatch(r"[0-9a-f]{32}", nonce) or nonce == "0" * 32:
@@ -165,7 +165,7 @@ def main():
     if sha(payload) != payload_hash:
         raise ValueError("Selected payload mismatch")
     files = selected.get("protected_files")
-    count = 26 if kind == "open-document-insertion-v1" else 24
+    count = 26 if kind in HOST_KINDS else 24
     if not isinstance(files, list) or len(files) != count:
         raise ValueError("Exact fresh mode-specific baseline hash inventory required")
     paths = set()
@@ -179,7 +179,7 @@ def main():
         paths.add(path)
     document, target, pages, runtime_files, immutable_files, mutable_files = partition(selected, files)
     host_inputs = {}
-    if kind == "open-document-insertion-v1":
+    if kind in HOST_KINDS:
         if selected.get("encoder_hashes") != ENCODER_HASHES:
             raise ValueError("Fresh verified target encoder/provider binding required")
         if (selected.get("references_reviewed") is not True or
@@ -219,7 +219,7 @@ def main():
     if host_inputs:
         for name, path in host_inputs.items():
             shutil.copyfile(path, output / name)
-        profile = {"nonce": nonce, "boot_id": selected["boot_id"], "document_id": document,
+        profile = {"experiment_kind": kind, "nonce": nonce, "boot_id": selected["boot_id"], "document_id": document,
                    "target_id": target, "page_ids": pages,
                    "immutable_hashes": {e["path"]: e["sha256"] for e in runtime_files + immutable_files},
                    "tools": {name: selected["host_artifacts"][name] for name in (("owned_tap_guardian", "observe_input", "publish_creation_arm") + tuple(CAPTURE_TOOLS))},

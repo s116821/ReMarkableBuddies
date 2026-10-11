@@ -3,6 +3,15 @@ import hashlib
 import re
 import shlex
 
+OBSERVATION_KIND = 'open-document-readiness-observation-v1'
+HOST_KINDS = {'open-document-insertion-v1', OBSERVATION_KIND}
+PHASE_LABELS = ('record_start', 'artifact_begin', 'artifact_end', 'sidecar_prepare_begin',
+                'sidecar_prepare_end', 'idle_begin', 'idle_end', 'native_pins_before_begin',
+                'native_pins_before_end', 'producer_begin', 'producer_end', 'converter_begin',
+                'converter_end', 'native_pins_after_begin', 'native_pins_after_end',
+                'sidecar_close_begin', 'sidecar_close_end', 'immutable_begin', 'immutable_end',
+                'response_begin', 'response_tail')
+
 TOOLS = {
     "native_frame_acquire": "eaaf0799c40b70e582fc4c3b395f9e5354b659d5e548861b809874c7cddbd6f5",
     "owned_frame": "fe8a516a63ac90b754c8ca154bb74f5886fb5ffa6a8b9e7827f92d1fa5c41765",
@@ -37,6 +46,9 @@ CONTRACT = {"kind": "native-owned-rgb32-scoped-v1", "frame_bytes": 10513468,
             "maximum_response_seconds": 20, "pin_checks": "ordered-alarm-batches-v1",
             "snapshot_prelude_pins": "ordered-alarm-batch-v1",
             "sidecar_checks": "initial-copy-plane-closing-v1",
+            "diagnostic": {"kind": OBSERVATION_KIND, "maximum_frames": 3,
+                           "candidate_seconds": 40, "maximum_phase_bytes": 1024,
+                           "phase_labels": list(PHASE_LABELS), "publication_permitted": False},
             "hash_tool_sha256": "df59cc89ea72164ae92b15db4ef089acae776eda5b373bf10e2fcc46b49c8c02"}
 
 
@@ -72,15 +84,17 @@ def pinned_hash_checks(output):
     return ordered_hash_checks(output, entries)
 
 
-def capture_script(prefix, nonce, boot):
+def capture_script(prefix, nonce, boot, diagnostic=False):
     if any(not isinstance(pin, str) or not re.fullmatch('[0-9a-f]{64}', pin)
            for pin in (TOOLS['native_frame_acquire'], SOURCES['private_acquisition'])):
         raise ValueError('Reviewed scoped producer source and artifact required')
-    if not re.fullmatch(r'host-(?:ready-00[0-2]|trigger|result|open-00[0-4])', prefix):
+    if not re.fullmatch(r'host-diagnostic-00[0-2]' if diagnostic else r'host-(?:ready-00[0-2]|trigger|result|open-00[0-4])', prefix):
         raise ValueError('Exact exclusive capture prefix required')
     if not re.fullmatch('[0-9a-f]{32}', nonce) or not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', boot):
         raise ValueError('Canonical capture nonce and boot required')
-    s = f'private "$root/{prefix}.claim"\ntest "$(cat "$root/{prefix}.claim")" = {nonce}\n' + pinned_hash_checks(f'$root/{prefix}.pins-before')
+    mark = lambda label: f'diagnostic_phase {label} || exit 90\n' if diagnostic else ''
+    s = f'private "$root/{prefix}.claim"\ntest "$(cat "$root/{prefix}.claim")" = {nonce}\n'
+    s += mark('native_pins_before_begin') + pinned_hash_checks(f'$root/{prefix}.pins-before') + mark('native_pins_before_end')
     s += 'test "$(df -Pk /run | awk \'NR==2 {print $4}\')" -ge 32768\n'
     for suffix in ('frame', 'producer-exit', 'producer-stderr', 'capture', 'converter-exit', 'converter-stderr', 'images', 'maps-before', 'maps-after'):
         s += f'test ! -e "$root/{prefix}.{suffix}"\ntest ! -L "$root/{prefix}.{suffix}"\n'
@@ -89,8 +103,10 @@ cat /proc/$pid/maps > "$root/{prefix}.maps-before"
 test "$(stat -c '%s' "$root/{prefix}.maps-before")" -le 262144
 test "$(now_upper)" -le $((cutoff-4))
 set +e
+{mark('producer_begin')}\
 "$root/native_frame_acquire" "$pid" "$start" {boot} {nonce} > "$root/{prefix}.frame" 2> "$root/{prefix}.producer-stderr"
 producer=$?
+{mark('producer_end')}\
 set -e
 printf '%s\\n' "$producer" > "$root/{prefix}.producer-exit"
 test "$(stat -c '%s' "$root/{prefix}.producer-stderr")" -le 525824
@@ -103,8 +119,10 @@ test "$(stat -c '%s' "$root/{prefix}.frame")" = 10513468
 frame_hash=$(sha256sum "$root/{prefix}.frame" | cut -d ' ' -f 1)
 test "$(now_upper)" -le $((cutoff-6))
 set +e
+{mark('converter_begin')}\
 "$root/owned_frame_alarm" "$root/owned_frame" "$root/{prefix}.frame" "$root/{prefix}.images" {nonce} "$pid" "$start" {boot} "$frame_hash" > "$root/{prefix}.capture" 2> "$root/{prefix}.converter-stderr"
 converter=$?
+{mark('converter_end')}\
 set -e
 printf '%s\\n' "$converter" > "$root/{prefix}.converter-exit"
 test "$converter" = 0
@@ -119,7 +137,7 @@ native_hash=$(sha256sum "$root/{prefix}.images/native.png" | cut -d ' ' -f 1)
 cp "$root/{prefix}.images/overview.png" "$root/{prefix}.png"
 test "$(now_upper)" -lt "$cutoff"
 '''
-    return s + pinned_hash_checks(f'$root/{prefix}.pins-after')
+    return s + mark('native_pins_after_begin') + pinned_hash_checks(f'$root/{prefix}.pins-after') + mark('native_pins_after_end')
 
 
 def validate_receipt(receipt, nonce, frame_hash, png, native_hash):

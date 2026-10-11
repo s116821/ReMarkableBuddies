@@ -14,6 +14,13 @@ STAGE_OFFSETS = {"ready": 20, "open": 35, "trigger": 40,
                  "result": 55, "stop": 60}
 
 
+def diagnostic_cutoff(timing, waiting_expiry_ms):
+    if type(waiting_expiry_ms) is not int or waiting_expiry_ms <= timing.candidate_at * 1000:
+        raise ValueError('Original SDK waiting expiry required')
+    return min((timing.candidate_at + 40) * 1000, waiting_expiry_ms,
+               timing.observation_end * 1000, (timing.deadline - RECOVERY_RESERVE) * 1000) // 1000
+
+
 def upper_uptime_ms(text):
     """Conservative BOOTTIME observation from bounded /proc/uptime bytes.
 

@@ -419,7 +419,7 @@ wait_insertion_stop() {
 
 observation_window() {
     candidate_window_start=$(now)
-    if test "$experiment" = open-document-insertion-v1; then
+    if test "$experiment" = open-document-insertion-v1 || test "$experiment" = open-document-readiness-observation-v1; then
         # Refuse late startup rather than shorten declared observations. This
         # uses the original independent actor BOOTTIME deadline, never a signal.
         reserve 255
@@ -429,7 +429,7 @@ observation_window() {
     fi
     reserve_cutoff=$((deadline - 185))
     test "$observe_end" -le "$reserve_cutoff" || observe_end=$reserve_cutoff
-    if test "$experiment" = open-document-insertion-v1; then
+    if test "$experiment" = open-document-insertion-v1 || test "$experiment" = open-document-readiness-observation-v1; then
         (set -C; printf '%s %s %s %s %s\n' "$nonce" "$armed_at" "$deadline" "$candidate_window_start" "$observe_end" > "$root/candidate.window")
         private "$root/candidate.window"
     fi
@@ -502,9 +502,9 @@ main() {
     case "$VALUE" in *"$root/launch.sh"*) :;; *) return 90;; esac
     candidate_started=yes
     claim candidate-start.claim
-    if test "$experiment" = open-document-insertion-v1; then observation_window; fi
+    if test "$experiment" = open-document-insertion-v1 || test "$experiment" = open-document-readiness-observation-v1; then observation_window; fi
     query start --no-block xochitl.service
-    if test "$experiment" != open-document-insertion-v1; then observation_window; fi
+    if test "$experiment" != open-document-insertion-v1 && test "$experiment" != open-document-readiness-observation-v1; then observation_window; fi
     wait_insertion_stop
 
 }
