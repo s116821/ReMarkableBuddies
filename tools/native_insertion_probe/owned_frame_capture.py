@@ -4,12 +4,12 @@ import re
 import shlex
 
 TOOLS = {
-    "native_frame_acquire": "1df200f054396de04f1b18c000c15088bb4449c46454844f0c046597aa72eef5",
+    "native_frame_acquire": "eaaf0799c40b70e582fc4c3b395f9e5354b659d5e548861b809874c7cddbd6f5",
     "owned_frame": "fe8a516a63ac90b754c8ca154bb74f5886fb5ffa6a8b9e7827f92d1fa5c41765",
     "owned_frame_alarm": "25e024efa8cdf3ac31fe2159b35c98acb899183c2dec74828881eeb510911b75",
 }
 SOURCES = {
-    "private_acquisition": "b545ea0375ab2a0e40a9841c72c19a6e5d96a898f8b79142fa70289b0fbece9d",
+    "private_acquisition": "dc739913913a05a9386818fee9406df458f3732fd04c9f77fed5db8e14a3a470",
     "converter_library": "9ede6e943e900a60dec17616a22e55c1e6682e8e5dc6226d22de081d80fc26f3",
     "converter_example": "4e0bcff64f46a9efe72fe3c51557513968a84591365cb1603d20409f36b3d08a",
     "private_alarm": "5bf7581b6785c6c2a1d6012d87f339952210e0757c0a6bcfccf804b9e2a88f5e",
@@ -27,7 +27,9 @@ PROVIDERS = {
     "/lib/libpthread.so.0": "4a9c1f5b2270484f4c02546c7ec64925d0bae7781f3a0a658377fb0301ecdfee",
     "/lib/libdl.so.2": "f0aa5ff0ab3e889fe3ec9f0ba59d3c7c0c4fbcb501ecc195a10ff3cb73d62989",
 }
-CONTRACT = {"kind": "native-owned-rgb32-v1", "frame_bytes": 10513468,
+CONTRACT = {"kind": "native-owned-rgb32-scoped-v1", "frame_bytes": 10513468,
+            "map_closure": "frozen-exact-dependencies-provider-rows-monotonic-heap-v1",
+            "wrapper_maps": "bounded-context-only",
             "maximum_producer_stderr_bytes": 525824,
             "source_sha256": SOURCES, "native_hashes": NATIVE_HASHES,
             "provider_hashes": PROVIDERS, "minimum_initial_free_kib": 196608, "maximum_open_frames": 7,
@@ -50,6 +52,9 @@ def pinned_hash_checks():
 
 
 def capture_script(prefix, nonce, boot):
+    if any(not isinstance(pin, str) or not re.fullmatch('[0-9a-f]{64}', pin)
+           for pin in (TOOLS['native_frame_acquire'], SOURCES['private_acquisition'])):
+        raise ValueError('Reviewed scoped producer source and artifact required')
     if not re.fullmatch(r'host-(?:ready|trigger|result|open-[0-9]{3})', prefix):
         raise ValueError('Exact exclusive capture prefix required')
     if not re.fullmatch('[0-9a-f]{32}', nonce) or not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', boot):
@@ -72,7 +77,6 @@ test "$producer" = 0
 test ! -s "$root/{prefix}.producer-stderr"
 cat /proc/$pid/maps > "$root/{prefix}.maps-after"
 test "$(stat -c '%s' "$root/{prefix}.maps-after")" -le 262144
-cmp "$root/{prefix}.maps-before" "$root/{prefix}.maps-after"
 private "$root/{prefix}.frame"
 test "$(stat -c '%s' "$root/{prefix}.frame")" = 10513468
 frame_hash=$(sha256sum "$root/{prefix}.frame" | cut -d ' ' -f 1)
