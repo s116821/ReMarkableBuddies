@@ -1,5 +1,7 @@
 """Offline transport refusal and cleanup scope checks; no device access."""
 from pathlib import Path
+import base64
+import json
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -8,6 +10,45 @@ from open_document_transport import SSHAdapter
 
 
 class AdapterTests(unittest.TestCase):
+    def guardian(self, adapter, status):
+        return {"nonce": adapter.profile["nonce"], "boot_id": adapter.profile["boot_id"], "pid": 24,
+                "start_ticks": 33, "slot": 0, "tracking_id": 123, "native_point": [201, 1360],
+                "lease_end_ms": 99000, "status": status, "exclusive_kernel_ownership": False}
+
+    def test_guardian_ready_release_is_bound_and_go_is_single_shot(self):
+        with tempfile.TemporaryDirectory() as root:
+            adapter, calls = self.adapter(root, {})
+            ready = (json.dumps(self.guardian(adapter, "guardian-ready-no-down")) + "\n").encode()
+            release = (json.dumps(self.guardian(adapter, "guardian-released")) + "\n").encode()
+            supervisor = (json.dumps(self.guardian(adapter, "normal-child-exit")) + "\n").encode()
+            encode = lambda data: base64.b64encode(data).decode()
+            output = iter([json.dumps({"ready": encode(ready), "setup": encode(b"setup bytes"), "selected_cutoff_ms": 100000, "uptime": encode(b"98.00 0.00\n")}),
+                           json.dumps({"released": encode(release), "supervisor": encode(supervisor), "lease": encode(b"lease bytes")})])
+            def transport(arguments, script, timeout):
+                calls.append(script)
+                return {"timeout": False, "exit": 0, "stdout": next(output), "stderr": ""}
+            adapter.transport = transport
+            adapter.open_once(("boot", 2, 3), 100)
+            self.assertTrue(adapter.tap_released)
+            self.assertEqual(len(calls), 2)
+            self.assertIn('nohup "$root/owned_tap_guardian"', calls[0])
+            self.assertNotIn('> "$root/tap.go"', calls[0])
+            self.assertEqual(calls[1].count('> "$root/tap.go"'), 1)
+            self.assertNotIn('/tmp/reader-buddy-probe.png', "".join(calls))
+            with self.assertRaises(Refused): adapter.open_once(("boot", 2, 3), 100)
+            self.assertEqual(len(calls), 2)
+
+    def test_takeover_receipt_or_identity_change_never_admits_arm(self):
+        with tempfile.TemporaryDirectory() as root:
+            adapter, calls = self.adapter(root, {})
+            for changed in (self.guardian(adapter, "conditional-takeover-released"),
+                            self.guardian(adapter, "guardian-released") | {"nonce": "2" * 32},
+                            self.guardian(adapter, "guardian-released") | {"lease_end_ms": 100001}):
+                with self.assertRaises(Refused):
+                    adapter.tap_receipt((json.dumps(changed) + "\n").encode(), "guardian-released", 100)
+            with self.assertRaises(Refused): adapter.arm_once(None, None, {})
+            self.assertFalse(calls)
+
     def adapter(self, root, result):
         calls = []
         def transport(arguments, script, timeout):
@@ -26,20 +67,18 @@ class AdapterTests(unittest.TestCase):
             with self.assertRaises(Refused): adapter.open_once(("boot", 2, 3), 100)
             self.assertEqual(len(calls), 1)
             self.assertIn('kill -KILL "$child"', calls[0])
-            self.assertIn('tap 110 280', calls[0])
+            self.assertIn('nohup "$root/owned_tap_guardian" --tap', calls[0])
+            self.assertNotIn('bounded "$root/owned_tap_guardian"', calls[0])
             self.assertTrue((Path(root) / "transport-001.json").exists())
 
-    def test_cleanup_requires_owned_root_and_fixed_path(self):
+    def test_guardian_sequence_never_mutates_shared_debug_image(self):
         with tempfile.TemporaryDirectory() as root:
             adapter, calls = self.adapter(root, {"timeout": False, "exit": 0, "stdout": ""})
             adapter.restore_probe()
             self.assertFalse(calls)
             adapter.tap_attempted = True
             adapter.restore_probe()
-            self.assertIn("'1 2'", calls[0])
-            self.assertIn("'600 0 1'", calls[0])
-            self.assertIn('test ! -L /tmp/reader-buddy-probe.png', calls[0])
-            self.assertNotIn('rm -rf', calls[0])
+            self.assertFalse(calls)
 
     def test_stop_is_one_attempt_even_on_uncertainty(self):
         with tempfile.TemporaryDirectory() as root:

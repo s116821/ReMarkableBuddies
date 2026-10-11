@@ -108,7 +108,7 @@ def main():
     parser.add_argument("--stock-unit", type=Path, required=True)
     parser.add_argument("--vendor-dropin", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    for option in ("hardware-probe", "observe-input", "creation-publisher", "library-reference", "source-reference"):
+    for option in ("tap-guardian", "observe-input", "creation-publisher", "library-reference", "source-reference"):
         parser.add_argument("--" + option, type=Path)
     args = parser.parse_args()
     selection_file, payload = map(regular, [args.selection, args.payload])
@@ -123,6 +123,8 @@ def main():
         selected.get("sdk_revision") != "485ac1a46367bfdf203abe140a8b764728cdf54d"
     ):
         raise ValueError("Explicit gated SDK clock-repair source selection required")
+    if kind == "open-document-insertion-v1" and not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", selected.get("boot_id", "")):
+        raise ValueError("Canonical selected boot identity required")
     nonce = selected.get("nonce", "")
     if not isinstance(nonce, str) or not re.fullmatch(r"[0-9a-f]{32}", nonce) or nonce == "0" * 32:
         raise ValueError("Fresh Main-selected nonce required; all-zero compile fixture is not native")
@@ -175,7 +177,7 @@ def main():
             selected.get("sdk_source_hashes", {}).get("tools/qt_creation_deadline.h") != "c3d8e7124eff6de5868c74f321189ce1f55f8b4111e8983ecdc7eb7c86b3a109" or
             selected.get("publisher_source_sha256") != sha(HERE / "publish_creation_arm.c")):
             raise ValueError("Reviewed references and transitive SDK/publisher source binding required")
-        inputs = {"hardware_probe": args.hardware_probe, "observe_input": args.observe_input,
+        inputs = {"owned_tap_guardian": args.tap_guardian, "observe_input": args.observe_input,
                   "publish_creation_arm": args.creation_publisher, "library-reference.png": args.library_reference,
                   "source-reference.png": args.source_reference}
         declared = selected.get("host_artifacts", {})
@@ -191,7 +193,9 @@ def main():
     root = "/run/rmb-qt-probe-" + nonce
     substitutions = {"@ROOT@": root, "@NONCE@": nonce, "@STOCKPID@": selected["stock_pid"],
                      "@STOCKSTART@": selected["stock_start"], "@PAYLOADHASH@": payload_hash, "@EXEHASH@": exe_hash,
-                     "@EXPERIMENT@": kind}
+                     "@EXPERIMENT@": kind,
+                     "@BOOTID@": selected.get("boot_id", "00000000-0000-0000-0000-000000000000"),
+                     "@TAPGUARDIANHASH@": selected.get("host_artifacts", {}).get("owned_tap_guardian", "0" * 64)}
     for name in ("actor.sh", "launch.sh"):
         text = regular(HERE / (name + ".in")).read_text()
         for key, value in substitutions.items():
@@ -206,16 +210,16 @@ def main():
         profile = {"nonce": nonce, "boot_id": selected["boot_id"], "document_id": document,
                    "target_id": target, "page_ids": pages,
                    "immutable_hashes": {e["path"]: e["sha256"] for e in runtime_files + immutable_files},
-                   "tools": {name: selected["host_artifacts"][name] for name in ("hardware_probe", "observe_input", "publish_creation_arm")},
+                   "tools": {name: selected["host_artifacts"][name] for name in ("owned_tap_guardian", "observe_input", "publish_creation_arm")},
                    "screenshot_path": "/home/root/rem9-validation/screenshot",
                    "screenshot_sha256": "df745d56a2ef1834ea644b8859646972210c5e0247a3e6e75e9e245f5fa919b8",
                    "publisher_source_sha256": selected["publisher_source_sha256"],
                    "sdk_creation_deadline_sha256": selected["sdk_source_hashes"]["tools/qt_creation_deadline.h"],
-                   "host_sequence_contract": "bounded-host-v1",
+                   "host_sequence_contract": "bounded-host-v2",
                    "source_sha256": {name: sha(HERE / name) for name in (
                        "open_document_host.py", "open_document_transport.py", "open_document_protocol.py",
                        "open_document_timing.py", "publish_creation_arm.c", "coordinator.py",
-                       "prepare_packet.py", "actor.sh.in", "arm.sh.in")}}
+                       "prepare_packet.py", "actor.sh.in", "arm.sh.in", "owned_tap_guardian.c")}}
         (output / "host-profile.json").write_text(json.dumps(profile, indent=2) + "\n", encoding="utf-8", newline="\n")
     (output / "stock-unit.original").write_bytes(original_unit)
     (output / "vendor-dropin.original").write_bytes(original_vendor)
@@ -232,7 +236,7 @@ def main():
         (output / name).write_text("".join(f"{e['sha256']}  {e['path']}\n" for e in subset), encoding="ascii", newline="\n")
     (output / "service.files").write_text("".join(f"{digest}  {path}\n" for path, digest in SERVICE_HASHES.values()), encoding="ascii", newline="\n")
     for file in output.iterdir():
-        file.chmod(0o700 if file.name in ("hardware_probe", "observe_input", "publish_creation_arm") else 0o600)
+        file.chmod(0o700 if file.name in ("owned_tap_guardian", "observe_input", "publish_creation_arm") else 0o600)
     hashes = {p.name: sha(p) for p in sorted(output.iterdir())}
     (output / "packet.files").write_text("".join(f"{v}  {k}\n" for k, v in hashes.items()), encoding="ascii", newline="\n")
     (output / "packet.files").chmod(0o600)

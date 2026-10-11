@@ -14,7 +14,7 @@ ALIAS = "rem25-usb-rm2"
 FILES = {"actor.sh", "launch.sh", "runtime.files", "document-immutable.files", "document-mutable.files", "payload.so", "owner",
          "guard.conf", "activation.conf", "stock.policy", "guard.policy", "baseline.files", "service.files",
          "stock-unit.original", "vendor-dropin.original", "unit-shadow.service", "vendor-shadow.conf"}
-HOST_FILES = {"host-profile.json", "hardware_probe", "observe_input", "publish_creation_arm", "library-reference.png", "source-reference.png"}
+HOST_FILES = {"host-profile.json", "owned_tap_guardian", "observe_input", "publish_creation_arm", "library-reference.png", "source-reference.png"}
 
 
 def packet_files(receipt):
@@ -26,8 +26,8 @@ def load_host_profile(packet, receipt):
         profile = json.loads(regular(Path(packet) / "host-profile.json").read_bytes())
         sources = {"open_document_host.py", "open_document_transport.py", "open_document_protocol.py",
                    "open_document_timing.py", "publish_creation_arm.c", "coordinator.py",
-                   "prepare_packet.py", "actor.sh.in", "arm.sh.in"}
-        if profile.get("host_sequence_contract") != "bounded-host-v1" or set(profile.get("source_sha256", {})) != sources:
+                   "prepare_packet.py", "actor.sh.in", "arm.sh.in", "owned_tap_guardian.c"}
+        if profile.get("host_sequence_contract") != "bounded-host-v2" or set(profile.get("source_sha256", {})) != sources:
             raise ValueError("Host source contract incomplete")
         if any(sha(regular(HERE / name).read_bytes()) != digest for name, digest in profile["source_sha256"].items()):
             raise ValueError("Reviewed host source changed")
@@ -49,7 +49,7 @@ def load_host_profile(packet, receipt):
                 expected[path] = digest
         if profile["immutable_hashes"] != expected:
             raise ValueError("Host immutable baseline differs from actor")
-        tool_names = {"hardware_probe", "observe_input", "publish_creation_arm"}
+        tool_names = {"owned_tap_guardian", "observe_input", "publish_creation_arm"}
         if profile["tools"] != {name: receipt["files"][name] for name in tool_names}:
             raise ValueError("Host helper hashes differ from packet")
         if profile["screenshot_path"] != "/home/root/rem9-validation/screenshot" or profile["screenshot_sha256"] != "df745d56a2ef1834ea644b8859646972210c5e0247a3e6e75e9e245f5fa919b8":
@@ -146,7 +146,7 @@ def render(receipt, receipt_hash):
                     "@ALLOWEDFILES@": "|".join(sorted(packet_files(receipt) | {"packet.files", "preparation.json"})),
                     "@PRIVATEFILES@": "\n    ".join(
                         f'test -f "$root/{name}" && test ! -L "$root/{name}"\n    test "$(stat -c \'%a %u %h\' \"$root/{name}\")" = \'700 0 1\''
-                        if name in {"hardware_probe", "observe_input", "publish_creation_arm"} else f'private "$root/{name}"'
+                        if name in {"owned_tap_guardian", "observe_input", "publish_creation_arm"} else f'private "$root/{name}"'
                         for name in sorted(packet_files(receipt)))}
     for key, value in replacements.items():
         text = text.replace(key, value)
@@ -176,6 +176,8 @@ def monitor_script(receipt):
              "recovery.failed", "query.unconfirmed", "host-query.unconfirmed", "query.stdout", "query.stderr"]
     names += ["stock.policy.observed", "guard.policy.observed", "guard.directory-created",
               "host-prepublication-runtime.files.check", "host-prepublication-document-immutable.files.check",
+              "tap.ready", "tap.go", "tap.released", "tap.empty", "tap.recovered", "tap.cleaned", "tap.unresolved", "tap-guardian.log", "tap-recovery.log", "input.recovery.failed",
+              "tap.supervisor-complete", "tap.supervisor-spent",
               "unit-shadow.install-intent", "vendor-shadow.install-intent", "guard-file.install-intent", "final-byte"]
     commands = ["set -eu", f"root='{root}'", "test -d \"$root\" && test ! -L \"$root\""]
     for name in names:

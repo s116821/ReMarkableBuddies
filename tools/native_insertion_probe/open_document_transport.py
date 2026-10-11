@@ -27,7 +27,9 @@ class SSHAdapter:
         self.tap_attempted = False
         self.arm_attempted = False
         self.stop_attempted = False
-        self.original_probe = None
+        self.tap_released = False
+        self.tap_release_sha256 = None
+        self.tap_supervisor_sha256 = None
 
     def retain(self, stage, evidence):
         def encode(value):
@@ -98,7 +100,7 @@ bounded() {
 b64() { base64 "$1" | tr -d '\n'; }
 """
         for name, digest in self.profile["tools"].items():
-            if name not in {"hardware_probe", "observe_input", "publish_creation_arm"} or not re.fullmatch("[0-9a-f]{64}", digest):
+            if name not in {"owned_tap_guardian", "observe_input", "publish_creation_arm"} or not re.fullmatch("[0-9a-f]{64}", digest):
                 raise Refused("Bounded exact tool identity required")
             text += f'test -f "$root/{name}" && test ! -L "$root/{name}"\ntest "$(stat -c \'%a %u %h\' "$root/{name}")" = \'700 0 1\'\n'
             text += f'test "$(sha256sum "$root/{name}" | cut -d " " -f 1)" = {q(digest)}\n'
@@ -197,24 +199,84 @@ if test -f "$root/candidate.window" && test -f "$root/creation-waiting" && test 
         self.tap_attempted = True
         script = self.prelude(cutoff, identity)
         script += 'test $((cutoff-$(now_upper))) -ge 4\n'
-        # Preserve the preexisting helper debug PNG, including absence state.
-        script += r"""test ! -e "$root/host-original-probe.claim"
-(set -C; : > "$root/host-original-probe.claim")
-if test -e /tmp/reader-buddy-probe.png || test -L /tmp/reader-buddy-probe.png; then
- test -f /tmp/reader-buddy-probe.png && test ! -L /tmp/reader-buddy-probe.png
- test "$(stat -c '%u %h' /tmp/reader-buddy-probe.png)" = '0 1'
- cp -p /tmp/reader-buddy-probe.png "$root/host-original-probe.png"
- printf present > "$root/host-original-probe.state"
-else printf absent > "$root/host-original-probe.state"; fi
-bounded "$root/hardware_probe" tap 110 280 > "$root/host-open.log" 2>&1
+        # Detached sole writer survives SSH loss; never wrap it in bounded().
+        script += 'test ! -e "$root/tap-start.claim" && test ! -L "$root/tap-start.claim"\n'
+        script += f'(set -C; printf \'%s\\n\' {q(self.profile["nonce"])} > "$root/tap-start.claim")\n'
+        # Select a setup cutoff once from fresh remote BOOTTIME, capped by the
+        # original open stage. Ceil+14 seconds is at most 15 seconds from now.
+        script += f'tap_cutoff_ms=$(( $(now_upper)*1000 + 14000 ))\ntest "$tap_cutoff_ms" -le {int(cutoff) * 1000} || tap_cutoff_ms={int(cutoff) * 1000}\n'
+        script += f'nohup "$root/owned_tap_guardian" --tap {q(self.profile["nonce"])} {q(self.profile["boot_id"])} "$tap_cutoff_ms" < /dev/null > "$root/tap-guardian.log" 2>&1 &\n'
+        script += r"""while ! test -f "$root/tap.ready"; do
+ test ! -e "$root/tap.unresolved" && test "$(now_upper)" -lt "$cutoff"
+ sleep 0.01
+done
+private "$root/tap.ready"
+private "$root/tap.setup"
+printf '{"ready":"%s","setup":"%s","selected_cutoff_ms":%s,"uptime":"%s"}\n' "$(b64 "$root/tap.ready")" "$(b64 "$root/tap.setup")" "$tap_cutoff_ms" "$(b64 /proc/uptime)"
 """
-        self.call(script, 6)
+        envelope = json.loads(self.call(script, 3))
+        ready_bytes = base64.b64decode(envelope["ready"], validate=True)
+        setup_bytes = base64.b64decode(envelope["setup"], validate=True)
+        if not setup_bytes or len(setup_bytes) > 1024:
+            raise Refused("Bounded complete guardian setup required")
+        ready = self.tap_receipt(ready_bytes, "guardian-ready-no-down", cutoff)
+        selected_cutoff = envelope["selected_cutoff_ms"]
+        uptime = base64.b64decode(envelope["uptime"], validate=True).decode("ascii")
+        if type(selected_cutoff) is not int or not upper_uptime_ms(uptime) < ready["lease_end_ms"] <= selected_cutoff <= int(cutoff) * 1000:
+            raise Refused("Guardian immutable setup cutoff not observed")
+        self.retain("tap-ready", {"receipt": ready_bytes, "setup": setup_bytes, "selected_cutoff_ms": selected_cutoff, "uptime": uptime})
+        # Publish exactly once, only after complete ready/lease evidence is saved.
+        script = self.prelude(cutoff, identity)
+        script += f'test "$(sha256sum "$root/tap.ready" | cut -d " " -f 1)" = {q(hashlib.sha256(ready_bytes).hexdigest())}\n'
+        script += f'test "$(sed \'s/^.*) //\' /proc/{ready["pid"]}/stat | awk \'{{print $20}}\')" = {q(ready["start_ticks"])}\n'
+        script += 'test ! -e "$root/tap.go" && test ! -L "$root/tap.go"\n'
+        script += f'(set -C; printf \'%s\\n\' {q(self.profile["nonce"])} > "$root/tap.go")\n'
+        script += r"""while ! test -f "$root/tap.released" || ! test -f "$root/tap.supervisor-complete"; do
+ for name in tap.unresolved tap.empty tap.cleaned tap.recovered tap.supervisor-spent; do test ! -e "$root/$name" && test ! -L "$root/$name"; done
+ test "$(now_upper)" -lt "$cutoff"
+ sleep 0.01
+done
+private "$root/tap.released"
+private "$root/tap.supervisor-complete"
+private "$root/tap.lease"
+printf '{"released":"%s","supervisor":"%s","lease":"%s"}\n' "$(b64 "$root/tap.released")" "$(b64 "$root/tap.supervisor-complete")" "$(b64 "$root/tap.lease")"
+"""
+        completed = json.loads(self.call(script, 3))
+        released_bytes = base64.b64decode(completed["released"], validate=True)
+        supervisor_bytes = base64.b64decode(completed["supervisor"], validate=True)
+        lease_bytes = base64.b64decode(completed["lease"], validate=True)
+        if not lease_bytes or len(lease_bytes) > 1024:
+            raise Refused("Bounded complete contact lease required")
+        released = self.tap_receipt(released_bytes, "guardian-released", cutoff)
+        if released["lease_end_ms"] > ready["lease_end_ms"] or released | {"status": ready["status"], "lease_end_ms": ready["lease_end_ms"]} != ready:
+            raise Refused("Guardian ready/released identity changed")
+        supervisor = self.tap_receipt(supervisor_bytes, "normal-child-exit", cutoff)
+        if supervisor | {"status": released["status"]} != released:
+            raise Refused("Supervisor/contact lease identity changed")
+        self.retain("tap-released", {"receipt": released_bytes, "supervisor": supervisor_bytes, "lease": lease_bytes})
+        self.tap_released = True
+        self.tap_release_sha256 = hashlib.sha256(released_bytes).hexdigest()
+        self.tap_supervisor_sha256 = hashlib.sha256(supervisor_bytes).hexdigest()
+
+    def tap_receipt(self, data, status, cutoff):
+        if len(data) > 512 or not data.endswith(b"\n"):
+            raise Refused("Bounded complete guardian receipt required")
+        value = json.loads(data)
+        fields = {"nonce", "boot_id", "pid", "start_ticks", "slot", "tracking_id", "native_point", "lease_end_ms", "status", "exclusive_kernel_ownership"}
+        if set(value) != fields or value["nonce"] != self.profile["nonce"] or value["boot_id"] != self.profile["boot_id"]:
+            raise Refused("Guardian receipt identity mismatch")
+        if any(type(value[key]) is not int or value[key] <= 0 for key in ("pid", "start_ticks", "tracking_id", "lease_end_ms")):
+            raise Refused("Canonical guardian process/lease identity required")
+        if value["pid"] <= 1 or value["tracking_id"] > 65535 or type(value["slot"]) is not int or value["slot"] != 0 or value["native_point"] != [201, 1360] or value["lease_end_ms"] > int(cutoff) * 1000 or value["status"] != status or value["exclusive_kernel_ownership"] is not False:
+            raise Refused("Guardian release/point/deadline not admitted")
+        return value
 
     def snapshot(self, stage, cutoff, idle):
         return self.raw_snapshot(stage, cutoff, idle)
 
     def arm_once(self, waiting, timing, ready):
         if self.arm_attempted: raise Refused("Creation publication already attempted")
+        if not self.tap_released: raise Refused("Positive guardian release required before creation")
         self.arm_attempted = True
         script = self.prelude(timing.stage_end("trigger"), self.identity)
         # Recheck the exact actor partitions after the host observation and
@@ -231,6 +293,13 @@ bounded "$root/hardware_probe" tap 110 280 > "$root/host-open.log" 2>&1
             script += f'test "$(sha256sum "$doc.{ext}" | cut -d " " -f 1)" = {q(digest)}\n'
             script += f'test "$(sha256sum "$root/host-trigger.{ext}" | cut -d " " -f 1)" = {q(digest)}\n'
             script += f'test ! -e "$root/host-source.{ext}" && test ! -L "$root/host-source.{ext}"\ncp "$root/host-trigger.{ext}" "$root/host-source.{ext}"\nchmod 600 "$root/host-source.{ext}"\n'
+        if not self.tap_release_sha256 or not self.tap_supervisor_sha256:
+            raise Refused("Exact retained guardian release binding missing")
+        script += 'private "$root/tap.released"\n'
+        script += f'test "$(sha256sum "$root/tap.released" | cut -d " " -f 1)" = {q(self.tap_release_sha256)}\n'
+        script += 'private "$root/tap.supervisor-complete"\n'
+        script += f'test "$(sha256sum "$root/tap.supervisor-complete" | cut -d " " -f 1)" = {q(self.tap_supervisor_sha256)}\n'
+        script += 'for name in tap.unresolved tap.empty tap.cleaned tap.recovered tap.supervisor-spent; do test ! -e "$root/$name" && test ! -L "$root/$name"; done\n'
         args = [waiting.nonce, waiting.pid, waiting.start_ticks, waiting.expiry_ms, timing.armed_at, timing.deadline, timing.candidate_at, self.profile["document_id"]]
         script += 'bounded "$root/publish_creation_arm" ' + " ".join(q(v) for v in args) + ' > "$root/host-publication.json" 2> "$root/host-publication.stderr"\ncat "$root/host-publication.json"\n'
         result = json.loads(self.call(script, 4))
@@ -275,34 +344,5 @@ private "$root/stop.request"
         self.call(script, 3)
 
     def restore_probe(self):
-        if not self.tap_attempted:
-            return
-        # This cleanup does not publish permissions, control services or retry
-        # input. It only restores the fixed debug path explicitly saved by us.
-        script = f"""set -eu
-root={q(self.root)}
-test -d "$root" && test ! -L "$root"
-test "$(stat -c '%a %u' "$root")" = '700 0'
-test "$(stat -c '%d %i' "$root")" = {q(self.root_inode)}
-test -f "$root/owner" && test ! -L "$root/owner"
-test "$(stat -c '%a %u %h' "$root/owner")" = '600 0 1'
-test "$(cat "$root/owner")" = {q(self.profile["nonce"])}
-test -f "$root/host-original-probe.claim" && test ! -L "$root/host-original-probe.claim"
-test "$(stat -c '%a %u %h' "$root/host-original-probe.claim")" = '600 0 1'
-test -f "$root/host-original-probe.state" && test ! -L "$root/host-original-probe.state"
-test "$(stat -c '%a %u %h' "$root/host-original-probe.state")" = '600 0 1'
-test ! -L /tmp/reader-buddy-probe.png
-if test -e /tmp/reader-buddy-probe.png; then
- test -f /tmp/reader-buddy-probe.png
- test "$(stat -c '%u %h' /tmp/reader-buddy-probe.png)" = '0 1'
-fi
-case "$(cat "$root/host-original-probe.state")" in
- present) test -f "$root/host-original-probe.png" && test ! -L "$root/host-original-probe.png"
-  test "$(stat -c '%u %h' "$root/host-original-probe.png")" = '0 1'
-  cp -p "$root/host-original-probe.png" /tmp/reader-buddy-probe.png
-  test "$(sha256sum /tmp/reader-buddy-probe.png | cut -d ' ' -f 1)" = "$(sha256sum "$root/host-original-probe.png" | cut -d ' ' -f 1)" ;;
- absent) test ! -L /tmp/reader-buddy-probe.png; rm -f /tmp/reader-buddy-probe.png ;;
- *) exit 90 ;;
-esac
-"""
-        self.call(script, 3)
+        # Guardian input never writes the shared hardware-probe debug PNG.
+        return

@@ -11,6 +11,26 @@ spec.loader.exec_module(fixture)
 fixture.SOURCE = (HERE / "actor.sh.in").read_text().split("# Main-only execution boundary", 1)[0]
 
 class Recovery(unittest.TestCase):
+    def test_input_recovery_failure_still_restores_stock_and_retains_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            overrides = """
+reserve() { return 0; }
+policy() { :; }
+cgroup_gone() { :; }
+process_gone() { :; }
+value() { VALUE='path=/usr/bin/xochitl ; argv[]=/usr/bin/xochitl --system ;'; }
+query() { printf 'Result=success\\n' > "$root/query.stdout"; }
+recovery_hashes() { :; }
+recover_owned_input() { return 90; }
+verify_stock() { printf restored > "$root/stock.restored"; }
+record_document_preservation() { :; }
+"""
+            fixture.shell(root, 'stock_stopped=yes; restore', overrides, expected=90)
+            self.assertTrue((root / "stock-start.claim").exists())
+            self.assertEqual((root / "stock.restored").read_text(), "restored")
+            self.assertTrue((root / "input.recovery.failed").exists())
+
     def run_case(self, damaged=False, unsafe=False, missing_identity=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

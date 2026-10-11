@@ -214,11 +214,30 @@ remove_guard_piece() {
     validate_guard_piece "$@" || return 90
     if test -e "$1"; then owned_remove "$1" "$2" || return 90; fi
 }
+recover_owned_input() {
+    test "$experiment" = open-document-insertion-v1 || return 0
+    # No guardian attempt means no owned input obligation. A launch claim is
+    # published before the detached writer can run, so partial launch is visible.
+    if ! test -e "$root/tap-start.claim" && ! test -L "$root/tap-start.claim"; then return 0; fi
+    private "$root/tap-start.claim"
+    test "$(cat "$root/tap-start.claim")" = "$nonce"
+    test -f "$root/owned_tap_guardian" && test ! -L "$root/owned_tap_guardian"
+    test "$(stat -c '%a %u %h' "$root/owned_tap_guardian")" = '700 0 1'
+    test "$(sha256sum "$root/owned_tap_guardian" | awk '{print $1}')" = '@TAPGUARDIANHASH@'
+    # This mode cannot inject a down or replay the ordinary tap. Its own fixed
+    # takeover bound must retain unresolved ownership instead of sweeping slots.
+    "$root/owned_tap_guardian" --recover "$nonce" '@BOOTID@' > "$root/tap-recovery.log" 2>&1
+}
 restore() {
     recovery_evidence_failed=no
     test ! -e "$root/query.unconfirmed" || return 90
     phase=restore-claim
     claim restore.claim || return 90
+    if ! recover_owned_input; then
+        recovery_evidence_failed=yes
+        printf '%s conditional-owned-input-recovery-unresolved\n' "$nonce" > "$root/input.recovery.failed" || :
+        # Input uncertainty never skips the existing guarded stock restoration.
+    fi
     if test "$stock_stopped" = yes; then
         policy "$root/guard.policy"
         if test "$candidate_started" = yes; then

@@ -41,6 +41,9 @@ class PrepublicationTests(unittest.TestCase):
                 result = subprocess.run(["/bin/sh", "-s"], input=script, capture_output=True, text=True, timeout=timeout)
                 return {"timeout": False, "exit": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
             adapter = module.SSHAdapter([], receipt, {"document_id": "fixture"}, root, transport, b"")
+            adapter.tap_released = True
+            adapter.tap_release_sha256 = "a" * 64
+            adapter.tap_supervisor_sha256 = "a" * 64
             adapter.prelude = lambda *args: 'set -eu\nroot=' + module.q(root) + '\nprivate() { test -f "$1"; }\nbounded() { "$@"; }\n'
             timing = SimpleNamespace(stage_end=lambda stage: 100, armed_at=1, deadline=361, candidate_at=20)
             waiting = SimpleNamespace(nonce="1" * 32, pid=2, start_ticks=3, expiry_ms=90000)
