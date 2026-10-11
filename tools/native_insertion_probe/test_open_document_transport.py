@@ -2,6 +2,7 @@
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 from open_document_host import Refused
 from open_document_transport import SSHAdapter
 
@@ -46,6 +47,31 @@ class AdapterTests(unittest.TestCase):
             with self.assertRaises(Refused): adapter.stop_once(("boot", 2, 3), 100)
             adapter.stop_once(("boot", 2, 3), 100)
             self.assertEqual(len(calls), 1)
+
+    def test_partial_diagnostic_read_waits_without_replaying_action(self):
+        with tempfile.TemporaryDirectory() as root:
+            adapter, calls = self.adapter(root, {})
+            observations = iter(['{"creation_trial":', '{"creation_trial":{"returned":true}}'])
+            adapter.call = lambda script, timeout: next(observations)
+            captures = []
+            adapter.raw_snapshot = lambda stage, cutoff, idle: captures.append((stage, cutoff, idle)) or {"captured": True}
+            with patch("open_document_transport.time.sleep"):
+                result = adapter.result_snapshot(("boot", 2, 3), 100)
+            self.assertEqual(result, {"captured": True})
+            self.assertEqual(captures, [("result", 100, False)])
+            self.assertFalse(adapter.tap_attempted)
+            self.assertFalse(adapter.arm_attempted)
+
+    def test_persistent_partial_diagnostics_have_fixed_poll_limit(self):
+        with tempfile.TemporaryDirectory() as root:
+            adapter, calls = self.adapter(root, {})
+            observations = []
+            adapter.call = lambda script, timeout: observations.append(script) or '{"partial":'
+            with patch("open_document_transport.time.sleep"), self.assertRaises(Refused):
+                adapter.result_snapshot(("boot", 2, 3), 100)
+            self.assertEqual(len(observations), 30)
+            self.assertFalse(adapter.tap_attempted)
+            self.assertFalse(adapter.arm_attempted)
 
 
 if __name__ == "__main__":

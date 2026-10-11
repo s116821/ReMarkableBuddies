@@ -246,7 +246,18 @@ if test -f "$root/diagnostics.json" && test ! -L "$root/diagnostics.json"; then 
 """
             text = self.call(script, 3).strip()
             if text:
-                diagnostics = json.loads(text)
+                # SDK creates the receipt before its single bounded write.
+                # An incomplete read is observation-not-ready, never a reason
+                # to replay input/publication or renew this fixed result cap.
+                if len(text.encode("utf-8")) > 8192:
+                    raise Refused("Native diagnostics exceed reviewed bound")
+                try:
+                    diagnostics = json.loads(text)
+                except json.JSONDecodeError:
+                    time.sleep(0.1)
+                    continue
+                if not isinstance(diagnostics, dict):
+                    raise Refused("Native diagnostics object required")
                 trial = diagnostics.get("creation_trial", {})
                 if diagnostics.get("terminal_stage") or trial.get("returned") or trial.get("exception"):
                     return self.raw_snapshot("result", cutoff, False)
