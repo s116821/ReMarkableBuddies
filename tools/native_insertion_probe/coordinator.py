@@ -14,6 +14,54 @@ ALIAS = "rem25-usb-rm2"
 FILES = {"actor.sh", "launch.sh", "runtime.files", "document-immutable.files", "document-mutable.files", "payload.so", "owner",
          "guard.conf", "activation.conf", "stock.policy", "guard.policy", "baseline.files", "service.files",
          "stock-unit.original", "vendor-dropin.original", "unit-shadow.service", "vendor-shadow.conf"}
+HOST_FILES = {"host-profile.json", "hardware_probe", "observe_input", "publish_creation_arm", "library-reference.png", "source-reference.png"}
+
+
+def packet_files(receipt):
+    return FILES | (HOST_FILES if receipt.get("experiment_kind") == "open-document-insertion-v1" else set())
+
+
+def load_host_profile(packet, receipt):
+    try:
+        profile = json.loads(regular(Path(packet) / "host-profile.json").read_bytes())
+        sources = {"open_document_host.py", "open_document_transport.py", "open_document_protocol.py",
+                   "open_document_timing.py", "publish_creation_arm.c", "coordinator.py",
+                   "prepare_packet.py", "actor.sh.in", "arm.sh.in"}
+        if profile.get("host_sequence_contract") != "bounded-host-v1" or set(profile.get("source_sha256", {})) != sources:
+            raise ValueError("Host source contract incomplete")
+        if any(sha(regular(HERE / name).read_bytes()) != digest for name, digest in profile["source_sha256"].items()):
+            raise ValueError("Reviewed host source changed")
+        if profile["nonce"] != receipt["nonce"] or profile["document_id"] != receipt["document_id"] or profile["target_id"] != receipt["target_page_id"] or profile["page_ids"] != receipt["before_page_ids"]:
+            raise ValueError("Host/packet identity mismatch")
+        if profile["sdk_creation_deadline_sha256"] != "c3d8e7124eff6de5868c74f321189ce1f55f8b4111e8983ecdc7eb7c86b3a109":
+            raise ValueError("Transitive SDK clock source missing")
+        if profile["publisher_source_sha256"] != sha(regular(HERE / "publish_creation_arm.c").read_bytes()):
+            raise ValueError("Publisher source binding changed")
+        expected = {}
+        for name, count in (("runtime.files", 10), ("document-immutable.files", 14)):
+            lines = regular(Path(packet) / name).read_text(encoding="ascii").splitlines()
+            if len(lines) != count:
+                raise ValueError("Complete immutable partition required")
+            for line in lines:
+                digest, path = line.split("  ", 1)
+                if not re.fullmatch("[0-9a-f]{64}", digest) or not path.startswith("/") or path in expected:
+                    raise ValueError("Exact unique immutable path required")
+                expected[path] = digest
+        if profile["immutable_hashes"] != expected:
+            raise ValueError("Host immutable baseline differs from actor")
+        tool_names = {"hardware_probe", "observe_input", "publish_creation_arm"}
+        if profile["tools"] != {name: receipt["files"][name] for name in tool_names}:
+            raise ValueError("Host helper hashes differ from packet")
+        if profile["screenshot_path"] != "/home/root/rem9-validation/screenshot" or profile["screenshot_sha256"] != "df745d56a2ef1834ea644b8859646972210c5e0247a3e6e75e9e245f5fa919b8":
+            raise ValueError("Reviewed screenshot helper required")
+        if not re.fullmatch("[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", profile["boot_id"]):
+            raise ValueError("Canonical boot identity required")
+        from open_document_host import pixels
+        pixels(regular(Path(packet) / "library-reference.png").read_bytes())
+        pixels(regular(Path(packet) / "source-reference.png").read_bytes())
+        return profile
+    except (KeyError, ValueError, OSError) as error:
+        raise ValueError("Open-document execution refused: exact host/profile/reference contract missing") from error
 SPENT = {"0" * 32, "2b34ff126957497285b66f77311df07e", "8287c096cca84cf6a0998b8d5f178c0d", "0404ebf9b5794196a85bfba7ee6859ba", "301a86a1a18d48d885c5ddcec0af549c", "b3e3ca0475a84432a9b328218395de0c",
          "4459cae2f852426b8262f658c6aa59ed", "a22fc58d4c9948098f7d2ccc8a9de8c4", "94f4037a4f3c40b881fe491b9b404bc3", "94774266c10f41e2aa8d410012fee601",
          "026e74d06f7248ae809bf1b1d6a417ba", "ff497d18868042319864c82bb34c0e5e"}
@@ -43,7 +91,7 @@ def load_packet(packet, receipt_hash):
         raise ValueError("Receipt root/budget refused")
     if receipt.get("experiment_kind") not in {"caller-selected-insertion-v1", "open-document-insertion-v1"}:
         raise ValueError("Insertion-specific receipt required")
-    if receipt.get("evidence_class") != "prepared only; no native execution" or set(receipt.get("files", {})) != FILES:
+    if receipt.get("evidence_class") != "prepared only; no native execution" or set(receipt.get("files", {})) != packet_files(receipt):
         raise ValueError("Complete prepared packet required")
     expected_manifest = ""
     for name, digest in sorted(receipt["files"].items()):
@@ -95,8 +143,11 @@ def render(receipt, receipt_hash):
                     "@UNITSHADOWHASH@": receipt["files"]["unit-shadow.service"],
                     "@VENDORSHADOWHASH@": receipt["files"]["vendor-shadow.conf"],
                     "@RECEIPTHASH@": receipt_hash,
-                    "@ALLOWEDFILES@": "|".join(sorted(FILES | {"packet.files", "preparation.json"})),
-                    "@PRIVATEFILES@": "\n    ".join(f'private "$root/{name}"' for name in sorted(FILES))}
+                    "@ALLOWEDFILES@": "|".join(sorted(packet_files(receipt) | {"packet.files", "preparation.json"})),
+                    "@PRIVATEFILES@": "\n    ".join(
+                        f'test -f "$root/{name}" && test ! -L "$root/{name}"\n    test "$(stat -c \'%a %u %h\' \"$root/{name}\")" = \'700 0 1\''
+                        if name in {"hardware_probe", "observe_input", "publish_creation_arm"} else f'private "$root/{name}"'
+                        for name in sorted(packet_files(receipt)))}
     for key, value in replacements.items():
         text = text.replace(key, value)
     if re.search("@[A-Z]+@", text):
@@ -124,6 +175,7 @@ def monitor_script(receipt):
              "candidate.pre-stop", "candidate.post-stop", "attempt.identity", "callback.json", "diagnostics.json", "stop.request", "stop.admitted", "document.preservation", "document.mutation", "document-immutable-check", "document-mutable-check", "stock.restored",
              "recovery.failed", "query.unconfirmed", "host-query.unconfirmed", "query.stdout", "query.stderr"]
     names += ["stock.policy.observed", "guard.policy.observed", "guard.directory-created",
+              "host-prepublication-runtime.files.check", "host-prepublication-document-immutable.files.check",
               "unit-shadow.install-intent", "vendor-shadow.install-intent", "guard-file.install-intent", "final-byte"]
     commands = ["set -eu", f"root='{root}'", "test -d \"$root\" && test ! -L \"$root\""]
     for name in names:
@@ -144,8 +196,7 @@ def main():
     parser.add_argument("--execute-main", action="store_true")
     args = parser.parse_args()
     receipt = load_packet(args.packet, args.receipt_sha256)
-    if args.execute_main and receipt.get("experiment_kind") == "open-document-insertion-v1":
-        raise ValueError("Open-document execution refused: bounded host observations/publication not integrated")
+    profile = load_host_profile(args.packet, receipt) if receipt["experiment_kind"] == "open-document-insertion-v1" else None
     known_hosts = pin_hosts(args.known_hosts, args.known_hosts_sha256)
     identity = regular(args.identity_file)
     output = args.output.absolute()
@@ -170,6 +221,27 @@ def main():
     started = time.monotonic()
     arm = transport(arguments, script, 55)
     (output / "arming.json").write_text(json.dumps(arm, indent=2) + "\n")
+    host_error = None
+    if profile is not None and not arm["timeout"] and arm["exit"] == 0:
+        from open_document_host import HostSequence
+        from open_document_transport import SSHAdapter
+        adapter = SSHAdapter(arguments, receipt, profile, output, transport,
+                             regular(args.packet / "library-reference.png").read_bytes())
+        try:
+            report = HostSequence(adapter, profile, regular(args.packet / "library-reference.png").read_bytes(),
+                                  regular(args.packet / "source-reference.png").read_bytes()).run()
+            (output / "host-report.json").write_text(json.dumps(report, indent=2) + "\n")
+        except Exception as error:
+            # Permission/input uncertainty never triggers a second attempt.
+            # Independent actor recovery and bounded read-only monitoring remain.
+            host_error = {"type": type(error).__name__, "message": str(error), "retry_permitted": False}
+            (output / "host-failure.json").write_text(json.dumps(host_error, indent=2) + "\n")
+        finally:
+            try:
+                adapter.restore_probe()
+            except Exception as error:
+                host_error = {"type": type(error).__name__, "message": str(error), "retry_permitted": False, "cleanup_failed": True}
+                (output / "probe-restore-failure.json").write_text(json.dumps({"type": type(error).__name__, "message": str(error)}) + "\n")
     # Bounded read-only monitoring even after uncertain/failing arm; never replay.
     final = started + 440
     index = 0
@@ -182,8 +254,9 @@ def main():
             break
         time.sleep(min(5, max(0, final-time.monotonic())))
     print(json.dumps({"arming_exit": arm["exit"], "arming_timeout": arm["timeout"], "observations": index,
-                      "evidence_directory": str(output), "native_success": "not inferred; Main must verify evidence", "replay_permitted": False}))
-    raise SystemExit(0 if not arm["timeout"] and arm["exit"] == 0 else 90)
+                      "evidence_directory": str(output), "host_error": host_error,
+                      "native_success": "not inferred; Main must verify evidence", "replay_permitted": False}))
+    raise SystemExit(0 if not arm["timeout"] and arm["exit"] == 0 and host_error is None else 90)
 
 
 if __name__ == "__main__":
