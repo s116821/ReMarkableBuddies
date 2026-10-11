@@ -80,7 +80,8 @@ class OpenDocumentTiming:
     def admit_creation_ms(self, upper_now_ms, sdk_gate_end_ms):
         """Fail closed across milliseconds and the actor's integer seconds."""
         if (type(upper_now_ms) is not int or type(sdk_gate_end_ms) is not int
-                or upper_now_ms < 0 or sdk_gate_end_ms <= self.candidate_at * 1000):
+                or upper_now_ms < self.candidate_at * 1000
+                or sdk_gate_end_ms <= self.candidate_at * 1000):
             return False
         # Round current time upwards, never the SDK deadline upwards. The
         # independent actor's seconds cutoffs may refuse up to one second early.

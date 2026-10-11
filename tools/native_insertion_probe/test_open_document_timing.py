@@ -65,6 +65,8 @@ class TimingTests(unittest.TestCase):
     def test_ms_expiry_equality_and_simulated_suspend_refuse(self):
         t = OpenDocumentTiming(100, 460, 127)
         self.assertTrue(t.admit_creation_ms(159999, 160000))
+        self.assertFalse(t.admit_creation_ms(126999, 160000))
+        self.assertTrue(t.admit_creation_ms(127000, 160000))
         self.assertFalse(t.admit_creation_ms(160000, 160000))
         self.assertFalse(t.admit_creation_ms(220000, 167000))
         self.assertFalse(t.admit_creation_ms(166001, 200000))
