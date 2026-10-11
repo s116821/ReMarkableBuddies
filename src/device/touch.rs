@@ -94,6 +94,10 @@ const ABS_MT_PRESSURE: u16 = 58;
 #[cfg(target_os = "linux")]
 pub struct Touch {
     device: Option<Device>,
+    #[cfg(test)]
+    batch_fixture: Option<Box<dyn FnMut(&[InputEvent]) -> Result<()>>>,
+    #[cfg(feature = "development-input-diagnostics")]
+    diagnostic: Option<(i32, Box<dyn DiagnosticGestureEmitter>)>,
     device_model: DeviceModel,
     trigger_corner: TriggerCorner,
 }
@@ -104,8 +108,86 @@ pub struct Touch {
     _trigger_corner: TriggerCorner,
 }
 
+/// Development-only emission boundary. Implementations must qualify and perform
+/// each batch, including conditional release; this never grants UI authority.
+#[cfg(all(target_os = "linux", feature = "development-input-diagnostics"))]
+pub trait DiagnosticGestureEmitter {
+    fn emit(&mut self, device: &mut Device, events: &[InputEvent]) -> Result<()>;
+}
+
 #[cfg(target_os = "linux")]
 impl Touch {
+    #[cfg(feature = "development-input-diagnostics")]
+    pub fn diagnostic_scoped_gesture(
+        tracking: i32,
+        emitter: Box<dyn DiagnosticGestureEmitter>,
+    ) -> Result<Self> {
+        use std::os::unix::fs::OpenOptionsExt;
+        anyhow::ensure!(
+            (1..=65535).contains(&tracking),
+            "Invalid diagnostic contact tag"
+        );
+        let model = DeviceModel::detect();
+        anyhow::ensure!(
+            model == DeviceModel::Remarkable2
+                && super::native_page::verified_contract(
+                    model,
+                    &std::fs::read_to_string("/usr/lib/os-release")?
+                ),
+            "Unqualified scoped gesture device/firmware"
+        );
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+            .open("/dev/input/event2")?;
+        let device = Device::from_fd(file.into())?;
+        Ok(Self {
+            device: Some(device),
+            #[cfg(test)]
+            batch_fixture: None,
+            diagnostic: Some((tracking, emitter)),
+            device_model: model,
+            trigger_corner: TriggerCorner::LowerLeft,
+        })
+    }
+
+    #[cfg(feature = "development-input-diagnostics")]
+    pub fn diagnostic_native_point(&self, point: (i32, i32)) -> (i32, i32) {
+        self.virtual_to_input(point)
+    }
+
+    fn output_tracking_id(&self) -> i32 {
+        #[cfg(feature = "development-input-diagnostics")]
+        if let Some((tracking, _)) = &self.diagnostic {
+            return *tracking;
+        }
+        1
+    }
+
+    fn has_output(&self) -> bool {
+        #[cfg(test)]
+        if self.batch_fixture.is_some() {
+            return true;
+        }
+        self.device.is_some()
+    }
+
+    fn emit_batch(&mut self, events: &[InputEvent]) -> Result<()> {
+        #[cfg(test)]
+        if let Some(sink) = &mut self.batch_fixture {
+            return sink(events);
+        }
+        if let Some(device) = &mut self.device {
+            #[cfg(feature = "development-input-diagnostics")]
+            if let Some((_, emitter)) = &mut self.diagnostic {
+                return emitter.emit(device, events);
+            }
+            device.send_events(events)?;
+        }
+        Ok(())
+    }
+
     /// Bounded complete-event diagnostic. Never proves UI acknowledgement.
     #[cfg(feature = "development-input-diagnostics")]
     pub fn diagnostic_tap_echo_raw(
@@ -232,6 +314,10 @@ impl Touch {
 
         Self {
             device,
+            #[cfg(test)]
+            batch_fixture: None,
+            #[cfg(feature = "development-input-diagnostics")]
+            diagnostic: None,
             device_model,
             trigger_corner,
         }
@@ -292,10 +378,11 @@ impl Touch {
     }
     pub fn touch_start(&mut self, xy: (i32, i32)) -> Result<()> {
         let (x, y) = self.virtual_to_input(xy);
-        if let Some(device) = &mut self.device {
-            device.send_events(&[
+        if self.has_output() {
+            let tracking = self.output_tracking_id();
+            self.emit_batch(&[
                 InputEvent::new(EvdevEventType::ABSOLUTE.0, ABS_MT_SLOT, 0),
-                InputEvent::new(EvdevEventType::ABSOLUTE.0, ABS_MT_TRACKING_ID, 1),
+                InputEvent::new(EvdevEventType::ABSOLUTE.0, ABS_MT_TRACKING_ID, tracking),
                 InputEvent::new(EvdevEventType::ABSOLUTE.0, ABS_MT_POSITION_X, x),
                 InputEvent::new(EvdevEventType::ABSOLUTE.0, ABS_MT_POSITION_Y, y),
                 InputEvent::new(EvdevEventType::ABSOLUTE.0, ABS_MT_PRESSURE, 100),
@@ -310,8 +397,8 @@ impl Touch {
     }
 
     pub fn touch_stop(&mut self) -> Result<()> {
-        if let Some(device) = &mut self.device {
-            device.send_events(&[
+        if self.has_output() {
+            self.emit_batch(&[
                 InputEvent::new(EvdevEventType::ABSOLUTE.0, ABS_MT_SLOT, 0),
                 InputEvent::new(EvdevEventType::ABSOLUTE.0, ABS_MT_TRACKING_ID, -1),
                 InputEvent::new(EvdevEventType::SYNCHRONIZATION.0, 0, 0), // SYN_REPORT
@@ -323,10 +410,11 @@ impl Touch {
 
     pub fn goto_xy(&mut self, xy: (i32, i32)) -> Result<()> {
         let (x, y) = self.virtual_to_input(xy);
-        if let Some(device) = &mut self.device {
-            device.send_events(&[
+        if self.has_output() {
+            let tracking = self.output_tracking_id();
+            self.emit_batch(&[
                 InputEvent::new(EvdevEventType::ABSOLUTE.0, ABS_MT_SLOT, 0),
-                InputEvent::new(EvdevEventType::ABSOLUTE.0, ABS_MT_TRACKING_ID, 1),
+                InputEvent::new(EvdevEventType::ABSOLUTE.0, ABS_MT_TRACKING_ID, tracking),
                 InputEvent::new(EvdevEventType::ABSOLUTE.0, ABS_MT_POSITION_X, x),
                 InputEvent::new(EvdevEventType::ABSOLUTE.0, ABS_MT_POSITION_Y, y),
                 InputEvent::new(EvdevEventType::SYNCHRONIZATION.0, 0, 0), // SYN_REPORT
@@ -435,12 +523,83 @@ mod hold_tests {
     fn proposed_diagnostic_point_uses_exact_existing_f32_mapping() {
         let touch = super::Touch {
             device: None,
+            #[cfg(test)]
+            batch_fixture: None,
+            #[cfg(feature = "development-input-diagnostics")]
+            diagnostic: None,
             device_model: super::DeviceModel::Remarkable2,
             trigger_corner: TriggerCorner::LowerLeft,
         };
         assert_eq!(touch.native_point((110, 280)), (201, 1360));
     }
 
+    #[cfg(all(target_os = "linux", feature = "development-input-diagnostics"))]
+    #[test]
+    fn unchanged_swipe_executes_every_tagged_batch_and_failed_start_stop_guard() {
+        use crate::workflow::xochitl_integration::{NavigationDirection, XochitlIntegration};
+        use std::{cell::RefCell, rc::Rc};
+        for direction in [NavigationDirection::Next, NavigationDirection::Previous] {
+            let batches = Rc::new(RefCell::new(Vec::new()));
+            let sink = batches.clone();
+            let mut touch = super::Touch {
+                device: None,
+                batch_fixture: Some(Box::new(move |events| {
+                    sink.borrow_mut().push(
+                        events
+                            .iter()
+                            .map(|e| [e.event_type().0 as i32, e.code() as i32, e.value()])
+                            .collect::<Vec<_>>(),
+                    );
+                    Ok(())
+                })),
+                diagnostic: Some((731, Box::new(UnusedEmitter))),
+                device_model: super::DeviceModel::Remarkable2,
+                trigger_corner: TriggerCorner::LowerLeft,
+            };
+            XochitlIntegration::swipe(&mut touch, direction).unwrap();
+            let observed = batches.borrow();
+            assert_eq!(observed.len(), 17);
+            let (a, b) = if direction == NavigationDirection::Next {
+                (700i32, 100i32)
+            } else {
+                (100, 700)
+            };
+            for (step, events) in observed[..16].iter().enumerate() {
+                let offset = (((b - a).abs() as f32) * (step as f32 / 15.0)) as i32;
+                let (x, y) = touch.virtual_to_input((a + (b - a).signum() * offset, 512));
+                assert_eq!(events[0], [3, 47, 0]);
+                assert_eq!(events[1], [3, 57, 731]);
+                assert_eq!(events[2], [3, 53, x]);
+                assert_eq!(events[3], [3, 54, y]);
+                assert_eq!(y, 936);
+                assert_eq!(events.last(), Some(&[0, 0, 0]));
+                assert_eq!(events.len(), if step == 0 { 9 } else { 5 });
+            }
+            assert_eq!(observed[16], vec![[3, 47, 0], [3, 57, -1], [0, 0, 0]]);
+        }
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let sink = calls.clone();
+        let mut touch = super::Touch {
+            device: None,
+            batch_fixture: Some(Box::new(move |events| {
+                sink.borrow_mut().push(events.len());
+                anyhow::bail!("Unstarted guard refuses every actual write")
+            })),
+            diagnostic: Some((731, Box::new(UnusedEmitter))),
+            device_model: super::DeviceModel::Remarkable2,
+            trigger_corner: TriggerCorner::LowerLeft,
+        };
+        assert!(XochitlIntegration::swipe(&mut touch, NavigationDirection::Next).is_err());
+        assert_eq!(*calls.borrow(), vec![9, 3]); // Guard still called on caller's conditional stop.
+    }
+    #[cfg(all(target_os = "linux", feature = "development-input-diagnostics"))]
+    struct UnusedEmitter;
+    #[cfg(all(target_os = "linux", feature = "development-input-diagnostics"))]
+    impl super::DiagnosticGestureEmitter for UnusedEmitter {
+        fn emit(&mut self, _: &mut evdev::Device, _: &[evdev::InputEvent]) -> anyhow::Result<()> {
+            panic!("Test fixture never opens or writes an input device")
+        }
+    }
     #[test]
     fn stationary_contact_triggers_at_threshold_not_before() {
         let mut hold = HoldTimer::default();
