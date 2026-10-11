@@ -107,7 +107,16 @@ main() {
     # No pre-staged query/state symlink or unrelated file can become an output.
     for file in "$root"/* "$root"/.[!.]* "$root"/..?*; do
         if ! test -e "$file" && ! test -L "$file"; then continue; fi
-        case "${file##*/}" in @ALLOWEDFILES@) private "$file";; *) exit 90;; esac
+        case "${file##*/}" in
+            @ALLOWEDFILES@)
+                case "${file##*/}" in
+                    owned_tap_guardian|observe_input|publish_creation_arm)
+                        test -f "$file" && test ! -L "$file"
+                        test "$(stat -c '%a %u %h' "$file")" = '700 0 1';;
+                    *) private "$file";;
+                esac;;
+            *) exit 90;;
+        esac
     done
     if test -e "$root/preparation.json"; then
         test "$(sha256sum "$root/preparation.json" | awk '{print $1}')" = '@RECEIPTHASH@'

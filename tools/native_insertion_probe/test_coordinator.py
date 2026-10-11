@@ -26,6 +26,45 @@ def run(root, body, overrides="", expected=0):
 
 
 class Coordinator(unittest.TestCase):
+    def test_rendered_open_packet_inventory_requires_exact_helper_and_record_modes(self):
+        helpers = {"owned_tap_guardian", "observe_input", "publish_creation_arm"}
+        variants = [(None, "valid")]
+        for helper in sorted(helpers):
+            variants += [(helper, mode) for mode in ("600", "755", "symlink", "hardlink", "wrong-owner")]
+        variants += [("owner", "700"), ("payload.so", "700"), ("extra", "extra"), ("owned_tap_guardian", "unselected-helper")]
+        for name, mode in variants:
+            with self.subTest(name=name, mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)/"packet";root.mkdir(mode=0o700)
+                kind = "caller-selected-insertion-v1" if mode=="unselected-helper" else "open-document-insertion-v1"
+                receipt = {"nonce": "1"*32, "remote_root": str(root), "experiment_kind": kind, "files": {}}
+                for item in sorted(coordinator.packet_files(receipt)):
+                    data = ("synthetic " + item).encode();path = root / item;path.write_bytes(data)
+                    path.chmod(0o700 if item in helpers else 0o600)
+                    receipt["files"][item] = coordinator.sha(data)
+                manifest = "".join(f"{digest}  {item}\n" for item,digest in sorted(receipt["files"].items()))
+                (root / "packet.files").write_text(manifest);(root / "packet.files").chmod(0o600)
+                receipt["packet_manifest_sha256"] = coordinator.sha(manifest.encode())
+                rendered = coordinator.render(receipt, "0"*64)
+                # Execute the exact rendered inventory AND subsequent per-file
+                # mode checks, stopping before hashing/claim/systemd admission.
+                private = rendered[rendered.index("private() {"):rendered.index("now() {")]
+                begin = rendered.index('    for file in "$root"/*')
+                end = rendered.index('    (cd "$root"; sha256sum -c packet.files)',begin)
+                admission = rendered[begin:end]
+                if mode.isdigit(): (root / name).chmod(int(mode,8))
+                elif mode == "symlink":
+                    (root / name).unlink();(root / name).symlink_to(root / "payload.so")
+                elif mode == "hardlink": os.link(root / name,Path(directory) / "linked-helper")
+                elif mode == "wrong-owner": os.chown(root / name,1,0)
+                elif mode == "extra": (root / "unrelated").write_bytes(b"extra")
+                elif mode == "unselected-helper":
+                    (root / name).write_bytes(b"unselected");(root / name).chmod(0o700)
+                result = subprocess.run(["/bin/sh","-c", "set -eu\n"+private+f"root='{root}'\n"+admission],
+                                        capture_output=True,text=True,timeout=8)
+                self.assertEqual(result.returncode==0,mode=="valid",result.stderr)
+                for marker in ("host-arm.claim","deadline","guard.request","start.request"):
+                    self.assertFalse((root / marker).exists())
+
     def test_actual_nine_second_preflight_bounded_ready_and_thirty_second_refusal(self):
         for source_template, ready_at, success in ((SOURCE,109,True), (SOURCE,124,True), (SOURCE,130,False), (SOURCE,999,False)):
             with tempfile.TemporaryDirectory() as directory:
