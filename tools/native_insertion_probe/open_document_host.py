@@ -84,6 +84,7 @@ class HostSequence:
         self.arm_attempted = False
         self.stop_attempted = False
         self.diagnostic_end = None
+        self.library_baseline = None
 
     def record(self, stage, evidence):
         self.trace.append((stage, evidence))
@@ -161,15 +162,45 @@ class HostSequence:
             raise Refused("Raw source sidecars changed across observations")
         return values
 
+    def library_context(self, raw):
+        """Immutable comparison tuple; never a selected-document witness."""
+        content, metadata = raw['content'], raw['metadata']
+        return (tuple(page['id'] for page in content['cPages']['pages']),
+                content['pageCount'], content['cPages']['lastOpened']['value'],
+                metadata['lastOpenedPage'], self.sidecars(raw),
+                raw.get('last_open_raw'), raw['last_open'])
+
+    def pending_library(self, raw, now_ms):
+        baseline = self.library_baseline
+        if (baseline is None or self.arm_attempted or raw.get('diagnostics') != {} or
+            now_ms >= self.waiting.expiry_ms):
+            raise Refused('Pending Library lacks original unarmed SDK/context authority')
+        context = self.library_context(raw)
+        if (context != baseline or context[0] != tuple(self.selected['page_ids']) or
+            context[1] != 7 or context[2] != self.selected['page_ids'][0] or
+            type(context[3]) is not int or context[3] != 0 or type(context[5]) is not bytes or
+            context[5] != b'LastOpen=@ByteArray()\n' or context[6] is not None):
+            raise Refused('Pending Library requires unchanged canonical raw baseline')
+
     def observe_open(self):
         # Read-only capture polling never renews the fixed open deadline. The
-        # footer can precede loaded body pixels, but every frame retains exact
-        # identity/document context and every later frame preserves raw sidecars.
+        # footer can precede loaded body pixels. A recognized pre-footer Library
+        # retains baseline context only; every source frame requires exact
+        # selected-document context and later frames preserve raw sidecars.
         footer_seen = False
         for index in range(MAX_OPEN_FRAMES):
             raw = self.adapter.snapshot("open", self.timing.stage_end("open"), False)
             self.record(f"open-frame-{index:03}", raw)
-            self.admit(raw, "open")
+            now_ms = self.admit(raw, "open")
+            if (self.selected.get('experiment_kind') == PRODUCTION_V2 and
+                same_pixels(raw['png'], self.library_png)):
+                if footer_seen:
+                    raise Refused('Library returned after source footer')
+                self.pending_library(raw, now_ms)
+                self.response_time(raw)
+                self.record(f'open-library-unready-{index:03}', raw)
+                self.response_time(raw)
+                continue
             self.document_context(raw)
             hashes = self.sidecars(raw)
             if not footer_seen:
@@ -225,6 +256,8 @@ class HostSequence:
                 self.response_time(library)
                 if matches:
                     self.record("library", library)
+                    if purpose == PRODUCTION_V2:
+                        self.library_baseline = self.library_context(library)
                     self.response_time(library)
                     break
                 if index + 1 == MAX_READY_FRAMES:

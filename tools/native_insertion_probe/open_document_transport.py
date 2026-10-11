@@ -349,7 +349,21 @@ test "$(now_upper)" -lt "$cutoff"
             script += f'private "$root/{prefix}.phases"\ntest "$(stat -c \'%s\' "$root/{prefix}.phases")" -le 1024\n'
             script += f'printf \'"phases":"%s",\' "$(b64 "$root/{prefix}.phases")"\n'
         script += 'printf \'"uptime":"%s"}\\n\' "$(b64 /proc/uptime)"\n'
+        # Retain the original SDK setup bound through pre-arm decoding and
+        # retention. Result access has its separate accepted A+5 interval.
+        sdk_deadline = None
+        if self.is_v2() and stage != 'result' and self.sdk_expiry_ms is not None:
+            sdk_deadline = self.known_deadline(self.sdk_expiry_ms / 1000)
+            if sdk_deadline is None:
+                raise Refused('Original SDK local clock context required')
+            stage_deadline = self.known_deadline(cutoff)
+            self.fixed_local_deadlines[cutoff] = min(stage_deadline, sdk_deadline) if stage_deadline is not None else sdk_deadline
         timeout, response_deadline = self.snapshot_timeout(cutoff)
+        if sdk_deadline is not None:
+            response_deadline = min(response_deadline, sdk_deadline)
+            timeout = min(timeout, response_deadline - time.monotonic())
+            if timeout <= 0:
+                raise Refused('Original SDK setup expired before acquisition')
         response = self.call(script, timeout)
         if time.monotonic() >= response_deadline:
             raise Refused("Complete snapshot response arrived after fixed deadline")
@@ -370,13 +384,14 @@ test "$(now_upper)" -lt "$cutoff"
             if not re.fullmatch("[0-9a-f]{64}", digest) or path in hashes:
                 raise Refused("Malformed immutable hash observation")
             hashes[path] = digest
-        last = decode("last_open").decode("utf-8").strip()
+        last_raw = decode("last_open")
+        last = last_raw.decode("utf-8").strip()
         match = re.fullmatch(r"LastOpen=@ByteArray\(([0-9a-f-]{36})\)", last)
         observed = {"window": [window[0]] + [int(v) for v in window[1:]], "boot_id": self.profile["boot_id"],
                     "response_deadline_monotonic": response_deadline,
                     "pid": raw["pid"], "start_ticks": raw["start_ticks"], "closed": False,
                     "waiting": decode("waiting"), "uptime": decode("uptime").decode("ascii"),
-                    "last_open": match[1] if match else None, "content": json.loads(decode("content")),
+                    "last_open": match[1] if match else None, "last_open_raw": last_raw, "content": json.loads(decode("content")),
                     "metadata": json.loads(decode("metadata")), "png": decode("png"), "hashes": hashes,
                     "content_raw_sha256": hashlib.sha256(decode("content")).hexdigest(),
                     "metadata_raw_sha256": hashlib.sha256(decode("metadata")).hexdigest(),
