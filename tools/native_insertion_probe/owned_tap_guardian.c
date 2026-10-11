@@ -10,6 +10,7 @@
  * --recover NONCE BOOT_UUID: release-only, same persistent flock, dead exact
  * writer identity, unexpired lease, exact tagged contact and no other contacts.
  * tap.released is positive state evidence, not a UI acknowledgment.
+ * --check-pidfd: read-only self-process capability check; signal zero only.
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -590,7 +591,23 @@ finish:
     if(c.lock>=0)close(c.lock);
     close(c.root);return 90;
 }
+static int check_pidfd(void) {
+    int supported=0,error=ENOSYS;
+#if defined(SYS_pidfd_open) && defined(SYS_pidfd_send_signal)
+    int fd=(int)syscall(SYS_pidfd_open,getpid(),0);
+    if(fd<0)error=errno;
+    else {
+        if(syscall(SYS_pidfd_send_signal,fd,0,NULL,0)==0){supported=1;error=0;}
+        else error=errno;
+        if(close(fd)!=0){supported=0;error=errno;}
+    }
+#endif
+    int written=printf("{\"status\":\"%s\",\"pidfd_supported\":%s,\"errno\":%d,\"input_events\":0,\"signal\":0}\n",
+        supported?"pidfd-self-check-supported":"pidfd-self-check-unavailable",supported?"true":"false",error);
+    return supported && written>0 && fflush(stdout)==0?0:90;
+}
 int main(int argc,char **argv) {
+    if(argc==2 && !strcmp(argv[1],"--check-pidfd"))return check_pidfd();
     if(argc==5 && (!strcmp(argv[1],"--tap") || !strcmp(argv[1],"--tap-close"))) {
         if(getuid()!=0 || !hex_string(argv[2],0) || !hex_string(argv[3],1))return 90;
         return supervise(argc,argv);

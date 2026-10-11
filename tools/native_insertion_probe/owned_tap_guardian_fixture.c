@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
 #include <linux/input.h>
@@ -21,6 +22,8 @@ static int fake_fsync(int);
 static int fake_open(const char *,int,...);
 static int fake_close(int);
 static int fake_sleep(const struct timespec *,struct timespec *);
+static long fake_syscall(long,...);
+#define syscall fake_syscall
 #define open fake_open
 #define close fake_close
 #define nanosleep fake_sleep
@@ -34,6 +37,7 @@ static int fake_sleep(const struct timespec *,struct timespec *);
 #define main guardian_main
 #include "owned_tap_guardian.c"
 #undef main
+#undef syscall
 #undef nanosleep
 #undef close
 #undef open
@@ -55,6 +59,20 @@ static struct context *intent_context;
 static int intent_fault, omit_syn, truncated_echo;
 static struct context *flow_context;
 static int delayed_go, stop_on_down, crash_after_release, late_supervisor;
+static int pidfd_fault, self_signal_calls;
+static long fake_syscall(long number,...) {
+    va_list args;va_start(args,number);long result=-1;
+    if(number==SYS_pidfd_open) {
+        pid_t pid=va_arg(args,pid_t);unsigned int flags=va_arg(args,unsigned int);
+        if(pidfd_fault==1){errno=ENOSYS;result=-1;}else result=syscall(number,pid,flags);
+    } else if(number==SYS_pidfd_send_signal) {
+        int fd=va_arg(args,int),sig=va_arg(args,int);void *info=va_arg(args,void *);
+        unsigned int flags=va_arg(args,unsigned int);
+        if(pidfd_fault){assert(sig==0);++self_signal_calls;errno=EPERM;result=-1;}
+        else result=syscall(number,fd,sig,info,flags);
+    } else assert(0);
+    va_end(args);return result;
+}
 static int fake_open(const char *path,int flags,...) {
     mode_t mode=0;if(flags&O_CREAT){va_list args;va_start(args,flags);mode=va_arg(args,int);va_end(args);}
     if(flow_context) {
@@ -206,7 +224,12 @@ static void assert_receipt_point(struct context *c,const char *name,const char *
 int main(int argc,char **argv) {
     assert(argc==2);char path[]="/tmp/guardian-fixture-XXXXXX";
     struct context c=make_context(path);const char *mode=argv[1];
-    if(!strcmp(mode,"close-grammar")) {
+    if(!strcmp(mode,"pidfd-open-unavailable")||!strcmp(mode,"pidfd-zero-denied")) {
+        pidfd_fault=!strcmp(mode,"pidfd-open-unavailable")?1:2;
+        char *args[]={"fixture","--check-pidfd",NULL};
+        assert(guardian_main(2,args)==90 && writes==0);
+        assert(self_signal_calls==(pidfd_fault==1?0:1));
+    } else if(!strcmp(mode,"close-grammar")) {
         bind_point(&c,CLOSE_X,CLOSE_Y);assert(write_frame(&c,1));
         assert(queued==9 && queue[2].code==ABS_MT_POSITION_X && queue[2].value==CLOSE_X &&
                queue[3].code==ABS_MT_POSITION_Y && queue[3].value==CLOSE_Y &&

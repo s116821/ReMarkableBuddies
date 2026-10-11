@@ -5,6 +5,7 @@ ordering, not actual kernel echo, scheduler/crash safety or exclusive ownership.
 """
 from pathlib import Path
 import os
+import json
 import shutil
 import subprocess
 import tempfile
@@ -20,7 +21,8 @@ class GuardianFaultTests(unittest.TestCase):
             raise unittest.SkipTest("Disposable root Linux fixture container required")
         cls.work = tempfile.TemporaryDirectory(prefix="guardian-build-")
         cls.fixture = Path(cls.work.name) / "fixture"
-        for name, output in (("owned_tap_guardian.c", Path(cls.work.name) / "guardian"),
+        cls.guardian = Path(cls.work.name) / "guardian"
+        for name, output in (("owned_tap_guardian.c", cls.guardian),
                              ("owned_tap_guardian_fixture.c", cls.fixture)):
             subprocess.run(["gcc", "-std=c11", "-Wall", "-Wextra", "-Werror",
                             str(HERE / name), "-o", str(output)], check=True, capture_output=True)
@@ -39,16 +41,33 @@ class GuardianFaultTests(unittest.TestCase):
                  "delayed-go", "supervisor-normal", "supervisor-stopped",
                  "supervisor-after-release-crash", "supervisor-expired", "pidfd-fence",
                  "close-grammar", "foreign-point", "mixed-point", "close-foreign-echo",
-                 "close-foreign-contact", "supervisor-close", "close-takeover", "supervisor-close-stopped")
+                 "close-foreign-contact", "supervisor-close", "close-takeover", "supervisor-close-stopped",
+                 "pidfd-open-unavailable", "pidfd-zero-denied")
         for mode in modes:
             with self.subTest(mode=mode):
                 result = subprocess.run([str(self.fixture), mode], text=True, capture_output=True, timeout=3)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertIn(mode + " PASS", result.stdout)
+                if mode.startswith("pidfd-") and mode != "pidfd-fence":
+                    receipt = json.loads(result.stdout.splitlines()[0])
+                    self.assertEqual(receipt["status"], "pidfd-self-check-unavailable")
+                    self.assertFalse(receipt["pidfd_supported"])
+                    self.assertEqual(receipt["input_events"], 0)
+                    self.assertEqual(receipt["signal"], 0)
+                    self.assertGreater(receipt["errno"], 0)
                 directory = Path(result.stdout.strip().split("temporary=", 1)[1]).resolve()
                 self.assertEqual(directory.parent, Path("/tmp"))
                 self.assertTrue(directory.name.startswith("guardian-fixture-"))
                 shutil.rmtree(directory)
+
+    def test_read_only_pidfd_self_check(self):
+        result = subprocess.run([str(self.guardian), "--check-pidfd"], text=True,
+                                capture_output=True, timeout=3)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout), {
+            "status": "pidfd-self-check-supported", "pidfd_supported": True,
+            "errno": 0, "input_events": 0, "signal": 0})
+        self.assertEqual(result.stderr, "")
 
 
 if __name__ == "__main__":
