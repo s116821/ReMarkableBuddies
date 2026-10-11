@@ -5,19 +5,31 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <time.h>
 static ssize_t fixture_write(int,const void *,size_t);
 static int fixture_puts(const char *);
 static long fixture_syscall(long,...);
+static int fixture_clock_gettime(clockid_t,struct timespec *);
+static unsigned writes;
 #define write fixture_write
 #define puts fixture_puts
 #define syscall fixture_syscall
 #define main publisher_main
+#define clock_gettime fixture_clock_gettime
 #include "publish_creation_arm.c"
 #undef main
 #undef syscall
 #undef puts
 #undef write
-static unsigned writes;
+#undef clock_gettime
+static int fixture_clock_gettime(clockid_t clock,struct timespec *value) {
+    const char *selected=getenv("TEST_NOW_MS");
+    if(writes && getenv("TEST_AFTER_WRITE_MS"))selected=getenv("TEST_AFTER_WRITE_MS");
+    if(!selected)return clock_gettime(clock,value);
+    long long ms=strtoll(selected,NULL,10);
+    value->tv_sec=ms/1000;value->tv_nsec=(ms%1000)*1000000;
+    return 0;
+}
 static ssize_t fixture_write(int fd,const void *bytes,size_t n) {
     ++writes;
     if(getenv("TEST_WRITE_FAIL") && writes>1){errno=EIO;return -1;}

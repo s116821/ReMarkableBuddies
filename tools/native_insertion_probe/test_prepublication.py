@@ -37,6 +37,11 @@ class PrepublicationTests(unittest.TestCase):
             publisher = root / "publish_creation_arm"
             publisher.write_text('#!/bin/sh\ntouch "' + str(root / "publisher-invoked") + '"\n')
             publisher.chmod(0o700)
+            # This control targets immutable admission, not alarm ownership.
+            # Keep the current --check call shape executable in this fixture.
+            alarm = root / 'owned_frame_alarm'
+            alarm.write_text('#!/bin/sh\ntest "$1" = --check || exit 90\nshift\nexec "$@"\n')
+            alarm.chmod(0o700)
             def transport(arguments, script, timeout):
                 result = subprocess.run(["/bin/sh", "-s"], input=script, capture_output=True, text=True, timeout=timeout)
                 return {"timeout": False, "exit": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
@@ -44,7 +49,7 @@ class PrepublicationTests(unittest.TestCase):
             adapter.tap_released = True
             adapter.tap_release_sha256 = "a" * 64
             adapter.tap_supervisor_sha256 = "a" * 64
-            adapter.prelude = lambda *args: 'set -eu\nroot=' + module.q(root) + '\nprivate() { test -f "$1"; }\nbounded() { "$@"; }\n'
+            adapter.prelude = lambda *args: 'set -eu\nroot=' + module.q(root) + '\ncutoff=100\nnow_upper() { printf "0\\n"; }\nprivate() { test -f "$1"; }\n'
             timing = SimpleNamespace(stage_end=lambda stage: 100, armed_at=1, deadline=361, candidate_at=20)
             waiting = SimpleNamespace(nonce="1" * 32, pid=2, start_ticks=3, expiry_ms=90000)
             ready = {ext + "_raw_sha256": "a" * 64 for ext in ("content", "metadata")}

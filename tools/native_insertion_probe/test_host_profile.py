@@ -4,14 +4,37 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import copy
+from unittest.mock import patch
 from PIL import Image
 import coordinator
 from owned_frame_capture import CONTRACT as CAPTURE_CONTRACT, TOOLS as CAPTURE_TOOLS
 from owned_frame_capture import OBSERVATION_KIND
 from prepare_packet import ENCODER_HASHES
+from open_document_timing import PRODUCTION_V2, V2_CONTRACT, V2_SDK_REVISION, V2_SDK_SOURCES, V2_PUBLISHER_SHA256
 
 
 class ProfileTests(unittest.TestCase):
+    def test_explicit_v2_contract_sdk_config_and_artifact_drift_refuse(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary); receipt,profile=self.fixture(root)
+            receipt['experiment_kind']=profile['experiment_kind']=PRODUCTION_V2
+            profile.update(production_contract=V2_CONTRACT,sdk_revision=V2_SDK_REVISION,
+                           sdk_source_hashes=V2_SDK_SOURCES,sdk_setup_variant='AfterOpen95s',
+                           sdk_configuration_sha256='c'*64,host_sequence_contract='bounded-host-v6-production-v2')
+            receipt['files']['publish_creation_arm']=profile['tools']['publish_creation_arm']=V2_PUBLISHER_SHA256
+            # This pure profile test uses a synthetic PNG pin; actual approved
+            # Library pixels and their fixed production hash are separate gates.
+            with patch('coordinator.V2_LIBRARY_SHA256',profile['references']['library-reference.png']):
+                (root/'host-profile.json').write_text(json.dumps(profile))
+                self.assertEqual(coordinator.load_host_profile(root,receipt),profile)
+                for field,value in (('sdk_revision','485ac1a46367bfdf203abe140a8b764728cdf54d'),
+                                    ('sdk_setup_variant','Legacy40s'),('sdk_source_hashes',{}),
+                                    ('production_contract',{}),('sdk_configuration_sha256',''),
+                                    ('host_sequence_contract','bounded-host-v5')):
+                    changed=copy.deepcopy(profile); changed[field]=value
+                    (root/'host-profile.json').write_text(json.dumps(changed))
+                    with self.subTest(field=field),self.assertRaises(ValueError): coordinator.load_host_profile(root,receipt)
     def test_purpose_is_bound_to_profile_and_packet(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);receipt,profile=self.fixture(root)

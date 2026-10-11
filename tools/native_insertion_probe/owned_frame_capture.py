@@ -4,7 +4,7 @@ import re
 import shlex
 
 OBSERVATION_KIND = 'open-document-readiness-observation-v1'
-HOST_KINDS = {'open-document-insertion-v1', OBSERVATION_KIND}
+HOST_KINDS = {'open-document-insertion-v1', 'open-document-insertion-v2', OBSERVATION_KIND}
 PHASE_LABELS = ('record_start', 'artifact_begin', 'artifact_end', 'sidecar_prepare_begin',
                 'sidecar_prepare_end', 'idle_begin', 'idle_end', 'native_pins_before_begin',
                 'native_pins_before_end', 'producer_begin', 'producer_end', 'converter_begin',

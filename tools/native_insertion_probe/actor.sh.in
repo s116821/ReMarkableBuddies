@@ -48,7 +48,8 @@ start_of() {
     sed 's/^.*) //' "/proc/$1/stat" | awk '{print $20}'
 }
 same_process() {
-    test -d "/proc/$1" && test "$(start_of "$1")" = "$2"
+    test -d "/proc/$1" || return 90
+    test "$(start_of "$1")" = "$2" || return 90
 }
 process_gone() {
     test -d "/proc/$1" || return 0
@@ -135,9 +136,9 @@ hashes() {
 recovery_hashes() {
     # Recovery safety is independent of document outcome. The complete 24-file
     # baseline remains mandatory during admission; no document file is omitted.
-    (cd "$root"; sha256sum -c packet.files) > "$root/recovery-packet-check"
-    sha256sum -c "$root/runtime.files" > "$root/recovery-runtime-check"
-    sha256sum -c "$root/service.files" > "$root/recovery-service-check"
+    (cd "$root" || exit 90; sha256sum -c packet.files) > "$root/recovery-packet-check" || return 90
+    sha256sum -c "$root/runtime.files" > "$root/recovery-runtime-check" || return 90
+    sha256sum -c "$root/service.files" > "$root/recovery-service-check" || return 90
 }
 record_document_preservation() {
     # This is evidence only, not a semantic insertion verdict. Exact intended
@@ -215,18 +216,19 @@ remove_guard_piece() {
     if test -e "$1"; then owned_remove "$1" "$2" || return 90; fi
 }
 recover_owned_input() {
-    test "$experiment" = open-document-insertion-v1 || return 0
+    if test "$experiment" != open-document-insertion-v1 && test "$experiment" != open-document-insertion-v2; then return 0; fi
     # No guardian attempt means no owned input obligation. A launch claim is
     # published before the detached writer can run, so partial launch is visible.
     if ! test -e "$root/tap-start.claim" && ! test -L "$root/tap-start.claim"; then return 0; fi
-    private "$root/tap-start.claim"
-    test "$(cat "$root/tap-start.claim")" = "$nonce"
-    test -f "$root/owned_tap_guardian" && test ! -L "$root/owned_tap_guardian"
-    test "$(stat -c '%a %u %h' "$root/owned_tap_guardian")" = '700 0 1'
-    test "$(sha256sum "$root/owned_tap_guardian" | awk '{print $1}')" = '@TAPGUARDIANHASH@'
+    private "$root/tap-start.claim" || return 90
+    test "$(cat "$root/tap-start.claim")" = "$nonce" || return 90
+    test -f "$root/owned_tap_guardian" || return 90
+    test ! -L "$root/owned_tap_guardian" || return 90
+    test "$(stat -c '%a %u %h' "$root/owned_tap_guardian")" = '700 0 1' || return 90
+    test "$(sha256sum "$root/owned_tap_guardian" | awk '{print $1}')" = '@TAPGUARDIANHASH@' || return 90
     # This mode cannot inject a down or replay the ordinary tap. Its own fixed
     # takeover bound must retain unresolved ownership instead of sweeping slots.
-    "$root/owned_tap_guardian" --recover "$nonce" '@BOOTID@' > "$root/tap-recovery.log" 2>&1
+    "$root/owned_tap_guardian" --recover "$nonce" '@BOOTID@' > "$root/tap-recovery.log" 2>&1 || return 90
 }
 restore() {
     recovery_evidence_failed=no
@@ -284,7 +286,8 @@ restore() {
         validate_guard_piece "$vendor_shadow" "$root/vendor-shadow.conf" vendor-shadow.install-intent
         validate_guard_piece "$unit_shadow" "$root/unit-shadow.service" unit-shadow.install-intent
         if test -e "$parent" || test -L "$parent"; then
-            test -d "$parent" && test ! -L "$parent"
+            test -d "$parent"
+            test ! -L "$parent"
             test "$(stat -c '%a %u' "$parent")" = '700 0'
             private "$root/guard.directory-created"
             test "$(cat "$root/guard.directory-created")" = "$nonce"
@@ -300,7 +303,8 @@ restore() {
         remove_guard_piece "$vendor_shadow" "$root/vendor-shadow.conf" vendor-shadow.install-intent
         remove_guard_piece "$unit_shadow" "$root/unit-shadow.service" unit-shadow.install-intent
         if test -e "$parent" || test -L "$parent"; then
-            test -d "$parent" && test ! -L "$parent"
+            test -d "$parent"
+            test ! -L "$parent"
             test "$(stat -c '%a %u' "$parent")" = '700 0'
             rmdir "$parent"
         fi
@@ -329,34 +333,39 @@ verify_stock() {
            query is-active --quiet reader-buddy.service &&
            query is-active --quiet rm-sync.service &&
            value Job && test -z "$VALUE"; then ready=yes; fi
-        test "$(now)" -lt "$verify_end"
+        test "$(now)" -lt "$verify_end" || return 90
         if test "$ready" = yes; then break; fi
         sleep 1
     done
-    value MainPID
+    value MainPID || return 90
     stock_pid=$VALUE
     case "$stock_pid" in ''|*[!0-9]*) return 90;; esac
-    test "$stock_pid" -gt 1
-    stock_start=$(start_of "$stock_pid")
-    test "$(sha256sum "/proc/$stock_pid/exe" | awk '{print $1}')" = '@EXEHASH@'
-    awk -v payload="$root/payload.so" '$NF==payload {found=1} END {exit found}' "/proc/$stock_pid/maps"
-    policy "$root/stock.policy"
-    recovery_hashes
-    value MainPID
-    test "$VALUE" = "$stock_pid"
-    same_process "$stock_pid" "$stock_start"
-    test ! -e "$guard" && test ! -e "$activation"
-    test ! -e "$unit_shadow" && test ! -L "$unit_shadow"
-    test ! -e "$vendor_shadow" && test ! -L "$vendor_shadow"
-    value DropInPaths
-    test "$VALUE" = /usr/lib/systemd/system/xochitl.service.d/xochitl-service-override.conf
-    members=$(awk 'NR>32 {exit 1} {print}' /sys/fs/cgroup/systemd/system.slice/xochitl.service/cgroup.procs)
+    test "$stock_pid" -gt 1 || return 90
+    stock_start=$(start_of "$stock_pid") || return 90
+    test "$(sha256sum "/proc/$stock_pid/exe" | awk '{print $1}')" = '@EXEHASH@' || return 90
+    awk -v payload="$root/payload.so" '$NF==payload {found=1} END {exit found}' "/proc/$stock_pid/maps" || return 90
+    policy "$root/stock.policy" || return 90
+    recovery_hashes || return 90
+    value MainPID || return 90
+    test "$VALUE" = "$stock_pid" || return 90
+    same_process "$stock_pid" "$stock_start" || return 90
+    test ! -e "$guard" || return 90
+    test ! -L "$guard" || return 90
+    test ! -e "$activation" || return 90
+    test ! -L "$activation" || return 90
+    test ! -e "$unit_shadow" || return 90
+    test ! -L "$unit_shadow" || return 90
+    test ! -e "$vendor_shadow" || return 90
+    test ! -L "$vendor_shadow" || return 90
+    value DropInPaths || return 90
+    test "$VALUE" = /usr/lib/systemd/system/xochitl.service.d/xochitl-service-override.conf || return 90
+    members=$(awk 'NR>32 {exit 1} {print}' /sys/fs/cgroup/systemd/system.slice/xochitl.service/cgroup.procs) || return 90
     for member in $members; do
         case "$member" in ''|*[!0-9]*) return 90;; esac
-        test "$member" -gt 1
-        awk -v payload="$root/payload.so" '$NF==payload {found=1} END {exit found}' "/proc/$member/maps"
+        test "$member" -gt 1 || return 90
+        awk -v payload="$root/payload.so" '$NF==payload {found=1} END {exit found}' "/proc/$member/maps" || return 90
     done
-    reserve 1
+    reserve 1 || return 90
     printf '%s %s %s stock-verified\n' "$nonce" "$stock_pid" "$stock_start" > "$root/stock.restored"
 }
 finish() {
@@ -379,17 +388,18 @@ finish() {
     exit "$primary"
 }
 validate_root() {
-    test -d "$root" && test ! -L "$root"
-    test "$(stat -c '%a %u' "$root")" = '700 0'
-    private "$root/owner"
-    test "$(cat "$root/owner")" = "$nonce"
-    private "$root/deadline"
-    read armed_at deadline extra < "$root/deadline"
-    test -z "${extra-}"
+    test -d "$root" || return 90
+    test ! -L "$root" || return 90
+    test "$(stat -c '%a %u' "$root")" = '700 0' || return 90
+    private "$root/owner" || return 90
+    test "$(cat "$root/owner")" = "$nonce" || return 90
+    private "$root/deadline" || return 90
+    read armed_at deadline extra < "$root/deadline" || return 90
+    test -z "${extra-}" || return 90
     case "$armed_at:$deadline" in *[!0-9:]*|:*|*:) return 90;; esac
-    test "$((deadline - armed_at))" = 360
-    test "$(now)" -ge "$armed_at"
-    reserve 1
+    test "$((deadline - armed_at))" = 360 || return 90
+    test "$(now)" -ge "$armed_at" || return 90
+    reserve 1 || return 90
 }
 wait_insertion_stop() {
     phase=observe-insertion-stop-request
@@ -405,7 +415,8 @@ wait_insertion_stop() {
             read attempted started extra < "$root/attempt.identity"
             test -z "${extra-}"
             case "$attempted:$started" in *[!0-9:]*|:*|*:) return 90;; esac
-            test "$attempted" -gt 1 && test "$started" -gt 0
+            test "$attempted" -gt 1
+            test "$started" -gt 0
             same_process "$attempted" "$started" || return 93
             claim stop.admitted
             return 0
@@ -419,17 +430,22 @@ wait_insertion_stop() {
 
 observation_window() {
     candidate_window_start=$(now)
-    if test "$experiment" = open-document-insertion-v1 || test "$experiment" = open-document-readiness-observation-v1; then
+    if test "$experiment" = open-document-insertion-v1 || test "$experiment" = open-document-readiness-observation-v1 || test "$experiment" = open-document-insertion-v2; then
         # Refuse late startup rather than shorten declared observations. This
         # uses the original independent actor BOOTTIME deadline, never a signal.
-        reserve 255
-        observe_end=$((candidate_window_start + 70))
+        if test "$experiment" = open-document-insertion-v2; then
+            reserve 315
+            observe_end=$((candidate_window_start + 130))
+        else
+            reserve 255
+            observe_end=$((candidate_window_start + 70))
+        fi
     else
         observe_end=$((candidate_window_start + 30))
     fi
     reserve_cutoff=$((deadline - 185))
     test "$observe_end" -le "$reserve_cutoff" || observe_end=$reserve_cutoff
-    if test "$experiment" = open-document-insertion-v1 || test "$experiment" = open-document-readiness-observation-v1; then
+    if test "$experiment" = open-document-insertion-v1 || test "$experiment" = open-document-readiness-observation-v1 || test "$experiment" = open-document-insertion-v2; then
         (set -C; printf '%s %s %s %s %s\n' "$nonce" "$armed_at" "$deadline" "$candidate_window_start" "$observe_end" > "$root/candidate.window")
         private "$root/candidate.window"
     fi
@@ -461,8 +477,10 @@ main() {
     test -f /sys/fs/cgroup/systemd/system.slice/xochitl.service/cgroup.procs
     value Job
     test -z "$VALUE"
-    test ! -e "$parent" && test ! -L "$parent"
-    test ! -e "$unit_shadow" && test ! -L "$unit_shadow"
+    test ! -e "$parent"
+    test ! -L "$parent"
+    test ! -e "$unit_shadow"
+    test ! -L "$unit_shadow"
     claim actor.ready
     phase=prearm-request
     wait_request guard.request
@@ -502,9 +520,9 @@ main() {
     case "$VALUE" in *"$root/launch.sh"*) :;; *) return 90;; esac
     candidate_started=yes
     claim candidate-start.claim
-    if test "$experiment" = open-document-insertion-v1 || test "$experiment" = open-document-readiness-observation-v1; then observation_window; fi
+    if test "$experiment" = open-document-insertion-v1 || test "$experiment" = open-document-readiness-observation-v1 || test "$experiment" = open-document-insertion-v2; then observation_window; fi
     query start --no-block xochitl.service
-    if test "$experiment" != open-document-insertion-v1 && test "$experiment" != open-document-readiness-observation-v1; then observation_window; fi
+    if test "$experiment" != open-document-insertion-v1 && test "$experiment" != open-document-readiness-observation-v1 && test "$experiment" != open-document-insertion-v2; then observation_window; fi
     wait_insertion_stop
 
 }

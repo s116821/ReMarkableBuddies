@@ -76,6 +76,64 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual(self.run_publisher().returncode, 90)
         self.assertEqual(arm.read_bytes(), self.token)
 
+    def select_v2(self, startup=27):
+        candidate = int(self.args[6]); armed = candidate - startup
+        self.args[4:6] = [str(armed), str(armed + 360)]
+        self.args[3] = str((candidate + 100) * 1000)
+        self.args.append('open-document-insertion-v2')
+        self.token = f'{self.nonce} {self.args[1]} {self.args[2]} create {self.args[3]}\n'.encode()
+        self.put('creation-waiting', self.token.replace(b' create ', b' waiting '))
+        self.put('candidate.window', f'{self.nonce} {armed} {armed+360} {candidate} {candidate+130}\n'.encode())
+
+    def test_v2_fresh_commit_and_trigger_boundary(self):
+        self.select_v2()
+        candidate = int(self.args[6])
+        # Conservative upper seconds at trigger90 refuse even just before90.
+        self.assertEqual(self.run_publisher({'TEST_NOW_MS': str((candidate+89)*1000+1)}).returncode, 90)
+        self.assertFalse((self.root/'creation-arm').exists())
+        self.assertEqual(self.run_publisher({'TEST_NOW_MS': str((candidate+89)*1000)}).returncode, 0)
+        self.assertEqual((self.root/'creation-arm').read_bytes(), self.token)
+
+    def test_v2_latest_start_and_original_sdk_expiry(self):
+        self.select_v2(startup=46)
+        candidate = int(self.args[6])
+        self.assertEqual(self.run_publisher({'TEST_NOW_MS': str(candidate*1000)}).returncode, 90)
+        self.args[4:6] = [str(candidate-45), str(candidate+315)]
+        self.put('candidate.window', f'{self.nonce} {candidate-45} {candidate+315} {candidate} {candidate+130}\n'.encode())
+        self.assertEqual(self.run_publisher({'TEST_NOW_MS': self.args[3]}).returncode, 90)
+        self.assertEqual(self.run_publisher({'TEST_NOW_MS': str((candidate+89)*1000)}).returncode, 0)
+
+    def early_sdk_expiry(self):
+        self.select_v2()
+        self.args[3]=str((int(self.args[6])+80)*1000)
+        self.token=f'{self.nonce} {self.args[1]} {self.args[2]} create {self.args[3]}\n'.encode()
+        self.put('creation-waiting',self.token.replace(b' create ',b' waiting '))
+
+    def test_original_sdk_expiry_independently_before_trigger(self):
+        self.early_sdk_expiry()
+        self.assertEqual(self.run_publisher({'TEST_NOW_MS':self.args[3]}).returncode,90)
+        self.assertEqual(self.run_publisher({'TEST_NOW_MS':str(int(self.args[3])-1)}).returncode,0)
+
+    def test_expiry_after_staging_refuses_at_fresh_commit(self):
+        self.early_sdk_expiry()
+        self.assertEqual(self.run_publisher({'TEST_NOW_MS':str(int(self.args[3])-1),
+                                             'TEST_AFTER_WRITE_MS':self.args[3]}).returncode,90)
+        self.assertTrue((self.root/'creation-arm.tmp').exists())
+        self.assertFalse((self.root/'creation-arm').exists())
+
+    def test_each_closure_shape_refuses_v2_without_publication(self):
+        self.select_v2()
+        for name in ('restore.claim','entry.closed','stop.request','stop.admitted','diagnostics.json','callback.json'):
+            for kind in ('file','directory','dangling'):
+                with self.subTest(name=name, kind=kind):
+                    path=self.root/name
+                    if kind=='file': self.put(name,b'closed')
+                    elif kind=='directory': path.mkdir()
+                    else: path.symlink_to(self.root/'absent-target')
+                    self.assertEqual(self.run_publisher().returncode,90)
+                    self.assertFalse((self.root/'creation-arm').exists())
+                    if kind=='directory': path.rmdir()
+                    else: path.unlink()
     def test_existing_destination_and_symlink_are_preserved(self):
         self.put("creation-arm", b"existing")
         self.assertEqual(self.run_publisher().returncode, 90)

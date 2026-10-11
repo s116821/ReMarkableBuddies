@@ -9,6 +9,7 @@ import re
 import subprocess
 import time
 from owned_frame_capture import CONTRACT as CAPTURE_CONTRACT, TOOLS as CAPTURE_TOOLS, HOST_KINDS, OBSERVATION_KIND
+from open_document_timing import PRODUCTION_V2, V2_LIBRARY_SHA256, V2_PUBLISHER_SHA256, validate_v2_binding
 
 HERE = Path(__file__).resolve().parent
 ALIAS = "rem25-usb-rm2"
@@ -25,7 +26,7 @@ def packet_files(receipt):
 def run_host_sequence(sequence, purpose):
     if purpose == OBSERVATION_KIND:
         return sequence.run_diagnostic()
-    if purpose == 'open-document-insertion-v1':
+    if purpose in {'open-document-insertion-v1', PRODUCTION_V2}:
         return sequence.run()
     raise ValueError('Unknown host purpose refused')
 
@@ -38,10 +39,16 @@ def load_host_profile(packet, receipt):
         sources = {"open_document_host.py", "open_document_transport.py", "open_document_protocol.py",
                    "open_document_timing.py", "publish_creation_arm.c", "coordinator.py",
                    "prepare_packet.py", "actor.sh.in", "arm.sh.in", "owned_tap_guardian.c", "owned_frame_capture.py"}
-        if profile.get("host_sequence_contract") != "bounded-host-v5" or set(profile.get("source_sha256", {})) != sources:
+        contract = 'bounded-host-v6-production-v2' if profile['experiment_kind'] == PRODUCTION_V2 else 'bounded-host-v5'
+        if profile.get("host_sequence_contract") != contract or set(profile.get("source_sha256", {})) != sources:
             raise ValueError("Host source contract incomplete")
         if any(sha(regular(HERE / name).read_bytes()) != digest for name, digest in profile["source_sha256"].items()):
             raise ValueError("Reviewed host source changed")
+        if profile['experiment_kind'] == PRODUCTION_V2:
+            validate_v2_binding(profile)
+            if (profile.get('tools', {}).get('publish_creation_arm') != V2_PUBLISHER_SHA256 or
+                profile.get('references', {}).get('library-reference.png') != V2_LIBRARY_SHA256):
+                raise ValueError('Production v2 publisher/reference binding changed')
         if profile["nonce"] != receipt["nonce"] or profile["document_id"] != receipt["document_id"] or profile["target_id"] != receipt["target_page_id"] or profile["page_ids"] != receipt["before_page_ids"]:
             raise ValueError("Host/packet identity mismatch")
         if profile["sdk_creation_deadline_sha256"] != "c3d8e7124eff6de5868c74f321189ce1f55f8b4111e8983ecdc7eb7c86b3a109":

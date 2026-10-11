@@ -12,6 +12,48 @@ RECOVERY_RESERVE = 185
 OBSERVATION_BUDGET = 70
 STAGE_OFFSETS = {"ready": 20, "open": 35, "trigger": 40,
                  "result": 55, "stop": 60}
+PRODUCTION_V2 = 'open-document-insertion-v2'
+V2_STAGES = {"ready": 45, "open": 75, "trigger": 90, "result": 115, "stop": 125}
+V2_CONTRACT = {"purpose": PRODUCTION_V2, "stages": V2_STAGES,
+               "candidate_seconds": 130, "start_reserve_seconds": 315,
+               "absolute_seconds": 360, "recovery_seconds": 185,
+               "sdk_setup_seconds": 95, "accepted_seconds": 5,
+               "publication_transport_seconds": 12,
+               "library_exclusion_half_open": [735, 30, 737, 36]}
+V2_SDK_REVISION = '39e386dd2927f771ccf5849b01edc60cffada49b'
+V2_CONFIG_LINE = 'config.setupVariant = qml_access::CreationConfig::SetupVariant::AfterOpen95s;'
+V2_LIBRARY_SHA256 = '9d4af329c95069fbf5845164b2b58c504a67c3aa30a9b85a91c226a6d23409aa'
+V2_PUBLISHER_SHA256 = '9f2379c2312bafa5a8fd2a914d7df98d02319f12fff97fbd48929f03dbdbaae8'
+V2_SDK_SOURCES = {
+    'tools/qt_qml_access_probe.cpp': '69e2e0402c676f6f338eee5248de923520bb31cb561926976d37e8451c54fdaf',
+    'tools/qt_qml_access_probe_core.h': '5b732ff7535a87a22880eefea867e4d4bc3671c029c910d18d1f6968be846460',
+    'tools/qt_qml_creation_bridge.h': '7165b284430b13feba6b7b21d6303d77eb3288629e4b14d647034c1c35c6a88b',
+    'tools/qt_qml_creation_bridge.cpp': '38a437c7865db590c215b2b632011cccfe7ab90cc5c5d1174afb1f88ad9ac81f',
+    'tools/qt_page_open.h': '5058c60a39dd75db8cbde2cd2ca02113ecce2ce2860cf00572b40020b956eaf7',
+    'tools/qt_page_open.cpp': '213ce54cc6985a25029a5cbc3342c58ce0d74dec9d363c2cba2cd540b70afc39',
+    'tools/qt_page_owner.h': '992a9c8c5d627030c2286d6b168758c725957e150067db8160c5e560231f2399',
+    'tools/qt_page_open_arm.h': '800daaad233995dc5f5c70db86d7192491aadd385b67e33479b05b8bf1535bbb',
+    'tools/qt_creation_deadline.h': 'c3d8e7124eff6de5868c74f321189ce1f55f8b4111e8983ecdc7eb7c86b3a109'}
+
+
+def validate_v2_binding(profile):
+    if (profile.get('production_contract') != V2_CONTRACT or
+        profile.get('sdk_revision') != V2_SDK_REVISION or
+        profile.get('sdk_source_hashes') != V2_SDK_SOURCES or
+        profile.get('sdk_setup_variant') != 'AfterOpen95s' or
+        not re.fullmatch('[0-9a-f]{64}', profile.get('sdk_configuration_sha256', ''))):
+        raise ValueError('Exact reviewed production v2 SDK/configuration binding required')
+
+
+def validate_v2_config(text):
+    """Lexically exclude comments/literals in the separately reviewed config."""
+    if not isinstance(text, str) or len(text.encode('utf-8')) > 65536:
+        raise ValueError('Bounded reviewed creation configuration required')
+    tokens = r'//[^\n]*|/\*[\s\S]*?\*/|"(?:\\.|[^"\\])*"|\x27(?:\\.|[^\x27\\])*\x27'
+    active = re.sub(tokens, lambda m: ''.join('\n' if c == '\n' else ' ' for c in m[0]), text)
+    if (len(re.findall(r'\bconfig\s*\.\s*setupVariant\s*=', active)) != 1 or
+        not re.search(r'^\s*' + re.escape(V2_CONFIG_LINE) + r'\s*$', active, re.MULTILINE)):
+        raise ValueError('One unambiguous active reviewed SDK95 selector required')
 
 
 def diagnostic_cutoff(timing, waiting_expiry_ms):
@@ -43,6 +85,7 @@ class OpenDocumentTiming:
     armed_at: int
     deadline: int
     candidate_at: int
+    purpose: str = 'open-document-insertion-v1'
 
     def __post_init__(self):
         values = (self.armed_at, self.deadline, self.candidate_at)
@@ -52,16 +95,23 @@ class OpenDocumentTiming:
             raise ValueError("Original absolute 360-second deadline required")
         if self.candidate_at < self.armed_at:
             raise ValueError("Candidate cannot precede independent actor arming")
-        if self.deadline - self.candidate_at < OBSERVATION_BUDGET + RECOVERY_RESERVE:
+        if self.purpose not in {'open-document-insertion-v1', 'open-document-readiness-observation-v1', PRODUCTION_V2}:
+            raise ValueError('Unknown timing purpose')
+        if self.deadline - self.candidate_at < self.candidate_seconds + RECOVERY_RESERVE:
             raise ValueError("Insufficient candidate observation and recovery reserve")
 
     @property
+    def candidate_seconds(self):
+        return 130 if self.purpose == PRODUCTION_V2 else OBSERVATION_BUDGET
+
+    @property
     def observation_end(self):
-        return min(self.candidate_at + OBSERVATION_BUDGET,
+        return min(self.candidate_at + self.candidate_seconds,
                    self.deadline - RECOVERY_RESERVE)
 
     def stage_end(self, stage):
-        return min(self.candidate_at + STAGE_OFFSETS[stage], self.observation_end)
+        offsets = V2_STAGES if self.purpose == PRODUCTION_V2 else STAGE_OFFSETS
+        return min(self.candidate_at + offsets[stage], self.observation_end)
 
     def admit(self, stage, now):
         """Timing prerequisite only; token/context/input checks remain mandatory."""
@@ -69,7 +119,13 @@ class OpenDocumentTiming:
             return False
         if now >= self.stage_end(stage):
             return False
-        if stage == "trigger" and self.deadline - now < RECOVERY_RESERVE + 30:
+        if self.purpose == PRODUCTION_V2:
+            remaining = self.observation_end - now
+            if self.deadline - now < remaining + RECOVERY_RESERVE:
+                return False
+            if stage == 'trigger' and (remaining < 40 or self.deadline - now < 225):
+                return False
+        elif stage == "trigger" and self.deadline - now < RECOVERY_RESERVE + 30:
             return False
         return True
 

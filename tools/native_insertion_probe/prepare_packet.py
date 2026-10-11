@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import shutil
 from owned_frame_capture import CONTRACT as CAPTURE_CONTRACT, TOOLS as CAPTURE_TOOLS, HOST_KINDS, OBSERVATION_KIND
+from open_document_timing import PRODUCTION_V2, V2_LIBRARY_SHA256, V2_PUBLISHER_SHA256, validate_v2_binding, validate_v2_config
 
 HERE = Path(__file__).resolve().parent
 POLICY = {"OnFailure": "remarkable-fail.service", "OnFailureJobMode": "replace",
@@ -112,7 +113,7 @@ def main():
     parser.add_argument("--stock-unit", type=Path, required=True)
     parser.add_argument("--vendor-dropin", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    for option in ("tap-guardian", "observe-input", "creation-publisher", "library-reference", "source-body-reference", "source-footer-reference", "native-frame-acquire", "owned-frame", "owned-frame-alarm"):
+    for option in ("tap-guardian", "observe-input", "creation-publisher", "creation-config", "library-reference", "source-body-reference", "source-footer-reference", "native-frame-acquire", "owned-frame", "owned-frame-alarm"):
         parser.add_argument("--" + option, type=Path)
     args = parser.parse_args()
     selection_file, payload = map(regular, [args.selection, args.payload])
@@ -122,7 +123,16 @@ def main():
     kind = selected.get("experiment_kind")
     if kind not in ({"caller-selected-insertion-v1"} | HOST_KINDS):
         raise ValueError("Explicit insertion experiment required; no diagnostic alias")
-    if kind in HOST_KINDS and (
+    if kind == PRODUCTION_V2:
+        validate_v2_binding(selected)
+        if args.creation_config is None:
+            raise ValueError('Reviewed SDK95 creation configuration input required')
+        config = regular(args.creation_config)
+        config_text = config.read_text(encoding='utf-8')
+        if sha(config) != selected['sdk_configuration_sha256']:
+            raise ValueError('Exact reviewed active SDK95 configuration required')
+        validate_v2_config(config_text)
+    if kind in HOST_KINDS and kind != PRODUCTION_V2 and (
         selected.get("development_after_open") is not True or
         selected.get("sdk_revision") != "485ac1a46367bfdf203abe140a8b764728cdf54d"
     ):
@@ -191,6 +201,9 @@ def main():
                   "source-body-reference.png": args.source_body_reference,
                   "source-footer-reference.png": args.source_footer_reference}
         declared = selected.get("host_artifacts", {})
+        if kind == PRODUCTION_V2 and (declared.get('publish_creation_arm') != V2_PUBLISHER_SHA256 or
+                                      declared.get('library-reference.png') != V2_LIBRARY_SHA256):
+            raise ValueError('Exact production v2 publisher/reference required')
         if selected.get("capture_contract") != CAPTURE_CONTRACT or any(declared.get(name) != digest for name, digest in CAPTURE_TOOLS.items()):
             raise ValueError("Exact reviewed native capture source/artifact contract required")
         if set(declared) != set(inputs) or any(path is None for path in inputs.values()):
@@ -233,6 +246,10 @@ def main():
                        "open_document_host.py", "open_document_transport.py", "open_document_protocol.py",
                        "open_document_timing.py", "publish_creation_arm.c", "coordinator.py",
                        "prepare_packet.py", "actor.sh.in", "arm.sh.in", "owned_tap_guardian.c", "owned_frame_capture.py")}}
+        if kind == PRODUCTION_V2:
+            profile.update({key: selected[key] for key in ('production_contract', 'sdk_revision', 'sdk_source_hashes',
+                                                          'sdk_setup_variant', 'sdk_configuration_sha256')})
+            profile['host_sequence_contract'] = 'bounded-host-v6-production-v2'
         (output / "host-profile.json").write_text(json.dumps(profile, indent=2) + "\n", encoding="utf-8", newline="\n")
     (output / "stock-unit.original").write_bytes(original_unit)
     (output / "vendor-dropin.original").write_bytes(original_vendor)

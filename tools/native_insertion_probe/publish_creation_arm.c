@@ -27,6 +27,7 @@ static struct stat rootstat, tmpstat;
 static char rootpath[128], token[128], waiting[128], window[160];
 static const char *nonce, *document;
 static long long pid, start_ticks, expiry, armed, deadline, candidate;
+static int production_v2;
 
 static int number(const char *s, long long *out) {
     char *end;
@@ -79,9 +80,9 @@ static int root_same(void) {
     close(fd); return ok;
 }
 static int open_admission(void) {
-    static const char *names[]={"restore.claim","entry.closed","stop.request","stop.admitted"};
+    static const char *names[]={"restore.claim","entry.closed","stop.request","stop.admitted","diagnostics.json","callback.json"};
     struct stat s;
-    for(size_t i=0;i<sizeof(names)/sizeof(*names);i++) {
+    for(size_t i=0;i<(production_v2?sizeof(names)/sizeof(*names):4);i++) {
         if(fstatat(rootfd,names[i],&s,AT_SYMLINK_NOFOLLOW)==0 || errno!=ENOENT)return 0;
     }
     return 1;
@@ -106,8 +107,13 @@ static int time_allowed(void) {
        __builtin_add_overflow(ms,(long long)(t.tv_nsec/1000000),&ms) ||
        ms>LLONG_MAX-999)return 0;
     long long upper_sec=(ms+999)/1000;
-    return ms>=candidate*1000 && ms<expiry && upper_sec<candidate+40 &&
-        deadline-upper_sec>=215;
+    if(production_v2) {
+        long long remaining=candidate+130-upper_sec;
+        return ms>=candidate*1000 && ms<expiry && upper_sec<candidate+90 &&
+            remaining>=40 && deadline-upper_sec>=225 &&
+            deadline-upper_sec>=remaining+185;
+    }
+    return ms>=candidate*1000 && ms<expiry && upper_sec<candidate+40 && deadline-upper_sec>=215;
 }
 static int sidecar_same(const char *ext) {
     char saved[64],live[256]; snprintf(saved,sizeof saved,"host-source.%s",ext);
@@ -134,16 +140,17 @@ static int fresh(void) {
 }
 int main(int argc,char **argv) {
     /* nonce pid start expiry_ms armed_seconds deadline_seconds candidate_seconds doc_uuid */
-    if(argc!=9 || getuid()!=0 || !hexid(argv[1],0)||!hexid(argv[8],1))goto refused;
+    production_v2=argc==10 && !strcmp(argv[9],"open-document-insertion-v2");
+    if((argc!=9 && !production_v2) || getuid()!=0 || !hexid(argv[1],0)||!hexid(argv[8],1))goto refused;
     nonce=argv[1]; document=argv[8];
     if(!number(argv[2],&pid)||pid<=1||!number(argv[3],&start_ticks)||!number(argv[4],&expiry)||
        !number(argv[5],&armed)||!number(argv[6],&deadline)||!number(argv[7],&candidate)||
-       deadline-armed!=360||candidate<armed||deadline-candidate<255||
+       deadline-armed!=360||candidate<armed||deadline-candidate<(production_v2?315:255)||
        candidate>LLONG_MAX/1000-1000)goto refused;
     snprintf(rootpath,sizeof rootpath,"/run/rmb-qt-probe-%s",nonce);
     snprintf(waiting,sizeof waiting,"%s %lld %lld waiting %lld\n",nonce,pid,start_ticks,expiry);
     snprintf(token,sizeof token,"%s %lld %lld create %lld\n",nonce,pid,start_ticks,expiry);
-    snprintf(window,sizeof window,"%s %lld %lld %lld %lld\n",nonce,armed,deadline,candidate,candidate+70);
+    snprintf(window,sizeof window,"%s %lld %lld %lld %lld\n",nonce,armed,deadline,candidate,candidate+(production_v2?130:70));
     rootfd=open(rootpath,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
     if(rootfd<0 || fstat(rootfd,&rootstat)!=0 || !root_same() || !fresh())goto refused;
     struct stat dest;

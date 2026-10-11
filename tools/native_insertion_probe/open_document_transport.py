@@ -7,7 +7,7 @@ import re
 import shlex
 import time
 from open_document_host import Refused, same_pixels
-from open_document_timing import upper_uptime_ms, OpenDocumentTiming, diagnostic_cutoff
+from open_document_timing import upper_uptime_ms, OpenDocumentTiming, diagnostic_cutoff, PRODUCTION_V2
 from open_document_protocol import parse_waiting
 from owned_frame_capture import CONTRACT as CAPTURE_CONTRACT, TOOLS as CAPTURE_TOOLS, OBSERVATION_KIND, PHASE_LABELS, capture_script, validate_receipt, hash_tool_checks, ordered_hash_checks
 
@@ -39,6 +39,13 @@ class SSHAdapter:
         self.tap_released = False
         self.tap_release_sha256 = None
         self.tap_supervisor_sha256 = None
+        self.action_deadline = None
+        self.production_window = None
+        self.production_waiting = None
+        self.sdk_expiry_ms = None
+        self.candidate_local_anchor = None
+        self.candidate_remote_at = None
+        self.fixed_local_deadlines = {}
 
     def retain(self, stage, evidence):
         def encode(value):
@@ -63,8 +70,66 @@ class SSHAdapter:
         return self.profile.get('experiment_kind') == OBSERVATION_KIND
 
     def require_publication(self):
-        if self.profile.get('experiment_kind', 'open-document-insertion-v1') != 'open-document-insertion-v1':
+        if self.profile.get('experiment_kind', 'open-document-insertion-v1') not in {'open-document-insertion-v1', PRODUCTION_V2}:
             raise Refused('Observation purpose cannot publish input or creation permission')
+
+    def is_v2(self):
+        return self.profile.get('experiment_kind') == PRODUCTION_V2
+
+    def action_guard(self, deadline=None):
+        end = self.action_deadline if deadline is None else deadline
+        if self.is_v2() and (end is None or time.monotonic() >= end):
+            raise Refused('Complete action processing exceeded immutable deadline; never replay')
+
+    def action_budget(self, cutoff, cap, sdk_expiry_ms=None, full=False):
+        """A query cannot renew the stage; its entire cost is charged."""
+        effective_cutoff = min(cutoff, sdk_expiry_ms / 1000) if sdk_expiry_ms is not None else cutoff
+        _, _, deadline = self.clock_query(effective_cutoff)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or (full and remaining < cap):
+            raise Refused('Full fixed action reservation unavailable; never replay')
+        self.action_deadline = deadline
+        return min(cap, remaining), deadline
+
+    def known_deadline(self, cutoff):
+        end = self.fixed_local_deadlines.get(cutoff)
+        if self.candidate_local_anchor is not None:
+            derived = self.candidate_local_anchor + cutoff - self.candidate_remote_at
+            end = derived if end is None else min(end, derived)
+        return end
+
+    def clock_query(self, cutoff):
+        """Known bounds apply before the query; refresh can only tighten."""
+        anchor = time.monotonic()
+        known = self.known_deadline(cutoff) if self.is_v2() else None
+        if known is not None and anchor >= known:
+            raise Refused('Fixed stage expired before clock query')
+        cap = min(3, known - anchor) if known is not None else 3
+        remote = upper_uptime_ms(self.call('set -eu\ncat /proc/uptime\n', cap))
+        deadline = anchor + cutoff - remote / 1000
+        if known is not None:
+            deadline = min(deadline, known)
+        if self.is_v2():
+            self.fixed_local_deadlines[cutoff] = deadline
+            if self.candidate_remote_at is not None:
+                refreshed = anchor + self.candidate_remote_at - remote / 1000
+                self.candidate_local_anchor = refreshed if self.candidate_local_anchor is None else min(self.candidate_local_anchor, refreshed)
+        return remote, anchor, deadline
+
+    def production_closure_checks(self):
+        checks = ''.join(f'test ! -e "$root/{name}"\ntest ! -L "$root/{name}"\n'
+                       for name in ('diagnostics.json', 'callback.json', 'creation-arm', 'creation-arm.tmp'))
+        if self.sdk_expiry_ms is not None:
+            checks += f'test $(( $(now_upper)*1000 )) -lt {self.sdk_expiry_ms}\n'
+        return checks
+
+    def poll_pause(self, deadline):
+        if not self.is_v2():
+            time.sleep(0.1)
+            return
+        self.action_guard(deadline)
+        time.sleep(min(0.1, max(0, deadline - time.monotonic())))
+        self.action_guard(deadline)
 
     def diagnostic_closure_checks(self):
         return ''.join(f'test ! -e "$root/{name}"\ntest ! -L "$root/{name}"\n'
@@ -91,10 +156,10 @@ umask 077
 root={q(self.root)}
 doc={q(self.doc)}
 private() {{
- test -f "$1" && test ! -L "$1"
+ test -f "$1"; test ! -L "$1"
  test "$(stat -c '%a %u %h' "$1")" = '600 0 1'
 }}
-test -d "$root" && test ! -L "$root"
+test -d "$root"; test ! -L "$root"
 test "$(stat -c '%a %u' "$root")" = '700 0'
 initial_root_identity=$(stat -c '%d %i' "$root")
 private "$root/owner"
@@ -105,11 +170,11 @@ private "$root/creation-waiting"
 read pid start extra < "$root/attempt.identity"
 test -z "$extra"
 case "$pid:$start" in *[!0-9:]*|:*|*:) exit 90;; esac
-test "$pid" -gt 1 && test "$start" -gt 0
+test "$pid" -gt 1; test "$start" -gt 0
 test "$(sed 's/^.*) //' /proc/$pid/stat | awk '{{print $20}}')" = "$start"
 test "$(systemctl show xochitl.service -p MainPID --value)" = "$pid"
 for name in entry.closed restore.claim stop.request stop.admitted; do
- test ! -e "$root/$name" && test ! -L "$root/$name"
+ test ! -e "$root/$name"; test ! -L "$root/$name"
 done
 test "$(cat /proc/sys/kernel/random/boot_id)" = {q(self.profile["boot_id"])}
 """
@@ -126,16 +191,20 @@ test "$(now_upper)" -lt "$cutoff"
 b64() { /usr/bin/openssl base64 -A -in "$1"; }
 """
         text += hash_tool_checks()
+        if self.is_v2() and self.production_window is not None:
+            text += f'test "$(cat "$root/candidate.window")" = {q(self.production_window)}\n'
+        if self.is_v2() and self.production_waiting is not None:
+            text += f'test "$(cat "$root/creation-waiting")" = {q(self.production_waiting)}\n'
         for path, digest in self.profile.get("encoder_hashes", {}).items():
             if path not in {"/usr/bin/openssl", "/usr/lib/libssl.so.3", "/usr/lib/libcrypto.so.3"} or not re.fullmatch("[0-9a-f]{64}", digest):
                 raise Refused("Exact encoder/provider path and digest required")
-            text += f'test -f {q(path)} && test ! -L {q(path)}\ntest "$(stat -c \'%u %h\' {q(path)})" = \'0 1\'\n'
+            text += f'test -f {q(path)}; test ! -L {q(path)}\ntest "$(stat -c \'%u %h\' {q(path)})" = \'0 1\'\n'
             if not snapshot:
                 text += f'test "$(sha256sum {q(path)} | cut -d " " -f 1)" = {q(digest)}\n'
         for name, digest in self.profile["tools"].items():
             if name not in ({"owned_tap_guardian", "observe_input", "publish_creation_arm"} | set(CAPTURE_TOOLS)) or not re.fullmatch("[0-9a-f]{64}", digest):
                 raise Refused("Bounded exact tool identity required")
-            text += f'test -f "$root/{name}" && test ! -L "$root/{name}"\ntest "$(stat -c \'%a %u %h\' "$root/{name}")" = \'700 0 1\'\n'
+            text += f'test -f "$root/{name}"; test ! -L "$root/{name}"\ntest "$(stat -c \'%a %u %h\' "$root/{name}")" = \'700 0 1\'\n'
             if not snapshot:
                 text += f'test "$(sha256sum "$root/{name}" | cut -d " " -f 1)" = {q(digest)}\n'
         return text
@@ -178,8 +247,7 @@ b64() { /usr/bin/openssl base64 -A -in "$1"; }
     def snapshot_timeout(self, cutoff):
         if type(cutoff) is not int or cutoff <= 0:
             raise Refused("Fixed canonical snapshot cutoff required")
-        anchor = time.monotonic()
-        remote = upper_uptime_ms(self.call('set -eu\ncat /proc/uptime\n', 3))
+        remote, anchor, fixed_deadline = self.clock_query(cutoff)
         now = time.monotonic()
         elapsed = now - anchor
         if elapsed < 0:
@@ -187,8 +255,10 @@ b64() { /usr/bin/openssl base64 -A -in "$1"; }
         remaining = cutoff - remote / 1000 - elapsed
         if remaining <= 0:
             raise Refused("Snapshot response fixed deadline exhausted")
-        deadline = min(anchor + cutoff - remote / 1000,
+        deadline = min(fixed_deadline,
                        now + CAPTURE_CONTRACT['maximum_response_seconds'])
+        if deadline <= now:
+            raise Refused('Immutable snapshot stage exhausted before acquisition')
         return deadline - now, deadline
 
     def _raw_snapshot(self, stage, cutoff, idle):
@@ -198,6 +268,8 @@ b64() { /usr/bin/openssl base64 -A -in "$1"; }
         if stage not in {"ready", "open", "trigger", "result", 'diagnostic'}:
             raise Refused("Unknown snapshot stage")
         script = self.prelude(cutoff, self.identity, snapshot=True)
+        if self.is_v2() and stage != 'result':
+            script += self.production_closure_checks()
         prefix = "host-" + stage
         if diagnostic:
             if not idle or self.diagnostic_context is None or cutoff != self.diagnostic_end or self.diagnostic_frames >= 3:
@@ -230,7 +302,7 @@ b64() { /usr/bin/openssl base64 -A -in "$1"; }
         script += mark('sidecar_prepare_end') + mark('idle_begin')
         # Every output is nonce-root-owned and exclusive. Snapshot failure cannot
         # renew a stage or lead to a tap/arm retry.
-        script += f'test ! -e "$root/{prefix}.png" && test ! -L "$root/{prefix}.png"\n'
+        script += f'test ! -e "$root/{prefix}.png"; test ! -L "$root/{prefix}.png"\n'
         if idle:
             script += f'test "$(now_upper)" -le $((cutoff-4))\n"$root/owned_frame_alarm" --observe "$root/observe_input" 2 > "$root/{prefix}.idle" 2>&1\n'
             script += '/usr/bin/evtest --query /dev/input/event1 EV_KEY BTN_TOUCH\n/usr/bin/evtest --query /dev/input/event1 EV_KEY BTN_TOOL_PEN\n'
@@ -247,13 +319,15 @@ b64() { /usr/bin/openssl base64 -A -in "$1"; }
         script += 'test "$(sed \'s/^.*) //\' /proc/$pid/stat | awk \'{print $20}\')" = "$start"\n'
         script += 'test "$(now_upper)" -lt "$cutoff"\n'
         script += 'test "$(systemctl show xochitl.service -p MainPID --value)" = "$pid"\n'
-        script += 'for name in entry.closed restore.claim stop.request stop.admitted; do test ! -e "$root/$name" && test ! -L "$root/$name"; done\n'
+        script += 'for name in entry.closed restore.claim stop.request stop.admitted; do test ! -e "$root/$name"; test ! -L "$root/$name"; done\n'
         script += 'test "$(stat -c \'%a %u\' "$root")" = \'700 0\'\nprivate "$root/owner"\n'
         script += f'test "$(cat "$root/owner")" = {q(self.profile["nonce"])}\n'
         if self.root_inode:
             script += f'test "$(stat -c \'%d %i\' "$root")" = {q(self.root_inode)}\n'
         if diagnostic:
             script += self.diagnostic_closure_checks()
+        if self.is_v2() and stage != 'result':
+            script += self.production_closure_checks()
         script += mark('response_begin')
         script += r"""printf '{"pid":%s,"start_ticks":%s,"root_inode":"%s","window":"%s","waiting":"%s","capture_uptime":"%s","last_open":"%s",' "$pid" "$start" "$(stat -c '%d %i' "$root")" "$(b64 "$root/candidate.window")" "$(b64 "$root/creation-waiting")" "$(b64 /proc/uptime)" "$(grep '^LastOpen' /home/root/.config/remarkable/xochitl.conf | /usr/bin/openssl base64 -A)"
 """
@@ -267,7 +341,7 @@ else printf '"diagnostics":"",'; fi
 test "$(stat -c '%d %i' "$root")" = "$initial_root_identity"
 test "$(sed 's/^.*) //' /proc/$pid/stat | awk '{print $20}')" = "$start"
 test "$(systemctl show xochitl.service -p MainPID --value)" = "$pid"
-for name in entry.closed restore.claim stop.request stop.admitted; do test ! -e "$root/$name" && test ! -L "$root/$name"; done
+for name in entry.closed restore.claim stop.request stop.admitted; do test ! -e "$root/$name"; test ! -L "$root/$name"; done
 test "$(now_upper)" -lt "$cutoff"
 """
         if diagnostic:
@@ -327,17 +401,36 @@ test "$(now_upper)" -lt "$cutoff"
         while time.monotonic() < end:
             script = f"""set -eu
 root={q(self.root)}
-test ! -e "$root/restore.claim" && test ! -e "$root/stock.restored" && test ! -e "$root/recovery.failed"
+test ! -e "$root/restore.claim"; test ! -L "$root/restore.claim"; test ! -e "$root/stock.restored"; test ! -L "$root/stock.restored"; test ! -e "$root/recovery.failed"; test ! -L "$root/recovery.failed"
 if test -f "$root/candidate.window" && test -f "$root/creation-waiting" && test -f "$root/attempt.identity"; then cat "$root/candidate.window"; fi
 """
-            line = self.call(script, 3).strip()
+            if self.is_v2():
+                script = script.replace('cat "$root/candidate.window"; fi', 'cat "$root/candidate.window"; cat /proc/uptime; fi')
+            marker_anchor = time.monotonic()
+            line = self.call(script, min(3, max(0.001, end-marker_anchor))).strip()
             if line:
+                if self.is_v2():
+                    lines = line.splitlines()
+                    if len(lines) != 2:
+                        raise Refused('Candidate clock context required before acquisition')
+                    line, marker_uptime = lines
                 values = line.split()
                 if len(values) != 5 or values[0] != self.profile["nonce"]:
                     raise Refused("Waiting actor window invalid")
-                cutoff = int(values[3]) + 20
+                timing = OpenDocumentTiming(*map(int, values[1:4]), self.profile.get('experiment_kind', 'open-document-insertion-v1'))
+                if int(values[4]) != timing.observation_end:
+                    raise Refused('Fixed candidate cutoff mismatch')
+                cutoff = timing.stage_end('ready')
+                if self.is_v2():
+                    self.candidate_remote_at = timing.candidate_at
+                    self.candidate_local_anchor = marker_anchor + timing.candidate_at - upper_uptime_ms(marker_uptime+'\n') / 1000
+                self.production_window = line
                 raw = self.raw_snapshot("ready", cutoff, True)
                 self.identity = (raw["boot_id"], raw["pid"], raw["start_ticks"])
+                if self.is_v2():
+                    waiting = parse_waiting(raw['waiting'], self.profile['nonce'], raw['pid'], raw['start_ticks'])
+                    self.production_waiting = raw['waiting'].decode('ascii').rstrip('\n')
+                    self.sdk_expiry_ms = waiting.expiry_ms
                 return raw
             time.sleep(0.2)
         raise Refused("Candidate waiting markers not observed in fixed setup allowance")
@@ -418,23 +511,28 @@ fi
         if self.tap_attempted: raise Refused("Ordinary open already attempted")
         self.tap_attempted = True
         script = self.prelude(cutoff, identity)
+        if self.is_v2():
+            script += self.production_closure_checks()
         script += 'test $((cutoff-$(now_upper))) -ge 4\n'
         # Detached sole writer survives SSH loss; never wrap it in bounded().
-        script += 'test ! -e "$root/tap-start.claim" && test ! -L "$root/tap-start.claim"\n'
+        script += 'test ! -e "$root/tap-start.claim"; test ! -L "$root/tap-start.claim"\n'
         script += f'(set -C; printf \'%s\\n\' {q(self.profile["nonce"])} > "$root/tap-start.claim")\n'
         # Select a setup cutoff once from fresh remote BOOTTIME, capped by the
         # original open stage. Ceil+14 seconds is at most 15 seconds from now.
         script += f'tap_cutoff_ms=$(( $(now_upper)*1000 + 14000 ))\ntest "$tap_cutoff_ms" -le {int(cutoff) * 1000} || tap_cutoff_ms={int(cutoff) * 1000}\n'
         script += f'nohup "$root/owned_tap_guardian" --tap {q(self.profile["nonce"])} {q(self.profile["boot_id"])} "$tap_cutoff_ms" < /dev/null > "$root/tap-guardian.log" 2>&1 &\n'
         script += r"""while ! test -f "$root/tap.ready"; do
- test ! -e "$root/tap.unresolved" && test "$(now_upper)" -lt "$cutoff"
+ test ! -e "$root/tap.unresolved"; test ! -L "$root/tap.unresolved"; test "$(now_upper)" -lt "$cutoff"
  sleep 0.01
 done
 private "$root/tap.ready"
 private "$root/tap.setup"
 printf '{"ready":"%s","setup":"%s","selected_cutoff_ms":%s,"uptime":"%s"}\n' "$(b64 "$root/tap.ready")" "$(b64 "$root/tap.setup")" "$tap_cutoff_ms" "$(b64 /proc/uptime)"
 """
-        envelope = json.loads(self.call(script, 3))
+        timeout, ready_deadline = self.action_budget(cutoff, 3, self.sdk_expiry_ms) if self.is_v2() else (3, None)
+        request_started = time.monotonic()
+        envelope = json.loads(self.call(script, timeout))
+        self.action_guard(ready_deadline)
         ready_bytes = base64.b64decode(envelope["ready"], validate=True)
         setup_bytes = base64.b64decode(envelope["setup"], validate=True)
         if not setup_bytes or len(setup_bytes) > 1024:
@@ -445,14 +543,22 @@ printf '{"ready":"%s","setup":"%s","selected_cutoff_ms":%s,"uptime":"%s"}\n' "$(
         if type(selected_cutoff) is not int or not upper_uptime_ms(uptime) < ready["lease_end_ms"] <= selected_cutoff <= int(cutoff) * 1000:
             raise Refused("Guardian immutable setup cutoff not observed")
         self.retain("tap-ready", {"receipt": ready_bytes, "setup": setup_bytes, "selected_cutoff_ms": selected_cutoff, "uptime": uptime})
+        self.action_guard(ready_deadline)
+        # Anchor before transport, conservatively charge the complete request
+        # plus decoding/retention against the remotely observed setup lease.
+        lease_deadline = request_started + (ready['lease_end_ms'] - upper_uptime_ms(uptime)) / 1000
+        if self.is_v2() and time.monotonic() >= lease_deadline:
+            raise Refused('Original guardian setup lease expired before GO')
         # Publish exactly once, only after complete ready/lease evidence is saved.
         script = self.prelude(cutoff, identity)
+        if self.is_v2():
+            script += self.production_closure_checks()
         script += f'test "$(sha256sum "$root/tap.ready" | cut -d " " -f 1)" = {q(hashlib.sha256(ready_bytes).hexdigest())}\n'
         script += f'test "$(sed \'s/^.*) //\' /proc/{ready["pid"]}/stat | awk \'{{print $20}}\')" = {q(ready["start_ticks"])}\n'
-        script += 'test ! -e "$root/tap.go" && test ! -L "$root/tap.go"\n'
+        script += 'test ! -e "$root/tap.go"; test ! -L "$root/tap.go"\n'
         script += f'(set -C; "$root/owned_tap_guardian" --publish-go {q(self.profile["nonce"])} {q(self.profile["boot_id"])} > "$root/tap.go-publication.json" 2> "$root/tap.go-publication.log")\n'
         script += r"""while ! test -f "$root/tap.released" || ! test -f "$root/tap.supervisor-complete"; do
- for name in tap.unresolved tap.empty tap.cleaned tap.recovered tap.supervisor-spent; do test ! -e "$root/$name" && test ! -L "$root/$name"; done
+ for name in tap.unresolved tap.empty tap.cleaned tap.recovered tap.supervisor-spent; do test ! -e "$root/$name"; test ! -L "$root/$name"; done
  test "$(now_upper)" -lt "$cutoff"
  sleep 0.01
 done
@@ -462,9 +568,19 @@ private "$root/tap.lease"
 private "$root/tap.go-publication.json"
 printf '{"released":"%s","supervisor":"%s","lease":"%s","publication":"%s"}\n' "$(b64 "$root/tap.released")" "$(b64 "$root/tap.supervisor-complete")" "$(b64 "$root/tap.lease")" "$(b64 "$root/tap.go-publication.json")"
 """
-        completed = json.loads(self.call(script, 3))
+        if self.is_v2():
+            timeout, go_deadline = self.action_budget(cutoff, 3, self.sdk_expiry_ms)
+            go_deadline = min(go_deadline, lease_deadline)
+            self.action_guard(go_deadline)
+            timeout = min(timeout, go_deadline - time.monotonic())
+            self.action_deadline = go_deadline
+        else:
+            timeout, go_deadline = 3, None
+        completed = json.loads(self.call(script, timeout))
+        self.action_guard(go_deadline)
         publication_bytes = base64.b64decode(completed["publication"], validate=True)
         self.retain("tap-go-publication", {"receipt": publication_bytes})
+        self.action_guard(go_deadline)
         if len(publication_bytes) > 512 or not publication_bytes.endswith(b"\n"):
             raise Refused("Bounded atomic tap permission receipt required; never replay")
         publication = json.loads(publication_bytes)
@@ -485,6 +601,7 @@ printf '{"released":"%s","supervisor":"%s","lease":"%s","publication":"%s"}\n' "
         if supervisor | {"status": released["status"]} != released:
             raise Refused("Supervisor/contact lease identity changed")
         self.retain("tap-released", {"receipt": released_bytes, "supervisor": supervisor_bytes, "lease": lease_bytes})
+        self.action_guard(go_deadline)
         self.tap_released = True
         self.tap_release_sha256 = hashlib.sha256(released_bytes).hexdigest()
         self.tap_supervisor_sha256 = hashlib.sha256(supervisor_bytes).hexdigest()
@@ -511,10 +628,16 @@ printf '{"released":"%s","supervisor":"%s","lease":"%s","publication":"%s"}\n' "
         if not self.tap_released: raise Refused("Positive guardian release required before creation")
         self.arm_attempted = True
         script = self.prelude(timing.stage_end("trigger"), self.identity)
+        if self.is_v2():
+            script += self.production_closure_checks()
+            script += f'test $(({timing.observation_end}-$(now_upper))) -ge 40\n'
+            script += f'test $(({timing.deadline}-$(now_upper))) -ge 225\n'
+            script += f'test $(({timing.deadline}-$(now_upper))) -ge $(({timing.observation_end}-$(now_upper)+185))\n'
         # Recheck the exact actor partitions after the host observation and
         # immediately before publishing permission. Observation is not a lock.
         for name in ("runtime.files", "document-immutable.files"):
             script += f'private "$root/{name}"\n'
+            script += f'test ! -e "$root/host-prepublication-{name}.check"\ntest ! -L "$root/host-prepublication-{name}.check"\n'
             script += f'test "$(sha256sum "$root/{name}" | cut -d " " -f 1)" = {q(self.receipt["files"][name])}\n'
             script += f'test "$(now_upper)" -le $((cutoff-4))\n"$root/owned_frame_alarm" --check /usr/bin/sha256sum -c "$root/{name}" > "$root/host-prepublication-{name}.check" 2>&1\n'
         for ext in ("content", "metadata"):
@@ -524,17 +647,31 @@ printf '{"released":"%s","supervisor":"%s","lease":"%s","publication":"%s"}\n' "
             if not digest: raise Refused("Exact sidecar-byte binding missing")
             script += f'test "$(sha256sum "$doc.{ext}" | cut -d " " -f 1)" = {q(digest)}\n'
             script += f'test "$(sha256sum "$root/host-trigger.{ext}" | cut -d " " -f 1)" = {q(digest)}\n'
-            script += f'test ! -e "$root/host-source.{ext}" && test ! -L "$root/host-source.{ext}"\ncp "$root/host-trigger.{ext}" "$root/host-source.{ext}"\nchmod 600 "$root/host-source.{ext}"\n'
+            script += f'test ! -e "$root/host-source.{ext}"; test ! -L "$root/host-source.{ext}"\ncp "$root/host-trigger.{ext}" "$root/host-source.{ext}"\nchmod 600 "$root/host-source.{ext}"\n'
         if not self.tap_release_sha256 or not self.tap_supervisor_sha256:
             raise Refused("Exact retained guardian release binding missing")
         script += 'private "$root/tap.released"\n'
         script += f'test "$(sha256sum "$root/tap.released" | cut -d " " -f 1)" = {q(self.tap_release_sha256)}\n'
         script += 'private "$root/tap.supervisor-complete"\n'
         script += f'test "$(sha256sum "$root/tap.supervisor-complete" | cut -d " " -f 1)" = {q(self.tap_supervisor_sha256)}\n'
-        script += 'for name in tap.unresolved tap.empty tap.cleaned tap.recovered tap.supervisor-spent; do test ! -e "$root/$name" && test ! -L "$root/$name"; done\n'
+        script += 'for name in tap.unresolved tap.empty tap.cleaned tap.recovered tap.supervisor-spent; do test ! -e "$root/$name"; test ! -L "$root/$name"; done\n'
         args = [waiting.nonce, waiting.pid, waiting.start_ticks, waiting.expiry_ms, timing.armed_at, timing.deadline, timing.candidate_at, self.profile["document_id"]]
+        for name in ('host-publication.json', 'host-publication.stderr'):
+            script += f'test ! -e "$root/{name}"\ntest ! -L "$root/{name}"\n'
         script += 'test "$(now_upper)" -le $((cutoff-4))\n"$root/owned_frame_alarm" --publish "$root/publish_creation_arm" ' + " ".join(q(v) for v in args) + ' > "$root/host-publication.json" 2> "$root/host-publication.stderr"\ncat "$root/host-publication.json"\n'
-        result = json.loads(self.call(script, 4))
+        if self.is_v2():
+            args.append(PRODUCTION_V2)
+            # Rebuild only the final invocation; argument pins select the new
+            # publisher preset explicitly, never through a field override.
+            script = script.rsplit('"$root/owned_frame_alarm" --publish', 1)[0] + '"$root/owned_frame_alarm" --publish "$root/publish_creation_arm" ' + " ".join(q(v) for v in args) + ' > "$root/host-publication.json" 2> "$root/host-publication.stderr"\ncat "$root/host-publication.json"\n'
+            timeout, deadline = self.action_budget(timing.stage_end('trigger'), 12, waiting.expiry_ms, full=True)
+            self.action_guard(deadline)
+            if deadline - time.monotonic() < 12:
+                raise Refused('Publication reservation consumed before RPC entry')
+        else:
+            timeout, deadline = 4, None
+        result = json.loads(self.call(script, timeout))
+        self.action_guard(deadline)
         if result.get("published") is not True or result.get("retry_permitted") is not False:
             raise Refused("Publication uncertain; never replay")
 
@@ -546,7 +683,9 @@ printf '{"released":"%s","supervisor":"%s","lease":"%s","publication":"%s"}\n' "
             script = self.prelude(cutoff, identity) + r"""
 if test -f "$root/diagnostics.json" && test ! -L "$root/diagnostics.json"; then cat "$root/diagnostics.json"; fi
 """
-            text = self.call(script, 3).strip()
+            timeout, deadline = self.action_budget(cutoff, 3) if self.is_v2() else (3, None)
+            text = self.call(script, timeout).strip()
+            self.action_guard(deadline)
             if text:
                 # SDK creates the receipt before its single bounded write.
                 # An incomplete read is observation-not-ready, never a reason
@@ -556,25 +695,28 @@ if test -f "$root/diagnostics.json" && test ! -L "$root/diagnostics.json"; then 
                 try:
                     diagnostics = json.loads(text)
                 except json.JSONDecodeError:
-                    time.sleep(0.1)
+                    self.poll_pause(deadline)
                     continue
                 if not isinstance(diagnostics, dict):
                     raise Refused("Native diagnostics object required")
                 trial = diagnostics.get("creation_trial", {})
+                self.action_guard(deadline)
                 if diagnostics.get("terminal_stage") or trial.get("returned") or trial.get("exception"):
                     return self.raw_snapshot("result", cutoff, False)
-            time.sleep(0.1)
+            self.poll_pause(deadline)
         raise Refused("Native result not observed before fixed result cap")
 
     def stop_once(self, identity, cutoff):
         if self.stop_attempted: return
         self.stop_attempted = True
         script = self.prelude(cutoff, identity) + r"""
-test ! -e "$root/stop.request" && test ! -L "$root/stop.request"
+test ! -e "$root/stop.request"; test ! -L "$root/stop.request"
 (set -C; printf '%s\n' "$(cat "$root/owner")" > "$root/stop.request")
 private "$root/stop.request"
 """
-        self.call(script, 3)
+        timeout, deadline = self.action_budget(cutoff, 4) if self.is_v2() else (3, None)
+        self.call(script, timeout)
+        self.action_guard(deadline)
 
     def restore_probe(self):
         # Guardian input never writes the shared hardware-probe debug PNG.

@@ -9,7 +9,7 @@ import re
 import time
 from PIL import Image
 from open_document_protocol import parse_waiting
-from open_document_timing import OpenDocumentTiming, upper_uptime_ms, diagnostic_cutoff
+from open_document_timing import OpenDocumentTiming, upper_uptime_ms, diagnostic_cutoff, PRODUCTION_V2, V2_CONTRACT
 from owned_frame_capture import CONTRACT as CAPTURE_CONTRACT, OBSERVATION_KIND, PHASE_LABELS
 
 BODY = (64, 0, 720, 980)
@@ -38,6 +38,32 @@ def pixels(data, box=None):
 
 def same_pixels(a, b, box=None):
     return pixels(a, box) == pixels(b, box)
+
+
+def library_comparison(a, b, purpose):
+    """Report every difference; exempt only the selected v2 final battery bar."""
+    actual, reference = pixels(a), pixels(b)
+    # One bit per viewport pixel retains the complete difference set with a
+    # fixed 98304-byte bound. Raw frame/reference retain both exact RGB values.
+    differences = bytearray(768 * 1024 // 8)
+    count = 0
+    outside = 0
+    for offset in range(0, len(actual), 3):
+        if actual[offset:offset+3] == reference[offset:offset+3]:
+            continue
+        index = offset // 3
+        x, y = index % 768, index // 768
+        differences[index // 8] |= 1 << (index % 8)
+        count += 1
+        if not (purpose == PRODUCTION_V2 and 735 <= x < 737 and 30 <= y < 36):
+            outside += 1
+    return {'whole_image_exact': count == 0, 'masked_match': outside == 0,
+            'viewport': [768, 1024], 'bitmap_bytes': 98304,
+            'actual_rgb_sha256': hashlib.sha256(actual).hexdigest(),
+            'reference_rgb_sha256': hashlib.sha256(reference).hexdigest(),
+            'exclusion_half_open': [735, 30, 737, 36] if purpose == PRODUCTION_V2 else None,
+            'different_pixels': count, 'outside_exclusion_pixels': outside,
+            'difference_bitmap_row_major_lsb_first': bytes(differences)}
 
 
 class HostSequence:
@@ -70,7 +96,7 @@ class HostSequence:
         window = raw["window"]
         if len(window) != 5 or window[0] != s["nonce"]:
             raise Refused("Candidate window nonce mismatch")
-        self.timing = OpenDocumentTiming(*window[1:4])
+        self.timing = OpenDocumentTiming(*window[1:4], self.selected.get('experiment_kind', 'open-document-insertion-v1'))
         if window[4] != self.timing.observation_end:
             raise Refused("Candidate cutoff mismatch")
         identity = (raw["boot_id"], raw["pid"], raw["start_ticks"])
@@ -151,10 +177,13 @@ class HostSequence:
                     self.source_sidecars = hashes
                     footer_seen = True
                     self.record("source-footer-observed", raw)
+                self.response_time(raw)
                 continue
             if same_pixels(raw["png"], self.source_body_png, BODY):
                 self.record("source-body-ready", raw)
+                self.response_time(raw)
                 return
+            self.response_time(raw)
         raise Refused("Actual source footer then fresh loaded body not observed within bounded frames")
 
     def idle(self, raw):
@@ -174,8 +203,11 @@ class HostSequence:
         self.adapter.stop_once(self.identity, self.timing.stage_end("stop"))
 
     def run(self):
-        if self.selected.get('experiment_kind', 'open-document-insertion-v1') != 'open-document-insertion-v1':
+        purpose = self.selected.get('experiment_kind', 'open-document-insertion-v1')
+        if purpose not in {'open-document-insertion-v1', PRODUCTION_V2}:
             raise Refused('Observation purpose cannot enter production sequence')
+        if purpose == PRODUCTION_V2 and self.selected.get('production_contract') != V2_CONTRACT:
+            raise Refused('Exact production v2 contract required')
         try:
             library = self.adapter.wait_library()
             for index in range(MAX_READY_FRAMES):
@@ -184,7 +216,12 @@ class HostSequence:
                     self.bind(library)
                 self.admit(library, "ready")
                 self.idle(library)
-                matches = same_pixels(library["png"], self.library_png)
+                if purpose == PRODUCTION_V2:
+                    comparison = library_comparison(library['png'], self.library_png, purpose)
+                    self.record(f'library-comparison-{index:03}', comparison)
+                    matches = comparison['masked_match']
+                else:
+                    matches = same_pixels(library['png'], self.library_png)
                 self.response_time(library)
                 if matches:
                     self.record("library", library)
@@ -206,6 +243,7 @@ class HostSequence:
             self.document(ready)
             self.sidecars(ready)
             self.idle(ready)
+            self.response_time(ready)
             if not self.timing.admit_creation_ms(now_ms, self.waiting.expiry_ms):
                 raise Refused("SDK/recovery publication expiry reached")
             self.arm_attempted = True
@@ -232,6 +270,7 @@ class HostSequence:
                 "authority": "bounded operator observation, not atomic native active-page authority",
             }
             self.record("report", report)
+            self.response_time(result)
             return report
         finally:
             self.stop_once()

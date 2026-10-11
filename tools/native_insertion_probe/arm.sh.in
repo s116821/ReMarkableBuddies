@@ -94,7 +94,8 @@ main() {
     test "$(cat "$root/owner")" = "$nonce"
     # Refuse spent/uncertain roots before any deadline or unit creation.
     for name in deadline host-arm.claim actor.claim actor.ready guard.request start.request restore.claim; do
-        test ! -e "$root/$name" && test ! -L "$root/$name"
+        test ! -e "$root/$name"
+        test ! -L "$root/$name"
     done
     test ! -e /run/systemd/system/xochitl.service.d
     test ! -L /run/systemd/system/xochitl.service.d
