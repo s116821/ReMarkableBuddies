@@ -23,6 +23,8 @@ static int fake_open(const char *,int,...);
 static int fake_close(int);
 static int fake_sleep(const struct timespec *,struct timespec *);
 static long fake_syscall(long,...);
+static int fake_openat(int,const char *,int,...);
+#define openat fake_openat
 #define syscall fake_syscall
 #define open fake_open
 #define close fake_close
@@ -37,6 +39,7 @@ static long fake_syscall(long,...);
 #define main guardian_main
 #include "owned_tap_guardian.c"
 #undef main
+#undef openat
 #undef syscall
 #undef nanosleep
 #undef close
@@ -62,6 +65,18 @@ static int delayed_go, stop_on_down, crash_after_release, late_supervisor;
 static int pidfd_fault, self_signal_calls;
 static int diagnostic_mode, diagnostic_axis_failure, event_reads;
 static int pen_key_code=BTN_TOUCH,pen_query_failure,pen_query_short;
+static int go_absence_race,publisher_mode,publisher_fault,rename_calls,root_syncs;
+static int fake_openat(int dir,const char *path,int flags,...) {
+    mode_t mode=0;if(flags&O_CREAT){va_list args;va_start(args,flags);mode=va_arg(args,int);va_end(args);}
+    int fd=openat(dir,path,flags,mode);
+    if(go_absence_race && !strcmp(path,"tap.go") && fd<0 && errno==ENOENT) {
+        go_absence_race=0;char token[34];snprintf(token,sizeof token,"%s\n",flow_context->lease.nonce);
+        assert(exclusive_record(flow_context,"tap.go.tmp",token,33));
+        assert(syscall(SYS_renameat2,dir,"tap.go.tmp",dir,"tap.go",RENAME_NOREPLACE)==0);
+        errno=ENOENT;
+    }
+    return fd;
+}
 static long fake_syscall(long number,...) {
     va_list args;va_start(args,number);long result=-1;
     if(number==SYS_pidfd_open) {
@@ -72,14 +87,24 @@ static long fake_syscall(long number,...) {
         unsigned int flags=va_arg(args,unsigned int);
         if(pidfd_fault){assert(sig==0);++self_signal_calls;errno=EPERM;result=-1;}
         else result=syscall(number,fd,sig,info,flags);
+    } else if(number==SYS_renameat2) {
+        int from=va_arg(args,int);const char *old=va_arg(args,const char *);
+        int to=va_arg(args,int);const char *new=va_arg(args,const char *);unsigned int flags=va_arg(args,unsigned int);
+        ++rename_calls;assert(flags==RENAME_NOREPLACE);
+        assert(!publisher_mode || root_syncs>=1);
+        if(publisher_fault==10){errno=ENOSYS;result=-1;}
+        else {
+            if(publisher_fault==11)assert(exclusive_record(flow_context,"tap.go","x",1));
+            result=syscall(number,from,old,to,new,flags);
+        }
     } else assert(0);
     va_end(args);return result;
 }
 static int fake_open(const char *path,int flags,...) {
     mode_t mode=0;if(flags&O_CREAT){va_list args;va_start(args,flags);mode=va_arg(args,int);va_end(args);}
     if(flow_context) {
-        if(!strcmp(path,"/dev/input/event2")){if(diagnostic_mode)assert((flags&O_ACCMODE)==O_RDONLY);return 100;}
-        if(!strcmp(path,"/dev/input/event1")){if(diagnostic_mode)assert((flags&O_ACCMODE)==O_RDONLY);return 101;}
+        if(!strcmp(path,"/dev/input/event2")){assert(!publisher_mode);if(diagnostic_mode)assert((flags&O_ACCMODE)==O_RDONLY);return 100;}
+        if(!strcmp(path,"/dev/input/event1")){assert(!publisher_mode);if(diagnostic_mode)assert((flags&O_ACCMODE)==O_RDONLY);return 101;}
         if(!strcmp(path,"/etc/hwrevision"))return openat(flow_context->root,"model",flags);
         if(!strcmp(path,"/etc/os-release")){errno=ELOOP;return -1;}
         if(!strcmp(path,"/usr/lib/os-release")){assert(flags&O_NOFOLLOW);return openat(flow_context->root,"release",flags);}
@@ -107,6 +132,41 @@ static int fake_sleep(const struct timespec *duration,struct timespec *remaining
     struct timespec tiny={0,1000000};return nanosleep(&tiny,remaining);
 }
 static int fake_fsync(int fd) {
+    if(publisher_mode) {
+        char descriptor[64],path[256];snprintf(descriptor,sizeof descriptor,"/proc/self/fd/%d",fd);
+        ssize_t n=readlink(descriptor,path,sizeof path-1);assert(n>0);path[n]=0;
+        if(strstr(path,"/tap.go.tmp")) {
+            if(publisher_fault==1){errno=EIO;return -1;}
+            if(publisher_fault==2)clock_now=flow_context->lease.expires;
+            if(publisher_fault==3)assert(exclusive_record(flow_context,"restore.claim","x",1));
+            if(publisher_fault==4) {
+                assert(renameat(flow_context->root,"tap.setup",flow_context->root,"old-setup")==0);
+                assert(exclusive_record(flow_context,"tap.setup",&flow_context->lease,sizeof flow_context->lease));
+            }
+            if(publisher_fault==5) {
+                assert(renameat(flow_context->root,"tap.go.tmp",flow_context->root,"old-tmp")==0);
+                publisher_mode=0;assert(exclusive_record(flow_context,"tap.go.tmp","bad",3));publisher_mode=1;
+            }
+            if(publisher_fault==6)assert(pwrite(fd,"x",1,0)==1);
+            if(publisher_fault==7) {
+                assert(renameat(flow_context->root,"tap.ready",flow_context->root,"old-ready")==0);
+                assert(receipt(flow_context,"tap.ready","guardian-ready-no-down"));
+            }
+            if(publisher_fault==12) {
+                int owner=openat(flow_context->root,"owner",O_WRONLY);assert(owner>=0);
+                assert(pwrite(owner,"x",1,0)==1);close(owner);
+            }
+            if(publisher_fault==13) {
+                assert(renameat(flow_context->root,"tap.lock",flow_context->root,"old-lock")==0);
+                assert(exclusive_record(flow_context,"tap.lock","",0));
+            }
+        }
+        struct stat s;assert(fstat(fd,&s)==0);
+        if(S_ISDIR(s.st_mode)) {
+            ++root_syncs;
+            if((publisher_fault==8 && root_syncs==1)||(publisher_fault==9 && root_syncs==2)){errno=EIO;return -1;}
+        }
+    }
     int result=fsync(fd);
     if(intent_context && fd==intent_context->history && intent_fault) {
         struct context *c=intent_context;int fault=intent_fault;intent_fault=0;
@@ -235,7 +295,57 @@ static void assert_receipt_point(struct context *c,const char *name,const char *
 int main(int argc,char **argv) {
     assert(argc==2);char path[]="/tmp/guardian-fixture-XXXXXX";
     struct context c=make_context(path);const char *mode=argv[1];
-    if(!strcmp(mode,"actual-os-release")||!strcmp(mode,"canonical-os-release-symlink")||
+    if(!strcmp(mode,"go-zero")||!strcmp(mode,"go-partial")||!strcmp(mode,"go-race-after-absent-open")) {
+        flow_context=&c;
+        if(!strcmp(mode,"go-race-after-absent-open")) {
+            go_absence_race=1;assert(read_go(&c)==0);
+            struct stat s;assert(fstatat(c.root,"tap.go",&s,0)==0 && s.st_size==33);
+            assert(read_go(&c)==1);
+        } else {
+            assert(exclusive_record(&c,"tap.go",c.lease.nonce,!strcmp(mode,"go-zero")?0:16));
+            assert(read_go(&c)==-1);
+        }
+        assert(writes==0 && event_reads==0);
+    } else if(!strncmp(mode,"publisher-",10)) {
+        flow_context=&c;assert(unlinkat(c.root,"tap.lease",0)==0);c.lease.contact=0;
+        pid_t zombie=-1;
+        if(!strcmp(mode,"publisher-zombie-writer")) {
+            zombie=fork();assert(zombie>=0);if(!zombie)_exit(0);
+            c.lease.pid=zombie;c.lease.start=process_start(zombie);
+            assert(c.lease.start>0);
+            for(int i=0;i<100 && writer_live(&c.lease);++i) {
+                struct timespec pause={0,1000000};nanosleep(&pause,NULL);
+            }
+            assert(!writer_live(&c.lease));
+        }
+        if(!strcmp(mode,"publisher-dead-writer"))++c.lease.start;
+        assert(exclusive_record(&c,"tap.setup",&c.lease,sizeof c.lease));
+        struct lease persisted;assert(read_exact_observed(c.root,"tap.setup",&persisted,sizeof persisted,&c.lease_stat));
+        assert(receipt(&c,"tap.ready","guardian-ready-no-down"));
+        if(!strcmp(mode,"publisher-existing-go"))assert(exclusive_record(&c,"tap.go","x",1));
+        if(!strcmp(mode,"publisher-expired"))clock_now=c.lease.expires;
+        if(!strcmp(mode,"publisher-closing"))assert(exclusive_record(&c,"restore.claim","x",1));
+        const char *faults[]={"publisher-tmp-fsync","publisher-expired-after-fsync","publisher-closing-after-fsync",
+            "publisher-setup-replaced","publisher-tmp-replaced","publisher-tmp-bytes","publisher-ready-replaced",
+            "publisher-root-fsync","publisher-post-rename-fsync","publisher-rename-unavailable","publisher-noreplace-race",
+            "publisher-owner-changed","publisher-lock-replaced"};
+        for(size_t i=0;i<sizeof faults/sizeof(*faults);++i)if(!strcmp(mode,faults[i]))publisher_fault=(int)i+1;
+        publisher_mode=1;char *args[]={"fixture","--publish-go",c.lease.nonce,c.lease.boot,NULL};
+        int result=guardian_main(4,args);
+        int success=!strcmp(mode,"publisher-success");
+        int uncertain=publisher_fault>=9 && publisher_fault<=11;
+        assert(result==(success?0:uncertain?91:90));
+        assert(writes==0 && event_reads==0);
+        assert(rename_calls==(success||uncertain?1:0));
+        struct stat s;int has_go=fstatat(c.root,"tap.go",&s,0)==0;
+        if(success||publisher_fault==9){assert(has_go && read_go(&c)==1);}
+        else if(!strcmp(mode,"publisher-existing-go")||publisher_fault==11) {
+            assert(has_go && s.st_size==1);char byte;int fd=openat(c.root,"tap.go",O_RDONLY);
+            assert(fd>=0 && read(fd,&byte,1)==1 && byte=='x');close(fd);
+        } else assert(!has_go);
+        publisher_mode=0;
+        if(zombie>0){int status;assert(waitpid(zombie,&status,0)==zombie && WIFEXITED(status));}
+    } else if(!strcmp(mode,"actual-os-release")||!strcmp(mode,"canonical-os-release-symlink")||
        !strcmp(mode,"check-input-released")||!strcmp(mode,"check-input-x-unsupported")||
        !strcmp(mode,"check-input-contact")||!strcmp(mode,"check-input-pen-touch")||
        !strcmp(mode,"check-input-pen-tool")||!strcmp(mode,"check-input-pen-rubber")||!strcmp(mode,"check-input-pen-query-error")||

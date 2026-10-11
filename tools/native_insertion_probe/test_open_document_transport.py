@@ -23,7 +23,8 @@ class AdapterTests(unittest.TestCase):
             supervisor = (json.dumps(self.guardian(adapter, "normal-child-exit")) + "\n").encode()
             encode = lambda data: base64.b64encode(data).decode()
             output = iter([json.dumps({"ready": encode(ready), "setup": encode(b"setup bytes"), "selected_cutoff_ms": 100000, "uptime": encode(b"98.00 0.00\n")}),
-                           json.dumps({"released": encode(release), "supervisor": encode(supervisor), "lease": encode(b"lease bytes")})])
+                           json.dumps({"released": encode(release), "supervisor": encode(supervisor), "lease": encode(b"lease bytes"),
+                                       "publication": encode((json.dumps({"nonce": adapter.profile["nonce"], "published": True, "retry_permitted": False, "input_events": 0}) + "\n").encode())})])
             def transport(arguments, script, timeout):
                 calls.append(script)
                 return {"timeout": False, "exit": 0, "stdout": next(output), "stderr": ""}
@@ -33,7 +34,9 @@ class AdapterTests(unittest.TestCase):
             self.assertEqual(len(calls), 2)
             self.assertIn('nohup "$root/owned_tap_guardian"', calls[0])
             self.assertNotIn('> "$root/tap.go"', calls[0])
-            self.assertEqual(calls[1].count('> "$root/tap.go"'), 1)
+            self.assertEqual(calls[1].count('--publish-go'), 1)
+            self.assertNotIn('> "$root/tap.go"', calls[1])
+            self.assertNotIn('bounded "$root/owned_tap_guardian"', calls[1])
             self.assertNotIn('/tmp/reader-buddy-probe.png', "".join(calls))
             with self.assertRaises(Refused): adapter.open_once(("boot", 2, 3), 100)
             self.assertEqual(len(calls), 2)
@@ -48,6 +51,29 @@ class AdapterTests(unittest.TestCase):
                     adapter.tap_receipt((json.dumps(changed) + "\n").encode(), "guardian-released", 100)
             with self.assertRaises(Refused): adapter.arm_once(None, None, {})
             self.assertFalse(calls)
+
+    def test_bad_atomic_permission_receipt_never_admits_release_or_replay(self):
+        changes = ({"nonce": "2" * 32}, {"published": False}, {"published": 1},
+                   {"retry_permitted": True}, {"input_events": 1}, {"input_events": False})
+        for changed in changes:
+            with self.subTest(changed=changed), tempfile.TemporaryDirectory() as root:
+                adapter, calls = self.adapter(root, {})
+                encode = lambda data: base64.b64encode(data).decode()
+                receipt = lambda status: (json.dumps(self.guardian(adapter, status)) + "\n").encode()
+                publication = {"nonce": adapter.profile["nonce"], "published": True, "retry_permitted": False, "input_events": 0} | changed
+                responses = iter([
+                    json.dumps({"ready": encode(receipt("guardian-ready-no-down")), "setup": encode(b"setup bytes"), "selected_cutoff_ms": 100000, "uptime": encode(b"98.00 0.00\n")}),
+                    json.dumps({"released": encode(receipt("guardian-released")), "supervisor": encode(receipt("normal-child-exit")), "lease": encode(b"lease bytes"), "publication": encode((json.dumps(publication) + "\n").encode())})])
+                def transport(arguments, script, timeout):
+                    calls.append(script)
+                    return {"timeout": False, "exit": 0, "stdout": next(responses)}
+                adapter.transport = transport
+                with self.assertRaisesRegex(Refused, "publication not confirmed"):
+                    adapter.open_once(("boot", 2, 3), 100)
+                self.assertTrue((Path(root) / "tap-go-publication.json").exists())
+                self.assertFalse(adapter.tap_released)
+                with self.assertRaises(Refused): adapter.open_once(("boot", 2, 3), 100)
+                self.assertEqual(len(calls), 2)
 
     def adapter(self, root, result):
         calls = []

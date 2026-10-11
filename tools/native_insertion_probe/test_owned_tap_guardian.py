@@ -46,12 +46,23 @@ class GuardianFaultTests(unittest.TestCase):
                  "actual-os-release", "canonical-os-release-symlink",
                  "check-input-released", "check-input-x-unsupported", "check-input-contact",
                  "check-input-pen-touch", "check-input-pen-tool", "check-input-pen-rubber", "check-input-pen-query-error",
-                 "check-input-pen-short")
+                 "check-input-pen-short", "go-zero", "go-partial", "go-race-after-absent-open",
+                 "publisher-success", "publisher-existing-go", "publisher-expired", "publisher-closing",
+                 "publisher-dead-writer", "publisher-tmp-fsync", "publisher-expired-after-fsync",
+                 "publisher-closing-after-fsync", "publisher-setup-replaced", "publisher-tmp-replaced",
+                 "publisher-tmp-bytes", "publisher-ready-replaced", "publisher-root-fsync",
+                 "publisher-post-rename-fsync", "publisher-rename-unavailable", "publisher-noreplace-race",
+                 "publisher-owner-changed", "publisher-lock-replaced", "publisher-zombie-writer")
         for mode in modes:
             with self.subTest(mode=mode):
                 result = subprocess.run([str(self.fixture), mode], text=True, capture_output=True, timeout=3)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertIn(mode + " PASS", result.stdout)
+                if mode == "publisher-success":
+                    self.assertEqual(json.loads(result.stdout.splitlines()[0]), {
+                        "nonce": "1"*32, "published": True, "retry_permitted": False, "input_events": 0})
+                elif mode.startswith("publisher-"):
+                    self.assertEqual(len(result.stdout.splitlines()), 1)
                 if mode.startswith("check-input-"):
                     diagnostic = json.loads(result.stdout.splitlines()[0])
                     self.assertEqual(diagnostic["input_events"], 0)

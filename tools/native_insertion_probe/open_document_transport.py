@@ -248,7 +248,7 @@ printf '{"ready":"%s","setup":"%s","selected_cutoff_ms":%s,"uptime":"%s"}\n' "$(
         script += f'test "$(sha256sum "$root/tap.ready" | cut -d " " -f 1)" = {q(hashlib.sha256(ready_bytes).hexdigest())}\n'
         script += f'test "$(sed \'s/^.*) //\' /proc/{ready["pid"]}/stat | awk \'{{print $20}}\')" = {q(ready["start_ticks"])}\n'
         script += 'test ! -e "$root/tap.go" && test ! -L "$root/tap.go"\n'
-        script += f'(set -C; printf \'%s\\n\' {q(self.profile["nonce"])} > "$root/tap.go")\n'
+        script += f'(set -C; "$root/owned_tap_guardian" --publish-go {q(self.profile["nonce"])} {q(self.profile["boot_id"])} > "$root/tap.go-publication.json" 2> "$root/tap.go-publication.log")\n'
         script += r"""while ! test -f "$root/tap.released" || ! test -f "$root/tap.supervisor-complete"; do
  for name in tap.unresolved tap.empty tap.cleaned tap.recovered tap.supervisor-spent; do test ! -e "$root/$name" && test ! -L "$root/$name"; done
  test "$(now_upper)" -lt "$cutoff"
@@ -257,9 +257,20 @@ done
 private "$root/tap.released"
 private "$root/tap.supervisor-complete"
 private "$root/tap.lease"
-printf '{"released":"%s","supervisor":"%s","lease":"%s"}\n' "$(b64 "$root/tap.released")" "$(b64 "$root/tap.supervisor-complete")" "$(b64 "$root/tap.lease")"
+private "$root/tap.go-publication.json"
+printf '{"released":"%s","supervisor":"%s","lease":"%s","publication":"%s"}\n' "$(b64 "$root/tap.released")" "$(b64 "$root/tap.supervisor-complete")" "$(b64 "$root/tap.lease")" "$(b64 "$root/tap.go-publication.json")"
 """
         completed = json.loads(self.call(script, 3))
+        publication_bytes = base64.b64decode(completed["publication"], validate=True)
+        self.retain("tap-go-publication", {"receipt": publication_bytes})
+        if len(publication_bytes) > 512 or not publication_bytes.endswith(b"\n"):
+            raise Refused("Bounded atomic tap permission receipt required; never replay")
+        publication = json.loads(publication_bytes)
+        if (set(publication) != {"nonce", "published", "retry_permitted", "input_events"} or
+                publication["nonce"] != self.profile["nonce"] or publication["published"] is not True or
+                publication["retry_permitted"] is not False or type(publication["input_events"]) is not int or
+                publication["input_events"] != 0):
+            raise Refused("Atomic tap permission publication not confirmed; never replay")
         released_bytes = base64.b64decode(completed["released"], validate=True)
         supervisor_bytes = base64.b64decode(completed["supervisor"], validate=True)
         lease_bytes = base64.b64decode(completed["lease"], validate=True)

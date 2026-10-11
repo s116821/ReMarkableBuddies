@@ -12,12 +12,14 @@
  * tap.released is positive state evidence, not a UI acknowledgment.
  * --check-pidfd: read-only self-process capability check; signal zero only.
  * --check-input: read-only named metadata/ioctl checks; no event reads or writes.
+ * --publish-go NONCE BOOT_UUID: filesystem-only one-shot atomic permission.
  */
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <linux/input.h>
+#include <linux/fs.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdint.h>
@@ -129,6 +131,12 @@ static int64_t process_start(int64_t pid) {
     if(!field)return -1;
     char *end; errno=0; long long value=strtoll(field,&end,10);
     return !errno && !*end && value>0 ? value : -1;
+}
+static int writer_live(const struct lease *l) {
+    char path[64],text[4096];snprintf(path,sizeof path,"/proc/%lld/stat",(long long)l->pid);
+    if(!file_text(path,text,sizeof text))return 0;
+    char *p=strrchr(text,')');
+    return p && p[1]==' ' && p[2] && p[3]==' ' && strchr("RSDTtI",p[2]) && process_start(l->pid)==l->start;
 }
 /* Absence and PID reuse prove this exact old process is gone. Read errors or
  * a still-live/zombie exact identity refuse; never signal a potentially reused PID. */
@@ -310,12 +318,36 @@ static int drain_history(struct context *c,int phase) {
     }
     return 0;
 }
-static int receipt(struct context *c,const char *name,const char *status) {
-    char text[512]; const struct lease *l=&c->lease;
+static int format_receipt(const struct lease *l,char *text,size_t capacity,const char *status) {
     if(l->nonce[32]!=0 || l->boot[36]!=0 || !hex_string(l->nonce,0) || !hex_string(l->boot,1) || !allowed_point(l))return 0;
-    int n=snprintf(text,sizeof text,"{\"nonce\":\"%s\",\"boot_id\":\"%s\",\"pid\":%lld,\"start_ticks\":%lld,\"slot\":0,\"tracking_id\":%d,\"native_point\":[%d,%d],\"lease_end_ms\":%lld,\"status\":\"%s\",\"exclusive_kernel_ownership\":false}\n",
+    int n=snprintf(text,capacity,"{\"nonce\":\"%s\",\"boot_id\":\"%s\",\"pid\":%lld,\"start_ticks\":%lld,\"slot\":0,\"tracking_id\":%d,\"native_point\":[%d,%d],\"lease_end_ms\":%lld,\"status\":\"%s\",\"exclusive_kernel_ownership\":false}\n",
         l->nonce,l->boot,(long long)l->pid,(long long)l->start,l->tracking,l->x,l->y,(long long)l->expires,status);
-    return n>0 && (size_t)n<sizeof text && exclusive_record(c,name,text,(size_t)n);
+    return n>0 && (size_t)n<capacity?n:0;
+}
+static int receipt(struct context *c,const char *name,const char *status) {
+    char text[512];int n=format_receipt(&c->lease,text,sizeof text,status);
+    return n>0 && exclusive_record(c,name,text,(size_t)n);
+}
+/* One open attempt determines absence. A complete atomic publication after an
+ * ENOENT is observed at the next bounded poll, never mistaken for malformed.
+ * 0 absent; -1 existing malformed/unknown; 1 exact complete permission. */
+static int read_go(struct context *c) {
+    int fd=openat(c->root,"tap.go",O_RDONLY|O_NOFOLLOW|O_CLOEXEC);
+    if(fd<0)return errno==ENOENT?0:-1;
+    struct stat before,after,path;char token[33],expected[34];
+    snprintf(expected,sizeof expected,"%s\n",c->lease.nonce);
+    int good=fstat(fd,&before)==0 && private_file(&before) && before.st_size==33;
+    size_t done=0;
+    while(good && done<sizeof token) {
+        ssize_t n=read(fd,token+done,sizeof token-done);
+        if(n<0 && errno==EINTR)continue;
+        if(n<=0){good=0;break;}done+=(size_t)n;
+    }
+    good=good && fstat(fd,&after)==0 && private_file(&after) && after.st_size==33 &&
+        before.st_mtim.tv_sec==after.st_mtim.tv_sec && before.st_mtim.tv_nsec==after.st_mtim.tv_nsec &&
+        fstatat(c->root,"tap.go",&path,AT_SYMLINK_NOFOLLOW)==0 && private_file(&path) &&
+        path.st_dev==after.st_dev && path.st_ino==after.st_ino && !memcmp(token,expected,33);
+    close(fd);return good?1:-1;
 }
 static int conditional_up(struct context *c,int takeover) {
     struct contact_state s;
@@ -377,9 +409,7 @@ static int start_tap(struct context *c,int64_t cutoff) {
     if(!receipt(c,"tap.ready","guardian-ready-no-down"))return 0;
     int permission=0;
     while(lease_valid(c) && admission_open(c) && !interrupted) {
-        char token[33],expected[34]; snprintf(expected,sizeof expected,"%s\n",c->lease.nonce);
-        if(read_exact_at(c->root,"tap.go",token,sizeof token)) { permission=!memcmp(token,expected,33);break; }
-        struct stat go; if(fstatat(c->root,"tap.go",&go,AT_SYMLINK_NOFOLLOW)==0 || errno!=ENOENT)return 0;
+        int go=read_go(c);if(go<0)return 0;if(go>0){permission=1;break;}
         struct timespec pause={0,2000000}; nanosleep(&pause,NULL);
     }
     if(!permission || interrupted || !lease_valid(c) || !admission_open(c) || !drain_history(c,0) || !pen_released(c) ||
@@ -621,6 +651,70 @@ static int check_pidfd(void) {
         supported?"pidfd-self-check-supported":"pidfd-self-check-unavailable",supported?"true":"false",error);
     return supported && written>0 && fflush(stdout)==0?0:90;
 }
+static int go_publication_context(struct context *c,const struct stat *ready_stat) {
+    const struct lease *l=&c->lease;
+    if(l->magic!=MAGIC || l->version!=1 || l->contact!=0 || l->nonce[32]!=0 || l->boot[36]!=0 ||
+        !hex_string(l->nonce,0) || !hex_string(l->boot,1) || l->pid<=1 || l->start<=0 || l->slot!=0 ||
+        l->tracking<=0 || l->tracking>65535 || !allowed_point(l) || l->born<0 || l->expires<=l->born ||
+        l->expires-l->born>15000)return 0;
+    char owner[32];struct lease current;struct stat setup,lock;
+    if(!same_root(c) || !same_boot(l) || !admission_open(c) ||
+        !read_exact_at(c->root,"owner",owner,sizeof owner) || memcmp(owner,l->nonce,32) ||
+        !read_exact_observed(c->root,"tap.setup",&current,sizeof current,&setup) ||
+        setup.st_dev!=c->lease_stat.st_dev || setup.st_ino!=c->lease_stat.st_ino || memcmp(&current,l,sizeof current) ||
+        fstatat(c->root,"tap.lock",&lock,AT_SYMLINK_NOFOLLOW) || !private_file(&lock) ||
+        (uint64_t)lock.st_dev!=l->lock_dev || (uint64_t)lock.st_ino!=l->lock_ino ||
+        !writer_live(l))return 0;
+    char expected[512],actual[512];struct stat ready;
+    int n=format_receipt(l,expected,sizeof expected,"guardian-ready-no-down");
+    if(n<=0 || !read_exact_observed(c->root,"tap.ready",actual,(size_t)n,&ready) || memcmp(actual,expected,(size_t)n) ||
+        (ready_stat && (ready.st_dev!=ready_stat->st_dev || ready.st_ino!=ready_stat->st_ino)))return 0;
+    const char *absent[]={"tap.go","tap.lease","tap.down-intent","tap.unresolved","tap.released",
+        "tap.cleaned","tap.empty","tap.recovered","tap.supervisor-complete","tap.supervisor-spent"};
+    struct stat s;
+    for(size_t i=0;i<sizeof absent/sizeof(*absent);++i)
+        if(fstatat(c->root,absent[i],&s,AT_SYMLINK_NOFOLLOW)==0 || errno!=ENOENT)return 0;
+    int64_t now=boot_ms();return now>=l->born && now<l->expires;
+}
+/* No device access or process mutation. Never acquire the writer's flock.
+ * The sole rename attempt is a commit boundary: every uncertain outcome after
+ * that attempt returns 91. Temporary/published files are never removed/retried. */
+static int publish_go(int argc,char **argv) {
+    struct context c={.root=-1,.lock=-1,.input=-1,.pen=-1,.history=-1};
+    int result=90,tmp=-1;struct stat ready_stat,tmp_stat;
+    if(argc!=4 || getuid()!=0 || !hex_string(argv[2],0) || !hex_string(argv[3],1))goto finish;
+    snprintf(c.path,sizeof c.path,"/run/rmb-qt-probe-%s",argv[2]);
+    c.root=open(c.path,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+    if(c.root<0 || !read_exact_observed(c.root,"tap.setup",&c.lease,sizeof c.lease,&c.lease_stat) ||
+        c.lease.nonce[32]!=0 || c.lease.boot[36]!=0 || strcmp(c.lease.nonce,argv[2]) || strcmp(c.lease.boot,argv[3]) ||
+        !go_publication_context(&c,NULL))goto finish;
+    char expected_ready[512],actual_ready[512];
+    int n=format_receipt(&c.lease,expected_ready,sizeof expected_ready,"guardian-ready-no-down");
+    if(n<=0 || !read_exact_observed(c.root,"tap.ready",actual_ready,(size_t)n,&ready_stat) ||
+        memcmp(actual_ready,expected_ready,(size_t)n))goto finish;
+    tmp=openat(c.root,"tap.go.tmp",O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);
+    char token[34];snprintf(token,sizeof token,"%s\n",argv[2]);
+    if(tmp<0 || fchmod(tmp,0600) || !bytes_write(tmp,token,33) || fsync(tmp) || fsync(c.root) ||
+        fstat(tmp,&tmp_stat) || !private_file(&tmp_stat) || tmp_stat.st_size!=33)goto finish;
+    char observed_token[33];struct stat observed_tmp;
+    if(!read_exact_observed(c.root,"tap.go.tmp",observed_token,sizeof observed_token,&observed_tmp) ||
+        observed_tmp.st_dev!=tmp_stat.st_dev || observed_tmp.st_ino!=tmp_stat.st_ino || memcmp(observed_token,token,33) ||
+        !go_publication_context(&c,&ready_stat))goto finish;
+#if defined(SYS_renameat2) && defined(RENAME_NOREPLACE)
+    result=91;
+    if(syscall(SYS_renameat2,c.root,"tap.go.tmp",c.root,"tap.go",RENAME_NOREPLACE)!=0 || fsync(c.root))goto finish;
+    int closing_fd=tmp;tmp=-1;if(close(closing_fd)!=0)goto finish;
+    closing_fd=c.root;c.root=-1;if(close(closing_fd)!=0)goto finish;
+    if(printf("{\"nonce\":\"%s\",\"published\":true,\"retry_permitted\":false,\"input_events\":0}\n",argv[2])<=0 ||
+        fflush(stdout)!=0)goto finish;
+    result=0;
+#endif
+finish:
+    if(tmp>=0)close(tmp);
+    if(c.root>=0)close(c.root);
+    if(result)fputs("go publication refused/uncertain; never retry this nonce\n",stderr);
+    return result;
+}
 static int diagnostic_check(const char *name,int ok,int error,int *first) {
     printf("%s{\"name\":\"%s\",\"ok\":%s,\"errno\":%d}",
         *first?"":",",name,ok?"true":"false",ok?0:error?error:EINVAL);
@@ -676,6 +770,7 @@ static int check_input(void) {
     return good && !ferror(stdout) && fflush(stdout)==0?0:90;
 }
 int main(int argc,char **argv) {
+    if(argc>=2 && !strcmp(argv[1],"--publish-go"))return publish_go(argc,argv);
     if(argc==2 && !strcmp(argv[1],"--check-input"))return check_input();
     if(argc==2 && !strcmp(argv[1],"--check-pidfd"))return check_pidfd();
     if(argc==5 && (!strcmp(argv[1],"--tap") || !strcmp(argv[1],"--tap-close"))) {
