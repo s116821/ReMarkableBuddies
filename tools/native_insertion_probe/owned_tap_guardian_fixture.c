@@ -60,6 +60,7 @@ static size_t queued;
 static int writes,down_prefix=-1,up_prefix=-1,source_lost,pen_active;
 static struct context *intent_context;
 static int intent_fault, omit_syn, truncated_echo;
+static int v2_echo_fault, go_seed_drift;
 static struct context *flow_context;
 static int delayed_go, stop_on_down, crash_after_release, late_supervisor;
 static int pidfd_fault, self_signal_calls;
@@ -127,6 +128,7 @@ static int fake_sleep(const struct timespec *duration,struct timespec *remaining
     if(delayed_go && clock_now>=1800) {
         char token[34];snprintf(token,sizeof token,"%s\n",flow_context->lease.nonce);
         assert(exclusive_record(flow_context,"tap.go",token,33));delayed_go=0;
+        if(go_seed_drift)kernel.x[0]++;
     }
     /* Yield to the real child/parent even though BOOTTIME is controlled. */
     struct timespec tiny={0,1000000};return nanosleep(&tiny,remaining);
@@ -172,6 +174,12 @@ static int fake_fsync(int fd) {
         struct context *c=intent_context;int fault=intent_fault;intent_fault=0;
         if(fault==1)clock_now=c->lease.expires;
         if(fault==2)assert(exclusive_record(c,"restore.claim","x",1));
+        if(fault==4)kernel.x[0]++;
+        if(fault==5)kernel.y[0]++;
+        if(fault==6)kernel.selected=1;
+        if(fault==7)kernel.id[1]=88;
+        if(fault==8)pen_active=1;
+        if(fault==9)source_lost=1;
         if(fault==3) {
             assert(renameat(c->root,"tap.lease",c->root,"old-lease")==0);
             assert(exclusive_record(c,"tap.lease",&c->lease,sizeof c->lease));
@@ -244,12 +252,25 @@ static ssize_t fake_write(int fd,const void *p,size_t size) {
     if(accepted>count)accepted=count;
     for(size_t i=0;i<accepted;++i) {
         struct input_event e=events[i];assert(queued<128);
-        if(!(omit_syn && e.type==EV_SYN))queue[queued++]=e;
+        if(down && v2_echo_fault==7 && e.type==EV_ABS && e.code==ABS_MT_POSITION_X)e.value++;
+        if(down && v2_echo_fault==8 && e.type==EV_ABS && e.code==ABS_MT_SLOT)e.value=1;
+        int suppressed=down && ((v2_echo_fault==1 && e.code==ABS_MT_POSITION_X && e.type==EV_ABS) ||
+            (v2_echo_fault==2 && e.code==ABS_MT_POSITION_Y && e.type==EV_ABS) ||
+            ((v2_echo_fault==3 || v2_echo_fault==6) && e.type==EV_ABS && (e.code==ABS_MT_POSITION_X || e.code==ABS_MT_POSITION_Y)) ||
+            (v2_echo_fault==5 && e.type==EV_SYN));
+        if(down && v2_echo_fault==4 && e.type==EV_ABS && e.code==ABS_MT_POSITION_X)
+            queue[queued++]=event(EV_SYN,SYN_REPORT,0);
+        if(!suppressed && !(omit_syn && e.type==EV_SYN))queue[queued++]=e;
         if(e.type!=EV_ABS)continue;
         if(e.code==ABS_MT_SLOT)kernel.selected=e.value;
         if(e.code==ABS_MT_TRACKING_ID)kernel.id[kernel.selected]=e.value;
         if(e.code==ABS_MT_POSITION_X)kernel.x[kernel.selected]=e.value;
         if(e.code==ABS_MT_POSITION_Y)kernel.y[kernel.selected]=e.value;
+    }
+    if(down && v2_echo_fault==6) {
+        queue[queued++]=event(EV_ABS,ABS_MT_POSITION_X,LIBRARY_V2_X);
+        queue[queued++]=event(EV_ABS,ABS_MT_POSITION_Y,LIBRARY_V2_Y);
+        queue[queued++]=event(EV_SYN,SYN_REPORT,0);
     }
     if(down && stop_on_down)raise(SIGSTOP);
     return (ssize_t)(accepted*sizeof(*events));
@@ -409,6 +430,67 @@ int main(int argc,char **argv) {
         kernel.x[0]=CLOSE_X;kernel.y[0]=CLOSE_Y;
         assert(recover_observed(&c));assert(writes==1 && kernel.id[0]==-1);
         assert_receipt_point(&c,"tap.recovered","\"native_point\":[1347,1817]");
+    } else if(!strncmp(mode,"v2-",3)) {
+        bind_point(&c,LIBRARY_V2_X,LIBRARY_V2_Y);
+        assert(exclusive_record(&c,"model","reMarkable2 1.0\n",15));
+        const char *v2_release="IMG_VERSION=\"3.28.0.172\"\n";
+        assert(exclusive_record(&c,"release",v2_release,strlen(v2_release)));
+        struct contact_state seed;assert(snapshot(&c,&seed));
+        if(!strcmp(mode,"v2-equal-x"))kernel.x[0]=LIBRARY_V2_X;
+        if(!strcmp(mode,"v2-equal-y"))kernel.y[0]=LIBRARY_V2_Y;
+        if(!strcmp(mode,"v2-equal-both")){kernel.x[0]=LIBRARY_V2_X;kernel.y[0]=LIBRARY_V2_Y;}
+        if(!strcmp(mode,"v2-active"))kernel.id[1]=88;
+        if(!strcmp(mode,"v2-seed-ioctl"))diagnostic_axis_failure=1;
+        if(!strncmp(mode,"v2-equal",8)||!strcmp(mode,"v2-active")||!strcmp(mode,"v2-seed-ioctl")) {
+            assert(!snapshot(&c,&seed) || !qualify_seed(&c,&seed));
+            assert(!write_frame(&c,1));assert(writes==0);
+        } else if(!strcmp(mode,"v2-full-missing")||!strcmp(mode,"v2-full-success")) {
+            flow_context=&c;delayed_go=1;v2_echo_fault=!strcmp(mode,"v2-full-missing")?3:0;
+            assert(unlinkat(c.root,"tap.lease",0)==0);c.lease_bound=0;
+            assert(start_tap(&c,6000)==(!v2_echo_fault));assert(writes==2 && kernel.id[0]==-1);
+            struct stat marker;
+            assert((fstatat(c.root,"tap.released",&marker,0)==0)==(!v2_echo_fault));
+            assert((fstatat(c.root,"tap.cleaned",&marker,0)==0)==(!!v2_echo_fault));
+        } else if(!strcmp(mode,"v2-go-drift")) {
+            flow_context=&c;delayed_go=1;go_seed_drift=1;
+            assert(unlinkat(c.root,"tap.lease",0)==0);c.lease_bound=0;
+            assert(!start_tap(&c,6000));assert(writes==0 && delayed_go==0 && c.seed_bound);
+            struct stat ready_marker;assert(fstatat(c.root,"tap.ready",&ready_marker,0)==0);
+        } else {
+            assert(qualify_seed(&c,&seed));
+            if(!strcmp(mode,"v2-intent-x"))intent_fault=4;
+            if(!strcmp(mode,"v2-intent-y"))intent_fault=5;
+            if(!strcmp(mode,"v2-intent-selected"))intent_fault=6;
+            if(!strcmp(mode,"v2-intent-id"))intent_fault=7;
+            if(!strcmp(mode,"v2-intent-expired"))intent_fault=1;
+            if(!strcmp(mode,"v2-intent-closing"))intent_fault=2;
+            if(!strcmp(mode,"v2-intent-pen"))intent_fault=8;
+            if(!strcmp(mode,"v2-intent-device"))intent_fault=9;
+            intent_context=&c;
+            if(intent_fault) {assert(!write_frame(&c,1));assert(writes==0);}
+            else if(!strcmp(mode,"v2-takeover")) {
+                kernel.id[0]=c.lease.tracking;kernel.x[0]=LIBRARY_V2_X;kernel.y[0]=LIBRARY_V2_Y;
+                assert(recover_observed(&c));assert(writes==1 && kernel.id[0]==-1);
+                assert_receipt_point(&c,"tap.recovered","\"native_point\":[164,1396]");
+            } else {
+                v2_echo_fault=!strcmp(mode,"v2-missing-x")?1:!strcmp(mode,"v2-missing-y")?2:
+                    !strcmp(mode,"v2-missing-both")?3:!strcmp(mode,"v2-split")?4:
+                    !strcmp(mode,"v2-no-syn")?5:!strcmp(mode,"v2-late")?6:!strcmp(mode,"v2-wrong-x")?7:!strcmp(mode,"v2-foreign-slot")?8:0;
+                assert(write_frame(&c,1));
+                if(v2_echo_fault>=7) {
+                    assert(!drain_history(&c,1));assert(!conditional_up(&c,0));assert(writes==1);
+                    cleanup(&c);printf("%s PASS temporary=%s\n",mode,path);return 0;
+                }
+                assert(drain_history(&c,1));
+                assert(c.down_frame==(!v2_echo_fault));assert(!c.invalid);
+                c.complete_down=c.down_frame;
+                assert(conditional_up(&c,0));assert(writes==2 && kernel.id[0]==-1);
+                char receipt_bytes[512];int rf=openat(c.root,v2_echo_fault?"tap.cleaned":"tap.released",O_RDONLY);assert(rf>=0);
+                ssize_t rn=read(rf,receipt_bytes,sizeof receipt_bytes-1);assert(rn>0);receipt_bytes[rn]=0;close(rf);
+                assert(strstr(receipt_bytes,v2_echo_fault?"partial-down-cleaned-not-a-tap":"guardian-released"));
+                if(v2_echo_fault){struct stat absent;assert(fstatat(c.root,"tap.released",&absent,0)<0 && errno==ENOENT);}
+            }
+        }
     } else if(!strcmp(mode,"success")) {
         assert(write_frame(&c,1));c.complete_down=1;
         assert(conditional_up(&c,0));assert(c.down_echo&&c.up_echo&&writes==2);
@@ -479,7 +561,7 @@ int main(int argc,char **argv) {
         struct stat s;assert(fstatat(c.root,"tap.released",&s,0)!=0);
     } else if(!strcmp(mode,"delayed-go")||!strcmp(mode,"supervisor-normal")||!strcmp(mode,"supervisor-stopped")||
               !strcmp(mode,"supervisor-after-release-crash")||!strcmp(mode,"supervisor-expired")||
-              !strcmp(mode,"pidfd-fence")||!strcmp(mode,"supervisor-close")||!strcmp(mode,"supervisor-close-stopped")) {
+              !strcmp(mode,"pidfd-fence")||!strcmp(mode,"supervisor-close")||!strcmp(mode,"supervisor-close-stopped")||!strcmp(mode,"supervisor-v2")||!strcmp(mode,"supervisor-v2-stopped")) {
         flow_context=&c;
         assert(exclusive_record(&c,"model","reMarkable2 1.0\n",15));
         const char *release="IMG_VERSION=\"3.28.0.172\"\n";
@@ -506,11 +588,12 @@ int main(int argc,char **argv) {
             assert(unlinkat(c.root,"tap.lock",0)==0);
             char token[34];snprintf(token,sizeof token,"%s\n",c.lease.nonce);
             assert(exclusive_record(&c,"tap.go",token,33));
-            stop_on_down=!strcmp(mode,"supervisor-stopped")||!strcmp(mode,"supervisor-expired")||!strcmp(mode,"supervisor-close-stopped");
+            stop_on_down=!strcmp(mode,"supervisor-stopped")||!strcmp(mode,"supervisor-expired")||!strcmp(mode,"supervisor-close-stopped")||!strcmp(mode,"supervisor-v2-stopped");
             crash_after_release=!strcmp(mode,"supervisor-after-release-crash");
             late_supervisor=!strcmp(mode,"supervisor-expired");
             int close_mode=!strcmp(mode,"supervisor-close")||!strcmp(mode,"supervisor-close-stopped");
-            char *args[]={"fixture",close_mode?"--tap-close":"--tap",c.lease.nonce,c.lease.boot,"6000",NULL};
+            int v2_mode=!strcmp(mode,"supervisor-v2")||!strcmp(mode,"supervisor-v2-stopped");
+            char *args[]={"fixture",close_mode?"--tap-close":v2_mode?"--tap-library-v2":"--tap",c.lease.nonce,c.lease.boot,"6000",NULL};
             int result=guardian_main(5,args);struct stat marker;
             if(stop_on_down||crash_after_release) {
                 assert(result==90);
@@ -519,15 +602,16 @@ int main(int argc,char **argv) {
                 assert(fstatat(c.root,"tap.supervisor-complete",&marker,0)!=0);
                 if(crash_after_release)assert(fstatat(c.root,"tap.released",&marker,0)==0);
                 if(close_mode)assert_receipt_point(&c,"tap.recovered","\"native_point\":[1347,1817]");
+                if(v2_mode)assert_receipt_point(&c,"tap.recovered","\"native_point\":[164,1396]");
             } else {
                 assert(result==0 && kernel.id[0]==-1);
                 assert(fstatat(c.root,"tap.supervisor-complete",&marker,0)==0);
-                const char *point=!strcmp(mode,"supervisor-close")?"\"native_point\":[1347,1817]":"\"native_point\":[201,1360]";
+                const char *point=v2_mode?"\"native_point\":[164,1396]":!strcmp(mode,"supervisor-close")?"\"native_point\":[1347,1817]":"\"native_point\":[201,1360]";
                 assert_receipt_point(&c,"tap.ready",point);
                 assert_receipt_point(&c,"tap.released",point);
                 assert_receipt_point(&c,"tap.supervisor-complete",point);
-                assert(kernel.x[0]==(!strcmp(mode,"supervisor-close")?CLOSE_X:NATIVE_X));
-                assert(kernel.y[0]==(!strcmp(mode,"supervisor-close")?CLOSE_Y:NATIVE_Y));
+                assert(kernel.x[0]==(!strcmp(mode,"supervisor-close")?CLOSE_X:v2_mode?LIBRARY_V2_X:NATIVE_X));
+                assert(kernel.y[0]==(!strcmp(mode,"supervisor-close")?CLOSE_Y:v2_mode?LIBRARY_V2_Y:NATIVE_Y));
             }
             assert(munmap(kernel_pointer,sizeof *kernel_pointer)==0);kernel_pointer=&local_kernel;
         }

@@ -535,7 +535,8 @@ fi
         # Select a setup cutoff once from fresh remote BOOTTIME, capped by the
         # original open stage. Ceil+14 seconds is at most 15 seconds from now.
         script += f'tap_cutoff_ms=$(( $(now_upper)*1000 + 14000 ))\ntest "$tap_cutoff_ms" -le {int(cutoff) * 1000} || tap_cutoff_ms={int(cutoff) * 1000}\n'
-        script += f'nohup "$root/owned_tap_guardian" --tap {q(self.profile["nonce"])} {q(self.profile["boot_id"])} "$tap_cutoff_ms" < /dev/null > "$root/tap-guardian.log" 2>&1 &\n'
+        tap_command = '--tap-library-v2' if self.is_v2() else '--tap'
+        script += f'nohup "$root/owned_tap_guardian" {tap_command} {q(self.profile["nonce"])} {q(self.profile["boot_id"])} "$tap_cutoff_ms" < /dev/null > "$root/tap-guardian.log" 2>&1 &\n'
         script += r"""while ! test -f "$root/tap.ready"; do
  test ! -e "$root/tap.unresolved"; test ! -L "$root/tap.unresolved"; test "$(now_upper)" -lt "$cutoff"
  sleep 0.01
@@ -630,7 +631,7 @@ printf '{"released":"%s","supervisor":"%s","lease":"%s","publication":"%s"}\n' "
             raise Refused("Guardian receipt identity mismatch")
         if any(type(value[key]) is not int or value[key] <= 0 for key in ("pid", "start_ticks", "tracking_id", "lease_end_ms")):
             raise Refused("Canonical guardian process/lease identity required")
-        if value["pid"] <= 1 or value["tracking_id"] > 65535 or type(value["slot"]) is not int or value["slot"] != 0 or value["native_point"] != [201, 1360] or value["lease_end_ms"] > int(cutoff) * 1000 or value["status"] != status or value["exclusive_kernel_ownership"] is not False:
+        if type(value["native_point"]) is not list or len(value["native_point"]) != 2 or any(type(axis) is not int for axis in value["native_point"]) or value["pid"] <= 1 or value["tracking_id"] > 65535 or type(value["slot"]) is not int or value["slot"] != 0 or value["native_point"] != ([164, 1396] if self.is_v2() else [201, 1360]) or value["lease_end_ms"] > int(cutoff) * 1000 or value["status"] != status or value["exclusive_kernel_ownership"] is not False:
             raise Refused("Guardian release/point/deadline not admitted")
         return value
 

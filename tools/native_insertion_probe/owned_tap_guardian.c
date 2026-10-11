@@ -6,6 +6,8 @@
  * --tap NONCE BOOT_UUID OPEN_CUTOFF_BOOTTIME_MS: independently launched sole
  * writer child supervised by its independent parent. Durable no-write setup
  * lease/ready precede exact NONCE\n tap.go, then a new 1500ms contact lease.
+ * --tap-library-v2 uses fixed library (90,260 -> 164,1396), stable released
+ * cached coordinates and coordinate-complete first DOWN echo.
  * --tap-close has the same arguments and supervision, using only the close point.
  * --recover NONCE BOOT_UUID: release-only, same persistent flock, dead exact
  * writer identity, unexpired lease, exact tagged contact and no other contacts.
@@ -38,6 +40,8 @@
 #define SLOT_COUNT 32
 #define NATIVE_X 201
 #define NATIVE_Y 1360
+#define LIBRARY_V2_X 164
+#define LIBRARY_V2_Y 1396
 #define CLOSE_X 1347
 #define CLOSE_Y 1817
 #define LEASE_MS 1500
@@ -60,6 +64,8 @@ struct context {
     struct lease lease;
     struct stat lease_stat;
     int lease_bound;
+    struct contact_state seed;
+    int seed_bound, down_first_syn, down_x_echo, down_y_echo;
     int invalid, down_echo, up_echo, down_frame, up_frame, selected, event_count, complete_down, writer_fenced;
 };
 static volatile sig_atomic_t interrupted;
@@ -174,7 +180,8 @@ static int same_input(struct context *c) {
         !memcmp(&id,&c->lease.input_id,sizeof id);
 }
 static int allowed_point(const struct lease *l) {
-    return (l->x==NATIVE_X && l->y==NATIVE_Y) || (l->x==CLOSE_X && l->y==CLOSE_Y);
+    return (l->x==NATIVE_X && l->y==NATIVE_Y) ||
+        (l->x==LIBRARY_V2_X && l->y==LIBRARY_V2_Y) || (l->x==CLOSE_X && l->y==CLOSE_Y);
 }
 static int lease_context(struct context *c) {
     const struct lease *l=&c->lease;
@@ -214,6 +221,21 @@ static int snapshot(struct context *c,struct contact_state *state) {
     return axis_values(c->input,ABS_MT_TRACKING_ID,state->id) &&
         axis_values(c->input,ABS_MT_POSITION_X,state->x) && axis_values(c->input,ABS_MT_POSITION_Y,state->y) &&
         axis_values(c->input,ABS_MT_TRACKING_ID,again) && !memcmp(state->id,again,sizeof again);
+}
+/* V2 is a fixed point policy; persisted lease ABI and UP recovery are unchanged. */
+static int library_v2(const struct lease *l) {
+    return l->x==LIBRARY_V2_X && l->y==LIBRARY_V2_Y;
+}
+static int qualify_seed(struct context *c,const struct contact_state *s) {
+    if(!library_v2(&c->lease))return 1;
+    for(int i=0;i<SLOT_COUNT;++i) {
+        if(s->id[i]!=-1)return 0;
+        if(c->seed_bound && (s->id[i]!=c->seed.id[i] ||
+            s->x[i]!=c->seed.x[i] || s->y[i]!=c->seed.y[i]))return 0;
+    }
+    if((c->seed_bound && s->selected!=c->seed.selected) ||
+        s->x[0]==LIBRARY_V2_X || s->y[0]==LIBRARY_V2_Y)return 0;
+    c->seed=*s;c->seed_bound=1;return 1;
 }
 struct pen_observation { int query_return, query_errno, touch, tool_pen, tool_rubber; };
 static int pen_released_observed(struct context *c,struct pen_observation *observed) {
@@ -274,7 +296,8 @@ static int write_frame(struct context *c,int down) {
      * nonblocking device write. Actor fencing still owns pause/crash recovery. */
     struct contact_state current;
     if(!lease_valid(c) || !pen_released(c) || !snapshot(c,&current))return 0;
-    if(down ? interrupted || !admission_open(c) || owned_state(&c->lease,&current)!=0 :
+    if(down ? interrupted || !admission_open(c) || owned_state(&c->lease,&current)!=0 ||
+        (library_v2(&c->lease) && (!c->seed_bound || !qualify_seed(c,&current))) :
         owned_state(&c->lease,&current)!=1)return 0;
     ssize_t written=write(c->input,e,n*sizeof(*e));
     return written==(ssize_t)(n*sizeof(*e));
@@ -293,7 +316,11 @@ static int drain_history(struct context *c,int phase) {
             if(phase==0)return 0;
             if(e->type==EV_SYN) {
                 if(e->code!=SYN_REPORT || e->value!=0)return 0;
-                if(phase==1 && c->down_echo)c->down_frame=1;
+                if(phase==1 && !c->down_first_syn) {
+                    c->down_first_syn=1;
+                    c->down_frame=c->down_echo && (!library_v2(&c->lease) ||
+                        (c->down_x_echo && c->down_y_echo));
+                } else if(phase==1 && !library_v2(&c->lease) && c->down_echo)c->down_frame=1;
                 if(phase==2 && c->up_echo)c->up_frame=1;
                 continue;
             }
@@ -314,6 +341,10 @@ static int drain_history(struct context *c,int phase) {
             default:return 0;
             }
             if(phase!=1 || e->value!=expected)return 0;
+            if(!c->down_first_syn) {
+                if(e->code==ABS_MT_POSITION_X)c->down_x_echo=1;
+                if(e->code==ABS_MT_POSITION_Y)c->down_y_echo=1;
+            }
         }
     }
     return 0;
@@ -388,7 +419,7 @@ static int setup_device(struct context *c,int existing) {
 static int start_tap(struct context *c,int64_t cutoff) {
     struct contact_state s; struct input_absinfo ids;
     if(!setup_device(c,0) || !pen_released(c) || !drain_history(c,0) || !snapshot(c,&s) ||
-        owned_state(&c->lease,&s)!=0 || ioctl(c->input,EVIOCGABS(ABS_MT_TRACKING_ID),&ids))return 0;
+        owned_state(&c->lease,&s)!=0 || !qualify_seed(c,&s) || ioctl(c->input,EVIOCGABS(ABS_MT_TRACKING_ID),&ids))return 0;
     int minimum=ids.minimum<1?1:ids.minimum;
     if(ids.maximum<minimum || ids.maximum>65535)return 0;
     uint32_t random; if(getrandom(&random,sizeof random,0)!=(ssize_t)sizeof random)return 0;
@@ -413,7 +444,7 @@ static int start_tap(struct context *c,int64_t cutoff) {
         struct timespec pause={0,2000000}; nanosleep(&pause,NULL);
     }
     if(!permission || interrupted || !lease_valid(c) || !admission_open(c) || !drain_history(c,0) || !pen_released(c) ||
-        !snapshot(c,&s) || owned_state(&c->lease,&s)!=0 || c->lease.expires-boot_ms()<200)return 0;
+        !snapshot(c,&s) || owned_state(&c->lease,&s)!=0 || !qualify_seed(c,&s) || c->lease.expires-boot_ms()<200)return 0;
     c->lease_bound=0;c->lease.contact=1;c->lease.born=boot_ms();
     if(c->lease.born<0 || c->lease.born>INT64_MAX-LEASE_MS)return 0;
     c->lease.expires=c->lease.born+LEASE_MS;
@@ -505,7 +536,8 @@ static int fence_writer(struct context *c,const char *nonce,const char *boot) {
 static int run_guardian(int argc,char **argv) {
     struct context c={.root=-1,.lock=-1,.input=-1,.pen=-1,.history=-1};
     int close_tap=argc==5 && !strcmp(argv[1],"--tap-close");
-    int tap=argc==5 && (!strcmp(argv[1],"--tap") || close_tap);
+    int v2_tap=argc==5 && !strcmp(argv[1],"--tap-library-v2");
+    int tap=argc==5 && (!strcmp(argv[1],"--tap") || close_tap || v2_tap);
     int take=argc==4 && !strcmp(argv[1],"--recover");
     int ok=0;
     if((!tap&&!take) || getuid()!=0 || !hex_string(argv[2],0) || !hex_string(argv[3],1))goto done;
@@ -532,7 +564,8 @@ static int run_guardian(int argc,char **argv) {
         c.lease.root_dev=root.st_dev;c.lease.root_ino=root.st_ino;
         c.lease.lock_dev=lock.st_dev;c.lease.lock_ino=lock.st_ino;
         c.lease.pid=getpid();c.lease.start=process_start(getpid());
-        c.lease.slot=0;c.lease.x=close_tap?CLOSE_X:NATIVE_X;c.lease.y=close_tap?CLOSE_Y:NATIVE_Y;
+        c.lease.slot=0;c.lease.x=close_tap?CLOSE_X:v2_tap?LIBRARY_V2_X:NATIVE_X;
+        c.lease.y=close_tap?CLOSE_Y:v2_tap?LIBRARY_V2_Y:NATIVE_Y;
         char *end;errno=0;long long cutoff=strtoll(argv[4],&end,10);
         if(errno || !argv[4][0] || *end || cutoff<=0)goto done;
         struct sigaction action={0};action.sa_handler=interruption;
@@ -604,8 +637,8 @@ static int supervise(int argc,char **argv) {
             read_exact_observed(c.root,"tap.lease",&c.lease,sizeof c.lease,&c.lease_stat) &&
             c.lease.nonce[32]==0 && c.lease.boot[36]==0 && !strcmp(c.lease.nonce,argv[2]) &&
             !strcmp(c.lease.boot,argv[3]) && c.lease.pid==child && c.lease.contact==1 &&
-            c.lease.x==(!strcmp(argv[1],"--tap-close")?CLOSE_X:NATIVE_X) &&
-            c.lease.y==(!strcmp(argv[1],"--tap-close")?CLOSE_Y:NATIVE_Y);
+            c.lease.x==(!strcmp(argv[1],"--tap-close")?CLOSE_X:!strcmp(argv[1],"--tap-library-v2")?LIBRARY_V2_X:NATIVE_X) &&
+            c.lease.y==(!strcmp(argv[1],"--tap-close")?CLOSE_Y:!strcmp(argv[1],"--tap-library-v2")?LIBRARY_V2_Y:NATIVE_Y);
         c.lease_bound=1;
         struct contact_state s;
         if(good)good=setup_device(&c,1) && lease_valid(&c) && snapshot(&c,&s) &&
@@ -773,7 +806,7 @@ int main(int argc,char **argv) {
     if(argc>=2 && !strcmp(argv[1],"--publish-go"))return publish_go(argc,argv);
     if(argc==2 && !strcmp(argv[1],"--check-input"))return check_input();
     if(argc==2 && !strcmp(argv[1],"--check-pidfd"))return check_pidfd();
-    if(argc==5 && (!strcmp(argv[1],"--tap") || !strcmp(argv[1],"--tap-close"))) {
+    if(argc==5 && (!strcmp(argv[1],"--tap") || !strcmp(argv[1],"--tap-close") || !strcmp(argv[1],"--tap-library-v2"))) {
         if(getuid()!=0 || !hex_string(argv[2],0) || !hex_string(argv[3],1))return 90;
         return supervise(argc,argv);
     }

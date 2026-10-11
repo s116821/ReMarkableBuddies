@@ -32,7 +32,12 @@ class GuardianFaultTests(unittest.TestCase):
         cls.work.cleanup()
 
     def test_exact_source_fault_controls(self):
-        modes = ("success", "partial-down-exact", "partial-down-no-point", "partial-up",
+        modes = ("v2-success", "v2-full-success", "v2-full-missing", "v2-wrong-x", "v2-foreign-slot", "v2-equal-x", "v2-equal-y", "v2-equal-both", "v2-active",
+                 "v2-seed-ioctl", "v2-go-drift", "v2-intent-x", "v2-intent-y",
+                 "v2-intent-selected", "v2-intent-id", "v2-intent-expired",
+                 "v2-intent-closing", "v2-intent-pen", "v2-intent-device",
+                 "v2-missing-x", "v2-missing-y", "v2-missing-both", "v2-split",
+                 "v2-no-syn", "v2-late", "v2-takeover", "supervisor-v2", "supervisor-v2-stopped", "success", "partial-down-exact", "partial-down-no-point", "partial-up",
                  "dropped", "other-contact", "replaced", "point-drift", "expired",
                  "clock-failure", "source-loss", "pen-contact", "empty", "live-writer",
                  "malformed", "closing", "lease-replacement", "takeover",

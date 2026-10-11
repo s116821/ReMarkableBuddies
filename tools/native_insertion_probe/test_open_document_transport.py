@@ -17,8 +17,48 @@ from owned_frame_capture import TOOLS as CAPTURE_TOOLS
 class AdapterTests(unittest.TestCase):
     def guardian(self, adapter, status):
         return {"nonce": adapter.profile["nonce"], "boot_id": adapter.profile["boot_id"], "pid": 24,
-                "start_ticks": 33, "slot": 0, "tracking_id": 123, "native_point": [201, 1360],
+                "start_ticks": 33, "slot": 0, "tracking_id": 123, "native_point": [164, 1396] if adapter.is_v2() else [201, 1360],
                 "lease_end_ms": 99000, "status": status, "exclusive_kernel_ownership": False}
+
+    def test_v2_guardian_fixed_point_and_command_preserve_legacy(self):
+        for v2 in (False, True):
+            with self.subTest(v2=v2), tempfile.TemporaryDirectory() as root:
+                adapter, calls = self.adapter(root, {"timeout": True, "exit": None})
+                if v2:
+                    from open_document_timing import PRODUCTION_V2
+                    adapter.profile["experiment_kind"] = PRODUCTION_V2
+                    # Exercise dispatch without live context/timing; those guards
+                    # have their own executed-source controls.
+                    adapter.production_closure_checks = lambda: ""
+                    adapter.prelude = lambda *args: ""
+                    adapter.action_budget = lambda *args: (3, None)
+                expected = [164, 1396] if v2 else [201, 1360]
+                receipt = self.guardian(adapter, "guardian-released") | {"native_point": expected}
+                self.assertEqual(adapter.tap_receipt((json.dumps(receipt)+"\n").encode(),
+                                                     "guardian-released", 100)["native_point"], expected)
+                for point in ([201, 1360] if v2 else [164, 1396], [164, 1360], [201, 1396], [float(axis) for axis in expected], str(expected), None):
+                    with self.assertRaises(Refused):
+                        adapter.tap_receipt((json.dumps(receipt | {"native_point": point})+"\n").encode(),
+                                            "guardian-released", 100)
+                with self.assertRaises(Refused):
+                    adapter.open_once(("boot", 2, 3), 100)
+                self.assertEqual(len(calls), 1)
+                command = "--tap-library-v2" if v2 else "--tap"
+                self.assertIn(f'owned_tap_guardian" {command} ', calls[0])
+
+    def test_guardian_source_and_artifact_drift_refuse_before_transport(self):
+        import coordinator
+        from test_host_profile import ProfileTests
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            receipt, profile = ProfileTests().fixture(root)
+            for changed in (
+                profile | {"source_sha256": profile["source_sha256"] | {"owned_tap_guardian.c": "0"*64}},
+                profile | {"tools": profile["tools"] | {"owned_tap_guardian": "0"*64}},
+            ):
+                (root/"host-profile.json").write_text(json.dumps(changed))
+                with self.assertRaisesRegex(ValueError, "execution refused"):
+                    coordinator.load_host_profile(root, receipt)
 
     def test_guardian_ready_release_is_bound_and_go_is_single_shot(self):
         with tempfile.TemporaryDirectory() as root:
