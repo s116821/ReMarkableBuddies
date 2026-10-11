@@ -40,6 +40,9 @@ mod owned {
         page_ids: Vec<String>,
         current_index: usize,
         direction: String,
+        geometry_variant: String,
+        virtual_path: Vec<[i32; 2]>,
+        native_path: Vec<[i32; 2]>,
         root_dev: u64,
         root_ino: u64,
         source_observed_ms: i64,
@@ -51,6 +54,91 @@ mod owned {
         page_map_sha256: String,
         executable_sha256: String,
     }
+    #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct GeometryEvidence {
+        geometry_variant: String,
+        direction: String,
+        virtual_path: Vec<[i32; 2]>,
+        native_path: Vec<[i32; 2]>,
+    }
+    fn declared_paths(direction: &str) -> Result<(Vec<[i32; 2]>, Vec<[i32; 2]>)> {
+        let (a, b) = match direction {
+            "next" => (700i32, 110i32),
+            "previous" => (100, 690),
+            _ => bail!("Unknown direction"),
+        };
+        let touch = Touch::new(true, TriggerCorner::LowerLeft);
+        let virtual_path = (0..=15)
+            .map(|i| {
+                let offset = (((b - a).abs() as f32) * (i as f32 / 15.0)) as i32;
+                [a + (b - a).signum() * offset, 512]
+            })
+            .collect::<Vec<_>>();
+        let native_path = virtual_path
+            .iter()
+            .map(|p| {
+                let (x, y) = touch.diagnostic_native_point((p[0], p[1]));
+                [x, y]
+            })
+            .collect();
+        Ok((virtual_path, native_path))
+    }
+    fn geometry(c: &Config) -> GeometryEvidence {
+        GeometryEvidence {
+            geometry_variant: c.geometry_variant.clone(),
+            direction: c.direction.clone(),
+            virtual_path: c.virtual_path.clone(),
+            native_path: c.native_path.clone(),
+        }
+    }
+    fn geometry_selection(c: &Config) -> Result<()> {
+        let (v, n) = declared_paths(&c.direction)?;
+        ensure!(
+            c.geometry_variant == "fixed-gap10-v1" && c.virtual_path == v && c.native_path == n,
+            "Missing/unknown/conflicting fixed geometry/path"
+        );
+        Ok(())
+    }
+    fn geometry_guard(c: &Config, root: &Path) -> Result<()> {
+        let m = fs::symlink_metadata(root.join("gesture.path"))?;
+        ensure!(
+            m.is_file() && m.uid() == 0 && m.mode() & 0o7777 == 0o600 && m.nlink() == 1,
+            "Private geometry evidence changed"
+        );
+        ensure!(
+            serde_json::from_slice::<GeometryEvidence>(&bounded(
+                &root.join("gesture.path"),
+                16384
+            )?)? == geometry(c),
+            "Sealed geometry/path evidence changed"
+        );
+        Ok(())
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ContextSamples {
+        first: [usize; 2],
+        second: [usize; 2],
+        bracket_changed: bool,
+    }
+    impl ContextSamples {
+        fn coherent(&self) -> bool {
+            !self.bracket_changed && self.first == self.second && self.first[0] == self.first[1]
+        }
+    }
+    #[derive(Debug)]
+    struct KnownStraddle(ContextSamples);
+    impl std::fmt::Display for KnownStraddle {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                f,
+                "Declared-pair sampling transition {:?}->{:?}, bracket_changed={}; MOVE refused",
+                self.0.first, self.0.second, self.0.bracket_changed
+            )
+        }
+    }
+    impl std::error::Error for KnownStraddle {}
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     struct Seed {
         ids: [i32; 32],
@@ -249,6 +337,8 @@ mod owned {
             matches!(c.direction.as_str(), "next" | "previous"),
             "One fixed direction required"
         );
+        geometry_selection(c)?;
+
         ensure!(
             if c.direction == "next" {
                 c.current_index + 1 < 8
@@ -342,28 +432,12 @@ mod owned {
         );
         Ok(ci == mi)
     }
-    fn context(c: &Config, root: &Path, source_only: bool, release_only: bool) -> Result<bool> {
-        validate(c, root)?;
-        ensure!(
-            fs::read_to_string("/proc/sys/kernel/random/boot_id")?.trim() == c.boot
-                && start(c.stock_pid)? == c.stock_start,
-            "Stock session changed"
-        );
-        let paths = [
-            PathBuf::from("/home/root/.config/remarkable/xochitl.conf"),
-            PathBuf::from(format!(
-                "/home/root/.local/share/remarkable/xochitl/{}.content",
-                c.document
-            )),
-            PathBuf::from(format!(
-                "/home/root/.local/share/remarkable/xochitl/{}.metadata",
-                c.document
-            )),
-        ];
-        let bytes = paths
-            .iter()
-            .map(|p| bounded(p, 65536))
-            .collect::<Result<Vec<_>>>()?;
+    fn parse_context_sample(
+        c: &Config,
+        bytes: &[Vec<u8>],
+        source_only: bool,
+    ) -> Result<[usize; 2]> {
+        ensure!(bytes.len() == 3, "Incomplete context sample");
         let last = std::str::from_utf8(&bytes[0])?
             .lines()
             .filter_map(|s| s.strip_prefix("LastOpen="))
@@ -417,8 +491,7 @@ mod owned {
         } else {
             c.current_index - 1
         };
-        let coherent =
-            owner_admission(c.current_index, neighbor, ci, mi, source_only, release_only)?;
+        owner_admission(c.current_index, neighbor, ci, mi, source_only, true)?;
         if source_only {
             ensure!(
                 bytes
@@ -428,10 +501,68 @@ mod owned {
                 "Pre-DOWN bytes changed"
             );
         }
-        for (p, b) in paths.iter().zip(&bytes) {
-            ensure!(bounded(p, 65536)? == *b, "Context changed while sampled");
+        Ok([ci, mi])
+    }
+    fn classify_context_samples(
+        c: &Config,
+        first: &[Vec<u8>],
+        second: &[Vec<u8>],
+        source_only: bool,
+        release_only: bool,
+    ) -> Result<ContextSamples> {
+        let a = parse_context_sample(c, first, source_only)?;
+        let b = parse_context_sample(c, second, source_only)?;
+        let samples = ContextSamples {
+            first: a,
+            second: b,
+            bracket_changed: first != second,
+        };
+        if !samples.coherent() && !release_only {
+            return Err(KnownStraddle(samples).into());
         }
-        Ok(coherent)
+        Ok(samples)
+    }
+    fn session_guard(c: &Config) -> Result<()> {
+        ensure!(
+            fs::read_to_string("/proc/sys/kernel/random/boot_id")?.trim() == c.boot
+                && start(c.stock_pid)? == c.stock_start,
+            "Stock session changed"
+        );
+        Ok(())
+    }
+    fn context(
+        c: &Config,
+        root: &Path,
+        source_only: bool,
+        release_only: bool,
+    ) -> Result<ContextSamples> {
+        validate(c, root)?;
+        geometry_guard(c, root)?;
+        session_guard(c)?;
+        let paths = [
+            PathBuf::from("/home/root/.config/remarkable/xochitl.conf"),
+            PathBuf::from(format!(
+                "/home/root/.local/share/remarkable/xochitl/{}.content",
+                c.document
+            )),
+            PathBuf::from(format!(
+                "/home/root/.local/share/remarkable/xochitl/{}.metadata",
+                c.document
+            )),
+        ];
+        let read = || {
+            paths
+                .iter()
+                .map(|p| bounded(p, 65536))
+                .collect::<Result<Vec<_>>>()
+        };
+        let first = read()?;
+        let second = read()?;
+        // Session/root/config/geometry remain sealed around both bounded samples.
+        session_guard(c)?;
+        validate(c, root)?;
+        geometry_guard(c, root)?;
+        classify_context_samples(c, &first, &second, source_only, release_only)
     }
     #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
     struct Limits {
@@ -646,19 +777,7 @@ mod owned {
         }
     }
     fn path(c: &Config) -> Vec<[i32; 2]> {
-        let touch = Touch::new(true, TriggerCorner::LowerLeft);
-        let (a, b) = if c.direction == "next" {
-            (700i32, 100i32)
-        } else {
-            (100, 700)
-        };
-        (0..=15)
-            .map(|i| {
-                let n = (((b - a).abs() as f32) * (i as f32 / 15.0)) as i32;
-                let (x, y) = touch.diagnostic_native_point((a + (b - a).signum() * n, 512));
-                [x, y]
-            })
-            .collect()
+        c.native_path.clone()
     }
     fn exclusive(p: &Path) -> Result<File> {
         Ok(OpenOptions::new()
@@ -870,22 +989,27 @@ mod owned {
             result
         }
     }
-    #[derive(Serialize, Deserialize)]
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct Request {
         events: Vec<Event>,
         identity: Identity,
     }
-    #[derive(Serialize, Deserialize)]
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct Permission {
+        step: usize,
         write: bool,
         before: Seed,
         inventory: Vec<Identity>,
     }
-    #[derive(Serialize, Deserialize)]
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct Written {
         bytes: isize,
         coherent: bool,
         input_valid: bool,
+        context_samples: Option<ContextSamples>,
     }
     fn send(socket: &mut UnixStream, value: &impl Serialize) -> Result<()> {
         let b = serde_json::to_vec(value)?;
@@ -928,85 +1052,540 @@ mod owned {
         );
         Ok(())
     }
-    struct Emitter {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "kebab-case")]
+    enum Phase {
+        BeforeRequest,
+        SendingRequest,
+        AwaitPermission,
+        PostPermission,
+        Context,
+        Input,
+        PreWrite,
+        Write,
+        Reply,
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "kebab-case")]
+    enum Cause {
+        Protocol,
+        Deadline,
+        ContextUnknown,
+        DeclaredStraddle,
+        InputUnknown,
+        ShortWrite,
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "kebab-case")]
+    enum ContextObserved {
+        NotObserved,
+        Coherent,
+        DeclaredStraddle,
+        Unknown,
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "kebab-case")]
+    enum InputObserved {
+        NotObserved,
+        Valid,
+        Unknown,
+    }
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct WorkerFault {
+        step: usize,
+        phase: Phase,
+        cause: Cause,
+        context: ContextObserved,
+        input: InputObserved,
+        bytes: Option<isize>,
+        context_samples: Option<ContextSamples>,
+        observed_ms: Option<i64>,
+        diagnostic: String,
+        diagnostic_truncated: bool,
+    }
+    struct Checked {
+        phase: Phase,
+        context: ContextObserved,
+        input: InputObserved,
+        bytes: Option<isize>,
+        samples: Option<ContextSamples>,
+    }
+    impl Checked {
+        fn fresh() -> Self {
+            Self {
+                phase: Phase::BeforeRequest,
+                context: ContextObserved::NotObserved,
+                input: InputObserved::NotObserved,
+                bytes: None,
+                samples: None,
+            }
+        }
+        fn fault(&self, step: usize, cause: Cause, error: anyhow::Error) -> WorkerFault {
+            let original = format!("{error:#}");
+            let mut diagnostic = String::new();
+            for ch in original.chars() {
+                if diagnostic.len() + ch.len_utf8() > 512 {
+                    break;
+                }
+                diagnostic.push(ch);
+            }
+            let diagnostic_truncated = diagnostic.len() != original.len();
+            WorkerFault {
+                step,
+                phase: self.phase,
+                cause,
+                context: self.context,
+                input: self.input,
+                bytes: self.bytes,
+                context_samples: self.samples,
+                observed_ms: now().ok(),
+                diagnostic,
+                diagnostic_truncated,
+            }
+        }
+    }
+    type Attempt<T> = std::result::Result<T, (Cause, anyhow::Error)>;
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(tag = "phase", rename_all = "kebab-case", deny_unknown_fields)]
+    enum WorkerFrame {
+        Request { step: usize, request: Request },
+        Written { step: usize, written: Written },
+        Refused { fault: WorkerFault },
+    }
+    struct Exchange {
         socket: UnixStream,
+        limits: Limits,
+        step: usize,
+        terminal: Option<WorkerFault>,
+    }
+    impl Exchange {
+        fn run(
+            &mut self,
+            events: &[InputEvent],
+            identity: impl FnOnce() -> Result<Identity>,
+            post: impl FnOnce(&Permission, &mut Checked) -> Attempt<Written>,
+        ) -> Result<()> {
+            ensure!(
+                self.terminal.is_none(),
+                "Terminal writer fault: no further request or write"
+            );
+            let mut observed = Checked::fresh();
+            let step = self.step;
+            let attempted = (|| -> Attempt<()> {
+                self.limits.normal().map_err(|e| (Cause::Deadline, e))?;
+                ensure_step(step).map_err(|e| (Cause::Protocol, e))?;
+                let id = identity().map_err(|e| {
+                    observed.input = InputObserved::Unknown;
+                    (Cause::InputUnknown, e)
+                })?;
+                let e = events
+                    .iter()
+                    .map(|e| [e.event_type().0 as i32, e.code() as i32, e.value()])
+                    .collect();
+                observed.phase = Phase::SendingRequest;
+                send(
+                    &mut self.socket,
+                    &WorkerFrame::Request {
+                        step,
+                        request: Request {
+                            events: e,
+                            identity: id,
+                        },
+                    },
+                )
+                .map_err(|e| (Cause::Protocol, e))?;
+                observed.phase = Phase::AwaitPermission;
+                let permission: Permission =
+                    receive(&mut self.socket, self.limits.write).map_err(|e| {
+                        (
+                            if now().is_ok_and(|n| n >= self.limits.write) {
+                                Cause::Deadline
+                            } else {
+                                Cause::Protocol
+                            },
+                            e,
+                        )
+                    })?;
+                if permission.step != step || !permission.write {
+                    return Err((
+                        Cause::Protocol,
+                        anyhow::anyhow!("Unexpected permission phase/step"),
+                    ));
+                }
+                observed.phase = Phase::PostPermission;
+                self.limits.normal().map_err(|e| (Cause::Deadline, e))?;
+                let written = post(&permission, &mut observed)?;
+                observed.bytes = Some(written.bytes);
+                observed.phase = Phase::Write;
+                if written.bytes != std::mem::size_of_val(events) as isize {
+                    return Err((
+                        Cause::ShortWrite,
+                        anyhow::anyhow!("Partial/failed write; never replay"),
+                    ));
+                }
+                observed.phase = Phase::Reply;
+                send(&mut self.socket, &WorkerFrame::Written { step, written })
+                    .map_err(|e| (Cause::Protocol, e))?;
+                self.step += 1;
+                Ok(())
+            })();
+            if let Err((cause, error)) = attempted {
+                let fault = observed.fault(step, cause, error);
+                // Latch BEFORE every reporting action. Caller STOP can never reenter the exchange.
+                self.terminal = Some(fault.clone());
+                if let Ok(b) = serde_json::to_vec(&fault) {
+                    let mut line = b;
+                    line.push(b'\n');
+                    // One best-effort write to the private file held by the parent; no retries.
+                    if now().is_ok_and(|n| n < self.limits.overall) {
+                        unsafe {
+                            libc::write(libc::STDERR_FILENO, line.as_ptr().cast(), line.len());
+                        }
+                    }
+                }
+                if let Ok(n) = now() {
+                    let left = self.limits.overall - n;
+                    if left > 0 {
+                        let _ = self
+                            .socket
+                            .set_write_timeout(Some(Duration::from_millis((left as u64).min(5))));
+                        let _ = send(
+                            &mut self.socket,
+                            &WorkerFrame::Refused {
+                                fault: fault.clone(),
+                            },
+                        );
+                    }
+                }
+                bail!(
+                    "Worker {:?}/{:?} step{}: {}",
+                    fault.phase,
+                    fault.cause,
+                    step,
+                    fault.diagnostic
+                )
+            }
+            Ok(())
+        }
+    }
+    fn ensure_step(step: usize) -> Result<()> {
+        ensure!(step <= 16, "Unknown gesture step");
+        Ok(())
+    }
+    fn checked_context(result: Result<ContextSamples>, observed: &mut Checked) -> Attempt<()> {
+        match result {
+            Ok(samples) => {
+                observed.samples = Some(samples);
+                observed.context = if samples.coherent() {
+                    ContextObserved::Coherent
+                } else {
+                    ContextObserved::DeclaredStraddle
+                };
+                Ok(())
+            }
+            Err(e) if e.downcast_ref::<KnownStraddle>().is_some() => {
+                observed.samples = Some(e.downcast_ref::<KnownStraddle>().unwrap().0);
+                observed.context = ContextObserved::DeclaredStraddle;
+                Err((Cause::DeclaredStraddle, e))
+            }
+            Err(e) => {
+                observed.context = ContextObserved::Unknown;
+                Err((Cause::ContextUnknown, e))
+            }
+        }
+    }
+    fn sticky_context(
+        policy: &mut Policy,
+        transition: &mut bool,
+        evidence: &mut Option<ContextSamples>,
+        result: Result<ContextSamples>,
+    ) -> Result<bool> {
+        match result {
+            Ok(samples) => {
+                if !samples.coherent() {
+                    *transition = true;
+                    if evidence.is_none() {
+                        *evidence = Some(samples);
+                    }
+                }
+                Ok(samples.coherent())
+            }
+            Err(e) if e.downcast_ref::<KnownStraddle>().is_some() => {
+                *transition = true;
+                if evidence.is_none() {
+                    *evidence = Some(e.downcast_ref::<KnownStraddle>().unwrap().0);
+                }
+                Err(e)
+            }
+            Err(e) => {
+                policy.bad = true;
+                Err(e)
+            }
+        }
+    }
+    fn validate_fault(f: &WorkerFault) -> Result<()> {
+        ensure_step(f.step)?;
+        ensure!(f.diagnostic.len() <= 512, "Fault diagnostic cap");
+        let unseen = f.context == ContextObserved::NotObserved
+            && f.input == InputObserved::NotObserved
+            && f.bytes.is_none();
+        let checked = matches!(
+            f.context,
+            ContextObserved::Coherent | ContextObserved::DeclaredStraddle
+        ) && f.input == InputObserved::Valid;
+        let expected = (if f.step == 0 {
+            9
+        } else if f.step == 16 {
+            3
+        } else {
+            5
+        }) * std::mem::size_of::<InputEvent>();
+        let valid = match f.cause {
+            Cause::DeclaredStraddle => {
+                f.step != 0
+                    && f.phase == Phase::Context
+                    && f.context == ContextObserved::DeclaredStraddle
+                    && f.input == InputObserved::NotObserved
+                    && f.bytes.is_none()
+            }
+            Cause::ContextUnknown => {
+                f.phase == Phase::Context
+                    && f.context == ContextObserved::Unknown
+                    && f.input == InputObserved::NotObserved
+                    && f.bytes.is_none()
+            }
+            Cause::InputUnknown => {
+                f.input == InputObserved::Unknown
+                    && f.bytes.is_none()
+                    && (f.phase == Phase::BeforeRequest
+                        && f.context == ContextObserved::NotObserved
+                        || f.phase == Phase::Input
+                            && matches!(
+                                f.context,
+                                ContextObserved::Coherent | ContextObserved::DeclaredStraddle
+                            ))
+            }
+            Cause::ShortWrite => {
+                f.phase == Phase::Write
+                    && checked
+                    && f.bytes.is_some_and(|n| n >= -1 && n < expected as isize)
+            }
+            Cause::Deadline => {
+                matches!(
+                    f.phase,
+                    Phase::BeforeRequest | Phase::AwaitPermission | Phase::PostPermission
+                ) && unseen
+                    || f.phase == Phase::PreWrite && checked && f.bytes.is_none()
+            }
+            Cause::Protocol => {
+                matches!(f.phase, Phase::SendingRequest | Phase::AwaitPermission) && unseen
+                    || f.phase == Phase::PreWrite && checked && f.bytes.is_none()
+                    || f.phase == Phase::Reply && checked && f.bytes == Some(expected as isize)
+            }
+        };
+        let observed = match f.context {
+            ContextObserved::NotObserved | ContextObserved::Unknown => f.context_samples.is_none(),
+            ContextObserved::Coherent => f.context_samples.is_some_and(|s| s.coherent()),
+            ContextObserved::DeclaredStraddle => f.context_samples.is_some_and(|s| !s.coherent()),
+        };
+        ensure!(valid && observed, "Contradictory worker fault observations");
+        Ok(())
+    }
+    fn samples_scope(samples: ContextSamples, owners: [usize; 2], source_only: bool) -> Result<()> {
+        for sample in [samples.first, samples.second] {
+            owner_admission(
+                owners[0],
+                owners[1],
+                sample[0],
+                sample[1],
+                source_only,
+                true,
+            )?;
+        }
+        Ok(())
+    }
+    fn check_frame(
+        frame: WorkerFrame,
+        step: usize,
+        written_phase: bool,
+        owners: [usize; 2],
+        policy: &mut Policy,
+        transition: &mut bool,
+        primary: &mut Option<WorkerFault>,
+    ) -> Result<WorkerFrame> {
+        ensure_step(step)?;
+        match &frame {
+            WorkerFrame::Refused { fault } => {
+                validate_fault(fault)?;
+                let phase_matches = if written_phase {
+                    !matches!(fault.phase, Phase::BeforeRequest | Phase::SendingRequest)
+                } else {
+                    matches!(fault.phase, Phase::BeforeRequest | Phase::SendingRequest)
+                };
+                ensure!(phase_matches, "Refusal outside permitted exchange phase");
+                if let Some(samples) = fault.context_samples {
+                    samples_scope(samples, owners, step == 0)?;
+                }
+                ensure!(
+                    fault.step == step && fault.diagnostic.len() <= 512 && primary.is_none(),
+                    "Wrong/repeated worker refusal"
+                );
+                if fault.context == ContextObserved::DeclaredStraddle {
+                    *transition = true;
+                }
+                if matches!(fault.cause, Cause::InputUnknown | Cause::ContextUnknown)
+                    || fault.context == ContextObserved::Unknown
+                    || fault.input == InputObserved::Unknown
+                {
+                    policy.bad = true;
+                }
+                *primary = Some(fault.clone());
+                bail!(
+                    "Worker {:?}/{:?} step{}: {}",
+                    fault.phase,
+                    fault.cause,
+                    step,
+                    fault.diagnostic
+                )
+            }
+            WorkerFrame::Request { step: n, .. } => {
+                ensure!(!written_phase && *n == step, "Wrong response phase/step")
+            }
+            WorkerFrame::Written { step: n, written } => {
+                ensure!(written_phase && *n == step, "Wrong response phase/step");
+                let samples = written
+                    .context_samples
+                    .context("Written context was not observed")?;
+                samples_scope(samples, owners, step == 0)?;
+                ensure!(
+                    samples.coherent() || step == 16,
+                    "Noncoherent MOVE response refused"
+                );
+                ensure!(
+                    written.input_valid && written.coherent == samples.coherent(),
+                    "Contradictory successful observations"
+                );
+            }
+        }
+        Ok(frame)
+    }
+    fn receive_worker(
+        socket: &mut UnixStream,
+        cutoff: i64,
+        step: usize,
+        written_phase: bool,
+        root: &Path,
+        config: &Config,
+        responses: &mut File,
+        policy: &mut Policy,
+        transition: &mut bool,
+        primary: &mut Option<WorkerFault>,
+    ) -> Result<WorkerFrame> {
+        let frame: WorkerFrame = receive(socket, cutoff)?;
+        let b = serde_json::to_vec(
+            &serde_json::json!({"expected_step":step,"await_written":written_phase,"frame":frame}),
+        )?;
+        ensure!(
+            responses.metadata()?.len() + b.len() as u64 + 1 <= 32768,
+            "Worker frame evidence cap"
+        );
+        responses.write_all(&b)?;
+        responses.write_all(b"\n")?;
+        let was_none = primary.is_none();
+        let neighbor = if config.direction == "next" {
+            config.current_index + 1
+        } else {
+            config.current_index - 1
+        };
+        let result = check_frame(
+            frame,
+            step,
+            written_phase,
+            [config.current_index, neighbor],
+            policy,
+            transition,
+            primary,
+        );
+        if result.is_err() {
+            responses.sync_all()?;
+        }
+        if was_none {
+            if let Some(fault) = primary {
+                durable(root, "gesture.worker-refusal", fault)?;
+            }
+        }
+        result
+    }
+    struct Emitter {
+        exchange: Exchange,
         c: Config,
         root: PathBuf,
-        limits: Limits,
         tag: i32,
         inputs: Inputs,
     }
     impl DiagnosticGestureEmitter for Emitter {
         fn emit(&mut self, device: &mut Device, events: &[InputEvent]) -> Result<()> {
-            self.limits.normal()?;
-            let e = events
-                .iter()
-                .map(|e| [e.event_type().0 as i32, e.code() as i32, e.value()])
-                .collect::<Vec<_>>();
             let fd = device.as_raw_fd();
-            let id = fd_identity(fd)?;
-            send(
-                &mut self.socket,
-                &Request {
-                    events: e.clone(),
-                    identity: id,
+            let c = &self.c;
+            let root = &self.root;
+            let inputs = &self.inputs;
+            let tag = self.tag;
+            let limits = self.exchange.limits.clone();
+            self.exchange.run(
+                events,
+                || fd_identity(fd),
+                |permission, observed| {
+                    observed.phase = Phase::Context;
+                    let start = events.len() == 9;
+                    let release = events[1].value() == -1;
+                    checked_context(context(c, root, start, release), observed)?;
+                    observed.phase = Phase::Input;
+                    let check = (|| -> Result<()> {
+                        inputs.validate()?;
+                        inputs.external_quiet()?;
+                        ensure!(
+                            inputs.identities() == permission.inventory
+                                && fd_identity(fd)? == inputs.files[inputs.touch].2,
+                            "Worker input binding drift"
+                        );
+                        ensure!(
+                            snapshot(fd)? == permission.before,
+                            "Postpermission contact drift"
+                        );
+                        Ok(())
+                    })();
+                    if let Err(e) = check {
+                        observed.input = InputObserved::Unknown;
+                        return Err((Cause::InputUnknown, e));
+                    }
+                    observed.input = InputObserved::Valid;
+                    observed.phase = Phase::PreWrite;
+                    ensure_tag(events[1].value(), tag).map_err(|e| (Cause::Protocol, e))?;
+                    limits.normal().map_err(|e| (Cause::Deadline, e))?;
+                    observed.phase = Phase::Write;
+                    let n = unsafe {
+                        libc::write(fd, events.as_ptr().cast(), std::mem::size_of_val(events))
+                    };
+                    observed.bytes = Some(n);
+                    Ok(Written {
+                        bytes: n,
+                        coherent: observed.context == ContextObserved::Coherent,
+                        input_valid: true,
+                        context_samples: observed.samples,
+                    })
                 },
-            )?;
-            let permission: Permission = receive(&mut self.socket, self.limits.write)?;
-            if !permission.write {
-                ensure!(permission.before.released(), "Unsafe skipped UP");
-                return Ok(());
-            }
-            self.limits.normal()?;
-            let coherent = context(&self.c, &self.root, e.len() == 9, e[1][2] == -1)?;
-            let input_check = (|| -> Result<()> {
-                self.inputs.validate()?;
-                self.inputs.external_quiet()?;
-                ensure!(
-                    self.inputs.identities() == permission.inventory
-                        && id == self.inputs.files[self.inputs.touch].2,
-                    "Worker input binding drift"
-                );
-                ensure!(
-                    snapshot(fd)? == permission.before && fd_identity(fd)? == id,
-                    "Postpermission contact/device drift"
-                );
-                Ok(())
-            })();
-            if let Err(error) = input_check {
-                send(
-                    &mut self.socket,
-                    &Written {
-                        bytes: -1,
-                        coherent,
-                        input_valid: false,
-                    },
-                )?;
-                return Err(error);
-            }
-            ensure!(e[1][2] == -1 || e[1][2] == self.tag, "Scoped tag changed");
-            self.limits.normal()?;
-            // One nonblocking syscall. A short/interrupted prefix is never retried.
-            let n =
-                unsafe { libc::write(fd, events.as_ptr().cast(), std::mem::size_of_val(events)) };
-            send(
-                &mut self.socket,
-                &Written {
-                    bytes: n,
-                    coherent,
-                    input_valid: true,
-                },
-            )?;
-            ensure!(
-                n == std::mem::size_of_val(events) as isize,
-                "Partial/failed write"
-            );
-            Ok(())
+            )
         }
+    }
+    fn ensure_tag(value: i32, tag: i32) -> Result<()> {
+        ensure!(value == -1 || value == tag, "Scoped tag changed");
+        Ok(())
     }
     fn worker(root: &Path, tag: i32, limits: Limits, fd: RawFd) -> Result<()> {
         let c: Config = serde_json::from_slice(&bounded(&root.join("config.json"), 16384)?)?;
         validate(&c, root)?;
+        geometry_guard(&c, root)?;
         ensure!(
             limits == Limits::fixed(limits.go, &c)?,
             "Worker ceilings changed"
@@ -1018,15 +1597,19 @@ mod owned {
         inputs.validate()?;
         inputs.external_quiet()?;
         let emitter = Emitter {
-            socket,
+            exchange: Exchange {
+                socket,
+                limits,
+                step: 0,
+                terminal: None,
+            },
             c: c.clone(),
             root: root.to_owned(),
-            limits,
             tag,
             inputs,
         };
         let mut touch = Touch::diagnostic_scoped_gesture(tag, Box::new(emitter))?;
-        XochitlIntegration::swipe(
+        XochitlIntegration::swipe_fixed_gap10_development(
             &mut touch,
             if c.direction == "next" {
                 NavigationDirection::Next
@@ -1085,6 +1668,7 @@ mod owned {
     fn supervisor(root: &Path) -> Result<()> {
         let c: Config = serde_json::from_slice(&bounded(&root.join("config.json"), 16384)?)?;
         validate(&c, root)?;
+        durable(root, "gesture.path", &geometry(&c))?;
         context(&c, root, true, false)?;
         let bytes = bounded(&root.join("source.png"), 16 * 1024 * 1024)?;
         ensure!(
@@ -1124,6 +1708,9 @@ mod owned {
         let (mut socket, writer_socket) = UnixStream::pair()?;
         socket.set_write_timeout(Some(Duration::from_millis(5)))?;
         let fd = writer_socket.as_raw_fd();
+        let fault_file = exclusive(&root.join("worker-fault.log"))?;
+        let retained_fault_file = fault_file.try_clone()?;
+        let mut responses = exclusive(&root.join("worker-frames.jsonl"))?;
         let mut command = Command::new(executable);
         command
             .arg("--worker")
@@ -1133,7 +1720,7 @@ mod owned {
             .arg(fd.to_string())
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
+            .stderr(std::process::Stdio::from(fault_file));
         unsafe {
             command.pre_exec(move || {
                 if libc::fcntl(fd, libc::F_SETFD, 0) < 0 {
@@ -1155,19 +1742,47 @@ mod owned {
             Ok(())
         })();
         let mut transition_unresolved = false;
+        let mut worker_refusal = None;
+        let mut parent_context_transition = None;
+        let mut protocol_uncertain = false;
+        let mut parent_phase = "setup";
         let run = (|| -> Result<()> {
             setup?;
             for expected_step in 0..=16 {
                 limits.normal()?;
                 ensure!(!stopped(&child)?, "Stopped writer");
-                let request: Request = receive(&mut socket, limits.write)?;
+                parent_phase = "await-request";
+                let received = receive_worker(
+                    &mut socket,
+                    limits.write,
+                    expected_step,
+                    false,
+                    root,
+                    &c,
+                    &mut responses,
+                    &mut policy,
+                    &mut transition_unresolved,
+                    &mut worker_refusal,
+                );
+                if received.is_err() && worker_refusal.is_none() {
+                    protocol_uncertain = true;
+                }
+                let frame = received?;
+                let WorkerFrame::Request { request, .. } = frame else {
+                    bail!("Expected request")
+                };
                 ensure!(
                     request.identity == inputs.files[inputs.touch].2,
                     "Writer descriptor differs"
                 );
                 inputs.drain(Some(&mut policy))?;
                 sticky_input(&mut policy, inputs.validate())?;
-                if !context(&c, root, expected_step == 0, expected_step == 16)? {
+                if !sticky_context(
+                    &mut policy,
+                    &mut transition_unresolved,
+                    &mut parent_context_transition,
+                    context(&c, root, expected_step == 0, expected_step == 16),
+                )? {
                     transition_unresolved = true;
                 }
                 let before = sticky_input(&mut policy, snapshot(inputs.fd()))?;
@@ -1184,7 +1799,12 @@ mod owned {
                 limits.normal()?;
                 inputs.drain(Some(&mut policy))?;
                 sticky_input(&mut policy, inputs.validate())?;
-                if !context(&c, root, step == 0, step == 16)? {
+                if !sticky_context(
+                    &mut policy,
+                    &mut transition_unresolved,
+                    &mut parent_context_transition,
+                    context(&c, root, step == 0, step == 16),
+                )? {
                     transition_unresolved = true;
                 }
                 let observed = sticky_input(&mut policy, snapshot(inputs.fd()))?;
@@ -1199,12 +1819,32 @@ mod owned {
                 send(
                     &mut socket,
                     &Permission {
+                        step,
                         write: true,
                         before,
                         inventory: inputs.identities(),
                     },
                 )?;
-                let written: Written = receive(&mut socket, limits.write)?;
+                parent_phase = "await-written";
+                let received = receive_worker(
+                    &mut socket,
+                    limits.write,
+                    step,
+                    true,
+                    root,
+                    &c,
+                    &mut responses,
+                    &mut policy,
+                    &mut transition_unresolved,
+                    &mut worker_refusal,
+                );
+                if received.is_err() && worker_refusal.is_none() {
+                    protocol_uncertain = true;
+                }
+                let frame = received?;
+                let WorkerFrame::Written { written, .. } = frame else {
+                    bail!("Expected written response")
+                };
                 accept_written(
                     &mut policy,
                     &mut transition_unresolved,
@@ -1252,7 +1892,12 @@ mod owned {
             let recovery = (|| -> Result<bool> {
                 inputs.drain(Some(&mut policy))?;
                 sticky_input(&mut policy, inputs.validate())?;
-                if !context(&c, root, false, true)? {
+                if !sticky_context(
+                    &mut policy,
+                    &mut transition_unresolved,
+                    &mut parent_context_transition,
+                    context(&c, root, false, true),
+                )? {
                     transition_unresolved = true;
                 }
                 let current = sticky_input(&mut policy, snapshot(inputs.fd()))?;
@@ -1270,7 +1915,12 @@ mod owned {
                 ensure!(now()? < limits.recovery, "Original recovery cutoff");
                 inputs.drain(Some(&mut policy))?;
                 sticky_input(&mut policy, inputs.validate())?;
-                if !context(&c, root, false, true)? {
+                if !sticky_context(
+                    &mut policy,
+                    &mut transition_unresolved,
+                    &mut parent_context_transition,
+                    context(&c, root, false, true),
+                )? {
                     transition_unresolved = true;
                 }
                 let observed = sticky_input(&mut policy, snapshot(inputs.fd()))?;
@@ -1309,16 +1959,25 @@ mod owned {
             })();
             recovered = recovery.as_ref().is_ok_and(|v| *v);
         }
+        ensure!(now()? < limits.overall, "Original evidence cutoff");
+        responses.sync_all()?;
+        if death.is_ok() {
+            ensure!(
+                retained_fault_file.metadata()?.len() <= 8192,
+                "Worker fault evidence cap"
+            );
+            retained_fault_file.sync_all()?;
+        }
         let unresolved = contact_unresolved(run.is_ok(), death.is_ok(), recovered);
         let success = run.is_ok()
             && death.as_ref().is_ok_and(|s| s.success())
             && policy.released
             && !transition_unresolved;
-        let report = serde_json::json!({"nonce":c.nonce,"tag":tag,"y_evidence":policy.evidence(),"limits":limits,
+        let report = serde_json::json!({"nonce":c.nonce,"geometry_variant":c.geometry_variant,"tag":tag,"y_evidence":policy.evidence(),"limits":limits,
         "complete_step":policy.complete,"transition_unresolved":transition_unresolved,"writer_death_confirmed":death.is_ok(),"unresolved":unresolved,
         "status":if success{"released-gesture-ui-unverified"}else if recovered{"failed-gesture-conditionally-cleaned"}
             else{"gesture-refused-or-unresolved"},"error":run.err().map(|e|e.to_string()),
-        "ui_verified":false,"exclusive_kernel_ownership":false});
+        "parent_phase":parent_phase,"protocol_uncertain":protocol_uncertain,"worker_refusal":worker_refusal,"parent_context_transition":parent_context_transition,"ui_verified":false,"exclusive_kernel_ownership":false});
         ensure!(now()? < limits.overall, "Original overall response ceiling");
         durable(root, "gesture.result", &report)?;
         ensure!(
@@ -1366,6 +2025,534 @@ mod owned {
                 recovery: 2600,
                 overall: 5100,
             }
+        }
+        fn live_limits() -> Limits {
+            let go = now().unwrap();
+            Limits {
+                go,
+                write: go + 1500,
+                recovery: go + 2500,
+                overall: go + 5000,
+            }
+        }
+        fn fixture_config() -> Config {
+            let (v, n) = declared_paths("previous").unwrap();
+            Config {
+                nonce: "0".repeat(32),
+                boot: "00000000-0000-0000-0000-000000000001".into(),
+                stock_pid: 2,
+                stock_start: 1,
+                document: "00000000-0000-0000-0000-000000000009".into(),
+                page_ids: (1..=8)
+                    .map(|i| format!("00000000-0000-0000-0000-{i:012}"))
+                    .collect(),
+                current_index: 1,
+                direction: "previous".into(),
+                geometry_variant: "fixed-gap10-v1".into(),
+                virtual_path: v,
+                native_path: n,
+                root_dev: 0,
+                root_ino: 0,
+                source_observed_ms: 0,
+                go_not_after_ms: 100,
+                overall_ceiling_ms: 5100,
+                source_image_sha256: "0".repeat(64),
+                source_image_verified: true,
+                sidecar_sha256: ["0".repeat(64), "0".repeat(64), "0".repeat(64)],
+                page_map_sha256: "0".repeat(64),
+                executable_sha256: "0".repeat(64),
+            }
+        }
+        fn sample(c: &Config, ci: usize, mi: usize) -> Vec<Vec<u8>> {
+            let content = serde_json::json!({"pageCount":8,"cPages":{"pages":c.page_ids.iter().enumerate().map(|(i,id)|{
+                serde_json::json!({"id":id,"idx":{"value":i.to_string()},"redir":{"value":i}})
+            }).collect::<Vec<_>>(),"lastOpened":{"value":c.page_ids[ci]}}});
+            vec![
+                format!("LastOpen=@ByteArray({})\n", c.document).into_bytes(),
+                serde_json::to_vec(&content).unwrap(),
+                serde_json::to_vec(&serde_json::json!({"lastOpenedPage":mi})).unwrap(),
+            ]
+        }
+        fn sampled_config() -> (Config, Vec<Vec<u8>>) {
+            let mut c = fixture_config();
+            let b = sample(&c, 1, 1);
+            c.page_map_sha256 = page_map(&serde_json::from_slice(&b[1]).unwrap()).unwrap();
+            for i in 0..3 {
+                c.sidecar_sha256[i] = sha(&b[i]);
+            }
+            (c, b)
+        }
+        fn owned_prefix(c: &Config) -> Policy {
+            let mut p = Policy::new(731, c.native_path.clone(), seed(936)).unwrap();
+            down(&mut p);
+            for step in 1..=9 {
+                let e = p.expected(step);
+                p.admit(&e, &state(&p)).unwrap();
+                for v in e {
+                    p.observe(v).unwrap();
+                }
+            }
+            p
+        }
+        fn fixture_root(label: &str) -> PathBuf {
+            static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let root = std::env::temp_dir()
+                .join(format!("owned-gesture-{}-{label}-{n}", std::process::id()));
+            fs::create_dir(&root).unwrap();
+            root
+        }
+        fn fake_id() -> Identity {
+            Identity {
+                dev: 1,
+                ino: 2,
+                rdev: 3,
+            }
+        }
+        #[test]
+        fn fixed_geometry_is_explicit_and_sealed_with_inverse_endpoint_gaps() {
+            let mut c = fixture_config();
+            geometry_selection(&c).unwrap();
+            let (pv, pn) = declared_paths("previous").unwrap();
+            let (nv, nn) = declared_paths("next").unwrap();
+            assert_eq!((pv[0], pv[15]), ([100, 512], [690, 512]));
+            assert_eq!((nv[0], nv[15]), ([700, 512], [110, 512]));
+            assert_eq!((pn[0], pn[15]), ([182, 936], [1261, 936]));
+            assert_eq!((nn[0], nn[15]), ([1279, 936], [201, 936]));
+            assert_eq!(nn[0][0] - pn[15][0], 18);
+            assert_eq!(nn[15][0] - pn[0][0], 19);
+            assert!(pn.windows(2).all(|p| p[0][0] < p[1][0]));
+            assert!(nn.windows(2).all(|p| p[0][0] > p[1][0]));
+            let mut json = serde_json::to_value(&c).unwrap();
+            json.as_object_mut().unwrap().remove("geometry_variant");
+            assert!(serde_json::from_value::<Config>(json).is_err());
+            c.geometry_variant = "adaptive".into();
+            assert!(geometry_selection(&c).is_err());
+            c.geometry_variant = "fixed-gap10-v1".into();
+            c.native_path[15][0] += 1;
+            assert!(geometry_selection(&c).is_err());
+            let c = fixture_config();
+            let root = fixture_root("geometry");
+            assert!(geometry_guard(&c, &root).is_err());
+            durable(&root, "gesture.path", &geometry(&c)).unwrap();
+            geometry_guard(&c, &root).unwrap();
+            let mut changed = geometry(&c);
+            changed.virtual_path[15][0] = 700;
+            fs::write(
+                root.join("gesture.path"),
+                serde_json::to_vec(&changed).unwrap(),
+            )
+            .unwrap();
+            assert!(geometry_guard(&c, &root).is_err());
+            fs::remove_file(root.join("gesture.path")).unwrap();
+            fs::remove_dir(root).unwrap();
+        }
+        #[test]
+        fn two_existing_samples_distinguish_known_pair_transition_from_unknown() {
+            let (c, first) = sampled_config();
+            assert!(classify_context_samples(&c, &first, &first, true, false)
+                .unwrap()
+                .coherent());
+            let neighbor = sample(&c, 0, 0);
+            assert!(
+                classify_context_samples(&c, &neighbor, &neighbor, false, false)
+                    .unwrap()
+                    .coherent()
+            );
+            let straddle = sample(&c, 1, 0);
+            for second in [&neighbor, &straddle] {
+                let error = classify_context_samples(&c, &first, second, false, false).unwrap_err();
+                let observed = error.downcast_ref::<KnownStraddle>().unwrap().0;
+                assert_eq!(observed.first, [1, 1]);
+                assert_eq!(
+                    observed.second,
+                    if second == &neighbor { [0, 0] } else { [1, 0] }
+                );
+                assert!(observed.bracket_changed);
+                assert!(!classify_context_samples(&c, &first, second, false, true)
+                    .unwrap()
+                    .coherent());
+            }
+            let mut timestamp = first.clone();
+            let mut meta: serde_json::Value = serde_json::from_slice(&timestamp[2]).unwrap();
+            meta["lastModified"] = serde_json::json!("new");
+            timestamp[2] = serde_json::to_vec(&meta).unwrap();
+            let error = classify_context_samples(&c, &first, &timestamp, false, false).unwrap_err();
+            let observed = error.downcast_ref::<KnownStraddle>().unwrap().0;
+            assert_eq!(observed.first, observed.second);
+            assert!(observed.bracket_changed);
+            // Before DOWN exact raw hashes remain mandatory for BOTH samples.
+            assert!(classify_context_samples(&c, &first, &timestamp, true, true)
+                .unwrap_err()
+                .downcast_ref::<KnownStraddle>()
+                .is_none());
+            for fault in [
+                "owner",
+                "redir",
+                "count",
+                "LastOpen",
+                "malformed",
+                "missing",
+            ] {
+                let mut second = neighbor.clone();
+                let mut content: serde_json::Value = serde_json::from_slice(&second[1]).unwrap();
+                match fault {
+                    "owner" => {
+                        content["cPages"]["lastOpened"]["value"] = serde_json::json!(c.page_ids[7]);
+                        second[1] = serde_json::to_vec(&content).unwrap();
+                    }
+                    "redir" => {
+                        content["cPages"]["pages"][0]["redir"]["value"] = serde_json::json!(99);
+                        second[1] = serde_json::to_vec(&content).unwrap();
+                    }
+                    "count" => {
+                        content["pageCount"] = serde_json::json!(9);
+                        second[1] = serde_json::to_vec(&content).unwrap();
+                    }
+                    "LastOpen" => second[0] = b"LastOpen=@ByteArray(foreign)\n".to_vec(),
+                    "malformed" => second[1] = b"{bad".to_vec(),
+                    _ => second[2] = b"{}".to_vec(),
+                }
+                let result = classify_context_samples(&c, &first, &second, false, true);
+                assert!(result.is_err(), "{fault}");
+                let mut p = owned_prefix(&c);
+                let mut transition = false;
+                let mut evidence = None;
+                assert!(sticky_context(&mut p, &mut transition, &mut evidence, result).is_err());
+                assert!(p.bad && !p.recovery_owned(&state(&p)));
+            }
+        }
+        #[test]
+        #[ignore = "Internal direct-child protocol fixture, launched by the parent test only"]
+        fn protocol_child_fixture() {
+            let fd: RawFd = std::env::var("OWNED_PROTOCOL_FD").unwrap().parse().unwrap();
+            let limits: Limits =
+                serde_json::from_str(&std::env::var("OWNED_PROTOCOL_LIMITS").unwrap()).unwrap();
+            let mode = std::env::var("OWNED_PROTOCOL_MODE").unwrap();
+            let step = if mode == "broken-report" { 0 } else { 10 };
+            let socket = unsafe { UnixStream::from_raw_fd(fd) };
+            socket
+                .set_write_timeout(Some(Duration::from_millis(5)))
+                .unwrap();
+            let mut client = Exchange {
+                socket,
+                limits,
+                step,
+                terminal: None,
+            };
+            let c = fixture_config();
+            let p = Policy::new(731, c.native_path, seed(936)).unwrap();
+            let events = p
+                .expected(step)
+                .into_iter()
+                .map(|e| InputEvent::new(e[0] as u16, e[1] as u16, e[2]))
+                .collect::<Vec<_>>();
+            let result = client.run(
+                &events,
+                || Ok(fake_id()),
+                |_, observed| {
+                    assert_ne!(
+                        mode, "broken-report",
+                        "No permission exists on broken socket"
+                    );
+                    observed.phase = Phase::Context;
+                    checked_context(
+                        Err(KnownStraddle(ContextSamples {
+                            first: [1, 0],
+                            second: [1, 0],
+                            bracket_changed: false,
+                        })
+                        .into()),
+                        observed,
+                    )?;
+                    unreachable!()
+                },
+            );
+            assert!(result.is_err());
+            assert!(client.terminal.is_some());
+            let stop = p
+                .expected(16)
+                .into_iter()
+                .map(|e| InputEvent::new(e[0] as u16, e[1] as u16, e[2]))
+                .collect::<Vec<_>>();
+            assert!(client
+                .run(
+                    &stop,
+                    || panic!("Terminal STOP must not query/send"),
+                    |_, _| panic!("Terminal STOP must not write")
+                )
+                .is_err());
+        }
+        fn spawn_protocol_fixture(
+            root: &Path,
+            limits: &Limits,
+            mode: &str,
+        ) -> (Child, Option<UnixStream>) {
+            let (server, client) = UnixStream::pair().unwrap();
+            let fd = client.as_raw_fd();
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "owned::tests::protocol_child_fixture",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("OWNED_PROTOCOL_FD", fd.to_string())
+                .env(
+                    "OWNED_PROTOCOL_LIMITS",
+                    serde_json::to_string(limits).unwrap(),
+                )
+                .env("OWNED_PROTOCOL_MODE", mode)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::from(
+                    exclusive(&root.join("fault.log")).unwrap(),
+                ));
+            unsafe {
+                command.pre_exec(move || {
+                    if libc::fcntl(fd, libc::F_SETFD, 0) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+            let server = if mode == "broken-report" {
+                drop(server);
+                None
+            } else {
+                Some(server)
+            };
+            let child = command.spawn().unwrap();
+            drop(client);
+            (child, server)
+        }
+        #[test]
+        fn actual_child_context_refusal_is_retained_then_fenced_before_conditional_release() {
+            let c = fixture_config();
+            let root = fixture_root("protocol");
+            let limits = live_limits();
+            let (mut child, socket) = spawn_protocol_fixture(&root, &limits, "context");
+            let mut socket = socket.unwrap();
+            let frame: WorkerFrame = receive(&mut socket, limits.write).unwrap();
+            let WorkerFrame::Request { step, request } = frame else {
+                panic!("Expected request")
+            };
+            assert_eq!(step, 10);
+            let mut p = owned_prefix(&c);
+            p.admit(&request.events, &state(&p)).unwrap();
+            send(
+                &mut socket,
+                &Permission {
+                    step: 10,
+                    write: true,
+                    before: state(&p),
+                    inventory: vec![fake_id()],
+                },
+            )
+            .unwrap();
+            let mut transition = false;
+            let mut primary = None;
+            let mut frames = exclusive(&root.join("frames")).unwrap();
+            let result = receive_worker(
+                &mut socket,
+                limits.write,
+                10,
+                true,
+                &root,
+                &c,
+                &mut frames,
+                &mut p,
+                &mut transition,
+                &mut primary,
+            );
+            assert!(result.unwrap_err().to_string().contains("DeclaredStraddle"));
+            let retained: WorkerFault = serde_json::from_slice(
+                &bounded(&root.join("gesture.worker-refusal"), 4096).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(retained.step, 10);
+            assert_eq!(retained.phase, Phase::Context);
+            assert_eq!(retained.cause, Cause::DeclaredStraddle);
+            assert_eq!(retained.input, InputObserved::NotObserved);
+            assert!(retained.bytes.is_none());
+            assert!(transition && !p.bad);
+            assert!(recovery_admission(&p, &state(&p), false, now().unwrap(), &limits).is_err());
+            let death = fence(&mut child, limits.recovery, true).unwrap();
+            assert!(death.success());
+            // Child completed the terminal STOP assertion before successful process exit.
+            assert!(receive::<WorkerFrame>(&mut socket, limits.recovery).is_err());
+            recovery_admission(&p, &state(&p), true, now().unwrap(), &limits).unwrap();
+            p.intent = Some(16);
+            p.cursor = 0;
+            for e in p.expected(16) {
+                p.observe(e).unwrap();
+            }
+            assert!(p.released && state(&p).released());
+            drop(frames);
+            for n in ["fault.log", "frames", "gesture.worker-refusal"] {
+                fs::remove_file(root.join(n)).unwrap();
+            }
+            fs::remove_dir(root).unwrap();
+        }
+        #[test]
+        fn failed_reporting_keeps_terminal_latch_and_private_primary_fault() {
+            let root = fixture_root("broken");
+            let limits = live_limits();
+            let (mut child, socket) = spawn_protocol_fixture(&root, &limits, "broken-report");
+            assert!(socket.is_none());
+            let death = fence(&mut child, limits.recovery, true).unwrap();
+            assert!(death.success());
+            let fault: WorkerFault =
+                serde_json::from_slice(&bounded(&root.join("fault.log"), 4096).unwrap()).unwrap();
+            assert_eq!(fault.step, 0);
+            assert_eq!(fault.phase, Phase::SendingRequest);
+            assert_eq!(fault.cause, Cause::Protocol);
+            assert_eq!(fault.context, ContextObserved::NotObserved);
+            assert_eq!(fault.input, InputObserved::NotObserved);
+            assert!(fault.context_samples.is_none() && fault.bytes.is_none());
+            fs::remove_file(root.join("fault.log")).unwrap();
+            fs::remove_dir(root).unwrap();
+        }
+        #[test]
+        fn wrong_phase_step_observations_and_duplicate_refusals_are_rejected() {
+            let c = fixture_config();
+            let mut p = owned_prefix(&c);
+            let mut transition = false;
+            let mut primary = None;
+            let request = WorkerFrame::Request {
+                step: 10,
+                request: Request {
+                    events: p.expected(10),
+                    identity: fake_id(),
+                },
+            };
+            assert!(check_frame(
+                request,
+                10,
+                true,
+                [1, 0],
+                &mut p,
+                &mut transition,
+                &mut primary
+            )
+            .is_err());
+            let make_written = |step| WorkerFrame::Written {
+                step,
+                written: Written {
+                    bytes: 80,
+                    coherent: true,
+                    input_valid: true,
+                    context_samples: Some(ContextSamples {
+                        first: [1, 1],
+                        second: [1, 1],
+                        bracket_changed: false,
+                    }),
+                },
+            };
+            assert!(check_frame(
+                make_written(9),
+                10,
+                true,
+                [1, 0],
+                &mut p,
+                &mut transition,
+                &mut primary
+            )
+            .is_err());
+            assert!(check_frame(
+                make_written(10),
+                10,
+                false,
+                [1, 0],
+                &mut p,
+                &mut transition,
+                &mut primary
+            )
+            .is_err());
+            let mut json = serde_json::to_value(make_written(10)).unwrap();
+            json["written"]["coherent"] = serde_json::json!(false);
+            json["written"]["context_samples"] =
+                serde_json::json!({"first":[1,0],"second":[1,0],"bracket_changed":false});
+            let decoded: WorkerFrame = serde_json::from_value(json).unwrap();
+            assert!(check_frame(
+                decoded,
+                10,
+                true,
+                [1, 0],
+                &mut p,
+                &mut transition,
+                &mut primary
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("Noncoherent MOVE"));
+            let mut observed = Checked::fresh();
+            observed.phase = Phase::Context;
+            let fault = checked_context(Err(anyhow::anyhow!("Unknown document")), &mut observed)
+                .unwrap_err();
+            let fault = observed.fault(10, fault.0, fault.1);
+            assert!(check_frame(
+                WorkerFrame::Refused {
+                    fault: fault.clone()
+                },
+                10,
+                true,
+                [1, 0],
+                &mut p,
+                &mut transition,
+                &mut primary
+            )
+            .is_err());
+            assert!(p.bad && !p.recovery_owned(&state(&p)));
+            assert!(primary.is_some());
+            assert!(check_frame(
+                WorkerFrame::Refused { fault },
+                10,
+                true,
+                [1, 0],
+                &mut p,
+                &mut transition,
+                &mut primary
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("repeated"));
+            let mut json = serde_json::to_value(make_written(10)).unwrap();
+            json["unexpected"] = serde_json::json!(true);
+            assert!(serde_json::from_value::<WorkerFrame>(json).is_err());
+        }
+        #[test]
+        fn refusal_stage_observations_never_default_to_valid() {
+            let mut at = Checked::fresh();
+            at.phase = Phase::BeforeRequest;
+            let mut fault = at.fault(10, Cause::Deadline, anyhow::anyhow!("cutoff"));
+            validate_fault(&fault).unwrap();
+            fault.context = ContextObserved::Coherent;
+            fault.context_samples = Some(ContextSamples {
+                first: [1, 1],
+                second: [1, 1],
+                bracket_changed: false,
+            });
+            assert!(validate_fault(&fault).is_err());
+            let mut at = Checked::fresh();
+            at.phase = Phase::Reply;
+            let mut fault = at.fault(10, Cause::Protocol, anyhow::anyhow!("lost response"));
+            assert!(validate_fault(&fault).is_err());
+            fault.context = ContextObserved::Coherent;
+            fault.context_samples = Some(ContextSamples {
+                first: [1, 1],
+                second: [1, 1],
+                bracket_changed: false,
+            });
+            fault.input = InputObserved::Valid;
+            fault.bytes = Some(5 * std::mem::size_of::<InputEvent>() as isize);
+            validate_fault(&fault).unwrap();
+            fault.phase = Phase::Write;
+            fault.cause = Cause::ShortWrite;
+            assert!(validate_fault(&fault).is_err());
+            fault.bytes = Some(-1);
+            validate_fault(&fault).unwrap();
         }
         #[test]
         #[ignore = "Requires isolated C-header ioctl fixture; see examples/fixtures/owned_gesture_ioctl_fixture.c"]
@@ -1578,6 +2765,7 @@ mod owned {
                     bytes: 48,
                     coherent: false,
                     input_valid: true,
+                    context_samples: None,
                 },
                 48,
             )
@@ -1590,6 +2778,7 @@ mod owned {
                     bytes: 48,
                     coherent: true,
                     input_valid: true,
+                    context_samples: None,
                 },
                 48,
             )
@@ -1601,7 +2790,8 @@ mod owned {
                 &Written {
                     bytes: -1,
                     coherent: true,
-                    input_valid: false
+                    input_valid: false,
+                    context_samples: None
                 },
                 48
             )
@@ -1659,6 +2849,19 @@ mod owned {
             "ARM input ABI mismatch"
         );
         let a = std::env::args().collect::<Vec<_>>();
+        if a.len() == 3 && a[1] == "--geometry-paths" {
+            let (v, n) = declared_paths(&a[2])?;
+            println!(
+                "{}",
+                serde_json::to_string(&GeometryEvidence {
+                    geometry_variant: "fixed-gap10-v1".into(),
+                    direction: a[2].clone(),
+                    virtual_path: v,
+                    native_path: n
+                })?
+            );
+            return Ok(());
+        }
         if a.len() == 3 && a[1] == "--page-map-sha256" {
             println!(
                 "{}",

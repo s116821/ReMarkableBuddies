@@ -538,44 +538,51 @@ mod hold_tests {
     fn unchanged_swipe_executes_every_tagged_batch_and_failed_start_stop_guard() {
         use crate::workflow::xochitl_integration::{NavigationDirection, XochitlIntegration};
         use std::{cell::RefCell, rc::Rc};
-        for direction in [NavigationDirection::Next, NavigationDirection::Previous] {
-            let batches = Rc::new(RefCell::new(Vec::new()));
-            let sink = batches.clone();
-            let mut touch = super::Touch {
-                device: None,
-                batch_fixture: Some(Box::new(move |events| {
-                    sink.borrow_mut().push(
-                        events
-                            .iter()
-                            .map(|e| [e.event_type().0 as i32, e.code() as i32, e.value()])
-                            .collect::<Vec<_>>(),
-                    );
-                    Ok(())
-                })),
-                diagnostic: Some((731, Box::new(UnusedEmitter))),
-                device_model: super::DeviceModel::Remarkable2,
-                trigger_corner: TriggerCorner::LowerLeft,
-            };
-            XochitlIntegration::swipe(&mut touch, direction).unwrap();
-            let observed = batches.borrow();
-            assert_eq!(observed.len(), 17);
-            let (a, b) = if direction == NavigationDirection::Next {
-                (700i32, 100i32)
-            } else {
-                (100, 700)
-            };
-            for (step, events) in observed[..16].iter().enumerate() {
-                let offset = (((b - a).abs() as f32) * (step as f32 / 15.0)) as i32;
-                let (x, y) = touch.virtual_to_input((a + (b - a).signum() * offset, 512));
-                assert_eq!(events[0], [3, 47, 0]);
-                assert_eq!(events[1], [3, 57, 731]);
-                assert_eq!(events[2], [3, 53, x]);
-                assert_eq!(events[3], [3, 54, y]);
-                assert_eq!(y, 936);
-                assert_eq!(events.last(), Some(&[0, 0, 0]));
-                assert_eq!(events.len(), if step == 0 { 9 } else { 5 });
+        for fixed in [false, true] {
+            for direction in [NavigationDirection::Next, NavigationDirection::Previous] {
+                let batches = Rc::new(RefCell::new(Vec::new()));
+                let sink = batches.clone();
+                let mut touch = super::Touch {
+                    device: None,
+                    batch_fixture: Some(Box::new(move |events| {
+                        sink.borrow_mut().push(
+                            events
+                                .iter()
+                                .map(|e| [e.event_type().0 as i32, e.code() as i32, e.value()])
+                                .collect::<Vec<_>>(),
+                        );
+                        Ok(())
+                    })),
+                    diagnostic: Some((731, Box::new(UnusedEmitter))),
+                    device_model: super::DeviceModel::Remarkable2,
+                    trigger_corner: TriggerCorner::LowerLeft,
+                };
+                if fixed {
+                    XochitlIntegration::swipe_fixed_gap10_development(&mut touch, direction)
+                        .unwrap();
+                } else {
+                    XochitlIntegration::swipe(&mut touch, direction).unwrap();
+                }
+                let observed = batches.borrow();
+                assert_eq!(observed.len(), 17);
+                let (a, b) = if direction == NavigationDirection::Next {
+                    (700i32, if fixed { 110i32 } else { 100i32 })
+                } else {
+                    (100, if fixed { 690 } else { 700 })
+                };
+                for (step, events) in observed[..16].iter().enumerate() {
+                    let offset = (((b - a).abs() as f32) * (step as f32 / 15.0)) as i32;
+                    let (x, y) = touch.virtual_to_input((a + (b - a).signum() * offset, 512));
+                    assert_eq!(events[0], [3, 47, 0]);
+                    assert_eq!(events[1], [3, 57, 731]);
+                    assert_eq!(events[2], [3, 53, x]);
+                    assert_eq!(events[3], [3, 54, y]);
+                    assert_eq!(y, 936);
+                    assert_eq!(events.last(), Some(&[0, 0, 0]));
+                    assert_eq!(events.len(), if step == 0 { 9 } else { 5 });
+                }
+                assert_eq!(observed[16], vec![[3, 47, 0], [3, 57, -1], [0, 0, 0]]);
             }
-            assert_eq!(observed[16], vec![[3, 47, 0], [3, 57, -1], [0, 0, 0]]);
         }
         let calls = Rc::new(RefCell::new(Vec::new()));
         let sink = calls.clone();
