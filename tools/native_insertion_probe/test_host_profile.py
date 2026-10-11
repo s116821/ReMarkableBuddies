@@ -11,7 +11,7 @@ import coordinator
 from owned_frame_capture import CONTRACT as CAPTURE_CONTRACT, TOOLS as CAPTURE_TOOLS
 from owned_frame_capture import OBSERVATION_KIND
 from prepare_packet import ENCODER_HASHES
-from open_document_timing import PRODUCTION_V2, V2_CONTRACT, V2_SDK_REVISION, V2_SDK_SOURCES, V2_PUBLISHER_SHA256
+from open_document_timing import PRODUCTION_V2, V2_CONTRACT, V2_SDK_REVISION, V2_SDK_SOURCES, V2_PUBLISHER_SHA256, FIXTURE_DOCUMENT, ORIGINAL_PAGES
 
 
 class ProfileTests(unittest.TestCase):
@@ -19,6 +19,8 @@ class ProfileTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary); receipt,profile=self.fixture(root)
             receipt['experiment_kind']=profile['experiment_kind']=PRODUCTION_V2
+            profile.update(document_id=FIXTURE_DOCUMENT, page_ids=list(ORIGINAL_PAGES))
+            receipt.update(document_id=FIXTURE_DOCUMENT, before_page_ids=list(ORIGINAL_PAGES))
             receipt['library_tap_variant']=profile['library_tap_variant']='primary-1641396'
             profile.update(production_contract=V2_CONTRACT,sdk_revision=V2_SDK_REVISION,
                            sdk_source_hashes=V2_SDK_SOURCES,sdk_setup_variant='AfterOpen95s',

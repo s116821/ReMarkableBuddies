@@ -61,6 +61,11 @@ def fixture_inventory_selection(profile, page_field='page_ids'):
             profile.get(page_field) != list(PRESERVED_PAGES)):
             raise ValueError('Exact preserved eight-page fixture required')
         return variant, 8
+    if profile.get('experiment_kind') == PRODUCTION_V2 and (
+        profile.get('document_id') != FIXTURE_DOCUMENT or
+        profile.get(page_field) != list(ORIGINAL_PAGES)
+    ):
+        raise ValueError('Exact original seven-page production fixture required')
     return variant, 7
 
 

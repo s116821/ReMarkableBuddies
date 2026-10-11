@@ -26,8 +26,9 @@ class AdapterTests(unittest.TestCase):
             with self.subTest(v2=v2), tempfile.TemporaryDirectory() as root:
                 adapter, calls = self.adapter(root, {"timeout": True, "exit": None})
                 if v2:
-                    from open_document_timing import PRODUCTION_V2
+                    from open_document_timing import PRODUCTION_V2, FIXTURE_DOCUMENT, ORIGINAL_PAGES
                     adapter.profile["experiment_kind"] = PRODUCTION_V2
+                    adapter.profile.update(document_id=FIXTURE_DOCUMENT, page_ids=list(ORIGINAL_PAGES))
                     adapter.profile["library_tap_variant"] = adapter.receipt["library_tap_variant"] = variant
                     # Exercise dispatch without live context/timing; those guards
                     # have their own executed-source controls.

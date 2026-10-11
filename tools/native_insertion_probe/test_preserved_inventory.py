@@ -92,6 +92,26 @@ class PreservedInventoryTests(unittest.TestCase):
                 (root/'host-profile.json').write_text(json.dumps(changed))
                 with self.assertRaises(ValueError):coordinator.load_host_profile(root,receipt)
 
+    def test_legacy_production_transport_refuses_missing_selector_and_page_drift(self):
+        s=selected();calls=[]
+        with tempfile.TemporaryDirectory() as temporary:
+            for variant in [None,'legacy']:
+                profile=s|{'page_ids':list(PRESERVED_PAGES),'nonce':'1'*32}
+                receipt=s|{'remote_root':'/run/rmb-qt-probe-'+ '1'*32}
+                if variant is None:
+                    profile.pop('fixture_inventory_variant');receipt.pop('fixture_inventory_variant')
+                else:
+                    profile['fixture_inventory_variant']=receipt['fixture_inventory_variant']=variant
+                with self.assertRaises(ValueError):
+                    SSHAdapter([],receipt,profile,temporary,lambda *args:calls.append(args),b'')
+            profile=s|{'page_ids':list(ORIGINAL_PAGES),'fixture_inventory_variant':'legacy','nonce':'1'*32}
+            receipt=s|{'before_page_ids':list(ORIGINAL_PAGES),'fixture_inventory_variant':'legacy','remote_root':'/run/rmb-qt-probe-'+ '1'*32}
+            adapter=SSHAdapter([],receipt,profile,temporary,lambda *args:calls.append(args),b'')
+            for pages in [list(reversed(ORIGINAL_PAGES)),list(PRESERVED_PAGES),list(ORIGINAL_PAGES[:-1])]:
+                profile['page_ids']=receipt['before_page_ids']=pages
+                with self.assertRaises(ValueError):adapter.call('true')
+            self.assertEqual(calls,[])
+
     def test_transport_inventory_latch_prevents_later_consistent_switch(self):
         s=selected();profile=s|{'page_ids':s['before_page_ids'],'nonce':'1'*32}
         receipt=s|{'remote_root':'/run/rmb-qt-probe-'+ '1'*32};calls=[]
