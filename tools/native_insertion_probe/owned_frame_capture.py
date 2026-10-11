@@ -35,6 +35,8 @@ CONTRACT = {"kind": "native-owned-rgb32-scoped-v1", "frame_bytes": 10513468,
             "provider_hashes": PROVIDERS, "minimum_initial_free_kib": 196608,
             "maximum_ready_frames": 3, "maximum_open_frames": 5,
             "maximum_response_seconds": 20, "pin_checks": "ordered-alarm-batches-v1",
+            "snapshot_prelude_pins": "ordered-alarm-batch-v1",
+            "sidecar_checks": "initial-copy-plane-closing-v1",
             "hash_tool_sha256": "df59cc89ea72164ae92b15db4ef089acae776eda5b373bf10e2fcc46b49c8c02"}
 
 
@@ -45,16 +47,13 @@ def hash_tool_checks():
             'test "$(sha256sum /usr/bin/busybox.nosuid | cut -d " " -f 1)" = df59cc89ea72164ae92b15db4ef089acae776eda5b373bf10e2fcc46b49c8c02\n')
 
 
-def pinned_hash_checks(output):
-    # Bootstrap before using the launcher; all native/provider paths are still
-    # checked at both original checkpoints, with retained exact ordered output.
+def ordered_hash_checks(output, entries):
+    # Callers supply already validated paths/digests. Bootstrap independently
+    # before using the launcher, then retain the complete ordered result.
     text = hash_tool_checks()
     text += f'test "$(sha256sum "$root/owned_frame_alarm" | cut -d " " -f 1)" = {TOOLS["owned_frame_alarm"]}\n'
-    paths, expected = [], []
-    for path, digest in (NATIVE_HASHES | PROVIDERS).items():
-        selected = '"/proc/$pid/exe"' if path == '/usr/bin/xochitl' else shlex.quote(path)
-        paths.append(selected)
-        expected.append(digest + '  ' + ('/proc/$pid/exe' if path == '/usr/bin/xochitl' else path))
+    paths = [selected for selected, printed, digest in entries]
+    expected = [digest + '  ' + printed for selected, printed, digest in entries]
     text += f'test ! -e "{output}"\ntest ! -L "{output}"\n'
     text += f'test ! -e "{output}.stderr"\ntest ! -L "{output}.stderr"\n'
     text += f'"$root/owned_frame_alarm" --hashes /usr/bin/sha256sum {" ".join(paths)} > "{output}" 2> "{output}.stderr"\n'
@@ -64,6 +63,13 @@ def pinned_hash_checks(output):
     # The only interpolation is the validated decimal PID, not input text.
     text += 'printf \'%s\\n\' "' + '\n'.join(expected) + f'" | cmp - "{output}"\n'
     return text + hash_tool_checks()
+
+
+def pinned_hash_checks(output):
+    entries = [(('"/proc/$pid/exe"' if path == '/usr/bin/xochitl' else shlex.quote(path)),
+                ('/proc/$pid/exe' if path == '/usr/bin/xochitl' else path), digest)
+               for path, digest in (NATIVE_HASHES | PROVIDERS).items()]
+    return ordered_hash_checks(output, entries)
 
 
 def capture_script(prefix, nonce, boot):

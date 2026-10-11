@@ -4,10 +4,14 @@ import base64
 import json
 import hashlib
 import tempfile
+import os
+import shutil
+import subprocess
 import unittest
 from unittest.mock import patch
 from open_document_host import Refused
 from open_document_transport import SSHAdapter
+from owned_frame_capture import TOOLS as CAPTURE_TOOLS
 
 
 class AdapterTests(unittest.TestCase):
@@ -85,7 +89,8 @@ class AdapterTests(unittest.TestCase):
             return result
         adapter = SSHAdapter([], {"remote_root": "/run/rmb-qt-probe-" + "1" * 32},
                              {"nonce": "1" * 32, "document_id": "fixture",
-                              "boot_id": "boot", "tools": {}}, root, transport, b"")
+                              "boot_id": "boot", "tools": CAPTURE_TOOLS | {name: 'a' * 64 for name in ('owned_tap_guardian', 'observe_input', 'publish_creation_arm')},
+                              "encoder_hashes": {path: 'b' * 64 for path in ('/usr/bin/openssl', '/usr/lib/libssl.so.3', '/usr/lib/libcrypto.so.3')}}, root, transport, b"")
         adapter.root_inode = "1 2"
         return adapter, calls
 
@@ -194,6 +199,85 @@ class AdapterTests(unittest.TestCase):
                 with self.assertRaises(ValueError): adapter.raw_snapshot('ready', 100, True)
                 self.assertTrue(adapter.capture_failed)
                 self.assertEqual(calls, ['set -eu\ncat /proc/uptime\n'])
+
+    def test_snapshot_batch_is_claimed_before_outputs_and_other_preludes_unchanged(self):
+        with tempfile.TemporaryDirectory() as root:
+            adapter, calls = self.adapter(root, {'timeout': False, 'exit': 0, 'stdout': json.dumps(self.raw_response())})
+            adapter.profile.update(immutable_hashes={}, boot_id='02b2347b-03aa-4a85-8dd7-d731aabf6f3e')
+            regular = adapter.prelude(100, None)
+            snapshot = adapter.prelude(100, None, snapshot=True)
+            for path in adapter.profile['encoder_hashes']:
+                self.assertIn(f'sha256sum {path}', regular)
+                self.assertNotIn(f'sha256sum {path}', snapshot)
+                self.assertIn(f'test -f {path}', snapshot)
+            for name in adapter.profile['tools']:
+                self.assertIn(f'sha256sum "$root/{name}"', regular)
+                self.assertNotIn(f'sha256sum "$root/{name}"', snapshot)
+                self.assertIn(f'test -f "$root/{name}"', snapshot)
+            adapter.raw_snapshot('ready', 100, True)
+            script = calls[-1]
+            self.assertLess(script.index('> "$root/host-ready-000.claim"'), script.index('.artifact-hashes"'))
+            self.assertLess(script.index('initial_content_result='), script.index('--observe "$root/observe_input" 2'))
+            self.assertLess(script.index('initial_metadata_result='), script.index('"$root/native_frame_acquire" "$pid"'))
+            self.assertLess(script.index('.pins-after"'), script.index('closing_content_result='))
+            self.assertLess(script.index('closing_metadata_result='), script.index('> "$root/host-ready-000.hashes"'))
+            self.assertEqual((adapter.sidecar_prepare('host-ready-000') + adapter.sidecar_close('host-ready-000')).count('sha256sum'), 6)
+
+    @unittest.skipUnless(os.name == 'posix' and shutil.which('sh'), 'POSIX shell controls')
+    def test_executed_snapshot_batch_checks_all_nine_actual_rendered_pins(self):
+        import test_owned_frame_capture as capture_tests
+        with tempfile.TemporaryDirectory() as root:
+            adapter, calls = self.adapter(root, {})
+            entries = [adapter.profile['encoder_hashes'][path] + '  ' + path for path in sorted(adapter.profile['encoder_hashes'])]
+            entries += [adapter.profile['tools'][name] + '  $root/' + name for name in sorted(adapter.profile['tools'])]
+            self.assertEqual(len(entries), 9)
+            capture_tests.CaptureTests().exercise_pin_batch(entries, lambda: adapter.snapshot_artifact_checks('host-ready-000'), 'host-ready-000.artifact-hashes')
+
+    @unittest.skipUnless(os.name == 'posix' and shutil.which('sh'), 'POSIX shell controls')
+    def test_executed_sidecar_bracket_refuses_copy_hash_and_during_plane_changes(self):
+        faults = ('equal', 'content-change', 'metadata-change', 'collision', 'copy-error', 'copy-wrong',
+                  'initial-hash-error', 'copied-hash-error', 'closing-hash-error', 'bad-hash', 'bad-path',
+                  'metadata-collision', 'metadata-copy-error', 'metadata-copy-wrong',
+                  'metadata-initial-hash-error', 'metadata-copied-hash-error', 'metadata-closing-hash-error')
+        for fault in faults:
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as root:
+                path = Path(root)
+                doc = path / 'document'
+                for ext in ('content', 'metadata'): (path / ('document.' + ext)).write_text(ext + ' bytes')
+                if fault == 'collision': (path / 'host-ready-000.content').write_text('prior evidence')
+                if fault == 'metadata-collision': (path / 'host-ready-000.metadata').write_text('prior evidence')
+                adapter, calls = self.adapter(root, {})
+                prelude = '''set -eu
+umask 077
+phase=initial
+private() { test -f "$1" && test ! -L "$1"; test "$(stat -c '%a %h' "$1")" = '600 1'; }
+sha256sum() {
+ case "$fault:$phase:$1" in
+  initial-hash-error:initial:*document.content|copied-hash-error:initial:*host-ready-000.content|closing-hash-error:closing:*document.content|metadata-initial-hash-error:initial:*document.metadata|metadata-copied-hash-error:initial:*host-ready-000.metadata|metadata-closing-hash-error:closing:*document.metadata) return 2;;
+  bad-hash:initial:*document.content) printf 'invalid  %s\\n' "$1"; return;;
+  bad-path:initial:*document.content) printf '%s  /wrong/path\\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; return;;
+ esac
+ command sha256sum "$@"
+}
+cat() {
+ case "$fault:$1" in
+  copy-error:*document.content|metadata-copy-error:*document.metadata) return 2;;
+  copy-wrong:*document.content|metadata-copy-wrong:*document.metadata) printf corrupted; return;;
+ esac
+ command cat "$@"
+}
+'''
+                middle = 'phase=closing\nprintf plane > "$root/plane"\n'
+                if fault == 'content-change': middle += 'printf changed > "$doc.content"\n'
+                if fault == 'metadata-change': middle += 'printf changed > "$doc.metadata"\n'
+                script = prelude + adapter.sidecar_prepare('host-ready-000') + middle + adapter.sidecar_close('host-ready-000') + 'printf accepted > "$root/accepted"\n'
+                result = subprocess.run(['sh', '-c', script], env=dict(os.environ, root=root, doc=str(doc), fault=fault), capture_output=True)
+                self.assertEqual(result.returncode == 0, fault == 'equal', result.stderr)
+                self.assertEqual((path / 'accepted').exists(), fault == 'equal')
+                if fault in ('content-change', 'metadata-change', 'closing-hash-error', 'metadata-closing-hash-error'):
+                    self.assertTrue((path / 'plane').exists())
+                elif fault != 'equal':
+                    self.assertFalse((path / 'plane').exists())
 
     def test_delayed_complete_response_and_decode_cannot_escape_local_deadline(self):
         for at in ('response', 'decode'):

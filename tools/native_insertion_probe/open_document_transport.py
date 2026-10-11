@@ -8,7 +8,7 @@ import shlex
 import time
 from open_document_host import Refused, same_pixels
 from open_document_timing import upper_uptime_ms
-from owned_frame_capture import CONTRACT as CAPTURE_CONTRACT, TOOLS as CAPTURE_TOOLS, capture_script, validate_receipt, hash_tool_checks
+from owned_frame_capture import CONTRACT as CAPTURE_CONTRACT, TOOLS as CAPTURE_TOOLS, capture_script, validate_receipt, hash_tool_checks, ordered_hash_checks
 
 
 def q(value):
@@ -51,7 +51,7 @@ class SSHAdapter:
             raise Refused("Remote action failed or uncertain; never replay an action")
         return result["stdout"]
 
-    def prelude(self, cutoff=None, identity=None):
+    def prelude(self, cutoff=None, identity=None, snapshot=False):
         text = f"""set -eu
 umask 077
 root={q(self.root)}
@@ -96,13 +96,41 @@ b64() { /usr/bin/openssl base64 -A -in "$1"; }
             if path not in {"/usr/bin/openssl", "/usr/lib/libssl.so.3", "/usr/lib/libcrypto.so.3"} or not re.fullmatch("[0-9a-f]{64}", digest):
                 raise Refused("Exact encoder/provider path and digest required")
             text += f'test -f {q(path)} && test ! -L {q(path)}\ntest "$(stat -c \'%u %h\' {q(path)})" = \'0 1\'\n'
-            text += f'test "$(sha256sum {q(path)} | cut -d " " -f 1)" = {q(digest)}\n'
+            if not snapshot:
+                text += f'test "$(sha256sum {q(path)} | cut -d " " -f 1)" = {q(digest)}\n'
         for name, digest in self.profile["tools"].items():
             if name not in ({"owned_tap_guardian", "observe_input", "publish_creation_arm"} | set(CAPTURE_TOOLS)) or not re.fullmatch("[0-9a-f]{64}", digest):
                 raise Refused("Bounded exact tool identity required")
             text += f'test -f "$root/{name}" && test ! -L "$root/{name}"\ntest "$(stat -c \'%a %u %h\' "$root/{name}")" = \'700 0 1\'\n'
-            text += f'test "$(sha256sum "$root/{name}" | cut -d " " -f 1)" = {q(digest)}\n'
+            if not snapshot:
+                text += f'test "$(sha256sum "$root/{name}" | cut -d " " -f 1)" = {q(digest)}\n'
         return text
+
+    def snapshot_artifact_checks(self, prefix):
+        encoders = {'/usr/bin/openssl', '/usr/lib/libssl.so.3', '/usr/lib/libcrypto.so.3'}
+        tools = {'owned_tap_guardian', 'observe_input', 'publish_creation_arm'} | set(CAPTURE_TOOLS)
+        if set(self.profile.get('encoder_hashes', {})) != encoders or set(self.profile['tools']) != tools:
+            raise Refused('Complete snapshot encoder and helper pins required')
+        entries = [(q(path), path, self.profile['encoder_hashes'][path]) for path in sorted(encoders)]
+        entries += [(f'"$root/{name}"', f'$root/{name}', self.profile['tools'][name]) for name in sorted(tools)]
+        return ordered_hash_checks(f'$root/{prefix}.artifact-hashes', entries)
+
+    def sidecar_prepare(self, prefix):
+        script = ''
+        for ext in ('content', 'metadata'):
+            script += f'test ! -e "$root/{prefix}.{ext}"\ntest ! -L "$root/{prefix}.{ext}"\n'
+            script += f'initial_{ext}_result=$(sha256sum "$doc.{ext}")\ninitial_{ext}=${{initial_{ext}_result%% *}}\n'
+            script += f'test "${{#initial_{ext}}}" = 64\ncase "$initial_{ext}" in *[!0-9a-f]*) exit 90;; esac\n'
+            script += f'test "$initial_{ext}_result" = "$initial_{ext}  $doc.{ext}"\n'
+            script += f'(set -C; cat "$doc.{ext}" > "$root/{prefix}.{ext}")\nprivate "$root/{prefix}.{ext}"\n'
+            script += f'copied_{ext}_result=$(sha256sum "$root/{prefix}.{ext}")\n'
+            script += f'test "$copied_{ext}_result" = "$initial_{ext}  $root/{prefix}.{ext}"\n'
+        return script
+
+    def sidecar_close(self, prefix):
+        return ''.join(f'closing_{ext}_result=$(sha256sum "$doc.{ext}")\n'
+                       f'test "$closing_{ext}_result" = "$initial_{ext}  $doc.{ext}"\n'
+                       for ext in ('content', 'metadata'))
 
     def raw_snapshot(self, stage, cutoff, idle):
         if self.capture_failed:
@@ -132,7 +160,7 @@ b64() { /usr/bin/openssl base64 -A -in "$1"; }
     def _raw_snapshot(self, stage, cutoff, idle):
         if stage not in {"ready", "open", "trigger", "result"}:
             raise Refused("Unknown snapshot stage")
-        script = self.prelude(cutoff, self.identity)
+        script = self.prelude(cutoff, self.identity, snapshot=True)
         prefix = "host-" + stage
         if stage == "ready":
             if not idle or self.ready_frames >= CAPTURE_CONTRACT['maximum_ready_frames']:
@@ -149,6 +177,8 @@ b64() { /usr/bin/openssl base64 -A -in "$1"; }
             self.open_frames += 1
         # Claim precedes every prefix output, including idle observations.
         script += f'(set -C; printf %s {q(self.profile["nonce"])} > "$root/{prefix}.claim")\n'
+        script += self.snapshot_artifact_checks(prefix)
+        script += self.sidecar_prepare(prefix)
         # Every output is nonce-root-owned and exclusive. Snapshot failure cannot
         # renew a stage or lead to a tap/arm retry.
         script += f'test ! -e "$root/{prefix}.png" && test ! -L "$root/{prefix}.png"\n'
@@ -158,9 +188,7 @@ b64() { /usr/bin/openssl base64 -A -in "$1"; }
         else:
             script += f': > "$root/{prefix}.idle"\n'
         script += capture_script(prefix, self.profile["nonce"], self.profile["boot_id"])
-        for ext in ("content", "metadata"):
-            script += f'before=$(sha256sum "$doc.{ext}" | cut -d " " -f 1)\ncp "$doc.{ext}" "$root/{prefix}.{ext}"\n'
-            script += f'test "$(sha256sum "$root/{prefix}.{ext}" | cut -d " " -f 1)" = "$before"\ntest "$(sha256sum "$doc.{ext}" | cut -d " " -f 1)" = "$before"\n'
+        script += self.sidecar_close(prefix)
         paths = " ".join(q(p) for p in self.profile["immutable_hashes"])
         script += f'test "$(now_upper)" -le $((cutoff-4))\n"$root/owned_frame_alarm" --hashes /usr/bin/sha256sum {paths} > "$root/{prefix}.hashes"\n'
         script += 'test "$(sed \'s/^.*) //\' /proc/$pid/stat | awk \'{print $20}\')" = "$start"\n'

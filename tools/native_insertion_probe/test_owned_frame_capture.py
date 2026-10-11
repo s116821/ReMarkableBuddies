@@ -30,13 +30,16 @@ class CaptureTests(unittest.TestCase):
     def test_executed_pin_batch_requires_bootstrap_complete_order_caps_and_empty_stderr(self):
         entries = [digest + '  ' + ('/proc/123/exe' if path == '/usr/bin/xochitl' else path)
                    for path, digest in (NATIVE_HASHES | PROVIDERS).items()]
+        self.exercise_pin_batch(entries, lambda: pinned_hash_checks('$root/pins'))
+
+    def exercise_pin_batch(self, entries, render, output_name='pins'):
         expected = '\n'.join(entries) + '\n'
         faults = [('equal', expected, '', 0, True),
                   ('missing', '\n'.join(entries[:-1]) + '\n', '', 0, False),
                   ('duplicate', expected + entries[0] + '\n', '', 0, False),
                   ('reordered', '\n'.join(reversed(entries)) + '\n', '', 0, False),
                   ('digest', expected.replace(entries[0][:64], '0' * 64), '', 0, False),
-                  ('path', expected.replace('/proc/123/exe', '/proc/124/exe'), '', 0, False),
+                  ('path', expected.replace(entries[0].split('  ', 1)[1], '/wrong/path'), '', 0, False),
                   ('partial', expected[:-1], '', 0, False),
                   ('status', expected, '', 2, False),
                   ('stderr', expected, 'warning', 0, False),
@@ -47,19 +50,19 @@ class CaptureTests(unittest.TestCase):
         for name, stdout, stderr, status, accepted in faults:
             with self.subTest(name=name), tempfile.TemporaryDirectory() as root:
                 path = Path(root)
-                (path / 'batch-data').write_text(stdout)
+                (path / 'batch-data').write_text(stdout.replace('$root', root))
                 (path / 'batch-stderr').write_text(stderr)
                 launcher = path / 'owned_frame_alarm'
-                args = ['--hashes', '/usr/bin/sha256sum'] + [line.split('  ', 1)[1] for line in entries]
+                args = ['--hashes', '/usr/bin/sha256sum'] + [line.split('  ', 1)[1].replace('$root', root) for line in entries]
                 # Stub only the reviewed launcher/tool, while running the full
                 # generated admission, output retention and ordered comparison.
                 launcher.write_text('#!/bin/sh\n' + 'test "$*" = ' + shlex.quote(' '.join(args)) + ' || exit 99\n'
                                     + 'printf invoked > "$root/invoked"\ncat "$root/batch-data"\ncat "$root/batch-stderr" >&2\n' + f'exit {status}\n')
                 launcher.chmod(0o700)
-                if name == 'exclusive': (path / 'pins').write_text('owned earlier evidence')
+                if name == 'exclusive': (path / output_name).write_text('owned earlier evidence')
                 digest = '0' * 64 if name == 'bootstrap' else TOOLS['owned_frame_alarm']
                 with patch('owned_frame_capture.hash_tool_checks', return_value=':\n'):
-                    script = pinned_hash_checks('$root/pins')
+                    script = render()
                 prelude = 'set -eu\numask 077\npid=123\nprivate() { test -f "$1" && test ! -L "$1"; }\n'
                 prelude += f"sha256sum() {{ printf '%s  %s\\n' {digest} \"$1\"; }}\n"
                 result = subprocess.run(['sh', '-c', prelude + script + 'printf accepted > "$root/accepted"\n'],
