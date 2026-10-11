@@ -123,6 +123,64 @@ pub const SCREENSHOT_VIRTUAL_WIDTH: u32 = 768;
 /// Virtual screen height - all screenshots are normalized to this size  
 pub const SCREENSHOT_VIRTUAL_HEIGHT: u32 = 1024;
 
+const RM2_RGB32_BYTES: usize = 1404 * 1872 * 4;
+/// Fixed experimental envelope size; no variable native layout is admitted.
+pub const OWNED_RM2_FRAME_BYTES: usize = RM2_RGB32_BYTES + 316;
+
+/// Both views encode the same validated, owned plane. This is not native proof.
+pub struct OwnedRm2Pngs {
+    pub native: Vec<u8>,
+    pub overview: Vec<u8>,
+}
+
+fn owned_rgb32_plane<'a>(
+    envelope: &'a [u8],
+    expected_nonce: &str,
+    expected: &CaptureIdentity,
+) -> Result<&'a [u8]> {
+    anyhow::ensure!(
+        expected_nonce.len() == 32
+            && expected_nonce
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+        "Invalid selected frame nonce"
+    );
+    anyhow::ensure!(
+        envelope.len() == OWNED_RM2_FRAME_BYTES,
+        "Incomplete or extra owned frame bytes"
+    );
+    anyhow::ensure!(
+        &envelope[..8] == b"RMBRAW01" && &envelope[envelope.len() - 8..] == b"RMBEND01",
+        "Invalid owned frame framing"
+    );
+    anyhow::ensure!(
+        &envelope[8..40] == expected_nonce.as_bytes()
+            && &envelope[40..76] == expected.boot_id.as_bytes()
+            && u64::from_le_bytes(envelope[76..84].try_into()?) == u64::from(expected.pid)
+            && u64::from_le_bytes(envelope[84..92].try_into()?) == expected.start_ticks,
+        "Owned frame identity mismatch"
+    );
+    let layout: Vec<u32> = envelope[92..116]
+        .chunks_exact(4)
+        .map(|word| u32::from_le_bytes(word.try_into().expect("four-byte word")))
+        .collect();
+    anyhow::ensure!(
+        layout == [1404, 1872, 32, 5616, 4, RM2_RGB32_BYTES as u32],
+        "Unsupported owned RGB32 frame layout"
+    );
+    // Deliberately opaque: native ABI and address authority stay with the
+    // separately qualified producer. Equality is closure evidence, not ownership.
+    anyhow::ensure!(
+        envelope[116..204] == envelope[204..292],
+        "Native frame tuples changed"
+    );
+    anyhow::ensure!(
+        envelope[292..300] == envelope[300..308],
+        "Native allocation headers changed"
+    );
+    Ok(&envelope[308..envelope.len() - 8])
+}
+
 /// Only attached to a discovery-header EIO whose candidate is absent from a
 /// fresh maps sample. It does not identify that candidate as the framebuffer.
 #[derive(Debug)]
@@ -168,6 +226,26 @@ pub struct Screenshot {
 }
 
 impl Screenshot {
+    /// Pure conversion only. The parent must first preserve producer exit zero
+    /// and the complete frame hash, and enforce its nonce/deadline/native gates.
+    /// No process lookup, device detection, native pointer parsing or memory read.
+    pub fn encode_owned_rm2_rgb32(
+        envelope: &[u8],
+        expected_nonce: &str,
+        expected: &CaptureIdentity,
+    ) -> Result<OwnedRm2Pngs> {
+        let raw = owned_rgb32_plane(envelope, expected_nonce, expected)?;
+        let _timing = crate::measurement::Span::new("capture.owned_conversion");
+        let native = Self::rm2_bgra_native_image(raw)?;
+        let native_png = Self::serialize(&native, "capture.native_png")?;
+        let overview = Self::normalize_timed(&native)?;
+        let overview_png = Self::serialize(&overview, "capture.overview_png")?;
+        Ok(OwnedRm2Pngs {
+            native: native_png,
+            overview: overview_png,
+        })
+    }
+
     pub fn new() -> Result<Screenshot> {
         let device_model = DeviceModel::detect();
         info!("Screen detected device: {}", device_model.name());
@@ -435,22 +513,7 @@ impl Screenshot {
             ));
         }
         if self.rm2_bgra {
-            let pixels = raw
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|pixel| {
-                    ((77 * u32::from(pixel[2])
-                        + 150 * u32::from(pixel[1])
-                        + 29 * u32::from(pixel[0])
-                        + 128)
-                        >> 8) as u8
-                })
-                .collect();
-            return Ok(image::DynamicImage::ImageLuma8(
-                GrayImage::from_raw(1404, 1872, pixels)
-                    .ok_or_else(|| anyhow::anyhow!("Invalid BGRA framebuffer"))?,
-            ));
+            return Self::rm2_bgra_native_image(raw);
         }
         let pixels = raw
             .as_chunks::<2>()
@@ -462,6 +525,28 @@ impl Screenshot {
             .ok_or_else(|| anyhow::anyhow!("Invalid legacy framebuffer"))?;
         Ok(image::DynamicImage::ImageLuma8(
             image::imageops::flip_horizontal(&image::imageops::rotate270(&image)),
+        ))
+    }
+
+    fn rm2_bgra_native_image(raw: &[u8]) -> Result<image::DynamicImage> {
+        anyhow::ensure!(
+            raw.len() == RM2_RGB32_BYTES,
+            "Invalid BGRA framebuffer length"
+        );
+        let pixels = raw
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|pixel| {
+                ((77 * u32::from(pixel[2])
+                    + 150 * u32::from(pixel[1])
+                    + 29 * u32::from(pixel[0])
+                    + 128)
+                    >> 8) as u8
+            })
+            .collect();
+        Ok(image::DynamicImage::ImageLuma8(
+            GrayImage::from_raw(1404, 1872, pixels).context("Invalid BGRA framebuffer")?,
         ))
     }
 
@@ -915,6 +1000,101 @@ impl Screenshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn owned_frame_fixture() -> (Vec<u8>, CaptureIdentity, &'static str) {
+        let identity = identity_fixture();
+        let nonce = "1234567890abcdef1234567890abcdef";
+        let mut envelope = Vec::with_capacity(OWNED_RM2_FRAME_BYTES);
+        envelope.extend_from_slice(b"RMBRAW01");
+        envelope.extend_from_slice(nonce.as_bytes());
+        envelope.extend_from_slice(identity.boot_id.as_bytes());
+        envelope.extend_from_slice(&u64::from(identity.pid).to_le_bytes());
+        envelope.extend_from_slice(&identity.start_ticks.to_le_bytes());
+        for word in [1404u32, 1872, 32, 5616, 4, RM2_RGB32_BYTES as u32] {
+            envelope.extend_from_slice(&word.to_le_bytes());
+        }
+        for _ in 0..2 {
+            envelope.extend_from_slice(&[0x5a; 88]);
+        }
+        for _ in 0..2 {
+            envelope.extend_from_slice(&[0xa5; 8]);
+        }
+        envelope.resize(308 + RM2_RGB32_BYTES, 255);
+        envelope.extend_from_slice(b"RMBEND01");
+        (envelope, identity, nonce)
+    }
+
+    #[test]
+    fn owned_frame_rejects_short_extra_changed_identity_layout_and_closure() {
+        let (mut envelope, identity, nonce) = owned_frame_fixture();
+        assert_eq!(envelope.len(), OWNED_RM2_FRAME_BYTES);
+        assert!(owned_rgb32_plane(&envelope, nonce, &identity).is_ok());
+        for length in [0, 7, 115, 307, OWNED_RM2_FRAME_BYTES - 1] {
+            assert!(
+                Screenshot::encode_owned_rm2_rgb32(&envelope[..length], nonce, &identity).is_err()
+            );
+        }
+        envelope.push(0);
+        assert!(Screenshot::encode_owned_rm2_rgb32(&envelope, nonce, &identity).is_err());
+        envelope.pop();
+        // Change each identity/layout/closure boundary, restoring between faults.
+        for offset in [
+            0,
+            8,
+            40,
+            76,
+            84,
+            92,
+            96,
+            100,
+            104,
+            108,
+            112,
+            116,
+            204,
+            292,
+            300,
+            OWNED_RM2_FRAME_BYTES - 8,
+        ] {
+            envelope[offset] ^= 1;
+            assert!(
+                Screenshot::encode_owned_rm2_rgb32(&envelope, nonce, &identity).is_err(),
+                "offset {offset}"
+            );
+            envelope[offset] ^= 1;
+        }
+        for format in [0u32, 5, 6, 16, 17, 18, u32::MAX] {
+            envelope[108..112].copy_from_slice(&format.to_le_bytes());
+            assert!(owned_rgb32_plane(&envelope, nonce, &identity).is_err());
+        }
+        envelope[108..112].copy_from_slice(&4u32.to_le_bytes());
+        assert!(owned_rgb32_plane(&envelope, "stale-selected-nonce", &identity).is_err());
+        let wrong =
+            CaptureIdentity::new(43, identity.start_ticks, identity.boot_id.clone()).unwrap();
+        assert!(owned_rgb32_plane(&envelope, nonce, &wrong).is_err());
+    }
+
+    #[test]
+    fn owned_rgb32_pngs_preserve_asymmetric_channels_and_same_plane() {
+        let (mut envelope, identity, nonce) = owned_frame_fixture();
+        // A colored asymmetry catches BGRA/RGBA reversal; grayscale cannot.
+        for pixel in envelope[308..308 + RM2_RGB32_BYTES].chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[9, 37, 211, 255]);
+        }
+        envelope[308..312].copy_from_slice(&[211, 37, 9, 255]);
+        let pngs = Screenshot::encode_owned_rm2_rgb32(&envelope, nonce, &identity).unwrap();
+        let native = image::load_from_memory(&pngs.native).unwrap();
+        let overview = image::load_from_memory(&pngs.overview).unwrap();
+        assert_eq!((native.width(), native.height()), (1404, 1872));
+        assert_eq!((overview.width(), overview.height()), (768, 1024));
+        let expected = ((77 * 211u32 + 150 * 37 + 29 * 9 + 128) >> 8) as u8;
+        let reversed = ((77 * 9u32 + 150 * 37 + 29 * 211 + 128) >> 8) as u8;
+        assert_ne!(expected, reversed);
+        assert_eq!(native.to_luma8().get_pixel(0, 0)[0], reversed);
+        assert_eq!(native.to_luma8().get_pixel(1, 0)[0], expected);
+        let normalized = Screenshot::normalize_native(&native).unwrap();
+        assert_eq!(overview.as_bytes(), normalized.as_bytes());
+    }
 
     fn identity_fixture() -> CaptureIdentity {
         CaptureIdentity::new(42, 123, "02b2347b-03aa-4a85-8dd7-d731aabf6f3e".into()).unwrap()
