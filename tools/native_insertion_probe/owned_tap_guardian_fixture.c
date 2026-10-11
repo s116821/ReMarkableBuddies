@@ -79,7 +79,8 @@ static int fake_open(const char *path,int flags,...) {
         if(!strcmp(path,"/dev/input/event2"))return 100;
         if(!strcmp(path,"/dev/input/event1"))return 101;
         if(!strcmp(path,"/etc/hwrevision"))return openat(flow_context->root,"model",flags);
-        if(!strcmp(path,"/etc/os-release"))return openat(flow_context->root,"release",flags);
+        if(!strcmp(path,"/etc/os-release")){errno=ELOOP;return -1;}
+        if(!strcmp(path,"/usr/lib/os-release")){assert(flags&O_NOFOLLOW);return openat(flow_context->root,"release",flags);}
         if(!strncmp(path,"/run/rmb-qt-probe-",18))return open(flow_context->path,flags,mode);
     }
     return open(path,flags,mode);
@@ -224,7 +225,25 @@ static void assert_receipt_point(struct context *c,const char *name,const char *
 int main(int argc,char **argv) {
     assert(argc==2);char path[]="/tmp/guardian-fixture-XXXXXX";
     struct context c=make_context(path);const char *mode=argv[1];
-    if(!strcmp(mode,"pidfd-open-unavailable")||!strcmp(mode,"pidfd-zero-denied")) {
+    if(!strcmp(mode,"actual-os-release")||!strcmp(mode,"canonical-os-release-symlink")) {
+        flow_context=&c;assert(exclusive_record(&c,"model","reMarkable2 1.0\n",15));
+        /* Exact bytes of Main's captured target-os-release, including LF quotes.
+         * os-release is metadata; it is never evaluated as shell code. */
+        const char *actual="ID=codex\nNAME=\"Codex Linux\"\nVERSION=\"5.8.203 (scarthgap)\"\n"
+            "VERSION_ID=5.8.203\nVERSION_CODENAME=\"scarthgap\"\n"
+            "PRETTY_NAME=\"Codex Linux 5.8.203 (scarthgap)\"\n"
+            "CPE_NAME=\"cpe:/o:openembedded:codex:5.8.203\"\n"
+            "BUILD_MODE_RM=\"public\"\nIMG_VERSION=\"3.28.0.172\"\n";
+        if(!strcmp(mode,"actual-os-release")) {
+            assert(exclusive_record(&c,"release",actual,strlen(actual)));
+            assert(setup_device(&c,1));
+        } else {
+            assert(exclusive_record(&c,"release-target",actual,strlen(actual)));
+            assert(symlinkat("release-target",c.root,"release")==0);
+            assert(!setup_device(&c,1));
+        }
+        assert(writes==0);
+    } else if(!strcmp(mode,"pidfd-open-unavailable")||!strcmp(mode,"pidfd-zero-denied")) {
         pidfd_fault=!strcmp(mode,"pidfd-open-unavailable")?1:2;
         char *args[]={"fixture","--check-pidfd",NULL};
         assert(guardian_main(2,args)==90 && writes==0);

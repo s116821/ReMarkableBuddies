@@ -42,7 +42,8 @@ class GuardianFaultTests(unittest.TestCase):
                  "supervisor-after-release-crash", "supervisor-expired", "pidfd-fence",
                  "close-grammar", "foreign-point", "mixed-point", "close-foreign-echo",
                  "close-foreign-contact", "supervisor-close", "close-takeover", "supervisor-close-stopped",
-                 "pidfd-open-unavailable", "pidfd-zero-denied")
+                 "pidfd-open-unavailable", "pidfd-zero-denied",
+                 "actual-os-release", "canonical-os-release-symlink")
         for mode in modes:
             with self.subTest(mode=mode):
                 result = subprocess.run([str(self.fixture), mode], text=True, capture_output=True, timeout=3)

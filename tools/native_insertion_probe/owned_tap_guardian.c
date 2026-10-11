@@ -326,7 +326,7 @@ static int conditional_up(struct context *c,int takeover) {
 static int setup_device(struct context *c,int existing) {
     char model[128],release[4096];
     if(!file_text("/etc/hwrevision",model,sizeof model) || !strstr(model,"reMarkable2 1.0") ||
-        !file_text("/etc/os-release",release,sizeof release) ||
+        !file_text("/usr/lib/os-release",release,sizeof release) ||
         (!strstr(release,"IMG_VERSION=\"3.28.0.172\"\n") && !strstr(release,"IMG_VERSION=3.28.0.172\n")))return 0;
     c->input=open("/dev/input/event2",O_RDWR|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC);
     c->pen=open("/dev/input/event1",O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC);
