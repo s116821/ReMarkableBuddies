@@ -113,3 +113,5 @@ Pending: independent exact source review;
 fresh target build/config/artifact review; fresh hardware identity/full backup;
 Main's explicit one-run selection and subsequent semantic/visual/restoration
 readback. Native authority, crash durability and product qualification remain open.
+
+The diagnostic reader revision preserves each existing full-map equality refusal and read budget. On a map mismatch it labels the comparison and privately retains only the already-read initial/failing buffers. Producer stderr is capped at 525824 bytes, including refusal metadata; incomplete framing is incomplete diagnostic evidence and never capture success. Trial 37d089df7dee426c999f9a0edbd0569f is spent after first-ready map refusal, with no tap or creation arm. A later fresh observation must interpret the exact map delta before any predicate change.

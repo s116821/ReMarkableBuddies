@@ -4,12 +4,12 @@ import re
 import shlex
 
 TOOLS = {
-    "native_frame_acquire": "a6758a94354a718dd550c141dd36f43d1810801e76f728ff11e841845aa08b8b",
+    "native_frame_acquire": "1df200f054396de04f1b18c000c15088bb4449c46454844f0c046597aa72eef5",
     "owned_frame": "fe8a516a63ac90b754c8ca154bb74f5886fb5ffa6a8b9e7827f92d1fa5c41765",
     "owned_frame_alarm": "25e024efa8cdf3ac31fe2159b35c98acb899183c2dec74828881eeb510911b75",
 }
 SOURCES = {
-    "private_acquisition": "fe145b7f8cc483fac8cf3ce201f61b3c8594b879fb803629f004a46ffbbbe5a6",
+    "private_acquisition": "b545ea0375ab2a0e40a9841c72c19a6e5d96a898f8b79142fa70289b0fbece9d",
     "converter_library": "9ede6e943e900a60dec17616a22e55c1e6682e8e5dc6226d22de081d80fc26f3",
     "converter_example": "4e0bcff64f46a9efe72fe3c51557513968a84591365cb1603d20409f36b3d08a",
     "private_alarm": "5bf7581b6785c6c2a1d6012d87f339952210e0757c0a6bcfccf804b9e2a88f5e",
@@ -28,6 +28,7 @@ PROVIDERS = {
     "/lib/libdl.so.2": "f0aa5ff0ab3e889fe3ec9f0ba59d3c7c0c4fbcb501ecc195a10ff3cb73d62989",
 }
 CONTRACT = {"kind": "native-owned-rgb32-v1", "frame_bytes": 10513468,
+            "maximum_producer_stderr_bytes": 525824,
             "source_sha256": SOURCES, "native_hashes": NATIVE_HASHES,
             "provider_hashes": PROVIDERS, "minimum_initial_free_kib": 196608, "maximum_open_frames": 7,
             "hash_tool_sha256": "df59cc89ea72164ae92b15db4ef089acae776eda5b373bf10e2fcc46b49c8c02"}
@@ -66,6 +67,7 @@ set +e
 producer=$?
 set -e
 printf '%s\\n' "$producer" > "$root/{prefix}.producer-exit"
+test "$(stat -c '%s' "$root/{prefix}.producer-stderr")" -le 525824
 test "$producer" = 0
 test ! -s "$root/{prefix}.producer-stderr"
 cat /proc/$pid/maps > "$root/{prefix}.maps-after"
