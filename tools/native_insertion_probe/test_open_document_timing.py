@@ -1,6 +1,6 @@
 """Pure timing cases only: no SSH, input, service, or native execution."""
 import unittest
-from open_document_timing import OpenDocumentTiming
+from open_document_timing import OpenDocumentTiming, upper_uptime_ms
 
 
 class TimingTests(unittest.TestCase):
@@ -52,6 +52,24 @@ class TimingTests(unittest.TestCase):
         self.assertFalse(t.admit_creation(160, True))
         self.assertTrue(t.admit_creation(159, 160))
         self.assertFalse(t.admit_creation(167, 200))  # host stage expired
+
+    def test_uptime_rounds_observation_up_without_floating_point(self):
+        self.assertEqual(upper_uptime_ms("159.99 10.20\n"), 160000)
+        self.assertEqual(upper_uptime_ms("159.999 10.20\n"), 160000)
+        self.assertEqual(upper_uptime_ms("159.9 10.20\n"), 160000)
+        for record in ("159.99", "159.99 10.20", "159.99 10.20\r\n",
+                       "-1.00 0.00\n", "1e2 0.00\n", "159.9999 0.00\n"):
+            with self.subTest(record=record), self.assertRaises(ValueError):
+                upper_uptime_ms(record)
+
+    def test_ms_expiry_equality_and_simulated_suspend_refuse(self):
+        t = OpenDocumentTiming(100, 460, 127)
+        self.assertTrue(t.admit_creation_ms(159999, 160000))
+        self.assertFalse(t.admit_creation_ms(160000, 160000))
+        self.assertFalse(t.admit_creation_ms(220000, 167000))
+        self.assertFalse(t.admit_creation_ms(166001, 200000))
+        self.assertFalse(t.admit_creation_ms(True, 200000))
+        self.assertFalse(t.admit_creation_ms(159999, None))
 
 
 if __name__ == "__main__":

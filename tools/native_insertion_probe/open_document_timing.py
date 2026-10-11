@@ -5,12 +5,30 @@ limits are fixed from candidate start, never refreshed by signals or tokens.
 The owning proposal is SDK 2cbe204; hardware feasibility remains unqualified.
 """
 from dataclasses import dataclass
+import re
 
 ABSOLUTE_BUDGET = 360
 RECOVERY_RESERVE = 185
 OBSERVATION_BUDGET = 70
 STAGE_OFFSETS = {"ready": 20, "open": 35, "trigger": 40,
                  "result": 55, "stop": 60}
+
+
+def upper_uptime_ms(text):
+    """Conservative BOOTTIME observation from bounded /proc/uptime bytes.
+
+    Linux exposes truncated decimal uptime. Add one displayed unit so the
+    returned integer never understates the observed time. No floating point.
+    This is an observation timestamp; transport delay must be checked afresh
+    remotely before publication, not assumed to be covered by rounding.
+    """
+    if not isinstance(text, str) or len(text) > 64:
+        raise ValueError("Bounded uptime record required")
+    m = re.fullmatch(r"([0-9]{1,12})\.([0-9]{1,3}) [0-9]{1,12}\.[0-9]{1,3}\n", text)
+    if not m:
+        raise ValueError("Canonical decimal uptime record required")
+    scale = 10 ** (3 - len(m[2]))
+    return int(m[1]) * 1000 + int(m[2]) * scale + scale
 
 
 @dataclass(frozen=True)
@@ -58,3 +76,13 @@ class OpenDocumentTiming:
         return (type(sdk_gate_end) is int and sdk_gate_end > self.candidate_at
                 and type(now) is int and now < sdk_gate_end
                 and self.admit("trigger", now))
+
+    def admit_creation_ms(self, upper_now_ms, sdk_gate_end_ms):
+        """Fail closed across milliseconds and the actor's integer seconds."""
+        if (type(upper_now_ms) is not int or type(sdk_gate_end_ms) is not int
+                or upper_now_ms < 0 or sdk_gate_end_ms <= self.candidate_at * 1000):
+            return False
+        # Round current time upwards, never the SDK deadline upwards. The
+        # independent actor's seconds cutoffs may refuse up to one second early.
+        return (upper_now_ms < sdk_gate_end_ms
+                and self.admit("trigger", (upper_now_ms + 999) // 1000))
