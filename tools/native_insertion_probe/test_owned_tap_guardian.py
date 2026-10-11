@@ -43,12 +43,28 @@ class GuardianFaultTests(unittest.TestCase):
                  "close-grammar", "foreign-point", "mixed-point", "close-foreign-echo",
                  "close-foreign-contact", "supervisor-close", "close-takeover", "supervisor-close-stopped",
                  "pidfd-open-unavailable", "pidfd-zero-denied",
-                 "actual-os-release", "canonical-os-release-symlink")
+                 "actual-os-release", "canonical-os-release-symlink",
+                 "check-input-released", "check-input-x-unsupported", "check-input-contact")
         for mode in modes:
             with self.subTest(mode=mode):
                 result = subprocess.run([str(self.fixture), mode], text=True, capture_output=True, timeout=3)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertIn(mode + " PASS", result.stdout)
+                if mode.startswith("check-input-"):
+                    diagnostic = json.loads(result.stdout.splitlines()[0])
+                    self.assertEqual(diagnostic["input_events"], 0)
+                    self.assertEqual(diagnostic["event_reads"], 0)
+                    self.assertFalse(diagnostic["tap_ready"])
+                    checks = {item["name"]: item for item in diagnostic["checks"]}
+                    if mode == "check-input-x-unsupported":
+                        self.assertFalse(checks["x-slots"]["ok"])
+                        self.assertEqual(checks["x-slots"]["errno"], 22)
+                        self.assertTrue(checks["tracking-slots"]["ok"])
+                    elif mode == "check-input-contact":
+                        self.assertFalse(checks["touch-released"]["ok"])
+                        self.assertEqual(diagnostic["tracking_ids"][1], 23)
+                    else:
+                        self.assertTrue(all(item["ok"] for item in diagnostic["checks"]))
                 if mode.startswith("pidfd-") and mode != "pidfd-fence":
                     receipt = json.loads(result.stdout.splitlines()[0])
                     self.assertEqual(receipt["status"], "pidfd-self-check-unavailable")

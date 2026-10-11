@@ -135,7 +135,7 @@ def main():
                  "b3e3ca0475a84432a9b328218395de0c", "4459cae2f852426b8262f658c6aa59ed",
                  "a22fc58d4c9948098f7d2ccc8a9de8c4", "94f4037a4f3c40b881fe491b9b404bc3",
                  "94774266c10f41e2aa8d410012fee601", "2b34ff126957497285b66f77311df07e", "8287c096cca84cf6a0998b8d5f178c0d",
-                 "026e74d06f7248ae809bf1b1d6a417ba", "ff497d18868042319864c82bb34c0e5e", "65dd38a2467e4d49b45e40e8397a1486"}:
+                 "026e74d06f7248ae809bf1b1d6a417ba", "ff497d18868042319864c82bb34c0e5e", "65dd38a2467e4d49b45e40e8397a1486", "de415731986b403094dc55676d794c82"}:
         raise ValueError("Historical nonce refused")
     if selected.get("budget_seconds") != 360 or selected.get("original_policy") != POLICY:
         raise ValueError("Exact selected budget/original policy required")

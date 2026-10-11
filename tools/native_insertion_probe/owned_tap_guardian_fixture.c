@@ -60,6 +60,7 @@ static int intent_fault, omit_syn, truncated_echo;
 static struct context *flow_context;
 static int delayed_go, stop_on_down, crash_after_release, late_supervisor;
 static int pidfd_fault, self_signal_calls;
+static int diagnostic_mode, diagnostic_axis_failure, event_reads;
 static long fake_syscall(long number,...) {
     va_list args;va_start(args,number);long result=-1;
     if(number==SYS_pidfd_open) {
@@ -76,8 +77,8 @@ static long fake_syscall(long number,...) {
 static int fake_open(const char *path,int flags,...) {
     mode_t mode=0;if(flags&O_CREAT){va_list args;va_start(args,flags);mode=va_arg(args,int);va_end(args);}
     if(flow_context) {
-        if(!strcmp(path,"/dev/input/event2"))return 100;
-        if(!strcmp(path,"/dev/input/event1"))return 101;
+        if(!strcmp(path,"/dev/input/event2")){if(diagnostic_mode)assert((flags&O_ACCMODE)==O_RDONLY);return 100;}
+        if(!strcmp(path,"/dev/input/event1")){if(diagnostic_mode)assert((flags&O_ACCMODE)==O_RDONLY);return 101;}
         if(!strcmp(path,"/etc/hwrevision"))return openat(flow_context->root,"model",flags);
         if(!strcmp(path,"/etc/os-release")){errno=ELOOP;return -1;}
         if(!strcmp(path,"/usr/lib/os-release")){assert(flags&O_NOFOLLOW);return openat(flow_context->root,"release",flags);}
@@ -143,11 +144,16 @@ static int fake_ioctl(int fd,unsigned long request,...) {
     if(fd==100 && request==EVIOCGABS(ABS_MT_TRACKING_ID)) {
         struct input_absinfo *a=p;memset(a,0,sizeof *a);a->maximum=65535;return 0;
     }
+    if(fd==100 && (request==EVIOCGABS(ABS_MT_POSITION_X)||request==EVIOCGABS(ABS_MT_POSITION_Y))) {
+        struct input_absinfo *a=p;memset(a,0,sizeof *a);
+        a->maximum=request==EVIOCGABS(ABS_MT_POSITION_X)?1403:1871;return 0;
+    }
     if(fd==100 && request==EVIOCGABS(ABS_MT_SLOT)) {
         struct input_absinfo *a=p;memset(a,0,sizeof *a);a->maximum=31;a->value=kernel.selected;return 0;
     }
     if(fd==100 && request==EVIOCGMTSLOTS(sizeof(int32_t)*(SLOT_COUNT+1))) {
         int32_t *a=p;int axis=*a;
+        if(diagnostic_axis_failure && axis==ABS_MT_POSITION_X){errno=EINVAL;return -1;}
         memcpy(a+1,axis==ABS_MT_TRACKING_ID?kernel.id:axis==ABS_MT_POSITION_X?kernel.x:kernel.y,sizeof kernel.id);
         return 0;
     }
@@ -158,6 +164,7 @@ static int fake_ioctl(int fd,unsigned long request,...) {
 }
 static ssize_t fake_read(int fd,void *p,size_t size) {
     if(fd!=100)return read(fd,p,size);
+    ++event_reads;
     if(source_lost){errno=ENODEV;return -1;}
     if(!queued){errno=EAGAIN;return -1;}
     if(truncated_echo){truncated_echo=0;memcpy(p,queue,sizeof(*queue)-1);queued=0;return sizeof(*queue)-1;}
@@ -225,7 +232,9 @@ static void assert_receipt_point(struct context *c,const char *name,const char *
 int main(int argc,char **argv) {
     assert(argc==2);char path[]="/tmp/guardian-fixture-XXXXXX";
     struct context c=make_context(path);const char *mode=argv[1];
-    if(!strcmp(mode,"actual-os-release")||!strcmp(mode,"canonical-os-release-symlink")) {
+    if(!strcmp(mode,"actual-os-release")||!strcmp(mode,"canonical-os-release-symlink")||
+       !strcmp(mode,"check-input-released")||!strcmp(mode,"check-input-x-unsupported")||
+       !strcmp(mode,"check-input-contact")) {
         flow_context=&c;assert(exclusive_record(&c,"model","reMarkable2 1.0\n",15));
         /* Exact bytes of Main's captured target-os-release, including LF quotes.
          * os-release is metadata; it is never evaluated as shell code. */
@@ -234,7 +243,14 @@ int main(int argc,char **argv) {
             "PRETTY_NAME=\"Codex Linux 5.8.203 (scarthgap)\"\n"
             "CPE_NAME=\"cpe:/o:openembedded:codex:5.8.203\"\n"
             "BUILD_MODE_RM=\"public\"\nIMG_VERSION=\"3.28.0.172\"\n";
-        if(!strcmp(mode,"actual-os-release")) {
+        if(!strncmp(mode,"check-input-",12)) {
+            diagnostic_mode=1;assert(exclusive_record(&c,"release",actual,strlen(actual)));
+            diagnostic_axis_failure=!strcmp(mode,"check-input-x-unsupported");
+            if(!strcmp(mode,"check-input-contact"))kernel.id[1]=23;
+            char *args[]={"fixture","--check-input",NULL};int result=guardian_main(2,args);
+            assert(result==(!strcmp(mode,"check-input-released")?0:90));
+            assert(writes==0 && event_reads==0);
+        } else if(!strcmp(mode,"actual-os-release")) {
             assert(exclusive_record(&c,"release",actual,strlen(actual)));
             assert(setup_device(&c,1));
         } else {

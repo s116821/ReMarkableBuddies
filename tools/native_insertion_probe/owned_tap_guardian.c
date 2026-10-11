@@ -11,6 +11,7 @@
  * writer identity, unexpired lease, exact tagged contact and no other contacts.
  * tap.released is positive state evidence, not a UI acknowledgment.
  * --check-pidfd: read-only self-process capability check; signal zero only.
+ * --check-input: read-only named metadata/ioctl checks; no event reads or writes.
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -606,7 +607,58 @@ static int check_pidfd(void) {
         supported?"pidfd-self-check-supported":"pidfd-self-check-unavailable",supported?"true":"false",error);
     return supported && written>0 && fflush(stdout)==0?0:90;
 }
+static int diagnostic_check(const char *name,int ok,int error,int *first) {
+    printf("%s{\"name\":\"%s\",\"ok\":%s,\"errno\":%d}",
+        *first?"":",",name,ok?"true":"false",ok?0:error?error:EINVAL);
+    *first=0;return ok;
+}
+static int check_input(void) {
+    struct context c={.root=-1,.lock=-1,.input=-1,.pen=-1,.history=-1};
+    char model[128],release[4096];struct stat input={0},pen={0};
+    struct input_absinfo slot={0},tracking={0},x={0},y={0};
+    struct contact_state state={0};int32_t again[SLOT_COUNT];
+    int first=1,all=1,keys=0,ids=0,xs=0,ys=0,stable=0;
+    printf("{\"checks\":[");
+#define INPUT_CHECK(name,expression) do { errno=0;int passed=(expression);int error=errno; \
+    all=diagnostic_check(name,passed,error,&first)&&all; } while(0)
+    INPUT_CHECK("model",file_text("/etc/hwrevision",model,sizeof model) && strstr(model,"reMarkable2 1.0")!=NULL);
+    INPUT_CHECK("canonical-firmware",file_text("/usr/lib/os-release",release,sizeof release) &&
+        (strstr(release,"IMG_VERSION=\"3.28.0.172\"\n") || strstr(release,"IMG_VERSION=3.28.0.172\n")));
+    INPUT_CHECK("touch-open-readonly",(c.input=open("/dev/input/event2",O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC))>=0);
+    INPUT_CHECK("pen-open-readonly",(c.pen=open("/dev/input/event1",O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC))>=0);
+    INPUT_CHECK("touch-character-device",fstat(c.input,&input)==0 && S_ISCHR(input.st_mode));
+    INPUT_CHECK("pen-character-device",fstat(c.pen,&pen)==0 && S_ISCHR(pen.st_mode));
+    c.lease.input_dev=input.st_dev;c.lease.input_ino=input.st_ino;c.lease.input_rdev=input.st_rdev;
+    c.lease.pen_dev=pen.st_dev;c.lease.pen_ino=pen.st_ino;c.lease.pen_rdev=pen.st_rdev;
+    INPUT_CHECK("touch-id",ioctl(c.input,EVIOCGID,&c.lease.input_id)==0);
+    INPUT_CHECK("touch-identity",same_input(&c));
+    INPUT_CHECK("pen-key-released",(keys=pen_released(&c)));
+    INPUT_CHECK("slot-range",ioctl(c.input,EVIOCGABS(ABS_MT_SLOT),&slot)==0 &&
+        slot.minimum==0 && slot.maximum==SLOT_COUNT-1 && slot.value>=0 && slot.value<SLOT_COUNT);
+    INPUT_CHECK("tracking-range",ioctl(c.input,EVIOCGABS(ABS_MT_TRACKING_ID),&tracking)==0 &&
+        tracking.minimum<=1 && tracking.maximum>=1 && tracking.maximum<=65535);
+    INPUT_CHECK("x-range",ioctl(c.input,EVIOCGABS(ABS_MT_POSITION_X),&x)==0 && x.minimum==0 && x.maximum==1403);
+    INPUT_CHECK("y-range",ioctl(c.input,EVIOCGABS(ABS_MT_POSITION_Y),&y)==0 && y.minimum==0 && y.maximum==1871);
+    INPUT_CHECK("tracking-slots",(ids=axis_values(c.input,ABS_MT_TRACKING_ID,state.id)));
+    INPUT_CHECK("x-slots",(xs=axis_values(c.input,ABS_MT_POSITION_X,state.x)));
+    INPUT_CHECK("y-slots",(ys=axis_values(c.input,ABS_MT_POSITION_Y,state.y)));
+    INPUT_CHECK("tracking-slots-stable",(stable=axis_values(c.input,ABS_MT_TRACKING_ID,again) &&
+        ids && !memcmp(again,state.id,sizeof again)));
+    state.selected=slot.value;int empty=ids && stable && owned_state(&c.lease,&state)==0;
+    INPUT_CHECK("touch-released",empty);
+#undef INPUT_CHECK
+    int good=all && keys && empty && xs && ys;
+    printf("],\"status\":\"%s\",\"selected_slot\":%d,\"tracking_ids\":[",
+        good?"input-readonly-check-released":"input-readonly-check-refused",slot.value);
+    for(int i=0;i<SLOT_COUNT;++i)printf("%s%d",i?",":"",ids?state.id[i]:-2);
+    printf("],\"axis_ranges\":{\"tracking\":[%d,%d],\"x\":[%d,%d],\"y\":[%d,%d]},\"input_events\":0,\"event_reads\":0,\"tap_ready\":false}\n",
+        tracking.minimum,tracking.maximum,x.minimum,x.maximum,y.minimum,y.maximum);
+    if(c.input>=0)close(c.input);
+    if(c.pen>=0)close(c.pen);
+    return good && !ferror(stdout) && fflush(stdout)==0?0:90;
+}
 int main(int argc,char **argv) {
+    if(argc==2 && !strcmp(argv[1],"--check-input"))return check_input();
     if(argc==2 && !strcmp(argv[1],"--check-pidfd"))return check_pidfd();
     if(argc==5 && (!strcmp(argv[1],"--tap") || !strcmp(argv[1],"--tap-close"))) {
         if(getuid()!=0 || !hex_string(argv[2],0) || !hex_string(argv[3],1))return 90;
