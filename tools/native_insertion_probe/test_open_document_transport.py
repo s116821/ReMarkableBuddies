@@ -17,34 +17,79 @@ from owned_frame_capture import TOOLS as CAPTURE_TOOLS
 class AdapterTests(unittest.TestCase):
     def guardian(self, adapter, status):
         return {"nonce": adapter.profile["nonce"], "boot_id": adapter.profile["boot_id"], "pid": 24,
-                "start_ticks": 33, "slot": 0, "tracking_id": 123, "native_point": [164, 1396] if adapter.is_v2() else [201, 1360],
+                "start_ticks": 33, "slot": 0, "tracking_id": 123, "native_point": adapter.selected_tap()[1],
                 "lease_end_ms": 99000, "status": status, "exclusive_kernel_ownership": False}
 
     def test_v2_guardian_fixed_point_and_command_preserve_legacy(self):
-        for v2 in (False, True):
+        for variant in (None, "primary-1641396", "alternate-2011360"):
+            v2 = variant is not None
             with self.subTest(v2=v2), tempfile.TemporaryDirectory() as root:
                 adapter, calls = self.adapter(root, {"timeout": True, "exit": None})
                 if v2:
                     from open_document_timing import PRODUCTION_V2
                     adapter.profile["experiment_kind"] = PRODUCTION_V2
+                    adapter.profile["library_tap_variant"] = adapter.receipt["library_tap_variant"] = variant
                     # Exercise dispatch without live context/timing; those guards
                     # have their own executed-source controls.
                     adapter.production_closure_checks = lambda: ""
                     adapter.prelude = lambda *args: ""
                     adapter.action_budget = lambda *args: (3, None)
-                expected = [164, 1396] if v2 else [201, 1360]
+                expected = [164, 1396] if variant == "primary-1641396" else [201, 1360]
                 receipt = self.guardian(adapter, "guardian-released") | {"native_point": expected}
                 self.assertEqual(adapter.tap_receipt((json.dumps(receipt)+"\n").encode(),
                                                      "guardian-released", 100)["native_point"], expected)
-                for point in ([201, 1360] if v2 else [164, 1396], [164, 1360], [201, 1396], [float(axis) for axis in expected], str(expected), None):
+                for point in ([201, 1360] if expected == [164, 1396] else [164, 1396], [164, 1360], [201, 1396], [float(axis) for axis in expected], str(expected), None):
                     with self.assertRaises(Refused):
                         adapter.tap_receipt((json.dumps(receipt | {"native_point": point})+"\n").encode(),
                                             "guardian-released", 100)
                 with self.assertRaises(Refused):
                     adapter.open_once(("boot", 2, 3), 100)
                 self.assertEqual(len(calls), 1)
-                command = "--tap-library-v2" if v2 else "--tap"
+                command = "--tap-library-v2" if variant == "primary-1641396" else "--tap-library-v2-alt" if v2 else "--tap"
                 self.assertIn(f'owned_tap_guardian" {command} ', calls[0])
+
+    def test_v2_missing_unknown_and_conflicting_tap_selection_refuses_before_attempt(self):
+        from open_document_timing import PRODUCTION_V2
+        for variant in (None, "", "unknown", 1, [], {}):
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as root:
+                adapter, calls = self.adapter(root, {})
+                adapter.profile["experiment_kind"] = PRODUCTION_V2
+                adapter.profile["library_tap_variant"] = variant
+                with self.assertRaises(Refused): adapter.open_once(("boot",2,3),100)
+                self.assertFalse(adapter.tap_attempted)
+                with self.assertRaises(Refused):adapter.arm_once(None,None,{})
+                self.assertFalse(adapter.arm_attempted)
+                self.assertFalse(calls)
+        for receipt_variant in (None, "unknown", 1, [], {}, "alternate-2011360"):
+            with tempfile.TemporaryDirectory() as root:
+                adapter, calls = self.adapter(root,{})
+                adapter.profile["experiment_kind"] = PRODUCTION_V2
+                adapter.receipt["library_tap_variant"] = receipt_variant
+                with self.assertRaises(Refused): adapter.open_once(("boot",2,3),100)
+                self.assertFalse(adapter.tap_attempted)
+                with self.assertRaises(Refused):adapter.arm_once(None,None,{})
+                self.assertFalse(adapter.arm_attempted)
+                self.assertFalse(calls)
+        for missing in ("profile","receipt"):
+            with tempfile.TemporaryDirectory() as root:
+                adapter,calls=self.adapter(root,{})
+                adapter.profile["experiment_kind"]=PRODUCTION_V2
+                (adapter.profile if missing=="profile" else adapter.receipt).pop("library_tap_variant")
+                with self.assertRaises(Refused):adapter.open_once(("boot",2,3),100)
+                with self.assertRaises(Refused):adapter.arm_once(None,None,{})
+                self.assertFalse(adapter.tap_attempted);self.assertFalse(adapter.arm_attempted)
+                self.assertFalse(calls)
+
+    def test_validated_v2_selection_cannot_switch_during_adapter_lifetime(self):
+        from open_document_timing import PRODUCTION_V2
+        with tempfile.TemporaryDirectory() as root:
+            adapter,calls=self.adapter(root,{})
+            adapter.profile["experiment_kind"]=PRODUCTION_V2
+            self.assertEqual(adapter.selected_tap()[1],[164,1396])
+            adapter.profile["library_tap_variant"]=adapter.receipt["library_tap_variant"]="alternate-2011360"
+            with self.assertRaises(Refused):adapter.selected_tap()
+            with self.assertRaises(Refused):adapter.open_once(("boot",2,3),100)
+            self.assertFalse(calls)
 
     def test_guardian_source_and_artifact_drift_refuse_before_transport(self):
         import coordinator
@@ -127,8 +172,8 @@ class AdapterTests(unittest.TestCase):
             if script == 'set -eu\ncat /proc/uptime\n':
                 return {"timeout": False, "exit": 0, "stdout": "51.00 0.00\n"}
             return result
-        adapter = SSHAdapter([], {"remote_root": "/run/rmb-qt-probe-" + "1" * 32},
-                             {"nonce": "1" * 32, "document_id": "fixture",
+        adapter = SSHAdapter([], {"remote_root": "/run/rmb-qt-probe-" + "1" * 32, "library_tap_variant": "primary-1641396"},
+                             {"nonce": "1" * 32, "document_id": "fixture", "library_tap_variant": "primary-1641396",
                               "boot_id": "boot", "tools": CAPTURE_TOOLS | {name: 'a' * 64 for name in ('owned_tap_guardian', 'observe_input', 'publish_creation_arm')},
                               "encoder_hashes": {path: 'b' * 64 for path in ('/usr/bin/openssl', '/usr/lib/libssl.so.3', '/usr/lib/libcrypto.so.3')}}, root, transport, b"")
         adapter.root_inode = "1 2"

@@ -268,8 +268,8 @@ static ssize_t fake_write(int fd,const void *p,size_t size) {
         if(e.code==ABS_MT_POSITION_Y)kernel.y[kernel.selected]=e.value;
     }
     if(down && v2_echo_fault==6) {
-        queue[queued++]=event(EV_ABS,ABS_MT_POSITION_X,LIBRARY_V2_X);
-        queue[queued++]=event(EV_ABS,ABS_MT_POSITION_Y,LIBRARY_V2_Y);
+        queue[queued++]=event(EV_ABS,ABS_MT_POSITION_X,intent_context->lease.x);
+        queue[queued++]=event(EV_ABS,ABS_MT_POSITION_Y,intent_context->lease.y);
         queue[queued++]=event(EV_SYN,SYN_REPORT,0);
     }
     if(down && stop_on_down)raise(SIGSTOP);
@@ -316,6 +316,8 @@ static void assert_receipt_point(struct context *c,const char *name,const char *
 int main(int argc,char **argv) {
     assert(argc==2);char path[]="/tmp/guardian-fixture-XXXXXX";
     struct context c=make_context(path);const char *mode=argv[1];
+    int alternate=!strncmp(mode,"v2-alt-",7);
+    char normalized[80];if(alternate){snprintf(normalized,sizeof normalized,"v2-%s",mode+7);mode=normalized;}
     if(!strcmp(mode,"go-zero")||!strcmp(mode,"go-partial")||!strcmp(mode,"go-race-after-absent-open")) {
         flow_context=&c;
         if(!strcmp(mode,"go-race-after-absent-open")) {
@@ -431,14 +433,15 @@ int main(int argc,char **argv) {
         assert(recover_observed(&c));assert(writes==1 && kernel.id[0]==-1);
         assert_receipt_point(&c,"tap.recovered","\"native_point\":[1347,1817]");
     } else if(!strncmp(mode,"v2-",3)) {
-        bind_point(&c,LIBRARY_V2_X,LIBRARY_V2_Y);
+        c.strict_library_v2=1;
+        bind_point(&c,alternate?NATIVE_X:LIBRARY_V2_X,alternate?NATIVE_Y:LIBRARY_V2_Y);
         assert(exclusive_record(&c,"model","reMarkable2 1.0\n",15));
         const char *v2_release="IMG_VERSION=\"3.28.0.172\"\n";
         assert(exclusive_record(&c,"release",v2_release,strlen(v2_release)));
         struct contact_state seed;assert(snapshot(&c,&seed));
-        if(!strcmp(mode,"v2-equal-x"))kernel.x[0]=LIBRARY_V2_X;
-        if(!strcmp(mode,"v2-equal-y"))kernel.y[0]=LIBRARY_V2_Y;
-        if(!strcmp(mode,"v2-equal-both")){kernel.x[0]=LIBRARY_V2_X;kernel.y[0]=LIBRARY_V2_Y;}
+        if(!strcmp(mode,"v2-equal-x"))kernel.x[0]=c.lease.x;
+        if(!strcmp(mode,"v2-equal-y"))kernel.y[0]=c.lease.y;
+        if(!strcmp(mode,"v2-equal-both")){kernel.x[0]=c.lease.x;kernel.y[0]=c.lease.y;}
         if(!strcmp(mode,"v2-active"))kernel.id[1]=88;
         if(!strcmp(mode,"v2-seed-ioctl"))diagnostic_axis_failure=1;
         if(!strncmp(mode,"v2-equal",8)||!strcmp(mode,"v2-active")||!strcmp(mode,"v2-seed-ioctl")) {
@@ -469,9 +472,9 @@ int main(int argc,char **argv) {
             intent_context=&c;
             if(intent_fault) {assert(!write_frame(&c,1));assert(writes==0);}
             else if(!strcmp(mode,"v2-takeover")) {
-                kernel.id[0]=c.lease.tracking;kernel.x[0]=LIBRARY_V2_X;kernel.y[0]=LIBRARY_V2_Y;
+                kernel.id[0]=c.lease.tracking;kernel.x[0]=c.lease.x;kernel.y[0]=c.lease.y;
                 assert(recover_observed(&c));assert(writes==1 && kernel.id[0]==-1);
-                assert_receipt_point(&c,"tap.recovered","\"native_point\":[164,1396]");
+                assert_receipt_point(&c,"tap.recovered",alternate?"\"native_point\":[201,1360]":"\"native_point\":[164,1396]");
             } else {
                 v2_echo_fault=!strcmp(mode,"v2-missing-x")?1:!strcmp(mode,"v2-missing-y")?2:
                     !strcmp(mode,"v2-missing-both")?3:!strcmp(mode,"v2-split")?4:
@@ -479,7 +482,7 @@ int main(int argc,char **argv) {
                 assert(write_frame(&c,1));
                 if(v2_echo_fault>=7) {
                     assert(!drain_history(&c,1));assert(!conditional_up(&c,0));assert(writes==1);
-                    cleanup(&c);printf("%s PASS temporary=%s\n",mode,path);return 0;
+                    cleanup(&c);printf("%s PASS temporary=%s\n",argv[1],path);return 0;
                 }
                 assert(drain_history(&c,1));
                 assert(c.down_frame==(!v2_echo_fault));assert(!c.invalid);
@@ -491,6 +494,10 @@ int main(int argc,char **argv) {
                 if(v2_echo_fault){struct stat absent;assert(fstatat(c.root,"tap.released",&absent,0)<0 && errno==ENOENT);}
             }
         }
+    } else if(!strcmp(mode,"legacy-same-coordinate")) {
+        kernel.x[0]=NATIVE_X;kernel.y[0]=NATIVE_Y;v2_echo_fault=3;
+        assert(write_frame(&c,1));assert(drain_history(&c,1));assert(c.down_frame);
+        c.complete_down=1;assert(conditional_up(&c,0));assert(writes==2);
     } else if(!strcmp(mode,"success")) {
         assert(write_frame(&c,1));c.complete_down=1;
         assert(conditional_up(&c,0));assert(c.down_echo&&c.up_echo&&writes==2);
@@ -561,7 +568,7 @@ int main(int argc,char **argv) {
         struct stat s;assert(fstatat(c.root,"tap.released",&s,0)!=0);
     } else if(!strcmp(mode,"delayed-go")||!strcmp(mode,"supervisor-normal")||!strcmp(mode,"supervisor-stopped")||
               !strcmp(mode,"supervisor-after-release-crash")||!strcmp(mode,"supervisor-expired")||
-              !strcmp(mode,"pidfd-fence")||!strcmp(mode,"supervisor-close")||!strcmp(mode,"supervisor-close-stopped")||!strcmp(mode,"supervisor-v2")||!strcmp(mode,"supervisor-v2-stopped")) {
+              !strcmp(mode,"pidfd-fence")||!strcmp(mode,"supervisor-close")||!strcmp(mode,"supervisor-close-stopped")||!strcmp(mode,"supervisor-v2")||!strcmp(mode,"supervisor-v2-stopped")||!strcmp(mode,"supervisor-alt")||!strcmp(mode,"supervisor-alt-stopped")) {
         flow_context=&c;
         assert(exclusive_record(&c,"model","reMarkable2 1.0\n",15));
         const char *release="IMG_VERSION=\"3.28.0.172\"\n";
@@ -588,12 +595,13 @@ int main(int argc,char **argv) {
             assert(unlinkat(c.root,"tap.lock",0)==0);
             char token[34];snprintf(token,sizeof token,"%s\n",c.lease.nonce);
             assert(exclusive_record(&c,"tap.go",token,33));
-            stop_on_down=!strcmp(mode,"supervisor-stopped")||!strcmp(mode,"supervisor-expired")||!strcmp(mode,"supervisor-close-stopped")||!strcmp(mode,"supervisor-v2-stopped");
+            stop_on_down=!strcmp(mode,"supervisor-stopped")||!strcmp(mode,"supervisor-expired")||!strcmp(mode,"supervisor-close-stopped")||!strcmp(mode,"supervisor-v2-stopped")||!strcmp(mode,"supervisor-alt-stopped");
             crash_after_release=!strcmp(mode,"supervisor-after-release-crash");
             late_supervisor=!strcmp(mode,"supervisor-expired");
             int close_mode=!strcmp(mode,"supervisor-close")||!strcmp(mode,"supervisor-close-stopped");
-            int v2_mode=!strcmp(mode,"supervisor-v2")||!strcmp(mode,"supervisor-v2-stopped");
-            char *args[]={"fixture",close_mode?"--tap-close":v2_mode?"--tap-library-v2":"--tap",c.lease.nonce,c.lease.boot,"6000",NULL};
+            int alt_mode=!strcmp(mode,"supervisor-alt")||!strcmp(mode,"supervisor-alt-stopped");
+            int v2_mode=!strcmp(mode,"supervisor-v2")||!strcmp(mode,"supervisor-v2-stopped")||alt_mode;
+            char *args[]={"fixture",close_mode?"--tap-close":alt_mode?"--tap-library-v2-alt":v2_mode?"--tap-library-v2":"--tap",c.lease.nonce,c.lease.boot,"6000",NULL};
             int result=guardian_main(5,args);struct stat marker;
             if(stop_on_down||crash_after_release) {
                 assert(result==90);
@@ -602,19 +610,19 @@ int main(int argc,char **argv) {
                 assert(fstatat(c.root,"tap.supervisor-complete",&marker,0)!=0);
                 if(crash_after_release)assert(fstatat(c.root,"tap.released",&marker,0)==0);
                 if(close_mode)assert_receipt_point(&c,"tap.recovered","\"native_point\":[1347,1817]");
-                if(v2_mode)assert_receipt_point(&c,"tap.recovered","\"native_point\":[164,1396]");
+                if(v2_mode)assert_receipt_point(&c,"tap.recovered",alt_mode?"\"native_point\":[201,1360]":"\"native_point\":[164,1396]");
             } else {
                 assert(result==0 && kernel.id[0]==-1);
                 assert(fstatat(c.root,"tap.supervisor-complete",&marker,0)==0);
-                const char *point=v2_mode?"\"native_point\":[164,1396]":!strcmp(mode,"supervisor-close")?"\"native_point\":[1347,1817]":"\"native_point\":[201,1360]";
+                const char *point=alt_mode?"\"native_point\":[201,1360]":v2_mode?"\"native_point\":[164,1396]":!strcmp(mode,"supervisor-close")?"\"native_point\":[1347,1817]":"\"native_point\":[201,1360]";
                 assert_receipt_point(&c,"tap.ready",point);
                 assert_receipt_point(&c,"tap.released",point);
                 assert_receipt_point(&c,"tap.supervisor-complete",point);
-                assert(kernel.x[0]==(!strcmp(mode,"supervisor-close")?CLOSE_X:v2_mode?LIBRARY_V2_X:NATIVE_X));
-                assert(kernel.y[0]==(!strcmp(mode,"supervisor-close")?CLOSE_Y:v2_mode?LIBRARY_V2_Y:NATIVE_Y));
+                assert(kernel.x[0]==(!strcmp(mode,"supervisor-close")?CLOSE_X:v2_mode&&!alt_mode?LIBRARY_V2_X:NATIVE_X));
+                assert(kernel.y[0]==(!strcmp(mode,"supervisor-close")?CLOSE_Y:v2_mode&&!alt_mode?LIBRARY_V2_Y:NATIVE_Y));
             }
             assert(munmap(kernel_pointer,sizeof *kernel_pointer)==0);kernel_pointer=&local_kernel;
         }
     } else assert(0);
-    cleanup(&c);printf("%s PASS temporary=%s\n",mode,path);return 0;
+    cleanup(&c);printf("%s PASS temporary=%s\n",argv[1],path);return 0;
 }

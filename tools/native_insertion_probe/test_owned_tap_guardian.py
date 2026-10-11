@@ -58,6 +58,8 @@ class GuardianFaultTests(unittest.TestCase):
                  "publisher-tmp-bytes", "publisher-ready-replaced", "publisher-root-fsync",
                  "publisher-post-rename-fsync", "publisher-rename-unavailable", "publisher-noreplace-race",
                  "publisher-owner-changed", "publisher-lock-replaced", "publisher-zombie-writer")
+        modes += tuple("v2-alt-" + mode[3:] for mode in modes if mode.startswith("v2-"))
+        modes += ("supervisor-alt", "supervisor-alt-stopped", "legacy-same-coordinate")
         for mode in modes:
             with self.subTest(mode=mode):
                 result = subprocess.run([str(self.fixture), mode], text=True, capture_output=True, timeout=3)

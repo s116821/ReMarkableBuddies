@@ -19,6 +19,7 @@ class ProfileTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary); receipt,profile=self.fixture(root)
             receipt['experiment_kind']=profile['experiment_kind']=PRODUCTION_V2
+            receipt['library_tap_variant']=profile['library_tap_variant']='primary-1641396'
             profile.update(production_contract=V2_CONTRACT,sdk_revision=V2_SDK_REVISION,
                            sdk_source_hashes=V2_SDK_SOURCES,sdk_setup_variant='AfterOpen95s',
                            sdk_configuration_sha256='c'*64,host_sequence_contract='bounded-host-v6-production-v2')
@@ -28,13 +29,36 @@ class ProfileTests(unittest.TestCase):
             with patch('coordinator.V2_LIBRARY_SHA256',profile['references']['library-reference.png']):
                 (root/'host-profile.json').write_text(json.dumps(profile))
                 self.assertEqual(coordinator.load_host_profile(root,receipt),profile)
+                alternate=copy.deepcopy(profile); alternate["library_tap_variant"]="alternate-2011360"
+                (root/"host-profile.json").write_text(json.dumps(alternate))
+                self.assertEqual(coordinator.load_host_profile(root,receipt | {"library_tap_variant":"alternate-2011360"}),alternate)
+                for missing in (None, "unknown", 1, [], {}):
+                    with self.assertRaises(ValueError): coordinator.load_host_profile(root,receipt | {"library_tap_variant":missing})
+                for missing_from in ("profile","receipt"):
+                    missing_profile=copy.deepcopy(profile);missing_receipt=copy.deepcopy(receipt)
+                    (missing_profile if missing_from=="profile" else missing_receipt).pop("library_tap_variant")
+                    (root/"host-profile.json").write_text(json.dumps(missing_profile))
+                    with self.assertRaises(ValueError):coordinator.load_host_profile(root,missing_receipt)
                 for field,value in (('sdk_revision','485ac1a46367bfdf203abe140a8b764728cdf54d'),
                                     ('sdk_setup_variant','Legacy40s'),('sdk_source_hashes',{}),
                                     ('production_contract',{}),('sdk_configuration_sha256',''),
-                                    ('host_sequence_contract','bounded-host-v5')):
+                                    ('host_sequence_contract','bounded-host-v5'),
+                                    ('library_tap_variant',None),('library_tap_variant','unknown'),
+                                    ('library_tap_variant',1),('library_tap_variant',[]),
+                                    ('library_tap_variant','alternate-2011360')):
                     changed=copy.deepcopy(profile); changed[field]=value
                     (root/'host-profile.json').write_text(json.dumps(changed))
                     with self.subTest(field=field),self.assertRaises(ValueError): coordinator.load_host_profile(root,receipt)
+    def test_preparation_tap_enum_has_no_default_or_adaptive_choice(self):
+        from prepare_packet import library_tap_selection
+        for value, command, point in (
+            ("primary-1641396","--tap-library-v2",[164,1396]),
+            ("alternate-2011360","--tap-library-v2-alt",[201,1360]),
+        ):
+            self.assertEqual(library_tap_selection({"library_tap_variant":value}),(command,point))
+        for value in (None, "", "unknown", 1, [], {}):
+            with self.assertRaises(ValueError): library_tap_selection({"library_tap_variant":value})
+
     def test_purpose_is_bound_to_profile_and_packet(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);receipt,profile=self.fixture(root)

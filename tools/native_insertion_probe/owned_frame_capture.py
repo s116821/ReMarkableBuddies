@@ -15,13 +15,13 @@ PHASE_LABELS = ('record_start', 'artifact_begin', 'artifact_end', 'sidecar_prepa
 TOOLS = {
     "native_frame_acquire": "eaaf0799c40b70e582fc4c3b395f9e5354b659d5e548861b809874c7cddbd6f5",
     "owned_frame": "fe8a516a63ac90b754c8ca154bb74f5886fb5ffa6a8b9e7827f92d1fa5c41765",
-    "owned_frame_alarm": "25e024efa8cdf3ac31fe2159b35c98acb899183c2dec74828881eeb510911b75",
+    "owned_frame_alarm": "cd9b2dddc238be68a42d4d96fcb06d94e5e9479b2d6595a9c93119bdb98c432c",
 }
 SOURCES = {
     "private_acquisition": "dc739913913a05a9386818fee9406df458f3732fd04c9f77fed5db8e14a3a470",
     "converter_library": "9ede6e943e900a60dec17616a22e55c1e6682e8e5dc6226d22de081d80fc26f3",
     "converter_example": "4e0bcff64f46a9efe72fe3c51557513968a84591365cb1603d20409f36b3d08a",
-    "private_alarm": "5bf7581b6785c6c2a1d6012d87f339952210e0757c0a6bcfccf804b9e2a88f5e",
+    "private_alarm": "e5a9fa01898546b55f9ac1876ac8945ed9d3536e30ce09783a23ca9eb45058c5",
 }
 NATIVE_HASHES = {
     "/usr/bin/xochitl": "071d85beef3ef2d4cc0e11002140b27b82a2cc04a2ed740a5669f591069b77df",

@@ -46,6 +46,11 @@ def load_host_profile(packet, receipt):
             raise ValueError("Reviewed host source changed")
         if profile['experiment_kind'] == PRODUCTION_V2:
             validate_v2_binding(profile)
+            from prepare_packet import library_tap_selection
+            library_tap_selection(profile)
+            library_tap_selection(receipt)
+            if profile["library_tap_variant"] != receipt["library_tap_variant"]:
+                raise ValueError("Host/packet tap selection mismatch")
             if (profile.get('tools', {}).get('publish_creation_arm') != V2_PUBLISHER_SHA256 or
                 profile.get('references', {}).get('library-reference.png') != V2_LIBRARY_SHA256):
                 raise ValueError('Production v2 publisher/reference binding changed')

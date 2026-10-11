@@ -8,6 +8,7 @@
  * lease/ready precede exact NONCE\n tap.go, then a new 1500ms contact lease.
  * --tap-library-v2 uses fixed library (90,260 -> 164,1396), stable released
  * cached coordinates and coordinate-complete first DOWN echo.
+ * --tap-library-v2-alt applies the same strict policy at fixed (201,1360).
  * --tap-close has the same arguments and supervision, using only the close point.
  * --recover NONCE BOOT_UUID: release-only, same persistent flock, dead exact
  * writer identity, unexpired lease, exact tagged contact and no other contacts.
@@ -65,7 +66,7 @@ struct context {
     struct stat lease_stat;
     int lease_bound;
     struct contact_state seed;
-    int seed_bound, down_first_syn, down_x_echo, down_y_echo;
+    int strict_library_v2, seed_bound, down_first_syn, down_x_echo, down_y_echo;
     int invalid, down_echo, up_echo, down_frame, up_frame, selected, event_count, complete_down, writer_fenced;
 };
 static volatile sig_atomic_t interrupted;
@@ -222,19 +223,17 @@ static int snapshot(struct context *c,struct contact_state *state) {
         axis_values(c->input,ABS_MT_POSITION_X,state->x) && axis_values(c->input,ABS_MT_POSITION_Y,state->y) &&
         axis_values(c->input,ABS_MT_TRACKING_ID,again) && !memcmp(state->id,again,sizeof again);
 }
-/* V2 is a fixed point policy; persisted lease ABI and UP recovery are unchanged. */
-static int library_v2(const struct lease *l) {
-    return l->x==LIBRARY_V2_X && l->y==LIBRARY_V2_Y;
-}
+/* Explicit command policy distinguishes strict alternate from legacy at the
+ * same point. Persisted lease ABI and UP-only recovery are unchanged. */
 static int qualify_seed(struct context *c,const struct contact_state *s) {
-    if(!library_v2(&c->lease))return 1;
+    if(!c->strict_library_v2)return 1;
     for(int i=0;i<SLOT_COUNT;++i) {
         if(s->id[i]!=-1)return 0;
         if(c->seed_bound && (s->id[i]!=c->seed.id[i] ||
             s->x[i]!=c->seed.x[i] || s->y[i]!=c->seed.y[i]))return 0;
     }
     if((c->seed_bound && s->selected!=c->seed.selected) ||
-        s->x[0]==LIBRARY_V2_X || s->y[0]==LIBRARY_V2_Y)return 0;
+        s->x[0]==c->lease.x || s->y[0]==c->lease.y)return 0;
     c->seed=*s;c->seed_bound=1;return 1;
 }
 struct pen_observation { int query_return, query_errno, touch, tool_pen, tool_rubber; };
@@ -297,7 +296,7 @@ static int write_frame(struct context *c,int down) {
     struct contact_state current;
     if(!lease_valid(c) || !pen_released(c) || !snapshot(c,&current))return 0;
     if(down ? interrupted || !admission_open(c) || owned_state(&c->lease,&current)!=0 ||
-        (library_v2(&c->lease) && (!c->seed_bound || !qualify_seed(c,&current))) :
+        (c->strict_library_v2 && (!c->seed_bound || !qualify_seed(c,&current))) :
         owned_state(&c->lease,&current)!=1)return 0;
     ssize_t written=write(c->input,e,n*sizeof(*e));
     return written==(ssize_t)(n*sizeof(*e));
@@ -318,9 +317,9 @@ static int drain_history(struct context *c,int phase) {
                 if(e->code!=SYN_REPORT || e->value!=0)return 0;
                 if(phase==1 && !c->down_first_syn) {
                     c->down_first_syn=1;
-                    c->down_frame=c->down_echo && (!library_v2(&c->lease) ||
+                    c->down_frame=c->down_echo && (!c->strict_library_v2 ||
                         (c->down_x_echo && c->down_y_echo));
-                } else if(phase==1 && !library_v2(&c->lease) && c->down_echo)c->down_frame=1;
+                } else if(phase==1 && !c->strict_library_v2 && c->down_echo)c->down_frame=1;
                 if(phase==2 && c->up_echo)c->up_frame=1;
                 continue;
             }
@@ -537,7 +536,9 @@ static int run_guardian(int argc,char **argv) {
     struct context c={.root=-1,.lock=-1,.input=-1,.pen=-1,.history=-1};
     int close_tap=argc==5 && !strcmp(argv[1],"--tap-close");
     int v2_tap=argc==5 && !strcmp(argv[1],"--tap-library-v2");
-    int tap=argc==5 && (!strcmp(argv[1],"--tap") || close_tap || v2_tap);
+    int alt_tap=argc==5 && !strcmp(argv[1],"--tap-library-v2-alt");
+    int tap=argc==5 && (!strcmp(argv[1],"--tap") || close_tap || v2_tap || alt_tap);
+    c.strict_library_v2=v2_tap || alt_tap;
     int take=argc==4 && !strcmp(argv[1],"--recover");
     int ok=0;
     if((!tap&&!take) || getuid()!=0 || !hex_string(argv[2],0) || !hex_string(argv[3],1))goto done;
@@ -806,7 +807,7 @@ int main(int argc,char **argv) {
     if(argc>=2 && !strcmp(argv[1],"--publish-go"))return publish_go(argc,argv);
     if(argc==2 && !strcmp(argv[1],"--check-input"))return check_input();
     if(argc==2 && !strcmp(argv[1],"--check-pidfd"))return check_pidfd();
-    if(argc==5 && (!strcmp(argv[1],"--tap") || !strcmp(argv[1],"--tap-close") || !strcmp(argv[1],"--tap-library-v2"))) {
+    if(argc==5 && (!strcmp(argv[1],"--tap") || !strcmp(argv[1],"--tap-close") || !strcmp(argv[1],"--tap-library-v2") || !strcmp(argv[1],"--tap-library-v2-alt"))) {
         if(getuid()!=0 || !hex_string(argv[2],0) || !hex_string(argv[3],1))return 90;
         return supervise(argc,argv);
     }

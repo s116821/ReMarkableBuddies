@@ -8,6 +8,16 @@ import shutil
 from owned_frame_capture import CONTRACT as CAPTURE_CONTRACT, TOOLS as CAPTURE_TOOLS, HOST_KINDS, OBSERVATION_KIND
 from open_document_timing import PRODUCTION_V2, V2_LIBRARY_SHA256, V2_PUBLISHER_SHA256, validate_v2_binding, validate_v2_config
 
+LIBRARY_TAP_VARIANTS = {
+    "primary-1641396": ("--tap-library-v2", [164, 1396]),
+    "alternate-2011360": ("--tap-library-v2-alt", [201, 1360]),
+}
+def library_tap_selection(profile):
+    value = profile.get("library_tap_variant")
+    if type(value) is not str or value not in LIBRARY_TAP_VARIANTS:
+        raise ValueError("Explicit preselected library tap variant required")
+    return LIBRARY_TAP_VARIANTS[value]
+
 HERE = Path(__file__).resolve().parent
 POLICY = {"OnFailure": "remarkable-fail.service", "OnFailureJobMode": "replace",
           "FailureAction": "none", "StartLimitAction": "none", "Restart": "on-failure",
@@ -125,6 +135,7 @@ def main():
         raise ValueError("Explicit insertion experiment required; no diagnostic alias")
     if kind == PRODUCTION_V2:
         validate_v2_binding(selected)
+        library_tap_selection(selected)
         if args.creation_config is None:
             raise ValueError('Reviewed SDK95 creation configuration input required')
         config = regular(args.creation_config)
@@ -247,7 +258,7 @@ def main():
                        "open_document_timing.py", "publish_creation_arm.c", "coordinator.py",
                        "prepare_packet.py", "actor.sh.in", "arm.sh.in", "owned_tap_guardian.c", "owned_frame_capture.py")}}
         if kind == PRODUCTION_V2:
-            profile.update({key: selected[key] for key in ('production_contract', 'sdk_revision', 'sdk_source_hashes',
+            profile.update({key: selected[key] for key in ('library_tap_variant', 'production_contract', 'sdk_revision', 'sdk_source_hashes',
                                                           'sdk_setup_variant', 'sdk_configuration_sha256')})
             profile['host_sequence_contract'] = 'bounded-host-v6-production-v2'
         (output / "host-profile.json").write_text(json.dumps(profile, indent=2) + "\n", encoding="utf-8", newline="\n")
@@ -274,6 +285,8 @@ def main():
                "experiment_kind": kind, "document_id": document, "target_page_id": target, "before_page_ids": pages,
                "absolute_budget_seconds": 360, "selection_sha256": sha(selection_file), "files": hashes,
                "packet_manifest_sha256": sha(output / "packet.files")}
+    if kind == PRODUCTION_V2:
+        receipt["library_tap_variant"] = selected["library_tap_variant"]
     (output / "preparation.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8", newline="\n")
     (output / "preparation.json").chmod(0o600)
     print(json.dumps(receipt))

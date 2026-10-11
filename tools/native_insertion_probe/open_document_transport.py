@@ -34,6 +34,7 @@ class SSHAdapter:
         self.diagnostic_context = None
         self.diagnostic_end = None
         self.tap_attempted = False
+        self.library_tap_variant = None
         self.arm_attempted = False
         self.stop_attempted = False
         self.tap_released = False
@@ -72,6 +73,22 @@ class SSHAdapter:
     def require_publication(self):
         if self.profile.get('experiment_kind', 'open-document-insertion-v1') not in {'open-document-insertion-v1', PRODUCTION_V2}:
             raise Refused('Observation purpose cannot publish input or creation permission')
+
+    def selected_tap(self):
+        if not self.is_v2():
+            return "--tap", [201, 1360]
+        from prepare_packet import library_tap_selection
+        try:
+            selected = library_tap_selection(self.profile)
+            library_tap_selection(self.receipt)
+            if self.receipt.get("library_tap_variant") != self.profile["library_tap_variant"]:
+                raise ValueError("Conflicting packet tap selection")
+            if self.library_tap_variant is not None and self.library_tap_variant != self.profile["library_tap_variant"]:
+                raise ValueError("Preselected tap variant changed; never switch")
+            self.library_tap_variant = self.profile["library_tap_variant"]
+            return selected
+        except ValueError as error:
+            raise Refused(str(error)) from error
 
     def is_v2(self):
         return self.profile.get('experiment_kind') == PRODUCTION_V2
@@ -523,6 +540,7 @@ fi
 
     def open_once(self, identity, cutoff):
         self.require_publication()
+        tap_command, _ = self.selected_tap()
         if self.tap_attempted: raise Refused("Ordinary open already attempted")
         self.tap_attempted = True
         script = self.prelude(cutoff, identity)
@@ -535,7 +553,6 @@ fi
         # Select a setup cutoff once from fresh remote BOOTTIME, capped by the
         # original open stage. Ceil+14 seconds is at most 15 seconds from now.
         script += f'tap_cutoff_ms=$(( $(now_upper)*1000 + 14000 ))\ntest "$tap_cutoff_ms" -le {int(cutoff) * 1000} || tap_cutoff_ms={int(cutoff) * 1000}\n'
-        tap_command = '--tap-library-v2' if self.is_v2() else '--tap'
         script += f'nohup "$root/owned_tap_guardian" {tap_command} {q(self.profile["nonce"])} {q(self.profile["boot_id"])} "$tap_cutoff_ms" < /dev/null > "$root/tap-guardian.log" 2>&1 &\n'
         script += r"""while ! test -f "$root/tap.ready"; do
  test ! -e "$root/tap.unresolved"; test ! -L "$root/tap.unresolved"; test "$(now_upper)" -lt "$cutoff"
@@ -631,7 +648,7 @@ printf '{"released":"%s","supervisor":"%s","lease":"%s","publication":"%s"}\n' "
             raise Refused("Guardian receipt identity mismatch")
         if any(type(value[key]) is not int or value[key] <= 0 for key in ("pid", "start_ticks", "tracking_id", "lease_end_ms")):
             raise Refused("Canonical guardian process/lease identity required")
-        if type(value["native_point"]) is not list or len(value["native_point"]) != 2 or any(type(axis) is not int for axis in value["native_point"]) or value["pid"] <= 1 or value["tracking_id"] > 65535 or type(value["slot"]) is not int or value["slot"] != 0 or value["native_point"] != ([164, 1396] if self.is_v2() else [201, 1360]) or value["lease_end_ms"] > int(cutoff) * 1000 or value["status"] != status or value["exclusive_kernel_ownership"] is not False:
+        if type(value["native_point"]) is not list or len(value["native_point"]) != 2 or any(type(axis) is not int for axis in value["native_point"]) or value["pid"] <= 1 or value["tracking_id"] > 65535 or type(value["slot"]) is not int or value["slot"] != 0 or value["native_point"] != self.selected_tap()[1] or value["lease_end_ms"] > int(cutoff) * 1000 or value["status"] != status or value["exclusive_kernel_ownership"] is not False:
             raise Refused("Guardian release/point/deadline not admitted")
         return value
 
@@ -640,6 +657,7 @@ printf '{"released":"%s","supervisor":"%s","lease":"%s","publication":"%s"}\n' "
 
     def arm_once(self, waiting, timing, ready):
         self.require_publication()
+        self.selected_tap()
         if self.arm_attempted: raise Refused("Creation publication already attempted")
         if not self.tap_released: raise Refused("Positive guardian release required before creation")
         self.arm_attempted = True
