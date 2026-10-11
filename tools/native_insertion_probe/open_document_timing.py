@@ -35,17 +35,47 @@ V2_SDK_SOURCES = {
     'tools/qt_page_open_arm.h': '800daaad233995dc5f5c70db86d7192491aadd385b67e33479b05b8bf1535bbb',
     'tools/qt_creation_deadline.h': 'c3d8e7124eff6de5868c74f321189ce1f55f8b4111e8983ecdc7eb7c86b3a109'}
 
+PRESERVED_EIGHT = 'preserved-eight-after-9005'
+# The eight-page Library reference is pinned only after Main's fresh visual review.
+EIGHT_LIBRARY_SHA256 = None
+EIGHT_SDK_REVISION = '7e3cca6fa15491a32a01b71f7f209a1d0d5dfec9'
+EIGHT_SDK_SOURCES = V2_SDK_SOURCES | {
+    'tools/qt_qml_access_probe_core.h': '1971b00dd34242cbe03a7f49a45cfc9d075f4099e49ec18f0f2f8df99b0e6463'}
+EIGHT_CONFIG_LINE = 'config.inventoryVariant = qml_access::CreationConfig::InventoryVariant::PreservedEightAfter9005;'
+FIXTURE_DOCUMENT = 'e7f661f1-db6f-4dfc-854a-b38aff7f75de'
+ORIGINAL_PAGES = (
+    'a7181850-3f03-4bb0-8b9e-01acfc20032e', '5aef884d-d3fc-4635-895a-28237568823d',
+    'd1261cb9-a8c0-4e15-ab24-7a9172b2027b', 'f39ae285-3e0c-43dd-b27c-866dff7a24cd',
+    '028b118f-474a-4886-a469-7273b290320c', 'fd5afbe2-a79c-461b-8b15-96907d181ab7',
+    '1692961d-ec5c-4f0f-9635-8e6081111dab')
+PRESERVED_PAGES = ORIGINAL_PAGES[:1] + ('4c8a847e-0eb8-4cf3-a747-77952d56445a',) + ORIGINAL_PAGES[1:]
+
+
+def fixture_inventory_selection(profile, page_field='page_ids'):
+    variant = profile.get('fixture_inventory_variant', 'legacy')
+    if type(variant) is not str or variant not in {'legacy', PRESERVED_EIGHT}:
+        raise ValueError('Exact fixture inventory selector required')
+    if variant == PRESERVED_EIGHT:
+        if (profile.get('experiment_kind') != PRODUCTION_V2 or
+            profile.get('document_id') != FIXTURE_DOCUMENT or
+            profile.get(page_field) != list(PRESERVED_PAGES)):
+            raise ValueError('Exact preserved eight-page fixture required')
+        return variant, 8
+    return variant, 7
+
 
 def validate_v2_binding(profile):
+    variant, _ = fixture_inventory_selection(profile, 'before_page_ids' if 'before_page_ids' in profile else 'page_ids')
+    revision, sources = (EIGHT_SDK_REVISION, EIGHT_SDK_SOURCES) if variant == PRESERVED_EIGHT else (V2_SDK_REVISION, V2_SDK_SOURCES)
     if (profile.get('production_contract') != V2_CONTRACT or
-        profile.get('sdk_revision') != V2_SDK_REVISION or
-        profile.get('sdk_source_hashes') != V2_SDK_SOURCES or
+        profile.get('sdk_revision') != revision or
+        profile.get('sdk_source_hashes') != sources or
         profile.get('sdk_setup_variant') != 'AfterOpen95s' or
         not re.fullmatch('[0-9a-f]{64}', profile.get('sdk_configuration_sha256', ''))):
         raise ValueError('Exact reviewed production v2 SDK/configuration binding required')
 
 
-def validate_v2_config(text):
+def validate_v2_config(text, inventory_variant='legacy'):
     """Lexically exclude comments/literals in the separately reviewed config."""
     if not isinstance(text, str) or len(text.encode('utf-8')) > 65536:
         raise ValueError('Bounded reviewed creation configuration required')
@@ -54,6 +84,13 @@ def validate_v2_config(text):
     if (len(re.findall(r'\bconfig\s*\.\s*setupVariant\s*=', active)) != 1 or
         not re.search(r'^\s*' + re.escape(V2_CONFIG_LINE) + r'\s*$', active, re.MULTILINE)):
         raise ValueError('One unambiguous active reviewed SDK95 selector required')
+    assignments = len(re.findall(r'\bconfig\s*\.\s*inventoryVariant\s*=', active))
+    if inventory_variant == PRESERVED_EIGHT:
+        if assignments != 1 or not re.search(r'^\s*' + re.escape(EIGHT_CONFIG_LINE) + r'\s*$', active, re.MULTILINE):
+            raise ValueError('One active preserved-eight SDK inventory selector required')
+    elif inventory_variant != 'legacy' or (assignments and (
+            assignments != 1 or not re.search(r'^\s*config\.inventoryVariant = qml_access::CreationConfig::InventoryVariant::Legacy;\s*$', active, re.MULTILINE))):
+        raise ValueError('Legacy SDK configuration must not select another inventory')
 
 
 def diagnostic_cutoff(timing, waiting_expiry_ms):

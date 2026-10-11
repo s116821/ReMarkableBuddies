@@ -6,7 +6,7 @@ from pathlib import Path
 import re
 import shutil
 from owned_frame_capture import CONTRACT as CAPTURE_CONTRACT, TOOLS as CAPTURE_TOOLS, HOST_KINDS, OBSERVATION_KIND
-from open_document_timing import PRODUCTION_V2, V2_LIBRARY_SHA256, V2_PUBLISHER_SHA256, validate_v2_binding, validate_v2_config
+from open_document_timing import PRODUCTION_V2, V2_LIBRARY_SHA256, EIGHT_LIBRARY_SHA256, V2_PUBLISHER_SHA256, validate_v2_binding, validate_v2_config, fixture_inventory_selection, PRESERVED_EIGHT, ORIGINAL_PAGES, PRESERVED_PAGES
 
 LIBRARY_TAP_VARIANTS = {
     "primary-1641396": ("--tap-library-v2", [164, 1396]),
@@ -78,20 +78,13 @@ def partition(selected, files):
     pages = selected.get("before_page_ids")
     if not isinstance(document, str) or not re.fullmatch(uuid, document):
         raise ValueError("Canonical fixture document required")
-    page_count = 7 if open_mode else 6
+    variant, open_count = fixture_inventory_selection(selected, 'before_page_ids') if open_mode else ('legacy', 7)
+    page_count = open_count if open_mode else 6
     if (not isinstance(pages, list) or len(pages) != page_count or
         any(not isinstance(p, str) or not re.fullmatch(uuid, p) for p in pages) or len(set(pages)) != page_count):
         raise ValueError("Exact distinct original page inventory required")
-    if open_mode and pages != [
-        "a7181850-3f03-4bb0-8b9e-01acfc20032e",
-        "5aef884d-d3fc-4635-895a-28237568823d",
-        "d1261cb9-a8c0-4e15-ab24-7a9172b2027b",
-        "f39ae285-3e0c-43dd-b27c-866dff7a24cd",
-        "028b118f-474a-4886-a469-7273b290320c",
-        "fd5afbe2-a79c-461b-8b15-96907d181ab7",
-        "1692961d-ec5c-4f0f-9635-8e6081111dab",
-    ]:
-        raise ValueError("Exact current seven-page order including stroked target required")
+    if open_mode and pages != list(PRESERVED_PAGES if variant == PRESERVED_EIGHT else ORIGINAL_PAGES):
+        raise ValueError("Exact selected fixture order including all preserved pages required")
     if (not isinstance(target, str) or not re.fullmatch(uuid, target) or
         target == "00000000-0000-0000-0000-000000000000" or target == document or target in pages):
         raise ValueError("Fresh distinct canonical target required")
@@ -103,10 +96,10 @@ def partition(selected, files):
     mutable_files = [e for e in document_files if e["path"] in mutable_paths]
     # The original 24 records are retained, not silently redefined. New-file
     # absence and full before/after content semantics remain Main admission.
-    document_count = 16 if open_mode else 14
+    document_count = (18 if variant == PRESERVED_EIGHT else 16) if open_mode else 14
     if len(document_files) != document_count or len(runtime_files) != 10 or {e["path"] for e in mutable_files} != mutable_paths:
         raise ValueError("Exact document/runtime partition and two mutable paths required")
-    ink_count = 4 if open_mode else 3
+    ink_count = (5 if variant == PRESERVED_EIGHT else 4) if open_mode else 3
     expected_document = {prefix + "." + ext for ext in ("content", "metadata", "local", "pagedata", "pdf")} | {prefix + "/" + p + ".rm" for p in pages[:ink_count]} | {prefix + ".thumbnails/" + p + ".png" for p in pages}
     if {e["path"] for e in document_files} != expected_document:
         raise ValueError("Exact fixture paths required; no substitute preservation files")
@@ -142,7 +135,7 @@ def main():
         config_text = config.read_text(encoding='utf-8')
         if sha(config) != selected['sdk_configuration_sha256']:
             raise ValueError('Exact reviewed active SDK95 configuration required')
-        validate_v2_config(config_text)
+        validate_v2_config(config_text, fixture_inventory_selection(selected, 'before_page_ids')[0])
     if kind in HOST_KINDS and kind != PRODUCTION_V2 and (
         selected.get("development_after_open") is not True or
         selected.get("sdk_revision") != "485ac1a46367bfdf203abe140a8b764728cdf54d"
@@ -186,7 +179,8 @@ def main():
     if sha(payload) != payload_hash:
         raise ValueError("Selected payload mismatch")
     files = selected.get("protected_files")
-    count = 26 if kind in HOST_KINDS else 24
+    inventory_variant, _ = fixture_inventory_selection(selected, 'before_page_ids') if kind in HOST_KINDS else ('legacy', 7)
+    count = (28 if inventory_variant == PRESERVED_EIGHT else 26) if kind in HOST_KINDS else 24
     if not isinstance(files, list) or len(files) != count:
         raise ValueError("Exact fresh mode-specific baseline hash inventory required")
     paths = set()
@@ -212,8 +206,9 @@ def main():
                   "source-body-reference.png": args.source_body_reference,
                   "source-footer-reference.png": args.source_footer_reference}
         declared = selected.get("host_artifacts", {})
+        library_pin = EIGHT_LIBRARY_SHA256 if inventory_variant == PRESERVED_EIGHT else V2_LIBRARY_SHA256
         if kind == PRODUCTION_V2 and (declared.get('publish_creation_arm') != V2_PUBLISHER_SHA256 or
-                                      declared.get('library-reference.png') != V2_LIBRARY_SHA256):
+                                      type(library_pin) is not str or declared.get('library-reference.png') != library_pin):
             raise ValueError('Exact production v2 publisher/reference required')
         if selected.get("capture_contract") != CAPTURE_CONTRACT or any(declared.get(name) != digest for name, digest in CAPTURE_TOOLS.items()):
             raise ValueError("Exact reviewed native capture source/artifact contract required")
@@ -261,6 +256,7 @@ def main():
             profile.update({key: selected[key] for key in ('library_tap_variant', 'production_contract', 'sdk_revision', 'sdk_source_hashes',
                                                           'sdk_setup_variant', 'sdk_configuration_sha256')})
             profile['host_sequence_contract'] = 'bounded-host-v6-production-v2'
+            profile['fixture_inventory_variant'] = inventory_variant
         (output / "host-profile.json").write_text(json.dumps(profile, indent=2) + "\n", encoding="utf-8", newline="\n")
     (output / "stock-unit.original").write_bytes(original_unit)
     (output / "vendor-dropin.original").write_bytes(original_vendor)
@@ -287,6 +283,7 @@ def main():
                "packet_manifest_sha256": sha(output / "packet.files")}
     if kind == PRODUCTION_V2:
         receipt["library_tap_variant"] = selected["library_tap_variant"]
+        receipt['fixture_inventory_variant'] = inventory_variant
     (output / "preparation.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8", newline="\n")
     (output / "preparation.json").chmod(0o600)
     print(json.dumps(receipt))

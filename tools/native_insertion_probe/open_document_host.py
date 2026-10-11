@@ -9,7 +9,7 @@ import re
 import time
 from PIL import Image
 from open_document_protocol import parse_waiting
-from open_document_timing import OpenDocumentTiming, upper_uptime_ms, diagnostic_cutoff, PRODUCTION_V2, V2_CONTRACT
+from open_document_timing import OpenDocumentTiming, upper_uptime_ms, diagnostic_cutoff, PRODUCTION_V2, V2_CONTRACT, fixture_inventory_selection
 from owned_frame_capture import CONTRACT as CAPTURE_CONTRACT, OBSERVATION_KIND, PHASE_LABELS
 
 BODY = (64, 0, 720, 980)
@@ -70,6 +70,7 @@ class HostSequence:
     def __init__(self, adapter, selected, library_png, source_body_png, source_footer_png):
         self.adapter = adapter
         self.selected = selected
+        self.fixture_inventory_variant, self.fixture_page_count = fixture_inventory_selection(selected)
         self.library_png = library_png
         self.source_body_png = source_body_png
         self.source_footer_png = source_footer_png
@@ -143,8 +144,8 @@ class HostSequence:
         content, metadata = raw["content"], raw["metadata"]
         pages = content["cPages"]["pages"]
         ids = [p["id"] for p in pages]
-        if ids != self.selected["page_ids"] or content["pageCount"] != 7:
-            raise Refused("Exact seven-page order changed")
+        if ids != self.selected["page_ids"] or content["pageCount"] != self.fixture_page_count:
+            raise Refused("Exact selected fixture order/count changed")
         if (raw["last_open"] != self.selected["document_id"] or
                 metadata["lastOpenedPage"] != 0 or
                 content["cPages"]["lastOpened"]["value"] != ids[0]):
@@ -177,7 +178,7 @@ class HostSequence:
             raise Refused('Pending Library lacks original unarmed SDK/context authority')
         context = self.library_context(raw)
         if (context != baseline or context[0] != tuple(self.selected['page_ids']) or
-            context[1] != 7 or context[2] != self.selected['page_ids'][0] or
+            context[1] != self.fixture_page_count or context[2] != self.selected['page_ids'][0] or
             type(context[3]) is not int or context[3] != 0 or type(context[5]) is not bytes or
             context[5] != b'LastOpen=@ByteArray()\n' or context[6] is not None):
             raise Refused('Pending Library requires unchanged canonical raw baseline')

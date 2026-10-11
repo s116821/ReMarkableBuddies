@@ -9,7 +9,7 @@ import re
 import subprocess
 import time
 from owned_frame_capture import CONTRACT as CAPTURE_CONTRACT, TOOLS as CAPTURE_TOOLS, HOST_KINDS, OBSERVATION_KIND
-from open_document_timing import PRODUCTION_V2, V2_LIBRARY_SHA256, V2_PUBLISHER_SHA256, validate_v2_binding
+from open_document_timing import PRODUCTION_V2, V2_LIBRARY_SHA256, EIGHT_LIBRARY_SHA256, V2_PUBLISHER_SHA256, validate_v2_binding, fixture_inventory_selection, PRESERVED_EIGHT
 
 HERE = Path(__file__).resolve().parent
 ALIAS = "rem25-usb-rm2"
@@ -51,8 +51,12 @@ def load_host_profile(packet, receipt):
             library_tap_selection(receipt)
             if profile["library_tap_variant"] != receipt["library_tap_variant"]:
                 raise ValueError("Host/packet tap selection mismatch")
+            inventory, _ = fixture_inventory_selection(profile)
+            if fixture_inventory_selection(receipt, 'before_page_ids')[0] != inventory:
+                raise ValueError('Host/packet fixture inventory selection mismatch')
+            library_pin = EIGHT_LIBRARY_SHA256 if inventory == PRESERVED_EIGHT else V2_LIBRARY_SHA256
             if (profile.get('tools', {}).get('publish_creation_arm') != V2_PUBLISHER_SHA256 or
-                profile.get('references', {}).get('library-reference.png') != V2_LIBRARY_SHA256):
+                type(library_pin) is not str or profile.get('references', {}).get('library-reference.png') != library_pin):
                 raise ValueError('Production v2 publisher/reference binding changed')
         if profile["nonce"] != receipt["nonce"] or profile["document_id"] != receipt["document_id"] or profile["target_id"] != receipt["target_page_id"] or profile["page_ids"] != receipt["before_page_ids"]:
             raise ValueError("Host/packet identity mismatch")
@@ -61,7 +65,8 @@ def load_host_profile(packet, receipt):
         if profile["publisher_source_sha256"] != sha(regular(HERE / "publish_creation_arm.c").read_bytes()):
             raise ValueError("Publisher source binding changed")
         expected = {}
-        for name, count in (("runtime.files", 10), ("document-immutable.files", 14)):
+        fixture_count = fixture_inventory_selection(profile)[1]
+        for name, count in (("runtime.files", 10), ("document-immutable.files", 16 if fixture_count == 8 else 14)):
             lines = regular(Path(packet) / name).read_text(encoding="ascii").splitlines()
             if len(lines) != count:
                 raise ValueError("Complete immutable partition required")

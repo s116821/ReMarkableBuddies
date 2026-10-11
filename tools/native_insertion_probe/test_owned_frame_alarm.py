@@ -67,6 +67,60 @@ class AlarmTests(unittest.TestCase):
             manifest=Path(root)/"manifest";manifest.write_bytes(out)
             _,code,_,err=self.execute(["--check","/usr/bin/sha256sum","-c",manifest])
             self.assertEqual((code,err),(0,b""))
+    def test_exact_26_hash_paths_and_27_path_refusal(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as root:
+            paths=[];expected=[]
+            for index in range(26):
+                path=Path(root)/f"protected-{index:02}"
+                data=f"fixed-{index}".encode();path.write_bytes(data)
+                paths.append(path);expected.append(hashlib.sha256(data).hexdigest()+"  "+str(path))
+            for count in (24,26):
+                _,code,out,err=self.execute(["--hashes","/usr/bin/sha256sum",*paths[:count]],inherit_alarm=True)
+                self.assertEqual((code,err),(0,b""))
+                self.assertEqual(out.decode(),"\n".join(expected[:count])+"\n")
+            # Execute the one actual snapshot-rendered immutable hash call.
+            import sys
+            if "PIL" not in sys.modules:
+                pil=types.ModuleType("PIL");pil.Image=None;pil.ImageDraw=None;sys.modules["PIL"]=pil
+            from open_document_transport import SSHAdapter
+            from open_document_timing import PRODUCTION_V2, PRESERVED_EIGHT, PRESERVED_PAGES, FIXTURE_DOCUMENT
+            from owned_frame_capture import TOOLS, OBSERVATION_KIND
+            from prepare_packet import ENCODER_HASHES
+            nonce="1"*32
+            profile={"experiment_kind":PRODUCTION_V2,"fixture_inventory_variant":PRESERVED_EIGHT,
+                     "page_ids":list(PRESERVED_PAGES),"document_id":FIXTURE_DOCUMENT,"nonce":nonce,
+                     "boot_id":"02b2347b-03aa-4a85-8dd7-d731aabf6f3e",
+                     "tools":TOOLS|{name:"a"*64 for name in ("owned_tap_guardian","observe_input","publish_creation_arm")},
+                     "encoder_hashes":ENCODER_HASHES,"immutable_hashes":dict(zip(map(str,paths),["a"*64]*26))}
+            receipt={"remote_root":root,"experiment_kind":PRODUCTION_V2,"document_id":FIXTURE_DOCUMENT,
+                     "fixture_inventory_variant":PRESERVED_EIGHT,"before_page_ids":list(PRESERVED_PAGES)}
+            adapter=SSHAdapter([],receipt,profile,root,lambda *a:None,b"")
+            adapter.prelude=lambda *a,**kw:""
+            adapter.snapshot_timeout=lambda *a:(20,time.monotonic()+100)
+            rendered=[]
+            class Rendered(Exception): pass
+            def retain_script(script,timeout):rendered.append(script);raise Rendered()
+            adapter.call=retain_script
+            with self.assertRaises(Rendered):adapter.raw_snapshot("result",9999999,False)
+            lines=[line for line in rendered[0].splitlines() if line.startswith('"$root/owned_frame_alarm" --hashes') and 'host-result.hashes' in line]
+            self.assertEqual(len(lines),1)
+            import shutil
+            shutil.copyfile(self.r4,Path(root)/"owned_frame_alarm");(Path(root)/"owned_frame_alarm").chmod(0o700)
+            result=subprocess.run(["sh","-c",'set -eu\numask 077\nroot='+root+'\n'+lines[0]],capture_output=True,timeout=4)
+            self.assertEqual((result.returncode,result.stderr),(0,b""))
+            self.assertEqual((Path(root)/"host-result.hashes").read_text(),"\n".join(expected)+"\n")
+            _,code,out,err=self.execute(["--hashes","/usr/bin/sha256sum",*paths,paths[0]])
+            self.assertEqual((code,out,err),(2,b"",b"Invalid own-alarm launcher arguments\n"))
+            _,code,out,err=self.execute(["--hashes","/usr/bin/sha256sum",*paths[:25],"relative"])
+            self.assertEqual((code,out,err),(2,b"",b"Invalid absolute hash path\n"))
+            previous=os.environ.get("REM25_ALARM_R4")
+            if previous:
+                binary=Path(self.work.name)/"previous-r4"
+                subprocess.run(["gcc","-std=c11","-Wall","-Wextra","-Werror",previous,"-o",str(binary)],check=True,capture_output=True)
+                _,code,out,err=self.execute(["--hashes","/usr/bin/sha256sum",*paths],wrapper=binary)
+                self.assertEqual((code,out,err),(2,b"",b"Invalid own-alarm launcher arguments\n"))
+
     def test_invalid_grammar_no_child_and_r3_v2_regression(self):
         v2=["--publish",self.child,*["a"]*8,"open-document-insertion-v2"]
         invalid=(v2[:-1]+["unknown"],v2+["extra"],v2[:-2],

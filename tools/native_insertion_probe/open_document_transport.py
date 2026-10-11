@@ -7,7 +7,7 @@ import re
 import shlex
 import time
 from open_document_host import Refused, same_pixels
-from open_document_timing import upper_uptime_ms, OpenDocumentTiming, diagnostic_cutoff, PRODUCTION_V2
+from open_document_timing import upper_uptime_ms, OpenDocumentTiming, diagnostic_cutoff, PRODUCTION_V2, fixture_inventory_selection
 from open_document_protocol import parse_waiting
 from owned_frame_capture import CONTRACT as CAPTURE_CONTRACT, TOOLS as CAPTURE_TOOLS, OBSERVATION_KIND, PHASE_LABELS, capture_script, validate_receipt, hash_tool_checks, ordered_hash_checks
 
@@ -19,6 +19,9 @@ def q(value):
 class SSHAdapter:
     def __init__(self, arguments, receipt, profile, output, transport, library_png):
         self.arguments, self.receipt, self.profile = arguments, receipt, profile
+        self.fixture_inventory = fixture_inventory_selection(profile)
+        if fixture_inventory_selection(receipt, 'before_page_ids') != self.fixture_inventory:
+            raise Refused('Profile/receipt fixture selection mismatch')
         self.output, self.transport = Path(output), transport
         self.root = receipt["remote_root"]
         self.doc = "/home/root/.local/share/remarkable/xochitl/" + profile["document_id"]
@@ -56,6 +59,9 @@ class SSHAdapter:
         (self.output / (stage + ".json")).write_text(json.dumps(evidence, default=encode, indent=2) + "\n")
 
     def call(self, script, timeout=4):
+        if (fixture_inventory_selection(self.profile) != self.fixture_inventory or
+            fixture_inventory_selection(self.receipt, 'before_page_ids') != self.fixture_inventory):
+            raise Refused('Sealed fixture inventory changed; no transport permitted')
         started = time.monotonic() if self.is_diagnostic() else None
         result = self.transport(self.arguments, script, timeout)
         if started is not None:
@@ -332,6 +338,7 @@ b64() { /usr/bin/openssl base64 -A -in "$1"; }
         script += mark('sidecar_close_end') + mark('immutable_begin')
         paths = " ".join(q(p) for p in self.profile["immutable_hashes"])
         script += f'test "$(now_upper)" -le $((cutoff-4))\n"$root/owned_frame_alarm" --hashes /usr/bin/sha256sum {paths} > "$root/{prefix}.hashes"\n'
+        script += f'private "$root/{prefix}.hashes"\ntest "$(stat -c \'%s\' "$root/{prefix}.hashes")" -le 4096\n'
         script += mark('immutable_end')
         script += 'test "$(sed \'s/^.*) //\' /proc/$pid/stat | awk \'{print $20}\')" = "$start"\n'
         script += 'test "$(now_upper)" -lt "$cutoff"\n'
