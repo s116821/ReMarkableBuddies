@@ -4,6 +4,7 @@ import io
 import hashlib
 import json
 import unittest
+from unittest.mock import patch
 from PIL import Image, ImageDraw
 from open_document_host import HostSequence, Refused
 
@@ -24,6 +25,7 @@ class Adapter:
         self.arm_error = False
         self.native_pages = False
         self.open_frames = 0
+        self.ready_frames = 0
 
     def raw(self, stage):
         s = self.selected
@@ -32,7 +34,7 @@ class Adapter:
             content["cPages"]["pages"].insert(1, {"id": s["target_id"]})
             content["pageCount"] = 8
         raw = {"window": [s["nonce"], 100, 460, 127, 197], "boot_id": s["boot_id"], "pid": 42, "start_ticks": 561,
-               "closed": False, "uptime": {"ready": "140.00 0.00\n", "open": "150.00 0.00\n", "trigger": "155.00 0.00\n", "result": "170.00 0.00\n"}[stage],
+               "closed": False, "uptime": {"ready": f"140.{self.ready_frames:02} 0.00\n", "open": "150.00 0.00\n", "trigger": "155.00 0.00\n", "result": "170.00 0.00\n"}[stage],
                "waiting": (s["nonce"] + " 42 561 waiting 167000\n").encode(), "hashes": dict(s["immutable_hashes"]),
                "last_open": s["document_id"], "content": content, "metadata": {"lastOpenedPage": 0},
                "png": png(stage == "ready"), "idle": {"interval_ms": 2000, "invalidated": False, "touch_active": False, "pen_contact": 0, "pen_tool": 0},
@@ -45,11 +47,14 @@ class Adapter:
         return raw
 
     def retain(self, stage, evidence): self.calls.append("retain:" + stage)
-    def wait_library(self): self.calls.append("wait"); return self.raw("ready")
+    def wait_library(self):
+        self.calls.append("wait"); self.ready_frames += 1
+        return self.raw("ready")
     def open_once(self, identity, cutoff): self.calls.append("tap")
     def snapshot(self, stage, cutoff, idle):
         self.calls.append("snapshot:" + stage)
         if stage == "open": self.open_frames += 1
+        if stage == "ready": self.ready_frames += 1
         return self.raw(stage)
     def arm_once(self, waiting, timing, ready):
         self.calls.append("arm")
@@ -90,6 +95,78 @@ class HostTests(unittest.TestCase):
         self.assertNotIn("tap", self.adapter.calls)
         self.assertNotIn("arm", self.adapter.calls)
         self.assertEqual(self.adapter.calls.count("stop"), 1)
+        self.assertEqual(self.adapter.ready_frames, 3)
+
+    def test_complete_nonmatching_observations_then_library_bind_first_and_retain_all(self):
+        def change(stage, raw):
+            if stage == 'ready' and self.adapter.ready_frames < 3:
+                raw['png'] = png()
+        self.adapter.change = change
+        self.host.run()
+        self.assertEqual(self.adapter.ready_frames, 3)
+        for index in range(3):
+            self.assertIn(f'retain:ready-frame-{index:03}', self.adapter.calls)
+        self.assertEqual(self.adapter.calls.count('tap'), 1)
+        self.assertEqual(self.host.identity, ('boot', 42, 561))
+
+    def test_ready_faults_are_terminal_before_any_next_observation_or_tap(self):
+        mutations = [lambda r: r['hashes'].update({'stroked.rm': 'changed'}),
+                     lambda r: r['idle'].update(invalidated=True),
+                     lambda r: r.update(uptime='147.00 0.00\n'),
+                     lambda r: r.update(png=b'invalid PNG')]
+        for mutate in mutations:
+            adapter = Adapter(self.selection)
+            def change(stage, raw):
+                if stage == 'ready':
+                    raw['png'] = png()
+                    mutate(raw)
+            adapter.change = change
+            with self.assertRaises(Refused):
+                HostSequence(adapter, self.selection, png(True), png(footer=False), png(body=False)).run()
+            self.assertEqual(adapter.ready_frames, 1)
+            self.assertNotIn('tap', adapter.calls)
+
+    def test_later_library_cannot_rebind_identity_window_or_waiting(self):
+        mutations = [lambda r: r.update(start_ticks=562),
+                     lambda r: r['window'].__setitem__(3, 128),
+                     lambda r: r.update(waiting=(self.selection['nonce'] + ' 42 561 waiting 168000\n').encode()),
+                     lambda r: r.update(closed=True),
+                     lambda r: r['hashes'].update({'stroked.rm': 'changed'}),
+                     lambda r: r['idle'].update(pen_contact=1)]
+        for mutate in mutations:
+            adapter = Adapter(self.selection)
+            def change(stage, raw):
+                if stage == 'ready':
+                    if adapter.ready_frames == 1:
+                        raw['png'] = png()
+                    else:
+                        mutate(raw)
+            adapter.change = change
+            host = HostSequence(adapter, self.selection, png(True), png(footer=False), png(body=False))
+            with self.assertRaises(Refused): host.run()
+            self.assertEqual(adapter.ready_frames, 2)
+            self.assertEqual(host.identity, ('boot', 42, 561))
+            self.assertNotIn('tap', adapter.calls)
+
+    def test_ready_transport_or_retention_failure_never_acquires_again(self):
+        self.adapter.change = lambda stage, raw: raw.update(png=png()) if stage == 'ready' else None
+        def failed_snapshot(stage, cutoff, idle):
+            self.adapter.calls.append('failed-snapshot')
+            raise Refused('partial response')
+        self.adapter.snapshot = failed_snapshot
+        with self.assertRaises(Refused): self.host.run()
+        self.assertEqual(self.adapter.calls.count('failed-snapshot'), 1)
+        self.assertNotIn('tap', self.adapter.calls)
+
+    def test_host_retention_or_pixels_cannot_admit_after_local_snapshot_deadline(self):
+        for times in ([10], [9, 10], [9, 9, 10]):
+            with self.subTest(times=times):
+                adapter = Adapter(self.selection)
+                adapter.change = lambda stage, raw: raw.update(response_deadline_monotonic=10) if stage == 'ready' else None
+                with patch('open_document_host.time.monotonic', side_effect=times), self.assertRaises(Refused):
+                    HostSequence(adapter, self.selection, png(True), png(footer=False), png(body=False)).run()
+                self.assertEqual(adapter.ready_frames, 1)
+                self.assertNotIn('tap', adapter.calls)
 
     def test_wrong_open_does_not_retry_tap_or_arm(self):
         def change(stage, raw):
@@ -148,7 +225,7 @@ class HostTests(unittest.TestCase):
             adapter=Adapter(self.selection)
             adapter.change=lambda stage,raw: raw.update(png=png(footer=False) if missing=="footer" else png(body=False)) if stage=="open" else None
             with self.assertRaises(Refused): HostSequence(adapter,self.selection,png(True),png(footer=False),png(body=False)).run()
-            self.assertEqual(adapter.open_frames,16)
+            self.assertEqual(adapter.open_frames,5)
             self.assertNotIn("arm",adapter.calls)
             self.assertEqual(adapter.calls.count("tap"),1)
 

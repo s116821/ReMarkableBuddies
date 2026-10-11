@@ -8,7 +8,7 @@ import shlex
 import time
 from open_document_host import Refused, same_pixels
 from open_document_timing import upper_uptime_ms
-from owned_frame_capture import TOOLS as CAPTURE_TOOLS, capture_script, validate_receipt, hash_tool_checks
+from owned_frame_capture import CONTRACT as CAPTURE_CONTRACT, TOOLS as CAPTURE_TOOLS, capture_script, validate_receipt, hash_tool_checks
 
 
 def q(value):
@@ -26,6 +26,9 @@ class SSHAdapter:
         self.root_inode = None
         self.counter = 0
         self.open_frames = 0
+        self.ready_frames = 0
+        self.ready_cutoff = None
+        self.capture_failed = False
         self.tap_attempted = False
         self.arm_attempted = False
         self.stop_attempted = False
@@ -102,12 +105,45 @@ b64() { /usr/bin/openssl base64 -A -in "$1"; }
         return text
 
     def raw_snapshot(self, stage, cutoff, idle):
+        if self.capture_failed:
+            raise Refused("Prior capture failed; no further acquisition")
+        try:
+            return self._raw_snapshot(stage, cutoff, idle)
+        except Exception:
+            self.capture_failed = True
+            raise
+
+    def snapshot_timeout(self, cutoff):
+        if type(cutoff) is not int or cutoff <= 0:
+            raise Refused("Fixed canonical snapshot cutoff required")
+        anchor = time.monotonic()
+        remote = upper_uptime_ms(self.call('set -eu\ncat /proc/uptime\n', 3))
+        now = time.monotonic()
+        elapsed = now - anchor
+        if elapsed < 0:
+            raise Refused("Monotonic clock regressed")
+        remaining = cutoff - remote / 1000 - elapsed
+        if remaining <= 0:
+            raise Refused("Snapshot response fixed deadline exhausted")
+        deadline = min(anchor + cutoff - remote / 1000,
+                       now + CAPTURE_CONTRACT['maximum_response_seconds'])
+        return deadline - now, deadline
+
+    def _raw_snapshot(self, stage, cutoff, idle):
         if stage not in {"ready", "open", "trigger", "result"}:
             raise Refused("Unknown snapshot stage")
         script = self.prelude(cutoff, self.identity)
         prefix = "host-" + stage
+        if stage == "ready":
+            if not idle or self.ready_frames >= CAPTURE_CONTRACT['maximum_ready_frames']:
+                raise Refused("Bounded ready observation with full idle required")
+            if self.ready_cutoff is not None and cutoff != self.ready_cutoff:
+                raise Refused("Ready cutoff cannot be renewed")
+            self.ready_cutoff = cutoff
+            prefix += f"-{self.ready_frames:03}"
+            self.ready_frames += 1
         if stage == "open":
-            if self.open_frames >= 7:
+            if self.open_frames >= CAPTURE_CONTRACT['maximum_open_frames']:
                 raise Refused("Bounded open observation frame count exhausted")
             prefix += f"-{self.open_frames:03}"
             self.open_frames += 1
@@ -151,7 +187,11 @@ for name in entry.closed restore.claim stop.request stop.admitted; do test ! -e 
 test "$(now_upper)" -lt "$cutoff"
 printf '"uptime":"%s"}\n' "$(b64 /proc/uptime)"
 """
-        raw = json.loads(self.call(script, 10))
+        timeout, response_deadline = self.snapshot_timeout(cutoff)
+        response = self.call(script, timeout)
+        if time.monotonic() >= response_deadline:
+            raise Refused("Complete snapshot response arrived after fixed deadline")
+        raw = json.loads(response)
         decode = lambda key: base64.b64decode(raw[key], validate=True)
         try:
             capture_evidence = validate_receipt(decode("capture_receipt").decode("ascii"), self.profile["nonce"], raw["frame_hash"], decode("png"), raw["native_hash"])
@@ -171,6 +211,7 @@ printf '"uptime":"%s"}\n' "$(b64 /proc/uptime)"
         last = decode("last_open").decode("utf-8").strip()
         match = re.fullmatch(r"LastOpen=@ByteArray\(([0-9a-f-]{36})\)", last)
         observed = {"window": [window[0]] + [int(v) for v in window[1:]], "boot_id": self.profile["boot_id"],
+                    "response_deadline_monotonic": response_deadline,
                     "pid": raw["pid"], "start_ticks": raw["start_ticks"], "closed": False,
                     "waiting": decode("waiting"), "uptime": decode("uptime").decode("ascii"),
                     "last_open": match[1] if match else None, "content": json.loads(decode("content")),
@@ -181,6 +222,8 @@ printf '"uptime":"%s"}\n' "$(b64 /proc/uptime)"
                     "capture": capture_evidence, "diagnostics": json.loads(decode("diagnostics")) if raw["diagnostics"] else {}}
         if self.root_inode is not None and self.root_inode != raw["root_inode"]:
             raise Refused("Private root inode changed")
+        if time.monotonic() >= response_deadline:
+            raise Refused("Snapshot decoding exhausted fixed response deadline")
         self.root_inode = raw["root_inode"]
         return observed
 

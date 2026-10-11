@@ -80,6 +80,8 @@ class AdapterTests(unittest.TestCase):
         calls = []
         def transport(arguments, script, timeout):
             calls.append(script)
+            if script == 'set -eu\ncat /proc/uptime\n':
+                return {"timeout": False, "exit": 0, "stdout": "51.00 0.00\n"}
             return result
         adapter = SSHAdapter([], {"remote_root": "/run/rmb-qt-probe-" + "1" * 32},
                              {"nonce": "1" * 32, "document_id": "fixture",
@@ -114,27 +116,94 @@ class AdapterTests(unittest.TestCase):
             adapter.stop_once(("boot", 2, 3), 100)
             self.assertEqual(len(calls), 1)
 
-    def test_open_frames_are_exclusive_bounded_and_do_not_renew_cutoff(self):
+    def raw_response(self):
         encode = lambda value: base64.b64encode(value).decode()
         raw = {"pid": 2, "start_ticks": 3, "root_inode": "1 2", "window": encode(("1" * 32 + " 1 361 50 120\n").encode()),
                "waiting": encode(b"waiting"), "uptime": encode(b"51.00 0.00\n"), "last_open": encode(b"unknown"),
                "content": encode(b"{}"), "metadata": encode(b"{}"), "png": encode(b"raw image"),
                "hashes": encode(b""), "idle": encode(b""), "diagnostics": "",
                "frame_hash": "a" * 64, "native_hash": "b" * 64, "capture_receipt": encode(("nonce=" + "1" * 32 + " frame_sha256=" + "a" * 64 + " native_sha256=" + "b" * 64 + " overview_sha256=" + hashlib.sha256(b"raw image").hexdigest() + " conversion_complete=true native_authority=false\n").encode())}
+        return raw
+
+    def test_open_frames_are_exclusive_bounded_and_do_not_renew_cutoff(self):
+        raw = self.raw_response()
         with tempfile.TemporaryDirectory() as root:
             adapter, calls = self.adapter(root, {"timeout": False, "exit": 0, "stdout": json.dumps(raw)})
             adapter.profile.update(immutable_hashes={}, boot_id="02b2347b-03aa-4a85-8dd7-d731aabf6f3e")
-            for _ in range(7):
+            for _ in range(5):
                 adapter.raw_snapshot("open", 100, False)
             with self.assertRaisesRegex(Refused, "frame count exhausted"):
                 adapter.raw_snapshot("open", 200, False)
-            self.assertEqual(len(calls), 7)
-            for index, script in enumerate(calls):
+            captures = [script for script in calls if 'host-open-' in script]
+            self.assertEqual(len(captures), 5)
+            for index, script in enumerate(captures):
                 self.assertIn(f'host-open-{index:03}.png', script)
                 self.assertIn("cutoff=100\n", script)
                 self.assertNotIn("cutoff=200\n", script)
             self.assertFalse(adapter.tap_attempted)
             self.assertFalse(adapter.arm_attempted)
+
+    def test_ready_attempts_have_distinct_prefixes_fixed_cutoff_and_full_idle(self):
+        for fault in ('cap', 'renew', 'idle'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as root:
+                adapter, calls = self.adapter(root, {'timeout': False, 'exit': 0, 'stdout': json.dumps(self.raw_response())})
+                adapter.profile.update(immutable_hashes={}, boot_id='02b2347b-03aa-4a85-8dd7-d731aabf6f3e')
+                count = 3 if fault == 'cap' else 1
+                for _ in range(count): adapter.raw_snapshot('ready', 100, True)
+                before = len(calls)
+                with self.assertRaises(Refused):
+                    adapter.raw_snapshot('ready', 200 if fault == 'renew' else 100, fault != 'idle')
+                self.assertEqual(len(calls), before)
+                captures = [s for s in calls if 'host-ready-' in s]
+                for index, script in enumerate(captures):
+                    self.assertIn(f'host-ready-{index:03}.claim', script)
+                    self.assertIn('--observe "$root/observe_input" 2', script)
+                    self.assertIn('cutoff=100\n', script)
+
+    def test_capture_transport_failure_or_partial_json_is_terminal(self):
+        for response in ({'timeout': True, 'exit': None, 'stdout': '{"png":'},
+                         {'timeout': False, 'exit': 0, 'stdout': '{"png":'}):
+            with self.subTest(response=response), tempfile.TemporaryDirectory() as root:
+                adapter, calls = self.adapter(root, response)
+                adapter.profile.update(immutable_hashes={}, boot_id='02b2347b-03aa-4a85-8dd7-d731aabf6f3e')
+                with self.assertRaises((Refused, json.JSONDecodeError)): adapter.raw_snapshot('ready', 100, True)
+                before = len(calls)
+                with self.assertRaisesRegex(Refused, 'Prior capture failed'): adapter.raw_snapshot('ready', 100, True)
+                self.assertEqual(len(calls), before)
+                self.assertEqual(adapter.ready_frames, 1)
+
+    def test_clock_query_time_is_charged_and_cap_never_renews_stage(self):
+        with tempfile.TemporaryDirectory() as root:
+            adapter, calls = self.adapter(root, {})
+            for clock, cutoff, expected in (([10, 12], 60, 6.99), ([10, 11], 100, 20)):
+                # Tight stage has 6.99 seconds left after the 2-second query.
+                with patch('open_document_transport.time.monotonic', side_effect=clock):
+                    timeout, deadline = adapter.snapshot_timeout(cutoff)
+                self.assertAlmostEqual(timeout, expected)
+                self.assertAlmostEqual(deadline, clock[-1] + timeout)
+            with patch('open_document_transport.time.monotonic', side_effect=[10, 20]), self.assertRaises(Refused):
+                adapter.snapshot_timeout(60)
+
+    def test_bad_or_timed_out_clock_query_never_claims_remote_capture(self):
+        for response in ({'timeout': False, 'exit': 0, 'stdout': 'not a clock'},
+                         {'timeout': True, 'exit': None, 'stdout': '51.'}):
+            with self.subTest(response=response), tempfile.TemporaryDirectory() as root:
+                adapter, calls = self.adapter(root, response)
+                adapter.profile.update(immutable_hashes={}, boot_id='02b2347b-03aa-4a85-8dd7-d731aabf6f3e')
+                adapter.transport = lambda arguments, script, timeout: calls.append(script) or response
+                with self.assertRaises(ValueError): adapter.raw_snapshot('ready', 100, True)
+                self.assertTrue(adapter.capture_failed)
+                self.assertEqual(calls, ['set -eu\ncat /proc/uptime\n'])
+
+    def test_delayed_complete_response_and_decode_cannot_escape_local_deadline(self):
+        for at in ('response', 'decode'):
+            with self.subTest(at=at), tempfile.TemporaryDirectory() as root:
+                adapter, calls = self.adapter(root, {'timeout': False, 'exit': 0, 'stdout': json.dumps(self.raw_response())})
+                adapter.profile.update(immutable_hashes={}, boot_id='02b2347b-03aa-4a85-8dd7-d731aabf6f3e')
+                with patch.object(adapter, 'snapshot_timeout', return_value=(5, 10)), patch('open_document_transport.time.monotonic', side_effect=[10] if at == 'response' else [9, 10]):
+                    with self.assertRaises(Refused): adapter.raw_snapshot('ready', 100, True)
+                self.assertTrue(adapter.capture_failed)
+                self.assertFalse(adapter.tap_attempted)
 
     def test_partial_diagnostic_read_waits_without_replaying_action(self):
         with tempfile.TemporaryDirectory() as root:

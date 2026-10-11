@@ -32,7 +32,9 @@ CONTRACT = {"kind": "native-owned-rgb32-scoped-v1", "frame_bytes": 10513468,
             "wrapper_maps": "bounded-context-only",
             "maximum_producer_stderr_bytes": 525824,
             "source_sha256": SOURCES, "native_hashes": NATIVE_HASHES,
-            "provider_hashes": PROVIDERS, "minimum_initial_free_kib": 196608, "maximum_open_frames": 7,
+            "provider_hashes": PROVIDERS, "minimum_initial_free_kib": 196608,
+            "maximum_ready_frames": 3, "maximum_open_frames": 5,
+            "maximum_response_seconds": 20, "pin_checks": "ordered-alarm-batches-v1",
             "hash_tool_sha256": "df59cc89ea72164ae92b15db4ef089acae776eda5b373bf10e2fcc46b49c8c02"}
 
 
@@ -43,11 +45,24 @@ def hash_tool_checks():
             'test "$(sha256sum /usr/bin/busybox.nosuid | cut -d " " -f 1)" = df59cc89ea72164ae92b15db4ef089acae776eda5b373bf10e2fcc46b49c8c02\n')
 
 
-def pinned_hash_checks():
-    text = ''
+def pinned_hash_checks(output):
+    # Bootstrap before using the launcher; all native/provider paths are still
+    # checked at both original checkpoints, with retained exact ordered output.
+    text = hash_tool_checks()
+    text += f'test "$(sha256sum "$root/owned_frame_alarm" | cut -d " " -f 1)" = {TOOLS["owned_frame_alarm"]}\n'
+    paths, expected = [], []
     for path, digest in (NATIVE_HASHES | PROVIDERS).items():
         selected = '"/proc/$pid/exe"' if path == '/usr/bin/xochitl' else shlex.quote(path)
-        text += f'test "$(sha256sum {selected} | cut -d " " -f 1)" = {digest}\n'
+        paths.append(selected)
+        expected.append(digest + '  ' + ('/proc/$pid/exe' if path == '/usr/bin/xochitl' else path))
+    text += f'test ! -e "{output}"\ntest ! -L "{output}"\n'
+    text += f'test ! -e "{output}.stderr"\ntest ! -L "{output}.stderr"\n'
+    text += f'"$root/owned_frame_alarm" --hashes /usr/bin/sha256sum {" ".join(paths)} > "{output}" 2> "{output}.stderr"\n'
+    for selected in (output, output + '.stderr'):
+        text += f'private "{selected}"\ntest "$(stat -c \'%s\' "{selected}")" -le 2048\n'
+    text += f'test ! -s "{output}.stderr"\n'
+    # The only interpolation is the validated decimal PID, not input text.
+    text += 'printf \'%s\\n\' "' + '\n'.join(expected) + f'" | cmp - "{output}"\n'
     return text + hash_tool_checks()
 
 
@@ -55,14 +70,14 @@ def capture_script(prefix, nonce, boot):
     if any(not isinstance(pin, str) or not re.fullmatch('[0-9a-f]{64}', pin)
            for pin in (TOOLS['native_frame_acquire'], SOURCES['private_acquisition'])):
         raise ValueError('Reviewed scoped producer source and artifact required')
-    if not re.fullmatch(r'host-(?:ready|trigger|result|open-[0-9]{3})', prefix):
+    if not re.fullmatch(r'host-(?:ready-00[0-2]|trigger|result|open-00[0-4])', prefix):
         raise ValueError('Exact exclusive capture prefix required')
     if not re.fullmatch('[0-9a-f]{32}', nonce) or not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', boot):
         raise ValueError('Canonical capture nonce and boot required')
-    s = f'private "$root/{prefix}.claim"\ntest "$(cat "$root/{prefix}.claim")" = {nonce}\n' + pinned_hash_checks()
+    s = f'private "$root/{prefix}.claim"\ntest "$(cat "$root/{prefix}.claim")" = {nonce}\n' + pinned_hash_checks(f'$root/{prefix}.pins-before')
     s += 'test "$(df -Pk /run | awk \'NR==2 {print $4}\')" -ge 32768\n'
     for suffix in ('frame', 'producer-exit', 'producer-stderr', 'capture', 'converter-exit', 'converter-stderr', 'images', 'maps-before', 'maps-after'):
-        s += f'test ! -e "$root/{prefix}.{suffix}" && test ! -L "$root/{prefix}.{suffix}"\n'
+        s += f'test ! -e "$root/{prefix}.{suffix}"\ntest ! -L "$root/{prefix}.{suffix}"\n'
     s += f'''test "$(now_upper)" -le $((cutoff-4))
 cat /proc/$pid/maps > "$root/{prefix}.maps-before"
 test "$(stat -c '%s' "$root/{prefix}.maps-before")" -le 262144
@@ -98,7 +113,7 @@ native_hash=$(sha256sum "$root/{prefix}.images/native.png" | cut -d ' ' -f 1)
 cp "$root/{prefix}.images/overview.png" "$root/{prefix}.png"
 test "$(now_upper)" -lt "$cutoff"
 '''
-    return s + pinned_hash_checks()
+    return s + pinned_hash_checks(f'$root/{prefix}.pins-after')
 
 
 def validate_receipt(receipt, nonce, frame_hash, png, native_hash):

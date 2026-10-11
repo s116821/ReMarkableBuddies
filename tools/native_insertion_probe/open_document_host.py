@@ -6,13 +6,16 @@ No retries of input, permission publication, or stop publication are allowed.
 import hashlib
 import io
 import re
+import time
 from PIL import Image
 from open_document_protocol import parse_waiting
 from open_document_timing import OpenDocumentTiming, upper_uptime_ms
+from owned_frame_capture import CONTRACT as CAPTURE_CONTRACT
 
 BODY = (64, 0, 720, 980)
 FOOTER = (280, 986, 488, 1024)
-MAX_OPEN_FRAMES = 16
+MAX_OPEN_FRAMES = CAPTURE_CONTRACT['maximum_open_frames']
+MAX_READY_FRAMES = CAPTURE_CONTRACT['maximum_ready_frames']
 
 
 class Refused(ValueError):
@@ -77,6 +80,7 @@ class HostSequence:
         self.candidate_window = tuple(window)
 
     def admit(self, raw, stage):
+        self.response_time(raw)
         if (raw["boot_id"], raw["pid"], raw["start_ticks"]) != self.identity:
             raise Refused("Candidate process identity changed")
         if raw["closed"] is not False:
@@ -95,6 +99,13 @@ class HostSequence:
                 raise Refused("Immutable ink/provider/file changed or unobserved")
         self.last_completed_ms = now_ms
         return now_ms
+
+    def response_time(self, raw):
+        # SSHAdapter supplies this local bound independently of remote JSON.
+        # Evidence retention and pixel decoding must not extend that allowance.
+        deadline = raw.get('response_deadline_monotonic')
+        if deadline is not None and time.monotonic() >= deadline:
+            raise Refused("Host processing exhausted fixed snapshot allowance")
 
     def document_context(self, raw):
         content, metadata = raw["content"], raw["metadata"]
@@ -160,12 +171,21 @@ class HostSequence:
     def run(self):
         try:
             library = self.adapter.wait_library()
-            self.record("library", library)
-            self.bind(library)
-            self.admit(library, "ready")
-            self.idle(library)
-            if not same_pixels(library["png"], self.library_png):
-                raise Refused("Library/tile/banner/modal pixels not exact")
+            for index in range(MAX_READY_FRAMES):
+                self.record(f"ready-frame-{index:03}", library)
+                if index == 0:
+                    self.bind(library)
+                self.admit(library, "ready")
+                self.idle(library)
+                matches = same_pixels(library["png"], self.library_png)
+                self.response_time(library)
+                if matches:
+                    self.record("library", library)
+                    self.response_time(library)
+                    break
+                if index + 1 == MAX_READY_FRAMES:
+                    raise Refused("Approved Library not observed within bounded ready frames")
+                library = self.adapter.snapshot("ready", self.timing.stage_end("ready"), True)
             # Adapter rechecks candidate identity/closing/time before this one
             # reviewed 768x1024 tap. Sorting alone never selects the tile.
             self.adapter.open_once(self.identity, self.timing.stage_end("open"))

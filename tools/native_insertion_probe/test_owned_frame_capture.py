@@ -3,11 +3,12 @@ import hashlib
 import os
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
-from owned_frame_capture import CONTRACT, SOURCES, TOOLS, capture_script, validate_receipt
+from owned_frame_capture import CONTRACT, SOURCES, TOOLS, NATIVE_HASHES, PROVIDERS, capture_script, validate_receipt, pinned_hash_checks
 
 
 class CaptureTests(unittest.TestCase):
@@ -23,11 +24,54 @@ class CaptureTests(unittest.TestCase):
         for target, key in ((TOOLS, 'native_frame_acquire'), (SOURCES, 'private_acquisition')):
             for invalid in (None, '', 'a' * 63, 'A' * 64):
                 with patch.dict(target, {key: invalid}), self.assertRaises(ValueError):
-                    capture_script('host-ready', '1' * 32, '02b2347b-03aa-4a85-8dd7-d731aabf6f3e')
+                    capture_script('host-ready-000', '1' * 32, '02b2347b-03aa-4a85-8dd7-d731aabf6f3e')
+
+    @unittest.skipUnless(os.name == 'posix' and shutil.which('sh'), 'POSIX shell controls')
+    def test_executed_pin_batch_requires_bootstrap_complete_order_caps_and_empty_stderr(self):
+        entries = [digest + '  ' + ('/proc/123/exe' if path == '/usr/bin/xochitl' else path)
+                   for path, digest in (NATIVE_HASHES | PROVIDERS).items()]
+        expected = '\n'.join(entries) + '\n'
+        faults = [('equal', expected, '', 0, True),
+                  ('missing', '\n'.join(entries[:-1]) + '\n', '', 0, False),
+                  ('duplicate', expected + entries[0] + '\n', '', 0, False),
+                  ('reordered', '\n'.join(reversed(entries)) + '\n', '', 0, False),
+                  ('digest', expected.replace(entries[0][:64], '0' * 64), '', 0, False),
+                  ('path', expected.replace('/proc/123/exe', '/proc/124/exe'), '', 0, False),
+                  ('partial', expected[:-1], '', 0, False),
+                  ('status', expected, '', 2, False),
+                  ('stderr', expected, 'warning', 0, False),
+                  ('cap', 'x' * 2049, '', 0, False),
+                  ('stderr_cap', expected, 'x' * 2049, 0, False),
+                  ('bootstrap', expected, '', 0, False),
+                  ('exclusive', expected, '', 0, False)]
+        for name, stdout, stderr, status, accepted in faults:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as root:
+                path = Path(root)
+                (path / 'batch-data').write_text(stdout)
+                (path / 'batch-stderr').write_text(stderr)
+                launcher = path / 'owned_frame_alarm'
+                args = ['--hashes', '/usr/bin/sha256sum'] + [line.split('  ', 1)[1] for line in entries]
+                # Stub only the reviewed launcher/tool, while running the full
+                # generated admission, output retention and ordered comparison.
+                launcher.write_text('#!/bin/sh\n' + 'test "$*" = ' + shlex.quote(' '.join(args)) + ' || exit 99\n'
+                                    + 'printf invoked > "$root/invoked"\ncat "$root/batch-data"\ncat "$root/batch-stderr" >&2\n' + f'exit {status}\n')
+                launcher.chmod(0o700)
+                if name == 'exclusive': (path / 'pins').write_text('owned earlier evidence')
+                digest = '0' * 64 if name == 'bootstrap' else TOOLS['owned_frame_alarm']
+                with patch('owned_frame_capture.hash_tool_checks', return_value=':\n'):
+                    script = pinned_hash_checks('$root/pins')
+                prelude = 'set -eu\numask 077\npid=123\nprivate() { test -f "$1" && test ! -L "$1"; }\n'
+                prelude += f"sha256sum() {{ printf '%s  %s\\n' {digest} \"$1\"; }}\n"
+                result = subprocess.run(['sh', '-c', prelude + script + 'printf accepted > "$root/accepted"\n'],
+                                        env=dict(os.environ, root=root), capture_output=True)
+                self.assertEqual(result.returncode == 0, accepted, result.stderr)
+                self.assertEqual((path / 'accepted').exists(), accepted)
+                if name in ('bootstrap', 'exclusive'):
+                    self.assertFalse((path / 'invoked').exists())
 
     @unittest.skipUnless(os.name == 'posix' and shutil.which('sh'), 'POSIX shell controls')
     def test_actual_shell_admission_keeps_failure_gates_and_context_maps(self):
-        script = capture_script('host-ready', '1' * 32, '02b2347b-03aa-4a85-8dd7-d731aabf6f3e')
+        script = capture_script('host-ready-000', '1' * 32, '02b2347b-03aa-4a85-8dd7-d731aabf6f3e')
         admission = script[script.index('set +e'):script.index('test "$(now_upper)" -le $((cutoff-6))')]
         # Execute the rendered producer admission section, preserving its real
         # status/stderr/size gates. Native closure policy belongs to the producer.
@@ -38,7 +82,7 @@ class CaptureTests(unittest.TestCase):
             with self.subTest(status=status, stderr=stderr, size=size), tempfile.TemporaryDirectory() as root:
                 path = Path(root)
                 (path / 'observed.maps').write_text('changed contextual map\n')
-                (path / 'host-ready.maps-before').write_text('initial contextual map\n')
+                (path / 'host-ready-000.maps-before').write_text('initial contextual map\n')
                 producer = path / 'native_frame_acquire'
                 producer.write_text(f'#!/bin/sh\nhead -c {size} /dev/zero\nprintf %s "{stderr}" >&2\nexit {status}\n')
                 producer.chmod(0o700)
@@ -48,21 +92,22 @@ class CaptureTests(unittest.TestCase):
                 self.assertEqual(run.returncode == 0, admitted, run.stderr)
                 self.assertEqual((path / 'admitted').exists(), admitted)
                 if admitted:
-                    self.assertNotEqual((path / 'host-ready.maps-before').read_bytes(),
-                                        (path / 'host-ready.maps-after').read_bytes())
+                    self.assertNotEqual((path / 'host-ready-000.maps-before').read_bytes(),
+                                        (path / 'host-ready-000.maps-after').read_bytes())
 
     def test_producer_failure_cannot_run_converter_and_closing_hash_precedes_conversion(self):
         s = capture_script('host-open-000', '1' * 32, '02b2347b-03aa-4a85-8dd7-d731aabf6f3e')
         self.assertLess(s.index('producer=$?'), s.index('frame_hash='))
-        self.assertLess(s.index('test "$producer" = 0'), s.index('"$root/owned_frame_alarm"'))
-        self.assertLess(s.index('frame_hash='), s.index('"$root/owned_frame_alarm"'))
+        converter = '"$root/owned_frame_alarm" "$root/owned_frame"'
+        self.assertLess(s.index('test "$producer" = 0'), s.index(converter))
+        self.assertLess(s.index('frame_hash='), s.index(converter))
         self.assertLess(s.index('test "$converter" = 0'), s.index('cp "$root/host-open-000.images/overview.png"'))
         self.assertNotIn('bounded ', s)
         self.assertNotIn(' | "$root/owned_frame"', s)
         self.assertEqual(s.count('"$root/native_frame_acquire"'), 1)
-        self.assertEqual(s.count('"$root/owned_frame_alarm"'), 1)
+        self.assertEqual(s.count(converter), 1)
         self.assertNotIn('/home/root/rem9-validation/screenshot', s)
-        self.assertNotIn('cmp ', s)
+        self.assertNotIn('cmp "$root/host-open-000.maps-before"', s)
         self.assertIn('maps-before', s)
         self.assertIn('maps-after', s)
         self.assertEqual(CONTRACT['kind'], 'native-owned-rgb32-scoped-v1')
@@ -79,11 +124,14 @@ class CaptureTests(unittest.TestCase):
             validate_receipt(receipt, nonce, frame, png + b'changed', 'b' * 64)
 
     def test_unknown_prefix_nonce_and_boot_refuse_before_script(self):
-        for prefix, nonce, boot in [('host-open-000; touch /tmp/a', '1' * 32, 'boot'), ('host-ready', 'short', 'boot'), ('host-ready', '1' * 32, 'boot')]:
+        for prefix, nonce, boot in [('host-open-000; touch /tmp/a', '1' * 32, 'boot'), ('host-ready-000', 'short', 'boot'), ('host-ready-000', '1' * 32, 'boot')]:
             with self.assertRaises(ValueError):
                 capture_script(prefix, nonce, boot)
         self.assertEqual(CONTRACT['frame_bytes'], 10513468)
         self.assertEqual(set(TOOLS), {'native_frame_acquire', 'owned_frame', 'owned_frame_alarm'})
+        for prefix in ('host-ready', 'host-ready-003', 'host-open-005', 'host-open-100'):
+            with self.assertRaises(ValueError):
+                capture_script(prefix, '1' * 32, '02b2347b-03aa-4a85-8dd7-d731aabf6f3e')
 
 
 if __name__ == '__main__':
