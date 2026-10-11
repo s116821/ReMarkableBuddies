@@ -57,6 +57,7 @@ private() {{
 }}
 test -d "$root" && test ! -L "$root"
 test "$(stat -c '%a %u' "$root")" = '700 0'
+initial_root_identity=$(stat -c '%d %i' "$root")
 private "$root/owner"
 test "$(cat "$root/owner")" = {q(self.profile["nonce"])}
 private "$root/candidate.window"
@@ -97,8 +98,13 @@ bounded() {
  wait "$child"
  test "$(now_upper)" -lt "$cutoff"
 }
-b64() { base64 "$1" | tr -d '\n'; }
+b64() { /usr/bin/openssl base64 -A -in "$1"; }
 """
+        for path, digest in self.profile.get("encoder_hashes", {}).items():
+            if path not in {"/usr/bin/openssl", "/usr/lib/libssl.so.3", "/usr/lib/libcrypto.so.3"} or not re.fullmatch("[0-9a-f]{64}", digest):
+                raise Refused("Exact encoder/provider path and digest required")
+            text += f'test -f {q(path)} && test ! -L {q(path)}\ntest "$(stat -c \'%u %h\' {q(path)})" = \'0 1\'\n'
+            text += f'test "$(sha256sum {q(path)} | cut -d " " -f 1)" = {q(digest)}\n'
         for name, digest in self.profile["tools"].items():
             if name not in {"owned_tap_guardian", "observe_input", "publish_creation_arm"} or not re.fullmatch("[0-9a-f]{64}", digest):
                 raise Refused("Bounded exact tool identity required")
@@ -134,14 +140,20 @@ b64() { base64 "$1" | tr -d '\n'; }
         script += f'test "$(cat "$root/owner")" = {q(self.profile["nonce"])}\n'
         if self.root_inode:
             script += f'test "$(stat -c \'%d %i\' "$root")" = {q(self.root_inode)}\n'
-        script += r"""printf '{"pid":%s,"start_ticks":%s,"root_inode":"%s","window":"%s","waiting":"%s","uptime":"%s","last_open":"%s",' "$pid" "$start" "$(stat -c '%d %i' "$root")" "$(b64 "$root/candidate.window")" "$(b64 "$root/creation-waiting")" "$(b64 /proc/uptime)" "$(grep '^LastOpen' /home/root/.config/remarkable/xochitl.conf | base64 | tr -d '\n')"
+        script += r"""printf '{"pid":%s,"start_ticks":%s,"root_inode":"%s","window":"%s","waiting":"%s","capture_uptime":"%s","last_open":"%s",' "$pid" "$start" "$(stat -c '%d %i' "$root")" "$(b64 "$root/candidate.window")" "$(b64 "$root/creation-waiting")" "$(b64 /proc/uptime)" "$(grep '^LastOpen' /home/root/.config/remarkable/xochitl.conf | /usr/bin/openssl base64 -A)"
 """
         for key in ("content", "metadata", "png", "hashes", "idle"):
             script += f'printf \'"{key}":"%s",\' "$(b64 "$root/{prefix}.{key}")"\n'
         script += r"""if test -f "$root/diagnostics.json" && test ! -L "$root/diagnostics.json"; then
  private "$root/diagnostics.json"
- printf '"diagnostics":"%s"}\n' "$(b64 "$root/diagnostics.json")"
-else printf '"diagnostics":""}\n'; fi
+ printf '"diagnostics":"%s",' "$(b64 "$root/diagnostics.json")"
+else printf '"diagnostics":"",'; fi
+test "$(stat -c '%d %i' "$root")" = "$initial_root_identity"
+test "$(sed 's/^.*) //' /proc/$pid/stat | awk '{print $20}')" = "$start"
+test "$(systemctl show xochitl.service -p MainPID --value)" = "$pid"
+for name in entry.closed restore.claim stop.request stop.admitted; do test ! -e "$root/$name" && test ! -L "$root/$name"; done
+test "$(now_upper)" -lt "$cutoff"
+printf '"uptime":"%s"}\n' "$(b64 /proc/uptime)"
 """
         raw = json.loads(self.call(script, 10))
         decode = lambda key: base64.b64decode(raw[key], validate=True)

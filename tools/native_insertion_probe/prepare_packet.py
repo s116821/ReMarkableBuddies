@@ -18,6 +18,9 @@ SERVICE_HASHES = {
                              "b15560e1dca2f4451b59537c490015aa2f5ea691437bd7ddddc7a65411aaad6e"),
 }
 EXE_HASH = "071d85beef3ef2d4cc0e11002140b27b82a2cc04a2ed740a5669f591069b77df"
+ENCODER_HASHES = {"/usr/bin/openssl": "73ad5be823389c81d53b032207b2f8d171ab41cb2ce6f757da242ea875d2a33c",
+                  "/usr/lib/libssl.so.3": "b39a50a0625cb6f9483d22f8bc00dfd2e46f59f19a2c0d79647a2803fb4ba40f",
+                  "/usr/lib/libcrypto.so.3": "b87a447ff09553a9aabe898b36a60904320b42c699f8c256c5e5f762740a984a"}
 
 
 def sha(path):
@@ -173,6 +176,8 @@ def main():
     document, target, pages, runtime_files, immutable_files, mutable_files = partition(selected, files)
     host_inputs = {}
     if kind == "open-document-insertion-v1":
+        if selected.get("encoder_hashes") != ENCODER_HASHES:
+            raise ValueError("Fresh verified target encoder/provider binding required")
         if (selected.get("references_reviewed") is not True or
             selected.get("sdk_source_hashes", {}).get("tools/qt_creation_deadline.h") != "c3d8e7124eff6de5868c74f321189ce1f55f8b4111e8983ecdc7eb7c86b3a109" or
             selected.get("publisher_source_sha256") != sha(HERE / "publish_creation_arm.c")):
@@ -214,8 +219,9 @@ def main():
                    "screenshot_path": "/home/root/rem9-validation/screenshot",
                    "screenshot_sha256": "df745d56a2ef1834ea644b8859646972210c5e0247a3e6e75e9e245f5fa919b8",
                    "publisher_source_sha256": selected["publisher_source_sha256"],
+                   "encoder_hashes": selected["encoder_hashes"],
                    "sdk_creation_deadline_sha256": selected["sdk_source_hashes"]["tools/qt_creation_deadline.h"],
-                   "host_sequence_contract": "bounded-host-v2",
+                   "host_sequence_contract": "bounded-host-v3",
                    "source_sha256": {name: sha(HERE / name) for name in (
                        "open_document_host.py", "open_document_transport.py", "open_document_protocol.py",
                        "open_document_timing.py", "publish_creation_arm.c", "coordinator.py",

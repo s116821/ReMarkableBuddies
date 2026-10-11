@@ -27,7 +27,7 @@ def load_host_profile(packet, receipt):
         sources = {"open_document_host.py", "open_document_transport.py", "open_document_protocol.py",
                    "open_document_timing.py", "publish_creation_arm.c", "coordinator.py",
                    "prepare_packet.py", "actor.sh.in", "arm.sh.in", "owned_tap_guardian.c"}
-        if profile.get("host_sequence_contract") != "bounded-host-v2" or set(profile.get("source_sha256", {})) != sources:
+        if profile.get("host_sequence_contract") != "bounded-host-v3" or set(profile.get("source_sha256", {})) != sources:
             raise ValueError("Host source contract incomplete")
         if any(sha(regular(HERE / name).read_bytes()) != digest for name, digest in profile["source_sha256"].items()):
             raise ValueError("Reviewed host source changed")
@@ -52,6 +52,9 @@ def load_host_profile(packet, receipt):
         tool_names = {"owned_tap_guardian", "observe_input", "publish_creation_arm"}
         if profile["tools"] != {name: receipt["files"][name] for name in tool_names}:
             raise ValueError("Host helper hashes differ from packet")
+        from prepare_packet import ENCODER_HASHES
+        if profile["encoder_hashes"] != ENCODER_HASHES:
+            raise ValueError("Exact reviewed target encoder/provider closure required")
         if profile["screenshot_path"] != "/home/root/rem9-validation/screenshot" or profile["screenshot_sha256"] != "df745d56a2ef1834ea644b8859646972210c5e0247a3e6e75e9e245f5fa919b8":
             raise ValueError("Reviewed screenshot helper required")
         if not re.fullmatch("[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", profile["boot_id"]):

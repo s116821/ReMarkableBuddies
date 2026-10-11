@@ -1,10 +1,12 @@
-/* Development-only RM2 3.28.0.172 ordinary tap (110,280 -> 201,1360).
+/* Development-only RM2 3.28.0.172 ordinary taps: library (110,280 -> 201,1360)
+ * and explicit close (737,30 -> 1347,1817). No arbitrary coordinates.
  * Conditional observed ownership, NOT an exclusive kernel lease. No human
  * input is permitted during this transaction. Never kill/restart/replay this
  * writer. Stock recovery must proceed independently of every failure here.
  * --tap NONCE BOOT_UUID OPEN_CUTOFF_BOOTTIME_MS: independently launched sole
  * writer child supervised by its independent parent. Durable no-write setup
  * lease/ready precede exact NONCE\n tap.go, then a new 1500ms contact lease.
+ * --tap-close has the same arguments and supervision, using only the close point.
  * --recover NONCE BOOT_UUID: release-only, same persistent flock, dead exact
  * writer identity, unexpired lease, exact tagged contact and no other contacts.
  * tap.released is positive state evidence, not a UI acknowledgment.
@@ -32,6 +34,8 @@
 #define SLOT_COUNT 32
 #define NATIVE_X 201
 #define NATIVE_Y 1360
+#define CLOSE_X 1347
+#define CLOSE_Y 1817
 #define LEASE_MS 1500
 #define HOLD_MS 100
 #define MAGIC 0x54415031u
@@ -159,6 +163,9 @@ static int same_input(struct context *c) {
         (uint64_t)held.st_rdev==c->lease.input_rdev && ioctl(c->input,EVIOCGID,&id)==0 &&
         !memcmp(&id,&c->lease.input_id,sizeof id);
 }
+static int allowed_point(const struct lease *l) {
+    return (l->x==NATIVE_X && l->y==NATIVE_Y) || (l->x==CLOSE_X && l->y==CLOSE_Y);
+}
 static int lease_context(struct context *c) {
     const struct lease *l=&c->lease;
     char owner[32];
@@ -175,7 +182,7 @@ static int lease_context(struct context *c) {
     }
     return l->magic==MAGIC && l->version==1 && l->nonce[32]==0 && l->boot[36]==0 &&
         hex_string(l->nonce,0) && hex_string(l->boot,1) && l->pid>1 && l->start>0 &&
-        l->slot==0 && l->tracking>0 && l->x==NATIVE_X && l->y==NATIVE_Y &&
+        l->slot==0 && l->tracking>0 && allowed_point(l) &&
         l->contact<=1 && l->born>=0 && l->expires>l->born &&
         l->expires-l->born<=(l->contact?LEASE_MS:15000) &&
         same_root(c) && same_boot(l) && same_input(c);
@@ -230,8 +237,8 @@ static int write_frame(struct context *c,int down) {
     e[n++]=event(EV_ABS,ABS_MT_SLOT,0);
     e[n++]=event(EV_ABS,ABS_MT_TRACKING_ID,down?c->lease.tracking:-1);
     if(down) {
-        e[n++]=event(EV_ABS,ABS_MT_POSITION_X,NATIVE_X);
-        e[n++]=event(EV_ABS,ABS_MT_POSITION_Y,NATIVE_Y);
+        e[n++]=event(EV_ABS,ABS_MT_POSITION_X,c->lease.x);
+        e[n++]=event(EV_ABS,ABS_MT_POSITION_Y,c->lease.y);
         e[n++]=event(EV_ABS,ABS_MT_PRESSURE,100);
         e[n++]=event(EV_ABS,ABS_MT_TOUCH_MAJOR,17);
         e[n++]=event(EV_ABS,ABS_MT_TOUCH_MINOR,17);
@@ -275,8 +282,8 @@ static int drain_history(struct context *c,int phase) {
                 if(e->value==c->lease.tracking && phase==1 && !c->down_echo){c->down_echo=1;continue;}
                 if(e->value==-1 && phase==2 && !c->up_echo){c->up_echo=1;continue;}
                 return 0;
-            case ABS_MT_POSITION_X: expected=NATIVE_X;break;
-            case ABS_MT_POSITION_Y: expected=NATIVE_Y;break;
+            case ABS_MT_POSITION_X: expected=c->lease.x;break;
+            case ABS_MT_POSITION_Y: expected=c->lease.y;break;
             case ABS_MT_PRESSURE: expected=100;break;
             case ABS_MT_TOUCH_MAJOR: case ABS_MT_TOUCH_MINOR: expected=17;break;
             case ABS_MT_ORIENTATION: expected=4;break;
@@ -289,9 +296,9 @@ static int drain_history(struct context *c,int phase) {
 }
 static int receipt(struct context *c,const char *name,const char *status) {
     char text[512]; const struct lease *l=&c->lease;
-    if(l->nonce[32]!=0 || l->boot[36]!=0 || !hex_string(l->nonce,0) || !hex_string(l->boot,1))return 0;
-    int n=snprintf(text,sizeof text,"{\"nonce\":\"%s\",\"boot_id\":\"%s\",\"pid\":%lld,\"start_ticks\":%lld,\"slot\":0,\"tracking_id\":%d,\"native_point\":[201,1360],\"lease_end_ms\":%lld,\"status\":\"%s\",\"exclusive_kernel_ownership\":false}\n",
-        l->nonce,l->boot,(long long)l->pid,(long long)l->start,l->tracking,(long long)l->expires,status);
+    if(l->nonce[32]!=0 || l->boot[36]!=0 || !hex_string(l->nonce,0) || !hex_string(l->boot,1) || !allowed_point(l))return 0;
+    int n=snprintf(text,sizeof text,"{\"nonce\":\"%s\",\"boot_id\":\"%s\",\"pid\":%lld,\"start_ticks\":%lld,\"slot\":0,\"tracking_id\":%d,\"native_point\":[%d,%d],\"lease_end_ms\":%lld,\"status\":\"%s\",\"exclusive_kernel_ownership\":false}\n",
+        l->nonce,l->boot,(long long)l->pid,(long long)l->start,l->tracking,l->x,l->y,(long long)l->expires,status);
     return n>0 && (size_t)n<sizeof text && exclusive_record(c,name,text,(size_t)n);
 }
 static int conditional_up(struct context *c,int takeover) {
@@ -451,7 +458,8 @@ static int fence_writer(struct context *c,const char *nonce,const char *boot) {
 }
 static int run_guardian(int argc,char **argv) {
     struct context c={.root=-1,.lock=-1,.input=-1,.pen=-1,.history=-1};
-    int tap=argc==5 && !strcmp(argv[1],"--tap");
+    int close_tap=argc==5 && !strcmp(argv[1],"--tap-close");
+    int tap=argc==5 && (!strcmp(argv[1],"--tap") || close_tap);
     int take=argc==4 && !strcmp(argv[1],"--recover");
     int ok=0;
     if((!tap&&!take) || getuid()!=0 || !hex_string(argv[2],0) || !hex_string(argv[3],1))goto done;
@@ -478,7 +486,7 @@ static int run_guardian(int argc,char **argv) {
         c.lease.root_dev=root.st_dev;c.lease.root_ino=root.st_ino;
         c.lease.lock_dev=lock.st_dev;c.lease.lock_ino=lock.st_ino;
         c.lease.pid=getpid();c.lease.start=process_start(getpid());
-        c.lease.slot=0;c.lease.x=NATIVE_X;c.lease.y=NATIVE_Y;
+        c.lease.slot=0;c.lease.x=close_tap?CLOSE_X:NATIVE_X;c.lease.y=close_tap?CLOSE_Y:NATIVE_Y;
         char *end;errno=0;long long cutoff=strtoll(argv[4],&end,10);
         if(errno || !argv[4][0] || *end || cutoff<=0)goto done;
         struct sigaction action={0};action.sa_handler=interruption;
@@ -549,7 +557,9 @@ static int supervise(int argc,char **argv) {
         int good=c.lock>=0 && flock(c.lock,LOCK_EX|LOCK_NB)==0 &&
             read_exact_observed(c.root,"tap.lease",&c.lease,sizeof c.lease,&c.lease_stat) &&
             c.lease.nonce[32]==0 && c.lease.boot[36]==0 && !strcmp(c.lease.nonce,argv[2]) &&
-            !strcmp(c.lease.boot,argv[3]) && c.lease.pid==child && c.lease.contact==1;
+            !strcmp(c.lease.boot,argv[3]) && c.lease.pid==child && c.lease.contact==1 &&
+            c.lease.x==(!strcmp(argv[1],"--tap-close")?CLOSE_X:NATIVE_X) &&
+            c.lease.y==(!strcmp(argv[1],"--tap-close")?CLOSE_Y:NATIVE_Y);
         c.lease_bound=1;
         struct contact_state s;
         if(good)good=setup_device(&c,1) && lease_valid(&c) && snapshot(&c,&s) &&
@@ -581,7 +591,7 @@ finish:
     close(c.root);return 90;
 }
 int main(int argc,char **argv) {
-    if(argc==5 && !strcmp(argv[1],"--tap")) {
+    if(argc==5 && (!strcmp(argv[1],"--tap") || !strcmp(argv[1],"--tap-close"))) {
         if(getuid()!=0 || !hex_string(argv[2],0) || !hex_string(argv[3],1))return 90;
         return supervise(argc,argv);
     }

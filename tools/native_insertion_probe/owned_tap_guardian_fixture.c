@@ -192,10 +192,46 @@ static void cleanup(struct context *c) {
     close(c->history);close(c->lock);close(c->root);
     /* Python runner owns/removes only this disposable temporary tree. */
 }
+static void bind_point(struct context *c,int x,int y) {
+    c->lease.x=x;c->lease.y=y;
+    int fd=openat(c->root,"tap.lease",O_WRONLY);assert(fd>=0);
+    assert(bytes_write(fd,&c->lease,sizeof c->lease) && fsync(fd)==0);close(fd);
+    struct lease persisted;
+    assert(read_exact_observed(c->root,"tap.lease",&persisted,sizeof persisted,&c->lease_stat));
+}
+static void assert_receipt_point(struct context *c,const char *name,const char *point) {
+    char bytes[512];int fd=openat(c->root,name,O_RDONLY);assert(fd>=0);
+    ssize_t n=read(fd,bytes,sizeof bytes-1);assert(n>0);bytes[n]=0;close(fd);assert(strstr(bytes,point));
+}
 int main(int argc,char **argv) {
     assert(argc==2);char path[]="/tmp/guardian-fixture-XXXXXX";
     struct context c=make_context(path);const char *mode=argv[1];
-    if(!strcmp(mode,"success")) {
+    if(!strcmp(mode,"close-grammar")) {
+        bind_point(&c,CLOSE_X,CLOSE_Y);assert(write_frame(&c,1));
+        assert(queued==9 && queue[2].code==ABS_MT_POSITION_X && queue[2].value==CLOSE_X &&
+               queue[3].code==ABS_MT_POSITION_Y && queue[3].value==CLOSE_Y &&
+               queue[8].type==EV_SYN && queue[8].code==SYN_REPORT);
+        assert(kernel.x[0]==CLOSE_X && kernel.y[0]==CLOSE_Y);
+        assert(drain_history(&c,1));c.complete_down=1;assert(conditional_up(&c,0));assert(writes==2);
+        assert_receipt_point(&c,"tap.released","\"native_point\":[1347,1817]");
+    } else if(!strcmp(mode,"foreign-point")||!strcmp(mode,"mixed-point")) {
+        bind_point(&c,!strcmp(mode,"foreign-point")?CLOSE_X+1:CLOSE_X,
+                   !strcmp(mode,"foreign-point")?CLOSE_Y:NATIVE_Y);
+        assert(!lease_valid(&c) && !write_frame(&c,1));assert(writes==0);
+        assert(!receipt(&c,"foreign-receipt","test"));
+    } else if(!strcmp(mode,"close-foreign-echo")) {
+        bind_point(&c,CLOSE_X,CLOSE_Y);assert(write_frame(&c,1));queue[2].value=NATIVE_X;
+        assert(!conditional_up(&c,0));assert(writes==1);
+    } else if(!strcmp(mode,"close-foreign-contact")) {
+        bind_point(&c,CLOSE_X,CLOSE_Y);kernel.id[0]=c.lease.tracking;
+        kernel.x[0]=NATIVE_X;kernel.y[0]=NATIVE_Y;
+        assert(!conditional_up(&c,1));assert(writes==0);
+    } else if(!strcmp(mode,"close-takeover")) {
+        bind_point(&c,CLOSE_X,CLOSE_Y);kernel.id[0]=c.lease.tracking;
+        kernel.x[0]=CLOSE_X;kernel.y[0]=CLOSE_Y;
+        assert(recover_observed(&c));assert(writes==1 && kernel.id[0]==-1);
+        assert_receipt_point(&c,"tap.recovered","\"native_point\":[1347,1817]");
+    } else if(!strcmp(mode,"success")) {
         assert(write_frame(&c,1));c.complete_down=1;
         assert(conditional_up(&c,0));assert(c.down_echo&&c.up_echo&&writes==2);
         char receipt_bytes[512];int fd=openat(c.root,"tap.released",O_RDONLY);assert(fd>=0);
@@ -265,7 +301,7 @@ int main(int argc,char **argv) {
         struct stat s;assert(fstatat(c.root,"tap.released",&s,0)!=0);
     } else if(!strcmp(mode,"delayed-go")||!strcmp(mode,"supervisor-normal")||!strcmp(mode,"supervisor-stopped")||
               !strcmp(mode,"supervisor-after-release-crash")||!strcmp(mode,"supervisor-expired")||
-              !strcmp(mode,"pidfd-fence")) {
+              !strcmp(mode,"pidfd-fence")||!strcmp(mode,"supervisor-close")||!strcmp(mode,"supervisor-close-stopped")) {
         flow_context=&c;
         assert(exclusive_record(&c,"model","reMarkable2 1.0\n",15));
         const char *release="IMG_VERSION=\"3.28.0.172\"\n";
@@ -292,20 +328,28 @@ int main(int argc,char **argv) {
             assert(unlinkat(c.root,"tap.lock",0)==0);
             char token[34];snprintf(token,sizeof token,"%s\n",c.lease.nonce);
             assert(exclusive_record(&c,"tap.go",token,33));
-            stop_on_down=!strcmp(mode,"supervisor-stopped")||!strcmp(mode,"supervisor-expired");
+            stop_on_down=!strcmp(mode,"supervisor-stopped")||!strcmp(mode,"supervisor-expired")||!strcmp(mode,"supervisor-close-stopped");
             crash_after_release=!strcmp(mode,"supervisor-after-release-crash");
             late_supervisor=!strcmp(mode,"supervisor-expired");
-            char *args[]={"fixture","--tap",c.lease.nonce,c.lease.boot,"6000",NULL};
-            int result=supervise(5,args);struct stat marker;
+            int close_mode=!strcmp(mode,"supervisor-close")||!strcmp(mode,"supervisor-close-stopped");
+            char *args[]={"fixture",close_mode?"--tap-close":"--tap",c.lease.nonce,c.lease.boot,"6000",NULL};
+            int result=guardian_main(5,args);struct stat marker;
             if(stop_on_down||crash_after_release) {
                 assert(result==90);
                 assert(late_supervisor?kernel.id[0]>=0:kernel.id[0]==-1);
                 assert(fstatat(c.root,"tap.supervisor-spent",&marker,0)==0);
                 assert(fstatat(c.root,"tap.supervisor-complete",&marker,0)!=0);
                 if(crash_after_release)assert(fstatat(c.root,"tap.released",&marker,0)==0);
+                if(close_mode)assert_receipt_point(&c,"tap.recovered","\"native_point\":[1347,1817]");
             } else {
                 assert(result==0 && kernel.id[0]==-1);
                 assert(fstatat(c.root,"tap.supervisor-complete",&marker,0)==0);
+                const char *point=!strcmp(mode,"supervisor-close")?"\"native_point\":[1347,1817]":"\"native_point\":[201,1360]";
+                assert_receipt_point(&c,"tap.ready",point);
+                assert_receipt_point(&c,"tap.released",point);
+                assert_receipt_point(&c,"tap.supervisor-complete",point);
+                assert(kernel.x[0]==(!strcmp(mode,"supervisor-close")?CLOSE_X:NATIVE_X));
+                assert(kernel.y[0]==(!strcmp(mode,"supervisor-close")?CLOSE_Y:NATIVE_Y));
             }
             assert(munmap(kernel_pointer,sizeof *kernel_pointer)==0);kernel_pointer=&local_kernel;
         }

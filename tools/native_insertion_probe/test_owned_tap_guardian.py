@@ -37,7 +37,9 @@ class GuardianFaultTests(unittest.TestCase):
                  "dead-writer", "persistent-lock", "expired-empty", "expired-owned",
                  "intent-expired", "intent-closing", "intent-replaced", "up-no-syn", "truncated-echo",
                  "delayed-go", "supervisor-normal", "supervisor-stopped",
-                 "supervisor-after-release-crash", "supervisor-expired", "pidfd-fence")
+                 "supervisor-after-release-crash", "supervisor-expired", "pidfd-fence",
+                 "close-grammar", "foreign-point", "mixed-point", "close-foreign-echo",
+                 "close-foreign-contact", "supervisor-close", "close-takeover", "supervisor-close-stopped")
         for mode in modes:
             with self.subTest(mode=mode):
                 result = subprocess.run([str(self.fixture), mode], text=True, capture_output=True, timeout=3)
