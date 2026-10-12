@@ -4,6 +4,8 @@ set -eu
 umask 077
 root='@ROOT@'
 nonce='@NONCE@'
+control_policy='@CONTROL_POLICY@'
+control_shell_sha256='@CONTROL_SHELL_SHA256@'
 experiment='@EXPERIMENT@'
 parent=/run/systemd/system/xochitl.service.d
 guard="$parent/zz-rmb-insertion-$nonce-guard.conf"
@@ -18,6 +20,68 @@ stock_stopped=no
 candidate_started=no
 guard_installed=no
 activation_installed=no
+control_shell() {
+    test "$(readlink /bin/sh)" = /usr/bin/bash.bash || return 90
+    test "$(sha256sum /bin/sh | awk '{print $1}')" = "$control_shell_sha256" || return 90
+}
+control_outputs() {
+    case "$control_policy" in legacy) return 0;; source5-child-fsize4096-v1) :;; *) return 90;; esac
+    for stream in stdout stderr; do
+        output="$root/$1.$stream"
+        if test -e "$output" || test -L "$output"; then private "$output" || return 90; fi
+    done
+}
+control_child() {
+    case "$control_policy" in legacy) return 0;; source5-child-fsize4096-v1) :;; *) return 90;; esac
+    control_shell || return 90
+    control_child_pid=$BASHPID
+    case "$control_child_pid" in ""|*[!0-9]*) return 90;; esac
+    private "$root/$1.stdout" && private "$root/$1.stderr" || return 90
+    test "$(stat -Lc '%d %i %a %u %h' /proc/$control_child_pid/fd/1)" = "$(stat -c '%d %i %a %u %h' "$root/$1.stdout")" || return 90
+    test "$(stat -Lc '%d %i %a %u %h' /proc/$control_child_pid/fd/2)" = "$(stat -c '%d %i %a %u %h' "$root/$1.stderr")" || return 90
+    ulimit -c 0 || return 90
+    ulimit -f 8 || return 90
+    inherited=$(cat /proc/self/limits) || return 90
+    printf '%s\n' "$inherited" | awk '$1=="Max" && $2=="file" && $3=="size" {n++; if($4!=4096 || $5!=4096 || $6!="bytes") bad=1} END {exit !(n==1 && !bad)}' || return 90
+    printf '%s\n' "$inherited" | awk '$1=="Max" && $2=="core" && $3=="file" && $4=="size" {n++; if($5!=0 || $6!=0 || $7!="bytes") bad=1} END {exit !(n==1 && !bad)}' || return 90
+}
+control_grammar() {
+    test "$control_policy" = source5-child-fsize4096-v1 || return 0
+    prefix=$1; shift
+    if test "${1-}" = /usr/bin/systemctl; then shift; fi
+    if test "${1-}" = --no-pager; then shift; fi
+    test "${1-}" = show || return 0
+    shift
+    requested=''; scalar=no
+    for argument in "$@"; do
+        case "$argument" in --property=*) test -z "$requested" || return 90; requested=${argument#--property=};; --value) scalar=yes;; xochitl.service|rmb-qt-insertion-*-actor.service) :;; *) return 90;; esac
+    done
+    test -n "$requested" || return 90
+    awk -v keys="$requested" -v scalar="$scalar" '
+    function bound(key) { if(key=="ExecStart") return 2048; if(key=="DropInPaths") return 512; if(key=="OnFailure") return 256; if(key=="FragmentPath") return 192; return 64 }
+    BEGIN { count=split(keys,list,","); for(i=1;i<=count;i++) { if(list[i] !~ /^(OnFailure|OnFailureJobMode|FailureAction|StartLimitAction|Restart|RestartMode|TimeoutStopUSec|WatchdogUSec|KillMode|KillSignal|FinalKillSignal|SendSIGKILL|FragmentPath|DropInPaths|ExecStart|Type|TimeoutStartUSec|ActiveState|SubState|MainPID|ExecMainPID|BindsTo|PartOf|StopWhenUnneeded|Result|ExecMainCode|ExecMainStatus|Job|ControlGroup)$/ || need[list[i]]++) bad=1 } }
+    { if($0 ~ /[^ -~]/) bad=1; if(scalar=="yes") { if(count!=1 || NR!=1 || length($0)>bound(list[1])) bad=1 }
+      else { separator=index($0,"="); key=substr($0,1,separator-1); value=substr($0,separator+1); if(!separator || !need[key] || seen[key]++ || length(value)>bound(key)) bad=1 } }
+    END { if(scalar=="yes") { if(NR!=1) bad=1 } else { for(key in need) if(seen[key]!=1) bad=1 }; exit bad ? 90 : 0 }
+    ' "$root/$prefix.stdout" || return 90
+}
+control_failure() {
+    test "$control_policy" = source5-child-fsize4096-v1 || return 0
+    case "$1" in query|host-query) :;; *) return 90;; esac
+    if test -e "$root/$1.output-unknown" || test -L "$root/$1.output-unknown"; then
+        private "$root/$1.output-unknown" || return 90
+        test "$(cat "$root/$1.output-unknown")" = "$nonce" || return 90
+    else
+        claim "$1.output-unknown" || return 90
+    fi
+}
+control_complete() {
+    case "$control_policy" in legacy) return 0;; source5-child-fsize4096-v1) :;; *) return 90;; esac
+    for stream in stdout stderr; do
+        private "$root/$1.$stream" || return 90
+        test "$(stat -c '%s' "$root/$1.$stream")" -lt 4096 || return 90
+    done
+}
 now() { awk '{print int($1)}' /proc/uptime; }
 remaining() { printf '%s\n' "$((deadline - $(now)))"; }
 reserve() { test "$(remaining)" -ge "$1"; }
@@ -63,7 +127,8 @@ query() {
     reserve 1 || return 90
     q_limit=$(($(now) + 3))
     test "$q_limit" -le "$deadline" || q_limit=$deadline
-    (exec /usr/bin/systemctl --no-pager "$@") > "$root/query.stdout" 2> "$root/query.stderr" &
+    control_outputs query || return 90
+    (control_child query || exit 90; exec /usr/bin/systemctl --no-pager "$@") > "$root/query.stdout" 2> "$root/query.stderr" &
     q_pid=$!
     q_start=''
     if test -d "/proc/$q_pid"; then q_start=$(start_of "$q_pid") || :; fi
@@ -84,7 +149,32 @@ query() {
         fi
         sleep 1
     done
-    wait "$q_pid"
+    if wait "$q_pid"; then :; else
+        q_status=$?
+        control_failure query || :
+        return "$q_status"
+    fi
+    if ! control_complete query || ! control_grammar query "$@"; then
+        control_failure query || :
+        return 90
+    fi
+}
+control_copy() {
+    if test "$control_policy" = source5-child-fsize4096-v1; then
+        case "$1" in "$root/stock.policy.observed"|"$root/guard.policy.observed"|"$root/initial-stock-stop"|"$root/candidate.pre-stop"|"$root/candidate.post-stop") :;; *) return 90;; esac
+        if test -e "$1" || test -L "$1"; then private "$1" || return 90; fi
+        control_complete query || return 90
+    fi
+    cp "$root/query.stdout" "$1" || return 90
+}
+stop_diagnostic() {
+    if query show --property=Result,ExecMainCode,ExecMainStatus,ActiveState,SubState,MainPID,Job xochitl.service && control_copy "$1"; then
+        return 0
+    fi
+    recovery_evidence_failed=yes
+    preserve_failure || :
+    # Diagnostic failure grants no success and does not revoke proved guarded STOP.
+    return 0
 }
 value() {
     VALUE=''
@@ -94,7 +184,7 @@ value() {
 policy() {
     case "$1" in "$root/stock.policy"|"$root/guard.policy") observed="$1.observed";; *) return 90;; esac
     query show --property=OnFailure,OnFailureJobMode,FailureAction,StartLimitAction,Restart,RestartMode,TimeoutStopUSec,WatchdogUSec,KillMode,KillSignal,FinalKillSignal,SendSIGKILL,FragmentPath,DropInPaths,ExecStart xochitl.service || return $?
-    cp "$root/query.stdout" "$observed" || return 90
+    control_copy "$observed" || return 90
     while IFS= read -r expected; do
         test "$(grep -Fxc "$expected" "$observed")" = 1 || return 90
     done < "$1"
@@ -128,12 +218,59 @@ install_owned() {
     (set -C; cat "$1" > "$2") || return 90
     matches_owned "$2" "$1" || return 90
 }
+control_hash_check() {
+    case "$1/$2" in
+        packet-check/packet.files|hash-check/baseline.files|service-check/service.files|recovery-packet-check/packet.files|recovery-runtime-check/runtime.files|recovery-service-check/service.files|document-immutable-check/document-immutable.files|document-mutable-check/document-mutable.files) :;;
+        *) return 90;;
+    esac
+    private "$root/$2" || return 90
+    if test -e "$root/$1" || test -L "$root/$1"; then private "$root/$1" || return 90; fi
+    output_name=$1
+    manifest_name=$2
+    (
+        control_shell || exit 90
+        control_child_pid=$BASHPID
+        case "$control_child_pid" in ''|*[!0-9]*) exit 90;; esac
+        private "$root/$output_name" || exit 90
+        held=$(stat -c '%d %i %a %u %h' "$root/$output_name") || exit 90
+        test "$(stat -Lc '%d %i %a %u %h' /proc/$control_child_pid/fd/1)" = "$held" || exit 90
+        test "$(stat -Lc '%d %i %a %u %h' /proc/$control_child_pid/fd/2)" = "$held" || exit 90
+        ulimit -c 0 || exit 90
+        ulimit -f 8 || exit 90
+        inherited=$(cat /proc/self/limits) || exit 90
+        printf '%s\n' "$inherited" | awk '$1=="Max" && $2=="file" && $3=="size" {n++; if($4!=4096 || $5!=4096 || $6!="bytes") bad=1} END {exit !(n==1 && !bad)}' || exit 90
+        printf '%s\n' "$inherited" | awk '$1=="Max" && $2=="core" && $3=="file" && $4=="size" {n++; if($5!=0 || $6!=0 || $7!="bytes") bad=1} END {exit !(n==1 && !bad)}' || exit 90
+        cd "$root" || exit 90
+        exec sha256sum -c "$manifest_name"
+    ) > "$root/$output_name" 2>&1 || return 90
+    private "$root/$output_name" || return 90
+    test "$(stat -c %s "$root/$output_name")" -lt 4096 || return 90
+}
+document_hash_check() {
+    if test "$control_policy" = source5-child-fsize4096-v1; then
+        control_hash_check "$1" "$2"
+    else
+        sha256sum -c "$root/$2" > "$root/$1" 2>&1
+    fi
+}
 hashes() {
+    if test "$control_policy" = source5-child-fsize4096-v1; then
+        control_hash_check packet-check packet.files || return 90
+        control_hash_check hash-check baseline.files || return 90
+        control_hash_check service-check service.files || return 90
+        return 0
+    fi
     (cd "$root"; sha256sum -c packet.files) > "$root/packet-check"
     sha256sum -c "$root/baseline.files" > "$root/hash-check"
     sha256sum -c "$root/service.files" > "$root/service-check"
 }
 recovery_hashes() {
+    if test "$control_policy" = source5-child-fsize4096-v1; then
+        control_hash_check recovery-packet-check packet.files || return 90
+        control_hash_check recovery-runtime-check runtime.files || return 90
+        control_hash_check recovery-service-check service.files || return 90
+        return 0
+    fi
     # Recovery safety is independent of document outcome. The complete 24-file
     # baseline remains mandatory during admission; no document file is omitted.
     (cd "$root" || exit 90; sha256sum -c packet.files) > "$root/recovery-packet-check" || return 90
@@ -143,14 +280,14 @@ recovery_hashes() {
 record_document_preservation() {
     # This is evidence only, not a semantic insertion verdict. Exact intended
     # content/metadata changes require Main's full backup/order/UUID readback.
-    if sha256sum -c "$root/document-immutable.files" > "$root/document-immutable-check" 2>&1; then
+    if document_hash_check document-immutable-check document-immutable.files; then
         printf '%s immutable-document-hashes-pass\n' "$nonce" > "$root/document.preservation"
     else
         printf '%s immutable-document-hashes-fail\n' "$nonce" > "$root/document.preservation"
         preserve_failure
     fi
     # Expected-mutable hashes are recorded even when unchanged, never approved.
-    if sha256sum -c "$root/document-mutable.files" > "$root/document-mutable-check" 2>&1; then
+    if document_hash_check document-mutable-check document-mutable.files; then
         printf '%s mutable-prehashes-unchanged\n' "$nonce" > "$root/document.mutation"
     else
         printf '%s mutable-prehashes-differ-or-unreadable\n' "$nonce" > "$root/document.mutation"
@@ -259,17 +396,25 @@ restore() {
                 # exec never reaches launch identity. Never invent a PID.
                 preserve_failure || recovery_evidence_failed=yes
             fi
+            if test "$control_policy" = source5-child-fsize4096-v1; then
+                stop_diagnostic "$root/candidate.pre-stop"
+            else
             query show --property=Result,ExecMainCode,ExecMainStatus,ActiveState,SubState,MainPID,Job xochitl.service
             if ! cp "$root/query.stdout" "$root/candidate.pre-stop"; then
                 recovery_evidence_failed=yes
                 preserve_failure || :
             fi
+            fi
             stop_unit candidate-stop-under-guard
             if test "$candidate_identity_known" = yes; then process_gone "$attempted" "$started"; fi
+            if test "$control_policy" = source5-child-fsize4096-v1; then
+                stop_diagnostic "$root/candidate.post-stop"
+            else
             query show --property=Result,ExecMainCode,ExecMainStatus,ActiveState,SubState,MainPID,Job xochitl.service
             if ! cp "$root/query.stdout" "$root/candidate.post-stop"; then
                 recovery_evidence_failed=yes
                 preserve_failure || :
+            fi
             fi
             if ! grep -Fxq 'Result=success' "$root/candidate.post-stop"; then preserve_failure || recovery_evidence_failed=yes; fi
         fi
@@ -507,7 +652,7 @@ main() {
     stop_unit initial-stock-stop-under-guard
     process_gone "$original_pid" "$original_start"
     query show --property=Result,ExecMainCode,ExecMainStatus xochitl.service
-    cp "$root/query.stdout" "$root/initial-stock-stop"
+    control_copy "$root/initial-stock-stop"
     grep -Fxq 'Result=success' "$root/initial-stock-stop"
     reserve 195
     phase=install-activation

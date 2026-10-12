@@ -84,11 +84,11 @@ def pinned_hash_checks(output):
     return ordered_hash_checks(output, entries)
 
 
-def capture_script(prefix, nonce, boot, diagnostic=False):
+def capture_script(prefix, nonce, boot, diagnostic=False, limited=False):
     if any(not isinstance(pin, str) or not re.fullmatch('[0-9a-f]{64}', pin)
            for pin in (TOOLS['native_frame_acquire'], SOURCES['private_acquisition'])):
         raise ValueError('Reviewed scoped producer source and artifact required')
-    if not re.fullmatch(r'host-diagnostic-00[0-2]' if diagnostic else r'host-(?:ready-00[0-2]|trigger|result|open-00[0-4])', prefix):
+    if not re.fullmatch(r'host-diagnostic-00[0-2]' if diagnostic else r'host-(?:ready-00[0-2]|trigger|result|open-00[0-4]|normalization-source|inserted-destination)', prefix):
         raise ValueError('Exact exclusive capture prefix required')
     if not re.fullmatch('[0-9a-f]{32}', nonce) or not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', boot):
         raise ValueError('Canonical capture nonce and boot required')
@@ -137,6 +137,19 @@ native_hash=$(sha256sum "$root/{prefix}.images/native.png" | cut -d ' ' -f 1)
 cp "$root/{prefix}.images/overview.png" "$root/{prefix}.png"
 test "$(now_upper)" -lt "$cutoff"
 '''
+    if limited:
+        # Retain one overflow sentinel byte; refuse oversized maps without first
+        # writing an unbounded proc file. Legacy capture grammar stays unchanged.
+        for label in ("before","after"):
+            s=s.replace(f'cat /proc/$pid/maps > "$root/{prefix}.maps-{label}"',
+                f'dd if=/proc/$pid/maps bs=1 count=262145 2>/dev/null > "$root/{prefix}.maps-{label}"')
+        producer=f'"$root/native_frame_acquire" "$pid" "$start" {boot} {nonce} > "$root/{prefix}.frame" 2> "$root/{prefix}.producer-stderr"\nproducer=$?'
+        bounded=f'( "$root/native_frame_acquire" "$pid" "$start" {boot} {nonce} > "$root/{prefix}.frame"; producer=$?; printf \'%s\' "$producer" > "$root/{prefix}.producer-exit" ) 2>&1 | dd bs=1 count=525825 2>/dev/null > "$root/{prefix}.producer-stderr"\nproducer=$(cat "$root/{prefix}.producer-exit")'
+        s=s.replace(producer,bounded)
+        converter=f'"$root/owned_frame_alarm" "$root/owned_frame" "$root/{prefix}.frame" "$root/{prefix}.images" {nonce} "$pid" "$start" {boot} "$frame_hash" > "$root/{prefix}.capture" 2> "$root/{prefix}.converter-stderr"\nconverter=$?'
+        bounded=f'( "$root/owned_frame_alarm" "$root/owned_frame" "$root/{prefix}.frame" "$root/{prefix}.images" {nonce} "$pid" "$start" {boot} "$frame_hash" > "$root/{prefix}.capture"; converter=$?; printf \'%s\' "$converter" > "$root/{prefix}.converter-exit" ) 2>&1 | dd bs=1 count=65537 2>/dev/null > "$root/{prefix}.converter-stderr"\nconverter=$(cat "$root/{prefix}.converter-exit")'
+        s=s.replace(converter,bounded)
+        s=s.replace(f'test "$converter" = 0',f'test "$(stat -c \'%s\' "$root/{prefix}.converter-stderr")" -le 65536\ntest "$converter" = 0')
     return s + mark('native_pins_after_begin') + pinned_hash_checks(f'$root/{prefix}.pins-after') + mark('native_pins_after_end')
 
 

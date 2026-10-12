@@ -54,6 +54,216 @@ mod owned {
         sidecar_sha256: [String; 3],
         page_map_sha256: String,
         executable_sha256: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        nine_inventory: Option<NineInventory>,
+    }
+    const ORIGINAL_EIGHT: [&str; 8] = [
+        "a7181850-3f03-4bb0-8b9e-01acfc20032e",
+        "4c8a847e-0eb8-4cf3-a747-77952d56445a",
+        "5aef884d-d3fc-4635-895a-28237568823d",
+        "d1261cb9-a8c0-4e15-ab24-7a9172b2027b",
+        "f39ae285-3e0c-43dd-b27c-866dff7a24cd",
+        "028b118f-474a-4886-a469-7273b290320c",
+        "fd5afbe2-a79c-461b-8b15-96907d181ab7",
+        "1692961d-ec5c-4f0f-9635-8e6081111dab",
+    ];
+    const FIXTURE_DOCUMENT: &str = "e7f661f1-db6f-4dfc-854a-b38aff7f75de";
+    #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct NineInventory {
+        variant: String,
+        target_id: String,
+        candidate_nonce: String,
+        boot_id: String,
+        pid: u32,
+        start_ticks: u64,
+        reconciled_creation_path: String,
+        reconciled_creation_sha256: String,
+        candidate_root_dev: u64,
+        candidate_root_ino: u64,
+        phase: String,
+        candidate_result_ceiling_ms: i64,
+        candidate_window_sha256: String,
+    }
+    #[derive(Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ReconciledCreation {
+        candidate_nonce: String,
+        boot_id: String,
+        pid: u32,
+        start_ticks: u64,
+        document_id: String,
+        before_page_ids: Vec<String>,
+        page_ids: Vec<String>,
+        target_id: String,
+        source_index: usize,
+        insertion_index: usize,
+        native_receipt_sha256: String,
+        page_map_sha256: String,
+        candidate_root_dev: u64,
+        candidate_root_ino: u64,
+        candidate_window_sha256: String,
+        preservation_verified: bool,
+        creation_verified: bool,
+    }
+    fn nine_order(target: &str) -> Result<Vec<String>> {
+        ensure!(
+            uuid(target)
+                && target != FIXTURE_DOCUMENT
+                && target != "00000000-0000-0000-0000-000000000000"
+                && !ORIGINAL_EIGHT.contains(&target),
+            "Unused canonical nine-page target required"
+        );
+        let mut order = ORIGINAL_EIGHT
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>();
+        order.insert(6, target.to_string());
+        Ok(order)
+    }
+    fn inventory_count(c: &Config) -> Result<usize> {
+        if let Some(n) = &c.nine_inventory {
+            ensure!(
+                n.variant == "source5-nine-after-insertion-v1"
+                    && c.document == FIXTURE_DOCUMENT
+                    && c.page_ids == nine_order(&n.target_id)?
+                    && matches!(
+                        (c.current_index, c.direction.as_str()),
+                        (6, "previous") | (5, "next")
+                    )
+                    && hex(&n.candidate_nonce, 32)
+                    && n.candidate_nonce != c.nonce
+                    && n.boot_id == c.boot
+                    && n.pid == c.stock_pid
+                    && n.start_ticks == c.stock_start
+                    && n.reconciled_creation_path
+                        == format!(
+                            "/run/rmb-qt-probe-{}/reconciled-creation.json",
+                            n.candidate_nonce
+                        )
+                    && hex(&n.reconciled_creation_sha256, 64)
+                    && hex(&n.candidate_window_sha256, 64)
+                    && n.candidate_root_dev > 0
+                    && n.candidate_root_ino > 0
+                    && n.phase
+                        == if c.direction == "previous" {
+                            "normalization-source"
+                        } else {
+                            "inserted-destination"
+                        }
+                    && c.overall_ceiling_ms <= n.candidate_result_ceiling_ms
+                    && c.go_not_after_ms
+                        .checked_add(5000)
+                        .is_some_and(|v| v <= c.overall_ceiling_ms),
+                "Sealed source5 nine-page candidate required"
+            );
+            Ok(9)
+        } else {
+            Ok(8)
+        }
+    }
+    fn inventory_guard(c: &Config, root: &Path) -> Result<()> {
+        inventory_count(c)?;
+        if let Some(n) = &c.nine_inventory {
+            let evidence = root.join("gesture.inventory");
+            let m = fs::symlink_metadata(&evidence)?;
+            ensure!(
+                m.is_file() && m.uid() == 0 && m.mode() & 0o7777 == 0o600 && m.nlink() == 1,
+                "Private inventory seal changed"
+            );
+            ensure!(
+                serde_json::from_slice::<NineInventory>(&bounded(&evidence, 16384)?)? == *n,
+                "Inventory seal changed"
+            );
+            let receipt_path = Path::new(&n.reconciled_creation_path);
+            let candidate_root = receipt_path.parent().context("No candidate root")?;
+            let m = fs::symlink_metadata(candidate_root)?;
+            ensure!(
+                m.is_dir() && m.uid() == 0 && m.mode() & 0o7777 == 0o700,
+                "Candidate root changed"
+            );
+            ensure!(
+                m.dev() == n.candidate_root_dev && m.ino() == n.candidate_root_ino,
+                "Held candidate root replaced"
+            );
+            let owner = candidate_root.join("owner");
+            let m = fs::symlink_metadata(&owner)?;
+            ensure!(
+                m.is_file()
+                    && m.uid() == 0
+                    && m.mode() & 0o7777 == 0o600
+                    && m.nlink() == 1
+                    && bounded(&owner, 32)? == n.candidate_nonce.as_bytes(),
+                "Candidate owner changed"
+            );
+            let window = candidate_root.join("candidate.window");
+            let m = fs::symlink_metadata(&window)?;
+            ensure!(
+                m.is_file() && m.uid() == 0 && m.mode() & 0o7777 == 0o600 && m.nlink() == 1,
+                "Private candidate window changed"
+            );
+            let bytes = bounded(&window, 256)?;
+            ensure!(
+                sha(&bytes) == n.candidate_window_sha256,
+                "Original window bytes changed"
+            );
+            let text = std::str::from_utf8(&bytes)?;
+            let parts = text.split_whitespace().collect::<Vec<_>>();
+            ensure!(
+                parts.len() == 5 && parts[0] == n.candidate_nonce,
+                "Candidate window nonce changed"
+            );
+            let nums = parts[1..]
+                .iter()
+                .map(|v| v.parse::<i64>().context("Invalid original clock"))
+                .collect::<Result<Vec<_>>>()?;
+            ensure!(
+                nums[0] >= 0
+                    && nums[1].checked_sub(nums[0]) == Some(360)
+                    && nums[2] >= nums[0]
+                    && nums[1].checked_sub(nums[2]).is_some_and(|v| v >= 315)
+                    && nums[2].checked_add(130) == Some(nums[3])
+                    && nums[2].checked_add(115).and_then(|v| v.checked_mul(1000))
+                        == Some(n.candidate_result_ceiling_ms),
+                "Original candidate result bound changed"
+            );
+            let m = fs::symlink_metadata(receipt_path)?;
+            ensure!(
+                m.is_file() && m.uid() == 0 && m.mode() & 0o7777 == 0o600 && m.nlink() == 1,
+                "Private reconciliation changed"
+            );
+            let bytes = bounded(receipt_path, 16384)?;
+            ensure!(
+                sha(&bytes) == n.reconciled_creation_sha256,
+                "Reconciliation bytes changed"
+            );
+            let r: ReconciledCreation = serde_json::from_slice(&bytes)?;
+            ensure!(
+                r.candidate_nonce == n.candidate_nonce
+                    && r.boot_id == c.boot
+                    && r.pid == c.stock_pid
+                    && r.start_ticks == c.stock_start
+                    && r.document_id == c.document
+                    && r.before_page_ids
+                        == ORIGINAL_EIGHT
+                            .iter()
+                            .map(|v| v.to_string())
+                            .collect::<Vec<_>>()
+                    && r.page_ids == c.page_ids
+                    && r.target_id == n.target_id
+                    && r.source_index == 5
+                    && r.insertion_index == 6
+                    && hex(&r.native_receipt_sha256, 64)
+                    && r.page_map_sha256 == c.page_map_sha256
+                    && r.candidate_root_dev == n.candidate_root_dev
+                    && r.candidate_root_ino == n.candidate_root_ino
+                    && r.candidate_window_sha256 == n.candidate_window_sha256
+                    && r.preservation_verified
+                    && r.creation_verified,
+                "Reconciled creation binding changed"
+            );
+        }
+        Ok(())
     }
     #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -380,14 +590,14 @@ mod owned {
             "Unknown selection"
         );
         ensure!(
-            c.page_ids.len() == 8
-                && c.current_index < 8
+            c.page_ids.len() == inventory_count(c)?
+                && c.current_index < inventory_count(c)?
                 && c.page_ids.iter().all(|s| uuid(s))
                 && c.page_ids
                     .iter()
                     .collect::<std::collections::BTreeSet<_>>()
                     .len()
-                    == 8,
+                    == inventory_count(c)?,
             "Exact eight-page order required"
         );
         ensure!(
@@ -398,7 +608,7 @@ mod owned {
 
         ensure!(
             if c.direction == "next" {
-                c.current_index + 1 < 8
+                c.current_index + 1 < inventory_count(c)?
             } else {
                 c.current_index > 0
             },
@@ -456,8 +666,11 @@ mod owned {
         Ok(())
     }
     fn page_map(content: &serde_json::Value) -> Result<String> {
+        page_map_count(content, 8)
+    }
+    fn page_map_count(content: &serde_json::Value, count: usize) -> Result<String> {
         ensure!(
-            content["pageCount"].as_u64() == Some(8),
+            content["pageCount"].as_u64() == Some(count as u64),
             "Page count changed"
         );
         let mut pages = Vec::new();
@@ -471,8 +684,33 @@ mod owned {
         }
         pages.sort_by_key(|p| p["id"].to_string());
         Ok(sha(&serde_json::to_vec(
-            &serde_json::json!({"pageCount":8,"pages":pages}),
+            &serde_json::json!({"pageCount":count,"pages":pages}),
         )?))
+    }
+    fn nine_map_semantics(content: &serde_json::Value, target: &str) -> Result<()> {
+        let pages = content["cPages"]["pages"]
+            .as_array()
+            .context("No nine-page map")?;
+        let source = pages
+            .iter()
+            .find(|p| p["id"] == ORIGINAL_EIGHT[5])
+            .context("Source5 missing")?;
+        let neighbor = pages
+            .iter()
+            .find(|p| p["id"] == ORIGINAL_EIGHT[6])
+            .context("Old neighbor missing")?;
+        let inserted = pages
+            .iter()
+            .find(|p| p["id"] == target)
+            .context("Target missing")?;
+        ensure!(
+            source["redir"]["value"].as_u64() == Some(1)
+                && neighbor["redir"]["value"].as_u64() == Some(2)
+                && (inserted.get("redir").is_none()
+                    || inserted["redir"].is_object() && inserted["redir"]["value"].is_null()),
+            "Source5 redirects/non-PDF target changed"
+        );
+        Ok(())
     }
     fn owner_admission(
         source: usize,
@@ -505,8 +743,11 @@ mod owned {
         );
         let content: serde_json::Value = serde_json::from_slice(&bytes[1])?;
         let meta: serde_json::Value = serde_json::from_slice(&bytes[2])?;
+        if let Some(n) = &c.nine_inventory {
+            nine_map_semantics(&content, &n.target_id)?;
+        }
         ensure!(
-            page_map(&content)? == c.page_map_sha256,
+            page_map_count(&content, inventory_count(c)?)? == c.page_map_sha256,
             "Immutable page map changed"
         );
         let mut order = Vec::new();
@@ -524,7 +765,7 @@ mod owned {
         }
         order.sort();
         ensure!(
-            order.len() == 8
+            order.len() == inventory_count(c)?
                 && order.windows(2).all(|p| p[0].0 != p[1].0)
                 && order.iter().map(|p| p.1.clone()).collect::<Vec<_>>() == c.page_ids,
             "Exact order changed"
@@ -621,6 +862,7 @@ mod owned {
     ) -> Result<ContextSamples> {
         validate(c, root)?;
         geometry_guard(c, root)?;
+        inventory_guard(c, root)?;
         session_guard(c)?;
         let paths = [
             PathBuf::from("/home/root/.config/remarkable/xochitl.conf"),
@@ -645,6 +887,7 @@ mod owned {
         session_guard(c)?;
         validate(c, root)?;
         geometry_guard(c, root)?;
+        inventory_guard(c, root)?;
         classify_context_samples(c, &first, &second, source_only, release_only)
     }
     #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -879,6 +1122,177 @@ mod owned {
         Ok(())
     }
 
+    const SOURCE5_FILE_CAP: u64 = 32768;
+    const SOURCE5_CONTROL_FILES: [&str; 15] = [
+        "config.json",
+        "gesture.path",
+        "gesture.inventory",
+        "gesture.claim",
+        "gesture.go",
+        "gesture.writer",
+        "gesture.up-intent",
+        "gesture.result",
+        "gesture.worker-refusal",
+        "intents.jsonl",
+        "worker-frames.jsonl",
+        "worker-fault.log",
+        "helper.stdout",
+        "helper.stderr",
+        "raw-input.bin",
+    ];
+    fn verify_output_caps() -> Result<()> {
+        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+        ensure!(
+            unsafe { libc::sigaction(libc::SIGXFSZ, std::ptr::null(), &mut action) } == 0
+                && action.sa_sigaction == libc::SIG_IGN,
+            "SOURCE5 file signal policy"
+        );
+        for (resource, expected) in [
+            (libc::RLIMIT_CORE, 0),
+            (libc::RLIMIT_FSIZE, SOURCE5_FILE_CAP),
+        ] {
+            let mut limit: libc::rlimit = unsafe { std::mem::zeroed() };
+            ensure!(
+                unsafe { libc::getrlimit(resource, &mut limit) } == 0
+                    && limit.rlim_cur == expected as libc::rlim_t
+                    && limit.rlim_max == expected as libc::rlim_t,
+                "SOURCE5 inherited output limit"
+            );
+        }
+        Ok(())
+    }
+    fn configure_output_caps() -> Result<()> {
+        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+        action.sa_sigaction = libc::SIG_IGN;
+        ensure!(
+            unsafe { libc::sigemptyset(&mut action.sa_mask) } == 0
+                && unsafe { libc::sigaction(libc::SIGXFSZ, &action, std::ptr::null_mut()) } == 0,
+            "SOURCE5 ignore file signal"
+        );
+        for (resource, expected) in [
+            (libc::RLIMIT_CORE, 0),
+            (libc::RLIMIT_FSIZE, SOURCE5_FILE_CAP),
+        ] {
+            let limit = libc::rlimit {
+                rlim_cur: expected as libc::rlim_t,
+                rlim_max: expected as libc::rlim_t,
+            };
+            ensure!(
+                unsafe { libc::setrlimit(resource, &limit) } == 0,
+                "SOURCE5 output limit setup"
+            );
+        }
+        verify_output_caps()
+    }
+    fn append_scoped(file: &mut File, bytes: &[u8], capped: bool) -> Result<()> {
+        if capped {
+            ensure!(
+                file.metadata()?
+                    .len()
+                    .checked_add(bytes.len() as u64)
+                    .is_some_and(|size| size < SOURCE5_FILE_CAP),
+                "SOURCE5 cumulative evidence cap"
+            );
+        }
+        file.write_all(bytes)?;
+        Ok(())
+    }
+    fn scoped_json(value: &impl Serialize) -> Result<Vec<u8>> {
+        let mut bytes = serde_json::to_vec(value)?;
+        bytes.push(b'\n');
+        ensure!(
+            bytes.len() < SOURCE5_FILE_CAP as usize,
+            "SOURCE5 JSON evidence cap"
+        );
+        Ok(bytes)
+    }
+    fn durable_scoped(capped: bool, root: &Path, name: &str, value: &impl Serialize) -> Result<()> {
+        if !capped {
+            return durable(root, name, value);
+        }
+        let bytes = scoped_json(value)?; // Serialize and reject BEFORE opening any file.
+        let mut file = exclusive(&root.join(name))?;
+        append_scoped(&mut file, &bytes, true)?;
+        file.sync_all()?;
+        File::open(root)?.sync_all()?;
+        Ok(())
+    }
+    fn source5_files_below_cap(root: &Path) -> Result<()> {
+        for entry in fs::read_dir(root)? {
+            let name = entry?.file_name();
+            let name = name.to_str().context("SOURCE5 unknown file name")?;
+            ensure!(
+                SOURCE5_CONTROL_FILES.contains(&name) || matches!(name, "owner" | "source.png"),
+                "SOURCE5 unbudgeted file"
+            );
+        }
+        for name in SOURCE5_CONTROL_FILES {
+            match fs::symlink_metadata(root.join(name)) {
+                Ok(m) => ensure!(
+                    m.is_file()
+                        && m.uid() == 0
+                        && m.nlink() == 1
+                        && m.mode() & 0o7777 == 0o600
+                        && m.len() < SOURCE5_FILE_CAP,
+                    "SOURCE5 control file reached cap or lost ownership"
+                ),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(())
+    }
+    fn source5_stream_identity(root: &Path, fd: RawFd, name: &str) -> Result<()> {
+        let path = fs::symlink_metadata(root.join(name))?;
+        let mut held: libc::stat = unsafe { std::mem::zeroed() };
+        ensure!(
+            unsafe { libc::fstat(fd, &mut held) } == 0
+                && held.st_mode & libc::S_IFMT == libc::S_IFREG
+                && held.st_uid == 0
+                && held.st_nlink == 1
+                && held.st_mode & 0o7777 == 0o600
+                && held.st_size >= 0
+                && held.st_size < SOURCE5_FILE_CAP as libc::off_t
+                && path.is_file()
+                && path.uid() == 0
+                && path.nlink() == 1
+                && path.mode() & 0o7777 == 0o600
+                && path.dev() == held.st_dev as u64
+                && path.ino() == held.st_ino as u64,
+            "SOURCE5 held output stream identity"
+        );
+        Ok(())
+    }
+    fn source5_streams(root: &Path, worker: bool) -> Result<()> {
+        source5_stream_identity(
+            root,
+            libc::STDERR_FILENO,
+            if worker {
+                "worker-fault.log"
+            } else {
+                "helper.stderr"
+            },
+        )?;
+        if !worker {
+            source5_stream_identity(root, libc::STDOUT_FILENO, "helper.stdout")?;
+        }
+        Ok(())
+    }
+
+    pub fn source5_invocation() -> bool {
+        matches!(
+            std::env::args().nth(1).as_deref(),
+            Some("--source5-capped" | "--source5-worker")
+        )
+    }
+    pub fn report_source5_failure() {
+        // Fixed, fallible output: never panic or retry while cleanup may be unresolved.
+        let bytes = b"SOURCE5 helper refused; original release/death evidence required\n";
+        unsafe {
+            libc::write(libc::STDERR_FILENO, bytes.as_ptr().cast(), bytes.len());
+        }
+    }
+
     fn expected_release_eligible(
         c: &Config,
         target: Option<TargetObservation>,
@@ -926,6 +1340,7 @@ mod owned {
         files: Vec<(PathBuf, File, Identity)>,
         touch: usize,
         history: Option<File>,
+        bounded_history: bool,
     }
     fn input_names() -> Result<Vec<PathBuf>> {
         let mut names = fs::read_dir("/dev/input")?
@@ -969,6 +1384,7 @@ mod owned {
             Ok(Self {
                 files,
                 touch: touch.context("Touch absent")?,
+                bounded_history: false,
                 history: root
                     .map(|r| exclusive(&r.join("raw-input.bin")))
                     .transpose()?,
@@ -1057,16 +1473,12 @@ mod owned {
                             n > 0 && n as usize % std::mem::size_of::<libc::input_event>() == 0,
                             "Malformed/partial input"
                         );
-                        self.history
-                            .as_mut()
-                            .context("No raw retention")?
-                            .write_all(unsafe {
-                                std::slice::from_raw_parts(events.as_ptr().cast::<u8>(), n as usize)
-                            })?;
-                        self.history
-                            .as_mut()
-                            .context("No raw retention")?
-                            .sync_data()?;
+                        let retained = self.history.as_mut().context("No raw retention")?;
+                        let bytes = unsafe {
+                            std::slice::from_raw_parts(events.as_ptr().cast::<u8>(), n as usize)
+                        };
+                        append_scoped(retained, bytes, self.bounded_history)?;
+                        retained.sync_data()?;
                         ensure!(i == self.touch, "External input");
                         let p = policy.as_deref_mut().context("Input before GO")?;
                         for e in events
@@ -1657,7 +2069,12 @@ mod owned {
             &serde_json::json!({"expected_step":step,"await_written":written_phase,"frame":frame}),
         )?;
         ensure!(
-            responses.metadata()?.len() + b.len() as u64 + 1 <= 32768,
+            responses.metadata()?.len() + b.len() as u64 + 1
+                < if config.nine_inventory.is_some() {
+                    32768
+                } else {
+                    32769
+                },
             "Worker frame evidence cap"
         );
         responses.write_all(&b)?;
@@ -1682,7 +2099,12 @@ mod owned {
         }
         if was_none {
             if let Some(fault) = primary {
-                durable(root, "gesture.worker-refusal", fault)?;
+                durable_scoped(
+                    config.nine_inventory.is_some(),
+                    root,
+                    "gesture.worker-refusal",
+                    fault,
+                )?;
             }
         }
         result
@@ -1751,9 +2173,19 @@ mod owned {
         ensure!(value == -1 || value == tag, "Scoped tag changed");
         Ok(())
     }
-    fn worker(root: &Path, tag: i32, limits: Limits, fd: RawFd) -> Result<()> {
+    fn worker(root: &Path, tag: i32, limits: Limits, fd: RawFd, capped: bool) -> Result<()> {
         let c: Config = serde_json::from_slice(&bounded(&root.join("config.json"), 16384)?)?;
+        ensure!(
+            c.nine_inventory.is_some() == capped,
+            "Closed SOURCE5 worker mode required"
+        );
+        if capped {
+            verify_output_caps()?;
+        }
         validate(&c, root)?;
+        if capped {
+            source5_streams(root, true)?;
+        }
         geometry_guard(&c, root)?;
         ensure!(
             limits == Limits::fixed(limits.go, &c)?,
@@ -1834,10 +2266,24 @@ mod owned {
         v.value = e[2];
         v
     }
-    fn supervisor(root: &Path) -> Result<()> {
+    fn supervisor(root: &Path, capped: bool) -> Result<()> {
         let c: Config = serde_json::from_slice(&bounded(&root.join("config.json"), 16384)?)?;
+        ensure!(
+            c.nine_inventory.is_some() == capped,
+            "Closed SOURCE5 parent mode required"
+        );
+        if capped {
+            verify_output_caps()?;
+        }
         validate(&c, root)?;
-        durable(root, "gesture.path", &geometry(&c))?;
+        if capped {
+            source5_files_below_cap(root)?;
+            source5_streams(root, false)?;
+        }
+        durable_scoped(capped, root, "gesture.path", &geometry(&c))?;
+        if let Some(n) = &c.nine_inventory {
+            durable_scoped(capped, root, "gesture.inventory", n)?;
+        }
         context(&c, root, true, false)?;
         let bytes = bounded(&root.join("source.png"), 16 * 1024 * 1024)?;
         ensure!(
@@ -1854,8 +2300,9 @@ mod owned {
             sha(&bounded(&executable, 32 * 1024 * 1024)?) == c.executable_sha256,
             "Own artifact changed"
         );
-        durable(root, "gesture.claim", &c.nonce)?;
+        durable_scoped(capped, root, "gesture.claim", &c.nonce)?;
         let mut inputs = Inputs::open(Some(root))?;
+        inputs.bounded_history = capped;
         inputs.validate()?;
         inputs.drain(None)?;
         let seed = snapshot(inputs.fd())?;
@@ -1868,7 +2315,7 @@ mod owned {
         let tag = low + (u32::from_ne_bytes(random) % (high - low + 1) as u32) as i32;
         let mut policy = Policy::new(tag, path(&c), seed)?;
         let limits = Limits::fixed(now()?, &c)?;
-        durable(root, "gesture.go", &limits)?;
+        durable_scoped(capped, root, "gesture.go", &limits)?;
         limits.normal()?;
         inputs.drain(None)?;
         inputs.validate()?;
@@ -1882,7 +2329,11 @@ mod owned {
         let mut responses = exclusive(&root.join("worker-frames.jsonl"))?;
         let mut command = Command::new(executable);
         command
-            .arg("--worker")
+            .arg(if capped {
+                "--source5-worker"
+            } else {
+                "--worker"
+            })
             .arg(root)
             .arg(tag.to_string())
             .arg(serde_json::to_string(&limits)?)
@@ -1902,7 +2353,8 @@ mod owned {
         let mut child = command.spawn()?;
         drop(writer_socket);
         let setup = (|| -> Result<()> {
-            durable(
+            durable_scoped(
+                capped,
                 root,
                 "gesture.writer",
                 &serde_json::json!({"pid":child.id(),"start":start(child.id())?,
@@ -1966,11 +2418,14 @@ mod owned {
                 let admission = policy.admit(&request.events, &before);
                 let step = sticky_input(&mut policy, admission)?;
                 ensure!(step == expected_step, "Unexpected step");
-                serde_json::to_writer(
-                    &mut intents,
-                    &serde_json::json!({"step":step,"before":before,"events":request.events}),
-                )?;
-                intents.write_all(b"\n")?;
+                let intent =
+                    serde_json::json!({"step":step,"before":before,"events":request.events});
+                if capped {
+                    append_scoped(&mut intents, &scoped_json(&intent)?, true)?;
+                } else {
+                    serde_json::to_writer(&mut intents, &intent)?;
+                    intents.write_all(b"\n")?;
+                }
                 intents.sync_all()?;
                 // Every authority is checked after potentially blocking durable intent.
                 limits.normal()?;
@@ -2115,7 +2570,8 @@ mod owned {
                 recovery_admission(&policy, &current, death.is_ok(), now()?, &limits)?;
                 policy.intent = Some(16);
                 policy.cursor = 0;
-                durable(
+                durable_scoped(
+                    capped,
                     root,
                     "gesture.up-intent",
                     &serde_json::json!({"point":policy.point,"tag":tag}),
@@ -2176,6 +2632,10 @@ mod owned {
             );
             retained_fault_file.sync_all()?;
         }
+        if capped {
+            source5_files_below_cap(root)?;
+            source5_streams(root, false)?;
+        }
         let unresolved = contact_unresolved(run.is_ok(), death.is_ok(), recovered);
         let expected_released = expected_release_eligible(
             &c,
@@ -2190,7 +2650,7 @@ mod owned {
             && death.as_ref().is_ok_and(|s| s.success())
             && policy.released
             && !transition_unresolved;
-        let report = serde_json::json!({"nonce":c.nonce,"geometry_variant":c.geometry_variant,"navigation_policy":c.navigation_policy,
+        let report = serde_json::json!({"nonce":c.nonce,"geometry_variant":c.geometry_variant,"navigation_policy":c.navigation_policy,"nine_inventory":c.nine_inventory,
         "trajectory_complete":success,"owned_down_prefix":owned_down_prefix,"release_positive":(success || recovered) && !policy.bad,
         "target_observation":target_observation.map(|o| serde_json::json!({"samples":o.samples,"witness_fields":o.witness_fields,"origin":o.origin,"phase":o.guard_phase,"step":o.step,"parent_waitstate":parent_phase,"worker_phase":o.worker_phase,"worker_step":o.worker_step})),"tag":tag,"y_evidence":policy.evidence(),"limits":limits,
         "complete_step":if expected_released { last_motion_step } else { policy.complete },"transition_unresolved":transition_unresolved,"writer_death_confirmed":death.is_ok(),"unresolved":unresolved,
@@ -2198,12 +2658,16 @@ mod owned {
             else{"gesture-refused-or-unresolved"},"error":run.err().map(|e|e.to_string()),
         "parent_phase":parent_phase,"protocol_uncertain":protocol_uncertain,"worker_refusal":worker_refusal,"parent_context_transition":parent_context_transition,"ui_verified":false,"exclusive_kernel_ownership":false});
         ensure!(now()? < limits.overall, "Original overall response ceiling");
-        durable(root, "gesture.result", &report)?;
+        durable_scoped(capped, root, "gesture.result", &report)?;
         ensure!(
             now()? < limits.overall,
             "Result retention exceeded original ceiling"
         );
-        println!("{report}");
+        if capped {
+            std::io::stdout().lock().write_all(&scoped_json(&report)?)?;
+        } else {
+            println!("{report}");
+        }
         ensure!(success || expected_released, "Gesture failed; never replay");
         Ok(())
     }
@@ -2211,6 +2675,222 @@ mod owned {
     #[cfg(test)]
     mod tests {
         use super::*;
+        #[test]
+        #[ignore = "Internal isolated output-cap child, launched by parent tests"]
+        fn source5_cap_process_fixture() {
+            let mode = std::env::var("SOURCE5_CAP_FIXTURE").unwrap();
+            let root = PathBuf::from(std::env::var("SOURCE5_CAP_ROOT").unwrap());
+            if mode == "setup-fails" {
+                assert!(configure_output_caps().is_err());
+                let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+                assert_eq!(
+                    unsafe { libc::sigaction(libc::SIGXFSZ, std::ptr::null(), &mut action) },
+                    0
+                );
+                assert_eq!(action.sa_sigaction, libc::SIG_IGN);
+                return;
+            }
+            if mode == "startup" || mode == "legacy-mismatch" {
+                let args = vec![
+                    "fixture".into(),
+                    "--source5-capped".into(),
+                    root.to_str().unwrap().into(),
+                ];
+                assert!(dispatch(args).is_err());
+                verify_output_caps().unwrap();
+                report_source5_failure();
+                assert!(!root.join("gesture.path").exists());
+                return;
+            }
+            if mode == "inherit" {
+                verify_output_caps().unwrap();
+                assert_eq!(unsafe { libc::raise(libc::SIGXFSZ) }, 0);
+                return;
+            }
+            assert_eq!(mode, "kernel");
+            configure_output_caps().unwrap();
+            verify_output_caps().unwrap();
+            assert_eq!(unsafe { libc::raise(libc::SIGXFSZ) }, 0);
+            let mut file = exclusive(&root.join("raw-input.bin")).unwrap();
+            file.write_all(&vec![0u8; 32767]).unwrap();
+            file.write_all(&[0]).unwrap(); // Kernel cap equality is retained but never qualifies.
+            let error = file.write_all(&[0]).unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(libc::EFBIG));
+            assert_eq!(file.metadata().unwrap().len(), 32768);
+            assert!(source5_files_below_cap(&root).is_err());
+            // Actual exec inheritance, not a same-process assumption.
+            let status = cap_child(&root, "inherit", false);
+            assert!(status.success());
+            verify_output_caps().unwrap();
+        }
+        fn cap_child(root: &Path, mode: &str, lower_hard: bool) -> ExitStatus {
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "owned::tests::source5_cap_process_fixture",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("SOURCE5_CAP_FIXTURE", mode)
+                .env("SOURCE5_CAP_ROOT", root)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::from(
+                    exclusive(&root.join(format!("{mode}.stderr"))).unwrap(),
+                ));
+            if lower_hard {
+                unsafe {
+                    command.pre_exec(|| {
+                        let limit = libc::rlimit {
+                            rlim_cur: 1024,
+                            rlim_max: 1024,
+                        };
+                        if libc::setrlimit(libc::RLIMIT_FSIZE, &limit) != 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        Ok(())
+                    });
+                }
+            }
+            let mut child = command.spawn().unwrap();
+            // Fixture startup includes the test runtime and a nested exec.
+            // Do not reuse the production worker's 50ms normal-death grace.
+            let end = now().unwrap() + 3000;
+            while now().unwrap() < end {
+                if let Some(status) = child.try_wait().unwrap() {
+                    return status;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            fence(&mut child, now().unwrap() + 1000, false).unwrap()
+        }
+        #[test]
+        fn source5_caps_are_isolated_nonfatal_inherited_and_preparse() {
+            let root = fixture_root("output-caps");
+            let before = [
+                (libc::RLIMIT_CORE, read_limit(libc::RLIMIT_CORE)),
+                (libc::RLIMIT_FSIZE, read_limit(libc::RLIMIT_FSIZE)),
+            ];
+            let status = cap_child(&root, "kernel", false);
+            assert!(
+                status.success(),
+                "status={status:?} stderr={}",
+                String::from_utf8_lossy(&bounded(&root.join("kernel.stderr"), 32768).unwrap())
+            );
+            assert!(cap_child(&root, "setup-fails", true).success());
+            fs::write(root.join("config.json"), b"{}").unwrap();
+            assert!(cap_child(&root, "startup", false).success());
+            assert!(fs::metadata(root.join("startup.stderr")).unwrap().len() <= 256);
+            fs::write(
+                root.join("config.json"),
+                serde_json::to_vec(&fixture_config()).unwrap(),
+            )
+            .unwrap();
+            assert!(cap_child(&root, "legacy-mismatch", false).success());
+            assert!(
+                fs::metadata(root.join("legacy-mismatch.stderr"))
+                    .unwrap()
+                    .len()
+                    <= 256
+            );
+            for (resource, expected) in before {
+                assert_eq!(read_limit(resource), expected);
+            }
+        }
+        fn read_limit(resource: libc::__rlimit_resource_t) -> (libc::rlim_t, libc::rlim_t) {
+            let mut value: libc::rlimit = unsafe { std::mem::zeroed() };
+            assert_eq!(unsafe { libc::getrlimit(resource, &mut value) }, 0);
+            (value.rlim_cur, value.rlim_max)
+        }
+        #[test]
+        fn source5_held_stream_requires_exact_private_regular_identity() {
+            let root = fixture_root("stream-identity");
+            let file = exclusive(&root.join("helper.stdout")).unwrap();
+            source5_stream_identity(&root, file.as_raw_fd(), "helper.stdout").unwrap();
+            let other = exclusive(&root.join("helper.stderr")).unwrap();
+            assert!(source5_stream_identity(&root, other.as_raw_fd(), "helper.stdout").is_err());
+            fs::rename(root.join("helper.stdout"), root.join("held-original")).unwrap();
+            let replacement = exclusive(&root.join("helper.stdout")).unwrap();
+            assert!(source5_stream_identity(&root, file.as_raw_fd(), "helper.stdout").is_err());
+            source5_stream_identity(&root, replacement.as_raw_fd(), "helper.stdout").unwrap();
+            let null = File::open("/dev/null").unwrap();
+            assert!(source5_stream_identity(&root, null.as_raw_fd(), "helper.stdout").is_err());
+        }
+        #[test]
+        fn source5_prewrite_caps_preserve_files_and_legacy_writes() {
+            let root = fixture_root("prewrite-caps");
+            assert_eq!(SOURCE5_CONTROL_FILES.len(), 15);
+            assert!(durable_scoped(true, &root, "gesture.result", &"x".repeat(32768)).is_err());
+            assert!(!root.join("gesture.result").exists());
+            let mut file = exclusive(&root.join("intents.jsonl")).unwrap();
+            append_scoped(&mut file, &vec![0; 32767], true).unwrap();
+            assert!(append_scoped(&mut file, &[0], true).is_err());
+            assert_eq!(file.metadata().unwrap().len(), 32767);
+            append_scoped(&mut file, &[0], false).unwrap();
+            assert_eq!(file.metadata().unwrap().len(), 32768);
+            assert!(source5_files_below_cap(&root).is_err());
+            // None/legacy still uses its original serialization behavior.
+            durable_scoped(false, &root, "legacy.json", &"x".repeat(32768)).unwrap();
+            assert!(fs::metadata(root.join("legacy.json")).unwrap().len() > 32768);
+        }
+
+        #[test]
+        fn source5_cap_failure_fences_before_only_original_release_eligibility() {
+            for raw_unknown in [false, true] {
+                let root = fixture_root(if raw_unknown { "raw-cap" } else { "intent-cap" });
+                let mut file = exclusive(&root.join(if raw_unknown {
+                    "raw-input.bin"
+                } else {
+                    "intents.jsonl"
+                }))
+                .unwrap();
+                append_scoped(&mut file, &vec![0; 32767], true).unwrap();
+                let c = fixture_config();
+                let mut policy = owned_prefix(&c);
+                let limits = live_limits();
+                let mut child = Command::new("/bin/sh")
+                    .args(["-c", "exec sleep 5"])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap();
+                let failure = append_scoped(&mut file, &[0], true);
+                assert!(failure.is_err());
+                assert_eq!(file.metadata().unwrap().len(), 32767);
+                // Evidence refusal cannot grant release while the writer is live.
+                assert!(recovery_admission(
+                    &policy,
+                    &state(&policy),
+                    false,
+                    now().unwrap(),
+                    &limits
+                )
+                .is_err());
+                if raw_unknown {
+                    assert!(sticky_input(&mut policy, failure).is_err());
+                }
+                let death = fence(&mut child, limits.recovery, false).unwrap();
+                assert!(!death.success());
+                let admission =
+                    recovery_admission(&policy, &state(&policy), true, now().unwrap(), &limits);
+                if raw_unknown {
+                    assert!(policy.bad && admission.is_err());
+                    assert!(!policy.released);
+                } else {
+                    admission.unwrap();
+                    assert!(!policy.bad);
+                    policy.intent = Some(16);
+                    policy.cursor = 0;
+                    for event in policy.expected(16) {
+                        policy.observe(event).unwrap();
+                    }
+                    assert!(policy.released && state(&policy).released());
+                }
+            }
+        }
+
         fn seed(y: i32) -> Seed {
             Seed {
                 ids: [-1; 32],
@@ -2280,12 +2960,13 @@ mod owned {
                 source_image_verified: true,
                 sidecar_sha256: ["0".repeat(64), "0".repeat(64), "0".repeat(64)],
                 page_map_sha256: "0".repeat(64),
+                nine_inventory: None,
                 executable_sha256: "0".repeat(64),
             }
         }
         fn sample(c: &Config, ci: usize, mi: usize) -> Vec<Vec<u8>> {
-            let content = serde_json::json!({"pageCount":8,"cPages":{"pages":c.page_ids.iter().enumerate().map(|(i,id)|{
-                serde_json::json!({"id":id,"idx":{"value":i.to_string()},"redir":{"value":i}})
+            let content = serde_json::json!({"pageCount":c.page_ids.len(),"cPages":{"pages":c.page_ids.iter().enumerate().map(|(i,id)|{
+                serde_json::json!({"id":id,"idx":{"value":i.to_string()},"redir":{"value":if c.page_ids.len()==9 { match i {5=>Some(1),7=>Some(2),6=>None,_=>Some(i)} } else {Some(i)}}})
             }).collect::<Vec<_>>(),"lastOpened":{"value":c.page_ids[ci]}}});
             vec![
                 format!("LastOpen=@ByteArray({})\n", c.document).into_bytes(),
@@ -2328,6 +3009,266 @@ mod owned {
                 ino: 2,
                 rdev: 3,
             }
+        }
+        #[test]
+        fn original_eight_config_serialization_remains_exact_without_nine_fields() {
+            let c = fixture_config();
+            let value = serde_json::to_value(&c).unwrap();
+            assert!(value.get("nine_inventory").is_none());
+            let original_fields = [
+                "nonce",
+                "boot",
+                "stock_pid",
+                "stock_start",
+                "document",
+                "page_ids",
+                "current_index",
+                "direction",
+                "geometry_variant",
+                "navigation_policy",
+                "virtual_path",
+                "native_path",
+                "root_dev",
+                "root_ino",
+                "source_observed_ms",
+                "go_not_after_ms",
+                "overall_ceiling_ms",
+                "source_image_sha256",
+                "source_image_verified",
+                "sidecar_sha256",
+                "page_map_sha256",
+                "executable_sha256",
+            ];
+            assert_eq!(value.as_object().unwrap().len(), original_fields.len());
+            assert!(original_fields
+                .iter()
+                .all(|field| value.get(*field).is_some()));
+            let read: Config = serde_json::from_value(value.clone()).unwrap();
+            assert!(read.nine_inventory.is_none());
+            assert_eq!(serde_json::to_value(read).unwrap(), value);
+            let mut unsupported = value;
+            unsupported["nine_inventory"] =
+                serde_json::json!({"variant":"source5-nine-after-insertion-v1"});
+            assert!(serde_json::from_value::<Config>(unsupported).is_err());
+        }
+        #[test]
+        fn nine_inventory_file_guards_bind_reconciled_map_owner_root_window_and_both_directions() {
+            let mut c = fixture_config();
+            c.document = FIXTURE_DOCUMENT.into();
+            c.nonce = "b".repeat(32);
+            c.page_ids = nine_order("11111111-2222-3333-4444-555555555555").unwrap();
+            c.page_map_sha256 = "c".repeat(64);
+            c.current_index = 6;
+            let candidate = "a".repeat(32);
+            let parent = PathBuf::from(format!("/run/rmb-qt-probe-{candidate}"));
+            let root = fixture_root("nine-files");
+            fs::create_dir(&parent).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+            exclusive(&parent.join("owner"))
+                .unwrap()
+                .write_all(candidate.as_bytes())
+                .unwrap();
+            let window = format!("{candidate} 0 360 0 130\n").into_bytes();
+            exclusive(&parent.join("candidate.window"))
+                .unwrap()
+                .write_all(&window)
+                .unwrap();
+            let m = fs::metadata(&parent).unwrap();
+            let mut n = NineInventory {
+                variant: "source5-nine-after-insertion-v1".into(),
+                target_id: c.page_ids[6].clone(),
+                candidate_nonce: candidate.clone(),
+                boot_id: c.boot.clone(),
+                pid: c.stock_pid,
+                start_ticks: c.stock_start,
+                reconciled_creation_path: parent
+                    .join("reconciled-creation.json")
+                    .to_str()
+                    .unwrap()
+                    .into(),
+                reconciled_creation_sha256: String::new(),
+                candidate_root_dev: m.dev(),
+                candidate_root_ino: m.ino(),
+                phase: "normalization-source".into(),
+                candidate_result_ceiling_ms: 115000,
+                candidate_window_sha256: sha(&window),
+            };
+            let receipt = ReconciledCreation {
+                candidate_nonce: candidate.clone(),
+                boot_id: c.boot.clone(),
+                pid: c.stock_pid,
+                start_ticks: c.stock_start,
+                document_id: c.document.clone(),
+                before_page_ids: ORIGINAL_EIGHT.iter().map(|v| v.to_string()).collect(),
+                page_ids: c.page_ids.clone(),
+                target_id: c.page_ids[6].clone(),
+                source_index: 5,
+                insertion_index: 6,
+                native_receipt_sha256: "d".repeat(64),
+                page_map_sha256: c.page_map_sha256.clone(),
+                candidate_root_dev: m.dev(),
+                candidate_root_ino: m.ino(),
+                candidate_window_sha256: sha(&window),
+                preservation_verified: true,
+                creation_verified: true,
+            };
+            let bytes = serde_json::to_vec(&receipt).unwrap();
+            exclusive(&parent.join("reconciled-creation.json"))
+                .unwrap()
+                .write_all(&bytes)
+                .unwrap();
+            n.reconciled_creation_sha256 = sha(&bytes);
+            c.nine_inventory = Some(n.clone());
+            for (index, direction, phase) in [
+                (6, "previous", "normalization-source"),
+                (5, "next", "inserted-destination"),
+            ] {
+                c.current_index = index;
+                c.direction = direction.into();
+                c.nine_inventory.as_mut().unwrap().phase = phase.into();
+                if root.join("gesture.inventory").exists() {
+                    fs::remove_file(root.join("gesture.inventory")).unwrap();
+                }
+                durable(
+                    &root,
+                    "gesture.inventory",
+                    c.nine_inventory.as_ref().unwrap(),
+                )
+                .unwrap();
+                let roundtrip: Config =
+                    serde_json::from_slice(&serde_json::to_vec(&c).unwrap()).unwrap();
+                inventory_guard(&roundtrip, &root).unwrap();
+            }
+            let valid = c.clone();
+            for case in 0..6 {
+                let mut c = valid.clone();
+                match case {
+                    0 => c.page_map_sha256 = "e".repeat(64), // Same IDs, newly resealed redirect/map digest.
+                    1 => c.nine_inventory.as_mut().unwrap().candidate_root_ino += 1,
+                    2 => c.nine_inventory.as_mut().unwrap().phase = "normalization-source".into(),
+                    3 => c.overall_ceiling_ms = 115001,
+                    4 => fs::write(parent.join("owner"), "f".repeat(32)).unwrap(),
+                    _ => fs::write(
+                        parent.join("candidate.window"),
+                        format!("{candidate} 1 361 0 130\n"),
+                    )
+                    .unwrap(),
+                }
+                if case < 4 {
+                    fs::remove_file(root.join("gesture.inventory")).unwrap();
+                    durable(
+                        &root,
+                        "gesture.inventory",
+                        c.nine_inventory.as_ref().unwrap(),
+                    )
+                    .unwrap();
+                }
+                let result = inventory_guard(&c, &root).map(|_| ContextSamples {
+                    first: [5, 5],
+                    second: [5, 5],
+                    bracket_changed: false,
+                });
+                let mut p = policy(936);
+                down(&mut p);
+                let mut transition = false;
+                let mut evidence = None;
+                assert!(
+                    sticky_context(&mut p, &mut transition, &mut evidence, result).is_err(),
+                    "case{case}"
+                );
+                assert!(p.bad && !p.recovery_owned(&state(&p)));
+                fs::write(parent.join("owner"), candidate.as_bytes()).unwrap();
+                fs::write(parent.join("candidate.window"), &window).unwrap();
+            }
+            // Replace root at the same name with copied bytes: held dev/inode still refuses.
+            fs::remove_file(root.join("gesture.inventory")).unwrap();
+            durable(
+                &root,
+                "gesture.inventory",
+                valid.nine_inventory.as_ref().unwrap(),
+            )
+            .unwrap();
+            let saved = parent.with_extension("saved");
+            fs::rename(&parent, &saved).unwrap();
+            fs::create_dir(&parent).unwrap();
+            fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+            for name in ["owner", "candidate.window", "reconciled-creation.json"] {
+                let data = fs::read(saved.join(name)).unwrap();
+                exclusive(&parent.join(name))
+                    .unwrap()
+                    .write_all(&data)
+                    .unwrap();
+            }
+            assert!(inventory_guard(&valid, &root).is_err());
+            for directory in [&parent, &saved] {
+                for name in ["owner", "candidate.window", "reconciled-creation.json"] {
+                    fs::remove_file(directory.join(name)).unwrap();
+                }
+                fs::remove_dir(directory).unwrap();
+            }
+            fs::remove_file(root.join("gesture.inventory")).unwrap();
+            fs::remove_dir(root).unwrap();
+        }
+        #[test]
+        fn nine_inventory_is_exact_source5_candidate_not_a_count_whitelist() {
+            let mut c = fixture_config();
+            assert_eq!(inventory_count(&c).unwrap(), 8);
+            let target = "11111111-2222-3333-4444-555555555555";
+            c.document = FIXTURE_DOCUMENT.into();
+            c.current_index = 6;
+            c.page_ids = nine_order(target).unwrap();
+            let candidate = "a".repeat(32);
+            c.nine_inventory = Some(NineInventory {
+                variant: "source5-nine-after-insertion-v1".into(),
+                target_id: target.into(),
+                candidate_nonce: candidate.clone(),
+                boot_id: c.boot.clone(),
+                pid: c.stock_pid,
+                start_ticks: c.stock_start,
+                reconciled_creation_path: format!(
+                    "/run/rmb-qt-probe-{candidate}/reconciled-creation.json"
+                ),
+                reconciled_creation_sha256: "b".repeat(64),
+                candidate_root_dev: 1,
+                candidate_root_ino: 2,
+                phase: "normalization-source".into(),
+                candidate_result_ceiling_ms: c.overall_ceiling_ms,
+                candidate_window_sha256: "c".repeat(64),
+            });
+            assert_eq!(inventory_count(&c).unwrap(), 9);
+            let valid = c.clone();
+            c.nine_inventory = None;
+            assert_eq!(inventory_count(&c).unwrap(), 8); // Existing structural selection then refuses9.
+            assert_ne!(c.page_ids.len(), inventory_count(&c).unwrap());
+            for case in 0..7 {
+                let mut c = valid.clone();
+                match case {
+                    0 => c.page_ids.swap(0, 1),
+                    1 => c.page_ids.pop().map(|_| ()).unwrap(),
+                    2 => c.current_index = 5,
+                    3 => c.nine_inventory.as_mut().unwrap().pid += 1,
+                    4 => c.nine_inventory.as_mut().unwrap().variant = "generic9".into(),
+                    5 => c
+                        .nine_inventory
+                        .as_mut()
+                        .unwrap()
+                        .reconciled_creation_path
+                        .push_str(".other"),
+                    _ => c.nine_inventory.as_mut().unwrap().candidate_nonce = c.nonce.clone(),
+                }
+                assert!(inventory_count(&c).is_err(), "case{case}");
+            }
+            for target in ORIGINAL_EIGHT
+                .iter()
+                .copied()
+                .chain([FIXTURE_DOCUMENT, "00000000-0000-0000-0000-000000000000"])
+            {
+                assert!(nine_order(target).is_err());
+            }
+            let content = serde_json::json!({"pageCount":9,"cPages":{"pages":[]}});
+            assert!(page_map(&content).is_err());
+            assert!(page_map_count(&content, 9).is_ok()); // Exactorder admission is separate and mandatory.
         }
         #[test]
         fn fixed_geometry_is_explicit_and_sealed_with_inverse_endpoint_gaps() {
@@ -3422,6 +4363,17 @@ mod owned {
     }
 
     pub fn main() -> Result<()> {
+        dispatch(std::env::args().collect())
+    }
+    fn dispatch(a: Vec<String>) -> Result<()> {
+        let capped_parent = a.get(1).is_some_and(|v| v == "--source5-capped");
+        let capped_worker = a.get(1).is_some_and(|v| v == "--source5-worker");
+        if capped_parent {
+            configure_output_caps()?;
+        }
+        if capped_worker {
+            verify_output_caps()?;
+        }
         ensure!(
             std::mem::size_of::<InputEvent>() == std::mem::size_of::<libc::input_event>(),
             "Input ABI mismatch"
@@ -3431,7 +4383,6 @@ mod owned {
             std::mem::size_of::<InputEvent>() == 16,
             "ARM input ABI mismatch"
         );
-        let a = std::env::args().collect::<Vec<_>>();
         if a.len() == 3 && a[1] == "--geometry-paths" {
             let (v, n) = declared_paths(&a[2])?;
             println!(
@@ -3446,6 +4397,31 @@ mod owned {
             );
             return Ok(());
         }
+        if a.len() == 4 && a[1] == "--nine-page-map-sha256" {
+            let content: serde_json::Value =
+                serde_json::from_slice(&bounded(Path::new(&a[2]), 65536)?)?;
+            nine_map_semantics(&content, &a[3])?;
+            let mut pages = content["cPages"]["pages"]
+                .as_array()
+                .context("No pages")?
+                .iter()
+                .filter(|p| p["deleted"]["value"] != true)
+                .map(|p| {
+                    Ok((
+                        p["idx"]["value"].as_str().context("No index")?.to_string(),
+                        p["id"].as_str().context("No id")?.to_string(),
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            pages.sort();
+            ensure!(
+                pages.windows(2).all(|p| p[0].0 != p[1].0)
+                    && pages.iter().map(|p| p.1.clone()).collect::<Vec<_>>() == nine_order(&a[3])?,
+                "Exact source5 nine-page map required"
+            );
+            println!("{}", page_map_count(&content, 9)?);
+            return Ok(());
+        }
         if a.len() == 3 && a[1] == "--page-map-sha256" {
             println!(
                 "{}",
@@ -3454,11 +4430,15 @@ mod owned {
             return Ok(());
         }
         ensure!(unsafe { libc::geteuid() } == 0, "Development root required");
+        if capped_parent {
+            ensure!(a.len() == 3, "Exact SOURCE5 parent grammar required");
+            return supervisor(Path::new(&a[2]), true);
+        }
         if a.len() == 2 {
-            return supervisor(Path::new(&a[1]));
+            return supervisor(Path::new(&a[1]), false);
         }
         ensure!(
-            a.len() == 6 && a[1] == "--worker",
+            a.len() == 6 && (a[1] == "--worker" || capped_worker),
             "Exact worker grammar required"
         );
         worker(
@@ -3466,12 +4446,19 @@ mod owned {
             a[3].parse()?,
             serde_json::from_str(&a[4])?,
             a[5].parse()?,
+            capped_worker,
         )
     }
 }
 #[cfg(all(target_os = "linux", feature = "development-input-diagnostics"))]
 fn main() -> anyhow::Result<()> {
-    owned::main()
+    let capped = owned::source5_invocation();
+    let result = owned::main();
+    if capped && result.is_err() {
+        owned::report_source5_failure();
+        std::process::exit(1);
+    }
+    result
 }
 #[cfg(not(all(target_os = "linux", feature = "development-input-diagnostics")))]
 fn main() -> anyhow::Result<()> {

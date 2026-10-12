@@ -13,7 +13,7 @@ HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location("coordinator", HERE / "coordinator.py")
 coordinator = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(coordinator)
-SOURCE = (HERE / "arm.sh.in").read_text().split("# Fixture source boundary", 1)[0].replace("@CAPTURESPACE@", ":")
+SOURCE = (HERE / "arm.sh.in").read_text().split("# Fixture source boundary", 1)[0].replace("@CAPTURESPACE@", ":").replace('@CONTROL_POLICY@', 'legacy').replace('@CONTROL_SHELL_SHA256@', '0' * 64)
 
 
 def run(root, body, overrides="", expected=0):

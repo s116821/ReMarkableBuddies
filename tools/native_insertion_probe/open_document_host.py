@@ -9,7 +9,7 @@ import re
 import time
 from PIL import Image
 from open_document_protocol import parse_waiting
-from open_document_timing import OpenDocumentTiming, upper_uptime_ms, diagnostic_cutoff, PRODUCTION_V2, V2_CONTRACT, fixture_inventory_selection
+from open_document_timing import OpenDocumentTiming, upper_uptime_ms, diagnostic_cutoff, PRODUCTION_V2, V2_CONTRACT, fixture_inventory_selection, fixture_source_selection, SOURCE5
 from owned_frame_capture import CONTRACT as CAPTURE_CONTRACT, OBSERVATION_KIND, PHASE_LABELS
 
 BODY = (64, 0, 720, 980)
@@ -71,6 +71,7 @@ class HostSequence:
         self.adapter = adapter
         self.selected = selected
         self.fixture_inventory_variant, self.fixture_page_count = fixture_inventory_selection(selected)
+        self.source_index, self.insertion_index = fixture_source_selection(selected)
         self.library_png = library_png
         self.source_body_png = source_body_png
         self.source_footer_png = source_footer_png
@@ -147,8 +148,8 @@ class HostSequence:
         if ids != self.selected["page_ids"] or content["pageCount"] != self.fixture_page_count:
             raise Refused("Exact selected fixture order/count changed")
         if (raw["last_open"] != self.selected["document_id"] or
-                metadata["lastOpenedPage"] != 0 or
-                content["cPages"]["lastOpened"]["value"] != ids[0]):
+                metadata["lastOpenedPage"] != self.source_index or
+                content["cPages"]["lastOpened"]["value"] != ids[self.source_index]):
             raise Refused("Exact source document/current page not observed")
     def document(self, raw):
         self.document_context(raw)
@@ -178,8 +179,8 @@ class HostSequence:
             raise Refused('Pending Library lacks original unarmed SDK/context authority')
         context = self.library_context(raw)
         if (context != baseline or context[0] != tuple(self.selected['page_ids']) or
-            context[1] != self.fixture_page_count or context[2] != self.selected['page_ids'][0] or
-            type(context[3]) is not int or context[3] != 0 or type(context[5]) is not bytes or
+            context[1] != self.fixture_page_count or context[2] != self.selected['page_ids'][self.source_index] or
+            type(context[3]) is not int or context[3] != self.source_index or type(context[5]) is not bytes or
             context[5] != b'LastOpen=@ByteArray()\n' or context[6] is not None):
             raise Refused('Pending Library requires unchanged canonical raw baseline')
 
@@ -280,12 +281,17 @@ class HostSequence:
             self.response_time(ready)
             if not self.timing.admit_creation_ms(now_ms, self.waiting.expiry_ms):
                 raise Refused("SDK/recovery publication expiry reached")
+            if self.fixture_inventory_variant == SOURCE5:
+                self.adapter.reserve_navigation_frames()
+            self.baseline_pages = ready["content"]["cPages"]["pages"]
             self.arm_attempted = True
             # Adapter must atomically publish once after a fresh remote BOOTTIME,
             # inode/owner/waiting/PID/start/closing and sidecar-hash recheck.
             self.adapter.arm_once(self.waiting, self.timing, ready)
             result = self.adapter.result_snapshot(self.identity, self.timing.stage_end("result"))
             self.record("result", result)
+            if self.fixture_inventory_variant == SOURCE5:
+                return self.source5_result(result)
             self.admit(result, "result")
             pages = result["content"]["cPages"]["pages"]
             ids = [p["id"] for p in pages]
@@ -294,7 +300,7 @@ class HostSequence:
                 "same_candidate": True, "native_receipt": native,
                 "observed_page_ids": ids,
                 "observed_target_presence": self.selected["target_id"] in ids,
-                "expected_inserted_order": [self.selected["page_ids"][0], self.selected["target_id"]] + self.selected["page_ids"][1:],
+                "expected_inserted_order": self.selected["page_ids"][:self.insertion_index] + [self.selected["target_id"]] + self.selected["page_ids"][self.insertion_index:],
                 "source_pixels_match": same_pixels(result["png"], self.source_body_png, BODY),
                 "source_footer_pixels_match": same_pixels(result["png"], self.source_footer_png, FOOTER),
                 "observed_page_count": result["content"].get("pageCount"),
@@ -308,6 +314,100 @@ class HostSequence:
             return report
         finally:
             self.stop_once()
+
+    def source5_context(self, raw, current):
+        self.admit(raw,"result")
+        expected = self.selected["page_ids"][:6]+[self.selected["target_id"]]+self.selected["page_ids"][6:]
+        content,meta=raw["content"],raw["metadata"]
+        pages=content["cPages"]["pages"]
+        try:
+            keys=[p["idx"]["value"] for p in pages]
+            if any(type(k) is not str or not k for k in keys) or len(set(keys))!=9: raise ValueError("idx")
+            if [p["id"] for p in sorted(pages,key=lambda p:p["idx"]["value"])] != expected: raise ValueError("order")
+            old={p["id"]:p for p in self.baseline_pages}
+            for p in pages:
+                if p["id"] in old:
+                    before=old[p["id"]]
+                    if p.get("deleted")!=before.get("deleted") or ("redir" in p)!=("redir" in before) or p.get("redir")!=before.get("redir"): raise ValueError("original map")
+            if any(p.get("deleted",{}).get("value") is True for p in pages): raise ValueError("deleted")
+        except (KeyError,TypeError,ValueError) as error: raise Refused("Changed active order/redirect map") from error
+        if (content.get("pageCount") != 9 or [p["id"] for p in pages] != expected
+            or raw["last_open"] != self.selected["document_id"]
+            or type(meta.get("lastOpenedPage")) is not int or meta["lastOpenedPage"] != current
+            or content["cPages"]["lastOpened"]["value"] != expected[current]):
+            raise Refused("Exact same-candidate nine-page/current state required")
+        if (type(pages[5].get("redir",{}).get("value")) is not int
+            or type(pages[7].get("redir",{}).get("value")) is not int
+            or pages[5].get("redir",{}).get("value") != 1
+            or pages[7].get("redir",{}).get("value") != 2
+            or "redir" in pages[6] and pages[6]["redir"].get("value") is not None):
+            raise Refused("Original PDF redirects/non-PDF target changed")
+        try: self.adapter.validate_creation_evidence(raw,self.waiting)
+        except ValueError as error: raise Refused(str(error)) from error
+        return expected
+
+    def source5_result(self, raw):
+        from source5_navigation import native_positive, canonical, bounded_local, pixel_classification, page_map_sha256
+        if len(self.selected.get("immutable_hashes",{}))!=26:
+            raise Refused("Complete preserved source5 26-file baseline required")
+        self.idle(raw)
+        expected=self.source5_context(raw,6) # Initial source/mixed states never choose a fallback.
+        if not self.arm_attempted or not self.adapter.arm_attempted:
+            raise Refused("No original one-shot native publication")
+        native=raw["diagnostics"].get("creation_trial",{})
+        try:
+            native_sha=native_positive(native,raw["diagnostics"])
+            self.adapter.validate_creation_evidence(raw,self.waiting)
+        except ValueError as error:
+            raise Refused(str(error)) from error
+        creation={"candidate_nonce":self.selected["nonce"],"boot_id":self.identity[0],
+            "pid":self.identity[1],"start_ticks":self.identity[2],"document_id":self.selected["document_id"],
+            "before_page_ids":self.selected["page_ids"],"page_ids":expected,"target_id":self.selected["target_id"],
+            "source_index":5,"insertion_index":6,"native_receipt_sha256":native_sha,"page_map_sha256":page_map_sha256(raw["content"]),
+            "preservation_verified":True,"creation_verified":True,
+            "candidate_root_dev":int(self.adapter.root_inode.split()[0]),"candidate_root_ino":int(self.adapter.root_inode.split()[1]),
+            "candidate_window_sha256":hashlib.sha256((self.adapter.production_window+"\n").encode()).hexdigest()}
+        self.record("reconciled-creation",creation)
+        self.response_time(raw)
+        deadline=self.adapter.known_deadline(self.timing.stage_end("result"))
+        if deadline is None: raise Refused("Original candidate clock missing")
+        # Initial capture retains its existing response/processing deadline.
+        classification=bounded_local(pixel_classification,(raw["png"],self.source_body_png,self.source_footer_png),
+            min(raw["response_deadline_monotonic"],deadline))
+        if classification["blank"]:
+            self.adapter.publish_reconciliation(creation,min(time.monotonic()+3,deadline-1))
+            report={"same_candidate":True,"destination_verified":True,"normalization_performed":False,
+                "native_durable_success":False,"reconciled_creation":creation,"observed_page_ids":expected}
+        elif classification["source"]:
+            phase=self.adapter.begin_navigation(both=True)
+            released=self.adapter.navigation_move("previous",6,raw,creation,phase)
+            source=self.adapter.navigation_snapshot("normalization-source",self.timing.stage_end("result"))
+            self.record("normalization-source",source)
+            self.source5_context(source,5)
+            self.idle(source)
+            proof=bounded_local(pixel_classification,(source["png"],self.source_body_png,self.source_footer_png),
+                source["response_deadline_monotonic"])
+            if not proof["source"]: raise Refused("Normalization did not restore printed PDF source5 body")
+            self.response_time(source)
+            phase=self.adapter.begin_navigation(both=False)
+            released=self.adapter.navigation_move("next",5,source,None,phase)
+            destination=self.adapter.navigation_snapshot("inserted-destination",self.timing.stage_end("result"))
+            self.record("inserted-destination",destination)
+            self.source5_context(destination,6)
+            self.idle(destination)
+            proof=bounded_local(pixel_classification,(destination["png"],self.source_body_png,self.source_footer_png),
+                destination["response_deadline_monotonic"])
+            if not proof["blank"]: raise Refused("Inserted target pixels not blank under qualified layout")
+            self.response_time(destination)
+            report={"same_candidate":True,"destination_verified":True,"normalization_performed":True,
+                "native_durable_success":False,"reconciled_creation":creation,"observed_page_ids":expected}
+        else:
+            raise Refused("Initial target-owned pixels are neither qualified blank nor exact source5")
+        end=min(time.monotonic()+1,deadline)
+        self.adapter.retain_bounded("source5-report",report,end)
+        if time.monotonic()>=end: raise Refused("Final report exceeded fixed allowance")
+        self.adapter.frame_ledger.terminal()
+        return report
 
     def diagnostic_phases(self, raw):
         data = raw.get('phases')

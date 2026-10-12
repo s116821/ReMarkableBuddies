@@ -13,6 +13,8 @@ OBSERVATION_BUDGET = 70
 STAGE_OFFSETS = {"ready": 20, "open": 35, "trigger": 40,
                  "result": 55, "stop": 60}
 PRODUCTION_V2 = 'open-document-insertion-v2'
+SOURCE5_CONTROL_POLICY = 'source5-child-fsize4096-v1'
+SOURCE5_CONTROL_SHELL_SHA256 = '5d24e03a147c3a0e8477a1fb4e52473c0781f436842a94ab505eafc9dbc6d1e9'
 V2_STAGES = {"ready": 45, "open": 75, "trigger": 90, "result": 115, "stop": 125}
 V2_CONTRACT = {"purpose": PRODUCTION_V2, "stages": V2_STAGES,
                "candidate_seconds": 130, "start_reserve_seconds": 315,
@@ -36,6 +38,14 @@ V2_SDK_SOURCES = {
     'tools/qt_creation_deadline.h': 'c3d8e7124eff6de5868c74f321189ce1f55f8b4111e8983ecdc7eb7c86b3a109'}
 
 PRESERVED_EIGHT = 'preserved-eight-after-9005'
+SOURCE5 = 'preserved-eight-after-9005-source5'
+# Pending independently reviewed source/artifact/reference pins refuse admission.
+SOURCE5_SDK_REVISION = '605b1f66e309ab2883b14d0e73d5819464cbdd8b'
+SOURCE5_SDK_SOURCES = V2_SDK_SOURCES | {
+    'tools/qt_qml_access_probe_core.h':'a44d90df44a02feb2a8ab6326f34caf4f7031f54e5fac4bde6df7892214cdbf6'}
+SOURCE5_LIBRARY_SHA256 = None
+SOURCE5_GESTURE_SHA256 = None
+SOURCE5_CONFIG_LINE = 'config.inventoryVariant = qml_access::CreationConfig::InventoryVariant::PreservedEightAfter9005Source5;'
 # The eight-page Library reference is pinned only after Main's fresh visual review.
 EIGHT_LIBRARY_SHA256 = None
 EIGHT_SDK_REVISION = '7e3cca6fa15491a32a01b71f7f209a1d0d5dfec9'
@@ -53,13 +63,21 @@ PRESERVED_PAGES = ORIGINAL_PAGES[:1] + ('4c8a847e-0eb8-4cf3-a747-77952d56445a',)
 
 def fixture_inventory_selection(profile, page_field='page_ids'):
     variant = profile.get('fixture_inventory_variant', 'legacy')
-    if type(variant) is not str or variant not in {'legacy', PRESERVED_EIGHT}:
+    if type(variant) is not str or variant not in {'legacy', PRESERVED_EIGHT, SOURCE5}:
         raise ValueError('Exact fixture inventory selector required')
-    if variant == PRESERVED_EIGHT:
+    source5_fields={'source_index','source_page_id','neighbor_index','neighbor_page_id','insertion_index'}
+    if variant != SOURCE5 and source5_fields.intersection(profile):
+        raise ValueError('Source5 tuple conflicts with earlier fixture selector')
+    if variant in {PRESERVED_EIGHT, SOURCE5}:
         if (profile.get('experiment_kind') != PRODUCTION_V2 or
             profile.get('document_id') != FIXTURE_DOCUMENT or
             profile.get(page_field) != list(PRESERVED_PAGES)):
             raise ValueError('Exact preserved eight-page fixture required')
+        if variant == SOURCE5:
+            expected = {'source_index':5,'source_page_id':PRESERVED_PAGES[5],
+                        'neighbor_index':6,'neighbor_page_id':PRESERVED_PAGES[6],'insertion_index':6}
+            if any(type(profile.get(k)) is not type(v) or profile[k] != v for k,v in expected.items()):
+                raise ValueError('Explicit fixed source5/neighbor6/insertion6 binding required')
         return variant, 8
     if profile.get('experiment_kind') == PRODUCTION_V2 and (
         profile.get('document_id') != FIXTURE_DOCUMENT or
@@ -69,9 +87,32 @@ def fixture_inventory_selection(profile, page_field='page_ids'):
     return variant, 7
 
 
+def fixture_source_selection(profile, page_field='page_ids'):
+    variant, _ = fixture_inventory_selection(profile,page_field)
+    return (5,6) if variant == SOURCE5 else (0,1)
+
+
+def validate_gesture_paths(paths):
+    if type(paths) is not dict or set(paths) != {'previous','next'}:
+        raise ValueError('Both exact prestaged geometry CLI views required')
+    for direction,view in paths.items():
+        sign,start=(1,100) if direction=='previous' else (-1,700)
+        virtual=[[start+sign*(590*step//15),512] for step in range(16)]
+        native=[[x*1404//768,y*1872//1024] for x,y in virtual]
+        expected={'geometry_variant':'fixed-gap10-v1','navigation_policy':'stop-at-declared-neighbor-v1',
+                  'direction':direction,'virtual_path':virtual,'native_path':native}
+        if type(view) is not dict or view != expected or any(
+                type(v) is not int for points in (view.get('virtual_path',[]),view.get('native_path',[])) for point in points for v in point):
+            raise ValueError('Exact frozen finite geometry paths required')
+
+
 def validate_v2_binding(profile):
     variant, _ = fixture_inventory_selection(profile, 'before_page_ids' if 'before_page_ids' in profile else 'page_ids')
-    revision, sources = (EIGHT_SDK_REVISION, EIGHT_SDK_SOURCES) if variant == PRESERVED_EIGHT else (V2_SDK_REVISION, V2_SDK_SOURCES)
+    revision, sources = ((SOURCE5_SDK_REVISION,SOURCE5_SDK_SOURCES) if variant == SOURCE5 else
+                        (EIGHT_SDK_REVISION, EIGHT_SDK_SOURCES) if variant == PRESERVED_EIGHT else
+                        (V2_SDK_REVISION, V2_SDK_SOURCES))
+    if type(revision) is not str or type(sources) is not dict:
+        raise ValueError('Reviewed SDK source5 pins pending')
     if (profile.get('production_contract') != V2_CONTRACT or
         profile.get('sdk_revision') != revision or
         profile.get('sdk_source_hashes') != sources or
@@ -90,8 +131,9 @@ def validate_v2_config(text, inventory_variant='legacy'):
         not re.search(r'^\s*' + re.escape(V2_CONFIG_LINE) + r'\s*$', active, re.MULTILINE)):
         raise ValueError('One unambiguous active reviewed SDK95 selector required')
     assignments = len(re.findall(r'\bconfig\s*\.\s*inventoryVariant\s*=', active))
-    if inventory_variant == PRESERVED_EIGHT:
-        if assignments != 1 or not re.search(r'^\s*' + re.escape(EIGHT_CONFIG_LINE) + r'\s*$', active, re.MULTILINE):
+    if inventory_variant in {PRESERVED_EIGHT, SOURCE5}:
+        line = SOURCE5_CONFIG_LINE if inventory_variant == SOURCE5 else EIGHT_CONFIG_LINE
+        if assignments != 1 or not re.search(r'^\s*' + re.escape(line) + r'\s*$', active, re.MULTILINE):
             raise ValueError('One active preserved-eight SDK inventory selector required')
     elif inventory_variant != 'legacy' or (assignments and (
             assignments != 1 or not re.search(r'^\s*config\.inventoryVariant = qml_access::CreationConfig::InventoryVariant::Legacy;\s*$', active, re.MULTILINE))):

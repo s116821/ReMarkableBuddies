@@ -6,7 +6,7 @@ from pathlib import Path
 import re
 import shutil
 from owned_frame_capture import CONTRACT as CAPTURE_CONTRACT, TOOLS as CAPTURE_TOOLS, HOST_KINDS, OBSERVATION_KIND
-from open_document_timing import PRODUCTION_V2, V2_LIBRARY_SHA256, EIGHT_LIBRARY_SHA256, V2_PUBLISHER_SHA256, validate_v2_binding, validate_v2_config, fixture_inventory_selection, PRESERVED_EIGHT, ORIGINAL_PAGES, PRESERVED_PAGES
+from open_document_timing import PRODUCTION_V2, V2_LIBRARY_SHA256, EIGHT_LIBRARY_SHA256, V2_PUBLISHER_SHA256, validate_v2_binding, validate_v2_config, fixture_inventory_selection, PRESERVED_EIGHT, ORIGINAL_PAGES, PRESERVED_PAGES, SOURCE5, SOURCE5_LIBRARY_SHA256, SOURCE5_GESTURE_SHA256, validate_gesture_paths, SOURCE5_CONTROL_POLICY, SOURCE5_CONTROL_SHELL_SHA256
 
 LIBRARY_TAP_VARIANTS = {
     "primary-1641396": ("--tap-library-v2", [164, 1396]),
@@ -83,7 +83,7 @@ def partition(selected, files):
     if (not isinstance(pages, list) or len(pages) != page_count or
         any(not isinstance(p, str) or not re.fullmatch(uuid, p) for p in pages) or len(set(pages)) != page_count):
         raise ValueError("Exact distinct original page inventory required")
-    if open_mode and pages != list(PRESERVED_PAGES if variant == PRESERVED_EIGHT else ORIGINAL_PAGES):
+    if open_mode and pages != list(PRESERVED_PAGES if variant in {PRESERVED_EIGHT,SOURCE5} else ORIGINAL_PAGES):
         raise ValueError("Exact selected fixture order including all preserved pages required")
     if (not isinstance(target, str) or not re.fullmatch(uuid, target) or
         target == "00000000-0000-0000-0000-000000000000" or target == document or target in pages):
@@ -96,10 +96,10 @@ def partition(selected, files):
     mutable_files = [e for e in document_files if e["path"] in mutable_paths]
     # The original 24 records are retained, not silently redefined. New-file
     # absence and full before/after content semantics remain Main admission.
-    document_count = (18 if variant == PRESERVED_EIGHT else 16) if open_mode else 14
+    document_count = (18 if variant in {PRESERVED_EIGHT,SOURCE5} else 16) if open_mode else 14
     if len(document_files) != document_count or len(runtime_files) != 10 or {e["path"] for e in mutable_files} != mutable_paths:
         raise ValueError("Exact document/runtime partition and two mutable paths required")
-    ink_count = (5 if variant == PRESERVED_EIGHT else 4) if open_mode else 3
+    ink_count = (5 if variant in {PRESERVED_EIGHT,SOURCE5} else 4) if open_mode else 3
     expected_document = {prefix + "." + ext for ext in ("content", "metadata", "local", "pagedata", "pdf")} | {prefix + "/" + p + ".rm" for p in pages[:ink_count]} | {prefix + ".thumbnails/" + p + ".png" for p in pages}
     if {e["path"] for e in document_files} != expected_document:
         raise ValueError("Exact fixture paths required; no substitute preservation files")
@@ -116,7 +116,7 @@ def main():
     parser.add_argument("--stock-unit", type=Path, required=True)
     parser.add_argument("--vendor-dropin", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    for option in ("tap-guardian", "observe-input", "creation-publisher", "creation-config", "library-reference", "source-body-reference", "source-footer-reference", "native-frame-acquire", "owned-frame", "owned-frame-alarm"):
+    for option in ("tap-guardian", "observe-input", "creation-publisher", "creation-config", "library-reference", "source-body-reference", "source-footer-reference", "native-frame-acquire", "owned-frame", "owned-frame-alarm", "owned-relative-gesture", "gesture-paths-previous", "gesture-paths-next"):
         parser.add_argument("--" + option, type=Path)
     args = parser.parse_args()
     selection_file, payload = map(regular, [args.selection, args.payload])
@@ -180,7 +180,7 @@ def main():
         raise ValueError("Selected payload mismatch")
     files = selected.get("protected_files")
     inventory_variant, _ = fixture_inventory_selection(selected, 'before_page_ids') if kind in HOST_KINDS else ('legacy', 7)
-    count = (28 if inventory_variant == PRESERVED_EIGHT else 26) if kind in HOST_KINDS else 24
+    count = (28 if inventory_variant in {PRESERVED_EIGHT,SOURCE5} else 26) if kind in HOST_KINDS else 24
     if not isinstance(files, list) or len(files) != count:
         raise ValueError("Exact fresh mode-specific baseline hash inventory required")
     paths = set()
@@ -206,7 +206,14 @@ def main():
                   "source-body-reference.png": args.source_body_reference,
                   "source-footer-reference.png": args.source_footer_reference}
         declared = selected.get("host_artifacts", {})
-        library_pin = EIGHT_LIBRARY_SHA256 if inventory_variant == PRESERVED_EIGHT else V2_LIBRARY_SHA256
+        library_pin = SOURCE5_LIBRARY_SHA256 if inventory_variant == SOURCE5 else EIGHT_LIBRARY_SHA256 if inventory_variant == PRESERVED_EIGHT else V2_LIBRARY_SHA256
+        if inventory_variant == SOURCE5:
+            inputs['owned_relative_gesture']=args.owned_relative_gesture
+            inputs['gesture-paths-previous.json']=args.gesture_paths_previous
+            inputs['gesture-paths-next.json']=args.gesture_paths_next
+            validate_gesture_paths(selected.get('gesture_paths'))
+            if type(SOURCE5_GESTURE_SHA256) is not str or declared.get('owned_relative_gesture') != SOURCE5_GESTURE_SHA256:
+                raise ValueError('Reviewed source5 nine-inventory gesture artifact required')
         if kind == PRODUCTION_V2 and (declared.get('publish_creation_arm') != V2_PUBLISHER_SHA256 or
                                       type(library_pin) is not str or declared.get('library-reference.png') != library_pin):
             raise ValueError('Exact production v2 publisher/reference required')
@@ -217,6 +224,8 @@ def main():
         host_inputs = {name: regular(path) for name, path in inputs.items()}
         if any(sha(path) != declared[name] for name, path in host_inputs.items()):
             raise ValueError("Host tool/reference artifact binding mismatch")
+        if inventory_variant == SOURCE5 and any(json.loads(host_inputs['gesture-paths-'+direction+'.json'].read_bytes()) != selected['gesture_paths'][direction] for direction in ('previous','next')):
+            raise ValueError('Prestaged geometry file/profile mismatch')
     output = args.output.absolute()
     if output.exists() or any(p.is_symlink() or p.is_junction() for p in [output, *output.parents]):
         raise ValueError("Packet output must be new without link ancestors")
@@ -225,6 +234,8 @@ def main():
     substitutions = {"@ROOT@": root, "@NONCE@": nonce, "@STOCKPID@": selected["stock_pid"],
                      "@STOCKSTART@": selected["stock_start"], "@PAYLOADHASH@": payload_hash, "@EXEHASH@": exe_hash,
                      "@EXPERIMENT@": kind,
+                     "@CONTROL_POLICY@": SOURCE5_CONTROL_POLICY if inventory_variant == SOURCE5 else 'legacy',
+                     "@CONTROL_SHELL_SHA256@": SOURCE5_CONTROL_SHELL_SHA256 if inventory_variant == SOURCE5 else '0' * 64,
                      "@BOOTID@": selected.get("boot_id", "00000000-0000-0000-0000-000000000000"),
                      "@TAPGUARDIANHASH@": selected.get("host_artifacts", {}).get("owned_tap_guardian", "0" * 64)}
     for name in ("actor.sh", "launch.sh"):
@@ -251,12 +262,19 @@ def main():
                    "source_sha256": {name: sha(HERE / name) for name in (
                        "open_document_host.py", "open_document_transport.py", "open_document_protocol.py",
                        "open_document_timing.py", "publish_creation_arm.c", "coordinator.py",
-                       "prepare_packet.py", "actor.sh.in", "arm.sh.in", "owned_tap_guardian.c", "owned_frame_capture.py")}}
+                       "prepare_packet.py", "actor.sh.in", "arm.sh.in", "owned_tap_guardian.c", "owned_frame_capture.py", "source5_navigation.py")}}
         if kind == PRODUCTION_V2:
             profile.update({key: selected[key] for key in ('library_tap_variant', 'production_contract', 'sdk_revision', 'sdk_source_hashes',
                                                           'sdk_setup_variant', 'sdk_configuration_sha256')})
             profile['host_sequence_contract'] = 'bounded-host-v6-production-v2'
             profile['fixture_inventory_variant'] = inventory_variant
+            if inventory_variant == SOURCE5:
+                profile.update({key:selected[key] for key in ('source_index','source_page_id','neighbor_index','neighbor_page_id','insertion_index')})
+                profile['tools']['owned_relative_gesture']=selected['host_artifacts']['owned_relative_gesture']
+                profile['gesture_paths']=selected['gesture_paths']
+                profile['gesture_path_hashes']={name:selected['host_artifacts'][name] for name in ('gesture-paths-previous.json','gesture-paths-next.json')}
+                profile['control_output_policy'] = SOURCE5_CONTROL_POLICY
+                profile['control_shell_sha256'] = SOURCE5_CONTROL_SHELL_SHA256
         (output / "host-profile.json").write_text(json.dumps(profile, indent=2) + "\n", encoding="utf-8", newline="\n")
     (output / "stock-unit.original").write_bytes(original_unit)
     (output / "vendor-dropin.original").write_bytes(original_vendor)
@@ -272,8 +290,17 @@ def main():
     for name, subset in (("runtime.files", runtime_files), ("document-immutable.files", immutable_files), ("document-mutable.files", mutable_files)):
         (output / name).write_text("".join(f"{e['sha256']}  {e['path']}\n" for e in subset), encoding="ascii", newline="\n")
     (output / "service.files").write_text("".join(f"{digest}  {path}\n" for path, digest in SERVICE_HASHES.values()), encoding="ascii", newline="\n")
+    if inventory_variant == SOURCE5:
+        profile['source5_control_bytes_reserve'] = 17 * 1024 * 1024
+        profile['packet_file_sizes'] = {p.name: p.stat().st_size for p in sorted(output.iterdir()) if p.name != 'host-profile.json'}
+        if sum(profile['packet_file_sizes'].values()) + 2 * 65536 + 1024 * 1024 > profile['source5_control_bytes_reserve']:
+            raise ValueError('Source5 complete packet exceeds reserved control budget')
+        profile_bytes = (json.dumps(profile, indent=2) + '\n').encode('utf-8')
+        if len(profile_bytes) > 65536:
+            raise ValueError('Source5 profile exceeds reserved profile cap')
+        (output / 'host-profile.json').write_bytes(profile_bytes)
     for file in output.iterdir():
-        file.chmod(0o700 if file.name in (("owned_tap_guardian", "observe_input", "publish_creation_arm") + tuple(CAPTURE_TOOLS)) else 0o600)
+        file.chmod(0o700 if file.name in (("owned_tap_guardian", "observe_input", "publish_creation_arm", "owned_relative_gesture") + tuple(CAPTURE_TOOLS)) else 0o600)
     hashes = {p.name: sha(p) for p in sorted(output.iterdir())}
     (output / "packet.files").write_text("".join(f"{v}  {k}\n" for k, v in hashes.items()), encoding="ascii", newline="\n")
     (output / "packet.files").chmod(0o600)
@@ -284,7 +311,16 @@ def main():
     if kind == PRODUCTION_V2:
         receipt["library_tap_variant"] = selected["library_tap_variant"]
         receipt['fixture_inventory_variant'] = inventory_variant
-    (output / "preparation.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8", newline="\n")
+        if inventory_variant == SOURCE5:
+            receipt.update({key:selected[key] for key in ('source_index','source_page_id','neighbor_index','neighbor_page_id','insertion_index')})
+            receipt['source5_control_bytes_reserve'] = profile['source5_control_bytes_reserve']
+            receipt['packet_file_sizes'] = profile['packet_file_sizes']
+            receipt['control_output_policy'] = SOURCE5_CONTROL_POLICY
+            receipt['control_shell_sha256'] = SOURCE5_CONTROL_SHELL_SHA256
+    receipt_bytes = (json.dumps(receipt, indent=2) + '\n').encode('utf-8')
+    if inventory_variant == SOURCE5 and len(receipt_bytes) + (output / 'packet.files').stat().st_size > 65536:
+        raise ValueError('Source5 receipt/manifest exceeds reserved cap')
+    (output / "preparation.json").write_bytes(receipt_bytes)
     (output / "preparation.json").chmod(0o600)
     print(json.dumps(receipt))
 

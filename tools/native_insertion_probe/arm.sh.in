@@ -4,10 +4,74 @@ set -eu
 umask 077
 root='@ROOT@'
 nonce='@NONCE@'
+control_policy='@CONTROL_POLICY@'
+control_shell_sha256='@CONTROL_SHELL_SHA256@'
 unit='rmb-qt-insertion-@NONCE@-actor.service'
 private() {
     test -f "$1" && test ! -L "$1" || return 90
     test "$(stat -c '%a %u %h' "$1")" = '600 0 1' || return 90
+}
+control_shell() {
+    test "$(readlink /bin/sh)" = /usr/bin/bash.bash || return 90
+    test "$(sha256sum /bin/sh | awk '{print $1}')" = "$control_shell_sha256" || return 90
+}
+control_outputs() {
+    case "$control_policy" in legacy) return 0;; source5-child-fsize4096-v1) :;; *) return 90;; esac
+    for stream in stdout stderr; do
+        output="$root/$1.$stream"
+        if test -e "$output" || test -L "$output"; then private "$output" || return 90; fi
+    done
+}
+control_child() {
+    case "$control_policy" in legacy) return 0;; source5-child-fsize4096-v1) :;; *) return 90;; esac
+    control_shell || return 90
+    control_child_pid=$BASHPID
+    case "$control_child_pid" in ""|*[!0-9]*) return 90;; esac
+    private "$root/$1.stdout" && private "$root/$1.stderr" || return 90
+    test "$(stat -Lc '%d %i %a %u %h' /proc/$control_child_pid/fd/1)" = "$(stat -c '%d %i %a %u %h' "$root/$1.stdout")" || return 90
+    test "$(stat -Lc '%d %i %a %u %h' /proc/$control_child_pid/fd/2)" = "$(stat -c '%d %i %a %u %h' "$root/$1.stderr")" || return 90
+    ulimit -c 0 || return 90
+    ulimit -f 8 || return 90
+    inherited=$(cat /proc/self/limits) || return 90
+    printf '%s\n' "$inherited" | awk '$1=="Max" && $2=="file" && $3=="size" {n++; if($4!=4096 || $5!=4096 || $6!="bytes") bad=1} END {exit !(n==1 && !bad)}' || return 90
+    printf '%s\n' "$inherited" | awk '$1=="Max" && $2=="core" && $3=="file" && $4=="size" {n++; if($5!=0 || $6!=0 || $7!="bytes") bad=1} END {exit !(n==1 && !bad)}' || return 90
+}
+control_grammar() {
+    test "$control_policy" = source5-child-fsize4096-v1 || return 0
+    prefix=$1; shift
+    if test "${1-}" = /usr/bin/systemctl; then shift; fi
+    if test "${1-}" = --no-pager; then shift; fi
+    test "${1-}" = show || return 0
+    shift
+    requested=''; scalar=no
+    for argument in "$@"; do
+        case "$argument" in --property=*) test -z "$requested" || return 90; requested=${argument#--property=};; --value) scalar=yes;; xochitl.service|rmb-qt-insertion-*-actor.service) :;; *) return 90;; esac
+    done
+    test -n "$requested" || return 90
+    awk -v keys="$requested" -v scalar="$scalar" '
+    function bound(key) { if(key=="ExecStart") return 2048; if(key=="DropInPaths") return 512; if(key=="OnFailure") return 256; if(key=="FragmentPath") return 192; return 64 }
+    BEGIN { count=split(keys,list,","); for(i=1;i<=count;i++) { if(list[i] !~ /^(OnFailure|OnFailureJobMode|FailureAction|StartLimitAction|Restart|RestartMode|TimeoutStopUSec|WatchdogUSec|KillMode|KillSignal|FinalKillSignal|SendSIGKILL|FragmentPath|DropInPaths|ExecStart|Type|TimeoutStartUSec|ActiveState|SubState|MainPID|ExecMainPID|BindsTo|PartOf|StopWhenUnneeded|Result|ExecMainCode|ExecMainStatus|Job|ControlGroup)$/ || need[list[i]]++) bad=1 } }
+    { if($0 ~ /[^ -~]/) bad=1; if(scalar=="yes") { if(count!=1 || NR!=1 || length($0)>bound(list[1])) bad=1 }
+      else { separator=index($0,"="); key=substr($0,1,separator-1); value=substr($0,separator+1); if(!separator || !need[key] || seen[key]++ || length(value)>bound(key)) bad=1 } }
+    END { if(scalar=="yes") { if(NR!=1) bad=1 } else { for(key in need) if(seen[key]!=1) bad=1 }; exit bad ? 90 : 0 }
+    ' "$root/$prefix.stdout" || return 90
+}
+control_failure() {
+    test "$control_policy" = source5-child-fsize4096-v1 || return 0
+    case "$1" in query|host-query) :;; *) return 90;; esac
+    if test -e "$root/$1.output-unknown" || test -L "$root/$1.output-unknown"; then
+        private "$root/$1.output-unknown" || return 90
+        test "$(cat "$root/$1.output-unknown")" = "$nonce" || return 90
+    else
+        claim "$1.output-unknown" || return 90
+    fi
+}
+control_complete() {
+    case "$control_policy" in legacy) return 0;; source5-child-fsize4096-v1) :;; *) return 90;; esac
+    for stream in stdout stderr; do
+        private "$root/$1.$stream" || return 90
+        test "$(stat -c '%s' "$root/$1.$stream")" -lt 4096 || return 90
+    done
 }
 now() { awk '{print int($1)}' /proc/uptime; }
 start_of() { sed 's/^.*) //' "/proc/$1/stat" | awk '{print $20}'; }
@@ -19,7 +83,8 @@ bounded() {
     test "$q_end" -le "$deadline" || q_end=$deadline
     if test -n "${stage_deadline-}" && test "$q_end" -gt "$stage_deadline"; then q_end=$stage_deadline; fi
     test "$(now)" -lt "$q_end" || return 90
-    (exec "$@") > "$root/host-query.stdout" 2> "$root/host-query.stderr" &
+    control_outputs host-query || return 90
+    (control_child host-query || exit 90; exec "$@") > "$root/host-query.stdout" 2> "$root/host-query.stderr" &
     q_pid=$!; q_start=''
     if test -d "/proc/$q_pid"; then q_start=$(start_of "$q_pid") || :; fi
     while kill -0 "$q_pid" 2>/dev/null; do
@@ -35,7 +100,23 @@ bounded() {
         fi
         sleep 1
     done
-    wait "$q_pid"
+    if wait "$q_pid"; then :; else
+        q_status=$?
+        control_failure host-query || :
+        return "$q_status"
+    fi
+    if ! control_complete host-query || ! control_grammar host-query "$@"; then
+        control_failure host-query || :
+        return 90
+    fi
+}
+control_copy() {
+    if test "$control_policy" = source5-child-fsize4096-v1; then
+        case "$1" in "$root/host-actor.properties"|"$root/host-guard.properties") :;; *) return 90;; esac
+        if test -e "$1" || test -L "$1"; then private "$1" || return 90; fi
+        control_complete host-query || return 90
+    fi
+    cp "$root/host-query.stdout" "$1" || return 90
 }
 show() { bounded /usr/bin/systemctl --no-pager show "$@"; }
 require_line() { test "$(grep -Fxc "$1" "$root/host-query.stdout")" = 1; }
@@ -64,7 +145,7 @@ actor_proof() {
     else
         saved_actor_pid=$actor_pid; saved_actor_start=$current_start
     fi
-    cp "$root/host-query.stdout" "$root/host-actor.properties" || return 90
+    control_copy "$root/host-actor.properties" || return 90
     printf '%s %s\n' "$saved_actor_pid" "$saved_actor_start" > "$root/host-actor.identity" || return 90
 }
 guard_proof() {
@@ -84,7 +165,7 @@ guard_proof() {
     require_line "FragmentPath=$unit_shadow" || return 90
     require_line "DropInPaths=$vendor_shadow $guard" || return 90
     grep -Fq 'path=/usr/bin/xochitl ; argv[]=/usr/bin/xochitl --system ;' "$root/host-query.stdout" || return 90
-    cp "$root/host-query.stdout" "$root/host-guard.properties" || return 90
+    control_copy "$root/host-guard.properties" || return 90
 }
 main() {
     test "$#" = 0

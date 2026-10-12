@@ -8,7 +8,7 @@ HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location("legacy_fixture", HERE.parent / "native_shutdown_probe/test_actor.py")
 fixture = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fixture)
-fixture.SOURCE = (HERE / "actor.sh.in").read_text().split("# Main-only execution boundary", 1)[0]
+fixture.SOURCE = (HERE / "actor.sh.in").read_text().split("# Main-only execution boundary", 1)[0].replace('@CONTROL_POLICY@', 'legacy').replace('@CONTROL_SHELL_SHA256@', '0' * 64)
 
 class Recovery(unittest.TestCase):
     def test_input_recovery_failure_still_restores_stock_and_retains_failure(self):

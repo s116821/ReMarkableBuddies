@@ -1,11 +1,11 @@
 """Executed POSIX closure and actor admission faults, no device/services."""
 import os
+import importlib.util
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
 import test_actor
-import test_open_document_transport as transport_tests
 
 
 @unittest.skipUnless(os.name == 'posix', 'POSIX exact-source execution')
@@ -57,6 +57,9 @@ class ShellV2Tests(unittest.TestCase):
             self.assertFalse((root/'tap-recovery.log').exists())
 
     def test_actual_production_entry_and_closing_loop_refuse_every_closure_shape(self):
+        if importlib.util.find_spec('PIL') is None:
+            self.skipTest('Actual transport fixture requires Pillow; no substitute pixel implementation')
+        import test_open_document_transport as transport_tests
         for point in ('entry','closing','guardian-wait'):
             for name in ('entry.closed','restore.claim','stop.request','stop.admitted') if point != 'guardian-wait' else ('tap.unresolved','tap.empty','tap.cleaned','tap.recovered','tap.supervisor-spent'):
                 for shape in ('file','directory','dangling'):

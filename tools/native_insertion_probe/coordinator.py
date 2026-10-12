@@ -1,5 +1,6 @@
 """Private Main-only coordinator. Default renders only; transport requires --execute-main."""
 import argparse
+import asyncio
 import base64
 import hashlib
 import json
@@ -9,7 +10,7 @@ import re
 import subprocess
 import time
 from owned_frame_capture import CONTRACT as CAPTURE_CONTRACT, TOOLS as CAPTURE_TOOLS, HOST_KINDS, OBSERVATION_KIND
-from open_document_timing import PRODUCTION_V2, V2_LIBRARY_SHA256, EIGHT_LIBRARY_SHA256, V2_PUBLISHER_SHA256, validate_v2_binding, fixture_inventory_selection, PRESERVED_EIGHT
+from open_document_timing import PRODUCTION_V2, V2_LIBRARY_SHA256, EIGHT_LIBRARY_SHA256, V2_PUBLISHER_SHA256, validate_v2_binding, fixture_inventory_selection, PRESERVED_EIGHT, SOURCE5, SOURCE5_LIBRARY_SHA256, SOURCE5_GESTURE_SHA256, validate_gesture_paths, SOURCE5_CONTROL_POLICY, SOURCE5_CONTROL_SHELL_SHA256
 
 HERE = Path(__file__).resolve().parent
 ALIAS = "rem25-usb-rm2"
@@ -17,10 +18,30 @@ FILES = {"actor.sh", "launch.sh", "runtime.files", "document-immutable.files", "
          "guard.conf", "activation.conf", "stock.policy", "guard.policy", "baseline.files", "service.files",
          "stock-unit.original", "vendor-dropin.original", "unit-shadow.service", "vendor-shadow.conf"}
 HOST_FILES = {"host-profile.json", "native_frame_acquire", "owned_frame", "owned_frame_alarm", "owned_tap_guardian", "observe_input", "publish_creation_arm", "library-reference.png", "source-body-reference.png", "source-footer-reference.png"}
+SOURCE5_CONTROL_FILE_CAPS = {'bindings.json': 2048, 'arming.json': 2048,
+    'host-report.json': 8192, 'host-failure.json': 4096, 'probe-restore-failure.json': 4096,
+    'control-overflow.json': 2048}
+SOURCE5_ARM_SCRIPT_CAP = 32768
+SOURCE5_MONITOR_RECORDS = 88
+SOURCE5_REMOTE_SCALAR_NAMES = frozenset({
+    'deadline','host-arm.claim','host-actor.identity','actor.lock','actor.claim','actor.ready',
+    'guard.request','start.request','restore.claim','insertion.outcome','insertion.failed',
+    'stock-start.claim','guard.install-intent','guard.directory-created','unit-shadow.install-intent',
+    'vendor-shadow.install-intent','guard-file.install-intent','guard.ready','activation.claim',
+    'stock-stop.claim','activation.install-intent','candidate-start.claim','attempt.claim','attempt.identity',
+    'stop.request','stop.admitted','document.preservation','document.mutation','stock.restored',
+    'recovery.failed','query.unconfirmed','host-query.unconfirmed','query.output-unknown',
+    'host-query.output-unknown','input.recovery.failed','final-byte','candidate.window',
+    'creation-waiting','entry.closed'})
+SOURCE5_REMOTE_CONTROL_BYTES = 45056 + 8 * 4096 + len(SOURCE5_REMOTE_SCALAR_NAMES) * 256 + 1024 + 32769
 
 
 def packet_files(receipt):
-    return FILES | (HOST_FILES if receipt.get("experiment_kind") in HOST_KINDS else set())
+    files=FILES | (HOST_FILES if receipt.get("experiment_kind") in HOST_KINDS else set())
+    if receipt.get('fixture_inventory_variant') == SOURCE5:
+        fixture_inventory_selection(receipt,'before_page_ids')
+        files=files|{'owned_relative_gesture','gesture-paths-previous.json','gesture-paths-next.json'}
+    return files
 
 
 def run_host_sequence(sequence, purpose):
@@ -38,7 +59,7 @@ def load_host_profile(packet, receipt):
             raise ValueError('Explicit matching host purpose required')
         sources = {"open_document_host.py", "open_document_transport.py", "open_document_protocol.py",
                    "open_document_timing.py", "publish_creation_arm.c", "coordinator.py",
-                   "prepare_packet.py", "actor.sh.in", "arm.sh.in", "owned_tap_guardian.c", "owned_frame_capture.py"}
+                   "prepare_packet.py", "actor.sh.in", "arm.sh.in", "owned_tap_guardian.c", "owned_frame_capture.py", "source5_navigation.py"}
         contract = 'bounded-host-v6-production-v2' if profile['experiment_kind'] == PRODUCTION_V2 else 'bounded-host-v5'
         if profile.get("host_sequence_contract") != contract or set(profile.get("source_sha256", {})) != sources:
             raise ValueError("Host source contract incomplete")
@@ -54,7 +75,9 @@ def load_host_profile(packet, receipt):
             inventory, _ = fixture_inventory_selection(profile)
             if fixture_inventory_selection(receipt, 'before_page_ids')[0] != inventory:
                 raise ValueError('Host/packet fixture inventory selection mismatch')
-            library_pin = EIGHT_LIBRARY_SHA256 if inventory == PRESERVED_EIGHT else V2_LIBRARY_SHA256
+            if inventory == SOURCE5 and any(profile[key] != receipt[key] for key in ('source_index','source_page_id','neighbor_index','neighbor_page_id','insertion_index')):
+                raise ValueError('Host/packet fixed source5 tuple mismatch')
+            library_pin = SOURCE5_LIBRARY_SHA256 if inventory == SOURCE5 else EIGHT_LIBRARY_SHA256 if inventory == PRESERVED_EIGHT else V2_LIBRARY_SHA256
             if (profile.get('tools', {}).get('publish_creation_arm') != V2_PUBLISHER_SHA256 or
                 type(library_pin) is not str or profile.get('references', {}).get('library-reference.png') != library_pin):
                 raise ValueError('Production v2 publisher/reference binding changed')
@@ -78,6 +101,15 @@ def load_host_profile(packet, receipt):
         if profile["immutable_hashes"] != expected:
             raise ValueError("Host immutable baseline differs from actor")
         tool_names = {"owned_tap_guardian", "observe_input", "publish_creation_arm"} | set(CAPTURE_TOOLS)
+        if profile.get('fixture_inventory_variant') == SOURCE5:
+            if (profile.get('control_output_policy') != SOURCE5_CONTROL_POLICY or
+                receipt.get('control_output_policy') != SOURCE5_CONTROL_POLICY or
+                profile.get('control_shell_sha256') != SOURCE5_CONTROL_SHELL_SHA256 or
+                receipt.get('control_shell_sha256') != SOURCE5_CONTROL_SHELL_SHA256):
+                raise ValueError('Source5 control output/shell binding refused')
+            tool_names=tool_names|{'owned_relative_gesture'}
+            if type(SOURCE5_GESTURE_SHA256) is not str or profile.get('tools',{}).get('owned_relative_gesture') != SOURCE5_GESTURE_SHA256:
+                raise ValueError('Reviewed source5 gesture artifact missing')
         if profile["tools"] != {name: receipt["files"][name] for name in tool_names}:
             raise ValueError("Host helper hashes differ from packet")
         from prepare_packet import ENCODER_HASHES
@@ -96,6 +128,29 @@ def load_host_profile(packet, receipt):
             if sha(data) != profile["references"][name]:
                 raise ValueError("Reference bytes changed")
             pixels(data)
+        if profile.get('fixture_inventory_variant') == SOURCE5:
+            sizes = profile.get('packet_file_sizes')
+            expected_names = packet_files(receipt) - {'host-profile.json'}
+            if (type(sizes) is not dict or set(sizes) != expected_names or
+                any(type(size) is not int or size < 0 for size in sizes.values()) or
+                sizes != receipt.get('packet_file_sizes') or
+                profile.get('source5_control_bytes_reserve') != 17 * 1024 * 1024 or
+                receipt.get('source5_control_bytes_reserve') != 17 * 1024 * 1024 or
+                sum(sizes.values()) + 2 * 65536 + 1024 * 1024 > 17 * 1024 * 1024):
+                raise ValueError('Source5 complete control budget binding refused')
+            if any(regular(Path(packet)/name).stat().st_size != size for name,size in sizes.items()):
+                raise ValueError('Source5 packet size binding changed')
+            if (regular(Path(packet)/'host-profile.json').stat().st_size > 65536 or
+                regular(Path(packet)/'preparation.json').stat().st_size + regular(Path(packet)/'packet.files').stat().st_size > 65536):
+                raise ValueError('Source5 profile/receipt/manifest cap exceeded')
+            validate_gesture_paths(profile.get('gesture_paths'))
+            names={'gesture-paths-previous.json','gesture-paths-next.json'}
+            if profile.get('gesture_path_hashes') != {name:receipt['files'][name] for name in names}:
+                raise ValueError('Prestaged geometry receipt binding differs')
+            for direction in ('previous','next'):
+                name='gesture-paths-'+direction+'.json';data=regular(Path(packet)/name).read_bytes()
+                if sha(data) != profile['gesture_path_hashes'][name] or json.loads(data) != profile['gesture_paths'][direction]:
+                    raise ValueError('Prestaged geometry file/profile differs')
         return profile
     except (KeyError, ValueError, OSError) as error:
         raise ValueError("Open-document execution refused: exact host/profile/reference contract missing") from error
@@ -179,6 +234,8 @@ def ssh_args(known_hosts, identity=None):
 def render(receipt, receipt_hash):
     text = regular(HERE / "arm.sh.in").read_text()
     replacements = {"@ROOT@": receipt["remote_root"], "@CAPTURESPACE@": 'test "$(df -Pk /run | awk \'NR==2 {print $4}\')" -ge 196608' if receipt.get("experiment_kind") in HOST_KINDS else ":", "@NONCE@": receipt["nonce"],
+                    "@CONTROL_POLICY@": SOURCE5_CONTROL_POLICY if receipt.get('fixture_inventory_variant') == SOURCE5 else 'legacy',
+                    "@CONTROL_SHELL_SHA256@": SOURCE5_CONTROL_SHELL_SHA256 if receipt.get('fixture_inventory_variant') == SOURCE5 else '0' * 64,
                     "@GUARDHASH@": receipt["files"]["guard.conf"], "@MANIFESTHASH@": receipt["packet_manifest_sha256"],
                     "@UNITSHADOWHASH@": receipt["files"]["unit-shadow.service"],
                     "@VENDORSHADOWHASH@": receipt["files"]["vendor-shadow.conf"],
@@ -186,7 +243,7 @@ def render(receipt, receipt_hash):
                     "@ALLOWEDFILES@": "|".join(sorted(packet_files(receipt) | {"packet.files", "preparation.json"})),
                     "@PRIVATEFILES@": "\n    ".join(
                         f'test -f "$root/{name}" && test ! -L "$root/{name}"\n    test "$(stat -c \'%a %u %h\' \"$root/{name}\")" = \'700 0 1\''
-                        if name in ({"owned_tap_guardian", "observe_input", "publish_creation_arm"} | set(CAPTURE_TOOLS)) else f'private "$root/{name}"'
+                        if name in ({"owned_tap_guardian", "observe_input", "publish_creation_arm", "owned_relative_gesture"} | set(CAPTURE_TOOLS)) else f'private "$root/{name}"'
                         for name in sorted(packet_files(receipt)))}
     for key, value in replacements.items():
         text = text.replace(key, value)
@@ -207,6 +264,127 @@ def transport(arguments, script, timeout):
                 "stderr": (error.stderr or b"").decode("utf-8", "replace"), "uncertain_remote_action": True}
 
 
+def bounded_control_transport(arguments, script, timeout):
+    """Source5 arm/monitor only: both streams share 1KiB before retention."""
+    script_bytes = script.encode('utf-8')
+    if len(script_bytes) > 65536 or timeout <= 0:
+        return {'exit': None, 'timeout': timeout <= 0, 'stdout': '', 'stderr': '',
+                'no_remote_process_started': True, 'input_limit_exceeded': len(script_bytes) > 65536}
+    async def run():
+        deadline = time.monotonic() + timeout
+        try:
+            process = await asyncio.create_subprocess_exec(*arguments, stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, limit=1024)
+        except Exception as error:
+            return {'exit': None, 'timeout': False, 'stdout': '', 'stderr': '',
+                    'no_remote_process_started': True, 'transport_error': type(error).__name__}
+        buffers = {'stdout': bytearray(), 'stderr': bytearray()}
+        overflow = False
+        expired = False
+        async def read(name, stream):
+            nonlocal overflow
+            while True:
+                chunk = await stream.read(256)
+                if not chunk:
+                    return
+                if sum(map(len, buffers.values())) + len(chunk) > 1024:
+                    overflow = True
+                    raise ValueError('Control output cap exceeded')
+                buffers[name].extend(chunk)
+        async def feed():
+            process.stdin.write(script_bytes)
+            await process.stdin.drain()
+            process.stdin.close()
+        tasks = []
+        failure = False
+        try:
+            if time.monotonic() >= deadline:
+                raise asyncio.TimeoutError
+            tasks = [asyncio.create_task(read('stdout', process.stdout)),
+                     asyncio.create_task(read('stderr', process.stderr)), asyncio.create_task(feed())]
+            await asyncio.wait_for(asyncio.gather(*tasks), max(0, deadline-time.monotonic()))
+            await asyncio.wait_for(process.wait(), max(0, deadline-time.monotonic()))
+        except asyncio.TimeoutError:
+            expired = failure = True
+        except Exception:
+            failure = True
+        finally:
+            if process.returncode is None:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                try:
+                    await asyncio.wait_for(process.wait(), .5)
+                except asyncio.TimeoutError:
+                    failure = True
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            if not process.stdin.is_closing():
+                process.stdin.close()
+            try:
+                await asyncio.wait_for(process.stdin.wait_closed(), .5)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            except asyncio.TimeoutError:
+                failure = True
+            # A cancelled reader can leave a paused Windows pipe buffered after
+            # actual child death. Discard only during bounded cleanup; none of
+            # these bytes enter evidence or create additional authority.
+            async def drain(stream):
+                while await stream.read(1024):
+                    pass
+            try:
+                await asyncio.wait_for(asyncio.gather(drain(process.stdout), drain(process.stderr)), .5)
+            except asyncio.TimeoutError:
+                failure = True
+        result = {'exit': None if failure else process.returncode, 'timeout': expired,
+                  'stdout': bytes(buffers['stdout']).decode('utf-8', 'replace'),
+                  'stderr': bytes(buffers['stderr']).decode('utf-8', 'replace')}
+        if failure:
+            result.update(uncertain_remote_action=True, output_limit_exceeded=overflow)
+        if len((json.dumps(result) + '\n').encode('utf-8')) > 2048:
+            # A prefix hash records the bounded bytes; it cannot prove completion.
+            result = {'exit': None, 'timeout': expired, 'stdout': '', 'stderr': '',
+                      'uncertain_remote_action': True, 'output_limit_exceeded': True,
+                      'captured_prefix_sha256': {key: sha(bytes(value)) for key,value in buffers.items()}}
+        return result
+    return asyncio.run(run())
+
+
+def control_write(output, name, value, ledger=None, terminal=False):
+    data = (json.dumps(value, separators=(',', ':')) + '\n').encode('utf-8') if ledger is not None else (json.dumps(value, indent=2) + '\n').encode('utf-8')
+    if ledger is not None:
+        maximum = 2048 if re.fullmatch(r'monitor-[0-9]{3}\.json', name) else SOURCE5_CONTROL_FILE_CAPS.get(name,65536)
+        if len(data) > maximum:
+            raise ValueError('Control record exceeds its closed output cap')
+        ledger.claim(len(data), terminal=terminal)
+    path = Path(output)/name
+    with path.open('xb') as stream:
+        stream.write(data)
+
+
+def control_write_or_mark(output, name, value, ledger=None, terminal=False):
+    if ledger is not None and ledger.overflow and not terminal:
+        marker = Path(output)/'control-overflow.json'
+        if not marker.exists():
+            control_write(output, marker.name, {'failed_record': name, 'qualification_permitted': False,
+                'replay_permitted': False, 'independent_recovery_required': True}, ledger, terminal=True)
+        return False
+    try:
+        control_write(output, name, value, ledger, terminal)
+        return True
+    except ValueError:
+        if ledger is None or not ledger.overflow:
+            raise
+        marker = Path(output)/'control-overflow.json'
+        if not marker.exists():
+            control_write(output, marker.name, {'failed_record': name, 'qualification_permitted': False,
+                'replay_permitted': False, 'independent_recovery_required': True}, ledger, terminal=True)
+        return False
+
+
 def monitor_script(receipt):
     root = receipt["remote_root"]
     # Fixed read-only evidence set with per-file caps, no policy or process changes.
@@ -220,12 +398,42 @@ def monitor_script(receipt):
               "tap.supervisor-complete", "tap.supervisor-spent",
               "tap.go-publication.json", "tap.go-publication.log", "tap.go.tmp",
               "unit-shadow.install-intent", "vendor-shadow.install-intent", "guard-file.install-intent", "final-byte"]
+    if receipt.get('fixture_inventory_variant') == SOURCE5:
+        names += ['query.output-unknown', 'host-query.output-unknown']
+        return compact_monitor_script(receipt, names)
     commands = ["set -eu", f"root='{root}'", "test -d \"$root\" && test ! -L \"$root\""]
     for name in names:
         commands += [f"printf '\\nFILE {name}\\n'", f'if test -f "$root/{name}" && test ! -L "$root/{name}"; then dd if="$root/{name}" bs=18433 count=1 2>/dev/null; fi']
     # Marker indicates files exist only, not proven healthy/native completion.
     commands += ['if test -f "$root/stock.restored" || test -f "$root/recovery.failed"; then printf "\\nEVIDENCE_TERMINAL_PRESENT\\n"; fi']
     return "\n".join(commands) + "\n"
+
+
+def compact_monitor_script(receipt, names):
+    # Hash summaries are diagnostics over changing files, not coherent snapshots.
+    rows = []
+    for name in names:
+        rows += [f'file="$root/{name}"',
+                 'if test -e "$file" || test -L "$file"; then',
+                 'test -f "$file" && test ! -L "$file" || return 90',
+                 'test "$(stat -c \'%a %u %h\' "$file")" = \'600 0 1\' || return 90',
+                 'before=$(stat -c \'%d %i %s %y\' "$file") || return 90',
+                 'test "$(stat -c %s "$file")" -le 20480 || return 90',
+                 'digest=$(dd if="$file" bs=1 count=20481 2>/dev/null | sha256sum | awk \'{print $1}\') || return 90',
+                 'test "$(stat -c \'%d %i %s %y\' "$file")" = "$before" || return 90',
+                 f'printf \'%s %s %s\\n\' {name} "$before" "$digest"',
+                 f'else printf \'missing %s\\n\' {name}; fi']
+    return '\n'.join(['set -eu', 'set -o pipefail || exit 90',
+        f"root='{receipt['remote_root']}'", f"nonce='{receipt['nonce']}'",
+        'test -d "$root" && test ! -L "$root"',
+        'test "$(stat -c \'%a %u\' "$root")" = \'700 0\'',
+        'test -f "$root/owner" && test ! -L "$root/owner"',
+        'test "$(stat -c \'%a %u %h %s\' "$root/owner")" = \'600 0 1 32\'',
+        'test "$(cat "$root/owner")" = "$nonce"',
+        'summary_rows() {'] + rows + ['}',
+        'aggregate=$(summary_rows | sha256sum | awk \'{print $1}\') || exit 90',
+        f'printf \'DIAGNOSTIC_ONLY_SUMMARY members={len(names)} root=%s sha256=%s\\n\' "$(stat -c \'%d:%i\' "$root")" "$aggregate"',
+        'if test -f "$root/stock.restored" || test -f "$root/recovery.failed"; then printf "\\nEVIDENCE_TERMINAL_PRESENT\\n"; fi', ''])
 
 
 def main():
@@ -240,6 +448,13 @@ def main():
     args = parser.parse_args()
     receipt = load_packet(args.packet, args.receipt_sha256)
     profile = load_host_profile(args.packet, receipt) if receipt["experiment_kind"] in HOST_KINDS else None
+    control_ledger = None
+    if profile is not None and profile.get('fixture_inventory_variant') == SOURCE5:
+        from source5_navigation import ControlLedger
+        control_ledger = ControlLedger()
+        # This known subtotal is inside the shared reserve before any host write.
+        # Additional remote groups require their own assessed closed table.
+        control_ledger.reserve_remote(SOURCE5_REMOTE_CONTROL_BYTES)
     known_hosts = pin_hosts(args.known_hosts, args.known_hosts_sha256)
     identity = regular(args.identity_file)
     output = args.output.absolute()
@@ -248,52 +463,65 @@ def main():
     output.mkdir(mode=0o700, parents=True)
     # Freeze public trusted host-key bytes locally; never copy private identity bytes.
     pinned_copy = output / "pinned-known-hosts"
-    pinned_copy.write_bytes(known_hosts.read_bytes())
+    pinned_bytes = known_hosts.read_bytes()
+    if len(pinned_bytes) > 8192 or sha(pinned_bytes) != args.known_hosts_sha256:
+        raise ValueError('Pinned host bytes changed before their owned copy')
+    if control_ledger is not None:
+        control_ledger.claim(len(pinned_bytes))
+    pinned_copy.write_bytes(pinned_bytes)
     pin_hosts(pinned_copy, args.known_hosts_sha256)
     script = render(receipt, args.receipt_sha256)
+    if control_ledger is not None:
+        if len(script.encode('utf-8')) > SOURCE5_ARM_SCRIPT_CAP:
+            raise ValueError('Source5 rendered arm script exceeds its reserved cap')
+        control_ledger.claim(len(script.encode('utf-8')))
     (output / "arm.sh").write_text(script, encoding="utf-8", newline="\n")
     bindings = {"receipt_sha256": args.receipt_sha256, "known_hosts_sha256": args.known_hosts_sha256,
                 "coordinator_sha256": sha(regular(__file__).read_bytes()), "arm_template_sha256": sha(regular(HERE / "arm.sh.in").read_bytes()),
                 "rendered_arm_sha256": sha(script.encode()), "nonce": receipt["nonce"], "remote_root": receipt["remote_root"],
                 "source_only": not args.execute_main, "no_retry": True}
-    (output / "bindings.json").write_text(json.dumps(bindings, indent=2) + "\n")
+    control_write(output, 'bindings.json', bindings, control_ledger)
     if not args.execute_main:
         print(json.dumps(bindings)); return
     arguments = ssh_args(pinned_copy, identity)
     # Separate packet staging must already be completed; no copy or xochitl control.
     started = time.monotonic()
-    arm = transport(arguments, script, 55)
-    (output / "arming.json").write_text(json.dumps(arm, indent=2) + "\n")
+    control_transport = bounded_control_transport if control_ledger is not None else transport
+    arm = control_transport(arguments, script, 55)
+    arm_retained = control_write_or_mark(output, 'arming.json', arm, control_ledger)
     host_error = None
-    if profile is not None and not arm["timeout"] and arm["exit"] == 0:
+    if profile is not None and arm_retained and not arm["timeout"] and arm["exit"] == 0:
         from open_document_host import HostSequence
         from open_document_transport import SSHAdapter
         adapter = SSHAdapter(arguments, receipt, profile, output, transport,
-                             regular(args.packet / "library-reference.png").read_bytes())
+                             regular(args.packet / "library-reference.png").read_bytes(), control_ledger=control_ledger)
         try:
             sequence = HostSequence(adapter, profile, regular(args.packet / "library-reference.png").read_bytes(),
                                     regular(args.packet / "source-body-reference.png").read_bytes(),
                                     regular(args.packet / "source-footer-reference.png").read_bytes())
             report = run_host_sequence(sequence, profile['experiment_kind'])
-            (output / "host-report.json").write_text(json.dumps(report, indent=2) + "\n")
+            if not control_write_or_mark(output, 'host-report.json', report, control_ledger):
+                raise ValueError('Control evidence budget exhausted; qualification refused')
         except Exception as error:
             # Permission/input uncertainty never triggers a second attempt.
             # Independent actor recovery and bounded read-only monitoring remain.
-            host_error = {"type": type(error).__name__, "message": str(error), "retry_permitted": False}
-            (output / "host-failure.json").write_text(json.dumps(host_error, indent=2) + "\n")
+            host_error = {"type": type(error).__name__, "message": str(error)[:512], "retry_permitted": False}
+            control_write_or_mark(output, 'host-failure.json', host_error, control_ledger, terminal=True)
         finally:
             try:
                 adapter.restore_probe()
             except Exception as error:
-                host_error = {"type": type(error).__name__, "message": str(error), "retry_permitted": False, "cleanup_failed": True}
-                (output / "probe-restore-failure.json").write_text(json.dumps({"type": type(error).__name__, "message": str(error)}) + "\n")
+                host_error = {"type": type(error).__name__, "message": str(error)[:512], "retry_permitted": False, "cleanup_failed": True}
+                control_write_or_mark(output, 'probe-restore-failure.json', host_error, control_ledger, terminal=True)
     # Bounded read-only monitoring even after uncertain/failing arm; never replay.
     final = started + 440
     index = 0
-    while time.monotonic() < final:
+    while time.monotonic() < final and (control_ledger is None or index < SOURCE5_MONITOR_RECORDS):
         remaining = final - time.monotonic()
-        observed = transport(arguments, monitor_script(receipt), min(3, remaining))
-        (output / f"monitor-{index:03}.json").write_text(json.dumps(observed, indent=2) + "\n")
+        observed = control_transport(arguments, monitor_script(receipt), min(3, remaining))
+        terminal_present = not observed['timeout'] and observed['exit'] == 0 and '\nEVIDENCE_TERMINAL_PRESENT\n' in observed['stdout']
+        control_write_or_mark(output, f"monitor-{index:03}.json", observed, control_ledger,
+                              terminal=bool(control_ledger is not None and control_ledger.overflow and terminal_present))
         index += 1
         if not observed["timeout"] and observed["exit"] == 0 and "\nEVIDENCE_TERMINAL_PRESENT\n" in observed["stdout"]:
             break
@@ -301,7 +529,8 @@ def main():
     print(json.dumps({"arming_exit": arm["exit"], "arming_timeout": arm["timeout"], "observations": index,
                       "evidence_directory": str(output), "host_error": host_error,
                       "native_success": "not inferred; Main must verify evidence", "replay_permitted": False}))
-    raise SystemExit(0 if not arm["timeout"] and arm["exit"] == 0 and host_error is None else 90)
+    raise SystemExit(0 if not arm["timeout"] and arm["exit"] == 0 and host_error is None and
+                     (control_ledger is None or not control_ledger.overflow) else 90)
 
 
 if __name__ == "__main__":

@@ -73,7 +73,7 @@ class ProfileTests(unittest.TestCase):
             with self.assertRaises(ValueError): coordinator.load_host_profile(root,receipt)
     def fixture(self, root):
         sources = ("open_document_host.py", "open_document_transport.py", "open_document_protocol.py",
-                   "open_document_timing.py", "publish_creation_arm.c", "coordinator.py", "prepare_packet.py", "actor.sh.in", "arm.sh.in", "owned_tap_guardian.c", "owned_frame_capture.py")
+                   "open_document_timing.py", "publish_creation_arm.c", "coordinator.py", "prepare_packet.py", "actor.sh.in", "arm.sh.in", "owned_tap_guardian.c", "owned_frame_capture.py", "source5_navigation.py")
         receipt = {"experiment_kind": "open-document-insertion-v1", "nonce": "1" * 32, "document_id": "e7f661f1-db6f-4dfc-854a-b38aff7f75de",
                    "target_page_id": "f" * 36, "before_page_ids": list(range(7)), "files": {}}
         profile = {"experiment_kind": "open-document-insertion-v1", "host_sequence_contract": "bounded-host-v5", "references": {}, "encoder_hashes": ENCODER_HASHES, "source_sha256": {name: coordinator.sha((coordinator.HERE / name).read_bytes()) for name in sources},
