@@ -22,6 +22,13 @@ struct Fixture {
     scope: SelectionScope,
 }
 impl Fixture {
+    fn mode(&self, choice: storage::sync::mode::SyncModeChoice) {
+        let store = Store::open(self.paths()).unwrap();
+        let current = store.sync_mode_snapshot().unwrap();
+        store
+            .set_sync_mode(&current.token, Uuid::new_v4(), choice)
+            .unwrap();
+    }
     fn new() -> Self {
         let fixture = Self {
             root: std::env::temp_dir().join(format!("buddy-reader-runtime-{}", Uuid::new_v4())),
@@ -182,6 +189,143 @@ fn actual_selected_startup_refuses_native_before_resolving_provider() {
         serde_json::from_slice::<Value>(&output.stdout).unwrap()["status"],
         "unsupported"
     );
+}
+
+#[test]
+fn explicit_local_isolated_and_shared_modes_route_before_private_runtime_setup() {
+    use storage::sync::mode::SyncModeChoice;
+    let fixture = Fixture::new();
+    fixture.mode(SyncModeChoice::LocalOnly);
+    assert_eq!(
+        fixture.report("inspect", json!({"conversation": fixture.conversation}))["status"],
+        "unsupported"
+    );
+    let output = fixture.command().output().unwrap();
+    assert!(output.status.success() && output.stderr.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()["status"],
+        "unsupported"
+    );
+    fixture.mode(SyncModeChoice::IsolatedBackup {
+        binding_sha256: fixture.scope.binding_sha256.clone(),
+    });
+    let output = fixture.command().output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()["status"],
+        "unsupported"
+    );
+    fixture.mode(SyncModeChoice::SharedGroup {
+        group: fixture.scope.group,
+        binding_sha256: fixture.scope.binding_sha256.clone(),
+        root_id: "chosen-not-qualified-root".into(),
+    });
+    assert_eq!(
+        fixture.report("inspect", json!({"conversation": fixture.conversation}))["status"],
+        "complete"
+    );
+    let output = fixture.command().output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()["data"]["reason"],
+        "no-native-adapter"
+    );
+    let mut foreign = fixture.scope.clone();
+    foreign.group = Uuid::new_v4();
+    fs::write(
+        fixture.root.join("config.json"),
+        serde_json::to_vec(&json!({"paths": fixture.paths(), "reader": {"selection": foreign}}))
+            .unwrap(),
+    )
+    .unwrap();
+    let output = fixture.command().output().unwrap();
+    assert!(output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "unsupported");
+    assert!(report["data"].is_null());
+    fs::write(
+        fixture.root.join("config.json"),
+        serde_json::to_vec(&json!({"paths": fixture.paths()})).unwrap(),
+    )
+    .unwrap();
+    let output = fixture.command().output().unwrap();
+    assert!(output.status.success() && output.stderr.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()["status"],
+        "unsupported"
+    );
+}
+
+#[test]
+fn corrupt_mode_and_partial_default_state_refuse_without_credential_or_device_setup() {
+    use storage::sync::mode::SyncModeChoice;
+    let fixture = Fixture::new();
+    fixture.mode(SyncModeChoice::LocalOnly);
+    fs::write(
+        fixture.paths().data.join("sync/mode.json"),
+        b"{private-invalid-mode",
+    )
+    .unwrap();
+    let output = fixture.command().output().unwrap();
+    assert!(output.status.success() && output.stderr.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()["status"],
+        "unavailable"
+    );
+    let partial = Fixture::new();
+    fs::write(
+        partial.root.join("config.json"),
+        serde_json::to_vec(&json!({"paths": partial.paths()})).unwrap(),
+    )
+    .unwrap();
+    fs::rename(
+        partial.paths().data.join("identity.json"),
+        partial.paths().data.join("identity.missing-fixture"),
+    )
+    .unwrap();
+    let output = partial.command().output().unwrap();
+    assert!(output.status.success() && output.stderr.is_empty());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "unavailable");
+    assert!(report["data"].is_null());
+}
+
+#[test]
+fn local_only_contradictory_publisher_and_busy_mode_keep_pure_input_precedence() {
+    use storage::sync::mode::SyncModeChoice;
+    let fixture = Fixture::new();
+    fixture.mode(SyncModeChoice::LocalOnly);
+    fs::write(
+        fixture.root.join("config.json"),
+        serde_json::to_vec(&json!({"paths": fixture.paths(), "sync": {"enabled": true}})).unwrap(),
+    )
+    .unwrap();
+    let output = fixture.command().output().unwrap();
+    assert!(output.status.success() && output.stderr.is_empty());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "unsupported");
+    assert!(report["data"].is_null());
+    fs::write(
+        fixture.root.join("config.json"),
+        serde_json::to_vec(
+            &json!({"paths": fixture.paths(), "reader": {"selection": fixture.scope}}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let held = Store::open(fixture.paths()).unwrap();
+    assert_eq!(
+        fixture.report(
+            "inspect",
+            json!({"conversation": fixture.conversation, "unexpected": "private-mode-sentinel"})
+        )["status"],
+        "invalid-input"
+    );
+    assert_eq!(
+        fixture.report("inspect", json!({"conversation": fixture.conversation}))["status"],
+        "busy"
+    );
+    drop(held);
 }
 
 #[test]

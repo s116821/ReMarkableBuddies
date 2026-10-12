@@ -7,6 +7,7 @@ use crate::{
     storage::{
         digest, files,
         selection::{SelectedReadBudget, SelectionScope, SelectionToken},
+        sync::mode::{SyncMode, SyncModeLease},
         Store, Uuid, MAX_ITEMS, MAX_METADATA, MAX_RECORD,
     },
     Workflow,
@@ -77,6 +78,7 @@ struct Pending {
     budget: SelectedReadBudget,
     sha256: String,
     consumed: bool,
+    mode_lease: Option<SyncModeLease>,
 }
 impl Report {
     fn new(operation: &'static str, status: Status) -> Self {
@@ -115,6 +117,9 @@ impl Report {
             Err(anyhow::anyhow!("reader report changed"))
         } else {
             SelectedAdmission::with_gates(&[&pending.admission], |store| {
+                if let Some(lease) = &pending.mode_lease {
+                    lease.require_shared_scope(pending.token.scope())?;
+                }
                 ensure!(
                     store.unavailable_commits()? == 0,
                     "reader store unavailable"
@@ -162,21 +167,104 @@ fn open(config: &Config) -> std::result::Result<Arc<Store>, Status> {
         .map_err(|error| admission_status(crate::memory::maintenance::store_open_status(&error)))
 }
 
+pub enum StartupDecision {
+    Ordinary(Option<Arc<Store>>),
+    Report(Box<Report>),
+}
+impl StartupDecision {
+    fn refused(status: Status) -> Self {
+        Self::Report(Box::new(Report::new("startup", status)))
+    }
+}
+fn ordinary_mode(store: &Store, config: &Config) -> std::result::Result<(), Status> {
+    let mode = store
+        .sync_mode_snapshot()
+        .map_err(|_| Status::Unavailable)?;
+    match mode.mode {
+        None => Ok(()),
+        Some(SyncMode::LocalOnly) if !config.sync.enabled => Ok(()),
+        _ => Err(Status::Unsupported),
+    }
+}
+/// Consume the startup-admitted Store once. Fresh ordinary roots are created
+/// only after credential validation; a raced nonlocal choice still refuses here.
+pub fn ordinary_store(
+    config: &Config,
+    admitted: Option<Arc<Store>>,
+) -> std::result::Result<Arc<Store>, Box<Report>> {
+    let store = match admitted {
+        Some(store) => store,
+        None => Arc::new(Store::open(config.paths.clone()).map_err(|error| {
+            Box::new(Report::new(
+                "startup",
+                admission_status(crate::memory::maintenance::store_open_status(&error)),
+            ))
+        })?),
+    };
+    ordinary_mode(&store, config).map_err(|status| Box::new(Report::new("startup", status)))?;
+    Ok(store)
+}
+fn selected_mode(
+    store: &Arc<Store>,
+    scope: &SelectionScope,
+) -> std::result::Result<Option<SyncModeLease>, Status> {
+    let mode = store
+        .sync_mode_snapshot()
+        .map_err(|_| Status::Unavailable)?;
+    match &mode.mode {
+        None => Ok(None),
+        Some(SyncMode::SharedGroup {
+            group,
+            binding_sha256,
+            ..
+        }) if *group == scope.group && binding_sha256 == &scope.binding_sha256 => {
+            let lease = store
+                .sync_mode_lease(&mode.token)
+                .map_err(|_| Status::Unavailable)?;
+            lease
+                .require_shared_scope(scope)
+                .map_err(|_| Status::Unsupported)?;
+            Ok(Some(lease))
+        }
+        _ => Err(Status::Unsupported),
+    }
+}
+
 /// Called from actual startup after final dotenv/config selection, before secrets
 /// or RealDevice/provider construction. No native query can occur in this platform.
-pub fn startup(config: &Config) -> Option<Report> {
-    let scope = config.reader.selection.as_ref()?;
+pub fn startup(config: &Config) -> StartupDecision {
+    if config.reader.selection.is_none() {
+        use crate::memory::maintenance::{preflight_state, StoreReadiness};
+        match preflight_state(config, true) {
+            Ok(StoreReadiness::Fresh) => return StartupDecision::Ordinary(None),
+            Ok(StoreReadiness::Existing) => {}
+            Err(status) => return StartupDecision::refused(admission_status(status)),
+        }
+        let store = match open(config) {
+            Ok(store) => store,
+            Err(status) => return StartupDecision::refused(status),
+        };
+        return match ordinary_mode(&store, config) {
+            Ok(()) => StartupDecision::Ordinary(Some(store)),
+            Err(status) => StartupDecision::refused(status),
+        };
+    }
+    let scope = config.reader.selection.as_ref().expect("selected branch");
     let mut report = Report::new("startup", Status::Unavailable);
     let store = match open(config) {
         Ok(store) => store,
         Err(status) => {
             report.status = status;
-            return Some(report);
+            return StartupDecision::Report(Box::new(report));
         }
+    };
+    let _mode_lease = match selected_mode(&store, scope) {
+        Ok(lease) => lease,
+        Err(status) => return StartupDecision::refused(status),
     };
     let admission = match SelectedAdmission::new(store.clone(), scope.clone()) {
         Ok(value) => Arc::new(value),
-        Err(_) => return Some(report),
+        Err(_) => return StartupDecision::Report(Box::new(report)),
     };
     let mut budget = allowance();
     let validated = SelectedAdmission::with_gates(&[admission.as_ref()], |store| {
@@ -194,7 +282,7 @@ pub fn startup(config: &Config) -> Option<Report> {
         Ok(())
     });
     if validated.is_err() {
-        return Some(report);
+        return StartupDecision::Report(Box::new(report));
     }
     let workflow = Workflow::selected_runtime(admission, config.debug_dump.unwrap_or(false));
     // Startup has no active request. Query availability without pretending to
@@ -203,7 +291,7 @@ pub fn startup(config: &Config) -> Option<Report> {
         workflow.reader_acquisition_kind(),
         crate::device::backend::AcquisitionKind::Unsupported
     ) {
-        return Some(report);
+        return StartupDecision::Report(Box::new(report));
     }
     use remarkable_open_sdk::{ObservationFailure, Platform, UnsupportedReason};
     let platform = remarkable_open_sdk::UnqualifiedPlatform;
@@ -214,7 +302,7 @@ pub fn startup(config: &Config) -> Option<Report> {
         report.incomplete = false;
         report.data = Some(serde_json::json!({"reason":"no-native-adapter"}));
     }
-    Some(report)
+    StartupDecision::Report(Box::new(report))
 }
 
 #[derive(Deserialize)]
@@ -339,6 +427,10 @@ fn execute(name: &'static str, input: Input, scope: &SelectionScope, store: Arc<
         }
         return report;
     }
+    let mode_lease = match selected_mode(&store, scope) {
+        Ok(lease) => lease,
+        Err(status) => return Report::new(name, status),
+    };
     let conversation = match input {
         Input::Inspect(id) | Input::Context(id) => id,
         Input::Recover(_) => unreachable!(),
@@ -367,16 +459,16 @@ fn execute(name: &'static str, input: Input, scope: &SelectionScope, store: Arc<
     if matches!(input, Input::Context(_)) {
         report.status = Status::ChoiceNeeded;
         report.incomplete = false;
-        return report;
-    }
-    report.status = Status::Complete;
-    report.incomplete = false;
-    report.data = Some(serde_json::json!({
+    } else {
+        report.status = Status::Complete;
+        report.incomplete = false;
+        report.data = Some(serde_json::json!({
         "records": records,
         "snapshot_sha256": read.accepted_history[0].sha256,
         "store_generation": read.snapshot.token.store_generation(),
         "aggregate_generation": read.snapshot.token.aggregate_generation()
-    }));
+        }));
+    }
     let sha256 = match serde_json::to_vec(&report) {
         Ok(bytes) => digest(&bytes),
         Err(_) => return Report::new(name, Status::Unavailable),
@@ -388,6 +480,7 @@ fn execute(name: &'static str, input: Input, scope: &SelectionScope, store: Arc<
         budget,
         sha256,
         consumed: false,
+        mode_lease,
     });
     report
 }
@@ -488,6 +581,69 @@ mod tests {
         }
     }
     #[test]
+    fn local_startup_reuses_admitted_store_and_shared_context_retains_real_mode_lease() {
+        use crate::storage::sync::mode::SyncModeChoice;
+        let (fixture, store, scope, conversation) = selected();
+        store
+            .set_sync_mode(
+                &store.sync_mode_snapshot().unwrap().token,
+                Uuid::new_v4(),
+                SyncModeChoice::SharedGroup {
+                    group: scope.group,
+                    binding_sha256: scope.binding_sha256.clone(),
+                    root_id: "chosen-root".into(),
+                },
+            )
+            .unwrap();
+        let mut context = execute(
+            "context",
+            Input::Context(conversation),
+            &scope,
+            store.clone(),
+        );
+        assert_eq!(context.status, Status::ChoiceNeeded);
+        assert!(context.pending.is_some() && context.data.is_none());
+        assert!(store
+            .set_sync_mode(
+                &store.sync_mode_snapshot().unwrap().token,
+                Uuid::new_v4(),
+                SyncModeChoice::LocalOnly
+            )
+            .is_err());
+        let mut output = vec![];
+        context.write_to(&mut output).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&output).unwrap()["status"],
+            "choice-needed"
+        );
+        drop(context);
+        store
+            .set_sync_mode(
+                &store.sync_mode_snapshot().unwrap().token,
+                Uuid::new_v4(),
+                SyncModeChoice::LocalOnly,
+            )
+            .unwrap();
+        let paths = store.paths.clone();
+        drop(store);
+        let config = Config {
+            paths,
+            ..Config::default()
+        };
+        let StartupDecision::Ordinary(Some(admitted)) = startup(&config) else {
+            panic!("local-only should admit ordinary data")
+        };
+        let saved = admitted.clone();
+        let reused = ordinary_store(&config, Some(admitted)).ok().unwrap();
+        assert!(Arc::ptr_eq(&saved, &reused), "no second Store open");
+        let mut contradictory = config.clone();
+        contradictory.sync.enabled = true;
+        assert!(ordinary_store(&contradictory, Some(reused.clone())).is_err());
+        drop(reused);
+        drop(saved);
+        drop(fixture);
+    }
+    #[test]
     fn typed_startup_availability_keeps_request_guards_separate() {
         let (_fixture, store, scope, _) = selected();
         let admission = Arc::new(SelectedAdmission::new(store, scope).unwrap());
@@ -506,7 +662,18 @@ mod tests {
     }
     #[test]
     fn default_config_skips_selected_startup_and_whole_report_bound_is_fixed() {
-        assert!(startup(&Config::default()).is_none());
+        let fresh =
+            Fixture(std::env::temp_dir().join(format!("reader-fresh-default-{}", Uuid::new_v4())));
+        let config = Config {
+            paths: StorePaths {
+                data: fresh.0.join("data"),
+                cache: fresh.0.join("cache"),
+                credentials: fresh.0.join("credentials"),
+            },
+            ..Config::default()
+        };
+        assert!(matches!(startup(&config), StartupDecision::Ordinary(None)));
+        assert!(!config.paths.data.exists());
         let mut report = Report::new("recover-pending", Status::Historical);
         report.data = Some(serde_json::Value::String(format!(
             "private-sentinel{}",
