@@ -218,7 +218,12 @@ fn reader_withheld_only_abstention_provider_failure_and_cancel_never_publish_pro
             .snapshot_heads_matching(&[Namespace::Conversation], 4096, |_| true)
             .unwrap();
         assert!(!envelopes.iter().any(|e| matches!(serde_json::from_value::<Record>(e.payload.clone()), Ok(Record::Turn(t)) if t.role == Role::Assistant)));
-        assert!(envelopes.iter().any(|e| matches!(serde_json::from_value::<Record>(e.payload.clone()), Ok(Record::Turn(t)) if t.role == Role::User && t.text.as_deref() == Some("G unc.?") && matches!(t.outcome, crate::conversation::Outcome::Failed | crate::conversation::Outcome::Canceled))));
+        let expected_outcome = if mode == 3 {
+            crate::conversation::Outcome::Canceled
+        } else {
+            crate::conversation::Outcome::Failed
+        };
+        assert!(envelopes.iter().any(|e| matches!(serde_json::from_value::<Record>(e.payload.clone()), Ok(Record::Turn(t)) if t.role == Role::User && t.text.as_deref() == Some("G unc.?") && t.outcome == expected_outcome)));
         drop(inspect);
     }
 }
