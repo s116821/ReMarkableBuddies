@@ -204,9 +204,11 @@ main() {
         test "$(sha256sum "$root/preparation.json" | awk '{print $1}')" = '@RECEIPTHASH@'
     fi
     @PRIVATEFILES@
-    (cd "$root"; sha256sum -c packet.files)
-    sha256sum -c "$root/baseline.files"
-    sha256sum -c "$root/service.files"
+    # Successful per-file listings exceed the bounded arming reply. Keep
+    # verification status and failure stderr; emit only final admission on success.
+    (cd "$root"; sha256sum -c packet.files) > /dev/null
+    sha256sum -c "$root/baseline.files" > /dev/null
+    sha256sum -c "$root/service.files" > /dev/null
     @CAPTURESPACE@
     claim host-arm.claim
     armed_at=$(now); deadline=$((armed_at+360))

@@ -111,6 +111,62 @@ class Coordinator(unittest.TestCase):
                 for marker in ("host-arm.claim", "deadline", "guard.request", "start.request"):
                     self.assertFalse((root / marker).exists())
 
+    @unittest.skipUnless(os.environ.get("REM25_SOURCE5_PREPARED_PACKET"), "prepared packet not supplied")
+    def test_prepared_packet_hash_preflight_fits_bounded_arming_reply(self):
+        packet = Path(os.environ["REM25_SOURCE5_PREPARED_PACKET"])
+        receipt_bytes = (packet / "preparation.json").read_bytes()
+        receipt = json.loads(receipt_bytes)
+        tools = json.loads((packet / "host-profile.json").read_bytes())["tools"]
+        for corrupt in (None, "payload.so", "baseline", "service"):
+            with self.subTest(corrupt=corrupt), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory) / "packet"
+                root.mkdir(mode=0o700)
+                for member in packet.iterdir():
+                    path = root / member.name
+                    path.write_bytes(member.read_bytes())
+                    path.chmod(0o700 if member.name in tools else 0o600)
+                # Preserve the actual packet hashes. Relocate external hash
+                # targets to synthetic local files, keeping exact row counts
+                # and long paths; no live service or device paths are accessed.
+                targets = {}
+                manifests = {}
+                for kind, name in (("baseline", "baseline.files"), ("service", "service.files")):
+                    rows = []
+                    for index, row in enumerate((packet / name).read_text().splitlines()):
+                        target = Path(directory) / (kind + "-" + "x" * 100 + str(index))
+                        data = row.encode()
+                        target.write_bytes(data)
+                        rows.append(f"{coordinator.sha(data)}  {target}\n")
+                        targets[kind] = target
+                    manifests[kind] = Path(directory) / name
+                    manifests[kind].write_text("".join(rows))
+                if corrupt:
+                    target = root / corrupt if corrupt == "payload.so" else targets[corrupt]
+                    target.write_bytes(b"changed after preparation")
+                rendered = coordinator.render(dict(receipt, remote_root=str(root)), coordinator.sha(receipt_bytes))
+                private = rendered[rendered.index("private() {"):rendered.index("now() {")]
+                begin = rendered.index('    for file in "$root"/*')
+                end = rendered.index('    claim host-arm.claim', begin)
+                preflight = rendered[begin:end]
+                for kind, name in (("baseline", "baseline.files"), ("service", "service.files")):
+                    preflight = preflight.replace(f'sha256sum -c "$root/{name}"',
+                                                  f"sha256sum -c '{manifests[kind]}'")
+                # Capture-space qualification is a separate device check.
+                preflight = preflight[:preflight.index('    test "$(df -Pk /run')]
+                report = next(line for line in rendered.splitlines() if "admitted-once" in line)
+                script = ("set -eu\n" + private + f"root='{root}'\nnonce='{receipt['nonce']}'\n" +
+                          preflight + "saved_actor_pid=2147483647; saved_actor_start=999999999999; deadline=999999999999\n" + report)
+                result = coordinator.bounded_control_transport(["/bin/sh"], script, 8)
+                self.assertFalse(result.get("output_limit_exceeded", False), result)
+                self.assertFalse(result.get("uncertain_remote_action", False), result)
+                self.assertEqual(result["exit"] == 0, corrupt is None, result)
+                self.assertLessEqual(len((result["stdout"] + result["stderr"]).encode()), 1024)
+                self.assertEqual("admitted-once" in result["stdout"], corrupt is None)
+                if corrupt:
+                    self.assertTrue(result["stderr"], "hash failure diagnostic was lost")
+                for marker in ("host-arm.claim", "deadline", "guard.request", "start.request"):
+                    self.assertFalse((root / marker).exists())
+
     def test_actual_nine_second_preflight_bounded_ready_and_thirty_second_refusal(self):
         for source_template, ready_at, success in ((SOURCE,109,True), (SOURCE,124,True), (SOURCE,130,False), (SOURCE,999,False)):
             with tempfile.TemporaryDirectory() as directory:
