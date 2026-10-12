@@ -8,6 +8,7 @@ from unittest import mock
 import subprocess
 import tempfile
 import unittest
+from open_document_timing import SOURCE5, PRODUCTION_V2, FIXTURE_DOCUMENT, PRESERVED_PAGES
 
 HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location("coordinator", HERE / "coordinator.py")
@@ -28,7 +29,7 @@ def run(root, body, overrides="", expected=0):
 class Coordinator(unittest.TestCase):
     def test_rendered_open_packet_inventory_requires_exact_helper_and_record_modes(self):
         helpers = {"owned_tap_guardian", "observe_input", "publish_creation_arm", "native_frame_acquire", "owned_frame", "owned_frame_alarm"}
-        variants = [(None, "valid")]
+        variants = [(None, "valid"), (None, "source5-valid"), ("owned_relative_gesture", "source5-600")]
         for helper in sorted(helpers):
             variants += [(helper, mode) for mode in ("600", "755", "symlink", "hardlink", "wrong-owner")]
         variants += [("owner", "700"), ("payload.so", "700"), ("extra", "extra"), ("owned_tap_guardian", "unselected-helper")]
@@ -37,9 +38,16 @@ class Coordinator(unittest.TestCase):
                 root = Path(directory)/"packet";root.mkdir(mode=0o700)
                 kind = "caller-selected-insertion-v1" if mode=="unselected-helper" else "open-document-insertion-v1"
                 receipt = {"nonce": "1"*32, "remote_root": str(root), "experiment_kind": kind, "files": {}}
+                selected_helpers = helpers
+                if mode.startswith("source5-"):
+                    receipt.update(experiment_kind=PRODUCTION_V2, fixture_inventory_variant=SOURCE5,
+                                   document_id=FIXTURE_DOCUMENT, before_page_ids=list(PRESERVED_PAGES),
+                                   source_index=5, source_page_id=PRESERVED_PAGES[5],
+                                   neighbor_index=6, neighbor_page_id=PRESERVED_PAGES[6], insertion_index=6)
+                    selected_helpers = helpers | {"owned_relative_gesture"}
                 for item in sorted(coordinator.packet_files(receipt)):
                     data = ("synthetic " + item).encode();path = root / item;path.write_bytes(data)
-                    path.chmod(0o700 if item in helpers else 0o600)
+                    path.chmod(0o700 if item in selected_helpers else 0o600)
                     receipt["files"][item] = coordinator.sha(data)
                 manifest = "".join(f"{digest}  {item}\n" for item,digest in sorted(receipt["files"].items()))
                 (root / "packet.files").write_text(manifest);(root / "packet.files").chmod(0o600)
@@ -51,7 +59,8 @@ class Coordinator(unittest.TestCase):
                 begin = rendered.index('    for file in "$root"/*')
                 end = rendered.index('    (cd "$root"; sha256sum -c packet.files)',begin)
                 admission = rendered[begin:end]
-                if mode.isdigit(): (root / name).chmod(int(mode,8))
+                if mode == "source5-600": (root / name).chmod(0o600)
+                elif mode.isdigit(): (root / name).chmod(int(mode,8))
                 elif mode == "symlink":
                     (root / name).unlink();(root / name).symlink_to(root / "payload.so")
                 elif mode == "hardlink": os.link(root / name,Path(directory) / "linked-helper")
@@ -61,8 +70,45 @@ class Coordinator(unittest.TestCase):
                     (root / name).write_bytes(b"unselected");(root / name).chmod(0o700)
                 result = subprocess.run(["/bin/sh","-c", "set -eu\n"+private+f"root='{root}'\n"+admission],
                                         capture_output=True,text=True,timeout=8)
-                self.assertEqual(result.returncode==0,mode=="valid",result.stderr)
+                self.assertEqual(result.returncode==0,mode in {"valid", "source5-valid"},result.stderr)
                 for marker in ("host-arm.claim","deadline","guard.request","start.request"):
+                    self.assertFalse((root / marker).exists())
+
+    @unittest.skipUnless(os.environ.get("REM25_SOURCE5_PREPARED_PACKET"), "prepared packet not supplied")
+    def test_actual_prepared_source5_packet_inventory_modes(self):
+        packet = Path(os.environ["REM25_SOURCE5_PREPARED_PACKET"])
+        receipt_bytes = (packet / "preparation.json").read_bytes()
+        receipt = json.loads(receipt_bytes)
+        profile = json.loads((packet / "host-profile.json").read_bytes())
+        self.assertEqual(receipt["fixture_inventory_variant"], SOURCE5)
+        self.assertEqual(set(profile["tools"]), {
+            "owned_tap_guardian", "observe_input", "publish_creation_arm",
+            "native_frame_acquire", "owned_frame", "owned_frame_alarm", "owned_relative_gesture"})
+        expected = coordinator.packet_files(receipt) | {"packet.files", "preparation.json"}
+        self.assertEqual({p.name for p in packet.iterdir()}, expected)
+        for name, digest in receipt["files"].items():
+            self.assertEqual(coordinator.sha((packet / name).read_bytes()), digest, name)
+        for changed, mode in ((None, None), ("owned_relative_gesture", 0o600),
+                              ("owned_relative_gesture", 0o755), ("gesture-paths-next.json", 0o700)):
+            with self.subTest(changed=changed, mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory) / "packet"
+                root.mkdir(mode=0o700)
+                for name in expected:
+                    path = root / name
+                    path.write_bytes((packet / name).read_bytes())
+                    path.chmod(0o700 if name in profile["tools"] else 0o600)
+                if changed:
+                    (root / changed).chmod(mode)
+                local_receipt = dict(receipt, remote_root=str(root))
+                rendered = coordinator.render(local_receipt, coordinator.sha(receipt_bytes))
+                private = rendered[rendered.index("private() {"):rendered.index("now() {")]
+                begin = rendered.index('    for file in "$root"/*')
+                end = rendered.index('    (cd "$root"; sha256sum -c packet.files)', begin)
+                result = subprocess.run(["/bin/sh", "-c", "set -eu\n" + private +
+                                         f"root='{root}'\n" + rendered[begin:end]],
+                                        capture_output=True, text=True, timeout=8)
+                self.assertEqual(result.returncode == 0, changed is None, result.stderr)
+                for marker in ("host-arm.claim", "deadline", "guard.request", "start.request"):
                     self.assertFalse((root / marker).exists())
 
     def test_actual_nine_second_preflight_bounded_ready_and_thirty_second_refusal(self):

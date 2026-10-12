@@ -192,7 +192,7 @@ main() {
         case "${file##*/}" in
             @ALLOWEDFILES@)
                 case "${file##*/}" in
-                    owned_tap_guardian|observe_input|publish_creation_arm|native_frame_acquire|owned_frame|owned_frame_alarm)
+                    owned_tap_guardian|observe_input|publish_creation_arm|native_frame_acquire|owned_frame|owned_frame_alarm|owned_relative_gesture)
                         test -f "$file" && test ! -L "$file"
                         test "$(stat -c '%a %u %h' "$file")" = '700 0 1';;
                     *) private "$file";;
