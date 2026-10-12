@@ -4,6 +4,7 @@ pub mod indicator;
 mod navigation;
 pub mod orchestrator;
 mod reader_attempt;
+pub mod selected_buddy;
 #[cfg(test)]
 pub(crate) use reader_attempt::assert_attachment_behavior;
 pub(crate) mod selected_backend;

@@ -37,6 +37,17 @@ impl SelectedBackendFacade {
     pub(crate) fn binding(&self) -> ReaderBackendBinding {
         self.binding.clone()
     }
+    /// Uses this facade's existing admission, without exposing its mutable backend.
+    pub(super) fn inspect_buddy_binding(
+        &self,
+        accepted: &crate::storage::selection::SelectionToken,
+        conversation: crate::storage::Uuid,
+        document: crate::storage::Uuid,
+        page: crate::storage::Uuid,
+    ) -> Result<crate::conversation::SelectedBindingInspection> {
+        self.admission
+            .inspect_buddy_binding(accepted, conversation, document, page)
+    }
     pub(crate) fn dispatch(
         &mut self,
         context: &ReaderContext,

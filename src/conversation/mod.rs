@@ -1,5 +1,6 @@
 //! Local-first conversation ledger. Stored facts are not native effect permissions.
 mod admission;
+mod binding_projection;
 pub mod capture_facts;
 pub mod development;
 mod intent;
@@ -19,6 +20,9 @@ use crate::storage::{
 };
 pub use admission::{HistoricalIntent, SelectedAdmission};
 use anyhow::{bail, ensure, Context, Result};
+pub use binding_projection::{
+    SelectedBindingCandidate, SelectedBindingInspection, SelectedBindingUnresolved,
+};
 pub use intent::*;
 pub use pending::{PendingIntentPublication, PendingIntentRequest, SourceAdmission};
 pub(crate) use pending::{ReaderContext, ReaderPreparation};
@@ -1048,20 +1052,9 @@ impl Ledger {
         }
         self.publish(operation, fingerprint, root, records, binding)
     }
-    /// Store a REM-25 association receipt. SDK qualification remains a caller gate;
-    /// no imported or synthetic record authorizes native reuse.
-    pub fn bind(
-        &self,
-        operation: Uuid,
-        expected_root: ExpectedHeads,
-        expected_binding: ExpectedHeads,
-        receipt: BindingReceipt,
-    ) -> Result<WriteResult> {
-        let fingerprint = Self::fingerprint(&("bind", &receipt))?;
-        if let Some(prior) = self.replay(operation, &fingerprint)? {
-            return Ok(prior);
-        }
-        ensure!(receipt.operation == operation, "receipt operation mismatch");
+    /// Historical receipt semantics shared by writes and selected inspection.
+    /// Successful validation never reconstructs native qualification.
+    fn validate_binding_receipt(receipt: &BindingReceipt) -> Result<()> {
         Self::validate_observation(&receipt.source)?;
         ensure!(
             receipt.intended_target == Some(receipt.observed_page),
@@ -1103,6 +1096,23 @@ impl Ledger {
             permitted == receipt.observed_order,
             "insertion receipt order mismatch"
         );
+        Ok(())
+    }
+    /// Store a REM-25 association receipt. SDK qualification remains a caller gate;
+    /// no imported or synthetic record authorizes native reuse.
+    pub fn bind(
+        &self,
+        operation: Uuid,
+        expected_root: ExpectedHeads,
+        expected_binding: ExpectedHeads,
+        receipt: BindingReceipt,
+    ) -> Result<WriteResult> {
+        let fingerprint = Self::fingerprint(&("bind", &receipt))?;
+        if let Some(prior) = self.replay(operation, &fingerprint)? {
+            return Ok(prior);
+        }
+        ensure!(receipt.operation == operation, "receipt operation mismatch");
+        Self::validate_binding_receipt(&receipt)?;
         let id = Self::binding_id(receipt.observed_document, receipt.observed_page);
         let (_, mut root) = self.live_root(receipt.conversation, Some(&expected_root))?;
         ensure!(
