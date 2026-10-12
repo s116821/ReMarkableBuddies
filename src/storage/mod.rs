@@ -9,7 +9,7 @@ pub mod selection;
 pub mod sync;
 pub mod types;
 use anyhow::{ensure, Context, Result};
-pub use recovery::BackupInspection;
+pub use recovery::{ArchivedSelectedSnapshot, BackupInspection};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},

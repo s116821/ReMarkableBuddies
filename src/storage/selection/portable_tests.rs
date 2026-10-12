@@ -105,6 +105,11 @@ fn portable_archive_preserves_history_retained_media_raw_references_and_other_sc
     assert_eq!(report.format, 2);
     assert_eq!(report.selected_scopes, 2);
     assert_eq!(report.selection_receipts, 5);
+    let historical = Store::inspect_selected_backup(&archive, &second, MAX_ITEMS)
+        .unwrap()
+        .unwrap();
+    assert_eq!(historical.transaction.selected.records, refs);
+    assert!(historical.selected_records == selected(&store, &second).selected_records);
     assert!(report.complete_media);
     assert!(!report.configuration_included);
     assert_eq!(fs::read(store.paths.data.join("CURRENT")).unwrap(), current);
@@ -293,6 +298,12 @@ fn portable_archive_partial_media_is_explicit_and_promised_missing_media_refuses
     let report = store.export_selected(&archive).unwrap();
     assert!(!report.complete_media);
     assert_eq!(Store::inspect_backup(&archive).unwrap(), report);
+    let historical = Store::inspect_selected_backup(&archive, &s, MAX_ITEMS)
+        .unwrap()
+        .unwrap();
+    assert!(!historical.complete_media);
+    assert!(historical.media.is_empty());
+    assert_eq!(historical.transaction.selected.media_coverage.len(), 1);
     let (complete_f, complete_store, s, _, archive) = export_fixture();
     let media = selected(&complete_store, &s).retained_records[0].media_descriptors[0].clone();
     fs::remove_file(archive.join("objects").join(&media.sha256)).unwrap();
@@ -380,4 +391,98 @@ fn portable_export_capacity_refuses_without_claiming_complete_or_dropping_record
     assert_eq!(selected(&store, &s).token, publication.token);
     assert_eq!(fs::read(store.paths.data.join("CURRENT")).unwrap(), current);
     assert_eq!(store.manifests().unwrap().len(), 10);
+}
+
+#[test]
+fn portable_selected_domain_inspection_preserves_raw_heads_membership_and_media() {
+    let f = Fixture::new();
+    let store = f.store();
+    let s = scope();
+    let (_, replacement, _, _) = retained_fixture(&store, &s);
+    let mut memory = record(&store);
+    memory.namespace = Namespace::SubjectMemory;
+    let next = store
+        .commit_selected(
+            &replacement.token,
+            Uuid::new_v4(),
+            vec![memory.clone()],
+            BTreeMap::new(),
+        )
+        .unwrap();
+    let root = store.generation(next.token.store_generation());
+    let head_path = root.join("selections").join(s.filename().unwrap());
+    let raw_head = serde_json::to_vec_pretty(&next.transaction).unwrap();
+    files::atomic(&head_path, &raw_head).unwrap();
+    let before = selected(&store, &s);
+    let current = fs::read(store.paths.data.join("CURRENT")).unwrap();
+    let archive = f.0.join("archive");
+    store.export_selected(&archive).unwrap();
+    let mut inspected = Store::inspect_selected_backup(&archive, &s, MAX_ITEMS)
+        .unwrap()
+        .unwrap();
+    assert_eq!(inspected.head_reference.sha256, digest(&raw_head));
+    assert_eq!(inspected.head_reference.bytes, raw_head.len() as u64);
+    assert_ne!(
+        inspected.head_reference.sha256,
+        digest(&serde_json::to_vec(&inspected.transaction).unwrap())
+    );
+    assert_eq!(inspected.origin_actor, store.actor_id);
+    assert_eq!(inspected.origin_generation, before.token.store_generation());
+    assert_eq!(inspected.transaction.selected, before.transaction.selected);
+    assert_eq!(inspected.transaction.retained, before.transaction.retained);
+    assert!(inspected.selected_records == before.selected_records);
+    assert!(inspected.retained_records == before.retained_records);
+    assert!(inspected.selected_records.contains(&memory));
+    assert!(inspected.complete_media);
+    for (hash, source) in &mut inspected.media {
+        assert_eq!(source.reference(), before.media[hash].reference());
+        let bytes = source.chunk(0, source.len()).unwrap();
+        assert_eq!(digest(&bytes), *hash);
+    }
+    assert_eq!(selected(&store, &s).token, before.token);
+    assert_eq!(fs::read(store.paths.data.join("CURRENT")).unwrap(), current);
+    assert_eq!(fs::read(head_path).unwrap(), raw_head);
+    assert!(store.restore(&archive).is_err());
+}
+
+#[test]
+fn portable_selected_domain_inspection_checks_whole_archive_before_absence() {
+    let (f, store, s, _, archive) = export_fixture();
+    assert!(
+        Store::inspect_selected_backup(&archive, &scope(), MAX_ITEMS)
+            .unwrap()
+            .is_none()
+    );
+    let mut invalid = s.clone();
+    invalid.group = Uuid::nil();
+    assert!(Store::inspect_selected_backup(&archive, &invalid, MAX_ITEMS).is_err());
+    for limit in [0, MAX_ITEMS + 1, 1] {
+        assert!(Store::inspect_selected_backup(&archive, &s, limit).is_err());
+    }
+    let second = scope();
+    let extra = record(&store);
+    let publication = initialize(&store, &second, &[extra]);
+    let other_archive = f.0.join("other-archive");
+    store.export_selected(&other_archive).unwrap();
+    let object = other_archive
+        .join("objects")
+        .join(&publication.transaction.selected.records[0].sha256);
+    let original = fs::read(&object).unwrap();
+    fs::write(&object, b"corrupt unrelated object").unwrap();
+    assert!(Store::inspect_selected_backup(&other_archive, &s, MAX_ITEMS).is_err());
+    assert!(Store::inspect_selected_backup(&other_archive, &scope(), MAX_ITEMS).is_err());
+    fs::write(&object, original).unwrap();
+    assert!(
+        Store::inspect_selected_backup(&other_archive, &s, MAX_ITEMS)
+            .unwrap()
+            .is_some()
+    );
+    let legacy_fixture = Fixture::new();
+    let legacy = legacy_fixture.store();
+    legacy
+        .commit(vec![record(&legacy)], BTreeMap::new())
+        .unwrap();
+    let legacy_archive = legacy_fixture.0.join("legacy");
+    legacy.export(&legacy_archive).unwrap();
+    assert!(Store::inspect_selected_backup(&legacy_archive, &s, MAX_ITEMS).is_err());
 }
