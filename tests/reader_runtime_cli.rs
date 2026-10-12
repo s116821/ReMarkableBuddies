@@ -390,3 +390,54 @@ fn selected_inspection_never_fills_missing_conversation_from_ordinary_or_retaine
         "complete"
     );
 }
+
+#[test]
+fn actual_recovery_command_distinguishes_absent_operation_and_foreign_input_before_store_open() {
+    use remarkable_reader_buddy::conversation::{
+        IntentSelectionEvidence, PendingIntentRequest, SourceObservation,
+    };
+    let fixture = Fixture::new();
+    let request = PendingIntentRequest {
+        operation: Uuid::new_v4(),
+        conversation: fixture.conversation,
+        turn: Uuid::new_v4(),
+        updated_ms: 1,
+        selection: IntentSelectionEvidence {
+            group: fixture.scope.group,
+            key_sha256: fixture.scope.key_sha256.clone(),
+            binding_sha256: fixture.scope.binding_sha256.clone(),
+            store_generation: Uuid::new_v4(),
+            aggregate_generation: Uuid::new_v4(),
+            accepted_base_sha256: storage::digest(b"historical fixture base"),
+            selection_sha256: storage::digest(b"historical fixture selection"),
+        },
+        source: SourceObservation {
+            document: Uuid::new_v4(),
+            page: Uuid::new_v4(),
+            session: "synthetic fixture".into(),
+            visit: "synthetic fixture".into(),
+            content_revision: None,
+            order_revision: None,
+            capability_revision: "synthetic-only".into(),
+            evidence_procedure: "no native qualification".into(),
+        },
+        evidence: vec![],
+        media: vec![],
+    };
+    let absent = fixture.report("recover-pending", json!({"request": request}));
+    assert_eq!(absent["status"], "not-found");
+    assert!(absent["data"].is_null());
+    let held = Store::open(fixture.paths()).unwrap();
+    let mut foreign = request.clone();
+    foreign.selection.group = Uuid::new_v4();
+    assert_eq!(
+        fixture.report("recover-pending", json!({"request": foreign}))["status"],
+        "invalid-input",
+        "pure foreign-scope validation must run before a busy Store can be opened"
+    );
+    assert_eq!(
+        fixture.report("recover-pending", json!({"request": request}))["status"],
+        "busy"
+    );
+    drop(held);
+}
