@@ -185,6 +185,96 @@ fn actual_selected_startup_refuses_native_before_resolving_provider() {
 }
 
 #[test]
+fn actual_startup_refuses_storage_valid_invalid_conversation_metadata() {
+    for invalid_schema in [true, false] {
+        let fixture = Fixture::new();
+        let store = Store::open(fixture.paths()).unwrap();
+        let snapshot = store
+            .selected_snapshot(&fixture.scope, storage::MAX_ITEMS)
+            .unwrap()
+            .unwrap();
+        let mut root = snapshot.selected_records[0].clone();
+        root.parents = BTreeSet::from([root.revision_id]);
+        root.revision_id = Uuid::new_v4();
+        root.operation_id = Uuid::new_v4();
+        if invalid_schema {
+            root.domain_schema_version += 1;
+        } else {
+            root.payload = serde_json::to_value(Record::Root(Root {
+                id: fixture.conversation,
+                next_sequence: 1,
+                binding: None,
+                created_ms: 1,
+                updated_ms: 1,
+            }))
+            .unwrap();
+        }
+        store
+            .commit_selected(&snapshot.token, Uuid::new_v4(), vec![root], BTreeMap::new())
+            .unwrap();
+        assert!(
+            store
+                .selected_snapshot(&fixture.scope, storage::MAX_ITEMS)
+                .unwrap()
+                .is_some(),
+            "fixture must be accepted by generic storage validation"
+        );
+        drop(snapshot);
+        drop(store);
+        let output = fixture.command().output().unwrap();
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            report["status"], "unavailable",
+            "invalid schema: {invalid_schema}"
+        );
+        assert!(report["data"].is_null());
+    }
+}
+
+#[test]
+fn actual_startup_refuses_a_store_with_unavailable_commits_despite_valid_selection() {
+    use remarkable_reader_buddy::conversation::Ledger;
+    use std::sync::Arc;
+    let fixture = Fixture::new();
+    let store = Arc::new(Store::open(fixture.paths()).unwrap());
+    Ledger::new(store.clone())
+        .create(Uuid::new_v4(), Uuid::new_v4(), 1)
+        .unwrap();
+    let ordinary = store
+        .manifests()
+        .unwrap()
+        .into_iter()
+        .find(|m| m.scope == Scope::LocalTransaction)
+        .unwrap();
+    let generation: Uuid =
+        storage::files::json(&fixture.paths().data.join("CURRENT"), 128).unwrap();
+    let blob = fixture
+        .paths()
+        .data
+        .join("generations")
+        .join(generation.to_string())
+        .join("objects")
+        .join(&ordinary.records[0].sha256);
+    assert!(blob.starts_with(&fixture.root));
+    drop(store);
+    fs::rename(&blob, blob.with_extension("missing-fixture")).unwrap();
+    let reopened = Store::open(fixture.paths()).unwrap();
+    assert!(reopened.unavailable_commits().unwrap() > 0);
+    assert!(reopened
+        .selected_snapshot(&fixture.scope, storage::MAX_ITEMS)
+        .unwrap()
+        .is_some());
+    drop(reopened);
+    let output = fixture.command().output().unwrap();
+    assert!(output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "unavailable");
+    assert!(report["data"].is_null());
+}
+
+#[test]
 fn actual_inspection_and_context_do_not_invent_token_counts() {
     let fixture = Fixture::new();
     let inspect = fixture.report("inspect", json!({"conversation": fixture.conversation}));

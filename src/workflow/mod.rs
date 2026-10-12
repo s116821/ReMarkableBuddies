@@ -211,12 +211,17 @@ impl Workflow {
     pub fn detail_images_base64(&self) -> Result<Vec<String>> {
         self.device.detail_images()
     }
+    /// Pure transport availability for startup; no request guard or acquisition.
+    pub(crate) fn reader_acquisition_kind(&self) -> crate::device::backend::AcquisitionKind {
+        self.device.acquisition_kind()
+    }
+
     /// Select first, acquire once, freeze all actual provider bytes under the guard.
     pub fn acquire_reader_evidence(&mut self) -> Result<AcquiredEvidence> {
         use crate::device::backend::AcquisitionKind;
         use base64::{engine::general_purpose::STANDARD, Engine};
         self.check_request_progress()?;
-        match self.device.acquisition_kind() {
+        match self.reader_acquisition_kind() {
             AcquisitionKind::Unsupported => anyhow::bail!("Reader acquisition unsupported"),
             AcquisitionKind::LegacyUnqualified => {
                 let (_, png) = self.capture_screenshot_with_data()?;
