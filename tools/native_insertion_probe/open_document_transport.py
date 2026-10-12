@@ -169,7 +169,9 @@ class SSHAdapter:
             raise TypeError("Unsupported evidence type")
         (self.output / (stage + ".json")).write_text(json.dumps(evidence, default=encode, indent=2) + "\n")
 
-    def call(self, script, timeout=4, record_role="ordinary"):
+    def call(self, script, timeout=4, record_role="ordinary", record_deadline=None):
+        if record_deadline is not None and time.monotonic() >= record_deadline:
+            raise Refused("Fixed record deadline exhausted before transport")
         if (fixture_inventory_selection(self.profile) != self.fixture_inventory or
             fixture_inventory_selection(self.receipt, 'before_page_ids') != self.fixture_inventory):
             raise Refused('Sealed fixture inventory changed; no transport permitted')
@@ -215,7 +217,9 @@ class SSHAdapter:
             if self.navigation_phase is not None:
                 deadline=self.navigation_phase.processing_end or getattr(self,"call_deadline",self.navigation_phase.staging_end)
             else:
-                deadline=getattr(self,"action_deadline",None) or (time.monotonic()+2)
+                # Snapshot/clock evidence belongs to that operation's sealed
+                # bound, not a preceding tap's shorter contact lease.
+                deadline=record_deadline if record_deadline is not None else (getattr(self,"action_deadline",None) or (time.monotonic()+2))
             self.retain_bounded(f"transport-{self.counter:03}",result,deadline,
                 control=not capture_record,maximum=caps[record_role],reservation=claim)
         else:
@@ -282,7 +286,7 @@ class SSHAdapter:
         clock_script='set -eu\ncat /proc/uptime\n'
         role=("stop-clock" if self.stop_attempted else "poll-clock" if self.poll_clock_scope
             else "staging-clock" if self.navigation_phase is not None else "clock")
-        clock_text=self.call(clock_script,cap,record_role=role) if self.frame_ledger is not None else self.call(clock_script,cap)
+        clock_text=self.call(clock_script,cap,record_role=role,record_deadline=anchor+cap) if self.frame_ledger is not None else self.call(clock_script,cap)
         remote=upper_uptime_ms(clock_text)
         if self.frame_ledger is not None:
             self.clock_sample=(int(float(clock_text.split()[0])*1000),self.last_response_arrival)
@@ -601,7 +605,9 @@ test "$(now_upper)" -lt "$cutoff"
             response_deadline = min(response_deadline, self.navigation_phase.capture_end)
             timeout = min(timeout,response_deadline-time.monotonic())
         self.capture_rpc=self.navigation_phase is not None
-        try: response=self.call(script,timeout)
+        try:
+            response=(self.call(script,timeout,record_deadline=response_deadline)
+                      if self.frame_ledger is not None else self.call(script,timeout))
         finally: self.capture_rpc=False
         if (self.last_response_arrival if self.navigation_phase is not None else time.monotonic()) >= response_deadline:
             raise Refused("Complete snapshot response arrived after fixed deadline")

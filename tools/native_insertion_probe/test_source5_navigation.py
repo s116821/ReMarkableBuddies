@@ -338,6 +338,57 @@ def ssh_fixture(directory,transport,whole=False):
     return SSHAdapter([],receipt,profile,directory,transport,image_bytes("library"))
 
 class PublicAdapterTests(unittest.TestCase):
+    def test_precreation_snapshots_use_own_bound_after_expired_tap_lease(self):
+        with tempfile.TemporaryDirectory() as directory:
+            adapter=phase_harness(directory)
+            tap_end=time.monotonic()-1
+            adapter.action_deadline=tap_end
+            adapter.route.clock=150000
+            calls=[];deadlines=[]
+            def transport(args,script,timeout):
+                calls.append(script)
+                stdout="150.00 0.00\n" if script=="set -eu\ncat /proc/uptime\n" else capture_response(adapter,adapter.route.raw("open",5))
+                return {"stdout":stdout,"stderr":"","exit":0,"timeout":False}
+            adapter.transport=transport
+            def writer(fn,args,deadline,**kwargs):
+                if time.monotonic()>=deadline: raise ValueError("No local processing allowance")
+                deadlines.append(deadline)
+                return fn(*args)
+            with patch("open_document_transport.bounded_local",side_effect=writer):
+                first=SSHAdapter.raw_snapshot(adapter,"open",202,False)
+                second=SSHAdapter.raw_snapshot(adapter,"open",202,False)
+            self.assertEqual(adapter.action_deadline,tap_end)
+            self.assertEqual(adapter.frame_ledger.frames,2)
+            self.assertEqual(len(calls),4)
+            self.assertEqual(len(list(Path(directory).glob("transport-*.json"))),4)
+            self.assertEqual(deadlines[1],first["response_deadline_monotonic"])
+            self.assertEqual(deadlines[3],second["response_deadline_monotonic"])
+            self.assertFalse(adapter.arm_attempted)
+            self.assertFalse(any('> "$root/creation-arm.tmp"' in script for script in calls))
+
+    def test_expired_snapshot_bound_refuses_transport_and_keeps_stop_available(self):
+        with tempfile.TemporaryDirectory() as directory:
+            adapter=phase_harness(directory)
+            adapter.action_deadline=time.monotonic()-2
+            adapter.fixed_local_deadlines[202]=time.monotonic()-1
+            with self.assertRaises(Refused): SSHAdapter.raw_snapshot(adapter,"open",202,False)
+            self.assertFalse(adapter.scripts)
+            self.assertTrue(adapter.capture_failed)
+            self.assertFalse(adapter.arm_attempted)
+            self.assertFalse(any(Path(directory).iterdir()))
+            adapter.stop_once(adapter.identity,252)
+            self.assertTrue(adapter.stop_attempted)
+            self.assertTrue(any("stop.request" in script for script in adapter.scripts))
+
+    def test_explicit_expired_record_bound_refuses_before_transport(self):
+        with tempfile.TemporaryDirectory() as directory:
+            calls=[]
+            adapter=ssh_fixture(directory,lambda *args:calls.append(args))
+            used=adapter.control_ledger.used
+            with self.assertRaises(Refused): adapter.call("read-only",record_deadline=time.monotonic()-1)
+            self.assertEqual(adapter.control_ledger.used,used)
+            self.assertFalse(calls)
+
     def test_poll_limit_refuses_thirty_first_rpc_and_result_reentry(self):
         with tempfile.TemporaryDirectory() as directory:
             calls=[]
