@@ -226,6 +226,7 @@ impl Store {
             store.paths.credentials.clone(),
             store.paths.data.join("sync"),
             store.paths.data.join("sync/incoming"),
+            store.paths.data.join("sync/selected-outbox"),
             store.generation(generation),
             store.generation(generation).join("objects"),
             store.generation(generation).join("commits"),

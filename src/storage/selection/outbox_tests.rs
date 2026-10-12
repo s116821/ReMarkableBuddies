@@ -259,3 +259,94 @@ fn selected_outbox_bounds_use_actual_journal_bytes_and_wake_only_new_preparation
     assert!(receive.try_recv().is_ok());
     assert_eq!(selected(&store, &s).token, publication.token);
 }
+
+#[test]
+fn selected_outbox_interrupted_staging_reopen_preserves_pending_and_withdrawn() {
+    for state in [
+        None,
+        Some(SelectedAttemptState::Pending),
+        Some(SelectedAttemptState::Withdrawn),
+    ] {
+        let f = Fixture::new();
+        let store = f.store();
+        let s = scope();
+        let publication = initialize(&store, &s, &[record(&store)]);
+        let request = request(&store);
+        if state.is_some() {
+            store
+                .prepare_selected_attempt(&publication.token, request.clone())
+                .unwrap();
+        }
+        if state == Some(SelectedAttemptState::Withdrawn) {
+            store.withdraw_selected_attempt(request.operation).unwrap();
+        }
+        let directory = store.paths.data.join("sync/selected-outbox");
+        files::directory(&directory).unwrap();
+        let journal = directory.join(format!("{}.json", request.operation));
+        let original = journal.exists().then(|| fs::read(&journal).unwrap());
+        let staging = directory.join(format!(".stage-{}", Uuid::new_v4()));
+        fs::write(&staging, b"partial preparation or withdrawal JSON").unwrap();
+        let current = fs::read(store.paths.data.join("CURRENT")).unwrap();
+        drop(store);
+        let store = f.store();
+        assert!(
+            !staging.exists(),
+            "uncommitted outbox staging survives reopen"
+        );
+        let inspected = store.inspect_selected_attempt(request.operation).unwrap();
+        assert_eq!(inspected.as_ref().map(|a| a.state), state);
+        if let Some(original) = original {
+            assert_eq!(fs::read(&journal).unwrap(), original);
+        }
+        let replay = store
+            .prepare_selected_attempt(&publication.token, request.clone())
+            .unwrap();
+        assert_eq!(replay.state, state.unwrap_or(SelectedAttemptState::Pending));
+        assert_eq!(replay.request, request);
+        assert_eq!(selected(&store, &s).token, publication.token);
+        assert_eq!(fs::read(store.paths.data.join("CURRENT")).unwrap(), current);
+        // Unsupported foreign files survive cleanup and still refuse inventory.
+        let foreign = directory.join(".stage-not-a-uuid");
+        fs::write(&foreign, b"foreign unsupported metadata").unwrap();
+        drop(store);
+        let store = f.store();
+        assert!(foreign.exists());
+        assert!(store.inspect_selected_attempt(request.operation).is_err());
+        fs::remove_file(foreign).unwrap();
+        assert_eq!(
+            store
+                .inspect_selected_attempt(request.operation)
+                .unwrap()
+                .unwrap()
+                .state,
+            replay.state
+        );
+    }
+}
+#[test]
+fn selected_outbox_staging_cleanup_refuses_nonregular_entries_without_deletion() {
+    let f = Fixture::new();
+    let store = f.store();
+    let directory = store.paths.data.join("sync/selected-outbox");
+    files::directory(&directory).unwrap();
+    let unsupported = directory.join(format!(".stage-{}", Uuid::new_v4()));
+    fs::create_dir(&unsupported).unwrap();
+    let sentinel = unsupported.join("preserved");
+    fs::write(&sentinel, b"keep").unwrap();
+    drop(store);
+    assert!(Store::open(f.paths()).is_err());
+    assert!(sentinel.exists());
+    fs::remove_dir_all(&unsupported).unwrap();
+    #[cfg(unix)]
+    {
+        let target = f.0.join("preserved-target");
+        fs::write(&target, b"keep").unwrap();
+        std::os::unix::fs::symlink(&target, &unsupported).unwrap();
+        assert!(Store::open(f.paths()).is_err());
+        assert!(fs::symlink_metadata(&unsupported)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(&target).unwrap(), b"keep");
+    }
+}
