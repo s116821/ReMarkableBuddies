@@ -402,6 +402,7 @@ impl SelectedMemory {
                 raw_heads,
                 budget,
                 consumed: false,
+                result_sha256: None,
             },
             aggregates,
             reads,
@@ -530,6 +531,7 @@ pub(crate) struct Pins {
     raw_heads: Vec<String>,
     budget: SelectedReadBudget,
     consumed: bool,
+    result_sha256: Option<String>,
 }
 impl std::fmt::Debug for Pins {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -570,6 +572,11 @@ impl Provider for SelectedMemory {
         self.mutation(&mutation.key, mutation.operation, mutation.expected, None)
     }
     fn inspect(&self, key: &Key) -> Result<Vec<Envelope>> {
+        let inspection = self.inspect_for_handoff(key)?;
+        inspection.with_current(self, &mut || Ok(()))?;
+        Ok(inspection.envelopes)
+    }
+    fn inspect_for_handoff(&self, key: &Key) -> Result<super::Inspection> {
         self.own(key)?;
         let mut view = self.read()?;
         let heads = view
@@ -579,11 +586,14 @@ impl Provider for SelectedMemory {
             .filter(|envelope| key.record_id().is_ok_and(|id| id == envelope.record_id))
             .cloned()
             .collect();
-        view.pins.guard(&self.store, || Ok(heads))
+        let mut admission = QueryResult::empty(Status::Complete);
+        view.pins.result_sha256 = Some(result_identity(&admission)?);
+        admission.pins = Some(Arc::new(Mutex::new(view.pins)));
+        super::Inspection::new(heads, Some(admission))
     }
     fn query(&self, query: &Query) -> Result<QueryResult> {
         query.validate()?;
-        let view = match self.read() {
+        let mut view = match self.read() {
             Ok(view) => view,
             Err(_) => {
                 let mut result = QueryResult::empty(Status::Unavailable);
@@ -598,6 +608,7 @@ impl Provider for SelectedMemory {
             .cloned()
             .collect();
         let mut result = query_heads(self.identity.profile, query, heads)?;
+        view.pins.result_sha256 = Some(result_identity(&result)?);
         result.pins = Some(Arc::new(Mutex::new(view.pins)));
         Ok(result)
     }
@@ -616,10 +627,22 @@ impl Provider for SelectedMemory {
             pins.instance == self.instance,
             "foreign selected memory result"
         );
+        ensure!(
+            pins.result_sha256.as_deref() == Some(result_identity(result)?.as_str()),
+            "selected memory result payload changed"
+        );
         let output = pins.guard(&self.store, consume);
         pins.consumed = true;
         output
     }
+}
+
+fn result_identity(result: &QueryResult) -> Result<String> {
+    Ok(digest(&serde_json::to_vec(&(
+        result.status,
+        &result.diagnostics,
+        &result.context,
+    ))?))
 }
 
 /// Historical acknowledgment only. No new publication or current token follows.
@@ -641,6 +664,30 @@ fn original_receipt(
     let previous = lineage
         .get(index + 1)
         .context("memory receipt predecessor absent")?;
+    let original_media: BTreeMap<_, _> = original
+        .selected
+        .media
+        .iter()
+        .map(|r| (&r.sha256, r))
+        .collect();
+    let previous_media: BTreeMap<_, _> = previous
+        .selected
+        .media
+        .iter()
+        .map(|r| (&r.sha256, r))
+        .collect();
+    let original_coverage: BTreeMap<_, _> = original
+        .selected
+        .media_coverage
+        .iter()
+        .map(|r| (r.hash(), r))
+        .collect();
+    let previous_coverage: BTreeMap<_, _> = previous
+        .selected
+        .media_coverage
+        .iter()
+        .map(|r| (r.hash(), r))
+        .collect();
     let encoded = serde_json::to_vec(envelope)?;
     let expected = ObjectRef {
         sha256: digest(&encoded),
@@ -669,8 +716,8 @@ fn original_receipt(
                 .all(|reference| original.selected.records.contains(reference))
             && original.selected.record_namespaces.get(&expected.sha256)
                 == Some(&Namespace::SubjectMemory)
-            && original.selected.media == previous.selected.media
-            && original.selected.media_coverage == previous.selected.media_coverage
+            && original_media == previous_media
+            && original_coverage == previous_coverage
             && original.selected.record_namespaces == namespaces
             && original.retained == previous.retained,
         "memory operation intent collision"

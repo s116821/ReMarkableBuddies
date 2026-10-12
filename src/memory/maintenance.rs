@@ -43,18 +43,31 @@ pub struct Report {
     pub status: ReportStatus,
     pub incomplete: bool,
     pub data: Option<serde_json::Value>,
+    #[serde(skip)]
+    pending: Option<Pending>,
+}
+struct Pending {
+    provider: Arc<dyn super::Provider>,
+    view: PendingView,
+    report_sha256: String,
+}
+enum PendingView {
+    Query(super::QueryResult),
+    Inspection(super::Inspection),
 }
 impl Report {
-    fn new(operation: Operation, status: ReportStatus) -> Self {
+    pub fn new(operation: Operation, status: ReportStatus) -> Self {
         Self {
             report_version: 1,
             operation,
             status,
             incomplete: false,
             data: None,
+            pending: None,
         }
     }
-    /// Bound the entire encoded report, including data/escaping/wrapper. Never retry a write.
+    /// Formatting only; selected current handoff requires `write_to`.
+    /// Bound the entire report including escaping/newline. Never retry a mutation.
     pub fn encoded(&self) -> anyhow::Result<Vec<u8>> {
         let mut bytes = serde_json::to_vec(self)?;
         bytes.push(b'\n');
@@ -66,6 +79,37 @@ impl Report {
         let mut bytes = serde_json::to_vec(&limited)?;
         bytes.push(b'\n');
         Ok(bytes)
+    }
+    pub fn write_to(&self, writer: &mut impl std::io::Write) -> anyhow::Result<()> {
+        let encoded = self.encoded()?;
+        let Some(pending) = &self.pending else {
+            return Ok(writer.write_all(&encoded)?);
+        };
+        let mut attempted = false;
+        let guarded = if storage::digest(&serde_json::to_vec(self)?) != pending.report_sha256 {
+            Err(anyhow::anyhow!("memory report payload changed"))
+        } else {
+            let mut consume = || {
+                attempted = true;
+                Ok(writer.write_all(&encoded)?)
+            };
+            match &pending.view {
+                PendingView::Query(view) => pending.provider.with_current(view, &mut consume),
+                PendingView::Inspection(view) => {
+                    view.with_current(pending.provider.as_ref(), &mut consume)
+                }
+            }
+        };
+        if let Err(error) = guarded {
+            // An I/O failure may have written a prefix. Never append a second report.
+            if attempted {
+                return Err(error);
+            }
+            let mut unavailable = Self::new(self.operation, ReportStatus::Unavailable);
+            unavailable.incomplete = true;
+            writer.write_all(&unavailable.encoded()?)?;
+        }
+        Ok(())
     }
 }
 enum Input {
@@ -269,6 +313,10 @@ pub fn run(operation: Operation, input_path: &Path, config_path: Option<PathBuf>
         Ok(store) => Arc::new(store),
         Err(error) => return Report::new(operation, store_open_status(&error)),
     };
+    execute(operation, input, &config, store)
+}
+
+fn execute(operation: Operation, input: Input, config: &Config, store: Arc<Store>) -> Report {
     let selected = config
         .memory
         .selection
@@ -284,12 +332,19 @@ pub fn run(operation: Operation, input_path: &Path, config_path: Option<PathBuf>
         Err(_) => return Report::new(operation, ReportStatus::Unsupported),
     };
     let mut report = Report::new(operation, ReportStatus::Ok);
+    let mut pending_view = None;
     let result = match input {
-        Input::Inspect(key) => memory.inspect(&key).and_then(|envelopes| Ok(serde_json::to_value(envelopes)?)),
+        Input::Inspect(key) => memory.inspect_for_handoff(&key).and_then(|view| {
+            let data=serde_json::to_value(&view.envelopes)?;
+            if view.selected() { pending_view=Some(PendingView::Inspection(view)); }
+            Ok(data)
+        }),
         Input::Query(query) => memory.query(&query).map(|result| {
             report.status = match result.status { Status::Partial => ReportStatus::Partial, Status::Unavailable => ReportStatus::Unavailable, _ => ReportStatus::Ok };
             report.incomplete = matches!(result.status, Status::Partial | Status::Unavailable);
-            serde_json::json!({"query_status":result.status,"diagnostics":result.diagnostics,"context":result.context})
+            let data = serde_json::json!({"query_status":result.status,"diagnostics":result.diagnostics,"context":result.context});
+            if result.selected() { pending_view = Some(PendingView::Query(result)); }
+            data
         }),
         Input::Put(mutation) => memory.put(mutation).map(|receipt| serde_json::json!({"transaction":receipt})),
         Input::Forget(mutation) => memory.forget(mutation).map(|receipt| serde_json::json!({"transaction":receipt})),
@@ -303,6 +358,22 @@ pub fn run(operation: Operation, input_path: &Path, config_path: Option<PathBuf>
     match result {
         Ok(data) => {
             report.data = Some(data);
+            if let Some(view) = pending_view {
+                match serde_json::to_vec(&report) {
+                    Ok(bytes) => {
+                        report.pending = Some(Pending {
+                            provider: memory,
+                            view,
+                            report_sha256: storage::digest(&bytes),
+                        })
+                    }
+                    Err(_) => {
+                        report.status = ReportStatus::Unavailable;
+                        report.incomplete = true;
+                        report.data = None;
+                    }
+                }
+            }
             report
         }
         Err(error) => {
@@ -335,6 +406,150 @@ fn store_open_status(error: &anyhow::Error) -> ReportStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn current_query_inspection_and_empty_report_are_guarded_at_the_actual_writer() {
+        use crate::memory::{self, Provider};
+        struct PrefixFailure(Vec<u8>, usize);
+        impl std::io::Write for PrefixFailure {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.1 += 1;
+                if self.1 == 1 {
+                    self.0.extend_from_slice(&bytes[..7]);
+                    Ok(7)
+                } else if self.1 == 2 {
+                    Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+                } else {
+                    self.0.extend_from_slice(bytes);
+                    Ok(bytes.len())
+                }
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        for mode in 0..5 {
+            let root = std::env::temp_dir().join(format!("memory-handoff-{}", Uuid::new_v4()));
+            let paths = storage::StorePaths {
+                data: root.join("data"),
+                cache: root.join("cache"),
+                credentials: root.join("credentials"),
+            };
+            let store = Arc::new(Store::open(paths.clone()).unwrap());
+            let profile = Uuid::new_v4();
+            let identity = memory::catalog::Identity {
+                group: Uuid::new_v4(),
+                profile,
+                binding_sha256: storage::digest(b"local fixture"),
+            };
+            let memory =
+                memory::selected::SelectedMemory::new(store.clone(), identity.clone()).unwrap();
+            let fact = memory::Fact {
+                key: Key {
+                    profile,
+                    scope: memory::Scope::Global,
+                    fact: Uuid::new_v4(),
+                },
+                claim: "gravity units".into(),
+                value: "private-original-gravity-value".into(),
+                subject: "gravity".into(),
+                tags: vec![],
+                provenance: memory::Provenance {
+                    basis: memory::Basis::UserConfirmed,
+                    description: "Explicit fixture".into(),
+                    conversation: None,
+                    turn: None,
+                    source: None,
+                },
+                confidence_basis_points: 8000,
+                observed_ms: 1,
+                expires_ms: None,
+            };
+            let registration = memory
+                .initialize_aggregate(memory::selected::InitializeAggregate {
+                    operation: Uuid::new_v4(),
+                    accepted_base_sha256: storage::digest(b"aggregate"),
+                    fact: fact.clone(),
+                })
+                .unwrap()
+                .registration
+                .unwrap();
+            memory
+                .initialize_selection(memory::selected::InitializeSelection {
+                    operation: Uuid::new_v4(),
+                    accepted_base_sha256: storage::digest(b"catalog"),
+                    registrations: if mode == 2 {
+                        vec![]
+                    } else {
+                        vec![registration.clone()]
+                    },
+                })
+                .unwrap();
+            let config = Config {
+                paths: paths.clone(),
+                memory: memory::Configuration {
+                    enabled: false,
+                    profile: Some(profile),
+                    selection: Some(identity),
+                },
+                ..Config::default()
+            };
+            let (operation, input) = if mode == 1 {
+                (Operation::Inspect, Input::Inspect(fact.key.clone()))
+            } else {
+                (
+                    Operation::Query,
+                    Input::Query(Query::new("gravity".into(), 10)),
+                )
+            };
+            let mut report = execute(operation, input, &config, store.clone());
+            assert!(report.pending.is_some());
+            if mode == 2 {
+                memory
+                    .register_selection(memory::selected::RegisterSelection {
+                        operation: Uuid::new_v4(),
+                        registration,
+                    })
+                    .unwrap();
+            } else if mode == 3 {
+                report.data = Some(serde_json::json!({"forged":"private-forged-value"}));
+            } else if mode != 4 {
+                let expected = memory
+                    .inspect(&fact.key)
+                    .unwrap()
+                    .into_iter()
+                    .map(|e| e.revision_id)
+                    .collect();
+                let mut changed = fact.clone();
+                changed.value = "corrected gravity value".into();
+                memory
+                    .put(memory::Mutation {
+                        operation: Uuid::new_v4(),
+                        expected,
+                        fact: changed,
+                    })
+                    .unwrap();
+            }
+            let mut output = Vec::new();
+            if mode == 4 {
+                let expected = report.encoded().unwrap();
+                let mut writer = PrefixFailure(Vec::new(), 0);
+                assert!(report.write_to(&mut writer).is_err());
+                assert_eq!(writer.0, &expected[..7]);
+                assert_eq!(writer.1, 2);
+            } else {
+                report.write_to(&mut output).unwrap();
+                let printed: serde_json::Value = serde_json::from_slice(&output).unwrap();
+                assert_eq!(printed["status"], "unavailable");
+                assert!(printed["data"].is_null());
+                assert!(!String::from_utf8(output).unwrap().contains("private-"));
+            }
+            drop(report);
+            drop(memory);
+            drop(store);
+            assert!(root.starts_with(std::env::temp_dir()));
+            let _ = fs::remove_dir_all(root);
+        }
+    }
     #[test]
     fn actual_reacquire_refusal_and_exact_error_classifier_never_match_substrings() {
         let root = std::env::temp_dir().join(format!("memory-lock-classifier-{}", Uuid::new_v4()));

@@ -585,13 +585,8 @@ fn entire_response_cap_includes_newline_and_never_returns_partial_refresh_data()
     use remarkable_reader_buddy::memory::maintenance::{
         Operation, Report, ReportStatus, MAX_RESPONSE,
     };
-    let report = Report {
-        report_version: 1,
-        operation: Operation::Inspect,
-        status: ReportStatus::Ok,
-        incomplete: false,
-        data: Some(Value::String("private-value".repeat(MAX_RESPONSE / 10))),
-    };
+    let mut report = Report::new(Operation::Inspect, ReportStatus::Ok);
+    report.data = Some(Value::String("private-value".repeat(MAX_RESPONSE / 10)));
     let bytes = report.encoded().unwrap();
     assert!(bytes.len() <= MAX_RESPONSE);
     assert_eq!(bytes.last(), Some(&b'\n'));

@@ -1,7 +1,7 @@
 //! Strict selected fact ownership; retained envelopes never supply current heads.
 use super::{
     catalog::{Identity, Owner, Registration},
-    Fact, Scope,
+    Fact, Key, Scope,
 };
 use crate::{
     conversation::{DocumentOwnership, SelectedDomainProjection},
@@ -45,7 +45,7 @@ impl Aggregate {
         let mut candidates: BTreeMap<Uuid, BTreeSet<Uuid>> = BTreeMap::new();
         let mut other_records = Vec::new();
         let mut other_refs: Vec<ObjectRef> = Vec::new();
-        let mut immutable: BTreeMap<Uuid, Fact> = BTreeMap::new();
+        let mut immutable: BTreeMap<Uuid, (Key, String)> = BTreeMap::new();
         for (envelope, reference) in snapshot
             .selected_records
             .iter()
@@ -72,31 +72,11 @@ impl Aggregate {
                 "unsupported memory aggregate envelope"
             );
             if envelope.kind == Kind::Value {
-                let fact: Fact = serde_json::from_value(envelope.payload.clone())
-                    .context("unsupported memory fact")?;
-                fact.validate()?;
-                ensure!(
-                    fact.key.record_id()? == envelope.record_id,
-                    "memory fact identity mismatch"
-                );
-                match &registration.owner {
-                    Owner::GlobalFact { key } => ensure!(fact.key == *key, "foreign global fact"),
-                    Owner::Document { document } => ensure!(
-                        fact.key.scope
-                            == Scope::Document {
-                                document: *document
-                            },
-                        "foreign document fact"
-                    ),
-                }
-                if let Some(prior) = immutable.get(&envelope.record_id) {
-                    ensure!(
-                        prior.key == fact.key && prior.claim == fact.claim,
-                        "memory immutable key or claim changed"
-                    );
-                } else {
-                    immutable.insert(envelope.record_id, fact);
-                }
+                remember(
+                    &mut immutable,
+                    envelope.record_id,
+                    owned_fact(envelope, registration)?,
+                )?;
             } else {
                 ensure!(
                     envelope.payload.is_null() && !envelope.parents.is_empty(),
@@ -111,6 +91,39 @@ impl Aggregate {
                 .entry(envelope.record_id)
                 .or_default()
                 .push(envelope.clone());
+        }
+        // Custody checks identity/claim only. These historical values never enter
+        // current heads, query ranking, mutation parents or effect permission.
+        let mut custody = immutable.clone();
+        for accepted in lineage {
+            ensure!(
+                accepted.transaction.scope == scope
+                    && accepted.selected_records.len()
+                        == accepted.transaction.selected.records.len(),
+                "incomplete accepted memory custody"
+            );
+            for envelope in &accepted.selected_records {
+                if envelope.namespace != Namespace::SubjectMemory {
+                    continue;
+                }
+                envelope.validate()?;
+                ensure!(
+                    envelope.domain_schema_version == 1 && envelope.media_descriptors.is_empty(),
+                    "unsupported accepted memory custody"
+                );
+                if envelope.kind == Kind::Value {
+                    remember(
+                        &mut custody,
+                        envelope.record_id,
+                        owned_fact(envelope, registration)?,
+                    )?;
+                } else {
+                    ensure!(
+                        envelope.payload.is_null() && !envelope.parents.is_empty(),
+                        "invalid historical forgetting"
+                    );
+                }
+            }
         }
         for (record, envelopes) in &history {
             ensure!(
@@ -165,4 +178,36 @@ impl Aggregate {
         }
         Ok(Self { heads, history })
     }
+}
+
+fn owned_fact(envelope: &Envelope, registration: &Registration) -> Result<Fact> {
+    let fact: Fact =
+        serde_json::from_value(envelope.payload.clone()).context("unsupported memory fact")?;
+    fact.validate()?;
+    ensure!(
+        fact.key.record_id()? == envelope.record_id,
+        "memory fact identity mismatch"
+    );
+    match &registration.owner {
+        Owner::GlobalFact { key } => ensure!(fact.key == *key, "foreign global fact"),
+        Owner::Document { document } => ensure!(
+            fact.key.scope
+                == Scope::Document {
+                    document: *document
+                },
+            "foreign document fact"
+        ),
+    }
+    Ok(fact)
+}
+fn remember(immutable: &mut BTreeMap<Uuid, (Key, String)>, record: Uuid, fact: Fact) -> Result<()> {
+    if let Some((key, claim)) = immutable.get(&record) {
+        ensure!(
+            *key == fact.key && *claim == fact.claim,
+            "memory immutable key or claim changed"
+        );
+    } else {
+        immutable.insert(record, (fact.key, fact.claim));
+    }
+    Ok(())
 }

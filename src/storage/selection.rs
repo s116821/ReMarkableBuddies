@@ -180,6 +180,9 @@ pub struct SelectedSnapshot {
 pub struct AcceptedSelectionTransaction {
     pub sha256: String,
     pub transaction: SelectionTransaction,
+    /// Already verified historical selected envelopes, in the original manifest
+    /// ObjectRef order. Custody evidence only, never the current winning view.
+    pub selected_records: Vec<Envelope>,
 }
 
 /// Budgeted snapshot plus its already validated lineage, without extra I/O.
@@ -273,17 +276,33 @@ impl Store {
             transaction.clone(),
             budget.as_deref_mut(),
         )?;
-        for accepted in &history {
-            publication::validate_closure_with_budget(&root, accepted, budget.as_deref_mut())?;
-        }
+        let keep_history = budget.is_some();
         let mut accepted_history = Vec::new();
         let mut sha256 = head_sha256;
         for transaction in history {
+            let parts = publication::validate_closure_with_budget(
+                &root,
+                &transaction,
+                budget.as_deref_mut(),
+            )?;
             let previous = transaction.previous_sha256.clone();
-            accepted_history.push(AcceptedSelectionTransaction {
-                sha256,
-                transaction,
-            });
+            if keep_history {
+                // Move the envelopes already parsed/charged during validation.
+                // Do not reread history or reserialize its original references.
+                let selected_records = parts
+                    .into_iter()
+                    .next()
+                    .context("validated selected closure is absent")?
+                    .1
+                    .into_iter()
+                    .map(|(record, _)| record)
+                    .collect();
+                accepted_history.push(AcceptedSelectionTransaction {
+                    sha256,
+                    transaction,
+                    selected_records,
+                });
+            }
             let Some(previous) = previous else {
                 break;
             };

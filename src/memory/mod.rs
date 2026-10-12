@@ -298,11 +298,49 @@ impl QueryResult {
 }
 
 /// Domain boundary shared by receiving buddies; cloud/selected adapters must preserve this contract.
+pub struct Inspection {
+    pub envelopes: Vec<Envelope>,
+    admission: Option<QueryResult>,
+    payload_sha256: String,
+}
+impl Inspection {
+    fn new(envelopes: Vec<Envelope>, admission: Option<QueryResult>) -> Result<Self> {
+        let payload_sha256 = crate::storage::digest(&serde_json::to_vec(&envelopes)?);
+        Ok(Self {
+            envelopes,
+            admission,
+            payload_sha256,
+        })
+    }
+    pub fn with_current(
+        &self,
+        provider: &dyn Provider,
+        consume: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        ensure!(
+            crate::storage::digest(&serde_json::to_vec(&self.envelopes)?) == self.payload_sha256,
+            "memory inspection payload changed"
+        );
+        if let Some(admission) = &self.admission {
+            provider.with_current(admission, consume)
+        } else {
+            consume()
+        }
+    }
+    pub(crate) fn selected(&self) -> bool {
+        self.admission.is_some()
+    }
+}
 pub trait Provider: Send + Sync {
     fn put(&self, mutation: Mutation) -> Result<Uuid>;
     fn forget(&self, mutation: Forget) -> Result<Uuid>;
     fn inspect(&self, key: &Key) -> Result<Vec<Envelope>>;
     fn query(&self, query: &Query) -> Result<QueryResult>;
+    /// Current CLI inspection keeps its admission through the consuming writer.
+    /// Plain inspect returns a historical read and does not grant handoff authority.
+    fn inspect_for_handoff(&self, key: &Key) -> Result<Inspection> {
+        Inspection::new(self.inspect(key)?, None)
+    }
     /// Guard the actual synchronous consuming publication, not a permission flag.
     fn with_current(
         &self,

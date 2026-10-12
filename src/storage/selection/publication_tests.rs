@@ -1937,3 +1937,133 @@ fn budgeted_selected_reads_return_already_verified_raw_lineage_without_extra_io(
     assert_eq!(budget.usage(), usage);
     assert_eq!(fs::read(head_path).unwrap(), raw_head);
 }
+
+#[test]
+fn budgeted_selected_history_preserves_creation_claim_custody_without_new_io() {
+    for retain_old_chain in [false, true] {
+        let f = Fixture::new();
+        let store = f.store();
+        let s = scope();
+        let document = record(&store);
+        let raw_document = serde_json::to_vec_pretty(&document).unwrap();
+        let document_ref = ObjectRef {
+            sha256: digest(&raw_document),
+            bytes: raw_document.len() as u64,
+        };
+        let (mut initial, _) = change(std::slice::from_ref(&document));
+        initial.selected.records = vec![document_ref.clone()];
+        initial.selected.record_namespaces =
+            BTreeMap::from([(document_ref.sha256.clone(), document.namespace)]);
+        let genesis = store
+            .initialize_selected(
+                &s,
+                initial,
+                BTreeMap::from([(document_ref.sha256.clone(), raw_document)]),
+            )
+            .unwrap();
+        // The fact is introduced AFTER aggregate Initialize, not a genesis anchor.
+        let mut fact = record(&store);
+        fact.namespace = Namespace::SubjectMemory;
+        fact.payload = json!({"claim":"original immutable claim", "value":"first"});
+        let created = store
+            .commit_selected(
+                &genesis.token,
+                Uuid::new_v4(),
+                vec![fact.clone()],
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let mut revised = edit(&fact);
+        revised.payload = json!({"claim":"original immutable claim", "value":"revised"});
+        let edited = store
+            .commit_selected(
+                &created.token,
+                Uuid::new_v4(),
+                vec![revised.clone()],
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let mut rerooted = record(&store);
+        rerooted.namespace = Namespace::SubjectMemory;
+        rerooted.record_id = fact.record_id;
+        rerooted.payload = json!({"claim":"different claim", "value":"replacement"});
+        let (mut replacement, objects) = change(std::slice::from_ref(&rerooted));
+        // Preserve the opaque noncanonical document reference, never reserialize it.
+        replacement.selected.records.push(document_ref.clone());
+        replacement
+            .selected
+            .record_namespaces
+            .insert(document_ref.sha256.clone(), document.namespace);
+        if retain_old_chain {
+            replacement.retained = vec![edited.transaction.selected.clone()];
+        }
+        let winner = store
+            .activate_selected(&edited.token, replacement, objects)
+            .unwrap();
+        let publications = [&winner, &edited, &created, &genesis];
+        let references = |transaction: &SelectionTransaction| {
+            std::iter::once(&transaction.selected)
+                .chain(&transaction.retained)
+                .flat_map(|m| &m.records)
+                .map(|r| r.bytes)
+                .sum::<u64>()
+        };
+        let reference_bytes = publications
+            .iter()
+            .map(|p| references(&p.transaction))
+            .sum::<u64>()
+            + references(&winner.transaction);
+        let metadata_bytes = publications
+            .iter()
+            .map(|p| serde_json::to_vec(&p.transaction).unwrap().len() as u64)
+            .sum::<u64>()
+            + 2 * reference_bytes;
+        let work_items = if retain_old_chain { 20 } else { 14 };
+        let mut budget = SelectedReadBudget::new(1, work_items, metadata_bytes, 0);
+        let read = store
+            .selected_snapshot_with_budget(&s, MAX_ITEMS, &mut budget)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            budget.usage(),
+            SelectedReadUsage {
+                aggregates: 1,
+                work_items,
+                metadata_bytes,
+                media_bytes: 0
+            }
+        );
+        assert_eq!(read.snapshot.token, winner.token);
+        assert!(read.snapshot.selected_records.contains(&rerooted));
+        assert!(!read.snapshot.selected_records.contains(&fact));
+        assert!(!read.snapshot.selected_records.contains(&revised));
+        assert_eq!(read.accepted_history.len(), 4);
+        assert!(read.accepted_history[2].selected_records.contains(&fact));
+        assert!(!read.accepted_history[3].selected_records.contains(&fact));
+        let root = store.generation(winner.token.store_generation());
+        for accepted in &read.accepted_history {
+            assert_eq!(
+                accepted.selected_records.len(),
+                accepted.transaction.selected.records.len()
+            );
+            for (record, reference) in accepted
+                .selected_records
+                .iter()
+                .zip(&accepted.transaction.selected.records)
+            {
+                let raw = fs::read(root.join("objects").join(&reference.sha256)).unwrap();
+                let decoded: Envelope = serde_json::from_slice(&raw).unwrap();
+                assert!(*record == decoded);
+                assert_eq!(digest(&raw), reference.sha256);
+                if record.record_id == document.record_id {
+                    assert_eq!(*reference, document_ref);
+                    assert_ne!(
+                        digest(&serde_json::to_vec(record).unwrap()),
+                        reference.sha256
+                    );
+                }
+            }
+        }
+        assert_eq!(selected(&store, &s).token, winner.token);
+    }
+}
