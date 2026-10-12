@@ -172,6 +172,30 @@ fn valid_order(observation: &PageObservation) -> bool {
         && observation.order().contains(&observation.page().page)
 }
 
+/// Contextualize a supplied legacy enum as model evidence only. The enum has
+/// no capture provenance, conversation relevance or current-device qualification.
+/// This neither calls nor changes the legacy classifier or installed workflow.
+pub fn model_legacy_answer_classification(
+    observation: &PageObservation,
+    conversation: Uuid,
+    classification: super::AnswerPageType,
+) -> Result<RecognitionWitness, UnresolvedReason> {
+    if !synthetic(observation) || !valid_order(observation) {
+        return Err(UnresolvedReason::ObservationGuard);
+    }
+    let recognition = match classification {
+        super::AnswerPageType::ExistingQA => Recognition::LegacyBuddy,
+        super::AnswerPageType::Blank => Recognition::Blank,
+        super::AnswerPageType::Invalid => Recognition::Unknown,
+    };
+    Ok(RecognitionWitness::modeled(
+        observation.clone(),
+        observation.page(),
+        conversation,
+        recognition,
+    ))
+}
+
 fn witness_matches(
     observed: &PageObservation,
     page: PageKey,
@@ -1125,5 +1149,106 @@ mod tests {
         assert_eq!(p.observe_page().unwrap(), supplied);
         assert_eq!(p.gesture_count(), gestures);
         assert_eq!(p.pages(), &[id(3), id(4)]);
+    }
+
+    #[test]
+    fn legacy_bridge_current_missing_association_never_inspects_or_plans_insertion() {
+        let p = platform();
+        let original = p.observe_page().unwrap();
+        for (legacy, expected) in [
+            (
+                super::super::AnswerPageType::ExistingQA,
+                Recognition::LegacyBuddy,
+            ),
+            (super::super::AnswerPageType::Blank, Recognition::Blank),
+            (super::super::AnswerPageType::Invalid, Recognition::Unknown),
+        ] {
+            let witness = model_legacy_answer_classification(&original, id(8), legacy).unwrap();
+            assert_eq!(witness.recognition, expected);
+            assert_eq!(witness.observation, original);
+            assert_eq!(witness.page, original.page());
+            assert_eq!(witness.conversation, id(8));
+            let missing = Lookup::new(AssociationState::Missing);
+            let decision = begin_current(&original, &original, id(8), &missing, Some(&witness));
+            match legacy {
+                super::super::AnswerPageType::ExistingQA => {
+                    assert!(matches!(decision, SyntheticDecision::AdoptionRequired(_)))
+                }
+                _ => assert!(matches!(
+                    decision,
+                    SyntheticDecision::Unresolved(UnresolvedReason::RecognitionUncertain)
+                )),
+            }
+            assert_eq!(*missing.calls.borrow(), vec![original.page()]);
+            assert_eq!(p.observe_page().unwrap(), original);
+            assert_eq!(p.gesture_count(), 0);
+            assert_eq!(p.pages(), &[id(3), id(4)]);
+            let known = Lookup::new(AssociationState::RelevantModelAssociation);
+            assert!(
+                matches!(begin_current(&original, &original, id(8), &known, Some(&witness)), SyntheticDecision::ReuseCandidate(ref candidate) if candidate.observation() == &original && candidate.conversation() == id(8))
+            );
+        }
+        let wrong = model_legacy_answer_classification(
+            &original,
+            id(9),
+            super::super::AnswerPageType::ExistingQA,
+        )
+        .unwrap();
+        let missing = Lookup::new(AssociationState::Missing);
+        assert!(matches!(
+            begin_current(&original, &original, id(8), &missing, Some(&wrong)),
+            SyntheticDecision::Unresolved(UnresolvedReason::WitnessMismatch)
+        ));
+        assert!(missing.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn legacy_bridge_successor_requires_adoption_or_remains_unresolved() {
+        let mut p = platform();
+        let original = p.observe_page().unwrap();
+        let plan = anchor(&original);
+        let next = navigate(
+            &mut p,
+            &original,
+            LogicalDirection::Next,
+            plan.neighbor(),
+            20,
+        );
+        let successor = p.observe_page().unwrap();
+        let gestures = p.gesture_count();
+        for legacy in [
+            super::super::AnswerPageType::ExistingQA,
+            super::super::AnswerPageType::Blank,
+            super::super::AnswerPageType::Invalid,
+        ] {
+            let witness = model_legacy_answer_classification(&successor, id(8), legacy).unwrap();
+            let missing = Lookup::new(AssociationState::Missing);
+            let decision = complete_successor(&plan, &next, &successor, &missing, Some(&witness));
+            match legacy {
+                super::super::AnswerPageType::ExistingQA => {
+                    assert!(matches!(decision, SyntheticDecision::AdoptionRequired(_)))
+                }
+                _ => assert!(matches!(
+                    decision,
+                    SyntheticDecision::Unresolved(UnresolvedReason::RecognitionUncertain)
+                )),
+            }
+            assert_eq!(*missing.calls.borrow(), vec![successor.page()]);
+            assert_eq!(p.observe_page().unwrap(), successor);
+            assert_eq!(p.gesture_count(), gestures);
+            assert_eq!(p.pages(), &[id(3), id(4)]);
+        }
+        let wrong = model_legacy_answer_classification(
+            &original,
+            id(8),
+            super::super::AnswerPageType::ExistingQA,
+        )
+        .unwrap();
+        let missing = Lookup::new(AssociationState::Missing);
+        assert!(matches!(
+            complete_successor(&plan, &next, &successor, &missing, Some(&wrong)),
+            SyntheticDecision::Unresolved(UnresolvedReason::WitnessMismatch)
+        ));
+        assert!(missing.calls.borrow().is_empty());
     }
 }
