@@ -69,6 +69,7 @@ pub struct Config {
     pub model_credential: Option<String>,
     pub sync: SyncPolicy,
     pub memory: crate::memory::Configuration,
+    pub reader: crate::reader_runtime::Configuration,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -83,6 +84,7 @@ impl Default for Config {
             model_credential: None,
             sync: SyncPolicy::default(),
             memory: crate::memory::Configuration::default(),
+            reader: crate::reader_runtime::Configuration::default(),
         }
     }
 }
@@ -112,6 +114,11 @@ impl Config {
         );
         self.sync.validate()?;
         self.memory.validate()?;
+        self.reader.validate()?;
+        ensure!(
+            !(self.reader.selection.is_some() && self.sync.enabled),
+            "selected Reader requires the separately qualified selected sync worker"
+        );
         ensure!(
             !(self.memory.selection.is_some() && self.sync.enabled),
             "selected memory requires the separately qualified selected sync worker"

@@ -66,6 +66,18 @@ pub struct Workflow {
 }
 
 impl Workflow {
+    /// Explicit executable selected mode. Unsupported transport never opens a
+    /// RealDevice or converts historical membership into live effect authority.
+    pub(crate) fn selected_runtime(
+        admission: std::sync::Arc<crate::conversation::SelectedAdmission>,
+        debug_dump: bool,
+    ) -> Self {
+        let facade = selected_backend::SelectedBackendFacade::new(
+            admission,
+            Box::new(selected_backend::RefusingBackend::new()),
+        );
+        Self::with_selected(facade, debug_dump)
+    }
     pub fn new(
         no_draw: bool,
         trigger_corner: crate::device::touch::TriggerCorner,

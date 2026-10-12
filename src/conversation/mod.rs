@@ -26,7 +26,9 @@ pub use binding_projection::{
     SelectedBindingCandidate, SelectedBindingInspection, SelectedBindingUnresolved,
 };
 pub use intent::*;
-pub use pending::{PendingIntentPublication, PendingIntentRequest, SourceAdmission};
+pub use pending::{
+    PendingIntentPublication, PendingIntentRequest, PendingRequestConflict, SourceAdmission,
+};
 #[cfg(test)]
 pub(crate) use pending::{ReaderContext, ReaderPreparation};
 pub use reader_plan::{ReaderEraseRectangle, ReaderHandoff, ReaderPlan, SmartEraseInput};
