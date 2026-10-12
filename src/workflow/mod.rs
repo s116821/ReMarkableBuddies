@@ -3,6 +3,7 @@ pub mod indicator;
 mod navigation;
 pub mod orchestrator;
 pub mod sdk_acquisition;
+pub mod sdk_buddy_decision;
 pub mod symbol_pool;
 pub mod xochitl_integration;
 
