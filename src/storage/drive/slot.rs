@@ -166,6 +166,34 @@ impl GoogleDrive {
         })
     }
 
+    /// Read the original prepared slot without creating or republishing anything.
+    /// Missing/invalid data is not freedom; this evidence grants no domain/native
+    /// authority or permission to send at another slot after local replacement.
+    pub fn observe_prepared_slot(&mut self, prepared: &PreparedSlot) -> Result<SlotObservation> {
+        ensure!(
+            prepared.application == self.credentials.client_id
+                && prepared.account == self.credentials.account_permission_id,
+            "prepared slot application/account mismatch"
+        );
+        prepared.pointer.properties()?;
+        self.authorize(prepared.pointer.binding.group)?;
+        self.observe_pointer(&prepared.pointer)
+    }
+    fn observe_pointer(&mut self, pointer: &SlotPointer) -> Result<SlotObservation> {
+        let observed =
+            SlotPointer::from_metadata(&pointer.binding, self.metadata(&pointer.binding.slot_id)?)?;
+        let descriptor = self.slot_descriptor(&observed)?;
+        Ok(SlotObservation {
+            candidate_match: if observed == *pointer {
+                PointerMatch::Same
+            } else {
+                PointerMatch::Different
+            },
+            pointer: observed,
+            descriptor,
+        })
+    }
+
     /// One create attempt at exactly the prepared ID, then an exact-ID observation.
     /// On an uncertain outcome, errors never mean "slot is free". Retry/read the
     /// same pinned ID; this method does not allocate, overwrite, delete or rebase.
@@ -211,17 +239,6 @@ impl GoogleDrive {
         }
         // Body submission may have committed remotely even on transport error;
         // observation below is the only acknowledgement. Never log that error.
-        let observed =
-            SlotPointer::from_metadata(&pointer.binding, self.metadata(&pointer.binding.slot_id)?)?;
-        let descriptor = self.slot_descriptor(&observed)?;
-        Ok(SlotObservation {
-            candidate_match: if observed == *pointer {
-                PointerMatch::Same
-            } else {
-                PointerMatch::Different
-            },
-            pointer: observed,
-            descriptor,
-        })
+        self.observe_pointer(pointer)
     }
 }
