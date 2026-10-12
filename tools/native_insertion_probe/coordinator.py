@@ -10,7 +10,7 @@ import re
 import subprocess
 import time
 from owned_frame_capture import CONTRACT as CAPTURE_CONTRACT, TOOLS as CAPTURE_TOOLS, HOST_KINDS, OBSERVATION_KIND
-from open_document_timing import PRODUCTION_V2, V2_LIBRARY_SHA256, EIGHT_LIBRARY_SHA256, V2_PUBLISHER_SHA256, validate_v2_binding, fixture_inventory_selection, PRESERVED_EIGHT, SOURCE5, SOURCE5_LIBRARY_SHA256, SOURCE5_GESTURE_SHA256, validate_gesture_paths, SOURCE5_CONTROL_POLICY, SOURCE5_CONTROL_SHELL_SHA256
+from open_document_timing import PRODUCTION_V2, V2_LIBRARY_SHA256, EIGHT_LIBRARY_SHA256, V2_PUBLISHER_SHA256, validate_v2_binding, fixture_inventory_selection, PRESERVED_EIGHT, SOURCE5, SOURCE5_LIBRARY_SHA256, SOURCE5_GESTURE_SHA256, validate_gesture_paths, SOURCE5_CONTROL_POLICY, SOURCE5_CONTROL_SHELL_SHA256, source_witness_selection
 
 HERE = Path(__file__).resolve().parent
 ALIAS = "rem25-usb-rm2"
@@ -55,6 +55,8 @@ def run_host_sequence(sequence, purpose):
 def load_host_profile(packet, receipt):
     try:
         profile = json.loads(regular(Path(packet) / "host-profile.json").read_bytes())
+        if source_witness_selection(profile) != source_witness_selection(receipt):
+            raise ValueError('Source witness receipt/profile mismatch')
         if profile.get('experiment_kind') != receipt.get('experiment_kind') or profile.get('experiment_kind') not in HOST_KINDS:
             raise ValueError('Explicit matching host purpose required')
         sources = {"open_document_host.py", "open_document_transport.py", "open_document_protocol.py",
@@ -179,6 +181,7 @@ def load_packet(packet, receipt_hash):
     if len(receipt_bytes) > 65536 or sha(receipt_bytes) != receipt_hash:
         raise ValueError("Reviewed receipt mismatch")
     receipt = json.loads(receipt_bytes)
+    source_witness_selection(receipt)
     nonce = receipt.get("nonce", "")
     if not isinstance(nonce, str) or not re.fullmatch("[0-9a-f]{32}", nonce) or nonce in SPENT:
         raise ValueError("Fresh selected nonce required")
@@ -480,6 +483,8 @@ def main():
                 "coordinator_sha256": sha(regular(__file__).read_bytes()), "arm_template_sha256": sha(regular(HERE / "arm.sh.in").read_bytes()),
                 "rendered_arm_sha256": sha(script.encode()), "nonce": receipt["nonce"], "remote_root": receipt["remote_root"],
                 "source_only": not args.execute_main, "no_retry": True}
+    if profile is not None and profile.get('fixture_inventory_variant') == SOURCE5:
+        bindings['source_witness_variant'] = source_witness_selection(profile)
     control_write(output, 'bindings.json', bindings, control_ledger)
     if not args.execute_main:
         print(json.dumps(bindings)); return

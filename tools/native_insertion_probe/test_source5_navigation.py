@@ -172,6 +172,7 @@ def image_bytes(kind):
 def selection():
     from open_document_timing import SOURCE5,PRODUCTION_V2,V2_CONTRACT,PRESERVED_PAGES,FIXTURE_DOCUMENT
     return {"fixture_inventory_variant":SOURCE5,"experiment_kind":PRODUCTION_V2,
+        "source_witness_variant":"source5-footer-then-body-v1",
         "production_contract":copy.deepcopy(V2_CONTRACT),"nonce":"1"*32,
         "boot_id":"22222222-2222-2222-2222-222222222222","document_id":FIXTURE_DOCUMENT,
         "page_ids":list(PRESERVED_PAGES),"target_id":"33333333-3333-3333-3333-333333333333",
@@ -314,10 +315,11 @@ def geometry_views():
             "native_path":[[x*1404//768,y*1872//1024] for x,y in virtual]}
     return views
 
-def ssh_fixture(directory,transport,whole=False):
+def ssh_fixture(directory,transport,whole=False,witness="source5-footer-then-body-v1"):
     from owned_frame_capture import TOOLS
     from source5_navigation import CONTROL_BYTES,canonical
     profile=selection()
+    profile['source_witness_variant']=witness
     profile["gesture_paths"]=geometry_views()
     profile["gesture_path_hashes"]={f"gesture-paths-{d}.json":hashlib.sha256(canonical(v)).hexdigest()
         for d,v in profile["gesture_paths"].items()}
@@ -327,7 +329,7 @@ def ssh_fixture(directory,transport,whole=False):
     files={"host-profile.json":"d"*64,"owned_relative_gesture":"b"*64}
     profile["packet_file_sizes"]={"owned_relative_gesture":4000000}
     receipt={k:v for k,v in profile.items() if k in {"fixture_inventory_variant","experiment_kind","document_id",
-        "source_index","source_page_id","neighbor_index","neighbor_page_id","insertion_index"}}
+        "source_index","source_page_id","neighbor_index","neighbor_page_id","insertion_index","source_witness_variant"}}
     receipt.update(remote_root="/run/rmb-qt-probe-"+profile["nonce"],before_page_ids=profile["page_ids"],files=files)
     if whole:
         profile["library_tap_variant"]="primary-1641396"
@@ -338,6 +340,27 @@ def ssh_fixture(directory,transport,whole=False):
     return SSHAdapter([],receipt,profile,directory,transport,image_bytes("library"))
 
 class PublicAdapterTests(unittest.TestCase):
+    def test_both_witness_selectors_drifting_together_refuse_before_rpc(self):
+        with tempfile.TemporaryDirectory() as directory:
+            calls=[]
+            adapter=ssh_fixture(directory,lambda *args:calls.append(args))
+            adapter.profile['source_witness_variant']=adapter.receipt['source_witness_variant']='source5-stable-body-idle-v1'
+            with self.assertRaises(Refused):adapter.call('no input')
+            self.assertFalse(calls)
+            self.assertFalse(any(Path(directory).iterdir()))
+
+    def test_capture_witness_cannot_echo_forged_claim_phase_hash_or_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            adapter=ssh_fixture(directory,lambda *args:None)
+            adapter.root_inode='6 123'
+            raw={'capture_prefix':'host-open-000','capture_claim':1,'_root_inode':'6 123','png':b'actual','uptime':'150.00 0.00\n'}
+            adapter.capture_sources['host-open-000']={'claim':1,'phase':'open','sha256':hashlib.sha256(b'actual').hexdigest(),'root_inode':'6 123','completed_uptime':raw['uptime']}
+            self.assertEqual(adapter.source_capture_witness(raw,'open')['capture_claim'],1)
+            for key,value in (('capture_claim',True),('capture_claim',2),('capture_prefix','echo'),('png',b'changed'),('_root_inode','6 999'),('uptime','151.00 0.00\n')):
+                with self.subTest(key=key),self.assertRaises(Refused):adapter.source_capture_witness(raw|{key:value},'open')
+            with self.assertRaises(Refused):adapter.source_capture_witness(raw,'trigger')
+            adapter.capture_sources['host-open-000']['root_inode']='6 999'
+            with self.assertRaises(Refused):adapter.source_capture_witness(raw,'open')
     def test_precreation_snapshots_use_own_bound_after_expired_tap_lease(self):
         with tempfile.TemporaryDirectory() as directory:
             adapter=phase_harness(directory)
@@ -679,7 +702,7 @@ class WholeRouteHarness(PhaseHarness):
         if 'then cat "$root/candidate.window";' in script:
             return answered(self.profile["nonce"]+" 100 460 127 257\n"+f"{self.clock:.2f}"+" 0.00\n")
         if 'native_frame_acquire" "$pid" "$start"' in script:
-            if "host-ready-000.claim" in script: stage="ready"
+            if "host-ready-" in script: stage="ready"
             elif "host-open-" in script:
                 stage="open"
                 self.route.opens+=1
@@ -717,8 +740,8 @@ class WholeRouteHarness(PhaseHarness):
             return answered(json.dumps(positive_native()))
         return super().transport_fixture(args,script,timeout)
 
-def whole_fixture(directory):
-    adapter=ssh_fixture(directory,lambda *args:None,whole=True)
+def whole_fixture(directory,witness="source5-footer-then-body-v1"):
+    adapter=ssh_fixture(directory,lambda *args:None,whole=True,witness=witness)
     adapter.__class__=WholeRouteHarness
     adapter.initialize_fixture()
     adapter.production_window=None
@@ -729,9 +752,107 @@ def whole_fixture(directory):
     adapter.root_inode=None
     adapter.target_absent_before_arm=False
     adapter.transport=adapter.transport_fixture
+    if witness=="source5-stable-body-idle-v1":
+        def stable(stage,raw):
+            if stage in {'open','trigger'}:
+                import io
+                from PIL import Image,ImageDraw
+                image=Image.open(io.BytesIO(image_bytes('source')))
+                ImageDraw.Draw(image).rectangle((280,986,488,1023),fill='white')
+                stream=io.BytesIO();image.save(stream,format='PNG');raw['png']=stream.getvalue()
+        adapter.route.change=stable
     return adapter
 
 class WholePublicRouteTests(unittest.TestCase):
+    def test_stable_two_ready_then_two_source_frames_fit_exact_original_budget(self):
+        with tempfile.TemporaryDirectory() as directory:
+            adapter=whole_fixture(directory,'source5-stable-body-idle-v1')
+            stable=adapter.route.change
+            def change(stage,raw):
+                stable(stage,raw)
+                if stage=='ready' and adapter.ready_frames==1:raw['png']=image_bytes('blank')
+            adapter.route.change=change
+            host=HostSequence(adapter,adapter.profile,image_bytes('library'),image_bytes('source'),image_bytes('source-footer'))
+            report=host.run()
+            self.assertEqual([x['capture_claim'] for x in report['source_witness']['observations']],[3,4])
+            self.assertEqual(adapter.frame_ledger.frames,7)
+            self.assertEqual(adapter.frame_ledger.bytes,192*1024*1024)
+            self.assertTrue(report['destination_verified'])
+
+    def test_stable_two_source_claims_absent_footer_and_original_publication(self):
+        with tempfile.TemporaryDirectory() as directory:
+            adapter=whole_fixture(directory,"source5-stable-body-idle-v1")
+            host=HostSequence(adapter,adapter.profile,image_bytes("library"),image_bytes("source"),image_bytes("source-footer"))
+            report=host.run()
+            witness=report['source_witness']
+            self.assertEqual(witness['source_witness_variant'],'source5-stable-body-idle-v1')
+            self.assertFalse(witness['native_current_page_authority'])
+            observations=witness['observations']
+            self.assertEqual([x['capture_prefix'] for x in observations],['host-open-000','host-trigger'])
+            self.assertEqual([x['capture_claim'] for x in observations],[2,3])
+            self.assertTrue(all(not x['footer_match'] for x in observations))
+            self.assertLess(observations[0]['completed_uptime_ms'],observations[1]['completed_uptime_ms'])
+            self.assertEqual(sum('--publish "$root/publish_creation_arm"' in s for s in adapter.scripts),1)
+            self.assertTrue(adapter.stop_attempted)
+            self.assertEqual(adapter.frame_ledger.frames,6)
+            self.assertLessEqual(adapter.frame_ledger.bytes,192*1024*1024)
+            self.assertLessEqual(max(adapter.host_record_counts.values()),3)
+            self.assertLess((Path(directory)/'source5-report.json').stat().st_size,8192)
+            self.assertLess((Path(directory)/'source-witness.json').stat().st_size,2048)
+
+    def test_stable_source_disagreement_refuses_before_publication_and_stops(self):
+        for fault in ('body','owner','metadata','map','raw','waiting','window','hash','time','idle','library-raw'):
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory() as directory:
+                adapter=whole_fixture(directory,'source5-stable-body-idle-v1')
+                stable=adapter.route.change
+                def change(stage,raw):
+                    stable(stage,raw)
+                    if stage=='open' and fault=='library-raw':raw['metadata']['timestamp']='changed across opening'
+                    if stage!='trigger': return
+                    if fault=='body': raw['png']=image_bytes('blank')
+                    elif fault=='owner': raw['content']['cPages']['lastOpened']['value']=adapter.profile['page_ids'][6]
+                    elif fault=='metadata': raw['metadata']['lastOpenedPage']=6
+                    elif fault=='map': raw['content']['cPages']['pages'][0]['idx']['value']='changed'
+                    elif fault=='raw': raw['metadata']['timestamp']='changed'
+                    elif fault=='waiting': raw['waiting']=raw['waiting'].replace(b'222000',b'222001')
+                    elif fault=='window': raw['window'][3]+=1
+                    elif fault=='hash': raw['hashes'][next(iter(raw['hashes']))]='b'*64
+                    elif fault=='time': raw['uptime']=first_time[0]
+                adapter.route.change=change
+                original=adapter.transport_fixture
+                first_time=[]
+                def transport(args,script,timeout):
+                    result=original(args,script,timeout)
+                    if 'native_frame_acquire" "$pid" "$start"' in script:
+                        import base64
+                        data=json.loads(result['stdout'])
+                        if 'host-open-000.claim' in script: first_time.append(base64.b64decode(data['uptime']).decode())
+                        if 'host-trigger.claim' in script and fault=='idle':
+                            data['idle']=base64.b64encode(b'input unobserved\n').decode()
+                            result['stdout']=json.dumps(data)
+                        if 'host-trigger.claim' in script and fault=='window':
+                            data['window']=base64.b64encode((adapter.production_window.replace(' 127 ',' 128 ')+'\n').encode()).decode()
+                            result['stdout']=json.dumps(data)
+                    return result
+                adapter.transport=transport
+                host=HostSequence(adapter,adapter.profile,image_bytes('library'),image_bytes('source'),image_bytes('source-footer'))
+                with self.assertRaises((Refused,ValueError)):host.run()
+                self.assertFalse(adapter.arm_attempted)
+                self.assertTrue(adapter.stop_attempted)
+                self.assertFalse(any('--publish "$root/publish_creation_arm"' in s for s in adapter.scripts))
+
+    def test_minimum_source_budget_refuses_before_open_without_refund(self):
+        for variant,count in (('source5-stable-body-idle-v1',3),('source5-footer-then-body-v1',2)):
+            with self.subTest(variant=variant),tempfile.TemporaryDirectory() as directory:
+                adapter=whole_fixture(directory,variant)
+                for _ in range(count-1):adapter.frame_ledger.claim()
+                host=HostSequence(adapter,adapter.profile,image_bytes('library'),image_bytes('source'),image_bytes('source-footer'))
+                with self.assertRaises(Refused):host.run()
+                self.assertEqual(adapter.frame_ledger.frames,count)
+                self.assertFalse(adapter.tap_attempted)
+                self.assertFalse(adapter.arm_attempted)
+                self.assertTrue(adapter.stop_attempted)
+
     def test_guardian_without_accepted_ready_never_launches_or_writes(self):
         with tempfile.TemporaryDirectory() as directory:
             adapter=whole_fixture(directory)

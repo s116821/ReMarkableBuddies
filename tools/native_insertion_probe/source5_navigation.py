@@ -97,6 +97,11 @@ class FrameLedger:
         self.reserved = 3
         self.arm_reserved = True
 
+    def forecast_source(self, count):
+        # Read-only minimum admission; claims remain exclusive and sticky.
+        if type(count) is not int or self.arm_reserved or count not in {2, 3} or self.frames + count + 3 > MAX_FRAMES or self.bytes + (count + 3) * FRAME_BYTES > MAX_BYTES:
+            raise ValueError("Required source and postcreation captures unavailable before input")
+
     def terminal(self):
         self.reserved = 0  # Only genuinely unused reserved slots.
 

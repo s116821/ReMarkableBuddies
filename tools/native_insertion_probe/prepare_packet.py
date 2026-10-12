@@ -6,7 +6,7 @@ from pathlib import Path
 import re
 import shutil
 from owned_frame_capture import CONTRACT as CAPTURE_CONTRACT, TOOLS as CAPTURE_TOOLS, HOST_KINDS, OBSERVATION_KIND
-from open_document_timing import PRODUCTION_V2, V2_LIBRARY_SHA256, EIGHT_LIBRARY_SHA256, V2_PUBLISHER_SHA256, validate_v2_binding, validate_v2_config, fixture_inventory_selection, PRESERVED_EIGHT, ORIGINAL_PAGES, PRESERVED_PAGES, SOURCE5, SOURCE5_LIBRARY_SHA256, SOURCE5_GESTURE_SHA256, validate_gesture_paths, SOURCE5_CONTROL_POLICY, SOURCE5_CONTROL_SHELL_SHA256
+from open_document_timing import PRODUCTION_V2, V2_LIBRARY_SHA256, EIGHT_LIBRARY_SHA256, V2_PUBLISHER_SHA256, validate_v2_binding, validate_v2_config, fixture_inventory_selection, PRESERVED_EIGHT, ORIGINAL_PAGES, PRESERVED_PAGES, SOURCE5, SOURCE5_LIBRARY_SHA256, SOURCE5_GESTURE_SHA256, validate_gesture_paths, SOURCE5_CONTROL_POLICY, SOURCE5_CONTROL_SHELL_SHA256, source_witness_selection
 
 LIBRARY_TAP_VARIANTS = {
     "primary-1641396": ("--tap-library-v2", [164, 1396]),
@@ -69,6 +69,7 @@ def remove_owned_onfailure(data):
 
 
 def partition(selected, files):
+    source_witness_selection(selected)
     # The coordinator still refuses executing this new mode until the complete
     # bounded host sequence is integrated and independently reviewed.
     open_mode = selected.get("experiment_kind") in HOST_KINDS
@@ -269,6 +270,7 @@ def main():
             profile['host_sequence_contract'] = 'bounded-host-v6-production-v2'
             profile['fixture_inventory_variant'] = inventory_variant
             if inventory_variant == SOURCE5:
+                profile['source_witness_variant'] = source_witness_selection(selected)
                 profile.update({key:selected[key] for key in ('source_index','source_page_id','neighbor_index','neighbor_page_id','insertion_index')})
                 profile['tools']['owned_relative_gesture']=selected['host_artifacts']['owned_relative_gesture']
                 profile['gesture_paths']=selected['gesture_paths']
@@ -313,6 +315,7 @@ def main():
         receipt['fixture_inventory_variant'] = inventory_variant
         if inventory_variant == SOURCE5:
             receipt.update({key:selected[key] for key in ('source_index','source_page_id','neighbor_index','neighbor_page_id','insertion_index')})
+            receipt['source_witness_variant'] = source_witness_selection(selected)
             receipt['source5_control_bytes_reserve'] = profile['source5_control_bytes_reserve']
             receipt['packet_file_sizes'] = profile['packet_file_sizes']
             receipt['control_output_policy'] = SOURCE5_CONTROL_POLICY

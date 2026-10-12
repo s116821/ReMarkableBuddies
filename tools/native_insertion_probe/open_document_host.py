@@ -9,7 +9,7 @@ import re
 import time
 from PIL import Image
 from open_document_protocol import parse_waiting
-from open_document_timing import OpenDocumentTiming, upper_uptime_ms, diagnostic_cutoff, PRODUCTION_V2, V2_CONTRACT, fixture_inventory_selection, fixture_source_selection, SOURCE5
+from open_document_timing import OpenDocumentTiming, upper_uptime_ms, diagnostic_cutoff, PRODUCTION_V2, V2_CONTRACT, fixture_inventory_selection, fixture_source_selection, SOURCE5, source_witness_selection, SOURCE5_STABLE_WITNESS
 from owned_frame_capture import CONTRACT as CAPTURE_CONTRACT, OBSERVATION_KIND, PHASE_LABELS
 
 BODY = (64, 0, 720, 980)
@@ -71,6 +71,9 @@ class HostSequence:
         self.adapter = adapter
         self.selected = selected
         self.fixture_inventory_variant, self.fixture_page_count = fixture_inventory_selection(selected)
+        self.source_witness_variant = source_witness_selection(selected)
+        self.source_witnesses = []
+        self.source_witness_report = None
         self.source_index, self.insertion_index = fixture_source_selection(selected)
         self.library_png = library_png
         self.source_body_png = source_body_png
@@ -143,6 +146,8 @@ class HostSequence:
 
     def document_context(self, raw):
         content, metadata = raw["content"], raw["metadata"]
+        if self.source_witness_variant == SOURCE5_STABLE_WITNESS and (type(content['pageCount']) is not int or type(metadata['lastOpenedPage']) is not int):
+            raise Refused('Stable source count/index requires exact integers')
         pages = content["cPages"]["pages"]
         ids = [p["id"] for p in pages]
         if ids != self.selected["page_ids"] or content["pageCount"] != self.fixture_page_count:
@@ -205,6 +210,17 @@ class HostSequence:
                 continue
             self.document_context(raw)
             hashes = self.sidecars(raw)
+            if self.source_witness_variant == SOURCE5_STABLE_WITNESS:
+                self.document(raw)
+                context=self.library_context(raw)
+                if (self.library_baseline is None or context[:5] != self.library_baseline[:5] or
+                    self.library_baseline[5:] != (b'LastOpen=@ByteArray()\n', None) or
+                    raw.get('last_open_raw') != ('LastOpen=@ByteArray('+self.selected['document_id']+')\n').encode()):
+                    raise Refused('Stable source differs from approved raw Library context')
+                self.source_sidecars=hashes
+                self.source_witnesses.append(self.source_witness(raw))
+                self.response_time(raw)
+                return
             if not footer_seen:
                 if same_pixels(raw["png"], self.source_footer_png, FOOTER):
                     self.source_sidecars = hashes
@@ -218,6 +234,27 @@ class HostSequence:
                 return
             self.response_time(raw)
         raise Refused("Actual source footer then fresh loaded body not observed within bounded frames")
+
+    def source_witness(self, raw, phase='open'):
+        witness=self.adapter.source_capture_witness(raw, phase)
+        witness['footer_match']=same_pixels(raw['png'],self.source_footer_png,FOOTER)
+        return witness
+
+    def seal_source_witness(self, raw):
+        if self.source_witness_variant != SOURCE5_STABLE_WITNESS:
+            return
+        second=self.source_witness(raw,'trigger')
+        if (len(self.source_witnesses)!=1 or
+            second['capture_prefix']==self.source_witnesses[0]['capture_prefix'] or
+            second['capture_claim']<=self.source_witnesses[0]['capture_claim'] or
+            second['completed_uptime_ms']<=self.source_witnesses[0]['completed_uptime_ms']):
+            raise Refused('Two distinct advancing source captures required')
+        self.source_witnesses.append(second)
+        self.source_witness_report={'source_witness_variant':self.source_witness_variant,
+            'observations':self.source_witnesses,'source_authority':'operator-conjunction',
+            'native_current_page_authority':False}
+        self.record('source-witness',self.source_witness_report)
+        self.response_time(raw)
 
     def idle(self, raw):
         idle = raw["idle"]
@@ -267,6 +304,9 @@ class HostSequence:
                 library = self.adapter.snapshot("ready", self.timing.stage_end("ready"), True)
             # Adapter rechecks candidate identity/closing/time before this one
             # reviewed 768x1024 tap. Sorting alone never selects the tile.
+            if self.fixture_inventory_variant == SOURCE5:
+                try: self.adapter.frame_ledger.forecast_source(2 if self.source_witness_variant == SOURCE5_STABLE_WITNESS else 3)
+                except ValueError as error: raise Refused(str(error)) from error
             self.adapter.open_once(self.identity, self.timing.stage_end("open"))
             self.observe_open()
             # Full idle interval follows tap/release and observed source. No
@@ -279,6 +319,7 @@ class HostSequence:
             self.sidecars(ready)
             self.idle(ready)
             self.response_time(ready)
+            self.seal_source_witness(ready)
             if not self.timing.admit_creation_ms(now_ms, self.waiting.expiry_ms):
                 raise Refused("SDK/recovery publication expiry reached")
             if self.fixture_inventory_variant == SOURCE5:
@@ -404,6 +445,9 @@ class HostSequence:
         else:
             raise Refused("Initial target-owned pixels are neither qualified blank nor exact source5")
         end=min(time.monotonic()+1,deadline)
+        report['source_witness_variant']=self.source_witness_variant
+        if self.source_witness_report is not None:
+            report['source_witness']=self.source_witness_report
         self.adapter.retain_bounded("source5-report",report,end)
         if time.monotonic()>=end: raise Refused("Final report exceeded fixed allowance")
         self.adapter.frame_ledger.terminal()

@@ -10,11 +10,23 @@ from coordinator import packet_files
 
 def source5():
     return selected()|{'fixture_inventory_variant':SOURCE5,'sdk_revision':SOURCE5_SDK_REVISION,
+        'source_witness_variant':'source5-footer-then-body-v1',
         'sdk_source_hashes':SOURCE5_SDK_SOURCES,'source_index':5,
         'source_page_id':PRESERVED_PAGES[5],'neighbor_index':6,
         'neighbor_page_id':PRESERVED_PAGES[6],'insertion_index':6}
 
 class Source5Selection(unittest.TestCase):
+    def test_witness_selector_closed_and_variant_specific(self):
+        from open_document_timing import source_witness_selection
+        s=source5()
+        for value in ('source5-footer-then-body-v1','source5-stable-body-idle-v1'):
+            self.assertEqual(source_witness_selection(s|{'source_witness_variant':value}),value)
+        for value in (None,True,'unknown'):
+            with self.assertRaises(ValueError):partition(s|{'source_witness_variant':value},inventory(s))
+        missing=s.copy();del missing['source_witness_variant']
+        with self.assertRaises(ValueError):partition(missing,inventory(s))
+        self.assertIsNone(source_witness_selection(selected()))
+        with self.assertRaises(ValueError):partition(selected()|{'source_witness_variant':'source5-footer-then-body-v1'},inventory(selected()))
     def test_explicit_tuple_no_defaults_or_type_aliases(self):
         s=source5()
         self.assertEqual(fixture_inventory_selection(s,'before_page_ids'),(SOURCE5,8))

@@ -39,6 +39,19 @@ V2_SDK_SOURCES = {
 
 PRESERVED_EIGHT = 'preserved-eight-after-9005'
 SOURCE5 = 'preserved-eight-after-9005-source5'
+SOURCE5_STABLE_WITNESS = 'source5-stable-body-idle-v1'
+SOURCE5_FOOTER_WITNESS = 'source5-footer-then-body-v1'
+
+
+def source_witness_selection(profile):
+    if profile.get('fixture_inventory_variant') == SOURCE5:
+        value = profile.get('source_witness_variant')
+        if type(value) is not str or value not in {SOURCE5_STABLE_WITNESS, SOURCE5_FOOTER_WITNESS}:
+            raise ValueError('Explicit closed Source5 source witness required')
+        return value
+    if 'source_witness_variant' in profile:
+        raise ValueError('Source witness selector on legacy inventory refused')
+    return None
 # Pending independently reviewed source/artifact/reference pins refuse admission.
 SOURCE5_SDK_REVISION = '605b1f66e309ab2883b14d0e73d5819464cbdd8b'
 SOURCE5_SDK_SOURCES = V2_SDK_SOURCES | {
@@ -107,6 +120,7 @@ def validate_gesture_paths(paths):
 
 
 def validate_v2_binding(profile):
+    source_witness_selection(profile)
     variant, _ = fixture_inventory_selection(profile, 'before_page_ids' if 'before_page_ids' in profile else 'page_ids')
     revision, sources = ((SOURCE5_SDK_REVISION,SOURCE5_SDK_SOURCES) if variant == SOURCE5 else
                         (EIGHT_SDK_REVISION, EIGHT_SDK_SOURCES) if variant == PRESERVED_EIGHT else

@@ -78,6 +78,12 @@ class Source5BudgetReview(unittest.TestCase):
     def test_positive_complete_profile(self):
         self.assertEqual(self.admit(), self.profile)
 
+    def test_witness_receipt_profile_mismatch_refuses_before_transport(self):
+        changed=self.profile|{'source_witness_variant':'source5-stable-body-idle-v1'}
+        with self.assertRaises(ValueError):self.admit(changed)
+        missing=copy.deepcopy(self.profile);del missing['source_witness_variant']
+        with self.assertRaises(ValueError):self.admit(missing)
+
     def test_size_schema_and_receipt_disagreement(self):
         variants = []
         for value in (True, -1, 2):

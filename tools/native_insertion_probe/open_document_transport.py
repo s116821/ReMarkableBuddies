@@ -8,7 +8,7 @@ import shlex
 import time
 import uuid
 from open_document_host import Refused, same_pixels
-from open_document_timing import upper_uptime_ms, OpenDocumentTiming, diagnostic_cutoff, PRODUCTION_V2, fixture_inventory_selection, fixture_source_selection, SOURCE5
+from open_document_timing import upper_uptime_ms, OpenDocumentTiming, diagnostic_cutoff, PRODUCTION_V2, fixture_inventory_selection, fixture_source_selection, SOURCE5, source_witness_selection
 from open_document_protocol import parse_waiting
 from source5_navigation import FrameLedger, PhaseBudget, POST_STAGES, canonical, bounded_local, CONTROL_BYTES, FUTURE_CONTROL_BYTES, ControlLedger
 from owned_frame_capture import CONTRACT as CAPTURE_CONTRACT, TOOLS as CAPTURE_TOOLS, OBSERVATION_KIND, PHASE_LABELS, capture_script, validate_receipt, hash_tool_checks, ordered_hash_checks
@@ -88,8 +88,10 @@ class SSHAdapter:
     def __init__(self, arguments, receipt, profile, output, transport, library_png, control_ledger=None):
         self.arguments, self.receipt, self.profile = arguments, receipt, profile
         self.fixture_inventory = fixture_inventory_selection(profile)
+        if source_witness_selection(profile) != source_witness_selection(receipt):
+            raise Refused('Source witness receipt/profile mismatch')
         self.fixture_source = fixture_source_selection(profile)
-        self.sealed_source5 = canonical({k:profile.get(k) for k in ("fixture_inventory_variant","source_index","source_page_id","neighbor_index","neighbor_page_id","insertion_index","target_id","document_id","page_ids","gesture_paths","gesture_path_hashes","tools")})
+        self.sealed_source5 = canonical({k:profile.get(k) for k in ("source_witness_variant","fixture_inventory_variant","source_index","source_page_id","neighbor_index","neighbor_page_id","insertion_index","target_id","document_id","page_ids","gesture_paths","gesture_path_hashes","tools")})
         self.frame_ledger = FrameLedger() if self.fixture_inventory[0] == SOURCE5 else None
         if self.frame_ledger is not None:
             sizes=profile.get("packet_file_sizes")
@@ -172,12 +174,14 @@ class SSHAdapter:
     def call(self, script, timeout=4, record_role="ordinary", record_deadline=None):
         if record_deadline is not None and time.monotonic() >= record_deadline:
             raise Refused("Fixed record deadline exhausted before transport")
+        if source_witness_selection(self.profile) != source_witness_selection(self.receipt):
+            raise Refused('Source witness changed before transport')
         if (fixture_inventory_selection(self.profile) != self.fixture_inventory or
             fixture_inventory_selection(self.receipt, 'before_page_ids') != self.fixture_inventory):
             raise Refused('Sealed fixture inventory changed; no transport permitted')
         if self.frame_ledger is not None and (canonical(self.profile)!=self.source5_profile_seal or canonical(self.receipt)!=self.source5_receipt_seal):
             raise Refused("Sealed source5 profile/receipt changed; no transport")
-        if self.frame_ledger is not None and canonical({k:self.profile.get(k) for k in ("fixture_inventory_variant","source_index","source_page_id","neighbor_index","neighbor_page_id","insertion_index","target_id","document_id","page_ids","gesture_paths","gesture_path_hashes","tools")}) != self.sealed_source5:
+        if self.frame_ledger is not None and canonical({k:self.profile.get(k) for k in ("source_witness_variant","fixture_inventory_variant","source_index","source_page_id","neighbor_index","neighbor_page_id","insertion_index","target_id","document_id","page_ids","gesture_paths","gesture_path_hashes","tools")}) != self.sealed_source5:
             raise Refused("Source5 tuple changed; no transport")
         recovery_role=record_role in {"stop","stop-clock"} or (record_role=="clock" and self.stop_attempted)
         if self.frame_ledger is not None and self.control_ledger.overflow and not recovery_role:
@@ -623,7 +627,24 @@ test "$(now_upper)" -lt "$cutoff"
             self.capture_sources[prefix]={"claim":self.frame_ledger.frames,"phase":stage,
                 "sha256":hashlib.sha256(observed["png"]).hexdigest(),"root_inode":self.root_inode}
             observed["capture_prefix"]=prefix
+            observed["capture_claim"]=self.frame_ledger.frames
+            observed['_root_inode']=self.root_inode
+            self.capture_sources[prefix]['completed_uptime']=observed['uptime']
         return observed
+
+    def source_capture_witness(self, raw, phase):
+        prefix=raw.get('capture_prefix')
+        if type(prefix) is not str:
+            raise Refused('Typed exclusive capture prefix required')
+        source=self.capture_sources.get(prefix)
+        if (type(raw.get('capture_claim')) is not int or phase not in {'open','trigger'} or source is None or source['phase'] != phase or
+            source['root_inode'] != self.root_inode or raw.get('_root_inode') != self.root_inode or
+            source['claim'] != raw.get('capture_claim') or
+            source['sha256'] != hashlib.sha256(raw['png']).hexdigest() or
+            source['completed_uptime'] != raw['uptime']):
+            raise Refused('Source witness lacks trusted exclusive capture binding')
+        return {'capture_prefix':prefix,'capture_claim':source['claim'],
+                'png_sha256':source['sha256'],'completed_uptime_ms':upper_uptime_ms(raw['uptime'])}
 
     def wait_library(self):
         if self.is_diagnostic():
