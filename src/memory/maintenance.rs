@@ -204,6 +204,17 @@ fn regular(path: &Path) -> bool {
 }
 /// Pure state/path and nonblocking lock admission before normal Store startup.
 pub(crate) fn preflight(config: &Config, allow_initialization: bool) -> Result<(), ReportStatus> {
+    preflight_state(config, allow_initialization).map(|_| ())
+}
+#[derive(Clone, Copy)]
+pub(crate) enum StoreReadiness {
+    Fresh,
+    Existing,
+}
+pub(crate) fn preflight_state(
+    config: &Config,
+    allow_initialization: bool,
+) -> Result<StoreReadiness, ReportStatus> {
     config
         .paths
         .validate()
@@ -224,7 +235,7 @@ pub(crate) fn preflight(config: &Config, allow_initialization: bool) -> Result<(
     };
     if fresh {
         return if allow_initialization {
-            Ok(())
+            Ok(StoreReadiness::Fresh)
         } else {
             Err(ReportStatus::Unavailable)
         };
@@ -265,7 +276,7 @@ pub(crate) fn preflight(config: &Config, allow_initialization: bool) -> Result<(
         .map_err(|_| ReportStatus::Unsupported)?;
     let handle = File::open(lock).map_err(|_| ReportStatus::Unavailable)?;
     match handle.try_lock() {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(StoreReadiness::Existing),
         Err(std::fs::TryLockError::WouldBlock) => Err(ReportStatus::Busy),
         Err(std::fs::TryLockError::Error(_)) => Err(ReportStatus::Unsupported),
     }

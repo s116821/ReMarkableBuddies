@@ -814,7 +814,50 @@ pub(in crate::conversation) mod tests {
             before,
             "recovery/changed/unknown input must not publish or refresh selection"
         );
+        use crate::storage::sync::mode::SyncModeChoice;
+        for choice in [
+            SyncModeChoice::SharedGroup {
+                group: scope.group,
+                binding_sha256: scope.binding_sha256.clone(),
+                root_id: "original-chosen-root".into(),
+            },
+            SyncModeChoice::LocalOnly,
+            SyncModeChoice::IsolatedBackup {
+                binding_sha256: digest(b"different chosen binding"),
+            },
+            SyncModeChoice::SharedGroup {
+                group: Uuid::new_v4(),
+                binding_sha256: digest(b"new chosen binding"),
+                root_id: "replacement-chosen-root".into(),
+            },
+        ] {
+            reopened
+                .set_sync_mode(
+                    &reopened.sync_mode_snapshot().unwrap().token,
+                    Uuid::new_v4(),
+                    choice,
+                )
+                .unwrap();
+        }
         drop(reopened);
+        assert_eq!(
+            run(&request)["status"],
+            "historical",
+            "departed mode must not grant or block original custody"
+        );
+        let mode_path = fixture.paths().data.join("sync/mode.json");
+        let valid_mode_bytes = std::fs::read(&mode_path).unwrap();
+        std::fs::write(&mode_path, b"{invalid-private-current-mode").unwrap();
+        assert_eq!(
+            run(&request)["status"],
+            "historical",
+            "historical recovery bypasses current mode admission"
+        );
+        assert_eq!(
+            std::fs::read(&mode_path).unwrap(),
+            b"{invalid-private-current-mode"
+        );
+        std::fs::write(&mode_path, valid_mode_bytes).unwrap();
         let generation: Uuid =
             crate::storage::files::json(&fixture.paths().data.join("CURRENT"), 128).unwrap();
         let blob = fixture

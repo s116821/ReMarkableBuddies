@@ -3,9 +3,8 @@ use clap::Parser;
 use dotenv::dotenv;
 use log::info;
 use remarkable_reader_buddy::config::{self, Config, Environment, Overrides};
-use remarkable_reader_buddy::storage::{files, sync::Worker, Store};
+use remarkable_reader_buddy::storage::{files, sync::Worker};
 use remarkable_reader_buddy::{OpenAI, Orchestrator, Workflow};
-use std::sync::Arc;
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -98,10 +97,13 @@ fn main() -> Result<()> {
         return Ok(());
     }
     let config = Config::load(std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into))?;
-    if let Some(mut report) = remarkable_reader_buddy::reader_runtime::startup(&config) {
-        report.write_to(&mut std::io::stdout().lock())?;
-        return Ok(());
-    }
+    let admitted_store = match remarkable_reader_buddy::reader_runtime::startup(&config) {
+        remarkable_reader_buddy::reader_runtime::StartupDecision::Ordinary(store) => store,
+        remarkable_reader_buddy::reader_runtime::StartupDecision::Report(mut report) => {
+            report.write_to(&mut std::io::stdout().lock())?;
+            return Ok(());
+        }
+    };
     let effective = config::resolve(
         &config,
         Overrides {
@@ -122,7 +124,14 @@ fn main() -> Result<()> {
         .filter_module("ureq_proto", log::LevelFilter::Off)
         .init();
     info!("=== ReMarkable Reader Buddy Starting ===");
-    let store = Arc::new(Store::open(config.paths.clone())?);
+    let store =
+        match remarkable_reader_buddy::reader_runtime::ordinary_store(&config, admitted_store) {
+            Ok(store) => store,
+            Err(mut report) => {
+                report.write_to(&mut std::io::stdout().lock())?;
+                return Ok(());
+            }
+        };
     store.snapshot_config(&config)?;
     files::atomic_json(
         &store.paths.data.join("effective-config.json"),
