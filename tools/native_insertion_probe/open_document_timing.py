@@ -43,7 +43,7 @@ SOURCE5 = 'preserved-eight-after-9005-source5'
 SOURCE5_SDK_REVISION = '605b1f66e309ab2883b14d0e73d5819464cbdd8b'
 SOURCE5_SDK_SOURCES = V2_SDK_SOURCES | {
     'tools/qt_qml_access_probe_core.h':'a44d90df44a02feb2a8ab6326f34caf4f7031f54e5fac4bde6df7892214cdbf6'}
-SOURCE5_LIBRARY_SHA256 = None
+SOURCE5_LIBRARY_SHA256 = 'a707694a419482cbf95eed5e49d4e9cac7baac32fe303ca01443084a9156dce7'
 SOURCE5_GESTURE_SHA256 = '8576644f68c357020359a1ac455a17eb43e37f347ea6a972c0abfd4e9f2551d9'
 SOURCE5_CONFIG_LINE = 'config.inventoryVariant = qml_access::CreationConfig::InventoryVariant::PreservedEightAfter9005Source5;'
 # The eight-page Library reference is pinned only after Main's fresh visual review.
