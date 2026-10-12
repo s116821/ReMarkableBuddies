@@ -143,6 +143,221 @@ fn stale_result_cannot_consume_and_exact_retry_after_tombstone_keeps_original_re
 }
 
 #[test]
+fn altered_query_or_inspection_payload_cannot_use_the_original_pins() {
+    let fixture = Fixture::new();
+    let store = fixture.store();
+    let id = identity();
+    let memory = selected::SelectedMemory::new(store, id.clone()).unwrap();
+    let first = fact(id.profile, Scope::Global);
+    register(&memory, initialize(&memory, first.clone()));
+    let original = memory.query(&Query::new("gravity".into(), 10)).unwrap();
+    for mode in 0..6 {
+        let mut altered = original.clone();
+        match mode {
+            0 => altered.context.facts[0].fact.value = "Forged assertion".into(),
+            1 => altered.context.facts[0].fact.key.profile = Uuid::new_v4(),
+            2 => altered.context.facts[0].fact.key.fact = Uuid::new_v4(),
+            3 => altered.context.facts[0].fact.confidence_basis_points = 1,
+            4 => altered.status = Status::Partial,
+            _ => altered.diagnostics.expired = 100,
+        }
+        let mut consumed = false;
+        assert!(memory
+            .with_current(&altered, &mut || {
+                consumed = true;
+                Ok(())
+            })
+            .is_err());
+        assert!(!consumed);
+    }
+    let unchanged = original.clone();
+    let mut count = 0;
+    memory
+        .with_current(&unchanged, &mut || {
+            count += 1;
+            Ok(())
+        })
+        .unwrap();
+    assert!(memory
+        .with_current(&original, &mut || {
+            count += 1;
+            Ok(())
+        })
+        .is_err());
+    assert_eq!(count, 1);
+    let mut inspected = memory.inspect_for_handoff(&first.key).unwrap();
+    inspected.envelopes[0].payload["value"] = serde_json::json!("Forged inspection value");
+    let mut consumed = false;
+    assert!(inspected
+        .with_current(&memory, &mut || {
+            consumed = true;
+            Ok(())
+        })
+        .is_err());
+    assert!(!consumed);
+}
+
+#[test]
+fn a_later_root_cannot_repair_a_rootless_accepted_catalog_initializer() {
+    let fixture = Fixture::new();
+    let store = fixture.store();
+    let id = identity();
+    let memory = selected::SelectedMemory::new(store.clone(), id.clone()).unwrap();
+    let registration = initialize(&memory, fact(id.profile, Scope::Global));
+    let record = catalog::Record::registration(registration)
+        .envelope(&id, store.actor_id, Uuid::new_v4())
+        .unwrap();
+    let bytes = serde_json::to_vec(&record).unwrap();
+    let sha256 = storage::digest(&bytes);
+    let manifest = storage::Manifest {
+        format: 1,
+        transaction_id: Uuid::new_v4(),
+        scope: storage::Scope::SelectedRecords,
+        records: vec![storage::ObjectRef {
+            sha256: sha256.clone(),
+            bytes: bytes.len() as u64,
+        }],
+        record_namespaces: BTreeMap::from([(sha256.clone(), storage::Namespace::SubjectMemory)]),
+        media: vec![],
+        media_coverage: vec![],
+    };
+    let publication = store
+        .initialize_selected(
+            &id.scope().unwrap(),
+            storage::selection::SelectionChange {
+                operation: Uuid::new_v4(),
+                accepted_base_sha256: storage::digest(b"rootless catalog fixture"),
+                selected: manifest,
+                retained: vec![],
+            },
+            BTreeMap::from([(sha256, bytes)]),
+        )
+        .unwrap();
+    let root = catalog::Record::root(&id)
+        .unwrap()
+        .envelope(&id, store.actor_id, Uuid::new_v4())
+        .unwrap();
+    store
+        .commit_selected(
+            &publication.token,
+            Uuid::new_v4(),
+            vec![root],
+            BTreeMap::new(),
+        )
+        .unwrap();
+    assert_eq!(
+        memory
+            .query(&Query::new("gravity".into(), 10))
+            .unwrap()
+            .status,
+        Status::Unavailable
+    );
+}
+
+#[test]
+fn accepted_claim_custody_survives_parentless_replacement_with_or_without_retained_copies() {
+    for (retained, changed_claim) in [(false, true), (true, true), (true, false)] {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        let id = identity();
+        let document = Uuid::new_v4();
+        let memory = selected::SelectedMemory::new(store.clone(), id.clone()).unwrap();
+        let seed = fact(id.profile, Scope::Document { document });
+        let registration = initialize(&memory, seed.clone());
+        register(&memory, registration.clone());
+        let mut later = fact(id.profile, Scope::Document { document });
+        later.claim = "gravity alternative".into();
+        later.value = "Original gravity alternative".into();
+        memory
+            .put(Mutation {
+                operation: Uuid::new_v4(),
+                expected: Default::default(),
+                fact: later.clone(),
+            })
+            .unwrap();
+        let scope = id.aggregate_scope(&registration.owner).unwrap();
+        let before = store.selected_snapshot(&scope, 4096).unwrap().unwrap();
+        let mut winner = later.clone();
+        winner.value = "Winning gravity alternative".into();
+        if changed_claim {
+            winner.claim = "changed gravity claim".into();
+        }
+        let mut replacement = envelope(
+            &store,
+            storage::Namespace::SubjectMemory,
+            later.key.record_id().unwrap(),
+            serde_json::to_value(winner).unwrap(),
+        );
+        replacement.revision_id = Uuid::new_v5(
+            &replacement.operation_id,
+            b"remarkable-buddies:subject-memory:revision:v1",
+        );
+        let bytes = serde_json::to_vec(&replacement).unwrap();
+        let sha256 = storage::digest(&bytes);
+        let mut manifest = before.transaction.selected.clone();
+        manifest.transaction_id = Uuid::new_v4();
+        manifest.records = before
+            .selected_records
+            .iter()
+            .zip(&before.transaction.selected.records)
+            .filter(|(e, _)| e.record_id != later.key.record_id().unwrap())
+            .map(|(_, r)| r.clone())
+            .collect();
+        manifest
+            .record_namespaces
+            .retain(|hash, _| manifest.records.iter().any(|r| &r.sha256 == hash));
+        manifest.records.push(storage::ObjectRef {
+            sha256: sha256.clone(),
+            bytes: bytes.len() as u64,
+        });
+        manifest
+            .record_namespaces
+            .insert(sha256.clone(), storage::Namespace::SubjectMemory);
+        let admission =
+            remarkable_reader_buddy::conversation::SelectedAdmission::new(store.clone(), scope)
+                .unwrap();
+        admission
+            .activate(
+                &before.token,
+                storage::selection::SelectionChange {
+                    operation: Uuid::new_v4(),
+                    accepted_base_sha256: storage::digest(b"explicit local winning fork"),
+                    selected: manifest,
+                    retained: if retained {
+                        vec![before.transaction.selected]
+                    } else {
+                        vec![]
+                    },
+                },
+                BTreeMap::from([(sha256, bytes)]),
+            )
+            .unwrap();
+        let mut query = Query::new("gravity".into(), 10);
+        query.document = Some(document);
+        let result = memory.query(&query).unwrap();
+        if changed_claim {
+            assert_eq!(result.status, Status::Unavailable);
+            assert!(result.context.facts.is_empty());
+            assert!(memory
+                .put(Mutation {
+                    operation: Uuid::new_v4(),
+                    expected: BTreeSet::from([replacement.revision_id]),
+                    fact: later
+                })
+                .is_err());
+        } else {
+            assert_eq!(result.status, Status::Complete);
+            assert!(result
+                .context
+                .facts
+                .iter()
+                .any(|item| item.fact.key == later.key
+                    && item.fact.value == "Winning gravity alternative"));
+        }
+    }
+}
+
+#[test]
 fn normalized_token_does_not_hide_changed_raw_genesis_at_consumption() {
     let fixture = Fixture::new();
     let store = fixture.store();
@@ -330,7 +545,7 @@ fn mixed_document_edit_preserves_exact_other_profile_and_noncanonical_conversati
         conversation,
         serde_json::to_value(Record::Root(Root {
             id: conversation,
-            next_sequence: 0,
+            next_sequence: 1,
             binding: Some(binding),
             created_ms: 1,
             updated_ms: 1,
@@ -382,11 +597,106 @@ fn mixed_document_edit_preserves_exact_other_profile_and_noncanonical_conversati
         &foreign.operation_id,
         b"remarkable-buddies:subject-memory:revision:v1",
     );
+    let Record::Binding(binding_record) = serde_json::from_value(bound.payload.clone()).unwrap()
+    else {
+        unreachable!()
+    };
+    let turn_id = Uuid::new_v4();
+    let mut source_ids = Vec::new();
+    let mut source_records = Vec::new();
+    let mut media_objects = BTreeMap::new();
+    let mut media_refs = Vec::new();
+    let mut coverage = Vec::new();
+    for (ordinal, color) in [[255u8, 0, 0], [0, 0, 255], [0, 255, 0]]
+        .into_iter()
+        .enumerate()
+    {
+        let image = image::RgbImage::from_pixel(1, 1, image::Rgb(color));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(image)
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+        let bytes = bytes.into_inner();
+        let media = storage::Media {
+            sha256: storage::digest(&bytes),
+            bytes: bytes.len() as u64,
+            media_type: "image/png".into(),
+        };
+        let source_id = Uuid::new_v4();
+        source_ids.push(source_id);
+        let source = remarkable_reader_buddy::conversation::ImageUse {
+            id: source_id,
+            conversation,
+            turn: turn_id,
+            image: media.clone(),
+            observation: binding_record.receipt.source.clone(),
+            width: 1,
+            height: 1,
+            purpose: "historical-fixture".into(),
+            ordinal: ordinal as u32,
+            parent: None,
+            parent_dimensions: None,
+            crop: None,
+            transform: [1., 0., 0., 1., 0., 0.],
+            target: None,
+            captured_ms: 1,
+        };
+        let mut record = envelope(
+            &store,
+            storage::Namespace::Source,
+            source_id,
+            serde_json::to_value(Record::Source(source)).unwrap(),
+        );
+        record.media_descriptors = vec![media.clone()];
+        source_records.push(record);
+        if ordinal == 2 {
+            coverage.push(storage::Coverage::Omitted {
+                sha256: media.sha256,
+                reason: storage::Omission::PolicyDisabled,
+            });
+        } else {
+            media_refs.push(storage::ObjectRef {
+                sha256: media.sha256.clone(),
+                bytes: media.bytes,
+            });
+            coverage.push(storage::Coverage::Included {
+                sha256: media.sha256.clone(),
+            });
+            media_objects.insert(media.sha256, bytes);
+        }
+    }
+    let turn = envelope(
+        &store,
+        storage::Namespace::Conversation,
+        turn_id,
+        serde_json::to_value(Record::Turn(remarkable_reader_buddy::conversation::Turn {
+            id: turn_id,
+            conversation,
+            exchange: Uuid::new_v4(),
+            sequence: 0,
+            role: remarkable_reader_buddy::conversation::Role::User,
+            mode: remarkable_reader_buddy::conversation::Mode::Reader,
+            outcome: remarkable_reader_buddy::conversation::Outcome::Interpreted,
+            text: Some("Historical fixture question".into()),
+            sources: source_ids,
+            correction_of: None,
+            created_ms: 1,
+            updated_ms: 1,
+            completion: None,
+        }))
+        .unwrap(),
+    );
     let mut manifest = before.transaction.selected.clone();
     manifest.transaction_id = Uuid::new_v4();
-    let mut objects = BTreeMap::new();
+    media_refs.sort_by(|a, b| b.sha256.cmp(&a.sha256));
+    coverage.sort_by(|a, b| b.hash().cmp(a.hash()));
+    manifest.media = media_refs.clone();
+    manifest.media_coverage = coverage.clone();
+    let mut objects = media_objects;
     let mut exact = Vec::new();
-    for record in [root, bound, foreign] {
+    let mut records = vec![root, bound, foreign, turn];
+    records.extend(source_records);
+    for record in records {
         let bytes = serde_json::to_vec_pretty(&record).unwrap();
         let sha256 = storage::digest(&bytes);
         let reference = storage::ObjectRef {
@@ -424,17 +734,47 @@ fn mixed_document_edit_preserves_exact_other_profile_and_noncanonical_conversati
     assert_eq!(selected.context.facts[0].fact.key.profile, id.profile);
     let mut corrected = first.clone();
     corrected.value = "Corrected gravity SI units".into();
-    memory
-        .put(Mutation {
-            operation: Uuid::new_v4(),
-            expected: parents(&memory, &first.key),
-            fact: corrected,
-        })
-        .unwrap();
+    let mutation = Mutation {
+        operation: Uuid::new_v4(),
+        expected: parents(&memory, &first.key),
+        fact: corrected,
+    };
+    let receipt = memory.put(mutation.clone()).unwrap();
     let after = store.selected_snapshot(&scope, 4096).unwrap().unwrap();
     for reference in exact {
         assert!(after.transaction.selected.records.contains(&reference));
     }
+    assert_ne!(after.transaction.selected.media, media_refs);
+    memory
+        .forget(Forget {
+            operation: Uuid::new_v4(),
+            expected: parents(&memory, &first.key),
+            key: first.key.clone(),
+        })
+        .unwrap();
+    let tombstone = store.selected_snapshot(&scope, 4096).unwrap().unwrap();
+    assert_eq!(memory.put(mutation).unwrap(), receipt);
+    assert_eq!(
+        store
+            .selected_snapshot(&scope, 4096)
+            .unwrap()
+            .unwrap()
+            .token,
+        tombstone.token
+    );
+    assert_eq!(
+        tombstone
+            .transaction
+            .selected
+            .media_coverage
+            .iter()
+            .map(|item| (item.hash(), item))
+            .collect::<BTreeMap<_, _>>(),
+        coverage
+            .iter()
+            .map(|item| (item.hash(), item))
+            .collect::<BTreeMap<_, _>>()
+    );
     let unsupported = envelope(
         &store,
         storage::Namespace::Handwriting,
@@ -442,9 +782,9 @@ fn mixed_document_edit_preserves_exact_other_profile_and_noncanonical_conversati
         serde_json::json!({"unknown":true}),
     );
     admission
-        .with_current(&after.token, |_| {
+        .with_current(&tombstone.token, |_| {
             store.commit_selected(
-                &after.token,
+                &tombstone.token,
                 Uuid::new_v4(),
                 vec![unsupported],
                 BTreeMap::new(),

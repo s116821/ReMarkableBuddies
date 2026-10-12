@@ -70,8 +70,7 @@ fn main() -> Result<()> {
             input,
             std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
         );
-        use std::io::Write;
-        std::io::stdout().lock().write_all(&report.encoded()?)?;
+        report.write_to(&mut std::io::stdout().lock())?;
         return Ok(());
     }
     dotenv().ok();

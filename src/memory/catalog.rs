@@ -333,6 +333,13 @@ impl Catalog {
             root.is_some() && registrations.len() <= MAX_AGGREGATES,
             "missing root or excessive aggregate count"
         );
+        let root = root.unwrap();
+        ensure!(
+            history
+                .iter()
+                .all(|item| item.transaction.selected.records.contains(root)),
+            "catalog accepted predecessor is missing the original root"
+        );
         Ok(Self { registrations })
     }
 }
