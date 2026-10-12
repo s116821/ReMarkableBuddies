@@ -143,6 +143,8 @@ pub(crate) fn load(store: &Store) -> Result<Option<ModeState>> {
             _ => None,
         })
         .collect();
+    let mut seen_backups = BTreeSet::new();
+    let mut previous: Option<&SyncMode> = None;
     for receipt in &state.transitions {
         ensure!(
             !receipt.operation.is_nil()
@@ -164,16 +166,34 @@ pub(crate) fn load(store: &Store) -> Result<Option<ModeState>> {
             "mode request identity mismatch"
         );
         match &receipt.mode {
-            SyncMode::IsolatedBackup { backup, .. } => ensure!(
-                !backup.is_nil() && *backup != state.actor && *backup != state.device,
-                "invalid backup identity"
-            ),
+            SyncMode::IsolatedBackup {
+                backup,
+                binding_sha256,
+            } => {
+                ensure!(
+                    !backup.is_nil() && *backup != state.actor && *backup != state.device,
+                    "invalid backup identity"
+                );
+                match previous {
+                    Some(SyncMode::IsolatedBackup {
+                        backup: old,
+                        binding_sha256: binding,
+                    }) if binding == binding_sha256 => {
+                        ensure!(old == backup, "same-binding backup identity discontinuity")
+                    }
+                    _ => ensure!(
+                        seen_backups.insert(*backup),
+                        "reused historical backup identity"
+                    ),
+                }
+            }
             SyncMode::SharedGroup { group, .. } => ensure!(
                 *group != state.actor && *group != state.device && !backups.contains(group),
                 "mode namespace identity collision"
             ),
             SyncMode::LocalOnly => (),
         }
+        previous = Some(&receipt.mode);
     }
     Ok(Some(state))
 }
@@ -518,6 +538,72 @@ mod tests {
             .set_sync_mode(&snapshot.token, Uuid::new_v4(), SyncModeChoice::LocalOnly)
             .unwrap();
         assert!(store.sync_mode_lease(&snapshot.token).is_err());
+    }
+    #[test]
+    fn sync_mode_persisted_backup_history_refuses_reuse_and_discontinuity() {
+        for case in 0..3 {
+            let f = Fixture::new();
+            let store = f.store();
+            let before = store.sync_mode_snapshot().unwrap();
+            let operation = Uuid::new_v4();
+            let choice = SyncModeChoice::IsolatedBackup {
+                binding_sha256: digest(b"binding A"),
+            };
+            let first = store
+                .set_sync_mode(&before.token, operation, choice.clone())
+                .unwrap();
+            match case {
+                0 => {
+                    set(&store, SyncModeChoice::LocalOnly);
+                }
+                1 => {
+                    set(&store, choice.clone());
+                }
+                _ => {
+                    set(
+                        &store,
+                        SyncModeChoice::IsolatedBackup {
+                            binding_sha256: digest(b"binding B"),
+                        },
+                    );
+                }
+            }
+            if case == 0 {
+                set(&store, choice.clone());
+            }
+            let valid_token = store.sync_mode_snapshot().unwrap().token;
+            let original = fs::read(path(&store)).unwrap();
+            let mut changed: serde_json::Value = serde_json::from_slice(&original).unwrap();
+            let index = if case == 0 { 2 } else { 1 };
+            changed["transitions"][index]["mode"]["backup"] = json!(if case == 1 {
+                Uuid::new_v4()
+            } else {
+                backup(&first)
+            });
+            let corrupt = serde_json::to_vec(&changed).unwrap();
+            fs::write(path(&store), &corrupt).unwrap();
+            drop(store);
+            let store = f.store();
+            assert!(
+                store.sync_mode_snapshot().is_err(),
+                "corrupt history case {case}"
+            );
+            assert!(store.sync_mode_lease(&valid_token).is_err());
+            assert!(store
+                .set_sync_mode(&before.token, operation, choice.clone())
+                .is_err());
+            assert_eq!(fs::read(path(&store)).unwrap(), corrupt);
+            fs::write(path(&store), original).unwrap();
+            assert_eq!(store.sync_mode_snapshot().unwrap().token, valid_token);
+            assert_eq!(
+                backup(
+                    &store
+                        .set_sync_mode(&before.token, operation, choice)
+                        .unwrap()
+                ),
+                backup(&first)
+            );
+        }
     }
     #[test]
     fn sync_mode_faults_recover_original_choice_and_refuse_foreign_metadata() {

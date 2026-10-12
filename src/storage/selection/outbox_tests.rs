@@ -436,3 +436,83 @@ fn selected_outbox_mode_epochs_refuse_unbound_and_old_shared_intents() {
     store.export_selected(&archive).unwrap();
     assert!(!archive.join("sync/mode.json").exists());
 }
+
+#[test]
+fn selected_outbox_root_only_mode_replacement_keeps_original_custody() {
+    use crate::storage::sync::mode::SyncModeChoice;
+    let f = Fixture::new();
+    let store = f.store();
+    let s = scope();
+    let selected = initialize(&store, &s, &[record(&store)]);
+    let choose = |root: &str| SyncModeChoice::SharedGroup {
+        group: s.group,
+        binding_sha256: s.binding_sha256.clone(),
+        root_id: root.into(),
+    };
+    let original = store
+        .set_sync_mode(
+            &store.sync_mode_snapshot().unwrap().token,
+            Uuid::new_v4(),
+            choose("first-root"),
+        )
+        .unwrap();
+    let request = request(&store);
+    let attempt = store
+        .prepare_selected_attempt(&selected.token, request.clone())
+        .unwrap();
+    assert_eq!(attempt.mode_epoch, Some(original.epoch));
+    let journal = serde_json::to_vec(&attempt).unwrap();
+    assert!(store
+        .current_selected_attempt(&selected.token, request.operation)
+        .is_ok());
+    let replaced = store
+        .set_sync_mode(
+            &store.sync_mode_snapshot().unwrap().token,
+            Uuid::new_v4(),
+            choose("replacement-root"),
+        )
+        .unwrap();
+    assert_ne!(original.epoch, replaced.epoch);
+    drop(store);
+    let store = f.store();
+    assert!(store
+        .current_selected_attempt(&selected.token, request.operation)
+        .is_err());
+    assert_eq!(
+        serde_json::to_vec(
+            &store
+                .inspect_selected_attempt(request.operation)
+                .unwrap()
+                .unwrap()
+        )
+        .unwrap(),
+        journal
+    );
+    assert_eq!(
+        serde_json::to_vec(
+            &store
+                .prepare_selected_attempt(&selected.token, request.clone())
+                .unwrap()
+        )
+        .unwrap(),
+        journal
+    );
+    let next = SelectedAttemptRequest {
+        operation: Uuid::new_v4(),
+        ..request
+    };
+    assert_eq!(
+        store
+            .prepare_selected_attempt(&selected.token, next.clone())
+            .unwrap()
+            .mode_epoch,
+        Some(replaced.epoch)
+    );
+    assert!(store
+        .current_selected_attempt(&selected.token, next.operation)
+        .is_ok());
+    assert_eq!(
+        store.selected_snapshot(&s, 4096).unwrap().unwrap().token,
+        selected.token
+    );
+}
