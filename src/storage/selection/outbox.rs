@@ -29,14 +29,25 @@ pub struct SelectedAttempt {
     pub selection: SelectionTransaction,
     pub request_sha256: String,
     pub state: SelectedAttemptState,
+    /// Private mode epoch only; absence preserves original unconfigured journals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode_epoch: Option<Uuid>,
 }
 impl SelectedAttempt {
     fn fingerprint(&self) -> Result<String> {
-        Ok(digest(&serde_json::to_vec(&(
-            self.actor,
-            &self.request,
-            &self.selection,
-        ))?))
+        match self.mode_epoch {
+            Some(epoch) => Ok(digest(&serde_json::to_vec(&(
+                self.actor,
+                &self.request,
+                &self.selection,
+                epoch,
+            ))?)),
+            None => Ok(digest(&serde_json::to_vec(&(
+                self.actor,
+                &self.request,
+                &self.selection,
+            ))?)),
+        }
     }
     fn validate(&self, actor: Uuid) -> Result<()> {
         ensure!(
@@ -202,6 +213,7 @@ impl Store {
             selection,
             request_sha256: String::new(),
             state: SelectedAttemptState::Pending,
+            mode_epoch: sync::mode::shared_epoch(self, expected.scope())?,
         };
         attempt.request_sha256 = attempt.fingerprint()?;
         attempt.validate(self.actor_id)?;
@@ -257,6 +269,10 @@ impl Store {
         ensure!(
             publication::token(&current)? == *expected,
             "stale selected intent token"
+        );
+        ensure!(
+            sync::mode::shared_epoch(self, expected.scope())? == attempt.mode_epoch,
+            "selected intent mode epoch mismatch"
         );
         verify(self, inner.generation, &attempt)?;
         Ok(attempt)

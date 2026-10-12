@@ -94,6 +94,8 @@ struct Inner {
     index: Index,
     fault: Fault,
     legacy_sync_handles: usize,
+    mode_handles: usize,
+    legacy_publisher_handles: usize,
 }
 pub struct Store {
     pub paths: StorePaths,
@@ -112,6 +114,17 @@ impl Drop for LegacySyncLease {
     }
 }
 
+pub(crate) struct LegacyPublisherLease {
+    store: Arc<Store>,
+    _legacy: LegacySyncLease,
+}
+impl Drop for LegacyPublisherLease {
+    fn drop(&mut self) {
+        if let Ok(mut inner) = self.store.inner.lock() {
+            inner.legacy_publisher_handles -= 1;
+        }
+    }
+}
 impl Drop for Store {
     fn drop(&mut self) {
         // A concurrent subprocess fork can temporarily inherit this descriptor.
@@ -121,6 +134,26 @@ impl Drop for Store {
 }
 
 impl Store {
+    pub(crate) fn legacy_publisher_lease(self: &Arc<Self>) -> Result<LegacyPublisherLease> {
+        // Preserve the domain lease while adding publisher-only lifetime accounting.
+        let legacy = self.legacy_sync_lease()?;
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        ensure!(
+            sync::mode::load(self)?.is_none(),
+            "explicit sync mode requires its matched worker"
+        );
+        inner.legacy_publisher_handles = inner
+            .legacy_publisher_handles
+            .checked_add(1)
+            .context("publisher lease overflow")?;
+        Ok(LegacyPublisherLease {
+            store: self.clone(),
+            _legacy: legacy,
+        })
+    }
     pub(crate) fn legacy_sync_lease(self: &Arc<Self>) -> Result<LegacySyncLease> {
         let mut inner = self
             .inner
@@ -217,6 +250,8 @@ impl Store {
                 index: Index::default(),
                 fault: Fault::None,
                 legacy_sync_handles: 0,
+                mode_handles: 0,
+                legacy_publisher_handles: 0,
             }),
             wake: Mutex::new(None),
         };

@@ -350,3 +350,89 @@ fn selected_outbox_staging_cleanup_refuses_nonregular_entries_without_deletion()
         assert_eq!(fs::read(&target).unwrap(), b"keep");
     }
 }
+
+#[test]
+fn selected_outbox_mode_epochs_refuse_unbound_and_old_shared_intents() {
+    use crate::storage::sync::mode::{SyncMode, SyncModeChoice};
+    let f = Fixture::new();
+    let store = f.store();
+    let s = scope();
+    let publication = initialize(&store, &s, &[record(&store)]);
+    let request = request(&store);
+    let unbound = store
+        .prepare_selected_attempt(&publication.token, request.clone())
+        .unwrap();
+    assert!(unbound.mode_epoch.is_none());
+    let shared = SyncModeChoice::SharedGroup {
+        group: s.group,
+        binding_sha256: s.binding_sha256.clone(),
+        root_id: "chosen-root".into(),
+    };
+    let mode = store
+        .set_sync_mode(
+            &store.sync_mode_snapshot().unwrap().token,
+            Uuid::new_v4(),
+            shared.clone(),
+        )
+        .unwrap();
+    assert!(matches!(mode.mode, SyncMode::SharedGroup { .. }));
+    assert!(store
+        .current_selected_attempt(&publication.token, request.operation)
+        .is_err());
+    assert!(store
+        .prepare_selected_attempt(&publication.token, request.clone())
+        .unwrap()
+        .mode_epoch
+        .is_none());
+    let bound_request = SelectedAttemptRequest {
+        operation: Uuid::new_v4(),
+        ..request.clone()
+    };
+    let bound = store
+        .prepare_selected_attempt(&publication.token, bound_request.clone())
+        .unwrap();
+    assert_eq!(bound.mode_epoch, Some(mode.epoch));
+    assert!(store
+        .current_selected_attempt(&publication.token, bound_request.operation)
+        .is_ok());
+    store
+        .set_sync_mode(
+            &store.sync_mode_snapshot().unwrap().token,
+            Uuid::new_v4(),
+            SyncModeChoice::LocalOnly,
+        )
+        .unwrap();
+    assert!(store
+        .current_selected_attempt(&publication.token, bound_request.operation)
+        .is_err());
+    let fresh = SelectedAttemptRequest {
+        operation: Uuid::new_v4(),
+        ..request.clone()
+    };
+    assert!(store
+        .prepare_selected_attempt(&publication.token, fresh)
+        .is_err());
+    let returned = store
+        .set_sync_mode(
+            &store.sync_mode_snapshot().unwrap().token,
+            Uuid::new_v4(),
+            shared,
+        )
+        .unwrap();
+    assert_ne!(returned.epoch, mode.epoch);
+    assert!(store
+        .current_selected_attempt(&publication.token, bound_request.operation)
+        .is_err());
+    assert_eq!(
+        store
+            .inspect_selected_attempt(bound_request.operation)
+            .unwrap()
+            .unwrap()
+            .mode_epoch,
+        bound.mode_epoch
+    );
+    assert_eq!(selected(&store, &s).token, publication.token);
+    let archive = f.0.join("archive");
+    store.export_selected(&archive).unwrap();
+    assert!(!archive.join("sync/mode.json").exists());
+}
