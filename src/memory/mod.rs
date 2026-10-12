@@ -1,9 +1,12 @@
 //! Explicit associative facts over the existing Store. No automatic extraction or sync engine.
+mod aggregate;
+pub mod catalog;
 pub mod context;
 pub mod maintenance;
+pub mod selected;
 
 use crate::storage::{Envelope, Kind, Namespace, Store, Uuid, MAX_ITEMS};
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -18,6 +21,7 @@ pub const MAX_MATCHES: usize = 16;
 pub struct Configuration {
     pub enabled: bool,
     pub profile: Option<Uuid>,
+    pub selection: Option<catalog::Identity>,
 }
 impl Configuration {
     pub fn validate(&self) -> Result<()> {
@@ -29,6 +33,13 @@ impl Configuration {
             !self.enabled || self.profile.is_some(),
             "enabled memory requires an explicit profile"
         );
+        if let Some(identity) = &self.selection {
+            identity.validate()?;
+            ensure!(
+                self.profile == Some(identity.profile),
+                "selected memory profile mismatch"
+            );
+        }
         Ok(())
     }
 }
@@ -264,8 +275,12 @@ pub struct QueryResult {
     pub status: Status,
     pub diagnostics: Diagnostics,
     pub context: ContextData,
+    pins: Option<Arc<std::sync::Mutex<selected::Pins>>>,
 }
 impl QueryResult {
+    pub(crate) fn selected(&self) -> bool {
+        self.pins.is_some()
+    }
     pub fn encoded(&self) -> Result<String> {
         Ok(format!(
             "ASSOCIATIVE_MEMORY: {}",
@@ -277,6 +292,7 @@ impl QueryResult {
             status,
             diagnostics: Diagnostics::default(),
             context: ContextData::empty(),
+            pins: None,
         }
     }
 }
@@ -287,11 +303,32 @@ pub trait Provider: Send + Sync {
     fn forget(&self, mutation: Forget) -> Result<Uuid>;
     fn inspect(&self, key: &Key) -> Result<Vec<Envelope>>;
     fn query(&self, query: &Query) -> Result<QueryResult>;
+    /// Guard the actual synchronous consuming publication, not a permission flag.
+    fn with_current(
+        &self,
+        result: &QueryResult,
+        consume: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        ensure!(result.pins.is_none(), "foreign selected memory result");
+        consume()
+    }
 }
 pub struct LocalMemory {
     store: Arc<Store>,
     profile: Uuid,
     _local_only_lease: crate::storage::LegacySyncLease,
+}
+pub fn configured(store: Arc<Store>, configuration: &Configuration) -> Result<Arc<dyn Provider>> {
+    configuration.validate()?;
+    let profile = configuration.profile.context("memory profile absent")?;
+    if let Some(identity) = &configuration.selection {
+        Ok(Arc::new(selected::SelectedMemory::new(
+            store,
+            identity.clone(),
+        )?))
+    } else {
+        Ok(Arc::new(LocalMemory::new_local(store, profile)?))
+    }
 }
 impl LocalMemory {
     /// Explicit local-only mode. Never substitutes for accepted selected-sync membership.
@@ -317,23 +354,7 @@ impl LocalMemory {
         Ok(())
     }
     fn decode(&self, envelope: &Envelope) -> Result<Fact> {
-        envelope.validate()?;
-        ensure!(
-            envelope.namespace == Namespace::SubjectMemory
-                && envelope.domain_schema_version == 1
-                && envelope.kind == Kind::Value
-                && envelope.media_descriptors.is_empty(),
-            "unsupported memory envelope"
-        );
-        let fact: Fact = serde_json::from_value(envelope.payload.clone())
-            .map_err(|_| anyhow::anyhow!("unsupported memory payload"))?;
-        fact.validate()?;
-        self.own(&fact.key)?;
-        ensure!(
-            fact.key.record_id()? == envelope.record_id,
-            "memory identity mismatch"
-        );
-        Ok(fact)
+        decode_fact(self.profile, envelope)
     }
     fn envelope(
         &self,
@@ -342,36 +363,7 @@ impl LocalMemory {
         expected: BTreeSet<Uuid>,
         fact: Option<Fact>,
     ) -> Result<Envelope> {
-        self.own(key)?;
-        ensure!(
-            !operation.is_nil()
-                && expected.len() <= MAX_ITEMS
-                && expected.iter().all(|id| !id.is_nil()),
-            "invalid memory mutation"
-        );
-        let envelope = Envelope {
-            envelope_version: 1,
-            namespace: Namespace::SubjectMemory,
-            domain_schema_version: 1,
-            record_id: key.record_id()?,
-            revision_id: Uuid::new_v5(&operation, b"remarkable-buddies:subject-memory:revision:v1"),
-            parents: expected,
-            operation_id: operation,
-            actor_id: self.store.actor_id,
-            kind: if fact.is_some() {
-                Kind::Value
-            } else {
-                Kind::Tombstone
-            },
-            payload: if let Some(fact) = fact {
-                serde_json::to_value(fact)?
-            } else {
-                serde_json::Value::Null
-            },
-            media_descriptors: vec![],
-        };
-        envelope.validate()?;
-        Ok(envelope)
+        fact_envelope(&self.store, self.profile, key, operation, expected, fact)
     }
     fn replay(&self, envelope: &Envelope) -> Result<Option<Uuid>> {
         let prior = self.store.snapshot_revisions_matching(
@@ -465,120 +457,175 @@ impl Provider for LocalMemory {
                     return Ok(result);
                 }
             };
-        let mut by_key: BTreeMap<Uuid, Vec<Envelope>> = BTreeMap::new();
-        for envelope in heads {
-            by_key.entry(envelope.record_id).or_default().push(envelope);
-        }
-        let mut by_claim: BTreeMap<String, Vec<Match>> = BTreeMap::new();
-        let mut blocked_claims = BTreeSet::new();
-        for (record, envelopes) in by_key {
-            let values: Vec<_> = envelopes.iter().filter(|e| e.kind == Kind::Value).collect();
-            let outside = !values.is_empty() && values.iter().all(|e| {
+        query_heads(self.profile, query, heads)
+    }
+}
+
+fn decode_fact(profile: Uuid, envelope: &Envelope) -> Result<Fact> {
+    envelope.validate()?;
+    ensure!(
+        envelope.namespace == Namespace::SubjectMemory
+            && envelope.domain_schema_version == 1
+            && envelope.kind == Kind::Value
+            && envelope.media_descriptors.is_empty(),
+        "unsupported memory envelope"
+    );
+    let fact: Fact = serde_json::from_value(envelope.payload.clone())
+        .map_err(|_| anyhow::anyhow!("unsupported memory payload"))?;
+    fact.validate()?;
+    ensure!(fact.key.profile == profile, "foreign memory profile");
+    ensure!(
+        fact.key.record_id()? == envelope.record_id,
+        "memory identity mismatch"
+    );
+    Ok(fact)
+}
+
+fn fact_envelope(
+    store: &Store,
+    profile: Uuid,
+    key: &Key,
+    operation: Uuid,
+    expected: BTreeSet<Uuid>,
+    fact: Option<Fact>,
+) -> Result<Envelope> {
+    key.validate()?;
+    ensure!(key.profile == profile, "foreign memory profile");
+    ensure!(
+        !operation.is_nil()
+            && expected.len() <= MAX_ITEMS
+            && expected.iter().all(|id| !id.is_nil()),
+        "invalid memory mutation"
+    );
+    let envelope = Envelope {
+        envelope_version: 1,
+        namespace: Namespace::SubjectMemory,
+        domain_schema_version: 1,
+        record_id: key.record_id()?,
+        revision_id: Uuid::new_v5(&operation, b"remarkable-buddies:subject-memory:revision:v1"),
+        parents: expected,
+        operation_id: operation,
+        actor_id: store.actor_id,
+        kind: if fact.is_some() {
+            Kind::Value
+        } else {
+            Kind::Tombstone
+        },
+        payload: if let Some(fact) = fact {
+            serde_json::to_value(fact)?
+        } else {
+            serde_json::Value::Null
+        },
+        media_descriptors: vec![],
+    };
+    envelope.validate()?;
+    Ok(envelope)
+}
+
+fn query_heads(profile: Uuid, query: &Query, heads: Vec<Envelope>) -> Result<QueryResult> {
+    query.validate()?;
+    let mut result = QueryResult::empty(Status::CompleteEmpty);
+    let mut by_key: BTreeMap<Uuid, Vec<Envelope>> = BTreeMap::new();
+    for envelope in heads {
+        by_key.entry(envelope.record_id).or_default().push(envelope);
+    }
+    let mut by_claim: BTreeMap<String, Vec<Match>> = BTreeMap::new();
+    let mut blocked_claims = BTreeSet::new();
+    for (record, envelopes) in by_key {
+        let values: Vec<_> = envelopes.iter().filter(|e| e.kind == Kind::Value).collect();
+        let outside = !values.is_empty() && values.iter().all(|e| {
                 let Ok(fact) = serde_json::from_value::<Fact>(e.payload.clone()) else { return false; };
                 fact.validate().is_ok() && fact.key.record_id().is_ok_and(|id| id == record)
-                    && (fact.key.profile != self.profile || matches!(fact.key.scope, Scope::Document { document } if Some(document) != query.document))
+                    && (fact.key.profile != profile || matches!(fact.key.scope, Scope::Document { document } if Some(document) != query.document))
             });
-            if outside {
-                continue;
-            }
-            if envelopes.len() > 1 {
-                result.diagnostics.conflicted_keys += 1;
-                for envelope in &envelopes {
-                    if let Ok(fact) = self.decode(envelope) {
-                        if matches!(fact.key.scope, Scope::Global)
-                            || matches!(fact.key.scope, Scope::Document { document } if Some(document) == query.document)
-                        {
-                            blocked_claims.insert(fact.claim);
-                        }
+        if outside {
+            continue;
+        }
+        if envelopes.len() > 1 {
+            result.diagnostics.conflicted_keys += 1;
+            for envelope in &envelopes {
+                if let Ok(fact) = decode_fact(profile, envelope) {
+                    if matches!(fact.key.scope, Scope::Global)
+                        || matches!(fact.key.scope, Scope::Document { document } if Some(document) == query.document)
+                    {
+                        blocked_claims.insert(fact.claim);
                     }
                 }
+            }
+            continue;
+        }
+        let envelope = &envelopes[0];
+        if envelope.kind == Kind::Tombstone {
+            continue;
+        }
+        // A valid foreign profile is not an unsupported record in this profile's view.
+        let foreign = envelope
+            .payload
+            .get("key")
+            .and_then(|v| v.get("profile"))
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok())
+            .is_some_and(|id| id != profile);
+        if foreign {
+            continue;
+        }
+        let fact = match decode_fact(profile, envelope) {
+            Ok(fact) => fact,
+            Err(_) => {
+                result.diagnostics.unsupported += 1;
                 continue;
             }
-            let envelope = &envelopes[0];
-            if envelope.kind == Kind::Tombstone {
-                continue;
-            }
-            // A valid foreign profile is not an unsupported record in this profile's view.
-            let foreign = envelope
-                .payload
-                .get("key")
-                .and_then(|v| v.get("profile"))
-                .and_then(|v| v.as_str())
-                .and_then(|s| Uuid::parse_str(s).ok())
-                .is_some_and(|id| id != self.profile);
-            if foreign {
-                continue;
-            }
-            let fact = match self.decode(envelope) {
-                Ok(fact) => fact,
-                Err(_) => {
-                    result.diagnostics.unsupported += 1;
-                    continue;
+        };
+        if !matches!(fact.key.scope, Scope::Global)
+            && !matches!(fact.key.scope, Scope::Document { document } if Some(document) == query.document)
+        {
+            continue;
+        }
+        if fact.expires_ms.is_some_and(|expiry| expiry <= query.now_ms) {
+            result.diagnostics.expired += 1;
+            continue;
+        }
+        if query.current_claims.contains(&fact.claim) {
+            result.diagnostics.suppressed += 1;
+            continue;
+        }
+        by_claim.entry(fact.claim.clone()).or_default().push(Match {
+            record,
+            revision: envelope.revision_id,
+            fact,
+        });
+    }
+    let terms = tokens(&query.text);
+    let mut candidates = vec![];
+    for (claim, matches) in by_claim {
+        if blocked_claims.contains(&claim) {
+            result.diagnostics.contradicted_claims += 1;
+            continue;
+        }
+        if matches
+            .iter()
+            .map(|m| &m.fact.value)
+            .collect::<BTreeSet<_>>()
+            .len()
+            > 1
+        {
+            result.diagnostics.contradicted_claims += 1;
+            continue;
+        }
+        let mut ranked: Vec<_> = matches
+            .into_iter()
+            .filter_map(|item| {
+                let mut words = tokens(&item.fact.value);
+                words.extend(tokens(&item.fact.claim));
+                words.extend(tokens(&item.fact.subject));
+                for tag in &item.fact.tags {
+                    words.extend(tokens(tag));
                 }
-            };
-            if !matches!(fact.key.scope, Scope::Global)
-                && !matches!(fact.key.scope, Scope::Document { document } if Some(document) == query.document)
-            {
-                continue;
-            }
-            if fact.expires_ms.is_some_and(|expiry| expiry <= query.now_ms) {
-                result.diagnostics.expired += 1;
-                continue;
-            }
-            if query.current_claims.contains(&fact.claim) {
-                result.diagnostics.suppressed += 1;
-                continue;
-            }
-            by_claim.entry(fact.claim.clone()).or_default().push(Match {
-                record,
-                revision: envelope.revision_id,
-                fact,
-            });
-        }
-        let terms = tokens(&query.text);
-        let mut candidates = vec![];
-        for (claim, matches) in by_claim {
-            if blocked_claims.contains(&claim) {
-                result.diagnostics.contradicted_claims += 1;
-                continue;
-            }
-            if matches
-                .iter()
-                .map(|m| &m.fact.value)
-                .collect::<BTreeSet<_>>()
-                .len()
-                > 1
-            {
-                result.diagnostics.contradicted_claims += 1;
-                continue;
-            }
-            let mut ranked: Vec<_> = matches
-                .into_iter()
-                .filter_map(|item| {
-                    let mut words = tokens(&item.fact.value);
-                    words.extend(tokens(&item.fact.claim));
-                    words.extend(tokens(&item.fact.subject));
-                    for tag in &item.fact.tags {
-                        words.extend(tokens(tag));
-                    }
-                    let overlap = terms.intersection(&words).count();
-                    (overlap > 0).then_some((overlap, item))
-                })
-                .collect();
-            ranked.sort_by(|a, b| {
-                b.0.cmp(&a.0)
-                    .then_with(|| {
-                        b.1.fact
-                            .confidence_basis_points
-                            .cmp(&a.1.fact.confidence_basis_points)
-                    })
-                    .then_with(|| a.1.record.cmp(&b.1.record))
-            });
-            if let Some(item) = ranked.into_iter().next() {
-                candidates.push(item);
-            }
-        }
-        candidates.sort_by(|a, b| {
+                let overlap = terms.intersection(&words).count();
+                (overlap > 0).then_some((overlap, item))
+            })
+            .collect();
+        ranked.sort_by(|a, b| {
             b.0.cmp(&a.0)
                 .then_with(|| {
                     b.1.fact
@@ -587,33 +634,45 @@ impl Provider for LocalMemory {
                 })
                 .then_with(|| a.1.record.cmp(&b.1.record))
         });
-        for (_, item) in candidates {
-            if result.context.facts.len() >= query.max_matches {
-                result.diagnostics.budget_omitted += 1;
-                continue;
-            }
-            result.context.facts.push(item);
-            if result.encoded()?.len() > query.max_context_bytes {
-                result.context.facts.pop();
-                result.diagnostics.budget_omitted += 1;
-            }
+        if let Some(item) = ranked.into_iter().next() {
+            candidates.push(item);
         }
-        ensure!(
-            result.encoded()?.len() <= query.max_context_bytes,
-            "memory context header exceeds budget"
-        );
-        let incomplete = result.diagnostics.conflicted_keys
-            + result.diagnostics.contradicted_claims
-            + result.diagnostics.unsupported
-            + result.diagnostics.budget_omitted
-            > 0;
-        result.status = if incomplete {
-            Status::Partial
-        } else if result.context.facts.is_empty() {
-            Status::CompleteEmpty
-        } else {
-            Status::Complete
-        };
-        Ok(result)
     }
+    candidates.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| {
+                b.1.fact
+                    .confidence_basis_points
+                    .cmp(&a.1.fact.confidence_basis_points)
+            })
+            .then_with(|| a.1.record.cmp(&b.1.record))
+    });
+    for (_, item) in candidates {
+        if result.context.facts.len() >= query.max_matches {
+            result.diagnostics.budget_omitted += 1;
+            continue;
+        }
+        result.context.facts.push(item);
+        if result.encoded()?.len() > query.max_context_bytes {
+            result.context.facts.pop();
+            result.diagnostics.budget_omitted += 1;
+        }
+    }
+    ensure!(
+        result.encoded()?.len() <= query.max_context_bytes,
+        "memory context header exceeds budget"
+    );
+    let incomplete = result.diagnostics.conflicted_keys
+        + result.diagnostics.contradicted_claims
+        + result.diagnostics.unsupported
+        + result.diagnostics.budget_omitted
+        > 0;
+    result.status = if incomplete {
+        Status::Partial
+    } else if result.context.facts.is_empty() {
+        Status::CompleteEmpty
+    } else {
+        Status::Complete
+    };
+    Ok(result)
 }

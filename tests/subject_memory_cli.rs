@@ -84,6 +84,175 @@ impl Drop for Fixture {
     }
 }
 
+fn selected_config(fixture: &Fixture) -> catalog::Identity {
+    let identity = catalog::Identity {
+        group: Uuid::new_v4(),
+        profile: fixture.profile,
+        binding_sha256: storage::digest(b"explicit host fixture binding, not a cloud account"),
+    };
+    fs::write(fixture.root.join("config.json"), serde_json::to_vec(&json!({
+        "paths": fixture.paths(), "memory": {"enabled":false,"profile":fixture.profile,"selection":identity}
+    })).unwrap()).unwrap();
+    identity
+}
+
+#[test]
+fn actual_selected_cli_explicit_empty_catalog_and_default_local_setup_refusal() {
+    let local = Fixture::new();
+    let input = json!({"operation":Uuid::new_v4(),"accepted_base_sha256":storage::digest(b"local setup"),"registrations":[]});
+    assert_eq!(
+        local.run("initialize-selection", &input)["status"],
+        "unsupported"
+    );
+    assert!(!local.paths().data.exists());
+    let fixture = Fixture::new();
+    selected_config(&fixture);
+    let first = fixture.run("initialize-selection", &input);
+    assert_eq!(first["status"], "ok");
+    assert_eq!(first["data"]["acknowledgment"], "published");
+    let retry = fixture.run("initialize-selection", &input);
+    assert_eq!(retry["data"]["transaction"], first["data"]["transaction"]);
+    assert_eq!(retry["data"]["acknowledgment"], "replayed");
+    let query = fixture.run("query", &Query::new("gravity".into(), 100));
+    assert_eq!(query["data"]["query_status"], "complete-empty");
+    let missing = fixture.fact();
+    assert_eq!(
+        fixture.run(
+            "put",
+            &Mutation {
+                operation: Uuid::new_v4(),
+                expected: Default::default(),
+                fact: missing
+            }
+        )["status"],
+        "unavailable"
+    );
+}
+
+#[test]
+fn actual_selected_cli_orphans_registration_adoption_retry_and_forgetting_preserve_other_keys() {
+    let fixture = Fixture::new();
+    selected_config(&fixture);
+    let first = fixture.fact();
+    let create = json!({"operation":Uuid::new_v4(),"accepted_base_sha256":storage::digest(b"accepted host descriptor"),"fact":first});
+    let initialized = fixture.run("initialize-aggregate", &create);
+    assert_eq!(initialized["status"], "ok");
+    assert_eq!(
+        fixture.run("query", &Query::new("gravity".into(), 100))["status"],
+        "unavailable"
+    );
+    assert_eq!(
+        fixture.run("initialize-aggregate", &create)["data"]["acknowledgment"],
+        "replayed"
+    );
+    let root = json!({"operation":Uuid::new_v4(),"accepted_base_sha256":storage::digest(b"catalog descriptor"),
+        "registrations":[initialized["data"]["registration"].clone()]});
+    assert_eq!(fixture.run("initialize-selection", &root)["status"], "ok");
+    let mut second = fixture.fact();
+    second.claim = "gravity convention".into();
+    second.value = "Use kelvin in gravity calculations".into();
+    let orphan = fixture.run("initialize-aggregate", &json!({"operation":Uuid::new_v4(),"accepted_base_sha256":storage::digest(b"second aggregate"),"fact":second}));
+    assert_eq!(orphan["status"], "ok");
+    assert_eq!(
+        fixture.run("query", &Query::new("gravity".into(), 100))["data"]["context"]["facts"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let register =
+        json!({"operation":Uuid::new_v4(),"registration":orphan["data"]["registration"].clone()});
+    let published = fixture.run("register-selection", &register);
+    assert_eq!(published["data"]["acknowledgment"], "published");
+    let retry = fixture.run("register-selection", &register);
+    assert_eq!(retry["data"]["acknowledgment"], "replayed");
+    assert_eq!(
+        retry["data"]["transaction"],
+        published["data"]["transaction"]
+    );
+    let adopted = fixture.run(
+        "register-selection",
+        &json!({"operation":Uuid::new_v4(),"registration":orphan["data"]["registration"].clone()}),
+    );
+    assert_eq!(adopted["data"]["acknowledgment"], "adopted");
+    assert!(adopted["data"]["transaction"].is_null());
+    let inspected = fixture.run("inspect", &first.key);
+    let parents: BTreeSet<_> = inspected["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| Uuid::parse_str(e["revision_id"].as_str().unwrap()).unwrap())
+        .collect();
+    let mut correction = first.clone();
+    correction.value = "Corrected SI gravity units".into();
+    let update = Mutation {
+        operation: Uuid::new_v4(),
+        expected: parents,
+        fact: correction,
+    };
+    let receipt = fixture.run("put", &update);
+    assert_eq!(receipt["status"], "ok");
+    let current = fixture.run("inspect", &first.key);
+    let parents = current["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| Uuid::parse_str(e["revision_id"].as_str().unwrap()).unwrap())
+        .collect();
+    assert_eq!(
+        fixture.run(
+            "forget",
+            &Forget {
+                operation: Uuid::new_v4(),
+                expected: parents,
+                key: first.key.clone()
+            }
+        )["status"],
+        "ok"
+    );
+    assert_eq!(
+        fixture.run("put", &update)["data"]["transaction"],
+        receipt["data"]["transaction"]
+    );
+    let remaining = fixture.run("query", &Query::new("gravity".into(), 100));
+    assert_eq!(
+        remaining["data"]["context"]["facts"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        remaining["data"]["context"]["facts"][0]["fact"]["key"]["fact"],
+        json!(second.key.fact)
+    );
+    let mut collided = update.clone();
+    collided.fact.value = "Changed replay payload".into();
+    assert_eq!(fixture.run("put", &collided)["status"], "unavailable");
+    assert_eq!(
+        fixture.run("query", &Query::new("gravity".into(), 100))["data"]["context"],
+        remaining["data"]["context"]
+    );
+}
+
+#[test]
+fn actual_selected_cli_invalid_setup_refuses_before_store_creation() {
+    let fixture = Fixture::new();
+    selected_config(&fixture);
+    let bad =
+        json!({"operation":Uuid::nil(),"accepted_base_sha256":"NOT-A-DIGEST","registrations":[]});
+    assert_eq!(
+        fixture.run("initialize-selection", &bad)["status"],
+        "invalid-input"
+    );
+    assert!(!fixture.paths().data.exists());
+    assert!(!fixture.paths().cache.exists());
+    let mut fact = fixture.fact();
+    fact.key.profile = Uuid::new_v4();
+    assert_eq!(fixture.run("initialize-aggregate", &json!({"operation":Uuid::new_v4(),"accepted_base_sha256":storage::digest(b"base"),"fact":fact}))["status"], "invalid-input");
+    assert!(!fixture.paths().data.exists());
+}
+
 #[test]
 fn actual_cli_put_query_inspect_cas_forget_and_exact_retry_are_offline() {
     let fixture = Fixture::new();

@@ -1674,3 +1674,266 @@ fn selected_snapshot_refuses_post_open_required_history_corruption_and_recovers_
         assert_eq!(selected(&f.store(), &s).token, active.token);
     }
 }
+
+#[test]
+fn budgeted_selected_reads_share_cumulative_limits_and_preserve_tokens() {
+    let f = Fixture::new();
+    let store = f.store();
+    let a = scope();
+    let mut b = a.clone();
+    b.key_sha256 = digest(b"another aggregate");
+    let first = initialize(&store, &a, &[record(&store)]);
+    let second = initialize(&store, &b, &[record(&store)]);
+    let root = store.generation(first.token.store_generation());
+    let head_bytes = [&a, &b]
+        .into_iter()
+        .map(|s| {
+            fs::metadata(root.join("selections").join(s.filename().unwrap()))
+                .unwrap()
+                .len()
+        })
+        .sum::<u64>();
+    let record_bytes =
+        first.transaction.selected.records[0].bytes + second.transaction.selected.records[0].bytes;
+    // Each current closure is verified and then decoded both during full history
+    // validation and during snapshot construction. All actual reads count.
+    let metadata_bytes = head_bytes + 4 * record_bytes;
+    let mut exact = SelectedReadBudget::new(2, 6, metadata_bytes, 0);
+    assert_eq!(
+        store
+            .selected_snapshot_with_budget(&a, MAX_ITEMS, &mut exact)
+            .unwrap()
+            .unwrap()
+            .snapshot
+            .token,
+        first.token
+    );
+    assert_eq!(
+        store
+            .selected_snapshot_with_budget(&b, MAX_ITEMS, &mut exact)
+            .unwrap()
+            .unwrap()
+            .snapshot
+            .token,
+        second.token
+    );
+    assert_eq!(
+        exact.usage(),
+        SelectedReadUsage {
+            aggregates: 2,
+            work_items: 6,
+            metadata_bytes,
+            media_bytes: 0
+        }
+    );
+    for limits in [
+        (1, 6, metadata_bytes),
+        (2, 5, metadata_bytes),
+        (2, 6, metadata_bytes - 1),
+    ] {
+        let mut budget = SelectedReadBudget::new(limits.0, limits.1, limits.2, 0);
+        assert!(store
+            .selected_snapshot_with_budget(&a, MAX_ITEMS, &mut budget)
+            .unwrap()
+            .is_some());
+        assert!(store
+            .selected_snapshot_with_budget(&b, MAX_ITEMS, &mut budget)
+            .is_err());
+        assert!(budget.exhausted());
+        let used = budget.usage();
+        assert!(store
+            .selected_snapshot_with_budget(&a, MAX_ITEMS, &mut budget)
+            .is_err());
+        assert_eq!(budget.usage(), used);
+        assert_eq!(selected(&store, &a).token, first.token);
+        assert_eq!(selected(&store, &b).token, second.token);
+    }
+    let mut absent = SelectedReadBudget::new(1, 0, 0, 0);
+    assert!(store
+        .selected_snapshot_with_budget(&scope(), MAX_ITEMS, &mut absent)
+        .unwrap()
+        .is_none());
+    assert_eq!(absent.usage().aggregates, 1);
+    assert_eq!(absent.usage().work_items, 0);
+}
+
+#[test]
+fn budgeted_selected_reads_charge_history_and_metadata_before_content_io() {
+    let f = Fixture::new();
+    let store = f.store();
+    let s = scope();
+    let original = initialize(&store, &s, &[record(&store)]);
+    let (change, objects) = change(&[record(&store)]);
+    let winner = store
+        .activate_selected(&original.token, change, objects)
+        .unwrap();
+    let root = store.generation(winner.token.store_generation());
+    let parent_path = root
+        .join("selection-history")
+        .join(winner.transaction.previous_sha256.as_ref().unwrap());
+    let parent_bytes = fs::read(&parent_path).unwrap();
+    fs::write(&parent_path, b"invalid historical JSON").unwrap();
+    let head_length = fs::metadata(root.join("selections").join(s.filename().unwrap()))
+        .unwrap()
+        .len();
+    for limits in [(1, u64::MAX), (u64::MAX, head_length)] {
+        let mut budget = SelectedReadBudget::new(1, limits.0, limits.1, u64::MAX);
+        let error = match store.selected_snapshot_with_budget(&s, MAX_ITEMS, &mut budget) {
+            Err(error) => error,
+            Ok(_) => panic!("budget should refuse before corrupt parent content"),
+        };
+        assert!(error.to_string().contains("budget exhausted"));
+        assert_eq!(budget.usage().metadata_bytes, head_length);
+        assert!(budget.exhausted());
+    }
+    let mut enough = SelectedReadBudget::new(1, 4096, MAX_METADATA as u64, MAX_MEDIA);
+    assert!(store
+        .selected_snapshot_with_budget(&s, MAX_ITEMS, &mut enough)
+        .is_err());
+    assert!(!enough.exhausted()); // Actual corruption was still validated/refused.
+    fs::write(&parent_path, parent_bytes).unwrap();
+    let mut repaired = SelectedReadBudget::new(1, 4096, MAX_METADATA as u64, MAX_MEDIA);
+    assert_eq!(
+        store
+            .selected_snapshot_with_budget(&s, MAX_ITEMS, &mut repaired)
+            .unwrap()
+            .unwrap()
+            .snapshot
+            .token,
+        winner.token
+    );
+    assert_eq!(repaired.usage().work_items, 5); // Two transactions + three record verifications.
+    let head_path = root.join("selections").join(s.filename().unwrap());
+    let head_bytes = fs::read(&head_path).unwrap();
+    fs::write(&head_path, b"invalid current JSON").unwrap();
+    let mut zero_metadata = SelectedReadBudget::new(1, 1, 0, 0);
+    let error = store
+        .selected_snapshot_with_budget(&s, MAX_ITEMS, &mut zero_metadata)
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("budget exhausted"));
+    assert_eq!(zero_metadata.usage().metadata_bytes, 0);
+    fs::write(head_path, head_bytes).unwrap();
+    assert_eq!(selected(&store, &s).token, winner.token);
+}
+
+#[test]
+fn budgeted_selected_reads_charge_every_media_verification_before_hashing() {
+    let f = Fixture::new();
+    let store = f.store();
+    let s = scope();
+    let bytes = b"bounded included media".to_vec();
+    let hash = digest(&bytes);
+    let mut envelope = record(&store);
+    envelope.media_descriptors.push(Media {
+        sha256: hash.clone(),
+        bytes: bytes.len() as u64,
+        media_type: "application/octet-stream".into(),
+    });
+    let (selected, objects) = closure(&[envelope], BTreeMap::from([(hash.clone(), bytes.clone())]));
+    let publication = store
+        .initialize_selected(
+            &s,
+            SelectionChange {
+                operation: Uuid::new_v4(),
+                accepted_base_sha256: digest(b"base"),
+                selected,
+                retained: vec![],
+            },
+            objects,
+        )
+        .unwrap();
+    let root = store.generation(publication.token.store_generation());
+    let media_path = root.join("objects").join(&hash);
+    let current = fs::read(store.paths.data.join("CURRENT")).unwrap();
+    fs::write(&media_path, vec![b'X'; bytes.len()]).unwrap();
+    let mut zero = SelectedReadBudget::new(1, 4096, MAX_METADATA as u64, 0);
+    let error = store
+        .selected_snapshot_with_budget(&s, MAX_ITEMS, &mut zero)
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("budget exhausted"));
+    assert_eq!(zero.usage().media_bytes, 0);
+    let mut generous = SelectedReadBudget::new(1, 4096, MAX_METADATA as u64, MAX_MEDIA);
+    assert!(store
+        .selected_snapshot_with_budget(&s, MAX_ITEMS, &mut generous)
+        .is_err());
+    assert!(!generous.exhausted());
+    fs::write(&media_path, &bytes).unwrap();
+    let total = 3 * bytes.len() as u64; // History, current record validation, returned handle.
+    let mut short = SelectedReadBudget::new(1, 4096, MAX_METADATA as u64, total - 1);
+    assert!(store
+        .selected_snapshot_with_budget(&s, MAX_ITEMS, &mut short)
+        .is_err());
+    assert_eq!(short.usage().media_bytes, 2 * bytes.len() as u64);
+    let mut exact = SelectedReadBudget::new(1, 4096, MAX_METADATA as u64, total);
+    let mut snapshot = store
+        .selected_snapshot_with_budget(&s, MAX_ITEMS, &mut exact)
+        .unwrap()
+        .unwrap();
+    assert_eq!(snapshot.snapshot.token, publication.token);
+    assert_eq!(exact.usage().media_bytes, total);
+    assert_eq!(exact.usage().work_items, 6);
+    assert_eq!(
+        snapshot
+            .snapshot
+            .media
+            .get_mut(&hash)
+            .unwrap()
+            .chunk(0, bytes.len())
+            .unwrap(),
+        bytes
+    );
+    assert_eq!(fs::read(store.paths.data.join("CURRENT")).unwrap(), current);
+}
+
+#[test]
+fn budgeted_selected_reads_return_already_verified_raw_lineage_without_extra_io() {
+    let f = Fixture::new();
+    let store = f.store();
+    let s = scope();
+    let first = initialize(&store, &s, &[record(&store)]);
+    let (change, objects) = change(&[record(&store)]);
+    let second = store
+        .activate_selected(&first.token, change, objects)
+        .unwrap();
+    let root = store.generation(second.token.store_generation());
+    let raw_parent = serde_json::to_vec_pretty(&first.transaction).unwrap();
+    let parent_hash = digest(&raw_parent);
+    files::object(
+        &root.join("selection-history").join(&parent_hash),
+        &parent_hash,
+        &raw_parent,
+    )
+    .unwrap();
+    let mut current = second.transaction;
+    current.previous_sha256 = Some(parent_hash.clone());
+    let raw_head = serde_json::to_vec_pretty(&current).unwrap();
+    let head_path = root.join("selections").join(s.filename().unwrap());
+    files::atomic(&head_path, &raw_head).unwrap();
+    let mut budget = SelectedReadBudget::new(1, 4096, MAX_METADATA as u64, MAX_MEDIA);
+    let read = store
+        .selected_snapshot_with_budget(&s, MAX_ITEMS, &mut budget)
+        .unwrap()
+        .unwrap();
+    let usage = budget.usage();
+    assert_eq!(read.snapshot.token, selected(&store, &s).token);
+    assert_eq!(read.accepted_history.len(), 2);
+    assert_eq!(read.accepted_history[0].sha256, digest(&raw_head));
+    assert_eq!(read.accepted_history[1].sha256, parent_hash);
+    assert_eq!(
+        read.accepted_history[1].transaction.operation,
+        first.transaction.operation
+    );
+    assert_eq!(
+        read.accepted_history[1].transaction.mutation,
+        SelectionMutation::Initialize
+    );
+    assert_ne!(
+        read.accepted_history[1].sha256,
+        digest(&serde_json::to_vec(&read.accepted_history[1].transaction).unwrap())
+    );
+    // Inspecting the already validated metadata does not read/hide more work.
+    assert_eq!(budget.usage(), usage);
+    assert_eq!(fs::read(head_path).unwrap(), raw_head);
+}
