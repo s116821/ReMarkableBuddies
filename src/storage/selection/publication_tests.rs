@@ -2,6 +2,8 @@ use super::*;
 use serde_json::json;
 use std::sync::{Arc, Barrier};
 
+#[path = "outbox_tests.rs"]
+mod outbox_tests;
 #[path = "portable_tests.rs"]
 mod portable_tests;
 

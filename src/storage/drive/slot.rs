@@ -30,6 +30,9 @@ pub struct SlotPointer {
     pub descriptor_sha256: String,
 }
 impl SlotPointer {
+    pub(crate) fn validate(&self) -> Result<()> {
+        self.properties().map(|_| ())
+    }
     fn properties(&self) -> Result<BTreeMap<String, String>> {
         self.binding.validate()?;
         id(&self.descriptor_id)?;
