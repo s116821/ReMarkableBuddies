@@ -35,11 +35,16 @@ pub struct Args {
     #[arg(long)]
     debug_dump: bool,
     /// One-shot local memory maintenance; no provider or tablet runtime
-    #[arg(long, value_enum, requires = "memory_input", conflicts_with_all = ["simulate", "api_key", "model", "base_url", "trigger_corner", "debug_dump", "log_level"])]
+    #[arg(long, value_enum, requires = "memory_input", conflicts_with_all = ["simulate", "api_key", "model", "base_url", "trigger_corner", "debug_dump", "log_level", "conversation_operation", "conversation_input"])]
     memory_operation: Option<remarkable_reader_buddy::memory::maintenance::Operation>,
     /// Bounded JSON input for an explicit memory operation
     #[arg(long, value_name = "FILE", requires = "memory_operation")]
     memory_input: Option<std::path::PathBuf>,
+    /// One-shot selected history inspection or original-request recovery
+    #[arg(long, value_enum, requires="conversation_input", conflicts_with_all=["simulate","api_key","model","base_url","trigger_corner","debug_dump","log_level","memory_operation","memory_input"])]
+    conversation_operation: Option<remarkable_reader_buddy::reader_runtime::Operation>,
+    #[arg(long, value_name = "FILE", requires = "conversation_operation")]
+    conversation_input: Option<std::path::PathBuf>,
 }
 
 fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_logger::Builder {
@@ -60,6 +65,19 @@ fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_lo
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    if let Some(operation) = args.conversation_operation {
+        let input = args
+            .conversation_input
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("conversation input absent"))?;
+        let mut report = remarkable_reader_buddy::reader_runtime::run(
+            operation,
+            input,
+            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+        );
+        report.write_to(&mut std::io::stdout().lock())?;
+        return Ok(());
+    }
     if let Some(operation) = args.memory_operation {
         let input = args
             .memory_input
@@ -80,6 +98,10 @@ fn main() -> Result<()> {
         return Ok(());
     }
     let config = Config::load(std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into))?;
+    if let Some(mut report) = remarkable_reader_buddy::reader_runtime::startup(&config) {
+        report.write_to(&mut std::io::stdout().lock())?;
+        return Ok(());
+    }
     let effective = config::resolve(
         &config,
         Overrides {
@@ -149,6 +171,8 @@ mod tests {
             [
                 "api-key",
                 "base-url",
+                "conversation-input",
+                "conversation-operation",
                 "debug-dump",
                 "log-level",
                 "memory-input",
@@ -163,6 +187,7 @@ mod tests {
         assert!(args.trigger_corner.is_none());
         assert!(!args.debug_dump);
         assert!(args.memory_operation.is_none() && args.memory_input.is_none());
+        assert!(args.conversation_operation.is_none() && args.conversation_input.is_none());
         for flag in [
             "--once",
             "--no-trigger",
