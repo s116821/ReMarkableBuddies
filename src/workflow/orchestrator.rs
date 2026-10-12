@@ -67,6 +67,7 @@ pub struct Orchestrator<M: LLMEngine = OpenAI> {
     llm: M,
     trigger_enabled: bool,
     ledger: Ledger,
+    memory: Option<std::sync::Arc<dyn crate::memory::Provider>>,
 }
 enum RenderOutcome {
     NoOutput(AttemptReason),
@@ -80,11 +81,20 @@ impl<M: LLMEngine> Orchestrator<M> {
             llm,
             trigger_enabled: true,
             ledger,
+            memory: None,
         }
     }
 
     pub fn set_trigger_enabled(&mut self, enabled: bool) {
         self.trigger_enabled = enabled;
+    }
+
+    /// Optional receiving context; never used for recognition or automatic learning.
+    pub fn set_subject_memory(
+        &mut self,
+        memory: Option<std::sync::Arc<dyn crate::memory::Provider>>,
+    ) {
+        self.memory = memory;
     }
 
     pub fn invalidate_history(&mut self) {
@@ -205,7 +215,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                 )?;
                 return Ok(());
             }
-            Some(result) => {
+            Some(mut result) => {
                 // Re-read the acknowledged stored batch; never query the device again.
                 let verification: Vec<String> = attempt
                     .images(&self.ledger)?
@@ -227,12 +237,35 @@ impl<M: LLMEngine> Orchestrator<M> {
                     )?;
                     return Ok(());
                 }
-                info!(
-                    "Got Q&A - Question: {} | Answer: {}",
-                    result.question, result.answer
-                );
-
                 attempt.interpret(&self.ledger, &result.question)?;
+                if self.memory.is_some() {
+                    if let Err(error) = self.enrich_answer(&mut result, &verification) {
+                        log::warn!("Subject memory answer was not completed");
+                        self.workflow.report_failure(Failure::Provider)?;
+                        attempt.outcome(
+                            &self.ledger,
+                            false,
+                            if self.workflow.input_failed() {
+                                Outcome::Canceled
+                            } else {
+                                Outcome::Failed
+                            },
+                            if self.workflow.input_failed() {
+                                AttemptReason::Canceled
+                            } else {
+                                AttemptReason::ProviderFailure
+                            },
+                        )?;
+                        return Err(error);
+                    }
+                    info!("Got verified Q&A with optional subject memory");
+                } else {
+                    info!(
+                        "Got Q&A - Question: {} | Answer: {}",
+                        result.question, result.answer
+                    );
+                }
+
                 attempt.generated(
                     &self.ledger,
                     Workflow::compose_qa(&result.question, &result.answer, result.selection_center),
@@ -437,6 +470,45 @@ impl<M: LLMEngine> Orchestrator<M> {
         info!("Independent question reading: {}", reading);
         Ok((!Self::transcriptions_agree(&result.question, &reading))
             .then_some(Failure::Transcription))
+    }
+
+    fn enrich_answer(&mut self, result: &mut AnalysisResult, images: &[String]) -> Result<()> {
+        use crate::memory::{context, Query, Status};
+        let Some(memory) = self.memory.as_ref() else {
+            return Ok(());
+        };
+        self.workflow.check_request_progress()?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_millis()
+            .try_into()?;
+        // No qualified document association is inferred from legacy image capture.
+        let query = Query::new(result.question.clone(), now);
+        let retrieved = memory
+            .query(&query)
+            .map_err(|_| anyhow::anyhow!("subject memory retrieval failed"))?;
+        self.workflow.check_request_progress()?;
+        info!(
+            "Subject memory retrieval: {:?} {:?}",
+            retrieved.status, retrieved.diagnostics
+        );
+        match retrieved.status {
+            Status::Disabled | Status::CompleteEmpty => return Ok(()),
+            Status::Unavailable => anyhow::bail!("subject memory retrieval unavailable"),
+            Status::Partial if retrieved.context.facts.is_empty() => {
+                anyhow::bail!("subject memory retrieval incomplete without usable facts")
+            }
+            _ => {}
+        }
+        let answer = context::answer(
+            &mut self.llm,
+            &result.question,
+            images,
+            &retrieved,
+            &mut || self.workflow.check_request_progress(),
+        )?;
+        result.answer = answer;
+        Ok(())
     }
 
     fn transcriptions_agree(question: &str, reading: &str) -> bool {
