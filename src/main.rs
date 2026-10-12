@@ -16,6 +16,9 @@ pub struct Args {
     /// Run a bounded local scenario (offline unless explicitly live)
     #[arg(long, value_name = "SCENARIO", conflicts_with_all = ["api_key", "model", "base_url", "trigger_corner", "debug_dump"])]
     simulate: Option<std::path::PathBuf>,
+    /// Report existing Buddy-owned file sizes without starting the Reader
+    #[arg(long, conflicts_with_all = ["simulate", "api_key", "model", "base_url", "trigger_corner", "debug_dump"])]
+    inspect_owned_data: bool,
     /// API key (prefer OPENAI_API_KEY to avoid shell history/process-list exposure)
     #[arg(long)]
     api_key: Option<String>,
@@ -53,8 +56,16 @@ fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_lo
 }
 
 fn main() -> Result<()> {
-    dotenv().ok();
     let args = Args::parse();
+    if args.inspect_owned_data {
+        let report = match Config::load(std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into)) {
+            Ok(config) => remarkable_reader_buddy::storage::inspection::inspect_owned_data(&config.paths),
+            Err(_) => remarkable_reader_buddy::storage::inspection::OwnedDataReport::configuration_unavailable(),
+        };
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+    dotenv().ok();
     if let Some(path) = args.simulate {
         logging(args.log_level, std::env::var("RUST_LOG").ok().as_deref()).init();
         remarkable_reader_buddy::simulator::run_file(&path)?;
@@ -125,6 +136,7 @@ mod tests {
                 "api-key",
                 "base-url",
                 "debug-dump",
+                "inspect-owned-data",
                 "log-level",
                 "model",
                 "simulate",
@@ -135,6 +147,7 @@ mod tests {
         assert!(args.model.is_none());
         assert!(args.trigger_corner.is_none());
         assert!(!args.debug_dump);
+        assert!(!args.inspect_owned_data);
         for flag in [
             "--once",
             "--no-trigger",
