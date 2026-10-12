@@ -171,6 +171,23 @@ pub enum StartupDecision {
     Ordinary(Option<Arc<Store>>),
     Report(Box<Report>),
 }
+fn fresh_auxiliary_roots(config: &Config) -> Result<()> {
+    for root in [&config.paths.cache, &config.paths.credentials] {
+        files::safe_path(root)?;
+        match std::fs::symlink_metadata(root) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+            Ok(metadata) => {
+                ensure!(metadata.is_dir(), "unsupported auxiliary root shape");
+                ensure!(
+                    std::fs::read_dir(root)?.next().is_none(),
+                    "nonempty auxiliary startup root"
+                );
+            }
+        }
+    }
+    Ok(())
+}
 impl StartupDecision {
     fn refused(status: Status) -> Self {
         Self::Report(Box::new(Report::new("startup", status)))
@@ -194,12 +211,21 @@ pub fn ordinary_store(
 ) -> std::result::Result<Arc<Store>, Box<Report>> {
     let store = match admitted {
         Some(store) => store,
-        None => Arc::new(Store::open(config.paths.clone()).map_err(|error| {
-            Box::new(Report::new(
-                "startup",
-                admission_status(crate::memory::maintenance::store_open_status(&error)),
-            ))
-        })?),
+        None => {
+            use crate::memory::maintenance::{preflight_state, StoreReadiness};
+            let state = preflight_state(config, true)
+                .map_err(|status| Box::new(Report::new("startup", admission_status(status))))?;
+            if matches!(state, StoreReadiness::Fresh) {
+                fresh_auxiliary_roots(config)
+                    .map_err(|_| Box::new(Report::new("startup", Status::Unavailable)))?;
+            }
+            Arc::new(Store::open(config.paths.clone()).map_err(|error| {
+                Box::new(Report::new(
+                    "startup",
+                    admission_status(crate::memory::maintenance::store_open_status(&error)),
+                ))
+            })?)
+        }
     };
     ordinary_mode(&store, config).map_err(|status| Box::new(Report::new("startup", status)))?;
     Ok(store)
@@ -236,7 +262,13 @@ pub fn startup(config: &Config) -> StartupDecision {
     if config.reader.selection.is_none() {
         use crate::memory::maintenance::{preflight_state, StoreReadiness};
         match preflight_state(config, true) {
-            Ok(StoreReadiness::Fresh) => return StartupDecision::Ordinary(None),
+            Ok(StoreReadiness::Fresh) => {
+                return if fresh_auxiliary_roots(config).is_ok() {
+                    StartupDecision::Ordinary(None)
+                } else {
+                    StartupDecision::refused(Status::Unavailable)
+                };
+            }
             Ok(StoreReadiness::Existing) => {}
             Err(status) => return StartupDecision::refused(admission_status(status)),
         }
@@ -642,6 +674,41 @@ mod tests {
         drop(reused);
         drop(saved);
         drop(fixture);
+    }
+    #[test]
+    fn deferred_fresh_creation_accepts_empty_auxiliary_roots_and_rechecks_changed_state() {
+        for foreign_after_admission in [false, true] {
+            let fresh = Fixture(
+                std::env::temp_dir().join(format!("reader-deferred-aux-{}", Uuid::new_v4())),
+            );
+            let config = Config {
+                paths: StorePaths {
+                    data: fresh.0.join("data"),
+                    cache: fresh.0.join("cache"),
+                    credentials: fresh.0.join("credentials"),
+                },
+                ..Config::default()
+            };
+            std::fs::create_dir_all(&config.paths.cache).unwrap();
+            std::fs::create_dir_all(&config.paths.credentials).unwrap();
+            let StartupDecision::Ordinary(admitted) = startup(&config) else {
+                panic!("safe empty auxiliaries")
+            };
+            assert!(admitted.is_none() && !config.paths.data.exists());
+            if foreign_after_admission {
+                std::fs::write(
+                    config.paths.credentials.join("owner.json"),
+                    b"foreign-owner-after-admission",
+                )
+                .unwrap();
+                assert!(ordinary_store(&config, admitted).is_err());
+                assert!(!config.paths.data.exists());
+            } else {
+                let store = ordinary_store(&config, admitted).ok().unwrap();
+                assert_eq!(store.paths.data, config.paths.data);
+                assert!(store.sync_mode_snapshot().unwrap().mode.is_none());
+            }
+        }
     }
     #[test]
     fn typed_startup_availability_keeps_request_guards_separate() {

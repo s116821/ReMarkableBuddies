@@ -329,6 +329,74 @@ fn local_only_contradictory_publisher_and_busy_mode_keep_pure_input_precedence()
 }
 
 #[test]
+fn fresh_default_rejects_foreign_auxiliary_state_before_credentials_without_data_creation() {
+    for empty_data in [false, true] {
+        for case in 0..6 {
+            let fixture = Fixture {
+                root: std::env::temp_dir().join(format!("reader-fresh-aux-{}", Uuid::new_v4())),
+                conversation: Uuid::new_v4(),
+                scope: SelectionScope {
+                    group: Uuid::new_v4(),
+                    key_sha256: storage::digest(b"unused selector"),
+                    binding_sha256: storage::digest(b"unused binding"),
+                },
+            };
+            fs::create_dir_all(&fixture.root).unwrap();
+            if empty_data {
+                fs::create_dir_all(fixture.paths().data).unwrap();
+            }
+            fs::write(
+                fixture.root.join("config.json"),
+                serde_json::to_vec(&json!({"paths": fixture.paths()})).unwrap(),
+            )
+            .unwrap();
+            let auxiliary = if case < 3 {
+                fixture.paths().cache
+            } else {
+                fixture.paths().credentials
+            };
+            let evidence = match case % 3 {
+                0 => {
+                    fs::write(&auxiliary, b"foreign-private-file").unwrap();
+                    auxiliary.clone()
+                }
+                1 => {
+                    fs::create_dir_all(&auxiliary).unwrap();
+                    let path = auxiliary.join("foreign");
+                    fs::write(&path, b"foreign-private-content").unwrap();
+                    path
+                }
+                _ => {
+                    fs::create_dir_all(&auxiliary).unwrap();
+                    let path = auxiliary.join("owner.json");
+                    fs::write(&path, b"old-private-owner").unwrap();
+                    path
+                }
+            };
+            let before = fs::read(&evidence).unwrap();
+            let output = fixture
+                .command()
+                .env("OPENAI_API_KEY", "")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success() && output.stderr.is_empty(),
+                "case {case}, empty {empty_data}"
+            );
+            let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(report["status"], "unavailable");
+            assert!(report["data"].is_null());
+            if empty_data {
+                assert!(fs::read_dir(fixture.paths().data).unwrap().next().is_none());
+            } else {
+                assert!(!fixture.paths().data.exists());
+            }
+            assert_eq!(fs::read(evidence).unwrap(), before);
+        }
+    }
+}
+
+#[test]
 fn actual_startup_refuses_storage_valid_invalid_conversation_metadata() {
     for invalid_schema in [true, false] {
         let fixture = Fixture::new();
