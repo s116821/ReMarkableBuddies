@@ -1,5 +1,6 @@
 //! Explicit associative facts over the existing Store. No automatic extraction or sync engine.
 pub mod context;
+pub mod maintenance;
 
 use crate::storage::{Envelope, Kind, Namespace, Store, Uuid, MAX_ITEMS};
 use anyhow::{ensure, Result};
@@ -159,19 +160,22 @@ impl Fact {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Mutation {
     pub operation: Uuid,
     pub expected: BTreeSet<Uuid>,
     pub fact: Fact,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Forget {
     pub operation: Uuid,
     pub expected: BTreeSet<Uuid>,
     pub key: Key,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Query {
     pub document: Option<Uuid>,
     pub text: String,
