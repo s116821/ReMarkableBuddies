@@ -91,6 +91,7 @@ pub enum UnresolvedReason {
     LogicalClaim,
     RecognitionUncertain,
     NavigationGuard,
+    ContinuityGuard,
 }
 
 #[derive(Clone, Debug)]
@@ -110,10 +111,17 @@ impl InspectionPlan {
 
 /// Historical placement only. No target allocation or creation-request conversion.
 #[derive(Clone, Debug)]
+enum PlacementContinuity {
+    UninspectedEnd,
+    InspectedSuccessor(PageObservation),
+}
+
+#[derive(Clone, Debug)]
 pub struct PlacementPlan {
     original: PageObservation,
     conversation: Uuid,
     neighbor: Option<PageKey>,
+    continuity: PlacementContinuity,
 }
 impl PlacementPlan {
     pub fn original_source(&self) -> PageKey {
@@ -284,6 +292,7 @@ pub fn begin_current(
             original: original.clone(),
             conversation,
             neighbor: None,
+            continuity: PlacementContinuity::UninspectedEnd,
         }),
     }
 }
@@ -325,6 +334,82 @@ pub fn complete_successor(
         original: anchor.original.clone(),
         conversation: anchor.conversation,
         neighbor: Some(anchor.neighbor),
+        continuity: PlacementContinuity::InspectedSuccessor(observed.clone()),
+    })
+}
+
+/// Point-in-time SDK model continuity only: no logical/recognition refresh or
+/// collection-freshness oracle, native qualification, or effect permission.
+#[derive(Clone, Debug)]
+pub struct SyntheticSourceContinuity {
+    placement: PlacementPlan,
+    source: PageObservation,
+}
+impl SyntheticSourceContinuity {
+    pub fn historical_placement(&self) -> &PlacementPlan {
+        &self.placement
+    }
+    pub fn matched_source(&self) -> &PageObservation {
+        &self.source
+    }
+    pub fn conversation(&self) -> Uuid {
+        self.placement.conversation
+    }
+}
+
+/// Match supplied SDK evidence without dispatching a return or refreshing any
+/// association/recognition predicate. An older clone may also compare equal;
+/// future effectful consumers still need separate current logical/native guards.
+pub fn match_source_continuity(
+    plan: &PlacementPlan,
+    supplied_source: &PageObservation,
+    return_receipt: Option<&NavigationReceipt>,
+) -> Result<SyntheticSourceContinuity, UnresolvedReason> {
+    if !synthetic(&plan.original)
+        || !synthetic(supplied_source)
+        || !valid_order(&plan.original)
+        || !valid_order(supplied_source)
+    {
+        return Err(UnresolvedReason::ContinuityGuard);
+    }
+    let matches = match (&plan.continuity, plan.neighbor, return_receipt) {
+        (PlacementContinuity::UninspectedEnd, None, None) => {
+            supplied_source == &plan.original
+                && plan.original.order().last() == Some(&plan.original.page().page)
+        }
+        (PlacementContinuity::InspectedSuccessor(successor), Some(neighbor), Some(receipt)) => {
+            let request = receipt.request();
+            let observed = receipt.observed();
+            let adjacent = plan
+                .original
+                .order()
+                .iter()
+                .position(|page| *page == plan.original.page().page)
+                .and_then(|index| plan.original.order().get(index + 1))
+                .copied()
+                == Some(neighbor.page);
+            synthetic(successor)
+                && synthetic(request.source())
+                && synthetic(observed)
+                && successor.page() == neighbor
+                && neighbor.document == plan.original.page().document
+                && successor.order() == plan.original.order()
+                && adjacent
+                && request.source() == successor
+                && request.direction() == LogicalDirection::Previous
+                && request.target() == plan.original.page()
+                && observed.page() == plan.original.page()
+                && observed.order() == plan.original.order()
+                && supplied_source == observed
+        }
+        _ => false,
+    };
+    if !matches {
+        return Err(UnresolvedReason::ContinuityGuard);
+    }
+    Ok(SyntheticSourceContinuity {
+        placement: plan.clone(),
+        source: supplied_source.clone(),
     })
 }
 
@@ -804,5 +889,241 @@ mod tests {
             begin_current(&original, &back, id(8), &lookup, None),
             SyntheticDecision::Unresolved(UnresolvedReason::ObservationGuard)
         ));
+    }
+
+    fn placement_after_inspection(p: &mut MockPlatform) -> (PlacementPlan, PageObservation) {
+        let original = p.observe_page().unwrap();
+        let plan = anchor(&original);
+        let next = navigate(p, &original, LogicalDirection::Next, plan.neighbor(), 20);
+        let successor = p.observe_page().unwrap();
+        let SyntheticDecision::InsertionPlan(placement) = complete_successor(
+            &plan,
+            &next,
+            &successor,
+            &Lookup::new(AssociationState::Missing),
+            Some(&recognition(&successor, Recognition::ConfirmedNonBuddy)),
+        ) else {
+            panic!("historical placement")
+        };
+        (placement, successor)
+    }
+
+    #[test]
+    fn supported_return_matches_changed_visit_without_policy_effects() {
+        let mut p = platform();
+        let (plan, successor) = placement_after_inspection(&mut p);
+        let previous = navigate(
+            &mut p,
+            &successor,
+            LogicalDirection::Previous,
+            plan.original_source(),
+            21,
+        );
+        let supplied = p.observe_page().unwrap();
+        assert_ne!(supplied, plan.original);
+        let gestures = p.gesture_count();
+        let result = match_source_continuity(&plan, &supplied, Some(&previous)).unwrap();
+        assert_eq!(result.matched_source(), &supplied);
+        assert_eq!(result.conversation(), id(8));
+        assert_eq!(
+            result.historical_placement().original_source(),
+            plan.original_source()
+        );
+        assert_eq!(
+            result.historical_placement().before_neighbor(),
+            Some(successor.page())
+        );
+        assert_eq!(
+            result.historical_placement().expected_order(),
+            plan.expected_order()
+        );
+        assert_eq!(p.observe_page().unwrap(), supplied);
+        assert_eq!(p.gesture_count(), gestures);
+        assert_eq!(p.pages(), &[id(3), id(4)]);
+        assert!(match_source_continuity(&plan, &plan.original, Some(&previous)).is_err());
+        assert!(match_source_continuity(&plan, &supplied, None).is_err());
+    }
+
+    #[test]
+    fn end_requires_no_receipt_and_exact_unchanged_original() {
+        let p = MockPlatform::new(id(1), id(2), vec![id(3)], id(3));
+        let original = p.observe_page().unwrap();
+        let SyntheticDecision::InsertionPlan(plan) = begin_current(
+            &original,
+            &original,
+            id(8),
+            &Lookup::new(AssociationState::Missing),
+            Some(&recognition(&original, Recognition::OrdinarySource)),
+        ) else {
+            panic!("end plan")
+        };
+        let supplied = p.observe_page().unwrap();
+        assert_eq!(
+            match_source_continuity(&plan, &supplied, None)
+                .unwrap()
+                .matched_source(),
+            &supplied
+        );
+        let mut other = platform();
+        let start = other.observe_page().unwrap();
+        let receipt = navigate(
+            &mut other,
+            &start,
+            LogicalDirection::Next,
+            anchor(&start).neighbor(),
+            20,
+        );
+        assert!(match_source_continuity(&plan, &supplied, Some(&receipt)).is_err());
+        assert!(match_source_continuity(&plan, &start, None).is_err());
+        assert_eq!(p.gesture_count(), 0);
+    }
+
+    #[test]
+    fn foreign_wrong_direction_target_and_replaced_plan_context_refuse_return() {
+        let mut p = MockPlatform::new(id(1), id(2), vec![id(3), id(4), id(5)], id(3));
+        let (plan, successor) = placement_after_inspection(&mut p);
+        let wrong = navigate(
+            &mut p,
+            &successor,
+            LogicalDirection::Next,
+            PageKey {
+                document: id(2),
+                page: id(5),
+            },
+            21,
+        );
+        let supplied = p.observe_page().unwrap();
+        assert!(match_source_continuity(&plan, &supplied, Some(&wrong)).is_err());
+        let mut foreign = platform();
+        let (other_plan, other_successor) = placement_after_inspection(&mut foreign);
+        let previous = navigate(
+            &mut foreign,
+            &other_successor,
+            LogicalDirection::Previous,
+            other_plan.original_source(),
+            21,
+        );
+        let fresh = foreign.observe_page().unwrap();
+        assert!(match_source_continuity(&plan, &fresh, Some(&previous)).is_err());
+        // Private invariant corruption controls only; public callers have no setters.
+        let mut changed = other_plan.clone();
+        changed.neighbor = Some(PageKey {
+            document: id(2),
+            page: id(5),
+        });
+        assert!(match_source_continuity(&changed, &fresh, Some(&previous)).is_err());
+        changed = other_plan.clone();
+        changed.continuity = PlacementContinuity::UninspectedEnd;
+        assert!(match_source_continuity(&changed, &fresh, Some(&previous)).is_err());
+    }
+
+    #[test]
+    fn no_movement_and_uncertain_return_do_not_match() {
+        let mut p = platform();
+        let (plan, successor) = placement_after_inspection(&mut p);
+        p.inject_navigation_fault(NavigationFault::NoMovement);
+        let request = NavigationRequest::new(
+            OperationId(id(21)),
+            successor,
+            LogicalDirection::Previous,
+            plan.original_source(),
+        )
+        .unwrap();
+        let NavigationOutcome::SyntheticUnchanged(receipt) = p.navigate(&request, false) else {
+            panic!("SDK no movement")
+        };
+        let supplied = p.observe_page().unwrap();
+        assert!(match_source_continuity(&plan, &supplied, Some(&receipt)).is_err());
+        for fault in [
+            NavigationFault::Deadline,
+            NavigationFault::UnreadyPixels,
+            NavigationFault::BeforeDispatchInput,
+            NavigationFault::BeforeDispatchSession,
+            NavigationFault::BeforeDispatchVisit,
+            NavigationFault::BeforeDispatchOrder,
+        ] {
+            let mut p = platform();
+            let (plan, successor) = placement_after_inspection(&mut p);
+            p.inject_navigation_fault(fault);
+            let request = NavigationRequest::new(
+                OperationId(id(21)),
+                successor,
+                LogicalDirection::Previous,
+                plan.original_source(),
+            )
+            .unwrap();
+            assert!(!matches!(
+                p.navigate(&request, false),
+                NavigationOutcome::SyntheticVerified(_)
+            ));
+            assert!(match_source_continuity(&plan, &p.observe_page().unwrap(), None).is_err());
+        }
+    }
+
+    #[test]
+    fn after_return_opaque_drift_refuses_even_when_page_ids_match() {
+        for fault in [
+            NavigationFault::BeforeDispatchInput,
+            NavigationFault::BeforeDispatchSession,
+            NavigationFault::BeforeDispatchVisit,
+            NavigationFault::BeforeDispatchOrder,
+        ] {
+            let mut p = platform();
+            let (plan, successor) = placement_after_inspection(&mut p);
+            let previous = navigate(
+                &mut p,
+                &successor,
+                LogicalDirection::Previous,
+                plan.original_source(),
+                21,
+            );
+            let returned = p.observe_page().unwrap();
+            p.inject_navigation_fault(fault);
+            let request = NavigationRequest::new(
+                OperationId(id(22)),
+                returned,
+                LogicalDirection::Next,
+                successor.page(),
+            )
+            .unwrap();
+            let _ = p.navigate(&request, false);
+            let changed = p.observe_page().unwrap();
+            assert_eq!(changed.page(), plan.original_source());
+            assert!(match_source_continuity(&plan, &changed, Some(&previous)).is_err());
+        }
+    }
+
+    #[test]
+    fn matching_sdk_continuity_cannot_refresh_changed_logical_projection() {
+        let mut p = platform();
+        let (plan, successor) = placement_after_inspection(&mut p);
+        let previous = navigate(
+            &mut p,
+            &successor,
+            LogicalDirection::Previous,
+            plan.original_source(),
+            21,
+        );
+        let supplied = p.observe_page().unwrap();
+        let changed = Lookup::new(AssociationState::Conflicted);
+        let gestures = p.gesture_count();
+        let continuity = match_source_continuity(&plan, &supplied, Some(&previous)).unwrap();
+        assert!(changed.calls.borrow().is_empty());
+        assert!(matches!(
+            begin_current(
+                continuity.matched_source(),
+                continuity.matched_source(),
+                continuity.conversation(),
+                &changed,
+                Some(&recognition(
+                    continuity.matched_source(),
+                    Recognition::OrdinarySource
+                )),
+            ),
+            SyntheticDecision::Unresolved(UnresolvedReason::LogicalClaim)
+        ));
+        assert_eq!(p.observe_page().unwrap(), supplied);
+        assert_eq!(p.gesture_count(), gestures);
+        assert_eq!(p.pages(), &[id(3), id(4)]);
     }
 }
