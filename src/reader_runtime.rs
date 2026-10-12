@@ -179,14 +179,30 @@ pub fn startup(config: &Config) -> Option<Report> {
         Err(_) => return Some(report),
     };
     let mut budget = allowance();
-    match store.selected_snapshot_with_budget(scope, MAX_ITEMS, &mut budget) {
-        Ok(Some(_)) => {}
-        _ => return Some(report),
+    let validated = SelectedAdmission::with_gates(&[admission.as_ref()], |store| {
+        ensure!(
+            store.unavailable_commits()? == 0,
+            "reader store unavailable"
+        );
+        let read = store
+            .selected_snapshot_with_budget(scope, MAX_ITEMS, &mut budget)?
+            .context("reader selection absent")?;
+        let projection = SelectedDomainProjection::from_snapshot(&read.snapshot)?;
+        for conversation in projection.document_ownership()?.keys() {
+            projection.inspect(*conversation)?;
+        }
+        Ok(())
+    });
+    if validated.is_err() {
+        return Some(report);
     }
-    let mut workflow = Workflow::selected_runtime(admission, config.debug_dump.unwrap_or(false));
-    // Exercise the actual acquisition boundary: selected refusing transport has
-    // Unsupported kind and cannot open devices, silently acquire legacy, or render.
-    if workflow.acquire_reader_evidence().is_ok() {
+    let workflow = Workflow::selected_runtime(admission, config.debug_dump.unwrap_or(false));
+    // Startup has no active request. Query availability without pretending to
+    // acquire evidence or treating a request-guard failure as unsupported capture.
+    if !matches!(
+        workflow.reader_acquisition_kind(),
+        crate::device::backend::AcquisitionKind::Unsupported
+    ) {
         return Some(report);
     }
     use remarkable_open_sdk::{ObservationFailure, Platform, UnsupportedReason};
@@ -471,6 +487,23 @@ mod tests {
                 assert!(output["data"].is_null());
             }
         }
+    }
+    #[test]
+    fn typed_startup_availability_keeps_request_guards_separate() {
+        let (_fixture, store, scope, _) = selected();
+        let admission = Arc::new(SelectedAdmission::new(store, scope).unwrap());
+        let mut workflow = Workflow::selected_runtime(admission, false);
+        assert!(matches!(
+            workflow.reader_acquisition_kind(),
+            crate::device::backend::AcquisitionKind::Unsupported
+        ));
+        // No active request exists. Acquisition must continue to refuse at its
+        // request guard; startup availability is not evidence or permission.
+        let error = workflow.acquire_reader_evidence().err().unwrap();
+        assert_eq!(
+            error.to_string(),
+            "Selected operation requires context dispatch"
+        );
     }
     #[test]
     fn default_config_skips_selected_startup_and_whole_report_bound_is_fixed() {
