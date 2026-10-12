@@ -207,13 +207,12 @@ pub fn startup(config: &Config) -> Option<Report> {
     }
     use remarkable_open_sdk::{ObservationFailure, Platform, UnsupportedReason};
     let platform = remarkable_open_sdk::UnqualifiedPlatform;
-    match platform.observe_page() {
-        Err(ObservationFailure::Unsupported(UnsupportedReason::NoNativeAdapter)) => {
-            report.status = Status::Unsupported;
-            report.incomplete = false;
-            report.data = Some(serde_json::json!({"reason":"no-native-adapter"}));
-        }
-        _ => {}
+    if let Err(ObservationFailure::Unsupported(UnsupportedReason::NoNativeAdapter)) =
+        platform.observe_page()
+    {
+        report.status = Status::Unsupported;
+        report.incomplete = false;
+        report.data = Some(serde_json::json!({"reason":"no-native-adapter"}));
     }
     Some(report)
 }
@@ -251,7 +250,7 @@ struct RecoverInput {
 enum Input {
     Inspect(Uuid),
     Context(Uuid),
-    Recover(PendingIntentRequest),
+    Recover(Box<PendingIntentRequest>),
 }
 fn input(operation: Operation, path: &Path, scope: &SelectionScope) -> Result<Input> {
     match operation {
@@ -284,7 +283,7 @@ fn input(operation: Operation, path: &Path, scope: &SelectionScope) -> Result<In
                     && r.selection.binding_sha256 == scope.binding_sha256,
                 "foreign recovery scope"
             );
-            Ok(Input::Recover(i.request))
+            Ok(Input::Recover(Box::new(i.request)))
         }
     }
 }
