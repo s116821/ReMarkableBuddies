@@ -1,5 +1,5 @@
 //! One-shot, bounded local maintenance. No provider, sync worker or device initialization.
-use super::{Forget, Key, LocalMemory, Mutation, Provider, Query, Status};
+use super::{Forget, Key, Mutation, Query, Status};
 use crate::{
     config::Config,
     storage::{self, files, Store, Uuid, MAX_ITEMS, MAX_METADATA, MAX_RECORD},
@@ -20,6 +20,9 @@ pub enum Operation {
     Query,
     Put,
     Forget,
+    InitializeAggregate,
+    InitializeSelection,
+    RegisterSelection,
 }
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -70,14 +73,31 @@ enum Input {
     Query(Query),
     Put(Mutation),
     Forget(Forget),
+    InitializeAggregate(super::selected::InitializeAggregate),
+    InitializeSelection(super::selected::InitializeSelection),
+    RegisterSelection(super::selected::RegisterSelection),
 }
 impl Input {
-    fn read(operation: Operation, path: &Path, profile: Uuid) -> anyhow::Result<Self> {
+    fn read(
+        operation: Operation,
+        path: &Path,
+        profile: Uuid,
+        selection: Option<&super::catalog::Identity>,
+    ) -> anyhow::Result<Self> {
         let input = match operation {
             Operation::Inspect => Self::Inspect(files::json(path, MAX_RECORD as u64)?),
             Operation::Query => Self::Query(files::json(path, MAX_RECORD as u64)?),
             Operation::Put => Self::Put(files::json(path, MAX_RECORD as u64)?),
             Operation::Forget => Self::Forget(files::json(path, MAX_RECORD as u64)?),
+            Operation::InitializeAggregate => {
+                Self::InitializeAggregate(files::json(path, MAX_RECORD as u64)?)
+            }
+            Operation::InitializeSelection => {
+                Self::InitializeSelection(files::json(path, MAX_RECORD as u64)?)
+            }
+            Operation::RegisterSelection => {
+                Self::RegisterSelection(files::json(path, MAX_RECORD as u64)?)
+            }
         };
         match &input {
             Self::Inspect(key) => {
@@ -99,6 +119,15 @@ impl Input {
                     "forget requires explicit heads"
                 );
             }
+            Self::InitializeAggregate(input) => input.validate(
+                selection.ok_or_else(|| anyhow::anyhow!("selected configuration absent"))?,
+            )?,
+            Self::InitializeSelection(input) => input.validate(
+                selection.ok_or_else(|| anyhow::anyhow!("selected configuration absent"))?,
+            )?,
+            Self::RegisterSelection(input) => input.validate(
+                selection.ok_or_else(|| anyhow::anyhow!("selected configuration absent"))?,
+            )?,
         }
         Ok(input)
     }
@@ -210,20 +239,47 @@ pub fn run(operation: Operation, input_path: &Path, config_path: Option<PathBuf>
     let Some(profile) = config.memory.profile else {
         return Report::new(operation, ReportStatus::Unavailable);
     };
-    let input = match Input::read(operation, input_path, profile) {
+    let setup = matches!(
+        operation,
+        Operation::InitializeAggregate
+            | Operation::InitializeSelection
+            | Operation::RegisterSelection
+    );
+    if setup && config.memory.selection.is_none() {
+        return Report::new(operation, ReportStatus::Unsupported);
+    }
+    let input = match Input::read(
+        operation,
+        input_path,
+        profile,
+        config.memory.selection.as_ref(),
+    ) {
         Ok(input) => input,
         Err(_) => return Report::new(operation, ReportStatus::InvalidInput),
     };
-    let allow_initialization =
-        matches!(&input, Input::Put(mutation) if mutation.expected.is_empty());
+    let allow_initialization = matches!(
+        &input,
+        Input::InitializeAggregate(_) | Input::InitializeSelection(_)
+    ) || (config.memory.selection.is_none()
+        && matches!(&input, Input::Put(mutation) if mutation.expected.is_empty()));
     if let Err(status) = preflight(&config, allow_initialization) {
         return Report::new(operation, status);
     }
-    let store = match Store::open(config.paths) {
+    let store = match Store::open(config.paths.clone()) {
         Ok(store) => Arc::new(store),
         Err(error) => return Report::new(operation, store_open_status(&error)),
     };
-    let memory = match LocalMemory::new_local(store, profile) {
+    let selected = config
+        .memory
+        .selection
+        .as_ref()
+        .map(|identity| super::selected::SelectedMemory::new(store.clone(), identity.clone()))
+        .transpose();
+    let selected = match selected {
+        Ok(selected) => selected,
+        Err(_) => return Report::new(operation, ReportStatus::Unsupported),
+    };
+    let memory = match super::configured(store, &config.memory) {
         Ok(memory) => memory,
         Err(_) => return Report::new(operation, ReportStatus::Unsupported),
     };
@@ -237,6 +293,12 @@ pub fn run(operation: Operation, input_path: &Path, config_path: Option<PathBuf>
         }),
         Input::Put(mutation) => memory.put(mutation).map(|receipt| serde_json::json!({"transaction":receipt})),
         Input::Forget(mutation) => memory.forget(mutation).map(|receipt| serde_json::json!({"transaction":receipt})),
+        Input::InitializeAggregate(input) => selected.as_ref().ok_or_else(|| anyhow::anyhow!("selection absent"))
+            .and_then(|memory| memory.initialize_aggregate(input)).and_then(|receipt| Ok(serde_json::to_value(receipt)?)),
+        Input::InitializeSelection(input) => selected.as_ref().ok_or_else(|| anyhow::anyhow!("selection absent"))
+            .and_then(|memory| memory.initialize_selection(input)).and_then(|receipt| Ok(serde_json::to_value(receipt)?)),
+        Input::RegisterSelection(input) => selected.as_ref().ok_or_else(|| anyhow::anyhow!("selection absent"))
+            .and_then(|memory| memory.register_selection(input)).and_then(|receipt| Ok(serde_json::to_value(receipt)?)),
     };
     match result {
         Ok(data) => {

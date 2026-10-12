@@ -10,8 +10,7 @@ use crate::llm::{openai::OpenAI, LLMEngine};
 use base64::{engine::general_purpose::STANDARD, Engine};
 
 /// Shared by the live workflow and bounded vision-comparison helper.
-pub const ANALYSIS_PROMPT: &str =
-    "Read the handwritten question annotation on this tablet page and answer it from \
+pub const ANALYSIS_PROMPT: &str = "Read the handwritten question annotation on this tablet page and answer it from \
              the technical concept selected by a hand-drawn closed outline or a deliberate \
              highlighted passage. A highlight can select content without any surrounding \
              outline and may appear gray on a grayscale tablet. Handwriting may be neat \
@@ -223,7 +222,9 @@ impl<M: LLMEngine> Orchestrator<M> {
                     .map(|bytes| STANDARD.encode(bytes))
                     .collect();
                 if let Some(failure) = self.verify_question(&result, &verification)? {
-                    info!("Independent question reading disagreed or was uncertain; no answer written");
+                    info!(
+                        "Independent question reading disagreed or was uncertain; no answer written"
+                    );
                     self.workflow.report_failure(failure)?;
                     attempt.outcome(
                         &self.ledger,
@@ -238,8 +239,10 @@ impl<M: LLMEngine> Orchestrator<M> {
                     return Ok(());
                 }
                 attempt.interpret(&self.ledger, &result.question)?;
+                let mut memory_view = None;
                 if self.memory.is_some() {
-                    if let Err(error) = self.enrich_answer(&mut result, &verification) {
+                    let enriched = self.enrich_answer(&mut result, &verification);
+                    if let Err(error) = enriched {
                         log::warn!("Subject memory answer was not completed");
                         self.workflow.report_failure(Failure::Provider)?;
                         attempt.outcome(
@@ -258,6 +261,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                         )?;
                         return Err(error);
                     }
+                    memory_view = Some(enriched?);
                     info!("Got verified Q&A with optional subject memory");
                 } else {
                     info!(
@@ -266,63 +270,101 @@ impl<M: LLMEngine> Orchestrator<M> {
                     );
                 }
 
-                attempt.generated(
-                    &self.ledger,
-                    Workflow::compose_qa(&result.question, &result.answer, result.selection_center),
-                )?;
-                if !attempt.legacy_output {
-                    attempt.outcome(
-                        &self.ledger,
-                        true,
-                        Outcome::Failed,
-                        AttemptReason::NativeOutputUnavailable,
-                    )?;
-                    return Ok(());
-                }
-                // Persist uncertainty before the first navigation/output effect.
-                attempt.outcome(
-                    &self.ledger,
-                    true,
-                    Outcome::ReconcileRequired,
-                    AttemptReason::OutputPending,
-                )?;
-                let rendered = self.render_answer(&result);
-                let recorded = match &rendered {
-                    Ok(RenderOutcome::NoOutput(reason)) => {
-                        attempt.outcome(&self.ledger, true, Outcome::Failed, reason.clone())
+                let memory = self.memory.clone();
+                if let (Some(memory), Some(view)) = (memory, memory_view.as_ref()) {
+                    let published = memory.with_current(view, &mut || {
+                        self.publish_answer(attempt, &result, !view.selected())
+                    });
+                    if let Err(error) = published {
+                        if attempt.assistant.is_none() {
+                            let canceled = self.workflow.input_failed();
+                            attempt.outcome(
+                                &self.ledger,
+                                false,
+                                if canceled {
+                                    Outcome::Canceled
+                                } else {
+                                    Outcome::Failed
+                                },
+                                if canceled {
+                                    AttemptReason::Canceled
+                                } else {
+                                    AttemptReason::ProviderFailure
+                                },
+                            )?;
+                        }
+                        return Err(error);
                     }
-                    Ok(RenderOutcome::SubmittedUnverified) => attempt.outcome(
-                        &self.ledger,
-                        true,
-                        Outcome::ReconcileRequired,
-                        AttemptReason::SubmittedUnverified,
-                    ),
-                    Err(_) => attempt.outcome(
-                        &self.ledger,
-                        true,
-                        Outcome::ReconcileRequired,
-                        AttemptReason::DeviceUncertain,
-                    ),
-                };
-                if let Err(recording) = recorded {
-                    return Err(anyhow::anyhow!(
-                        "output result {:?}; terminal recording failed: {recording:#}",
-                        rendered.as_ref().err()
-                    ));
-                }
-                if let Err(e) = rendered {
-                    error!("Error rendering answer: {}", e);
-                    if self.workflow.input_failed() {
-                        return Err(e);
-                    }
-                    // On error, retain the typed diagnostic without source feedback
-                    self.workflow.report_failure(Failure::Device)?;
-                    return Err(e);
+                } else {
+                    self.publish_answer(attempt, &result, true)?;
                 }
             }
         }
 
         info!("=== Iteration Complete ===");
+        Ok(())
+    }
+
+    fn publish_answer(
+        &mut self,
+        attempt: &mut Attempt,
+        result: &AnalysisResult,
+        allow_native: bool,
+    ) -> Result<()> {
+        self.workflow.check_request_progress()?;
+        attempt.generated(
+            &self.ledger,
+            Workflow::compose_qa(&result.question, &result.answer, result.selection_center),
+        )?;
+        if !attempt.legacy_output || !allow_native {
+            attempt.outcome(
+                &self.ledger,
+                true,
+                Outcome::Failed,
+                AttemptReason::NativeOutputUnavailable,
+            )?;
+            return Ok(());
+        }
+        // Persist uncertainty before the first navigation/output effect.
+        attempt.outcome(
+            &self.ledger,
+            true,
+            Outcome::ReconcileRequired,
+            AttemptReason::OutputPending,
+        )?;
+        let rendered = self.render_answer(result);
+        let recorded = match &rendered {
+            Ok(RenderOutcome::NoOutput(reason)) => {
+                attempt.outcome(&self.ledger, true, Outcome::Failed, reason.clone())
+            }
+            Ok(RenderOutcome::SubmittedUnverified) => attempt.outcome(
+                &self.ledger,
+                true,
+                Outcome::ReconcileRequired,
+                AttemptReason::SubmittedUnverified,
+            ),
+            Err(_) => attempt.outcome(
+                &self.ledger,
+                true,
+                Outcome::ReconcileRequired,
+                AttemptReason::DeviceUncertain,
+            ),
+        };
+        if let Err(recording) = recorded {
+            return Err(anyhow::anyhow!(
+                "output result {:?}; terminal recording failed: {recording:#}",
+                rendered.as_ref().err()
+            ));
+        }
+        if let Err(e) = rendered {
+            error!("Error rendering answer: {}", e);
+            if self.workflow.input_failed() {
+                return Err(e);
+            }
+            // On error, retain the typed diagnostic without source feedback
+            self.workflow.report_failure(Failure::Device)?;
+            return Err(e);
+        }
         Ok(())
     }
 
@@ -472,11 +514,16 @@ impl<M: LLMEngine> Orchestrator<M> {
             .then_some(Failure::Transcription))
     }
 
-    fn enrich_answer(&mut self, result: &mut AnalysisResult, images: &[String]) -> Result<()> {
+    fn enrich_answer(
+        &mut self,
+        result: &mut AnalysisResult,
+        images: &[String],
+    ) -> Result<crate::memory::QueryResult> {
         use crate::memory::{context, Query, Status};
-        let Some(memory) = self.memory.as_ref() else {
-            return Ok(());
-        };
+        let memory = self
+            .memory
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("memory absent"))?;
         self.workflow.check_request_progress()?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
@@ -493,7 +540,7 @@ impl<M: LLMEngine> Orchestrator<M> {
             retrieved.status, retrieved.diagnostics
         );
         match retrieved.status {
-            Status::Disabled | Status::CompleteEmpty => return Ok(()),
+            Status::Disabled | Status::CompleteEmpty => return Ok(retrieved),
             Status::Unavailable => anyhow::bail!("subject memory retrieval unavailable"),
             Status::Partial if retrieved.context.facts.is_empty() => {
                 anyhow::bail!("subject memory retrieval incomplete without usable facts")
@@ -508,7 +555,7 @@ impl<M: LLMEngine> Orchestrator<M> {
             &mut || self.workflow.check_request_progress(),
         )?;
         result.answer = answer;
-        Ok(())
+        Ok(retrieved)
     }
 
     fn transcriptions_agree(question: &str, reading: &str) -> bool {
@@ -794,7 +841,9 @@ mod tests {
             "SELECTION_CENTER: 384,512\nSELECTION_CENTER: 1,2",
             "OUTLINE_BOX: 1,2,3,4",
         ] {
-            let response = format!("QUESTION: G unc.?\nQUESTION_BOX: 130,35,200,50\n{center}\n---\nANSWER: About 14 ppm.");
+            let response = format!(
+                "QUESTION: G unc.?\nQUESTION_BOX: 130,35,200,50\n{center}\n---\nANSWER: About 14 ppm."
+            );
             assert!(
                 Orchestrator::<OpenAI>::parse_analysis_response(&response, vec![]).is_none(),
                 "{center}"

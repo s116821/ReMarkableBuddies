@@ -122,13 +122,10 @@ fn main() -> Result<()> {
         remarkable_reader_buddy::conversation::Ledger::new(store.clone()),
     );
     if config.memory.enabled {
-        let profile = config
-            .memory
-            .profile
-            .ok_or_else(|| anyhow::anyhow!("memory profile absent"))?;
-        orchestrator.set_subject_memory(Some(Arc::new(
-            remarkable_reader_buddy::memory::LocalMemory::new_local(store.clone(), profile)?,
-        )));
+        orchestrator.set_subject_memory(Some(remarkable_reader_buddy::memory::configured(
+            store.clone(),
+            &config.memory,
+        )?));
     }
     let _sync_worker = Worker::google(store.clone(), config.sync)?;
     info!("Initialization complete; starting main loop");

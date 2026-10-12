@@ -113,6 +113,10 @@ impl Config {
         self.sync.validate()?;
         self.memory.validate()?;
         ensure!(
+            !(self.memory.selection.is_some() && self.sync.enabled),
+            "selected memory requires the separately qualified selected sync worker"
+        );
+        ensure!(
             !(self.memory.enabled
                 && self.sync.enabled
                 && self.sync.namespaces.contains(&Namespace::SubjectMemory)),
