@@ -63,11 +63,21 @@ pub(super) fn history(
     scope: &SelectionScope,
     transaction: SelectionTransaction,
 ) -> Result<Vec<SelectionTransaction>> {
-    history_directory(
+    history_with_budget(root, generation, scope, transaction, None)
+}
+pub(super) fn history_with_budget(
+    root: &Path,
+    generation: Uuid,
+    scope: &SelectionScope,
+    transaction: SelectionTransaction,
+    budget: Option<&mut SelectedReadBudget>,
+) -> Result<Vec<SelectionTransaction>> {
+    history_directory_with_budget(
         &root.join("selection-history"),
         generation,
         scope,
         transaction,
+        budget,
     )
 }
 pub(super) fn history_directory(
@@ -75,6 +85,15 @@ pub(super) fn history_directory(
     generation: Uuid,
     scope: &SelectionScope,
     transaction: SelectionTransaction,
+) -> Result<Vec<SelectionTransaction>> {
+    history_directory_with_budget(directory, generation, scope, transaction, None)
+}
+fn history_directory_with_budget(
+    directory: &Path,
+    generation: Uuid,
+    scope: &SelectionScope,
+    transaction: SelectionTransaction,
+    mut budget: Option<&mut SelectedReadBudget>,
 ) -> Result<Vec<SelectionTransaction>> {
     let mut chain = Vec::new();
     let mut seen = BTreeSet::new();
@@ -105,7 +124,14 @@ pub(super) fn history_directory(
         let Some(hash) = previous else {
             break;
         };
-        let encoded = files::read(&directory.join(&hash), MAX_METADATA as u64)?;
+        if let Some(budget) = budget.as_deref_mut() {
+            budget.charge(0, 1, 0, 0)?;
+        }
+        let encoded = files::read_with_budget(
+            &directory.join(&hash),
+            MAX_METADATA as u64,
+            budget.as_deref_mut(),
+        )?;
         ensure!(
             digest(&encoded) == hash,
             "selection history integrity failure"
@@ -152,13 +178,21 @@ pub(super) fn validate_closure(
     root: &Path,
     transaction: &SelectionTransaction,
 ) -> Result<Vec<ValidatedManifest>> {
+    validate_closure_with_budget(root, transaction, None)
+}
+pub(super) fn validate_closure_with_budget(
+    root: &Path,
+    transaction: &SelectionTransaction,
+    mut budget: Option<&mut SelectedReadBudget>,
+) -> Result<Vec<ValidatedManifest>> {
     transaction.validate(MAX_ITEMS)?;
-    let active = Store::validate_objects(root, &transaction.selected)?;
+    let active =
+        Store::validate_objects_with_budget(root, &transaction.selected, budget.as_deref_mut())?;
     closure_index(&active, true)?;
     let mut combined = active.clone();
     let mut parts = vec![(transaction.selected.clone(), active)];
     for manifest in &transaction.retained {
-        let records = Store::validate_objects(root, manifest)?;
+        let records = Store::validate_objects_with_budget(root, manifest, budget.as_deref_mut())?;
         combined.extend(records.clone());
         parts.push((manifest.clone(), records));
     }

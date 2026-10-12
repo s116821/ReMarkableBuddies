@@ -311,16 +311,45 @@ impl Store {
         Ok(index)
     }
     fn validate_objects(root: &Path, manifest: &Manifest) -> Result<Vec<(Envelope, String)>> {
+        Self::validate_objects_with_budget(root, manifest, None)
+    }
+    fn validate_objects_with_budget(
+        root: &Path,
+        manifest: &Manifest,
+        mut budget: Option<&mut selection::SelectedReadBudget>,
+    ) -> Result<Vec<(Envelope, String)>> {
         manifest.validate()?;
-        for item in manifest.records.iter().chain(&manifest.media) {
-            let _ = files::Source::open(&root.join("objects").join(&item.sha256), item)?;
+        for (item, media) in manifest
+            .records
+            .iter()
+            .map(|r| (r, false))
+            .chain(manifest.media.iter().map(|r| (r, true)))
+        {
+            if let Some(budget) = budget.as_deref_mut() {
+                budget.charge(0, 1, 0, 0)?;
+            }
+            let _ = files::Source::open_with_budget(
+                &root.join("objects").join(&item.sha256),
+                item,
+                budget.as_deref_mut(),
+                media,
+            )?;
         }
         let mut records = Vec::new();
         let mut descriptors = BTreeMap::new();
         for item in &manifest.records {
             ensure!(item.bytes <= MAX_RECORD as u64, "record exceeds bound");
-            let envelope: Envelope =
-                files::json(&root.join("objects").join(&item.sha256), MAX_RECORD as u64)?;
+            let encoded = files::read_with_budget(
+                &root.join("objects").join(&item.sha256),
+                MAX_RECORD as u64,
+                budget.as_deref_mut(),
+            )?;
+            ensure!(
+                encoded.len() as u64 == item.bytes && digest(&encoded) == item.sha256,
+                "record changed after verification"
+            );
+            let envelope: Envelope = serde_json::from_slice(&encoded)
+                .map_err(|_| anyhow::anyhow!("invalid or unsupported stored JSON"))?;
             envelope.validate()?;
             ensure!(
                 manifest.record_namespaces.get(&item.sha256) == Some(&envelope.namespace),
