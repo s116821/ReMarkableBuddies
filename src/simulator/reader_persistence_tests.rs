@@ -1,11 +1,294 @@
 use super::*;
 use crate::{
     conversation::*,
-    storage::{Fault as StorageFault, Namespace, Store},
+    storage::{Fault as StorageFault, Namespace, Store, Uuid},
 };
 use std::{collections::BTreeMap, sync::Arc};
 
 type Calls = Rc<RefCell<Vec<Vec<Vec<u8>>>>>;
+
+struct SelectedModel {
+    expected: Vec<Vec<u8>>,
+    images: Vec<String>,
+    calls: Rc<std::cell::Cell<usize>>,
+    store: Arc<Store>,
+    replace: Option<(
+        Arc<SelectedAdmission>,
+        crate::storage::selection::SelectionToken,
+    )>,
+    fail_write: bool,
+    check_mode_lease: bool,
+}
+impl LLMEngine for SelectedModel {
+    fn add_text_content(&mut self, _: &str) {}
+    fn add_image_content(&mut self, image: &str) {
+        self.images.push(image.into());
+    }
+    fn clear_content(&mut self) {
+        self.images.clear();
+    }
+    fn execute(&mut self) -> Result<String> {
+        if self.check_mode_lease {
+            let mode = self.store.sync_mode_snapshot()?;
+            ensure!(
+                self.store
+                    .set_sync_mode(
+                        &mode.token,
+                        Uuid::new_v4(),
+                        crate::storage::sync::mode::SyncModeChoice::LocalOnly
+                    )
+                    .is_err(),
+                "selected Attempt lost mode lease during provider call"
+            );
+            ensure!(
+                self.store.sync_mode_snapshot()?.mode == mode.mode,
+                "refused mode mutation changed persisted state"
+            );
+        }
+        let actual = self
+            .images
+            .iter()
+            .map(|image| STANDARD.decode(image).map_err(Into::into))
+            .collect::<Result<Vec<_>>>()?;
+        ensure!(
+            actual == self.expected,
+            "selected provider bytes/order changed"
+        );
+        let calls = self.calls.get() + 1;
+        self.calls.set(calls);
+        if calls == 1 {
+            if let Some((admission, token)) = &self.replace {
+                let snapshot = self
+                    .store
+                    .selected_snapshot(token.scope(), crate::storage::MAX_ITEMS)?
+                    .unwrap();
+                admission.activate(
+                    token,
+                    crate::storage::selection::SelectionChange {
+                        operation: Uuid::new_v4(),
+                        accepted_base_sha256: snapshot.transaction.accepted_base_sha256,
+                        selected: snapshot.transaction.selected,
+                        retained: snapshot.transaction.retained,
+                    },
+                    BTreeMap::new(),
+                )?;
+            }
+            Ok("QUESTION: Why?\nQUESTION_BOX: 20,20,30,30\nSELECTION_CENTER: 300,400\n---\nANSWER: Because.".into())
+        } else {
+            if self.fail_write {
+                self.store.set_fault(StorageFault::BeforeCommit)?;
+            }
+            Ok("TRANSCRIPTION: Why?".into())
+        }
+    }
+}
+
+#[test]
+fn selected_actual_orchestrator_publishes_owned_draft_and_stops_on_replacement_or_write_failure() {
+    use crate::storage::selection::{SelectionChange, SelectionScope};
+    use crate::storage::{Coverage, Manifest, ObjectRef, Scope, FORMAT, MAX_ITEMS};
+    for case in 0..6 {
+        let fixture = SimulatorLedger::new();
+        let ledger = fixture.open().unwrap();
+        let store = ledger.store().clone();
+        let conversation = Uuid::new_v4();
+        ledger.create(conversation, Uuid::new_v4(), 1).unwrap();
+        let (capture, _, _) = development_capture_fixture();
+        let user = Turn {
+            id: Uuid::new_v4(),
+            conversation,
+            exchange: Uuid::new_v4(),
+            sequence: 0,
+            role: Role::User,
+            mode: Mode::Reader,
+            outcome: Outcome::Prepared,
+            text: None,
+            sources: vec![],
+            correction_of: None,
+            created_ms: 1,
+            updated_ms: 1,
+            completion: None,
+        };
+        let prepared = ledger
+            .prepare_development(
+                Uuid::new_v4(),
+                ledger
+                    .expected(Namespace::Conversation, conversation)
+                    .unwrap(),
+                user.clone(),
+                Uuid::new_v4(),
+                &capture,
+            )
+            .unwrap();
+        let mut objects = BTreeMap::new();
+        let mut refs = BTreeMap::new();
+        let mut namespaces = BTreeMap::new();
+        let mut media = BTreeMap::new();
+        for manifest in store.manifests().unwrap() {
+            for reference in manifest.records {
+                namespaces.insert(
+                    reference.sha256.clone(),
+                    manifest.record_namespaces[&reference.sha256],
+                );
+                objects.insert(
+                    reference.sha256.clone(),
+                    store.read_object(&reference).unwrap(),
+                );
+                refs.insert(reference.sha256.clone(), reference);
+            }
+            for reference in manifest.media {
+                objects.insert(
+                    reference.sha256.clone(),
+                    store.read_object(&reference).unwrap(),
+                );
+                media.insert(reference.sha256.clone(), reference);
+            }
+        }
+        let admission = Arc::new(
+            SelectedAdmission::new(
+                store.clone(),
+                SelectionScope {
+                    group: Uuid::new_v4(),
+                    key_sha256: crate::storage::digest(b"selected application fixture"),
+                    binding_sha256: crate::storage::digest(b"fixture source binding"),
+                },
+            )
+            .unwrap(),
+        );
+        let publication = admission
+            .initialize(
+                SelectionChange {
+                    operation: Uuid::new_v4(),
+                    accepted_base_sha256: crate::storage::digest(b"fixture base"),
+                    retained: vec![],
+                    selected: Manifest {
+                        format: FORMAT,
+                        transaction_id: Uuid::new_v4(),
+                        scope: Scope::SelectedRecords,
+                        records: refs.into_values().collect(),
+                        record_namespaces: namespaces,
+                        media_coverage: media
+                            .keys()
+                            .map(|sha256| Coverage::Included {
+                                sha256: sha256.clone(),
+                            })
+                            .collect(),
+                        media: media.into_values().collect(),
+                    },
+                },
+                objects,
+            )
+            .unwrap();
+        if case == 5 {
+            let mode = store.sync_mode_snapshot().unwrap();
+            store
+                .set_sync_mode(
+                    &mode.token,
+                    Uuid::new_v4(),
+                    crate::storage::sync::mode::SyncModeChoice::SharedGroup {
+                        group: publication.token.scope().group,
+                        binding_sha256: publication.token.scope().binding_sha256.clone(),
+                        root_id: "sharedroot".into(),
+                    },
+                )
+                .unwrap();
+        }
+        let snapshot = store
+            .selected_snapshot(publication.token.scope(), MAX_ITEMS)
+            .unwrap()
+            .unwrap();
+        let projection = SelectedDomainProjection::from_snapshot(&snapshot).unwrap();
+        let pin = |id| {
+            let (envelope, _) = projection.head(Namespace::Conversation, id).unwrap();
+            let reference = snapshot
+                .selected_records
+                .iter()
+                .zip(&snapshot.transaction.selected.records)
+                .find(|(record, _)| record.revision_id == envelope.revision_id)
+                .unwrap()
+                .1;
+            IntentRecordRef {
+                namespace: Namespace::Conversation,
+                record_id: id,
+                revision_id: envelope.revision_id,
+                object: ObjectRef {
+                    sha256: reference.sha256.clone(),
+                    bytes: reference.bytes,
+                },
+            }
+        };
+        let calls = Rc::new(std::cell::Cell::new(0));
+        let model = SelectedModel {
+            expected: prepared.images.clone(),
+            images: vec![],
+            calls: calls.clone(),
+            store: store.clone(),
+            replace: (case == 1).then(|| (admission.clone(), publication.token.clone())),
+            fail_write: case == 2,
+            check_mode_lease: case == 5,
+        };
+        let device = setup();
+        let facade = crate::workflow::selected_backend::SelectedBackendFacade::new(
+            admission.clone(),
+            Box::new(SimDevice(device.clone())),
+        );
+        let workflow = Workflow::with_selected_development_capture(facade, capture, false);
+        if case == 3 || case == 4 {
+            crate::workflow::assert_selected_retry_control(
+                &ledger,
+                &workflow,
+                publication.token.clone(),
+                pin(conversation),
+                pin(user.id),
+                prepared.evidence.id,
+                case == 4,
+            );
+            assert!(device.borrow().counts.is_empty());
+            continue;
+        }
+        let mut orchestrator = Orchestrator::new(workflow, model, ledger);
+        let result = orchestrator.run_selected_prepared(
+            publication.token.clone(),
+            pin(conversation),
+            pin(user.id),
+            prepared.evidence.id,
+        );
+        assert!(result.is_err());
+        assert!(device.borrow().counts.is_empty());
+        assert_eq!(calls.get(), if case == 1 { 1 } else { 2 });
+        let current = store
+            .selected_snapshot(publication.token.scope(), MAX_ITEMS)
+            .unwrap()
+            .unwrap();
+        let records = SelectedDomainProjection::from_snapshot(&current)
+            .unwrap()
+            .inspect(conversation)
+            .unwrap();
+        let drafts = records
+            .iter()
+            .filter_map(|record| match record {
+                Record::Turn(turn) if turn.role == Role::Assistant => Some(turn),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(drafts.len(), if case == 0 || case == 5 { 1 } else { 0 });
+        if case == 0 || case == 5 {
+            assert_eq!(drafts[0].outcome, Outcome::Generated);
+            assert!(drafts[0].sources.is_empty());
+            assert_eq!(drafts[0].exchange, user.exchange);
+        }
+        assert!(!records
+            .iter()
+            .any(|record| matches!(record, Record::OutcomeFact(_) | Record::Binding(_))));
+        let SelectedCaptureImages::Development(saved) = admission
+            .capture_images(&current.token, prepared.evidence.id)
+            .unwrap()
+        else {
+            panic!("historical origin changed")
+        };
+        assert_eq!(saved.images, prepared.images);
+    }
+}
 struct RecordingModel {
     images: Vec<String>,
     calls: Calls,

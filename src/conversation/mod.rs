@@ -11,6 +11,11 @@ mod reader_dispatch;
 mod reader_plan;
 mod reader_uncertainty;
 mod selected;
+mod selected_reader_write;
+pub use selected_reader_write::{
+    SelectedReaderAcknowledgment, SelectedReaderPublication, SelectedReaderText,
+    SelectedReaderWrite,
+};
 #[cfg(test)]
 mod selected_context_tests;
 mod settlement;
