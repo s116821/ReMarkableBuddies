@@ -1,10 +1,4 @@
-use crate::{
-    conversation::{
-        capture_facts::{HistoricalCapture, SDK_SOURCE},
-        *,
-    },
-    storage::*,
-};
+use crate::{conversation::*, storage::*};
 use remarkable_open_sdk::{
     capture::{synthetic::*, *},
     mock::MockPlatform,
@@ -129,16 +123,6 @@ fn root(ledger: &Ledger, conversation: Uuid) -> ExpectedHeads {
         .unwrap()
 }
 
-fn select_fixture(store: &Arc<Store>) -> (Arc<SelectedAdmission>, selection::SelectionToken) {
-    select_fixture_scope(
-        store,
-        selection::SelectionScope {
-            group: Uuid::new_v4(),
-            key_sha256: digest(b"Reader text fixture"),
-            binding_sha256: digest(b"fixture binding"),
-        },
-    )
-}
 fn select_fixture_scope(
     store: &Arc<Store>,
     scope: selection::SelectionScope,
