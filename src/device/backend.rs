@@ -10,7 +10,9 @@ use super::{
     screenshot::Screenshot,
     touch::{Touch, TriggerCorner},
 };
-use crate::workflow::xochitl_integration::{NavigationDirection, XochitlIntegration};
+use crate::workflow::xochitl_integration::NavigationDirection;
+#[cfg(target_os = "linux")]
+use crate::workflow::xochitl_integration::XochitlIntegration;
 
 #[derive(Clone, Default)]
 pub struct Frame {
@@ -23,8 +25,28 @@ impl Frame {
         STANDARD.encode(&self.png)
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AcquisitionKind {
+    Unsupported,
+    LegacyUnqualified,
+    Sdk,
+    Development,
+}
 
 pub trait DeviceBackend {
+    /// Must be selected before acquisition; failed SDK capture cannot downgrade.
+    fn acquisition_kind(&self) -> AcquisitionKind {
+        AcquisitionKind::Unsupported
+    }
+    fn capture_sdk(&mut self) -> Result<remarkable_open_sdk::capture::CapturedBatch> {
+        anyhow::bail!("SDK acquisition unavailable")
+    }
+    /// Separate development evidence; never a synthetic SDK batch or legacy fallback.
+    fn capture_development(
+        &mut self,
+    ) -> Result<remarkable_open_sdk::development_capture::ReadOnlyDevelopmentCapture> {
+        anyhow::bail!("Development capture unavailable")
+    }
     /// Optional editing contract. Unsupported backends retain normal Reader
     /// behavior and cannot arm history. Expected text must be fully persisted.
     fn history_snapshot(
@@ -143,11 +165,15 @@ impl super::navigation_completion::NavigationIo for NativeNavigation<'_> {
             image,
         })
     }
-    fn swipe(&mut self, direction: NavigationDirection) -> Result<()> {
+    fn swipe(
+        &mut self,
+        direction: NavigationDirection,
+        orientation: remarkable_open_sdk::navigation::gesture::Orientation,
+    ) -> Result<()> {
         // The successor observer and source capture have already overlapped
         // the retained request. Only the deliberate physical gesture is unobserved.
         self.device.finish_request_guard()?;
-        XochitlIntegration::swipe(&mut self.device.touch, direction)
+        XochitlIntegration::swipe_with_orientation(&mut self.device.touch, direction, orientation)
     }
     fn now(&self) -> Duration {
         self.device.clock.elapsed()
@@ -622,6 +648,9 @@ impl RealDevice {
 }
 
 impl DeviceBackend for RealDevice {
+    fn acquisition_kind(&self) -> AcquisitionKind {
+        AcquisitionKind::LegacyUnqualified
+    }
     #[cfg(target_os = "linux")]
     fn history_snapshot(
         &mut self,
@@ -720,6 +749,8 @@ impl DeviceBackend for RealDevice {
         self.status_wait_cancellation.record(result)
     }
     fn navigate(&mut self, direction: NavigationDirection) -> Result<NavigationCompletion> {
+        #[cfg(not(target_os = "linux"))]
+        let _ = direction;
         self.check_request_guard()?;
         let _timing = crate::measurement::Span::new("device.navigation");
         #[cfg(target_os = "linux")]
@@ -738,9 +769,9 @@ impl DeviceBackend for RealDevice {
             }
             return result;
         }
-        self.finish_request_guard()?;
-        XochitlIntegration::navigate_to_page(&mut self.touch, direction)?;
-        Ok(NavigationCompletion::Legacy)
+        Err(anyhow::anyhow!(
+            "Navigation requires a supported current document orientation and source layout"
+        ))
     }
     fn render_text(&mut self, text: &str) -> Result<()> {
         self.check_request_guard()?;
