@@ -268,9 +268,15 @@ impl Drop for PanicArm {
 fn composed_post_consumption_panic_is_sticky_without_publication() {
     const FILTER: &str = "memory::selected::composed_panic_tests::composed_post_consumption_panic_is_sticky_without_publication";
     if std::env::var_os("BUDDY_COMPOSED_PANIC_CHILD").is_none() {
+        let nonce = Uuid::new_v4().to_string();
+        let witness_path =
+            std::env::temp_dir().join(format!("buddy-composed-panic-{nonce}.witness"));
+        assert!(!witness_path.exists());
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", FILTER, "--nocapture"])
             .env("BUDDY_COMPOSED_PANIC_CHILD", "1")
+            .env("BUDDY_COMPOSED_PANIC_NONCE", &nonce)
+            .env("BUDDY_COMPOSED_PANIC_WITNESS_PATH", &witness_path)
             .spawn()
             .unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
@@ -286,6 +292,8 @@ fn composed_post_consumption_panic_is_sticky_without_publication() {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
+        assert_eq!(std::fs::read(&witness_path).unwrap(), nonce.as_bytes());
+        std::fs::remove_file(&witness_path).unwrap();
         return;
     }
     use crate::memory::{self, Provider};
@@ -460,14 +468,16 @@ fn composed_post_consumption_panic_is_sticky_without_publication() {
         .expect("poisoned same receiving view must refuse");
     assert!(format!("{same:#}").contains("selected memory pins unavailable"));
     let another_reader = SelectedAdmission::new(store.clone(), initial.scope().clone()).unwrap();
-    assert!(memory
+    let fresh_error = memory
         .publish_selected_reader_text(
             &fresh_view,
             &another_reader,
             &publication.token,
-            draft.clone()
+            draft.clone(),
         )
-        .is_err());
+        .err()
+        .expect("live shared domain gates must remain poisoned");
+    assert!(format!("{fresh_error:#}").contains("domain admission unavailable"));
     assert_eq!(
         serde_json::to_vec(&store.manifests().unwrap()).unwrap(),
         before
@@ -480,6 +490,21 @@ fn composed_post_consumption_panic_is_sticky_without_publication() {
     for (reference, bytes) in media {
         assert_eq!(store.read_object(&reference).unwrap(), bytes);
     }
+    let nonce = std::env::var("BUDDY_COMPOSED_PANIC_NONCE").unwrap();
+    let witness_path =
+        PathBuf::from(std::env::var_os("BUDDY_COMPOSED_PANIC_WITNESS_PATH").unwrap());
+    assert_eq!(
+        witness_path,
+        std::env::temp_dir().join(format!("buddy-composed-panic-{nonce}.witness"))
+    );
+    use std::io::Write;
+    let mut witness = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&witness_path)
+        .unwrap();
+    witness.write_all(nonce.as_bytes()).unwrap();
+    witness.sync_all().unwrap();
     println!(
         "COMPOSED_PANIC_WITNESS: post-consumption panic, poisoned retries, zero publication, exact media preserved"
     );
