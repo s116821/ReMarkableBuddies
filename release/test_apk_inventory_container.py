@@ -5,7 +5,7 @@ from apk_contract import Refusal
 if sys.platform=='linux':
  from apk_generate import inventory,TOOL_SHA,FILES
 
-@unittest.skipUnless(sys.platform=='linux','Pinned APK tool probe runs in the offline Linux container')
+@unittest.skipUnless(sys.platform=='linux' and Path('/tool/apk').is_file(),'Pinned APK tool probe requires the explicit offline container mount')
 class ActualSchema(unittest.TestCase):
  def test_signed_standard_filename_pattern(self):
   tool=Path('/tool/apk');self.assertEqual(hashlib.sha256(tool.read_bytes()).hexdigest(),TOOL_SHA)
