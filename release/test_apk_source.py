@@ -22,6 +22,17 @@ class CommandBounds(unittest.TestCase):
   with self.assertRaisesRegex(Refusal,'deadline'):
    self.command('import time;time.sleep(10)',timeout=0.2)
   self.assertLess(time.monotonic()-start,3)
+ def test_private_diagnostics_survive_success_and_deadline(self):
+  with tempfile.TemporaryDirectory() as directory:
+   root=pathlib.Path(directory)
+   self.assertEqual(run([sys.executable,'-c',"print('compiler success')"],root,private_diagnostics=root/'success'),'compiler success')
+   self.assertEqual((root/'success/stdout.bin').read_bytes(),b'compiler success\n' if sys.platform!='win32' else b'compiler success\r\n')
+   with self.assertRaisesRegex(Refusal,'deadline'):
+    run([sys.executable,'-c',"import sys,time;sys.stderr.write('private compiler failure');sys.stderr.flush();time.sleep(10)"],root,timeout=0.2,private_diagnostics=root/'refused')
+   self.assertEqual((root/'refused/stderr.bin').read_bytes(),b'private compiler failure')
+   self.assertLessEqual(sum(path.stat().st_size for path in (root/'refused').iterdir()),16384)
+   with self.assertRaises(FileExistsError):
+    run([sys.executable,'-c',"print('overwrite')"],root,private_diagnostics=root/'success')
  def test_stdout_and_combined_diagnostic_caps(self):
   for code in ["print('x'*17000)","import sys;sys.stdout.write('x'*9000);sys.stderr.write('y'*9000)"]:
    with self.subTest(code=code),self.assertRaisesRegex(Refusal,'bound'):self.command(code)

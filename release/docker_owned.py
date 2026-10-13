@@ -24,7 +24,7 @@ def phase(arguments,cwd,command,timeout=120,env=None,**options):
   return command(['docker','run','--label','buddy-apk-owner='+nonce,'--name',nonce,*arguments],cwd,env=env,timeout=timeout,**options)
  finally:cleanup(nonce,cwd,command)
 
-def cross_phase(argv,cwd,env,command,timeout=120):
+def cross_phase(argv,cwd,env,command,timeout=120,**options):
  nonce=owner();selected=dict(env,CROSS_CONTAINER_OPTS='--label buddy-apk-owner='+nonce)
- try:return command(argv,cwd,env=selected,timeout=timeout)
+ try:return command(argv,cwd,env=selected,timeout=timeout,**options)
  finally:cleanup(nonce,cwd,command)

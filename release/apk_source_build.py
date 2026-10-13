@@ -14,7 +14,11 @@ IMAGES={
  'aarch64-unknown-linux-gnu':'ghcr.io/cross-rs/aarch64-unknown-linux-gnu@sha256:99294ae75048aa07d00bb4f1a18a017e0812ff25753768d21d5938bf7562b40a',
 }
 
-def run(argv,cwd,env=None,timeout=120,stdout_limit=16384,combined_limit=16384,return_streams=False):
+def run(argv,cwd,env=None,timeout=120,stdout_limit=16384,combined_limit=16384,return_streams=False,private_diagnostics=None):
+ if private_diagnostics is not None:
+  private_diagnostics=Path(private_diagnostics)
+  require(combined_limit==16384,'private compiler diagnostic bound')
+  private_diagnostics.mkdir(exist_ok=False)
  guard=OwnedProcess(argv,cwd=cwd,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
  process=guard.process
  events=queue.Queue(maxsize=8)
@@ -26,7 +30,7 @@ def run(argv,cwd,env=None,timeout=120,stdout_limit=16384,combined_limit=16384,re
  def drain(stream,channel):
   try:
    while True:
-    block=stream.read(4096)
+    block=stream.read1(4096)
     deliver((channel,block))
     if stopped.is_set(): break
     if not block: break
@@ -51,9 +55,16 @@ def run(argv,cwd,env=None,timeout=120,stdout_limit=16384,combined_limit=16384,re
   return buffers[0].decode('utf-8').strip()
  finally:
   stopped.set()
-  try:guard.terminate_and_verify()
-  finally:guard.close()
-  for reader in readers: reader.join(timeout=1)
+  try:
+   try:guard.terminate_and_verify()
+   finally:guard.close()
+  finally:
+   for reader in readers: reader.join(timeout=1)
+   if private_diagnostics is not None:
+    try:
+     for name,value in zip(('stdout.bin','stderr.bin'),buffers):
+      with (private_diagnostics/name).open('xb') as file:file.write(value)
+    except OSError:raise Refusal('private compiler diagnostic retention failed') from None
 
 def git(repo,*args): return run(['git',*args],repo)
 def sha(path):
@@ -188,7 +199,7 @@ def build(repo,tag,target,target_dir,cross_configuration,sdk_tag=None):
   config_home=Path(config_home);(config_home/'git').mkdir()
   git(repo,'config','--file',str(config_home/'git/config'),'safe.directory',container_source)
   env['XDG_CONFIG_HOME']=container_source+'/.git/'+config_home.name
-  cross_phase(argv,repo,env,run)
+  cross_phase(argv,repo,env,run,timeout=900,private_diagnostics=target_dir/'compiler-diagnostics')
   binary=target_dir/target/'release/reader-buddy'
   require(binary.is_file() and not binary.is_symlink(),'new build executable')
   with binary.open('rb') as checked:
