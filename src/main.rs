@@ -3,9 +3,8 @@ use clap::Parser;
 use dotenv::dotenv;
 use log::info;
 use remarkable_reader_buddy::config::{self, Config, Environment, Overrides};
-use remarkable_reader_buddy::storage::{files, sync::Worker, Store};
+use remarkable_reader_buddy::storage::{files, sync::Worker};
 use remarkable_reader_buddy::{OpenAI, Orchestrator, Workflow};
-use std::sync::Arc;
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -34,6 +33,20 @@ pub struct Args {
     /// Save local page-image diagnostics (independent of logging)
     #[arg(long)]
     debug_dump: bool,
+    /// One-shot local memory maintenance; no provider or tablet runtime
+    #[arg(long, value_enum, requires = "memory_input", conflicts_with_all = ["simulate", "api_key", "model", "base_url", "trigger_corner", "debug_dump", "log_level", "conversation_operation", "conversation_input"])]
+    memory_operation: Option<remarkable_reader_buddy::memory::maintenance::Operation>,
+    /// Bounded JSON input for an explicit memory operation
+    #[arg(long, value_name = "FILE", requires = "memory_operation")]
+    memory_input: Option<std::path::PathBuf>,
+    /// One-shot selected history inspection or original-request recovery
+    #[arg(long, value_enum, requires="conversation_input", conflicts_with_all=["simulate","api_key","model","base_url","trigger_corner","debug_dump","log_level","memory_operation","memory_input"])]
+    conversation_operation: Option<remarkable_reader_buddy::reader_runtime::Operation>,
+    #[arg(long, value_name = "FILE", requires = "conversation_operation")]
+    conversation_input: Option<std::path::PathBuf>,
+    /// Fixed local personalization maintenance; mutation JSON comes from bounded stdin
+    #[arg(long, value_enum, conflicts_with_all=["simulate","api_key","model","base_url","trigger_corner","debug_dump","log_level","memory_operation","memory_input","conversation_operation","conversation_input"])]
+    personalization_operation: Option<config::personalization::Operation>,
 }
 
 fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_logger::Builder {
@@ -53,14 +66,56 @@ fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_lo
 }
 
 fn main() -> Result<()> {
-    dotenv().ok();
     let args = Args::parse();
+    if let Some(operation) = args.personalization_operation {
+        let report = config::personalization::run(
+            operation,
+            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+            &mut std::io::stdin().lock(),
+        );
+        report.write_to(&mut std::io::stdout().lock())?;
+        return Ok(());
+    }
+    if let Some(operation) = args.conversation_operation {
+        let input = args
+            .conversation_input
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("conversation input absent"))?;
+        let mut report = remarkable_reader_buddy::reader_runtime::run(
+            operation,
+            input,
+            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+        );
+        report.write_to(&mut std::io::stdout().lock())?;
+        return Ok(());
+    }
+    if let Some(operation) = args.memory_operation {
+        let input = args
+            .memory_input
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("memory input absent"))?;
+        let report = remarkable_reader_buddy::memory::maintenance::run(
+            operation,
+            input,
+            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+        );
+        report.write_to(&mut std::io::stdout().lock())?;
+        return Ok(());
+    }
+    dotenv().ok();
     if let Some(path) = args.simulate {
         logging(args.log_level, std::env::var("RUST_LOG").ok().as_deref()).init();
         remarkable_reader_buddy::simulator::run_file(&path)?;
         return Ok(());
     }
     let config = Config::load(std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into))?;
+    let admitted_store = match remarkable_reader_buddy::reader_runtime::startup(&config) {
+        remarkable_reader_buddy::reader_runtime::StartupDecision::Ordinary(store) => store,
+        remarkable_reader_buddy::reader_runtime::StartupDecision::Report(mut report) => {
+            report.write_to(&mut std::io::stdout().lock())?;
+            return Ok(());
+        }
+    };
     let effective = config::resolve(
         &config,
         Overrides {
@@ -81,7 +136,14 @@ fn main() -> Result<()> {
         .filter_module("ureq_proto", log::LevelFilter::Off)
         .init();
     info!("=== ReMarkable Reader Buddy Starting ===");
-    let store = Arc::new(Store::open(config.paths.clone())?);
+    let store =
+        match remarkable_reader_buddy::reader_runtime::ordinary_store(&config, admitted_store) {
+            Ok(store) => store,
+            Err(mut report) => {
+                report.write_to(&mut std::io::stdout().lock())?;
+                return Ok(());
+            }
+        };
     store.snapshot_config(&config)?;
     files::atomic_json(
         &store.paths.data.join("effective-config.json"),
@@ -96,7 +158,17 @@ fn main() -> Result<()> {
     );
     let workflow = Workflow::new(false, effective.trigger_corner, effective.debug_dump)?;
     sleep(Duration::from_millis(1000));
-    let mut orchestrator = Orchestrator::new(workflow, llm);
+    let mut orchestrator = Orchestrator::new(
+        workflow,
+        llm,
+        remarkable_reader_buddy::conversation::Ledger::new(store.clone()),
+    );
+    if config.memory.enabled {
+        orchestrator.set_subject_memory(Some(remarkable_reader_buddy::memory::configured(
+            store.clone(),
+            &config.memory,
+        )?));
+    }
     let _sync_worker = Worker::google(store.clone(), config.sync)?;
     info!("Initialization complete; starting main loop");
     orchestrator.run_loop()
@@ -120,9 +192,14 @@ mod tests {
             [
                 "api-key",
                 "base-url",
+                "conversation-input",
+                "conversation-operation",
                 "debug-dump",
                 "log-level",
+                "memory-input",
+                "memory-operation",
                 "model",
+                "personalization-operation",
                 "simulate",
                 "trigger-corner"
             ]
@@ -131,6 +208,8 @@ mod tests {
         assert!(args.model.is_none());
         assert!(args.trigger_corner.is_none());
         assert!(!args.debug_dump);
+        assert!(args.memory_operation.is_none() && args.memory_input.is_none());
+        assert!(args.conversation_operation.is_none() && args.conversation_input.is_none());
         for flag in [
             "--once",
             "--no-trigger",
