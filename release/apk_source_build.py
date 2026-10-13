@@ -13,6 +13,31 @@ IMAGES={
  'armv7-unknown-linux-gnueabihf':'ghcr.io/cross-rs/armv7-unknown-linux-gnueabihf@sha256:1ab143450cd888657baa3563ad663203bc5887629e338ef77718ef515d56fb7a',
  'aarch64-unknown-linux-gnu':'ghcr.io/cross-rs/aarch64-unknown-linux-gnu@sha256:99294ae75048aa07d00bb4f1a18a017e0812ff25753768d21d5938bf7562b40a',
 }
+RUNTIMES={
+ 'armv7-unknown-linux-gnueabihf':('/usr/bin/qemu-arm-static','/usr/arm-linux-gnueabihf','/usr/arm-linux-gnueabihf/lib/ld-linux-armhf.so.3',28227984,'9edc1bfb9213599f9dc8c5af6e0a4ab36afa1f43defa07ddd558ccc310fe2023',1285388,'269cf41f9fe4557c032becbca48f913998333e5ff20de67845b96a153b790cde'),
+ 'aarch64-unknown-linux-gnu':('/usr/bin/qemu-aarch64-static','/usr/aarch64-linux-gnu','/usr/aarch64-linux-gnu/lib/ld-linux-aarch64.so.1',32969136,'fafbcc92255151273ce0030a6f0975700ab7d9c25086cc0e4438784ce21c4ebf',202784,'142f02374792bf5f62293efc3500d472dbbe280dc658cc60480eff73ad46f33c'),
+}
+
+def runtime(binary,repo,target,image,diagnostics):
+ from docker_owned import phase
+ runner,prefix,loader,runner_size,runner_sha,loader_size,loader_sha=RUNTIMES[target]
+ deadline=time.monotonic()+120;actual_argv=[]
+ def remaining():
+  value=deadline-time.monotonic();require(value>0,'complete runtime deadline');return value
+ def recorded_command(argv,*args,**kwargs):
+  if argv[:2]==['docker','run']:actual_argv.append(list(argv))
+  return run(argv,*args,**kwargs)
+ def observe():
+  identity=json.loads(run(['docker','image','inspect',image,'--format','{"id":{{json .Id}},"os":{{json .Os}},"arch":{{json .Architecture}},"digests":{{json .RepoDigests}}}'],repo,timeout=remaining()))
+  require(identity['os']=='linux' and identity['arch']=='amd64' and image in identity['digests'],'runtime immutable image identity')
+  raw=phase(['--rm','--network','none','--cap-drop','ALL','--read-only','--entrypoint','/bin/sh',image,'-c',"stat -Lc '%n %s' "+runner+' '+loader+' && sha256sum '+runner+' '+loader],repo,recorded_command,timeout=remaining())
+  expected=[runner+' '+str(runner_size),loader+' '+str(loader_size),runner_sha+'  '+runner,loader_sha+'  '+loader]
+  require(raw.splitlines()==expected,'runtime runner/loader identity mismatch')
+  return dict(image=identity,runner=runner,sysroot=prefix,loader=loader,runner_sha256=runner_sha,loader_sha256=loader_sha,runner_bytes=runner_size,loader_bytes=loader_size)
+ before=observe()
+ output=phase(['--rm','--network','none','--cap-drop','ALL','--read-only','--memory','512m','--pids-limit','32','--mount',f'type=bind,source={binary},target=/inputs/reader-buddy,readonly','--env','LD_BIND_NOW=1','--entrypoint',runner,image,'-L',prefix,'/inputs/reader-buddy','--version'],repo,recorded_command,timeout=remaining(),private_diagnostics=diagnostics)
+ after=observe();require(after==before,'runtime image/runner/loader changed');remaining()
+ return output,dict(before=before,after=after,actual_container_argv=actual_argv)
 
 def run(argv,cwd,env=None,timeout=120,stdout_limit=16384,combined_limit=16384,return_streams=False,private_diagnostics=None):
  if private_diagnostics is not None:
@@ -206,7 +231,6 @@ def build(repo,tag,target,target_dir,cross_configuration,sdk_tag=None):
  # Use exactly the observed stable Linux counterpart chosen by the pinned
  # Cross image platform. A source/compiler/container switch refuses below.
  argv=[str(cross),'+stable','build','--locked','--release','--target',target,'--target-dir',str(target_dir),'--bin','reader-buddy']
- runtime_argv=[str(cross),'+stable','run',*argv[3:],'--','--version']
  container_source=repo.as_posix()
  if os.name=='nt':container_source='/mnt/'+container_source[0].lower()+container_source[2:]
  import tempfile
@@ -223,7 +247,8 @@ def build(repo,tag,target,target_dir,cross_configuration,sdk_tag=None):
   with binary.open('rb') as checked:
    before=os.fstat(checked.fileno());require(1<=before.st_size<=134217728,'actual executable bound')
    executed_hash=hashlib.file_digest(checked,'sha256').hexdigest();checked.seek(0)
-   output=cross_phase(runtime_argv,repo,env,run)
+   output,runtime_evidence=runtime(binary,repo,target,image,target_dir/'runtime-diagnostics')
+   runtime_argv=runtime_evidence['actual_container_argv'][1]
    require(output.split()[-1:]==[tag[1:]],'actual target runtime tag version')
    after=os.fstat(checked.fileno());current=binary.stat()
    identity=lambda info:(info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns)
@@ -261,4 +286,5 @@ def build(repo,tag,target,target_dir,cross_configuration,sdk_tag=None):
  private_evidence=dict(source_root=str(repo),target_root=str(target_dir),configuration_path=str(configuration),cargo_configuration_digests=configurations,actual_build_argv=argv,actual_runtime_argv=runtime_argv,recorded_environment={key:env[key] for key in [*OVERRIDES,'READER_BUDDY_RELEASE_TAG','READER_BUDDY_RELEASE_SHA','CROSS_CONFIG','LD_BIND_NOW','SOURCE_DATE_EPOCH','XDG_CONFIG_HOME']},cargo_observations=private_cargo,compiler_before=before_compiler,compiler_after=after_compiler,executed_binary_identity=list(identity(before)),executed_binary_sha256=executed_hash,elf_observation=actual_elf,runtime_version_output=output,source_license=license_id,license_basis=dict(project_declaration=LICENSE_DECLARATION,committed_blob=LICENSE_BLOB,actual_file_sha256=sha(repo/'LICENSE'),existing_detected_identifier='GPL-3.0',classifier_is_owner_grant=False))
  private_evidence['git_conversion']=conversion
  private_evidence['container_git_conversion']=before_conversion
+ private_evidence['runtime_observations']=runtime_evidence
  return frozen,metadata,private_evidence

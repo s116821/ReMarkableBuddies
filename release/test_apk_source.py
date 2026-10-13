@@ -1,7 +1,7 @@
 """Real child-process refusal controls; no device or network access."""
 import pathlib,sys,time,unittest,tempfile,hashlib
 from apk_contract import Refusal
-from apk_source_build import run,source_license,LICENSE_BLOB,build,git_conversion,container_git_conversion
+from apk_source_build import run,source_license,LICENSE_BLOB,build,git_conversion,container_git_conversion,runtime,RUNTIMES,IMAGES
 from apk_builder import copy_verified
 from unittest.mock import patch
 
@@ -65,6 +65,36 @@ class GitConversion(unittest.TestCase):
      with self.assertRaisesRegex(Refusal,'container Git conversion'):container_git_conversion(pathlib.Path('.'),'image','/source','/config',expected)
     else:
      self.assertEqual(container_git_conversion(pathlib.Path('.'),'image','/source','/config',expected)['autocrlf'],autocrlf)
+
+class DirectRuntime(unittest.TestCase):
+ def test_pinned_runtime_uses_selected_file_without_compiler(self):
+  target='armv7-unknown-linux-gnueabihf';runner,prefix,loader,rs,rh,ls,lh=RUNTIMES[target]
+  pins='\n'.join([runner+' '+str(rs),loader+' '+str(ls),rh+'  '+runner,lh+'  '+loader])
+  commands=[]
+  def command(argv,*args,**kwargs):
+   commands.append(argv)
+   if argv[:3]==['docker','image','inspect']:return __import__('json').dumps(dict(id='pinned',os='linux',arch='amd64',digests=[IMAGES[target]]))
+   return pins if '/bin/sh' in argv else 'reader-buddy 1.2.3'
+  def phase(args,cwd,callback,**kwargs):return callback(['docker','run',*args],cwd,**kwargs)
+  with patch('apk_source_build.run',side_effect=command),patch('docker_owned.phase',side_effect=phase):
+   output,evidence=runtime(pathlib.Path('/fresh/reader-buddy'),pathlib.Path('.'),target,IMAGES[target],pathlib.Path('/private/diagnostics'))
+  self.assertEqual(output,'reader-buddy 1.2.3')
+  execution=evidence['actual_container_argv'][1]
+  self.assertIn('type=bind,source='+str(pathlib.Path('/fresh/reader-buddy'))+',target=/inputs/reader-buddy,readonly',execution)
+  self.assertEqual(execution[-4:],['-L',prefix,'/inputs/reader-buddy','--version'])
+  self.assertFalse(any(value in ('cargo','cross','build') for argv in commands for value in argv))
+ def test_missing_or_changed_pin_refuses_before_execution(self):
+  target='armv7-unknown-linux-gnueabihf'
+  image=__import__('json').dumps(dict(id='pinned',os='linux',arch='amd64',digests=[IMAGES[target]]))
+  with patch('apk_source_build.run',return_value=image),patch('docker_owned.phase',return_value='wrong pins') as calls:
+   with self.assertRaisesRegex(Refusal,'runner/loader identity'):runtime(pathlib.Path('/fresh/bin'),pathlib.Path('.'),target,IMAGES[target],pathlib.Path('/private'))
+   self.assertEqual(calls.call_count,1)
+ def test_image_change_after_execution_refuses(self):
+  target='armv7-unknown-linux-gnueabihf';runner,prefix,loader,rs,rh,ls,lh=RUNTIMES[target]
+  pins='\n'.join([runner+' '+str(rs),loader+' '+str(ls),rh+'  '+runner,lh+'  '+loader])
+  images=[__import__('json').dumps(dict(id=value,os='linux',arch='amd64',digests=[IMAGES[target]])) for value in ('before','after')]
+  with patch('apk_source_build.run',side_effect=images),patch('docker_owned.phase',side_effect=[pins,'reader-buddy 1.2.3',pins]):
+   with self.assertRaisesRegex(Refusal,'runtime image/runner/loader changed'):runtime(pathlib.Path('/fresh/bin'),pathlib.Path('.'),target,IMAGES[target],pathlib.Path('/private'))
 
 class FrozenInput(unittest.TestCase):
  def test_exact_bytes(self):
@@ -131,8 +161,11 @@ class FreshBuildAdmission(unittest.TestCase):
       return ''
      if fault=='runtime-replacement':file.write_bytes(b'changed after runtime')
      return 'reader-buddy 1.2.3'
+    def runtime_call(binary,*args):
+     if fault=='runtime-replacement':binary.write_bytes(b'changed after runtime')
+     return 'reader-buddy 1.2.3',dict(actual_container_argv=[[],['docker','run','observed-runtime'],[]])
     identities=[compiler,changed if fault=='compiler-switch' else compiler]
-    with patch('apk_source_build.shutil.which',return_value=str(fake_cross)),patch('apk_source_build.source_identity',return_value=source_id),patch('apk_source_build.source_license',return_value='GPL-3.0'),patch('apk_source_build.cargo_configuration',return_value=[]),patch('apk_source_build.git_conversion',side_effect=[dict(autocrlf='false',eol='native',resolved_eol='lf'),dict(autocrlf='true' if fault=='git-conversion-switch' else 'false',eol='native',resolved_eol='lf')]),patch('apk_source_build.container_git_conversion',return_value=dict(autocrlf='false',eol='lf',resolved_eol='lf')),patch('apk_source_build.cargo_identity',return_value=cargo),patch('apk_source_build.git',return_value=''),patch('apk_compiler.identity',side_effect=identities),patch('docker_owned.cross_phase',side_effect=cross_call),patch('abi.qualify',return_value={'elf':{'interpreter':'/lib/ld-linux-armhf.so.3'}}):
+    with patch('apk_source_build.shutil.which',return_value=str(fake_cross)),patch('apk_source_build.runtime',side_effect=runtime_call),patch('apk_source_build.source_identity',return_value=source_id),patch('apk_source_build.source_license',return_value='GPL-3.0'),patch('apk_source_build.cargo_configuration',return_value=[]),patch('apk_source_build.git_conversion',side_effect=[dict(autocrlf='false',eol='native',resolved_eol='lf'),dict(autocrlf='true' if fault=='git-conversion-switch' else 'false',eol='native',resolved_eol='lf')]),patch('apk_source_build.container_git_conversion',return_value=dict(autocrlf='false',eol='lf',resolved_eol='lf')),patch('apk_source_build.cargo_identity',return_value=cargo),patch('apk_source_build.git',return_value=''),patch('apk_compiler.identity',side_effect=identities),patch('docker_owned.cross_phase',side_effect=cross_call),patch('abi.qualify',return_value={'elf':{'interpreter':'/lib/ld-linux-armhf.so.3'}}):
      message='executed binary file identity changed' if fault=='runtime-replacement' else 'source Git conversion semantics changed' if fault=='git-conversion-switch' else 'actual Cross compiler/image identity changed'
      with self.assertRaisesRegex(Refusal,message):build(source,'v1.2.3','armv7-unknown-linux-gnueabihf',target,configuration)
 
