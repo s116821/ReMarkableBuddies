@@ -7,6 +7,22 @@ use std::{collections::BTreeMap, sync::Arc};
 
 type Calls = Rc<RefCell<Vec<Vec<Vec<u8>>>>>;
 
+struct RefusedComposedMemory;
+impl crate::memory::Provider for RefusedComposedMemory {
+    fn put(&self, _: crate::memory::Mutation) -> Result<Uuid> {
+        panic!("composed memory put called")
+    }
+    fn forget(&self, _: crate::memory::Forget) -> Result<Uuid> {
+        panic!("composed memory forget called")
+    }
+    fn inspect(&self, _: &crate::memory::Key) -> Result<Vec<crate::storage::Envelope>> {
+        panic!("composed memory inspect called")
+    }
+    fn query(&self, _: &crate::memory::Query) -> Result<crate::memory::QueryResult> {
+        panic!("composed memory query called")
+    }
+}
+
 struct SelectedModel {
     expected: Vec<Vec<u8>>,
     images: Vec<String>,
@@ -87,7 +103,7 @@ impl LLMEngine for SelectedModel {
 fn selected_actual_orchestrator_publishes_owned_draft_and_stops_on_replacement_or_write_failure() {
     use crate::storage::selection::{SelectionChange, SelectionScope};
     use crate::storage::{Coverage, Manifest, ObjectRef, Scope, FORMAT, MAX_ITEMS};
-    for case in 0..6 {
+    for case in 0..7 {
         let fixture = SimulatorLedger::new();
         let ledger = fixture.open().unwrap();
         let store = ledger.store().clone();
@@ -247,6 +263,9 @@ fn selected_actual_orchestrator_publishes_owned_draft_and_stops_on_replacement_o
             continue;
         }
         let mut orchestrator = Orchestrator::new(workflow, model, ledger);
+        if case == 6 {
+            orchestrator.set_subject_memory(Some(Arc::new(RefusedComposedMemory)));
+        }
         let result = orchestrator.run_selected_prepared(
             publication.token.clone(),
             pin(conversation),
@@ -255,7 +274,16 @@ fn selected_actual_orchestrator_publishes_owned_draft_and_stops_on_replacement_o
         );
         assert!(result.is_err());
         assert!(device.borrow().counts.is_empty());
-        assert_eq!(calls.get(), if case == 1 { 1 } else { 2 });
+        assert_eq!(
+            calls.get(),
+            if case == 6 {
+                0
+            } else if case == 1 {
+                1
+            } else {
+                2
+            }
+        );
         let current = store
             .selected_snapshot(publication.token.scope(), MAX_ITEMS)
             .unwrap()

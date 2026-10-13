@@ -83,6 +83,10 @@ impl<M: LLMEngine> Orchestrator<M> {
         user: crate::conversation::IntentRecordRef,
         capture: crate::storage::Uuid,
     ) -> Result<()> {
+        anyhow::ensure!(
+            self.memory.is_none(),
+            "Selected prepared entry requires a reviewed combined subject-memory admission set"
+        );
         let mut attempt =
             Attempt::prepare_selected(&self.ledger, &self.workflow, token, root, user, capture)?;
         self.workflow.begin_iteration()?;
