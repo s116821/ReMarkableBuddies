@@ -104,7 +104,6 @@ impl Workflow {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn with_selected(
         facade: selected_backend::SelectedBackendFacade,
         debug_dump: bool,
