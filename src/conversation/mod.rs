@@ -7,8 +7,10 @@ mod intent;
 mod legacy;
 pub use development::{DevelopmentCaptureHistory, PreparedDevelopmentCapture};
 mod pending;
+#[cfg(test)]
 mod reader_dispatch;
 mod reader_plan;
+#[cfg(test)]
 mod reader_uncertainty;
 mod selected;
 #[cfg(test)]
@@ -25,6 +27,7 @@ pub use binding_projection::{
 };
 pub use intent::*;
 pub use pending::{PendingIntentPublication, PendingIntentRequest, SourceAdmission};
+#[cfg(test)]
 pub(crate) use pending::{ReaderContext, ReaderPreparation};
 pub use reader_plan::{ReaderEraseRectangle, ReaderHandoff, ReaderPlan, SmartEraseInput};
 pub use selected::*;

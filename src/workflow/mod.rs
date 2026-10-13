@@ -55,6 +55,7 @@ const BLANK_PAGE_SAMPLE_RATE: u32 = 2;
 pub struct Workflow {
     device: Box<dyn DeviceBackend>,
     selected: Option<selected_backend::SelectedBackendFacade>,
+    #[cfg(test)]
     development_non_output: bool,
     frame: Frame,
     debug_dump: bool,
@@ -80,6 +81,7 @@ impl Workflow {
         Self {
             device,
             selected: None,
+            #[cfg(test)]
             development_non_output: false,
             frame: Frame::default(),
             debug_dump,
@@ -90,6 +92,7 @@ impl Workflow {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn with_selected(
         facade: selected_backend::SelectedBackendFacade,
         debug_dump: bool,
@@ -103,6 +106,7 @@ impl Workflow {
     }
     /// Source-only transport of an already-owned capture; no production bootstrap,
     /// native freshness, trigger setup or output capability follows from this.
+    #[cfg(test)]
     pub(crate) fn with_selected_development_capture(
         facade: selected_backend::SelectedBackendFacade,
         capture: remarkable_open_sdk::development_capture::ReadOnlyDevelopmentCapture,
@@ -119,6 +123,7 @@ impl Workflow {
     pub(crate) fn is_selected(&self) -> bool {
         self.selected.is_some()
     }
+    #[cfg(test)]
     pub(crate) fn dispatch_reader(
         &mut self,
         context: Option<&crate::conversation::ReaderContext>,

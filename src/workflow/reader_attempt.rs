@@ -13,6 +13,7 @@ pub(super) struct Attempt {
     evidence: Uuid,
     pub legacy_output: bool,
     development_evidence: bool,
+    #[cfg(test)]
     reader_preparation: Option<ReaderPreparation>,
 }
 fn now() -> Result<u64> {
@@ -152,6 +153,7 @@ impl Attempt {
             evidence,
             legacy_output,
             development_evidence,
+            #[cfg(test)]
             reader_preparation: None,
         };
         attempt.user = attempt.load_turn(ledger, attempt.user.id)?;
@@ -159,6 +161,7 @@ impl Attempt {
     }
     /// A live context arrives only from the controlled new Pending branch.
     /// SDK fixture preparation supplies none and remains non-output.
+    #[cfg(test)]
     pub(super) fn install_reader_preparation(
         &mut self,
         preparation: ReaderPreparation,
@@ -193,6 +196,7 @@ impl Attempt {
         self.reader_preparation = Some(preparation);
         Ok(())
     }
+    #[cfg(test)]
     pub(super) fn dispatch_selected(
         &self,
         workflow: &mut super::Workflow,
@@ -203,6 +207,17 @@ impl Attempt {
             anyhow::bail!("Historical or unqualified Attempt cannot dispatch Reader output")
         };
         workflow.dispatch_reader(Some(context), ordinal, handoff)
+    }
+    fn has_reader_preparation(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.reader_preparation.is_some()
+        }
+        #[cfg(not(test))]
+        {
+            // Ordinary runtime has no qualified adapter or context attachment path.
+            false
+        }
     }
     fn load_turn(&self, ledger: &Ledger, id: Uuid) -> Result<Turn> {
         ledger
@@ -230,7 +245,7 @@ impl Attempt {
     }
     pub fn interpret(&mut self, ledger: &Ledger, text: &str) -> Result<()> {
         anyhow::ensure!(
-            self.reader_preparation.is_none(),
+            !self.has_reader_preparation(),
             "Selected Reader preparation requires selected domain mutation/settlement"
         );
         let mut turn = self.user.clone();
@@ -248,7 +263,7 @@ impl Attempt {
     }
     pub fn generated(&mut self, ledger: &Ledger, text: String) -> Result<()> {
         anyhow::ensure!(
-            self.reader_preparation.is_none(),
+            !self.has_reader_preparation(),
             "Selected Reader preparation requires selected domain mutation/settlement"
         );
         let timestamp = now()?;
@@ -284,7 +299,7 @@ impl Attempt {
         reason: AttemptReason,
     ) -> Result<()> {
         anyhow::ensure!(
-            self.reader_preparation.is_none(),
+            !self.has_reader_preparation(),
             "Selected Reader preparation requires selected domain mutation/settlement"
         );
         let original = if assistant {
