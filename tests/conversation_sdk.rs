@@ -143,12 +143,41 @@ fn select_fixture_scope(
     store: &Arc<Store>,
     scope: selection::SelectionScope,
 ) -> (Arc<SelectedAdmission>, selection::SelectionToken) {
+    select_fixture_scope_filtered(store, scope, None)
+}
+fn select_fixture_scope_filtered(
+    store: &Arc<Store>,
+    scope: selection::SelectionScope,
+    conversation: Option<Uuid>,
+) -> (Arc<SelectedAdmission>, selection::SelectionToken) {
     let mut objects = BTreeMap::new();
     let mut records = BTreeMap::new();
     let mut namespaces = BTreeMap::new();
     let mut media = BTreeMap::new();
     for manifest in store.manifests().unwrap() {
         for reference in manifest.records {
+            if let Some(conversation) = conversation {
+                let envelope: Envelope =
+                    serde_json::from_slice(&store.read_object(&reference).unwrap()).unwrap();
+                if !matches!(
+                    envelope.namespace,
+                    Namespace::Conversation | Namespace::Source
+                ) {
+                    continue;
+                }
+                let value: Record = serde_json::from_value(envelope.payload).unwrap();
+                let owner = match value {
+                    Record::Root(root) => root.id,
+                    Record::Turn(turn) => turn.conversation,
+                    Record::Capture(capture) => capture.conversation,
+                    Record::Receipt(receipt) => receipt.acknowledgment.conversation,
+                    _ => panic!("unexpected opposing fixture record"),
+                };
+                if owner != conversation {
+                    continue;
+                }
+            }
+
             namespaces.insert(
                 reference.sha256.clone(),
                 manifest.record_namespaces[&reference.sha256],
@@ -903,6 +932,225 @@ fn composed_memory_reader_same_key_publishes_once_without_reentrant_gate() {
             .unwrap()
             .token,
         valid.token
+    );
+}
+
+#[test]
+fn composed_memory_opposing_document_sets_publish_one_without_deadlock() {
+    if std::env::var_os("BUDDY_OPPOSING_DOCUMENT_CHILD").is_none() {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "composed_memory_opposing_document_sets_publish_one_without_deadlock",
+                "--nocapture",
+            ])
+            .env("BUDDY_OPPOSING_DOCUMENT_CHILD", "1")
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("opposing document admission exceeded deadline");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        return;
+    }
+    use remarkable_reader_buddy::memory::{self, Provider};
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    let ledger = Ledger::new(store.clone());
+    let identity = memory::catalog::Identity {
+        group: Uuid::new_v4(),
+        profile: Uuid::new_v4(),
+        binding_sha256: digest(b"opposing documents binding"),
+    };
+    // First provider precedes its Reader; second provider follows both Readers.
+    let first_memory =
+        Arc::new(memory::selected::SelectedMemory::new(store.clone(), identity.clone()).unwrap());
+    let key = memory::Key {
+        profile: identity.profile,
+        scope: memory::Scope::Global,
+        fact: Uuid::new_v4(),
+    };
+    let global_registration = first_memory
+        .initialize_aggregate(memory::selected::InitializeAggregate {
+            operation: Uuid::new_v4(),
+            accepted_base_sha256: digest(b"opposing global genesis"),
+            fact: memory::Fact {
+                key: key.clone(),
+                claim: "gravity units".into(),
+                value: "SI context".into(),
+                subject: "gravity".into(),
+                tags: vec![],
+                provenance: memory::Provenance {
+                    basis: memory::Basis::UserConfirmed,
+                    description: "Explicit opposing fixture".into(),
+                    conversation: None,
+                    turn: None,
+                    source: None,
+                },
+                confidence_basis_points: 9000,
+                observed_ms: 1,
+                expires_ms: None,
+            },
+        })
+        .unwrap()
+        .registration
+        .unwrap();
+    let mut registrations = vec![global_registration];
+    let mut requests = Vec::new();
+    for _ in 0..2 {
+        let document = Uuid::new_v4();
+        let conversation = create(&ledger);
+        let source = batch(Uuid::new_v4(), document, Uuid::new_v4());
+        let prepared = ledger
+            .prepare_sdk_fixture(
+                Uuid::new_v4(),
+                root(&ledger, conversation),
+                request(conversation),
+                &source,
+            )
+            .unwrap();
+        let scope = identity
+            .aggregate_scope(&memory::catalog::Owner::Document { document })
+            .unwrap();
+        let (reader, initial) = select_fixture_scope_filtered(&store, scope, Some(conversation));
+        let genesis = store
+            .selected_snapshot(initial.scope(), MAX_ITEMS)
+            .unwrap()
+            .unwrap()
+            .transaction;
+        registrations.push(memory::catalog::Registration {
+            format: 1,
+            catalog: identity.record_id().unwrap(),
+            key_sha256: initial.scope().key_sha256.clone(),
+            owner: memory::catalog::Owner::Document { document },
+            genesis_operation: genesis.operation,
+            genesis_sha256: initial.selection_sha256().into(),
+        });
+        let interpretation = SelectedReaderWrite {
+            operation: Uuid::new_v4(),
+            root: selected_pin(&store, &initial, conversation),
+            user: selected_pin(&store, &initial, prepared.turn),
+            updated_ms: 11,
+            text: "gravity units?".into(),
+            kind: SelectedReaderText::Interpret,
+        };
+        let SelectedReaderPublication::Published {
+            publication,
+            acknowledgment,
+        } = reader
+            .publish_reader_text(&initial, interpretation)
+            .unwrap()
+        else {
+            panic!("new interpretation historical")
+        };
+        let write = SelectedReaderWrite {
+            operation: Uuid::new_v4(),
+            root: acknowledgment.root,
+            user: acknowledgment.turn,
+            updated_ms: 12,
+            text: "opposing answer".into(),
+            kind: SelectedReaderText::Generate {
+                assistant: Uuid::new_v4(),
+            },
+        };
+        requests.push((
+            reader,
+            publication.token,
+            write,
+            document,
+            conversation,
+            prepared,
+        ));
+    }
+    first_memory
+        .initialize_selection(memory::selected::InitializeSelection {
+            operation: Uuid::new_v4(),
+            accepted_base_sha256: digest(b"opposing catalog genesis"),
+            registrations,
+        })
+        .unwrap();
+    let second_memory =
+        Arc::new(memory::selected::SelectedMemory::new(store.clone(), identity.clone()).unwrap());
+    let global_scope = identity
+        .aggregate_scope(&memory::catalog::Owner::GlobalFact { key })
+        .unwrap();
+    let global_before = store
+        .selected_snapshot(&global_scope, MAX_ITEMS)
+        .unwrap()
+        .unwrap()
+        .token;
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let mut handles = Vec::new();
+    let mut originals = Vec::new();
+    for (provider, (reader, accepted, write, document, conversation, prepared)) in
+        [first_memory, second_memory].into_iter().zip(requests)
+    {
+        let mut query = memory::Query::new("gravity units".into(), 20);
+        query.document = Some(document);
+        let view = provider.query(&query).unwrap();
+        assert_eq!(view.status, memory::Status::Complete);
+        assert_eq!(view.context.facts.len(), 1);
+        originals.push((reader.clone(), accepted.clone(), conversation, prepared));
+        let barrier = barrier.clone();
+        handles.push(std::thread::spawn(move || {
+            barrier.wait();
+            provider.publish_selected_reader_text(&view, &reader, &accepted, write)
+        }));
+    }
+    let results = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        results
+            .iter()
+            .filter(|r| matches!(r, Ok(SelectedReaderPublication::Published { .. })))
+            .count(),
+        1
+    );
+    assert_eq!(results.iter().filter(|r| r.is_err()).count(), 1);
+    let mut assistants = 0;
+    for (reader, accepted, conversation, prepared) in originals {
+        let current = store
+            .selected_snapshot(accepted.scope(), MAX_ITEMS)
+            .unwrap()
+            .unwrap();
+        let records = SelectedDomainProjection::from_snapshot(&current)
+            .unwrap()
+            .inspect(conversation)
+            .unwrap();
+        assistants += records
+            .iter()
+            .filter(|r| matches!(r, Record::Turn(t) if t.role == Role::Assistant))
+            .count();
+        let SelectedCaptureImages::Sdk(saved) = reader
+            .capture_images(&current.token, prepared.capture)
+            .unwrap()
+        else {
+            panic!("source origin changed")
+        };
+        assert_eq!(
+            saved.images.iter().map(|i| &i.bytes).collect::<Vec<_>>(),
+            prepared.images.iter().map(|i| &i.bytes).collect::<Vec<_>>()
+        );
+    }
+    assert_eq!(assistants, 1);
+    assert_eq!(
+        store
+            .selected_snapshot(&global_scope, MAX_ITEMS)
+            .unwrap()
+            .unwrap()
+            .token,
+        global_before
     );
 }
 
