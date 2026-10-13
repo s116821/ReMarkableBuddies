@@ -18,6 +18,27 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+#[cfg(test)]
+mod composed_panic_tests;
+
+#[cfg(test)]
+thread_local! {
+    static PANIC_AFTER_CONSUMPTION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static PANIC_AFTER_CONSUMPTION_WITNESSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn witness_composed_panic(valid: bool) {
+    if PANIC_AFTER_CONSUMPTION.with(|armed| armed.replace(false)) {
+        assert!(
+            valid,
+            "panic witness requires valid current receiving inputs"
+        );
+        PANIC_AFTER_CONSUMPTION_WITNESSED.with(|witness| witness.set(true));
+        panic!("composed post-consumption panic witness");
+    }
+}
+
 fn budget() -> SelectedReadBudget {
     SelectedReadBudget::new(64, 4096, 8 * 1024 * 1024, 32 * 1024 * 1024)
 }
@@ -601,6 +622,8 @@ impl Provider for SelectedMemory {
             // A fresh attempt consumes its receiving view even on refusal or a
             // later failure. Historical recovery never invokes this callback.
             pins.consumed = true;
+            #[cfg(test)]
+            witness_composed_panic(validation.is_ok());
             validation
         })
     }
