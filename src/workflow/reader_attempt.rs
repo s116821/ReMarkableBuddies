@@ -384,6 +384,7 @@ impl Attempt {
         self.user = turn;
         Ok(())
     }
+    #[cfg(test)]
     pub fn generated(&mut self, ledger: &Ledger, text: String) -> Result<()> {
         self.generated_with_memory(ledger, text, None)
     }
