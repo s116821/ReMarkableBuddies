@@ -7,6 +7,8 @@ mod reader_attempt;
 pub mod selected_buddy;
 #[cfg(test)]
 pub(crate) use reader_attempt::assert_attachment_behavior;
+#[cfg(test)]
+pub(crate) use reader_attempt::assert_selected_retry_control;
 pub(crate) mod selected_backend;
 pub mod symbol_pool;
 pub mod xochitl_integration;
@@ -55,7 +57,6 @@ const BLANK_PAGE_SAMPLE_RATE: u32 = 2;
 pub struct Workflow {
     device: Box<dyn DeviceBackend>,
     selected: Option<selected_backend::SelectedBackendFacade>,
-    #[cfg(test)]
     development_non_output: bool,
     frame: Frame,
     debug_dump: bool,
@@ -93,7 +94,6 @@ impl Workflow {
         Self {
             device,
             selected: None,
-            #[cfg(test)]
             development_non_output: false,
             frame: Frame::default(),
             debug_dump,
@@ -133,6 +133,14 @@ impl Workflow {
     }
     pub(crate) fn is_selected(&self) -> bool {
         self.selected.is_some()
+    }
+    pub(super) fn selected_admission(
+        &self,
+    ) -> Result<std::sync::Arc<crate::conversation::SelectedAdmission>> {
+        self.selected
+            .as_ref()
+            .map(|selected| selected.admission())
+            .ok_or_else(|| anyhow::anyhow!("selected Workflow absent"))
     }
     #[cfg(test)]
     pub(crate) fn dispatch_reader(
