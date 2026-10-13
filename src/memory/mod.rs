@@ -1,5 +1,5 @@
 //! Explicit associative facts over the existing Store. No automatic extraction or sync engine.
-mod aggregate;
+pub(crate) mod aggregate;
 pub mod catalog;
 pub mod context;
 pub mod maintenance;
@@ -332,6 +332,23 @@ impl Inspection {
     }
 }
 pub trait Provider: Send + Sync {
+    /// Setup compatibility only; actual selected publication still validates
+    /// current receiving pins under its complete ordered admission set.
+    fn require_selected_reader(
+        &self,
+        _reader: &crate::conversation::SelectedAdmission,
+    ) -> Result<()> {
+        anyhow::bail!("subject memory provider does not support selected Reader admission")
+    }
+    fn publish_selected_reader_text(
+        &self,
+        _result: &QueryResult,
+        _reader: &crate::conversation::SelectedAdmission,
+        _accepted: &crate::storage::selection::SelectionToken,
+        _request: crate::conversation::SelectedReaderWrite,
+    ) -> Result<crate::conversation::SelectedReaderPublication> {
+        anyhow::bail!("subject memory provider does not support selected Reader publication")
+    }
     fn put(&self, mutation: Mutation) -> Result<Uuid>;
     fn forget(&self, mutation: Forget) -> Result<Uuid>;
     fn inspect(&self, key: &Key) -> Result<Vec<Envelope>>;

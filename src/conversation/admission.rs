@@ -23,6 +23,7 @@ pub struct HistoricalIntent {
 
 /// All handles for the same Store and aggregate share admission, including a
 /// replacement binding. Callers still own qualified source/backend validation.
+#[derive(Clone)]
 pub struct SelectedAdmission {
     store: Arc<Store>,
     scope: SelectionScope,
@@ -277,7 +278,7 @@ impl SelectedAdmission {
             .map_err(|_| anyhow::anyhow!("domain admission unavailable"))?;
         operation(&self.store)
     }
-    pub(super) fn scope(&self) -> &SelectionScope {
+    pub(crate) fn scope(&self) -> &SelectionScope {
         &self.scope
     }
     pub fn initialize(

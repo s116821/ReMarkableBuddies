@@ -130,6 +130,19 @@ fn root(ledger: &Ledger, conversation: Uuid) -> ExpectedHeads {
 }
 
 fn select_fixture(store: &Arc<Store>) -> (Arc<SelectedAdmission>, selection::SelectionToken) {
+    select_fixture_scope(
+        store,
+        selection::SelectionScope {
+            group: Uuid::new_v4(),
+            key_sha256: digest(b"Reader text fixture"),
+            binding_sha256: digest(b"fixture binding"),
+        },
+    )
+}
+fn select_fixture_scope(
+    store: &Arc<Store>,
+    scope: selection::SelectionScope,
+) -> (Arc<SelectedAdmission>, selection::SelectionToken) {
     let mut objects = BTreeMap::new();
     let mut records = BTreeMap::new();
     let mut namespaces = BTreeMap::new();
@@ -154,11 +167,6 @@ fn select_fixture(store: &Arc<Store>) -> (Arc<SelectedAdmission>, selection::Sel
             media.insert(reference.sha256.clone(), reference);
         }
     }
-    let scope = selection::SelectionScope {
-        group: Uuid::new_v4(),
-        key_sha256: digest(b"Reader text fixture"),
-        binding_sha256: digest(b"fixture binding"),
-    };
     let admission = Arc::new(SelectedAdmission::new(store.clone(), scope).unwrap());
     let selected = Manifest {
         format: FORMAT,
@@ -207,6 +215,695 @@ fn selected_pin(store: &Store, token: &selection::SelectionToken, id: Uuid) -> I
         revision_id: envelope.revision_id,
         object: reference.clone(),
     }
+}
+
+#[test]
+fn composed_memory_reader_same_key_publishes_once_without_reentrant_gate() {
+    // Run the real shared-key path in a bounded child; an admission regression
+    // must fail on a deadline rather than hang this test runner.
+    if std::env::var_os("BUDDY_COMPOSED_GATE_CHILD").is_none() {
+        for fault in [
+            "none",
+            "before",
+            "after",
+            "concurrent",
+            "reader",
+            "fact",
+            "budget",
+        ] {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "composed_memory_reader_same_key_publishes_once_without_reentrant_gate",
+                    "--nocapture",
+                ])
+                .env("BUDDY_COMPOSED_GATE_CHILD", "1")
+                .env("BUDDY_COMPOSED_FAULT", fault)
+                .spawn()
+                .unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    assert!(status.success());
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                    panic!("combined admission exceeded deadline");
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        return;
+    }
+    use remarkable_reader_buddy::memory::{self, Provider};
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    let ledger = Ledger::new(store.clone());
+    let conversation = create(&ledger);
+    let document = Uuid::new_v4();
+    let source = batch(Uuid::new_v4(), document, Uuid::new_v4());
+    let original = ledger
+        .prepare_sdk_fixture(
+            Uuid::new_v4(),
+            root(&ledger, conversation),
+            request(conversation),
+            &source,
+        )
+        .unwrap();
+    let identity = memory::catalog::Identity {
+        group: Uuid::new_v4(),
+        profile: Uuid::new_v4(),
+        binding_sha256: digest(b"composed binding"),
+    };
+    let local = memory::LocalMemory::new_local(store.clone(), identity.profile).unwrap();
+    local
+        .put(memory::Mutation {
+            operation: Uuid::new_v4(),
+            expected: Default::default(),
+            fact: memory::Fact {
+                key: memory::Key {
+                    profile: identity.profile,
+                    scope: memory::Scope::Document { document },
+                    fact: Uuid::new_v4(),
+                },
+                claim: "gravity units".into(),
+                value: "SI gravity units".into(),
+                subject: "gravity".into(),
+                tags: vec![],
+                provenance: memory::Provenance {
+                    basis: memory::Basis::UserConfirmed,
+                    description: "Explicit fixture".into(),
+                    conversation: None,
+                    turn: None,
+                    source: None,
+                },
+                confidence_basis_points: 9000,
+                observed_ms: 1,
+                expires_ms: None,
+            },
+        })
+        .unwrap();
+    drop(local);
+    let scope = identity
+        .aggregate_scope(&memory::catalog::Owner::Document { document })
+        .unwrap();
+    let (reader, initial) = select_fixture_scope(&store, scope);
+    let genesis = store
+        .selected_snapshot(initial.scope(), MAX_ITEMS)
+        .unwrap()
+        .unwrap()
+        .transaction;
+    let memory = memory::selected::SelectedMemory::new(store.clone(), identity.clone()).unwrap();
+    let global_key = memory::Key {
+        profile: identity.profile,
+        scope: memory::Scope::Global,
+        fact: Uuid::new_v4(),
+    };
+    let global_registration = memory
+        .initialize_aggregate(memory::selected::InitializeAggregate {
+            operation: Uuid::new_v4(),
+            accepted_base_sha256: digest(b"distinct global aggregate"),
+            fact: memory::Fact {
+                key: global_key.clone(),
+                claim: "gravity global units".into(),
+                value: "global SI context".into(),
+                subject: "gravity".into(),
+                tags: vec![],
+                provenance: memory::Provenance {
+                    basis: memory::Basis::UserConfirmed,
+                    description: "Explicit global fixture".into(),
+                    conversation: None,
+                    turn: None,
+                    source: None,
+                },
+                confidence_basis_points: 9000,
+                observed_ms: 1,
+                expires_ms: None,
+            },
+        })
+        .unwrap()
+        .registration
+        .unwrap();
+    let mut registrations = vec![
+        global_registration,
+        memory::catalog::Registration {
+            format: 1,
+            catalog: identity.record_id().unwrap(),
+            key_sha256: initial.scope().key_sha256.clone(),
+            owner: memory::catalog::Owner::Document { document },
+            genesis_operation: genesis.operation,
+            genesis_sha256: initial.selection_sha256().into(),
+        },
+    ];
+    if std::env::var("BUDDY_COMPOSED_FAULT").as_deref() == Ok("budget") {
+        let global_scope = identity
+            .aggregate_scope(&memory::catalog::Owner::GlobalFact {
+                key: global_key.clone(),
+            })
+            .unwrap();
+        let seed = store
+            .selected_snapshot(&global_scope, MAX_ITEMS)
+            .unwrap()
+            .unwrap();
+        let seed_fact: memory::Fact =
+            serde_json::from_value(seed.selected_records[0].payload.clone()).unwrap();
+        for index in 0..30 {
+            let mut fact = seed_fact.clone();
+            fact.key.fact = Uuid::new_v4();
+            fact.claim = format!("unrelated {index}");
+            fact.subject = "unrelated".into();
+            registrations.push(
+                memory
+                    .initialize_aggregate(memory::selected::InitializeAggregate {
+                        operation: Uuid::new_v4(),
+                        accepted_base_sha256: digest(b"budget aggregate"),
+                        fact,
+                    })
+                    .unwrap()
+                    .registration
+                    .unwrap(),
+            );
+        }
+    }
+    memory
+        .initialize_selection(memory::selected::InitializeSelection {
+            operation: Uuid::new_v4(),
+            accepted_base_sha256: digest(b"composed catalog base"),
+            registrations,
+        })
+        .unwrap();
+    let interpretation = SelectedReaderWrite {
+        operation: Uuid::new_v4(),
+        root: selected_pin(&store, &initial, conversation),
+        user: selected_pin(&store, &initial, original.turn),
+        updated_ms: 11,
+        text: "gravity units?".into(),
+        kind: SelectedReaderText::Interpret,
+    };
+    let SelectedReaderPublication::Published {
+        publication,
+        acknowledgment,
+    } = reader
+        .publish_reader_text(&initial, interpretation)
+        .unwrap()
+    else {
+        panic!("interpretation replayed")
+    };
+    let mut query = memory::Query::new("gravity units".into(), 20);
+    query.document = Some(document);
+    let view = memory.query(&query).unwrap();
+    assert_eq!(view.status, memory::Status::Complete);
+    assert_eq!(view.context.facts.len(), 2);
+    let draft = SelectedReaderWrite {
+        operation: Uuid::new_v4(),
+        root: acknowledgment.root,
+        user: acknowledgment.turn,
+        updated_ms: 12,
+        text: "source and optional memory answer".into(),
+        kind: SelectedReaderText::Generate {
+            assistant: Uuid::new_v4(),
+        },
+    };
+    let foreign_instance =
+        memory::selected::SelectedMemory::new(store.clone(), identity.clone()).unwrap();
+    assert!(foreign_instance
+        .publish_selected_reader_text(&view, &reader, &publication.token, draft.clone())
+        .is_err());
+    let original_global_token = store
+        .selected_snapshot(
+            &identity
+                .aggregate_scope(&memory::catalog::Owner::GlobalFact {
+                    key: global_key.clone(),
+                })
+                .unwrap(),
+            MAX_ITEMS,
+        )
+        .unwrap()
+        .unwrap()
+        .token;
+    let fault = std::env::var("BUDDY_COMPOSED_FAULT").unwrap_or_else(|_| "none".into());
+    if matches!(fault.as_str(), "reader" | "fact" | "budget") {
+        if fault != "budget" {
+            let scope = if fault == "reader" {
+                initial.scope().clone()
+            } else {
+                identity
+                    .aggregate_scope(&memory::catalog::Owner::GlobalFact { key: global_key })
+                    .unwrap()
+            };
+            let selected = store.selected_snapshot(&scope, MAX_ITEMS).unwrap().unwrap();
+            SelectedAdmission::new(store.clone(), scope)
+                .unwrap()
+                .activate(
+                    &selected.token,
+                    selection::SelectionChange {
+                        operation: Uuid::new_v4(),
+                        accepted_base_sha256: selected.transaction.accepted_base_sha256,
+                        selected: selected.transaction.selected,
+                        retained: selected.transaction.retained,
+                    },
+                    BTreeMap::new(),
+                )
+                .unwrap();
+        }
+        let before = store
+            .selected_snapshot(initial.scope(), MAX_ITEMS)
+            .unwrap()
+            .unwrap()
+            .token;
+        let refused = memory
+            .publish_selected_reader_text(&view, &reader, &publication.token, draft.clone())
+            .err()
+            .expect("new publication must refuse");
+        if fault == "budget" {
+            assert!(format!("{refused:#}").contains("selected read budget exhausted"));
+        }
+        assert!(memory
+            .publish_selected_reader_text(&view, &reader, &publication.token, draft)
+            .is_err());
+        assert_eq!(
+            store
+                .selected_snapshot(initial.scope(), MAX_ITEMS)
+                .unwrap()
+                .unwrap()
+                .token,
+            before
+        );
+        return;
+    }
+    if fault == "concurrent" {
+        let second_view = memory.query(&query).unwrap();
+        let second_reader =
+            Arc::new(SelectedAdmission::new(store.clone(), initial.scope().clone()).unwrap());
+        let memory = Arc::new(memory);
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let mut handles = Vec::new();
+        for (selected_reader, selected_view) in
+            [(reader.clone(), view), (second_reader, second_view)]
+        {
+            let memory = memory.clone();
+            let barrier = barrier.clone();
+            let accepted = publication.token.clone();
+            let mut request = draft.clone();
+            request.operation = Uuid::new_v4();
+            request.kind = SelectedReaderText::Generate {
+                assistant: Uuid::new_v4(),
+            };
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                memory.publish_selected_reader_text(
+                    &selected_view,
+                    &selected_reader,
+                    &accepted,
+                    request,
+                )
+            }));
+        }
+        let results = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Ok(SelectedReaderPublication::Published { .. })))
+                .count(),
+            1
+        );
+        assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+        let selected = store
+            .selected_snapshot(initial.scope(), MAX_ITEMS)
+            .unwrap()
+            .unwrap();
+        let records = SelectedDomainProjection::from_snapshot(&selected)
+            .unwrap()
+            .inspect(conversation)
+            .unwrap();
+        assert_eq!(
+            records
+                .iter()
+                .filter(|r| matches!(r, Record::Turn(t) if t.role == Role::Assistant))
+                .count(),
+            1
+        );
+        return;
+    }
+    if fault != "none" {
+        store
+            .set_fault(if fault == "before" {
+                Fault::BeforeCommit
+            } else {
+                Fault::AfterCommit
+            })
+            .unwrap();
+        let first =
+            memory.publish_selected_reader_text(&view, &reader, &publication.token, draft.clone());
+        if fault == "before" {
+            assert!(first.is_err());
+        } else {
+            assert!(matches!(
+                first.unwrap(),
+                SelectedReaderPublication::Historical { .. }
+            ));
+        }
+        let retry =
+            memory.publish_selected_reader_text(&view, &reader, &publication.token, draft.clone());
+        if fault == "before" {
+            assert!(retry.is_err());
+            assert_eq!(
+                store
+                    .selected_snapshot(initial.scope(), MAX_ITEMS)
+                    .unwrap()
+                    .unwrap()
+                    .token,
+                publication.token
+            );
+        } else {
+            assert!(matches!(
+                retry.unwrap(),
+                SelectedReaderPublication::Historical { .. }
+            ));
+            let selected = store
+                .selected_snapshot(initial.scope(), MAX_ITEMS)
+                .unwrap()
+                .unwrap();
+            let records = SelectedDomainProjection::from_snapshot(&selected)
+                .unwrap()
+                .inspect(conversation)
+                .unwrap();
+            assert_eq!(
+                records
+                    .iter()
+                    .filter(|r| matches!(r, Record::Turn(t) if t.role == Role::Assistant))
+                    .count(),
+                1
+            );
+        }
+        return;
+    }
+    let SelectedReaderPublication::Published {
+        publication: generated,
+        acknowledgment: ack,
+    } = memory
+        .publish_selected_reader_text(&view, &reader, &publication.token, draft.clone())
+        .unwrap()
+    else {
+        panic!("new combined draft historical")
+    };
+    assert!(ack.written.sources.is_empty());
+    assert_eq!(ack.user.sources, vec![original.capture]);
+    assert!(matches!(
+        memory
+            .publish_selected_reader_text(&view, &reader, &publication.token, draft.clone())
+            .unwrap(),
+        SelectedReaderPublication::Historical { .. }
+    ));
+    let mut changed = draft.clone();
+    changed.operation = Uuid::new_v4();
+    assert!(memory
+        .publish_selected_reader_text(&view, &reader, &publication.token, changed)
+        .is_err());
+    let mut altered = view.clone();
+    altered.context.facts[0].fact.value.push('!');
+    assert!(memory
+        .publish_selected_reader_text(&altered, &reader, &publication.token, draft.clone())
+        .is_err());
+    assert_eq!(
+        store
+            .selected_snapshot(initial.scope(), MAX_ITEMS)
+            .unwrap()
+            .unwrap()
+            .token,
+        generated.token
+    );
+    let SelectedCaptureImages::Sdk(images) = reader
+        .capture_images(&generated.token, original.capture)
+        .unwrap()
+    else {
+        panic!("capture origin changed")
+    };
+    assert_eq!(
+        images
+            .images
+            .iter()
+            .map(|image| &image.bytes)
+            .collect::<Vec<_>>(),
+        original
+            .images
+            .iter()
+            .map(|image| &image.bytes)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        store
+            .selected_snapshot(original_global_token.scope(), MAX_ITEMS)
+            .unwrap()
+            .unwrap()
+            .token,
+        original_global_token
+    );
+    let fresh_view = memory.query(&query).unwrap();
+    let catalog_scope = identity.scope().unwrap();
+    let catalog_snapshot = store
+        .selected_snapshot(&catalog_scope, MAX_ITEMS)
+        .unwrap()
+        .unwrap();
+    let catalog_admission = SelectedAdmission::new(store.clone(), catalog_scope).unwrap();
+    catalog_admission
+        .activate(
+            &catalog_snapshot.token,
+            selection::SelectionChange {
+                operation: Uuid::new_v4(),
+                accepted_base_sha256: catalog_snapshot.transaction.accepted_base_sha256,
+                selected: catalog_snapshot.transaction.selected,
+                retained: catalog_snapshot.transaction.retained,
+            },
+            BTreeMap::new(),
+        )
+        .unwrap();
+    let next = SelectedReaderWrite {
+        operation: Uuid::new_v4(),
+        root: ack.root.clone(),
+        user: ack.turn.clone(),
+        updated_ms: 13,
+        text: "must not publish after catalog replacement".into(),
+        kind: SelectedReaderText::Generate {
+            assistant: Uuid::new_v4(),
+        },
+    };
+    assert!(memory
+        .publish_selected_reader_text(&fresh_view, &reader, &generated.token, next.clone())
+        .is_err());
+    assert!(memory
+        .publish_selected_reader_text(&fresh_view, &reader, &generated.token, next)
+        .is_err());
+    assert!(matches!(
+        memory
+            .publish_selected_reader_text(&view, &reader, &publication.token, draft)
+            .unwrap(),
+        SelectedReaderPublication::Historical { .. }
+    ));
+    assert_eq!(
+        store
+            .selected_snapshot(initial.scope(), MAX_ITEMS)
+            .unwrap()
+            .unwrap()
+            .token,
+        generated.token
+    );
+    let valid = store
+        .selected_snapshot(initial.scope(), MAX_ITEMS)
+        .unwrap()
+        .unwrap();
+    for case in 0..12 {
+        let mut malformed = store
+            .selected_snapshot(initial.scope(), MAX_ITEMS)
+            .unwrap()
+            .unwrap();
+        let memory_index = malformed
+            .selected_records
+            .iter()
+            .position(|record| record.namespace == Namespace::SubjectMemory)
+            .unwrap();
+        let memory_id = malformed.selected_records[memory_index].record_id;
+        match case {
+            0 => malformed.selected_records[memory_index].domain_schema_version = 9,
+            1 => {
+                malformed.selected_records[memory_index].payload["key"]["scope"] =
+                    serde_json::json!("global")
+            }
+            2 => {
+                malformed.selected_records[memory_index].payload["key"]["scope"] =
+                    serde_json::json!({"document":{"document":Uuid::new_v4()}})
+            }
+            3 => malformed.selected_records[memory_index].payload["claim"] = serde_json::json!(""),
+            4 => {
+                malformed.selected_records[memory_index]
+                    .parents
+                    .insert(Uuid::new_v4());
+            }
+            5 => {
+                let mut fork = malformed.selected_records[memory_index].clone();
+                fork.revision_id = Uuid::new_v4();
+                fork.operation_id = Uuid::new_v4();
+                malformed.selected_records.push(fork);
+            }
+            6 => {
+                let mut child = malformed.selected_records[memory_index].clone();
+                child.revision_id = Uuid::new_v4();
+                child.operation_id = Uuid::new_v4();
+                child
+                    .parents
+                    .insert(malformed.selected_records[memory_index].revision_id);
+                malformed.selected_records[memory_index]
+                    .parents
+                    .insert(child.revision_id);
+                malformed.selected_records.push(child);
+            }
+            7 => {
+                malformed.selected_records[memory_index].revision_id = malformed
+                    .selected_records
+                    .iter()
+                    .find(|record| record.namespace != Namespace::SubjectMemory)
+                    .unwrap()
+                    .revision_id
+            }
+            8 => malformed.selected_records[memory_index].namespace = Namespace::Handwriting,
+            9 => {
+                malformed.selected_records[memory_index].kind = Kind::Tombstone;
+                malformed.selected_records[memory_index].payload = serde_json::Value::Null;
+            }
+            10 => {
+                let mut edit = malformed.selected_records[memory_index].clone();
+                edit.revision_id = Uuid::new_v4();
+                edit.operation_id = Uuid::new_v4();
+                edit.parents
+                    .insert(malformed.selected_records[memory_index].revision_id);
+                edit.payload["claim"] = serde_json::json!("changed immutable claim");
+                malformed.selected_records.push(edit);
+            }
+            _ => {
+                let foreign = malformed
+                    .selected_records
+                    .iter()
+                    .find(|record| record.namespace == Namespace::Conversation)
+                    .unwrap()
+                    .revision_id;
+                malformed.selected_records[memory_index]
+                    .parents
+                    .insert(foreign);
+            }
+        }
+        malformed.transaction.selected.records = malformed
+            .selected_records
+            .iter()
+            .map(|record| {
+                let raw = serde_json::to_vec(record).unwrap();
+                ObjectRef {
+                    sha256: digest(&raw),
+                    bytes: raw.len() as u64,
+                }
+            })
+            .collect();
+        assert!(
+            SelectedDomainProjection::from_snapshot(&malformed).is_err(),
+            "partition case{case} accepted memory{memory_id}"
+        );
+    }
+    for case in 0..5 {
+        let mut malformed = store
+            .selected_snapshot(initial.scope(), MAX_ITEMS)
+            .unwrap()
+            .unwrap();
+        match case {
+            0 => malformed
+                .transaction
+                .selected
+                .records
+                .pop()
+                .map(|_| ())
+                .unwrap(),
+            1 => malformed.transaction.selected.records[0].sha256 = "invalid".into(),
+            2 => malformed.transaction.selected.records[0].bytes = 0,
+            3 => malformed.transaction.selected.records[0].bytes = MAX_RECORD as u64 + 1,
+            4 => {
+                let record = malformed.selected_records[0].clone();
+                malformed.selected_records = vec![record; MAX_ITEMS + 1];
+                malformed.transaction.selected.records =
+                    vec![valid.transaction.selected.records[0].clone(); MAX_ITEMS + 1];
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            SelectedDomainProjection::from_snapshot(&malformed).is_err(),
+            "mixed reference case {case} accepted"
+        );
+    }
+    let mut other_profile = store
+        .selected_snapshot(initial.scope(), MAX_ITEMS)
+        .unwrap()
+        .unwrap();
+    let mut other = other_profile
+        .selected_records
+        .iter()
+        .find(|record| record.namespace == Namespace::SubjectMemory)
+        .unwrap()
+        .clone();
+    let mut fact: memory::Fact = serde_json::from_value(other.payload.clone()).unwrap();
+    fact.key.profile = Uuid::new_v4();
+    other.record_id = fact.key.record_id().unwrap();
+    other.revision_id = Uuid::new_v4();
+    other.operation_id = Uuid::new_v4();
+    other.payload = serde_json::to_value(fact).unwrap();
+    other.parents.clear();
+    let raw = serde_json::to_vec(&other).unwrap();
+    other_profile.transaction.selected.records.push(ObjectRef {
+        sha256: digest(&raw),
+        bytes: raw.len() as u64,
+    });
+    other_profile.selected_records.push(other);
+    assert!(SelectedDomainProjection::from_snapshot(&other_profile).is_ok());
+    // A valid later tombstone preserves its owned ancestor and never enters the
+    // Reader transcript. Other profiles in this same document are also retained.
+    let mut tombstone = store
+        .selected_snapshot(initial.scope(), MAX_ITEMS)
+        .unwrap()
+        .unwrap();
+    let prior = tombstone
+        .selected_records
+        .iter()
+        .find(|record| record.namespace == Namespace::SubjectMemory)
+        .unwrap()
+        .clone();
+    let mut deleted = prior.clone();
+    deleted.revision_id = Uuid::new_v4();
+    deleted.operation_id = Uuid::new_v4();
+    deleted.parents.insert(prior.revision_id);
+    deleted.kind = Kind::Tombstone;
+    deleted.payload = serde_json::Value::Null;
+    tombstone.selected_records.push(deleted);
+    tombstone.transaction.selected.records = tombstone
+        .selected_records
+        .iter()
+        .map(|record| {
+            let raw = serde_json::to_vec(record).unwrap();
+            ObjectRef {
+                sha256: digest(&raw),
+                bytes: raw.len() as u64,
+            }
+        })
+        .collect();
+    assert!(SelectedDomainProjection::from_snapshot(&tombstone).is_ok());
+    assert_eq!(
+        store
+            .selected_snapshot(initial.scope(), MAX_ITEMS)
+            .unwrap()
+            .unwrap()
+            .token,
+        valid.token
+    );
 }
 
 #[test]

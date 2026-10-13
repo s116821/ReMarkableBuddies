@@ -83,10 +83,10 @@ impl<M: LLMEngine> Orchestrator<M> {
         user: crate::conversation::IntentRecordRef,
         capture: crate::storage::Uuid,
     ) -> Result<()> {
-        anyhow::ensure!(
-            self.memory.is_none(),
-            "Selected prepared entry requires a reviewed combined subject-memory admission set"
-        );
+        if let Some(memory) = &self.memory {
+            let admission = self.workflow.selected_admission()?;
+            memory.require_selected_reader(admission.as_ref())?;
+        }
         let mut attempt =
             Attempt::prepare_selected(&self.ledger, &self.workflow, token, root, user, capture)?;
         self.workflow.begin_iteration()?;
@@ -295,9 +295,13 @@ impl<M: LLMEngine> Orchestrator<M> {
 
                 let memory = self.memory.clone();
                 if let (Some(memory), Some(view)) = (memory, memory_view.as_ref()) {
-                    let published = memory.with_current(view, &mut || {
-                        self.publish_answer(attempt, &result, !view.selected())
-                    });
+                    let published = if attempt.is_selected() {
+                        self.publish_answer(attempt, &result, false, Some((memory.as_ref(), view)))
+                    } else {
+                        memory.with_current(view, &mut || {
+                            self.publish_answer(attempt, &result, !view.selected(), None)
+                        })
+                    };
                     if let Err(error) = published {
                         if attempt.assistant.is_none() {
                             let canceled = self.workflow.input_failed();
@@ -319,7 +323,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                         return Err(error);
                     }
                 } else {
-                    self.publish_answer(attempt, &result, true)?;
+                    self.publish_answer(attempt, &result, true, None)?;
                 }
             }
         }
@@ -333,12 +337,14 @@ impl<M: LLMEngine> Orchestrator<M> {
         attempt: &mut Attempt,
         result: &AnalysisResult,
         allow_native: bool,
+        memory: Option<(&dyn crate::memory::Provider, &crate::memory::QueryResult)>,
     ) -> Result<()> {
         self.workflow.check_request_progress()?;
         attempt.check_selected()?;
-        attempt.generated(
+        attempt.generated_with_memory(
             &self.ledger,
             Workflow::compose_qa(&result.question, &result.answer, result.selection_center),
+            memory,
         )?;
         if attempt.is_selected() {
             anyhow::bail!("Selected Generated draft acknowledged; qualified Pending/native output unavailable");
@@ -568,8 +574,10 @@ impl<M: LLMEngine> Orchestrator<M> {
             .duration_since(std::time::UNIX_EPOCH)?
             .as_millis()
             .try_into()?;
-        // No qualified document association is inferred from legacy image capture.
-        let query = Query::new(result.question.clone(), now);
+        // Selected ownership supplies historical data scope only, never native
+        // authority. Legacy capture still supplies no inferred association.
+        let mut query = Query::new(result.question.clone(), now);
+        query.document = attempt.memory_document()?;
         let retrieved = memory
             .query(&query)
             .map_err(|_| anyhow::anyhow!("subject memory retrieval failed"))?;

@@ -539,25 +539,71 @@ impl std::fmt::Debug for Pins {
     }
 }
 impl Pins {
-    fn guard<T>(&mut self, store: &Store, consume: impl FnOnce() -> Result<T>) -> Result<T> {
+    fn validate_current(&mut self, store: &Store) -> Result<()> {
         ensure!(!self.consumed, "selected memory result already consumed");
-        let handles: Vec<_> = self.admissions.iter().collect();
+        available(store)?;
+        for (token, raw_head) in self.tokens.iter().zip(&self.raw_heads) {
+            let fresh = store
+                .selected_snapshot_with_budget(token.scope(), MAX_ITEMS, &mut self.budget)?
+                .context("selected memory membership absent")?;
+            ensure!(
+                fresh.snapshot.token == *token && fresh.accepted_history[0].sha256 == *raw_head,
+                "selected memory membership replaced"
+            );
+        }
+        Ok(())
+    }
+    fn guard<T>(&mut self, store: &Store, consume: impl FnOnce() -> Result<T>) -> Result<T> {
+        let admissions = self.admissions.clone();
+        let handles: Vec<_> = admissions.iter().collect();
         SelectedAdmission::with_gates(&handles, |_| {
-            available(store)?;
-            for (token, raw_head) in self.tokens.iter().zip(&self.raw_heads) {
-                let fresh = store
-                    .selected_snapshot_with_budget(token.scope(), MAX_ITEMS, &mut self.budget)?
-                    .context("selected memory membership absent")?;
-                ensure!(
-                    fresh.snapshot.token == *token && fresh.accepted_history[0].sha256 == *raw_head,
-                    "selected memory membership replaced"
-                );
-            }
+            self.validate_current(store)?;
             consume()
         })
     }
 }
 impl Provider for SelectedMemory {
+    fn require_selected_reader(&self, reader: &SelectedAdmission) -> Result<()> {
+        ensure!(
+            reader.uses_store(&self.store)
+                && reader.scope().group == self.identity.group
+                && reader.scope().binding_sha256 == self.identity.binding_sha256,
+            "subject memory and Reader have foreign Store/group/binding"
+        );
+        Ok(())
+    }
+    fn publish_selected_reader_text(
+        &self,
+        result: &QueryResult,
+        reader: &SelectedAdmission,
+        accepted: &SelectionToken,
+        request: crate::conversation::SelectedReaderWrite,
+    ) -> Result<crate::conversation::SelectedReaderPublication> {
+        self.require_selected_reader(reader)?;
+        let mut pins = result
+            .pins
+            .as_ref()
+            .context("selected memory pins absent")?
+            .lock()
+            .map_err(|_| anyhow::anyhow!("selected memory pins unavailable"))?;
+        ensure!(
+            pins.instance == self.instance,
+            "foreign selected memory result"
+        );
+        ensure!(
+            pins.result_sha256.as_deref() == Some(result_identity(result)?.as_str()),
+            "selected memory result payload changed"
+        );
+        let admissions = pins.admissions.clone();
+        let handles: Vec<_> = admissions.iter().collect();
+        reader.publish_reader_text_joined(accepted, request, &handles, |store| {
+            let validation = pins.validate_current(store);
+            // A fresh attempt consumes its receiving view even on refusal or a
+            // later failure. Historical recovery never invokes this callback.
+            pins.consumed = true;
+            validation
+        })
+    }
     fn put(&self, mutation: Mutation) -> Result<Uuid> {
         mutation.fact.validate()?;
         let key = mutation.fact.key.clone();
