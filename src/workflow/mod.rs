@@ -117,6 +117,7 @@ impl Workflow {
     }
     /// Source-only transport of an already-owned capture; no production bootstrap,
     /// native freshness, trigger setup or output capability follows from this.
+    #[cfg(test)]
     pub(crate) fn with_selected_development_capture(
         facade: selected_backend::SelectedBackendFacade,
         capture: remarkable_open_sdk::development_capture::ReadOnlyDevelopmentCapture,
