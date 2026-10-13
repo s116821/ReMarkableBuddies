@@ -1,7 +1,7 @@
 """Real child-process refusal controls; no device or network access."""
 import pathlib,sys,time,unittest,tempfile,hashlib
 from apk_contract import Refusal
-from apk_source_build import run,source_license,LICENSE_BLOB,build
+from apk_source_build import run,source_license,LICENSE_BLOB,build,git_conversion
 from apk_builder import copy_verified
 from unittest.mock import patch
 
@@ -44,6 +44,18 @@ class CommandBounds(unittest.TestCase):
    with self.assertRaisesRegex(Refusal,'deadline'):self.command(parent,timeout=0.2)
    time.sleep(1)
    self.assertFalse(marker.exists(),'owned descendant continued after refusal')
+
+class GitConversion(unittest.TestCase):
+ def test_defaults_native_resolution_and_explicit_precedence(self):
+  with tempfile.TemporaryDirectory() as directory:
+   root=pathlib.Path(directory)
+   with patch('apk_source_build.git',side_effect=['false','native']):
+    value=git_conversion(root)
+   self.assertEqual(value['resolved_eol'],'crlf' if sys.platform=='win32' else 'lf')
+   with patch('apk_source_build.git',side_effect=['input','crlf']):
+    self.assertEqual(git_conversion(root),dict(autocrlf='input',eol='crlf',resolved_eol='crlf'))
+   with patch('apk_source_build.git',side_effect=['unknown','native']):
+    with self.assertRaisesRegex(Refusal,'unsupported source Git'):git_conversion(root)
 
 class FrozenInput(unittest.TestCase):
  def test_exact_bytes(self):
@@ -94,7 +106,7 @@ class FreshBuildAdmission(unittest.TestCase):
  def test_runtime_replacement_or_compiler_switch_refuses(self):
   # Real file changes, with compiler/runner transport mocked. No source-build
   # result or real executable authority is inferred from this fixture.
-  for fault in ['runtime-replacement','compiler-switch']:
+  for fault in ['runtime-replacement','compiler-switch','git-conversion-switch']:
    with self.subTest(fault=fault),tempfile.TemporaryDirectory() as directory:
     root=pathlib.Path(directory);source=root/'source';source.mkdir();(source/'.git').mkdir();target=root/'fresh-output'
     configuration=pathlib.Path(__file__).with_name('Cross.apk.toml')
@@ -111,8 +123,8 @@ class FreshBuildAdmission(unittest.TestCase):
      if fault=='runtime-replacement':file.write_bytes(b'changed after runtime')
      return 'reader-buddy 1.2.3'
     identities=[compiler,changed if fault=='compiler-switch' else compiler]
-    with patch('apk_source_build.shutil.which',return_value=str(fake_cross)),patch('apk_source_build.source_identity',return_value=source_id),patch('apk_source_build.source_license',return_value='GPL-3.0'),patch('apk_source_build.cargo_configuration',return_value=[]),patch('apk_source_build.cargo_identity',return_value=cargo),patch('apk_source_build.git',return_value=''),patch('apk_compiler.identity',side_effect=identities),patch('docker_owned.cross_phase',side_effect=cross_call),patch('abi.qualify',return_value={'elf':{'interpreter':'/lib/ld-linux-armhf.so.3'}}):
-     message='executed binary file identity changed' if fault=='runtime-replacement' else 'actual Cross compiler/image identity changed'
+    with patch('apk_source_build.shutil.which',return_value=str(fake_cross)),patch('apk_source_build.source_identity',return_value=source_id),patch('apk_source_build.source_license',return_value='GPL-3.0'),patch('apk_source_build.cargo_configuration',return_value=[]),patch('apk_source_build.git_conversion',side_effect=[dict(autocrlf='false',eol='native',resolved_eol='lf'),dict(autocrlf='true' if fault=='git-conversion-switch' else 'false',eol='native',resolved_eol='lf')]),patch('apk_source_build.cargo_identity',return_value=cargo),patch('apk_source_build.git',return_value=''),patch('apk_compiler.identity',side_effect=identities),patch('docker_owned.cross_phase',side_effect=cross_call),patch('abi.qualify',return_value={'elf':{'interpreter':'/lib/ld-linux-armhf.so.3'}}):
+     message='executed binary file identity changed' if fault=='runtime-replacement' else 'source Git conversion semantics changed' if fault=='git-conversion-switch' else 'actual Cross compiler/image identity changed'
      with self.assertRaisesRegex(Refusal,message):build(source,'v1.2.3','armv7-unknown-linux-gnueabihf',target,configuration)
 
 if __name__=='__main__': unittest.main()

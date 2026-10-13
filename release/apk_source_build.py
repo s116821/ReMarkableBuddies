@@ -67,6 +67,11 @@ def run(argv,cwd,env=None,timeout=120,stdout_limit=16384,combined_limit=16384,re
     except OSError:raise Refusal('private compiler diagnostic retention failed') from None
 
 def git(repo,*args): return run(['git',*args],repo)
+def git_conversion(repo):
+ autocrlf=git(repo,'config','--default','false','--get','core.autocrlf').lower()
+ eol=git(repo,'config','--default','native','--get','core.eol').lower()
+ require(autocrlf in {'false','true','input'} and eol in {'lf','crlf','native'},'unsupported source Git conversion semantics')
+ return dict(autocrlf=autocrlf,eol=eol,resolved_eol=('crlf' if os.name=='nt' else 'lf') if eol=='native' else eol)
 def sha(path):
  with path.open('rb') as source: return hashlib.file_digest(source,'sha256').hexdigest()
 
@@ -180,7 +185,7 @@ def build(repo,tag,target,target_dir,cross_configuration,sdk_tag=None):
  cross=Path(shutil.which('cross') or '')
  require(cross.is_file(),'actual cross executable')
  private_cargo=[];before_source=source_identity(repo,tag);license_id=source_license(repo)
- configurations=cargo_configuration(repo);before_cargo=cargo_identity(repo,target,sdk_tag,private_cargo)
+ configurations=cargo_configuration(repo);conversion=git_conversion(repo);before_cargo=cargo_identity(repo,target,sdk_tag,private_cargo)
  require(all(not os.environ.get(k) for k in OVERRIDES),'unreviewed build override')
  require(not any(value and (key in UNRECORDED_OVERRIDES or key.startswith(('CARGO_PROFILE_','CROSS_')) or key=='DOCKER_OPTS' or key=='RUSTUP_TOOLCHAIN' or (key.startswith('CARGO_TARGET_') and key.endswith(('_RUSTFLAGS','_LINKER','_RUNNER')))) for key,value in os.environ.items()),'unrecorded compiler/linker/runner/toolchain override')
  require(not any(k.startswith('VERGEN_') for k in os.environ),'version override')
@@ -198,6 +203,8 @@ def build(repo,tag,target,target_dir,cross_configuration,sdk_tag=None):
  with tempfile.TemporaryDirectory(prefix='apk-git-config-',dir=repo/'.git') as config_home:
   config_home=Path(config_home);(config_home/'git').mkdir()
   git(repo,'config','--file',str(config_home/'git/config'),'safe.directory',container_source)
+  git(repo,'config','--file',str(config_home/'git/config'),'core.autocrlf',conversion['autocrlf'])
+  git(repo,'config','--file',str(config_home/'git/config'),'core.eol',conversion['resolved_eol'])
   env['XDG_CONFIG_HOME']=container_source+'/.git/'+config_home.name
   cross_phase(argv,repo,env,run,timeout=900,private_diagnostics=target_dir/'compiler-diagnostics')
   binary=target_dir/target/'release/reader-buddy'
@@ -227,6 +234,7 @@ def build(repo,tag,target,target_dir,cross_configuration,sdk_tag=None):
  require(after_compiler==before_compiler,'actual Cross compiler/image identity changed')
  require(source_identity(repo,tag)==before_source and cargo_identity(repo,target,sdk_tag,private_cargo)==before_cargo,'build inputs changed')
  require(cargo_configuration(repo)==configurations and source_license(repo)==license_id,'source configuration/license changed')
+ require(git_conversion(repo)==conversion,'source Git conversion semantics changed')
  require(sha(configuration)==configuration_hash and sha(Path(__file__))==helper_hash,'build helper/configuration changed')
  fields=before_compiler['rustc_fields'];sdk=before_cargo['sdk']
  observed_image=next(value for value in before_compiler['image']['digests'] if value==image)
@@ -239,4 +247,5 @@ def build(repo,tag,target,target_dir,cross_configuration,sdk_tag=None):
  from apk_contract import canonical
  canonical(metadata)
  private_evidence=dict(source_root=str(repo),target_root=str(target_dir),configuration_path=str(configuration),cargo_configuration_digests=configurations,actual_build_argv=argv,actual_runtime_argv=runtime_argv,recorded_environment={key:env[key] for key in [*OVERRIDES,'READER_BUDDY_RELEASE_TAG','READER_BUDDY_RELEASE_SHA','CROSS_CONFIG','LD_BIND_NOW','SOURCE_DATE_EPOCH','XDG_CONFIG_HOME']},cargo_observations=private_cargo,compiler_before=before_compiler,compiler_after=after_compiler,executed_binary_identity=list(identity(before)),executed_binary_sha256=executed_hash,elf_observation=actual_elf,runtime_version_output=output,source_license=license_id,license_basis=dict(project_declaration=LICENSE_DECLARATION,committed_blob=LICENSE_BLOB,actual_file_sha256=sha(repo/'LICENSE'),existing_detected_identifier='GPL-3.0',classifier_is_owner_grant=False))
+ private_evidence['git_conversion']=conversion
  return frozen,metadata,private_evidence
