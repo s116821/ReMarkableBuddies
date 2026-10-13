@@ -120,8 +120,11 @@ fn projection(
             serde_json::from_slice::<Envelope>(&store.read_object(reference)?).map_err(Into::into)
         })
         .collect::<Result<Vec<_>>>()?;
-    let projection =
-        SelectedDomainProjection::from_pinned_records(&records, &transaction.selected.records)?;
+    let projection = SelectedDomainProjection::from_mixed_records(
+        &records,
+        &transaction.selected.records,
+        &transaction.scope,
+    )?;
     projection.document_ownership()?;
     Ok(projection)
 }
@@ -355,13 +358,27 @@ impl SelectedAdmission {
         accepted: &SelectionToken,
         request: SelectedReaderWrite,
     ) -> Result<SelectedReaderPublication> {
+        self.publish_reader_text_joined(accepted, request, &[], |_| Ok(()))
+    }
+    /// Own the complete ordered set; the verifier must only use the supplied
+    /// Store and must never reacquire a participating admission.
+    pub(crate) fn publish_reader_text_joined(
+        &self,
+        accepted: &SelectionToken,
+        request: SelectedReaderWrite,
+        additional: &[&SelectedAdmission],
+        verify_new: impl FnOnce(&Store) -> Result<()>,
+    ) -> Result<SelectedReaderPublication> {
         input(&request)?;
         ensure!(
             accepted.scope() == self.scope(),
             "foreign selected Reader scope"
         );
         let fingerprint = fingerprint(accepted, &request)?;
-        self.mutate(|store| {
+        let mut admissions = Vec::with_capacity(additional.len() + 1);
+        admissions.push(self);
+        admissions.extend_from_slice(additional);
+        Self::with_gates(&admissions, |store| {
             if let Some((transaction, acknowledgment)) =
                 recover(store, accepted, &request, &fingerprint)?
             {
@@ -370,6 +387,7 @@ impl SelectedAdmission {
                     acknowledgment: Box::new(acknowledgment),
                 });
             }
+            verify_new(store)?;
             ensure!(
                 store.unavailable_commits()? == 0,
                 "selected Reader store incomplete"

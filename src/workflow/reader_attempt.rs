@@ -176,6 +176,11 @@ impl Attempt {
     pub(super) fn is_selected(&self) -> bool {
         self.selected.is_some()
     }
+    pub(super) fn memory_document(&self) -> Result<Option<Uuid>> {
+        self.selected
+            .as_ref()
+            .map_or(Ok(None), |selected| selected.document())
+    }
     pub fn prepare(ledger: &Ledger, acquired: AcquiredEvidence) -> Result<Self> {
         let timestamp = now()?;
         let conversation = Uuid::new_v4();
@@ -358,7 +363,7 @@ impl Attempt {
     }
     pub fn interpret(&mut self, ledger: &Ledger, text: &str) -> Result<()> {
         if let Some(selected) = &mut self.selected {
-            let acknowledgment = selected.write(text, false)?;
+            let acknowledgment = selected.write(text, false, None)?;
             self.user = acknowledgment.written;
             return Ok(());
         }
@@ -380,11 +385,23 @@ impl Attempt {
         Ok(())
     }
     pub fn generated(&mut self, ledger: &Ledger, text: String) -> Result<()> {
+        self.generated_with_memory(ledger, text, None)
+    }
+    pub(super) fn generated_with_memory(
+        &mut self,
+        ledger: &Ledger,
+        text: String,
+        memory: Option<(&dyn crate::memory::Provider, &crate::memory::QueryResult)>,
+    ) -> Result<()> {
         if let Some(selected) = &mut self.selected {
-            let acknowledgment = selected.write(&text, true)?;
+            let acknowledgment = selected.write(&text, true, memory)?;
             self.assistant = Some(acknowledgment.written);
             return Ok(());
         }
+        anyhow::ensure!(
+            memory.is_none(),
+            "composed memory publication requires selected Attempt"
+        );
         anyhow::ensure!(
             !self.has_reader_preparation(),
             "Selected Reader preparation requires selected domain mutation/settlement"

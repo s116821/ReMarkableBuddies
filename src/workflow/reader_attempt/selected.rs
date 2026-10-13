@@ -113,6 +113,16 @@ impl Selected {
     pub(super) fn check(&self) -> Result<()> {
         self.current_user().map(|_| ())
     }
+    pub(super) fn document(&self) -> Result<Option<Uuid>> {
+        self.check()?;
+        self.admission.with_current(&self.token, |snapshot| {
+            let owners = SelectedDomainProjection::from_snapshot(snapshot)?.document_ownership()?;
+            Ok(match owners.get(&self.root.record_id) {
+                Some(DocumentOwnership::Document(document)) => Some(*document),
+                _ => None,
+            })
+        })
+    }
     pub(super) fn images(&self) -> Result<Vec<Vec<u8>>> {
         self.check()?;
         let images = self.admission.capture_images(&self.token, self.capture)?;
@@ -129,6 +139,7 @@ impl Selected {
         &mut self,
         text: &str,
         generated: bool,
+        memory: Option<(&dyn crate::memory::Provider, &crate::memory::QueryResult)>,
     ) -> Result<SelectedReaderAcknowledgment> {
         let slot = if generated {
             &mut self.generation
@@ -171,9 +182,17 @@ impl Selected {
         }
         .unwrap();
         self.mode()?;
-        let result = self
-            .admission
-            .publish_reader_text(&frozen.accepted, frozen.request.clone())?;
+        let result = match memory {
+            Some((provider, view)) => provider.publish_selected_reader_text(
+                view,
+                &self.admission,
+                &frozen.accepted,
+                frozen.request.clone(),
+            )?,
+            None => self
+                .admission
+                .publish_reader_text(&frozen.accepted, frozen.request.clone())?,
+        };
         let SelectedReaderPublication::Published {
             publication,
             acknowledgment,
