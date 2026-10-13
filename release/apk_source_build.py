@@ -72,6 +72,16 @@ def git_conversion(repo):
  eol=git(repo,'config','--default','native','--get','core.eol').lower()
  require(autocrlf in {'false','true','input'} and eol in {'lf','crlf','native'},'unsupported source Git conversion semantics')
  return dict(autocrlf=autocrlf,eol=eol,resolved_eol=('crlf' if os.name=='nt' else 'lf') if eol=='native' else eol)
+def container_git_conversion(repo,image,container_source,config_home,conversion):
+ from docker_owned import phase
+ # Same source path and temporary XDG config as the selected Cross invocation;
+ # readonly probe must detect local/worktree settings overriding that config.
+ raw=phase(['--rm','--network','none','--cap-drop','ALL','--read-only','--mount',f'type=bind,source={repo},target={container_source},readonly','--workdir',container_source,'--env','XDG_CONFIG_HOME='+config_home,'--entrypoint','/bin/sh',image,'-c','git config --default false --get core.autocrlf && git config --default native --get core.eol'],repo,run,timeout=30)
+ values=raw.splitlines()
+ require(len(values)==2 and values[0].lower()==conversion['autocrlf'],'container Git conversion semantics mismatch')
+ effective=values[1].lower();require(effective in {'native','lf','crlf'},'unsupported container Git eol')
+ require(conversion['autocrlf']!='false' or ('lf' if effective=='native' else effective)==conversion['resolved_eol'],'container Git conversion semantics mismatch')
+ return dict(autocrlf=values[0].lower(),eol=effective,resolved_eol='lf' if effective=='native' else effective)
 def sha(path):
  with path.open('rb') as source: return hashlib.file_digest(source,'sha256').hexdigest()
 
@@ -206,6 +216,7 @@ def build(repo,tag,target,target_dir,cross_configuration,sdk_tag=None):
   git(repo,'config','--file',str(config_home/'git/config'),'core.autocrlf',conversion['autocrlf'])
   git(repo,'config','--file',str(config_home/'git/config'),'core.eol',conversion['resolved_eol'])
   env['XDG_CONFIG_HOME']=container_source+'/.git/'+config_home.name
+  before_conversion=container_git_conversion(repo,image,container_source,env['XDG_CONFIG_HOME'],conversion)
   cross_phase(argv,repo,env,run,timeout=900,private_diagnostics=target_dir/'compiler-diagnostics')
   binary=target_dir/target/'release/reader-buddy'
   require(binary.is_file() and not binary.is_symlink(),'new build executable')
@@ -226,6 +237,7 @@ def build(repo,tag,target,target_dir,cross_configuration,sdk_tag=None):
      block=checked.read(min(65536,remaining));require(block,'short checked executable')
      destination.write(block);copied.update(block);remaining-=len(block)
    require(copied.hexdigest()==executed_hash and identity(os.fstat(checked.fileno()))==identity(before),'checked descriptor changed during freeze')
+  require(container_git_conversion(repo,image,container_source,env['XDG_CONFIG_HOME'],conversion)==before_conversion,'container Git conversion changed')
  require(sha(frozen)==executed_hash,'frozen executable identity')
  cls,machine=elf_header(frozen);arch,abi,expected_cls,expected_machine=TARGETS[target]
  require((cls,machine)==(expected_cls,expected_machine),'target ELF correspondence')
@@ -248,4 +260,5 @@ def build(repo,tag,target,target_dir,cross_configuration,sdk_tag=None):
  canonical(metadata)
  private_evidence=dict(source_root=str(repo),target_root=str(target_dir),configuration_path=str(configuration),cargo_configuration_digests=configurations,actual_build_argv=argv,actual_runtime_argv=runtime_argv,recorded_environment={key:env[key] for key in [*OVERRIDES,'READER_BUDDY_RELEASE_TAG','READER_BUDDY_RELEASE_SHA','CROSS_CONFIG','LD_BIND_NOW','SOURCE_DATE_EPOCH','XDG_CONFIG_HOME']},cargo_observations=private_cargo,compiler_before=before_compiler,compiler_after=after_compiler,executed_binary_identity=list(identity(before)),executed_binary_sha256=executed_hash,elf_observation=actual_elf,runtime_version_output=output,source_license=license_id,license_basis=dict(project_declaration=LICENSE_DECLARATION,committed_blob=LICENSE_BLOB,actual_file_sha256=sha(repo/'LICENSE'),existing_detected_identifier='GPL-3.0',classifier_is_owner_grant=False))
  private_evidence['git_conversion']=conversion
+ private_evidence['container_git_conversion']=before_conversion
  return frozen,metadata,private_evidence

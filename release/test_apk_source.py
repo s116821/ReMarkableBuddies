@@ -1,7 +1,7 @@
 """Real child-process refusal controls; no device or network access."""
 import pathlib,sys,time,unittest,tempfile,hashlib
 from apk_contract import Refusal
-from apk_source_build import run,source_license,LICENSE_BLOB,build,git_conversion
+from apk_source_build import run,source_license,LICENSE_BLOB,build,git_conversion,container_git_conversion
 from apk_builder import copy_verified
 from unittest.mock import patch
 
@@ -56,6 +56,15 @@ class GitConversion(unittest.TestCase):
     self.assertEqual(git_conversion(root),dict(autocrlf='input',eol='crlf',resolved_eol='crlf'))
    with patch('apk_source_build.git',side_effect=['unknown','native']):
     with self.assertRaisesRegex(Refusal,'unsupported source Git'):git_conversion(root)
+
+ def test_container_local_native_mismatch_and_ignored_eol(self):
+  for autocrlf in ('false','true','input'):
+   with self.subTest(autocrlf=autocrlf),patch('docker_owned.phase',return_value=autocrlf+'\nnative'):
+    expected=dict(autocrlf=autocrlf,eol='native',resolved_eol='crlf')
+    if autocrlf=='false':
+     with self.assertRaisesRegex(Refusal,'container Git conversion'):container_git_conversion(pathlib.Path('.'),'image','/source','/config',expected)
+    else:
+     self.assertEqual(container_git_conversion(pathlib.Path('.'),'image','/source','/config',expected)['autocrlf'],autocrlf)
 
 class FrozenInput(unittest.TestCase):
  def test_exact_bytes(self):
@@ -123,7 +132,7 @@ class FreshBuildAdmission(unittest.TestCase):
      if fault=='runtime-replacement':file.write_bytes(b'changed after runtime')
      return 'reader-buddy 1.2.3'
     identities=[compiler,changed if fault=='compiler-switch' else compiler]
-    with patch('apk_source_build.shutil.which',return_value=str(fake_cross)),patch('apk_source_build.source_identity',return_value=source_id),patch('apk_source_build.source_license',return_value='GPL-3.0'),patch('apk_source_build.cargo_configuration',return_value=[]),patch('apk_source_build.git_conversion',side_effect=[dict(autocrlf='false',eol='native',resolved_eol='lf'),dict(autocrlf='true' if fault=='git-conversion-switch' else 'false',eol='native',resolved_eol='lf')]),patch('apk_source_build.cargo_identity',return_value=cargo),patch('apk_source_build.git',return_value=''),patch('apk_compiler.identity',side_effect=identities),patch('docker_owned.cross_phase',side_effect=cross_call),patch('abi.qualify',return_value={'elf':{'interpreter':'/lib/ld-linux-armhf.so.3'}}):
+    with patch('apk_source_build.shutil.which',return_value=str(fake_cross)),patch('apk_source_build.source_identity',return_value=source_id),patch('apk_source_build.source_license',return_value='GPL-3.0'),patch('apk_source_build.cargo_configuration',return_value=[]),patch('apk_source_build.git_conversion',side_effect=[dict(autocrlf='false',eol='native',resolved_eol='lf'),dict(autocrlf='true' if fault=='git-conversion-switch' else 'false',eol='native',resolved_eol='lf')]),patch('apk_source_build.container_git_conversion',return_value=dict(autocrlf='false',eol='lf',resolved_eol='lf')),patch('apk_source_build.cargo_identity',return_value=cargo),patch('apk_source_build.git',return_value=''),patch('apk_compiler.identity',side_effect=identities),patch('docker_owned.cross_phase',side_effect=cross_call),patch('abi.qualify',return_value={'elf':{'interpreter':'/lib/ld-linux-armhf.so.3'}}):
      message='executed binary file identity changed' if fault=='runtime-replacement' else 'source Git conversion semantics changed' if fault=='git-conversion-switch' else 'actual Cross compiler/image identity changed'
      with self.assertRaisesRegex(Refusal,message):build(source,'v1.2.3','armv7-unknown-linux-gnueabihf',target,configuration)
 
