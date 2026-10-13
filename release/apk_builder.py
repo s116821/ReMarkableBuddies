@@ -3,11 +3,12 @@ import argparse,hashlib,json,os,shutil,tempfile
 from pathlib import Path
 from apk_contract import canonical,require,integer
 from apk_source_build import build,run,sha,source_identity,source_license
+from docker_owned import phase
 
 IMAGE='sha256:8d79948df2c7c568a043683f786e7ce4ad2e25e469673b72b8da8d2dbb2fa9ac'
 TOOL_SHA='7488a9650411143a205bf80af511203fadd79499e21613c970b4ef8c207fe11a'
 TARGETS=[('armv7','armv7-unknown-linux-gnueabihf'),('aarch64','aarch64-unknown-linux-gnu')]
-MODULES=['apk_generate.py','apk_contract.py','apk_source_build.py','apk_index.py']
+MODULES=['apk_generate.py','apk_observe.py','apk_contract.py','apk_source_build.py','apk_index.py','process_guard.py','docker_owned.py','apk_compiler.py']
 
 def copy_verified(source,destination,expected_bytes,expected_sha):
  require(source.is_file() and not source.is_symlink(),'regular generated input')
@@ -25,10 +26,11 @@ def copy_verified(source,destination,expected_bytes,expected_sha):
 def produce(args):
  source=args.source.resolve();target_root=args.target_dir.resolve();output=args.output.resolve()
  require(integer(args.pkgrel,0,65535),'pkgrel')
- require(not output.exists() and not output.is_relative_to(source) and not target_root.is_relative_to(source),'new external output roots')
+ require(not output.exists() and not target_root.exists() and not output.is_relative_to(source) and not target_root.is_relative_to(source),'new external output roots')
  identity=source_identity(source,args.tag);license_id=source_license(source)
  tool=args.apk_tool.resolve();require(tool.name=='apk' and tool.is_file() and sha(tool)==TOOL_SHA,'pinned APK tool')
  require(run(['docker','image','inspect',IMAGE,'--format','{{.Id}}'],source)==IMAGE,'existing pinned generation image')
+ target_root.mkdir(exist_ok=False)
  # Preserve failed or incomplete builds as private working evidence. Only the
  # final output has a completed two-target artifact receipt.
  work=Path(tempfile.mkdtemp(prefix='buddy-apk-work-',dir=output.parent))
@@ -36,7 +38,7 @@ def produce(args):
  for name in MODULES:shutil.copyfile(Path(__file__).with_name(name),modules/name)
  private={};input_hashes={}
  for arch,target in TARGETS:
-  binary,metadata,evidence=build(source,args.tag,target,target_root,Path(__file__).with_name('Cross.apk.toml'),args.sdk_tag)
+  binary,metadata,evidence=build(source,args.tag,target,target_root/arch,Path(__file__).with_name('Cross.apk.toml'),args.sdk_tag)
   require(metadata['source']==identity,'source unchanged across targets')
   directory=inputs/arch;directory.mkdir()
   copy_verified(binary,directory/'reader-buddy',metadata['binary']['bytes'],metadata['binary']['sha256'])
@@ -48,26 +50,32 @@ def produce(args):
   json.dump(dict(pkgrel=args.pkgrel,source_license=license_id,targets=[arch for arch,_ in TARGETS]),stream,sort_keys=True,separators=(',',':'));stream.write('\n')
  input_hashes['input-set.json']=sha(inputs/'input-set.json')
  with (work/'private-source-build-evidence.json').open('x',encoding='utf-8') as stream:json.dump(private,stream,sort_keys=True)
- container='buddy-apk-'+work.name.removeprefix('buddy-apk-work-')
- command=['docker','run','--name',container,'--rm','--network','none','--cap-drop','ALL','--read-only','--memory','1536m','--pids-limit','64','--tmpfs','/tmp:rw,nosuid,noexec,size=768m',
+ command=['--rm','--network','none','--cap-drop','ALL','--read-only','--memory','1536m','--pids-limit','64','--tmpfs','/tmp:rw,nosuid,noexec,size=768m',
   '--mount',f'type=bind,source={inputs},target=/inputs,readonly','--mount',f'type=bind,source={artifacts},target=/output',
   '--mount',f'type=bind,source={modules},target=/modules,readonly','--mount',f'type=bind,source={tool.parent},target=/tool,readonly',
   '--entrypoint','/usr/bin/python3',IMAGE,'/modules/apk_generate.py']
- try:
-  result=json.loads(run(command,source,timeout=120,stdout_limit=65536))
- finally:
-  # The unique owned container name is never shared or reused. Stop only it
-  # when a host timeout leaves Docker running; never touch images/other jobs.
-  found=run(['docker','ps','--all','--filter','name=^/'+container+'$','--format','{{.ID}}'],source)
-  if found:run(['docker','rm','--force',container],source)
+ result=json.loads(phase(command,source,run,timeout=120,stdout_limit=65536,combined_limit=None))
  require(source_identity(source,args.tag)==identity and source_license(source)==license_id,'source changed before output')
  require(all(sha(inputs/path)==digest for path,digest in input_hashes.items()),'internal inputs changed during generation')
  require(sha(tool)==TOOL_SHA,'APK tool changed during generation')
  version=args.tag[1:]+'-r'+str(args.pkgrel)
  names={f'remarkable-buddies-{version}.{arch}.apk' for arch,_ in TARGETS}|{'buddy-index.adb','fixture.pub'}
  require({path.name for path in artifacts.iterdir()}==names,'exact completed artifact set')
- require(result['status']=='test-key-source-build-only' and result['eligibility']=='not-qualified' and result['private_key_exported'] is False,'generation result')
+ require(result['status']=='generation-self-checks-only' and result['eligibility']=='not-qualified' and result['private_key_exported'] is False,'generation result')
  require(set(result['artifact_files'])==names,'generation artifact observations')
+ observations=work/'observations';observations.mkdir()
+ with (observations/'generated-control.json').open('x',encoding='ascii') as stream:json.dump(result,stream,sort_keys=True)
+ # Generation has returned, its private temporary key has been disposed, and
+ # its owned container absence is confirmed before this separate phase.
+ # Pass the pin via the generation control channel, never from adjacent key
+ # bytes or signed package metadata. This remains local fixture trust only.
+ observation_command=['--rm','--network','none','--cap-drop','ALL','--read-only','--memory','768m','--pids-limit','32','--tmpfs','/tmp:rw,nosuid,noexec,size=32m',
+  '--mount',f'type=bind,source={inputs},target=/inputs,readonly','--mount',f'type=bind,source={artifacts},target=/artifacts,readonly',
+  '--mount',f'type=bind,source={observations},target=/observations,readonly','--mount',f'type=bind,source={modules},target=/modules,readonly',
+  '--mount',f'type=bind,source={tool.parent},target=/tool,readonly','--entrypoint','/usr/bin/python3',IMAGE,
+  '/modules/apk_observe.py','--expected-spki',result['fixture_public_key_spki_sha256']]
+ observation=json.loads(phase(observation_command,source,run,timeout=120))
+ require(observation['status']=='public-key-only-observed' and observation['private_key_available'] is False,'independent public-key-only observation required')
  output.mkdir(exist_ok=False)
  published={}
  for name in sorted(names):
@@ -77,7 +85,7 @@ def produce(args):
  # This exclusive receipt is the completion marker; partial outputs without
  # it remain unfinished. Future consumers must revalidate actual bytes.
  receipt=dict(status='test-key-source-build-only',eligibility='not-qualified',source=identity,artifacts=published,
-  fixture_public_key_spki_sha256=result['fixture_public_key_spki_sha256'],observations=result)
+  fixture_public_key_spki_sha256=result['fixture_public_key_spki_sha256'],generation_observations=result,public_key_observation=observation)
  with (output/'test-key-build-receipt.json').open('x',encoding='ascii',newline='\n') as stream:json.dump(receipt,stream,sort_keys=True);stream.write('\n')
  return receipt
 

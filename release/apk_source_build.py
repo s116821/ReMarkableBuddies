@@ -2,6 +2,7 @@
 import hashlib,json,os,re,shutil,subprocess,tomllib,threading,time,queue
 from pathlib import Path
 from apk_contract import REPOSITORY,SDK_REPOSITORY,TARGETS,Refusal,require,stable
+from process_guard import OwnedProcess
 
 OVERRIDES=['RUSTFLAGS','CFLAGS','CXXFLAGS','CPPFLAGS','LDFLAGS']
 UNRECORDED_OVERRIDES={'CARGO_ENCODED_RUSTFLAGS','RUSTC','RUSTC_WRAPPER','RUSTC_WORKSPACE_WRAPPER','CARGO_BUILD_RUSTC','CARGO_BUILD_RUSTC_WRAPPER','CARGO_BUILD_RUSTFLAGS','CROSS_RUNNER'}
@@ -13,8 +14,9 @@ IMAGES={
  'aarch64-unknown-linux-gnu':'ghcr.io/cross-rs/aarch64-unknown-linux-gnu@sha256:99294ae75048aa07d00bb4f1a18a017e0812ff25753768d21d5938bf7562b40a',
 }
 
-def run(argv,cwd,env=None,timeout=120,stdout_limit=16*1024*1024,combined_limit=None):
- process=subprocess.Popen(argv,cwd=cwd,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+def run(argv,cwd,env=None,timeout=120,stdout_limit=16384,combined_limit=16384,return_streams=False):
+ guard=OwnedProcess(argv,cwd=cwd,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+ process=guard.process
  events=queue.Queue(maxsize=8)
  stopped=threading.Event()
  def deliver(item):
@@ -44,12 +46,13 @@ def run(argv,cwd,env=None,timeout=120,stdout_limit=16*1024*1024,combined_limit=N
    require(len(buffers[channel])+len(block)<=limit,'build/tool output bound')
    require(combined_limit is None or sum(len(value) for value in buffers)+len(block)<=combined_limit,'build/tool combined diagnostic bound')
    buffers[channel].extend(block)
-  require(process.wait(timeout=max(0.001,deadline-time.monotonic()))==0,'actual build/tool command failed')
+  require(guard.exit_status(deadline)==0,'actual build/tool command failed')
+  if return_streams:return bytes(buffers[0]),bytes(buffers[1])
   return buffers[0].decode('utf-8').strip()
  finally:
   stopped.set()
-  if process.poll() is None: process.kill()
-  process.wait(timeout=5)
+  try:guard.terminate_and_verify()
+  finally:guard.close()
   for reader in readers: reader.join(timeout=1)
 
 def git(repo,*args): return run(['git',*args],repo)
@@ -97,7 +100,7 @@ def source_identity(repo,tag):
  return dict(repository=REPOSITORY,tag=tag,sha=head,epoch=int(git(repo,'show','-s','--format=%ct',head)))
 
 def cargo_identity(repo,target,sdk_tag=None,private_observations=None):
- data=json.loads(run(['cargo','metadata','--locked','--format-version','1','--filter-platform',target],repo))
+ data=json.loads(run(['cargo','metadata','--locked','--format-version','1','--filter-platform',target],repo,stdout_limit=16*1024*1024,combined_limit=None))
  if private_observations is not None: private_observations.append(data)
  resolve=data.get('resolve') or {};root_id=resolve.get('root')
  by_id={node['id']:node for node in resolve.get('nodes',[])}
@@ -153,50 +156,76 @@ def elf_header(path):
  return cls,'ARM' if machine==40 else 'AArch64'
 
 def build(repo,tag,target,target_dir,cross_configuration,sdk_tag=None):
+ from apk_compiler import identity as compiler_identity
+ from docker_owned import cross_phase
+ from abi import qualify
  repo=repo.resolve();target_dir=target_dir.resolve();configuration=cross_configuration.resolve()
  require(target in TARGETS and configuration.is_file(),'build target/configuration')
- require(not target_dir.is_relative_to(repo),'external build output root required')
+ require(not target_dir.exists() and not target_dir.is_relative_to(repo),'fresh external target root required')
+ require((repo/'.git').is_dir(),'initial Cross source requires standalone full Git checkout')
  config=tomllib.loads(configuration.read_text());image=config['target'][target]['image']
  require(image==IMAGES[target],'reviewed immutable build image')
- configuration_hash=sha(configuration)
+ configuration_hash=sha(configuration);helper_hash=sha(Path(__file__))
  cross=Path(shutil.which('cross') or '')
  require(cross.is_file(),'actual cross executable')
- cross_hash=sha(cross)
- private_cargo=[]
- before_source=source_identity(repo,tag)
- license_id=source_license(repo)
- configurations=cargo_configuration(repo)
- before_cargo=cargo_identity(repo,target,sdk_tag,private_cargo)
- # Disallow inherited compiler/linker overrides rather than silently attesting them.
+ private_cargo=[];before_source=source_identity(repo,tag);license_id=source_license(repo)
+ configurations=cargo_configuration(repo);before_cargo=cargo_identity(repo,target,sdk_tag,private_cargo)
  require(all(not os.environ.get(k) for k in OVERRIDES),'unreviewed build override')
- require(not any(value and (key in UNRECORDED_OVERRIDES or key.startswith('CARGO_PROFILE_') or (key.startswith('CARGO_TARGET_') and key.endswith(('_RUSTFLAGS','_LINKER','_RUNNER')))) for key,value in os.environ.items()),'unrecorded compiler/linker/runner override')
+ require(not any(value and (key in UNRECORDED_OVERRIDES or key.startswith(('CARGO_PROFILE_','CROSS_')) or key=='DOCKER_OPTS' or key=='RUSTUP_TOOLCHAIN' or (key.startswith('CARGO_TARGET_') and key.endswith(('_RUSTFLAGS','_LINKER','_RUNNER')))) for key,value in os.environ.items()),'unrecorded compiler/linker/runner/toolchain override')
  require(not any(k.startswith('VERGEN_') for k in os.environ),'version override')
+ target_dir.mkdir(exist_ok=False)
  env=dict(os.environ,READER_BUDDY_RELEASE_TAG=tag,READER_BUDDY_RELEASE_SHA=before_source['sha'],CROSS_CONFIG=str(configuration),LD_BIND_NOW='1',SOURCE_DATE_EPOCH=str(before_source['epoch']))
  env.update({key:'' for key in OVERRIDES})
- argv=['cross','run','--locked','--release','--target',target,'--target-dir',str(target_dir),'--bin','reader-buddy','--','--version']
- output=run(argv,repo,env)
- require(output.split()[-1:]==[tag[1:]],'actual target runtime tag version')
- require(source_identity(repo,tag)==before_source and cargo_identity(repo,target,sdk_tag,private_cargo)==before_cargo,'build inputs changed')
- require(cargo_configuration(repo)==configurations,'Cargo configuration changed')
- require(source_license(repo)==license_id,'source license changed')
- require(sha(configuration)==configuration_hash and sha(cross)==cross_hash,'build tools/configuration changed')
- binary=target_dir/target/'release/reader-buddy'
- require(binary.is_file() and not binary.is_symlink() and 1<=binary.stat().st_size<=134217728,'actual build executable')
- cls,machine=elf_header(binary);arch,abi,expected_cls,expected_machine=TARGETS[target]
+ before_compiler=compiler_identity(repo,target,image,cross,run,sha)
+ # Use exactly the observed stable Linux counterpart chosen by the pinned
+ # Cross image platform. A source/compiler/container switch refuses below.
+ argv=[str(cross),'+stable','build','--locked','--release','--target',target,'--target-dir',str(target_dir),'--bin','reader-buddy']
+ runtime_argv=[str(cross),'+stable','run',*argv[3:],'--','--version']
+ container_source=repo.as_posix()
+ if os.name=='nt':container_source='/mnt/'+container_source[0].lower()+container_source[2:]
+ import tempfile
+ with tempfile.TemporaryDirectory(prefix='apk-git-config-',dir=repo/'.git') as config_home:
+  config_home=Path(config_home);(config_home/'git').mkdir()
+  git(repo,'config','--file',str(config_home/'git/config'),'safe.directory',container_source)
+  env['XDG_CONFIG_HOME']=container_source+'/.git/'+config_home.name
+  cross_phase(argv,repo,env,run)
+  binary=target_dir/target/'release/reader-buddy'
+  require(binary.is_file() and not binary.is_symlink(),'new build executable')
+  with binary.open('rb') as checked:
+   before=os.fstat(checked.fileno());require(1<=before.st_size<=134217728,'actual executable bound')
+   executed_hash=hashlib.file_digest(checked,'sha256').hexdigest();checked.seek(0)
+   output=cross_phase(runtime_argv,repo,env,run)
+   require(output.split()[-1:]==[tag[1:]],'actual target runtime tag version')
+   after=os.fstat(checked.fileno());current=binary.stat()
+   identity=lambda info:(info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns)
+   require(identity(before)==identity(after)==identity(current),'executed binary file identity changed')
+   require(hashlib.file_digest(checked,'sha256').hexdigest()==executed_hash,'executed binary bytes changed')
+   checked.seek(0)
+   frozen_dir=target_dir/'verified-input';frozen_dir.mkdir(exist_ok=False);frozen=frozen_dir/'reader-buddy'
+   with frozen.open('xb') as destination:
+    remaining=before.st_size;copied=hashlib.sha256()
+    while remaining:
+     block=checked.read(min(65536,remaining));require(block,'short checked executable')
+     destination.write(block);copied.update(block);remaining-=len(block)
+   require(copied.hexdigest()==executed_hash and identity(os.fstat(checked.fileno()))==identity(before),'checked descriptor changed during freeze')
+ require(sha(frozen)==executed_hash,'frozen executable identity')
+ cls,machine=elf_header(frozen);arch,abi,expected_cls,expected_machine=TARGETS[target]
  require((cls,machine)==(expected_cls,expected_machine),'target ELF correspondence')
- # Full interpreter/ABI admission uses the reviewed readelf helper, not this header alone.
- from abi import qualify
- actual_elf=qualify(binary,target,lambda command:run(command,repo))
- rustc=run(['rustc','--version','--verbose'],repo)
- fields=dict(line.split(': ',1) for line in rustc.splitlines() if ': ' in line)
- sdk=before_cargo['sdk']
+ actual_elf=qualify(frozen,target,lambda command:run(command,repo,stdout_limit=65536,combined_limit=None))
+ after_compiler=compiler_identity(repo,target,image,cross,run,sha)
+ require(after_compiler==before_compiler,'actual Cross compiler/image identity changed')
+ require(source_identity(repo,tag)==before_source and cargo_identity(repo,target,sdk_tag,private_cargo)==before_cargo,'build inputs changed')
+ require(cargo_configuration(repo)==configurations and source_license(repo)==license_id,'source configuration/license changed')
+ require(sha(configuration)==configuration_hash and sha(Path(__file__))==helper_hash,'build helper/configuration changed')
+ fields=before_compiler['rustc_fields'];sdk=before_cargo['sdk']
+ observed_image=next(value for value in before_compiler['image']['digests'] if value==image)
  metadata=dict(schema=1,evidence='developer-source-build',eligibility='not-qualified',source=before_source,
   target=dict(rust_target=target,apk_arch=arch,abi=abi,elf_class=cls,elf_machine=machine,elf_endian='little',interpreter=actual_elf['elf']['interpreter']),
-  sdk=sdk,cargo={k:before_cargo[k] for k in ['lock_sha256','metadata_identity_sha256','features']},
-  toolchain=dict(rustc_release=fields['release'],rustc_commit=None if fields.get('commit-hash')=='unknown' else fields.get('commit-hash'),rustc_host=fields['host'],cross_version=run(['cross','--version'],repo),cross_binary_sha256=sha(cross),image_digest='sha256:'+image.split('@sha256:',1)[1],build_configuration_sha256=sha(configuration)),
-  build=dict(argv=['cross','run','--locked','--release','--target',target,'--target-dir','TARGET_ROOT','--bin','reader-buddy','--','--version'],environment={k:'' for k in OVERRIDES},profile='legacy-no-sdk' if sdk is None else 'unqualified-development',source_build_helper_sha256=sha(Path(__file__))),
-  binary=dict(path='usr/bin/reader-buddy',sha256=sha(binary),bytes=binary.stat().st_size,mode=493))
+  sdk=sdk,cargo={key:before_cargo[key] for key in ['lock_sha256','metadata_identity_sha256','features']},
+  toolchain=dict(rustc_release=fields['release'],rustc_commit=None if fields.get('commit-hash')=='unknown' else fields.get('commit-hash'),rustc_host=fields['host'],cross_version=before_compiler['cross_version'],cross_binary_sha256=before_compiler['cross_binary_sha256'],image_digest='sha256:'+observed_image.split('@sha256:',1)[1],build_configuration_sha256=configuration_hash),
+  build=dict(argv=['TOOL_ROOT/'+cross.name,'+stable','build','--locked','--release','--target',target,'--target-dir','TARGET_ROOT','--bin','reader-buddy'],environment={key:'' for key in OVERRIDES},profile='legacy-no-sdk' if sdk is None else 'unqualified-development',source_build_helper_sha256=helper_hash),
+  binary=dict(path='usr/bin/reader-buddy',sha256=executed_hash,bytes=before.st_size,mode=493))
  from apk_contract import canonical
  canonical(metadata)
- private_evidence=dict(source_root=str(repo),target_root=str(target_dir),configuration_path=str(configuration),cargo_configuration_digests=configurations,actual_argv=argv,recorded_environment={key:env[key] for key in [*OVERRIDES,'READER_BUDDY_RELEASE_TAG','READER_BUDDY_RELEASE_SHA','CROSS_CONFIG','LD_BIND_NOW','SOURCE_DATE_EPOCH']},cargo_observations=private_cargo,rustc_verbose=rustc,elf_observation=actual_elf,runtime_version_output=output,source_license=license_id,license_basis=dict(project_declaration=LICENSE_DECLARATION,committed_blob=LICENSE_BLOB,actual_file_sha256=sha(repo/'LICENSE'),existing_detected_identifier='GPL-3.0',classifier_is_owner_grant=False))
- return binary,metadata,private_evidence
+ private_evidence=dict(source_root=str(repo),target_root=str(target_dir),configuration_path=str(configuration),cargo_configuration_digests=configurations,actual_build_argv=argv,actual_runtime_argv=runtime_argv,recorded_environment={key:env[key] for key in [*OVERRIDES,'READER_BUDDY_RELEASE_TAG','READER_BUDDY_RELEASE_SHA','CROSS_CONFIG','LD_BIND_NOW','SOURCE_DATE_EPOCH','XDG_CONFIG_HOME']},cargo_observations=private_cargo,compiler_before=before_compiler,compiler_after=after_compiler,executed_binary_identity=list(identity(before)),executed_binary_sha256=executed_hash,elf_observation=actual_elf,runtime_version_output=output,source_license=license_id,license_basis=dict(project_declaration=LICENSE_DECLARATION,committed_blob=LICENSE_BLOB,actual_file_sha256=sha(repo/'LICENSE'),existing_detected_identifier='GPL-3.0',classifier_is_owner_grant=False))
+ return frozen,metadata,private_evidence

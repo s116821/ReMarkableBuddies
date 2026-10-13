@@ -102,6 +102,6 @@ def generate():
    with path.open('rb') as source,destination.open('xb') as output:shutil.copyfileobj(source,output,65536)
    require(destination.stat().st_size==expected_size and sha(destination)==expected_hash,'exported artifact identity')
    exported[path.name]=dict(bytes=expected_size,sha256=expected_hash)
-  return dict(status='test-key-source-build-only',eligibility='not-qualified',fixture_public_key_spki_sha256=fingerprint,packages=observed,index_sha256=sha(indexes[0]),artifact_files=exported,private_key_exported=False)
+  return dict(status='generation-self-checks-only',eligibility='not-qualified',fixture_public_key_spki_sha256=fingerprint,packages=observed,index_sha256=sha(indexes[0]),regenerated_index_readback=readbacks[1].decode(),artifact_files=exported,private_key_exported=False)
 
 if __name__=='__main__':print(json.dumps(generate(),sort_keys=True))
