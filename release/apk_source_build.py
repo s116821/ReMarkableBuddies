@@ -34,15 +34,26 @@ def runtime(binary,repo,target,image,diagnostics):
   expected=[runner+' '+str(runner_size),loader+' '+str(loader_size),runner_sha+'  '+runner,loader_sha+'  '+loader]
   require(raw.splitlines()==expected,'runtime runner/loader identity mismatch')
   return dict(image=identity,runner=runner,sysroot=prefix,loader=loader,runner_sha256=runner_sha,loader_sha256=loader_sha,runner_bytes=runner_size,loader_bytes=loader_size)
- before=observe()
- output=phase(['--rm','--network','none','--cap-drop','ALL','--read-only','--memory','512m','--pids-limit','32','--mount',f'type=bind,source={binary},target=/inputs/reader-buddy,readonly','--env','LD_BIND_NOW=1','--entrypoint',runner,image,'-L',prefix,'/inputs/reader-buddy','--version'],repo,recorded_command,timeout=remaining(),private_diagnostics=diagnostics)
- after=observe();require(after==before,'runtime image/runner/loader changed');remaining()
- return output,dict(before=before,after=after,actual_container_argv=actual_argv)
+ evidence=dict(status='refused',stage='before-observation',actual_container_argv=actual_argv,before=None,after=None)
+ with diagnostics.with_suffix('.control.json').open('xb') as control:
+  try:
+   before=observe();evidence['before']=before;evidence['stage']='execution'
+   output=phase(['--rm','--network','none','--cap-drop','ALL','--read-only','--memory','512m','--pids-limit','32','--mount',f'type=bind,source={binary},target=/inputs/reader-buddy,readonly','--env','LD_BIND_NOW=1','--entrypoint',runner,image,'-L',prefix,'/inputs/reader-buddy','--version'],repo,recorded_command,timeout=remaining(),stdout_limit=8192,combined_limit=8192,private_diagnostics=diagnostics)
+   evidence['stage']='after-observation';after=observe();evidence['after']=after
+   require(after==before,'runtime image/runner/loader changed');remaining()
+   evidence['stage']='complete';evidence['status']='runtime-returned'
+  finally:
+   raw=(json.dumps(evidence,sort_keys=True,separators=(',',':'))+'\n').encode()
+   require(len(actual_argv)<=3 and len(raw)<=8192,'runtime control evidence bound')
+   try:control.write(raw);control.flush()
+   except OSError:raise Refusal('private runtime control retention failed') from None
+ remaining()
+ return output,evidence
 
 def run(argv,cwd,env=None,timeout=120,stdout_limit=16384,combined_limit=16384,return_streams=False,private_diagnostics=None):
  if private_diagnostics is not None:
   private_diagnostics=Path(private_diagnostics)
-  require(combined_limit==16384,'private compiler diagnostic bound')
+  require(combined_limit in {8192,16384},'private compiler diagnostic bound')
   private_diagnostics.mkdir(exist_ok=False)
  guard=OwnedProcess(argv,cwd=cwd,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
  process=guard.process

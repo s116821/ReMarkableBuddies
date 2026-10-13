@@ -76,8 +76,8 @@ class DirectRuntime(unittest.TestCase):
    if argv[:3]==['docker','image','inspect']:return __import__('json').dumps(dict(id='pinned',os='linux',arch='amd64',digests=[IMAGES[target]]))
    return pins if '/bin/sh' in argv else 'reader-buddy 1.2.3'
   def phase(args,cwd,callback,**kwargs):return callback(['docker','run',*args],cwd,**kwargs)
-  with patch('apk_source_build.run',side_effect=command),patch('docker_owned.phase',side_effect=phase):
-   output,evidence=runtime(pathlib.Path('/fresh/reader-buddy'),pathlib.Path('.'),target,IMAGES[target],pathlib.Path('/private/diagnostics'))
+  with tempfile.TemporaryDirectory() as directory,patch('apk_source_build.run',side_effect=command),patch('docker_owned.phase',side_effect=phase):
+   output,evidence=runtime(pathlib.Path('/fresh/reader-buddy'),pathlib.Path('.'),target,IMAGES[target],pathlib.Path(directory)/'runtime')
   self.assertEqual(output,'reader-buddy 1.2.3')
   execution=evidence['actual_container_argv'][1]
   self.assertIn('type=bind,source='+str(pathlib.Path('/fresh/reader-buddy'))+',target=/inputs/reader-buddy,readonly',execution)
@@ -86,15 +86,27 @@ class DirectRuntime(unittest.TestCase):
  def test_missing_or_changed_pin_refuses_before_execution(self):
   target='armv7-unknown-linux-gnueabihf'
   image=__import__('json').dumps(dict(id='pinned',os='linux',arch='amd64',digests=[IMAGES[target]]))
-  with patch('apk_source_build.run',return_value=image),patch('docker_owned.phase',return_value='wrong pins') as calls:
-   with self.assertRaisesRegex(Refusal,'runner/loader identity'):runtime(pathlib.Path('/fresh/bin'),pathlib.Path('.'),target,IMAGES[target],pathlib.Path('/private'))
+  with tempfile.TemporaryDirectory() as directory,patch('apk_source_build.run',return_value=image),patch('docker_owned.phase',return_value='wrong pins') as calls:
+   with self.assertRaisesRegex(Refusal,'runner/loader identity'):runtime(pathlib.Path('/fresh/bin'),pathlib.Path('.'),target,IMAGES[target],pathlib.Path(directory)/'runtime')
    self.assertEqual(calls.call_count,1)
+   control=__import__('json').loads((pathlib.Path(directory)/'runtime.control.json').read_text());self.assertEqual(control['stage'],'before-observation');self.assertIsNone(control['before']);self.assertIsNone(control['after'])
+   with self.assertRaises(FileExistsError):runtime(pathlib.Path('/fresh/bin'),pathlib.Path('.'),target,IMAGES[target],pathlib.Path(directory)/'runtime')
  def test_image_change_after_execution_refuses(self):
   target='armv7-unknown-linux-gnueabihf';runner,prefix,loader,rs,rh,ls,lh=RUNTIMES[target]
   pins='\n'.join([runner+' '+str(rs),loader+' '+str(ls),rh+'  '+runner,lh+'  '+loader])
   images=[__import__('json').dumps(dict(id=value,os='linux',arch='amd64',digests=[IMAGES[target]])) for value in ('before','after')]
-  with patch('apk_source_build.run',side_effect=images),patch('docker_owned.phase',side_effect=[pins,'reader-buddy 1.2.3',pins]):
-   with self.assertRaisesRegex(Refusal,'runtime image/runner/loader changed'):runtime(pathlib.Path('/fresh/bin'),pathlib.Path('.'),target,IMAGES[target],pathlib.Path('/private'))
+  with tempfile.TemporaryDirectory() as directory,patch('apk_source_build.run',side_effect=images),patch('docker_owned.phase',side_effect=[pins,'reader-buddy 1.2.3',pins]):
+   with self.assertRaisesRegex(Refusal,'runtime image/runner/loader changed'):runtime(pathlib.Path('/fresh/bin'),pathlib.Path('.'),target,IMAGES[target],pathlib.Path(directory)/'runtime')
+   control=__import__('json').loads((pathlib.Path(directory)/'runtime.control.json').read_text());self.assertEqual(control['status'],'refused');self.assertEqual(control['stage'],'after-observation');self.assertEqual(control['after']['image']['id'],'after')
+
+ def test_timeout_retains_completed_observation_without_fabricated_after(self):
+  target='armv7-unknown-linux-gnueabihf';runner,prefix,loader,rs,rh,ls,lh=RUNTIMES[target]
+  pins='\n'.join([runner+' '+str(rs),loader+' '+str(ls),rh+'  '+runner,lh+'  '+loader])
+  image=__import__('json').dumps(dict(id='pinned',os='linux',arch='amd64',digests=[IMAGES[target]]))
+  with tempfile.TemporaryDirectory() as directory,patch('apk_source_build.run',return_value=image),patch('docker_owned.phase',side_effect=[pins,Refusal('build/tool deadline')]):
+   with self.assertRaisesRegex(Refusal,'deadline'):runtime(pathlib.Path('/fresh/bin'),pathlib.Path('.'),target,IMAGES[target],pathlib.Path(directory)/'runtime')
+   file=pathlib.Path(directory)/'runtime.control.json';control=__import__('json').loads(file.read_text())
+   self.assertEqual(control['stage'],'execution');self.assertEqual(control['before']['image']['id'],'pinned');self.assertIsNone(control['after']);self.assertLessEqual(file.stat().st_size,8192)
 
 class FrozenInput(unittest.TestCase):
  def test_exact_bytes(self):
