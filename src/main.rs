@@ -44,6 +44,9 @@ pub struct Args {
     conversation_operation: Option<remarkable_reader_buddy::reader_runtime::Operation>,
     #[arg(long, value_name = "FILE", requires = "conversation_operation")]
     conversation_input: Option<std::path::PathBuf>,
+    /// Fixed local personalization maintenance; mutation JSON comes from bounded stdin
+    #[arg(long, value_enum, conflicts_with_all=["simulate","api_key","model","base_url","trigger_corner","debug_dump","log_level","memory_operation","memory_input","conversation_operation","conversation_input"])]
+    personalization_operation: Option<config::personalization::Operation>,
 }
 
 fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_logger::Builder {
@@ -64,6 +67,15 @@ fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_lo
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    if let Some(operation) = args.personalization_operation {
+        let report = config::personalization::run(
+            operation,
+            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+            &mut std::io::stdin().lock(),
+        );
+        report.write_to(&mut std::io::stdout().lock())?;
+        return Ok(());
+    }
     if let Some(operation) = args.conversation_operation {
         let input = args
             .conversation_input
@@ -188,6 +200,7 @@ mod tests {
                 "memory-input",
                 "memory-operation",
                 "model",
+                "personalization-operation",
                 "simulate",
                 "trigger-corner"
             ]
