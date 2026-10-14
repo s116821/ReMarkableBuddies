@@ -516,3 +516,121 @@ fn selected_outbox_root_only_mode_replacement_keeps_original_custody() {
         selected.token
     );
 }
+
+#[test]
+fn selected_outbox_inventory_recovers_original_stale_and_withdrawn_custody() {
+    let f = Fixture::new();
+    let store = f.store();
+    assert!(store.selected_attempt_inventory().unwrap().is_empty());
+    let first = initialize(&store, &scope(), &[record(&store)]);
+    let other = initialize(&store, &scope(), &[record(&store)]);
+    let a = request(&store);
+    let b = request(&store);
+    store
+        .prepare_selected_attempt(&other.token, b.clone())
+        .unwrap();
+    store
+        .set_sync_mode(
+            &store.sync_mode_snapshot().unwrap().token,
+            Uuid::new_v4(),
+            crate::storage::sync::mode::SyncModeChoice::SharedGroup {
+                group: first.token.scope().group,
+                binding_sha256: first.token.scope().binding_sha256.clone(),
+                root_id: "chosen-root".into(),
+            },
+        )
+        .unwrap();
+    let prepared = store
+        .prepare_selected_attempt(&first.token, a.clone())
+        .unwrap();
+    assert!(prepared.mode_epoch.is_some());
+    let withdrawn = store.withdraw_selected_attempt(b.operation).unwrap();
+    let (change, objects) = change(&[record(&store)]);
+    let replacement = store
+        .activate_selected(&first.token, change, objects)
+        .unwrap();
+    store
+        .set_sync_mode(
+            &store.sync_mode_snapshot().unwrap().token,
+            Uuid::new_v4(),
+            crate::storage::sync::mode::SyncModeChoice::LocalOnly,
+        )
+        .unwrap();
+    let directory = store.paths.data.join("sync/selected-outbox");
+    let before_a = fs::read(directory.join(format!("{}.json", a.operation))).unwrap();
+    let before_b = fs::read(directory.join(format!("{}.json", b.operation))).unwrap();
+    drop(store);
+    let store = f.store();
+    let entries = store.selected_attempt_inventory().unwrap();
+    assert_eq!(entries.len(), 2);
+    assert!(entries[0].request.operation < entries[1].request.operation);
+    let recovered = entries
+        .iter()
+        .find(|e| e.request.operation == a.operation)
+        .unwrap();
+    assert_eq!(
+        serde_json::to_vec(recovered).unwrap(),
+        serde_json::to_vec(&prepared).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_vec(
+            entries
+                .iter()
+                .find(|e| e.request.operation == b.operation)
+                .unwrap()
+        )
+        .unwrap(),
+        serde_json::to_vec(&withdrawn).unwrap()
+    );
+    assert!(store
+        .current_selected_attempt(&first.token, a.operation)
+        .is_err());
+    assert!(store
+        .current_selected_attempt(&other.token, b.operation)
+        .is_err());
+    assert_eq!(
+        selected(&store, first.token.scope()).token,
+        replacement.token
+    );
+    assert_eq!(
+        fs::read(directory.join(format!("{}.json", a.operation))).unwrap(),
+        before_a
+    );
+    assert_eq!(
+        fs::read(directory.join(format!("{}.json", b.operation))).unwrap(),
+        before_b
+    );
+}
+
+#[test]
+fn selected_outbox_inventory_refuses_whole_corrupt_journal_without_mutation() {
+    let f = Fixture::new();
+    let store = f.store();
+    let current = initialize(&store, &scope(), &[record(&store)]);
+    let request = request(&store);
+    store
+        .prepare_selected_attempt(&current.token, request.clone())
+        .unwrap();
+    let directory = store.paths.data.join("sync/selected-outbox");
+    let path = directory.join(format!("{}.json", request.operation));
+    let original = fs::read(&path).unwrap();
+    for corrupt in [b"{truncated".to_vec(), {
+        let mut entry: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        entry["actor"] = serde_json::json!(Uuid::new_v4());
+        serde_json::to_vec(&entry).unwrap()
+    }] {
+        fs::write(&path, &corrupt).unwrap();
+        assert!(store.selected_attempt_inventory().is_err());
+        assert_eq!(fs::read(&path).unwrap(), corrupt);
+        fs::write(&path, &original).unwrap();
+        assert_eq!(store.selected_attempt_inventory().unwrap().len(), 1);
+    }
+    let foreign = directory.join("foreign.json");
+    fs::write(&foreign, &original).unwrap();
+    assert!(store.selected_attempt_inventory().is_err());
+    assert_eq!(fs::read(&foreign).unwrap(), original);
+    fs::remove_file(&foreign).unwrap();
+    assert_eq!(store.selected_attempt_inventory().unwrap().len(), 1);
+    assert_eq!(selected(&store, current.token.scope()).token, current.token);
+    assert_eq!(fs::read(&path).unwrap(), original);
+}

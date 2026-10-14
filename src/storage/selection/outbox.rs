@@ -228,6 +228,17 @@ impl Store {
         }
         Ok(attempt)
     }
+    /// Enumerate complete bounded journal custody in operation UUID order.
+    /// Stale and withdrawn intents remain historical evidence; this validates
+    /// metadata only and grants no current, provider or native authority.
+    pub fn selected_attempt_inventory(&self) -> Result<Vec<SelectedAttempt>> {
+        let _inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        Ok(inventory(self)?.into_values().collect())
+    }
+
     /// Journal inspection is historical custody only, including withdrawn intents.
     pub fn inspect_selected_attempt(&self, operation: Uuid) -> Result<Option<SelectedAttempt>> {
         ensure!(!operation.is_nil(), "nil selected intent operation");
