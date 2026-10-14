@@ -96,7 +96,11 @@ fn main() -> Result<()> {
     );
     let workflow = Workflow::new(false, effective.trigger_corner, effective.debug_dump)?;
     sleep(Duration::from_millis(1000));
-    let mut orchestrator = Orchestrator::new(workflow, llm);
+    let mut orchestrator = Orchestrator::new(
+        workflow,
+        llm,
+        remarkable_reader_buddy::conversation::Ledger::new(store.clone()),
+    );
     let _sync_worker = Worker::google(store.clone(), config.sync)?;
     info!("Initialization complete; starting main loop");
     orchestrator.run_loop()
