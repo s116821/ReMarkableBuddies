@@ -107,6 +107,8 @@ test('actual paths Action: docs, mixed, unknown, executable, later page and rena
   const filters = readFileSync(path.join(root, '.github/application-paths.yml'), 'utf8');
   const run = () => action(t, 'PATHS_ACTION', endpoint, { token: 'fixture-only', filters, 'predicate-quantifier': 'every' });
   let result = await run(); assert.equal(result.code, 0, result.text); assert.equal(result.outputs.application, 'false');
+  files = [{ filename: 'release/README.md', status: 'modified' }];
+  result = await run(); assert.equal(result.code, 0, result.text); assert.equal(result.outputs.application, 'false');
   for (const filename of ['src/main.rs', 'unknown/file', 'docs/fixture.json', 'docs/images/helper.py', 'docs/licenses/tool.sh']) {
     files = [{ filename: 'README.md', status: 'modified' }, { filename, status: 'modified' }];
     result = await run(); assert.equal(result.code, 0, result.text); assert.equal(result.outputs.application, 'true', filename);

@@ -2,6 +2,7 @@
 application:
   - '**'
   - '!README.md'
+  - '!release/README.md'
   - '!AGENTS.md'
   - '!CHANGELOG.md'
   - '!LICENSE'
