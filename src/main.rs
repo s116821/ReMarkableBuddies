@@ -94,11 +94,16 @@ fn main() -> Result<()> {
             .memory_input
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("memory input absent"))?;
-        let report = remarkable_reader_buddy::memory::maintenance::run(
-            operation,
-            input,
-            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
-        );
+        let config_path = std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into);
+        let report = if input.as_os_str() == std::ffi::OsStr::new("-") {
+            remarkable_reader_buddy::memory::maintenance::run_stdin(
+                operation,
+                &mut std::io::stdin().lock(),
+                config_path,
+            )
+        } else {
+            remarkable_reader_buddy::memory::maintenance::run(operation, input, config_path)
+        };
         report.write_to(&mut std::io::stdout().lock())?;
         return Ok(());
     }

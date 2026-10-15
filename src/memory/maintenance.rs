@@ -7,6 +7,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File},
+    io::Read,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -143,7 +144,29 @@ impl Input {
                 Self::RegisterSelection(files::json(path, MAX_RECORD as u64)?)
             }
         };
-        match &input {
+        input.validated(profile, selection)
+    }
+    fn read_stdin(
+        input: &mut impl Read,
+        profile: Uuid,
+        selection: Option<&super::catalog::Identity>,
+    ) -> anyhow::Result<Self> {
+        let mut bytes = Vec::new();
+        input
+            .take((MAX_RECORD + 1) as u64)
+            .read_to_end(&mut bytes)?;
+        anyhow::ensure!(
+            bytes.len() <= MAX_RECORD,
+            "memory query input exceeds bound"
+        );
+        Self::Query(serde_json::from_slice(&bytes)?).validated(profile, selection)
+    }
+    fn validated(
+        self,
+        profile: Uuid,
+        selection: Option<&super::catalog::Identity>,
+    ) -> anyhow::Result<Self> {
+        match &self {
             Self::Inspect(key) => {
                 key.validate()?;
                 anyhow::ensure!(key.profile == profile, "foreign profile");
@@ -173,7 +196,7 @@ impl Input {
                 selection.ok_or_else(|| anyhow::anyhow!("selected configuration absent"))?,
             )?,
         }
-        Ok(input)
+        Ok(self)
     }
 }
 fn valid_operation(
@@ -284,6 +307,30 @@ pub(crate) fn preflight_state(
 }
 
 pub fn run(operation: Operation, input_path: &Path, config_path: Option<PathBuf>) -> Report {
+    run_with_input(operation, config_path, |profile, selection| {
+        Input::read(operation, input_path, profile, selection)
+    })
+}
+
+/// Query-only stdin transport. The caller supplies EOF and owns its I/O deadline.
+pub fn run_stdin(
+    operation: Operation,
+    input: &mut impl Read,
+    config_path: Option<PathBuf>,
+) -> Report {
+    if operation != Operation::Query {
+        return Report::new(operation, ReportStatus::Unsupported);
+    }
+    run_with_input(operation, config_path, |profile, selection| {
+        Input::read_stdin(input, profile, selection)
+    })
+}
+
+fn run_with_input(
+    operation: Operation,
+    config_path: Option<PathBuf>,
+    read_input: impl FnOnce(Uuid, Option<&super::catalog::Identity>) -> anyhow::Result<Input>,
+) -> Report {
     let Some(config_path) = config_path else {
         return Report::new(operation, ReportStatus::Unavailable);
     };
@@ -303,12 +350,7 @@ pub fn run(operation: Operation, input_path: &Path, config_path: Option<PathBuf>
     if setup && config.memory.selection.is_none() {
         return Report::new(operation, ReportStatus::Unsupported);
     }
-    let input = match Input::read(
-        operation,
-        input_path,
-        profile,
-        config.memory.selection.as_ref(),
-    ) {
+    let input = match read_input(profile, config.memory.selection.as_ref()) {
         Ok(input) => input,
         Err(_) => return Report::new(operation, ReportStatus::InvalidInput),
     };
@@ -418,6 +460,59 @@ pub(crate) fn store_open_status(error: &anyhow::Error) -> ReportStatus {
 mod tests {
     use super::*;
     #[test]
+    fn stdin_query_read_error_and_nonquery_refusal_do_not_admit_store() {
+        struct MustNotRead;
+        impl Read for MustNotRead {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                panic!("unsupported stdin operation read input")
+            }
+        }
+        for operation in [
+            Operation::Inspect,
+            Operation::Put,
+            Operation::Forget,
+            Operation::InitializeAggregate,
+            Operation::InitializeSelection,
+            Operation::RegisterSelection,
+        ] {
+            assert_eq!(
+                run_stdin(operation, &mut MustNotRead, None).status,
+                ReportStatus::Unsupported
+            );
+        }
+        struct FailedRead;
+        impl Read for FailedRead {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("PRIVATE_STDIN_READ_ERROR"))
+            }
+        }
+        let root = std::env::temp_dir().join(format!("memory-stdin-error-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let paths = storage::StorePaths {
+            data: root.join("data"),
+            cache: root.join("cache"),
+            credentials: root.join("credentials"),
+        };
+        let config = Config {
+            paths: paths.clone(),
+            memory: super::super::Configuration {
+                profile: Some(Uuid::new_v4()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let config_path = root.join("config.json");
+        std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+        let report = run_stdin(Operation::Query, &mut FailedRead, Some(config_path));
+        assert_eq!(report.status, ReportStatus::InvalidInput);
+        assert!(!String::from_utf8(report.encoded().unwrap())
+            .unwrap()
+            .contains("PRIVATE_STDIN_READ_ERROR"));
+        assert!(!paths.data.exists() && !paths.cache.exists() && !paths.credentials.exists());
+        assert_eq!(root.parent(), Some(std::env::temp_dir().as_path()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn current_query_inspection_and_empty_report_are_guarded_at_the_actual_writer() {
         use crate::memory::{self, Provider};
         struct PrefixFailure(Vec<u8>, usize);
@@ -509,7 +604,14 @@ mod tests {
             } else {
                 (
                     Operation::Query,
-                    Input::Query(Query::new("gravity".into(), 10)),
+                    Input::read_stdin(
+                        &mut std::io::Cursor::new(
+                            serde_json::to_vec(&Query::new("gravity".into(), 10)).unwrap(),
+                        ),
+                        profile,
+                        config.memory.selection.as_ref(),
+                    )
+                    .unwrap(),
                 )
             };
             let mut report = execute(operation, input, &config, store.clone());

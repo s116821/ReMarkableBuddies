@@ -4,7 +4,14 @@ use remarkable_reader_buddy::{
     storage::{self, Store, StorePaths, Uuid},
 };
 use serde_json::{json, Value};
-use std::{collections::BTreeSet, fs, path::PathBuf, process::Command, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+    sync::Arc,
+};
 
 struct Fixture {
     root: PathBuf,
@@ -51,17 +58,40 @@ impl Fixture {
         }
     }
     fn command(&self, operation: &str) -> Command {
+        self.input_command(operation, &self.root.join("input.json"))
+    }
+    fn input_command(&self, operation: &str, input: &Path) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_reader-buddy"));
         command
             .current_dir(&self.root)
             .args(["--memory-operation", operation, "--memory-input"])
-            .arg(self.root.join("input.json"))
+            .arg(input)
             .env("REMARKABLE_BUDDIES_CONFIG", self.root.join("config.json"))
             .env("OPENAI_API_KEY", "private-provider-sentinel")
             .env("OPENAI_BASE_URL", "http://127.0.0.1:1")
             .env("RUST_LOG", "trace")
             .env("READER_BUDDY_DEBUG_DUMP", "invalid-unused-setting");
         command
+    }
+    fn stdin_query(&self, input: &[u8]) -> Value {
+        let mut child = self
+            .input_command("query", Path::new("-"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut writer = child.stdin.take().unwrap();
+        writer.write_all(input).unwrap();
+        drop(writer); // EOF is part of the explicit stdin contract.
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        assert!(output.stdout.len() <= maintenance::MAX_RESPONSE);
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["report_version"], 1);
+        assert_eq!(report["operation"], "query");
+        report
     }
     fn run(&self, operation: &str, input: &impl serde::Serialize) -> Value {
         fs::write(
@@ -76,6 +106,86 @@ impl Fixture {
         assert_eq!(report["report_version"], 1);
         report
     }
+}
+
+#[test]
+fn actual_cli_stdin_query_matches_file_for_local_and_selected_memory() {
+    for selected in [false, true] {
+        let fixture = Fixture::new();
+        let fact = fixture.fact();
+        if selected {
+            selected_config(&fixture);
+            let aggregate = fixture.run("initialize-aggregate", &json!({"operation":Uuid::new_v4(),"accepted_base_sha256":storage::digest(b"stdin aggregate"),"fact":fact}));
+            assert_eq!(aggregate["status"], "ok");
+            let selection = fixture.run("initialize-selection", &json!({"operation":Uuid::new_v4(),"accepted_base_sha256":storage::digest(b"stdin catalog"),"registrations":[aggregate["data"]["registration"].clone()]}));
+            assert_eq!(selection["status"], "ok");
+        } else {
+            assert_eq!(
+                fixture.run(
+                    "put",
+                    &Mutation {
+                        operation: Uuid::new_v4(),
+                        expected: BTreeSet::new(),
+                        fact: fact.clone()
+                    }
+                )["status"],
+                "ok"
+            );
+        }
+        let query = Query::new("physics gravity units\r\nα".into(), 100);
+        let file_report = fixture.run("query", &query);
+        let bytes = serde_json::to_vec(&query).unwrap();
+        let stdin_report = fixture.stdin_query(&bytes);
+        assert_eq!(stdin_report, file_report);
+        assert_eq!(stdin_report["status"], "ok");
+        assert_eq!(
+            stdin_report["data"]["context"]["facts"][0]["fact"]["value"],
+            fact.value
+        );
+        assert_eq!(
+            stdin_report["data"]["context"]["facts"][0]["fact"]["provenance"]["description"],
+            fact.provenance.description
+        );
+        assert!(serde_json::to_vec(&stdin_report).unwrap().len() < 128 * 1024);
+        if !selected {
+            let mut padded = bytes;
+            padded.resize(storage::MAX_RECORD, b' ');
+            assert_eq!(fixture.stdin_query(&padded), file_report);
+        }
+    }
+}
+
+#[test]
+fn actual_cli_stdin_invalid_query_refuses_before_store_and_does_not_echo() {
+    let query = Query::new("PRIVATE_STDIN_CANARY".into(), 100);
+    let valid = serde_json::to_vec(&query).unwrap();
+    let mut oversized = valid.clone();
+    oversized.resize(storage::MAX_RECORD + 1, b' ');
+    let mut trailing = valid.clone();
+    trailing.extend_from_slice(b" {}");
+    let mut bad_query = serde_json::to_value(&query).unwrap();
+    bad_query["max_matches"] = json!(0);
+    for bytes in [
+        b"PRIVATE_STDIN_CANARY".to_vec(),
+        vec![0xff, 0xfe],
+        oversized,
+        trailing,
+        serde_json::to_vec(&bad_query).unwrap(),
+    ] {
+        let fixture = Fixture::new();
+        let report = fixture.stdin_query(&bytes);
+        assert_eq!(report["status"], "invalid-input");
+        assert!(report["data"].is_null());
+        assert!(!serde_json::to_string(&report)
+            .unwrap()
+            .contains("PRIVATE_STDIN_CANARY"));
+        assert!(!fixture.paths().data.exists());
+        assert!(!fixture.paths().cache.exists());
+        assert!(!fixture.paths().credentials.exists());
+    }
+    let fixture = Fixture::new();
+    assert_eq!(fixture.stdin_query(&valid)["status"], "unavailable");
+    assert!(!fixture.paths().data.exists());
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
