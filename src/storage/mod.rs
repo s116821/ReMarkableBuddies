@@ -1,6 +1,8 @@
 //! Versioned local persistence, independent of Reader/Writer domain semantics.
 pub mod drive;
 pub mod files;
+#[cfg(all(test, unix))]
+mod lease_tests;
 pub mod migration;
 mod recovery;
 pub mod sync;
