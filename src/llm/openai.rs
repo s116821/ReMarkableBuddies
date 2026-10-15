@@ -7,7 +7,7 @@ use serde_json::Value as JsonValue;
 pub const DEFAULT_MODEL: &str = "gpt-5.6-terra";
 
 pub struct OpenAI {
-    agent: ureq::Agent,
+    timeout: std::time::Duration,
     model: String,
     base_url: String,
     api_key: String,
@@ -19,10 +19,7 @@ impl OpenAI {
         let base_url = base_url.unwrap_or_else(|| "https://api.openai.com".to_string());
 
         Self {
-            agent: ureq::Agent::config_builder()
-                .timeout_global(Some(std::time::Duration::from_secs(90)))
-                .build()
-                .into(),
+            timeout: std::time::Duration::from_secs(90),
             model,
             base_url,
             api_key,
@@ -42,10 +39,7 @@ impl OpenAI {
 
     /// Bound explicitly requested development calls without changing tablet defaults.
     pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
-        self.agent = ureq::Agent::config_builder()
-            .timeout_global(Some(timeout))
-            .build()
-            .into();
+        self.timeout = timeout;
         self
     }
 
@@ -77,83 +71,129 @@ impl LLMEngine for OpenAI {
     }
 
     fn execute(&mut self) -> Result<String> {
-        let _timing = crate::measurement::Span::new("provider.request");
-        let body = json!({
-            "model": self.model,
-            "messages": [{
-                "role": "user",
-                "content": self.content
-            }],
-            "max_completion_tokens": 4000
-        });
-
-        debug!(
-            "Request: model={} content_parts={}",
-            self.model,
-            self.content.len()
-        );
-        let raw_response = self
-            .agent
-            .post(format!("{}/v1/chat/completions", self.base_url).as_str())
-            .header("Authorization", &format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .send_json(&body);
-
-        let mut response = match raw_response {
-            Ok(response) => response,
-            Err(err) => {
-                info!("API Error: {}", err);
-                return Err(anyhow::anyhow!("API ERROR: {}", err));
-            }
-        };
-
-        // Read response body as string
-        let body_text = response
-            .body_mut()
-            .read_to_string()
-            .context("Read model response")?;
-        parse_response(&body_text)
+        self.execute_with_progress(&mut || Ok(()))
     }
 
     fn execute_with_progress(
         &mut self,
         progress: &mut dyn FnMut() -> Result<()>,
     ) -> Result<String> {
-        std::thread::scope(|scope| {
-            let run = crate::measurement::context();
-            let _timing = crate::measurement::Span::new("provider.wait_with_progress");
-            let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-            let worker = scope.spawn(move || {
-                let _run = crate::measurement::Run::enter(run);
-                let _ = sender.send(self.execute());
-            });
-            let mut due = std::time::Instant::now();
-            let result = loop {
-                match receiver
-                    .recv_timeout(due.saturating_duration_since(std::time::Instant::now()))
-                {
-                    Ok(result) => break result,
-                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                        break Err(anyhow::anyhow!("Model worker disconnected"));
-                    }
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                        let started = std::time::Instant::now();
-                        if let Err(error) = progress() {
-                            break Err(error);
+        // Refuse before dispatch if the caller has already canceled/lost admission.
+        let preflight = std::time::Instant::now();
+        progress()?;
+        let run = crate::measurement::context();
+        let _timing = crate::measurement::Span::new("provider.wait_with_progress");
+        let body = json!({
+            "model": self.model,
+            "messages": [{"role": "user", "content": self.content}],
+            "max_completion_tokens": 4000
+        });
+        debug!(
+            "Request: model={} content_parts={}",
+            self.model,
+            self.content.len()
+        );
+        let endpoint = format!("{}/v1/chat/completions", self.base_url);
+        let api_key = self.api_key.clone();
+        let timeout = self.timeout;
+        let (cancel, mut canceled) = tokio::sync::watch::channel(false);
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let worker = std::thread::Builder::new().name("buddy-provider-request".into()).spawn(move || {
+            let _run = crate::measurement::Run::enter(run);
+            let result = (|| -> Result<String> {
+                let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()
+                    .context("Create provider runtime")?;
+                runtime.block_on(async {
+                    let request = async {
+                        let _timing = crate::measurement::Span::new("provider.request");
+                        let client = reqwest::Client::builder().timeout(timeout).hickory_dns(true).build()
+                            .context("Create asynchronous provider transport")?;
+                        let mut response = client.post(endpoint).bearer_auth(api_key).json(&body).send().await
+                            .map_err(provider_error)?
+                            .error_for_status().map_err(|error| error.without_url()).context("Model response status")?;
+                        // Preserve the previous bounded response behavior, including unknown lengths.
+                        const MAX_RESPONSE: usize = 10 * 1024 * 1024;
+                        anyhow::ensure!(response.content_length().is_none_or(|size| size <= MAX_RESPONSE as u64), "Model response exceeds bound");
+                        let mut bytes = Vec::new();
+                        while let Some(chunk) = response.chunk().await.map_err(provider_error)? {
+                            anyhow::ensure!(chunk.len() <= MAX_RESPONSE.saturating_sub(bytes.len()), "Model response exceeds bound");
+                            bytes.extend_from_slice(&chunk);
                         }
-                        due = started
-                            + crate::workflow::indicator::next_deadline(
-                                std::time::Duration::ZERO,
-                                started.elapsed(),
-                            );
+                        let text = String::from_utf8(bytes).context("Decode model response text")?;
+                        parse_response(&text)
+                    };
+                    tokio::pin!(request);
+                    tokio::select! {
+                        biased;
+                        _ = canceled.changed() => Err(anyhow::anyhow!("Model request canceled")),
+                        result = &mut request => result,
                     }
+                })
+                // Dropping this runtime stops async I/O; no blocking HTTP/DNS task
+                // is spawned or leaked via a shutdown timeout/background escape.
+            })();
+            let _ = sender.send(result);
+        }).context("Start provider request")?;
+        let mut owned = OwnedRequest {
+            cancel,
+            worker: Some(worker),
+        };
+        let mut due = preflight
+            + crate::workflow::indicator::next_deadline(
+                std::time::Duration::ZERO,
+                preflight.elapsed(),
+            );
+        let result = loop {
+            match receiver.recv_timeout(due.saturating_duration_since(std::time::Instant::now())) {
+                Ok(result) => break result,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    break Err(anyhow::anyhow!("Model worker disconnected"))
                 }
-            };
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    let started = std::time::Instant::now();
+                    if let Err(error) = progress() {
+                        break Err(error);
+                    }
+                    due = started
+                        + crate::workflow::indicator::next_deadline(
+                            std::time::Duration::ZERO,
+                            started.elapsed(),
+                        );
+                }
+            }
+        };
+        owned.finish()?;
+        result
+    }
+}
+
+/// Always cancel and join owned request work, including callback unwinding.
+struct OwnedRequest {
+    cancel: tokio::sync::watch::Sender<bool>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+impl OwnedRequest {
+    fn finish(&mut self) -> Result<()> {
+        let _ = self.cancel.send(true);
+        if let Some(worker) = self.worker.take() {
             worker
                 .join()
                 .map_err(|_| anyhow::anyhow!("Model worker panicked"))?;
-            result
-        })
+        }
+        Ok(())
+    }
+}
+impl Drop for OwnedRequest {
+    fn drop(&mut self) {
+        let _ = self.finish();
+    }
+}
+
+fn provider_error(error: reqwest::Error) -> anyhow::Error {
+    if error.is_timeout() {
+        anyhow::anyhow!("Model request timeout")
+    } else {
+        anyhow::Error::from(error.without_url()).context("Model request")
     }
 }
 
