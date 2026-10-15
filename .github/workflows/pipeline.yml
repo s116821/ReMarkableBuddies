@@ -322,4 +322,4 @@ jobs:
           release_id: ${{ steps.complete.outputs.release_id }}
           draft: false
           make_latest: legacy
-          body: ${{ steps.complete.outputs.notes }}
+          body: ${{ toJSON(steps.complete.outputs.notes) }}
