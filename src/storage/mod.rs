@@ -1,6 +1,8 @@
 //! Versioned local persistence, independent of Reader/Writer domain semantics.
 pub mod drive;
 pub mod files;
+#[cfg(all(test, unix))]
+mod lease_tests;
 pub mod migration;
 mod recovery;
 pub mod sync;
@@ -96,6 +98,14 @@ pub struct Store {
     _lease: File,
     inner: Mutex<Inner>,
     wake: Mutex<Option<SyncSender<()>>>,
+}
+
+impl Drop for Store {
+    fn drop(&mut self) {
+        // A concurrent subprocess fork can temporarily inherit this descriptor.
+        // Closing our copy alone would retain flock until that child execs.
+        let _ = self._lease.unlock();
+    }
 }
 
 impl Store {
