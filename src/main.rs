@@ -164,6 +164,7 @@ fn main() -> Result<()> {
         llm,
         remarkable_reader_buddy::conversation::Ledger::new(store.clone()),
     );
+    orchestrator.set_personalization(config.personalization_snapshot()?);
     if config.memory.enabled {
         orchestrator.set_subject_memory(Some(remarkable_reader_buddy::memory::configured(
             store.clone(),

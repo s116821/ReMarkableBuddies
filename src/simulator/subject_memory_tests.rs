@@ -237,6 +237,118 @@ fn setup() -> (Shared, Workflow) {
     let workflow = Workflow::with_device(Box::new(SimDevice(state.clone())), false);
     (state, workflow)
 }
+
+#[test]
+fn reader_personalization_is_once_after_verification_with_optional_memory() {
+    let text = "Use short explanations.\r\nPreserve units: µ and α.";
+    for (enabled, value, memory_mode, agrees) in [
+        (true, text, 0, true),
+        (true, text, 1, true),
+        (true, text, 2, true),
+        (false, text, 0, true),
+        (true, "", 0, true),
+        (true, text, 0, false),
+    ] {
+        let (state, workflow) = setup();
+        let fixture = SimulatorLedger::new();
+        let ledger = fixture.open().unwrap();
+        let store = ledger.store().clone();
+        let calls = Rc::new(RefCell::new(vec![]));
+        let model = Model {
+            current: Request::default(), calls: calls.clone(), cancel: None,
+            replies: VecDeque::from([
+                "QUESTION: G unc.?\nQUESTION_BOX: 130,35,200,50\nSELECTION_CENTER: 385,230\n---\nANSWER: Original answer.".into(),
+                if agrees { "TRANSCRIPTION: G unc.?".into() } else { "TRANSCRIPTION: different question?".into() },
+                "ANSWER: Personalized gravity answer.".into(),
+            ]),
+        };
+        let mut reader = Orchestrator::new(workflow, model, ledger);
+        reader.set_trigger_enabled(false);
+        let mut saved_preference = crate::config::Personalization {
+            enabled,
+            text: value.into(),
+            ..Default::default()
+        };
+        reader.set_personalization(saved_preference.snapshot().unwrap());
+        // A later saved value cannot mutate the already selected startup value.
+        saved_preference.text = "A later edit must not appear in this request.".into();
+        saved_preference.enabled = false;
+        assert!(saved_preference
+            .snapshot()
+            .unwrap()
+            .effective_text()
+            .is_none());
+        if memory_mode > 0 {
+            let profile = Uuid::new_v4();
+            let memory = Arc::new(memory::LocalMemory::new_local(store.clone(), profile).unwrap());
+            if memory_mode == 2 {
+                remember(
+                    &memory,
+                    profile,
+                    "G unc. uses SI gravity units",
+                    Uuid::new_v4(),
+                );
+            }
+            reader.set_subject_memory(Some(memory));
+        }
+        reader.run_iteration().unwrap();
+        let calls = calls.borrow();
+        let personalized = enabled && !value.is_empty() && agrees;
+        assert_eq!(calls.len(), if personalized { 3 } else { 2 });
+        assert!(calls[..2].iter().all(|call| call
+            .text
+            .iter()
+            .all(|part| !part.contains("PERSONALIZATION"))));
+        if personalized {
+            let expected = format!("PERSONALIZATION: {}", serde_json::to_string(value).unwrap());
+            assert_eq!(
+                calls[2]
+                    .text
+                    .iter()
+                    .filter(|part| **part == expected)
+                    .count(),
+                1
+            );
+            assert!(calls[2]
+                .text
+                .iter()
+                .any(|part| part == "CURRENT_REQUEST: \"G unc.?\""));
+            assert_eq!(calls[2].images, calls[0].images);
+            assert_eq!(
+                calls[2]
+                    .text
+                    .iter()
+                    .any(|part| part.starts_with("ASSOCIATIVE_MEMORY: ")),
+                memory_mode == 2
+            );
+        }
+        let turns: Vec<crate::conversation::Turn> = store
+            .snapshot_heads_matching(&[Namespace::Conversation], 4096, |_| true)
+            .unwrap()
+            .into_iter()
+            .filter_map(|entry| serde_json::from_value::<Record>(entry.payload).ok())
+            .filter_map(|record| match record {
+                Record::Turn(turn) => Some(turn),
+                _ => None,
+            })
+            .collect();
+        let users: Vec<_> = turns
+            .iter()
+            .filter(|turn| turn.role == Role::User)
+            .collect();
+        assert_eq!(users.len(), 1);
+        assert!(users.iter().all(|turn| turn
+            .text
+            .as_deref()
+            .is_none_or(|question| question == "G unc.?")));
+        assert!(turns
+            .iter()
+            .all(|turn| turn.text.as_ref().is_none_or(|body| !body.contains(text))));
+        if !agrees {
+            assert!(state.borrow().pages.iter().all(|page| page.text.is_empty()));
+        }
+    }
+}
 fn remember(provider: &memory::LocalMemory, profile: Uuid, value: &str, key: Uuid) {
     provider
         .put(memory::Mutation {

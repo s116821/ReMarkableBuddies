@@ -67,6 +67,7 @@ pub struct Orchestrator<M: LLMEngine = OpenAI> {
     trigger_enabled: bool,
     ledger: Ledger,
     memory: Option<std::sync::Arc<dyn crate::memory::Provider>>,
+    personalization: crate::config::PersonalizationSnapshot,
 }
 enum RenderOutcome {
     NoOutput(AttemptReason),
@@ -100,11 +101,19 @@ impl<M: LLMEngine> Orchestrator<M> {
             trigger_enabled: true,
             ledger,
             memory: None,
+            personalization: crate::config::Personalization::default()
+                .snapshot()
+                .expect("valid default preference"),
         }
     }
 
     pub fn set_trigger_enabled(&mut self, enabled: bool) {
         self.trigger_enabled = enabled;
+    }
+
+    /// Set before serving requests; each prepared request retains its own snapshot.
+    pub fn set_personalization(&mut self, snapshot: crate::config::PersonalizationSnapshot) {
+        self.personalization = snapshot;
     }
 
     /// Optional receiving context; never used for recognition or automatic learning.
@@ -202,6 +211,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         result
     }
     fn run_prepared(&mut self, attempt: &mut Attempt) -> Result<()> {
+        let personalization = self.personalization.clone();
         let images = attempt.images(&self.ledger)?;
         let screenshot_png_data = images
             .first()
@@ -263,10 +273,11 @@ impl<M: LLMEngine> Orchestrator<M> {
                 }
                 attempt.interpret(&self.ledger, &result.question)?;
                 let mut memory_view = None;
-                if self.memory.is_some() {
-                    let enriched = self.enrich_answer(attempt, &mut result, &verification);
+                if self.memory.is_some() || personalization.effective_text().is_some() {
+                    let enriched =
+                        self.enrich_answer(attempt, &mut result, &verification, &personalization);
                     if let Err(error) = enriched {
-                        log::warn!("Subject memory answer was not completed");
+                        log::warn!("Contextual answer was not completed");
                         self.workflow.report_failure(Failure::Provider)?;
                         attempt.outcome(
                             &self.ledger,
@@ -284,8 +295,8 @@ impl<M: LLMEngine> Orchestrator<M> {
                         )?;
                         return Err(error);
                     }
-                    memory_view = Some(enriched?);
-                    info!("Got verified Q&A with optional subject memory");
+                    memory_view = enriched?;
+                    info!("Got verified Q&A with optional receiving context");
                 } else {
                     info!(
                         "Got Q&A - Question: {} | Answer: {}",
@@ -562,43 +573,56 @@ impl<M: LLMEngine> Orchestrator<M> {
         attempt: &Attempt,
         result: &mut AnalysisResult,
         images: &[String],
-    ) -> Result<crate::memory::QueryResult> {
+        preference: &crate::config::PersonalizationSnapshot,
+    ) -> Result<Option<crate::memory::QueryResult>> {
         attempt.check_selected()?;
         use crate::memory::{context, Query, Status};
-        let memory = self
+        self.workflow.check_request_progress()?;
+        let retrieved = self
             .memory
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("memory absent"))?;
+            .map(|memory| {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_millis()
+                    .try_into()?;
+                // Historical memory scope is independent of preference configuration.
+                let mut query = Query::new(result.question.clone(), now);
+                query.document = attempt.memory_document()?;
+                memory
+                    .query(&query)
+                    .map_err(|_| anyhow::anyhow!("subject memory retrieval failed"))
+            })
+            .transpose()?;
         self.workflow.check_request_progress()?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_millis()
-            .try_into()?;
-        // Selected ownership supplies historical data scope only, never native
-        // authority. Legacy capture still supplies no inferred association.
-        let mut query = Query::new(result.question.clone(), now);
-        query.document = attempt.memory_document()?;
-        let retrieved = memory
-            .query(&query)
-            .map_err(|_| anyhow::anyhow!("subject memory retrieval failed"))?;
-        self.workflow.check_request_progress()?;
-        info!(
-            "Subject memory retrieval: {:?} {:?}",
-            retrieved.status, retrieved.diagnostics
-        );
-        match retrieved.status {
-            Status::Disabled | Status::CompleteEmpty => return Ok(retrieved),
-            Status::Unavailable => anyhow::bail!("subject memory retrieval unavailable"),
-            Status::Partial if retrieved.context.facts.is_empty() => {
-                anyhow::bail!("subject memory retrieval incomplete without usable facts")
+        if let Some(retrieved) = &retrieved {
+            info!(
+                "Subject memory retrieval: {:?} {:?}",
+                retrieved.status, retrieved.diagnostics
+            );
+            match retrieved.status {
+                Status::Disabled | Status::CompleteEmpty
+                    if preference.effective_text().is_none() =>
+                {
+                    return Ok(Some(retrieved.clone()))
+                }
+                Status::Unavailable => anyhow::bail!("subject memory retrieval unavailable"),
+                Status::Partial if retrieved.context.facts.is_empty() => {
+                    anyhow::bail!("subject memory retrieval incomplete without usable facts")
+                }
+                _ => {}
             }
-            _ => {}
         }
-        let answer = context::answer(
+        let usable_memory = retrieved.as_ref().filter(|view| {
+            matches!(view.status, Status::Complete | Status::Partial)
+                && !view.context.facts.is_empty()
+        });
+        let answer = context::answer_with_preference(
             &mut self.llm,
             &result.question,
             images,
-            &retrieved,
+            usable_memory,
+            Some(preference),
             &mut || {
                 attempt
                     .check_selected()
