@@ -134,6 +134,8 @@ test('actual paths Action push base/ref sees one merged source commit', async t 
 
 test('actual exact GraphQL lookup and release-ID request Actions avoid draft pagination', async t => {
   let draft = true, failedLookup = false; const events = [];
+  const notes = 'v0.4.1\n\nSource: ' + 'a'.repeat(40)
+    + '\n\n<!-- manager-complete:{"tag":"v0.4.1","quoted":"café → exact"} -->';
   const endpoint = await server(t, (req, bytes) => {
     const url = new URL(req.url, 'http://localhost'); events.push(req.method + ' ' + url.pathname);
     if (url.pathname === '/graphql') {
@@ -145,8 +147,9 @@ test('actual exact GraphQL lookup and release-ID request Actions avoid draft pag
     if (req.method === 'GET' && url.pathname === '/repos/fixture/owned/releases/55')
       return { body: { id: 55, tag_name: 'v0.4.1', draft, assets: [] } };
     if (req.method === 'PATCH' && url.pathname === '/repos/fixture/owned/releases/55') {
-      assert.equal(JSON.parse(bytes).draft, false); draft = false;
-      return { body: { id: 55, tag_name: 'v0.4.1', draft, assets: [] } };
+      const data = JSON.parse(bytes);
+      assert.equal(data.draft, false); assert.equal(data.body, notes); draft = false;
+      return { body: { id: 55, tag_name: 'v0.4.1', draft, body: data.body, assets: [] } };
     }
     throw new Error('Unexpected route including release listing: ' + req.url);
   });
@@ -158,8 +161,19 @@ test('actual exact GraphQL lookup and release-ID request Actions avoid draft pag
   result = await action(t, 'REQUEST_ACTION', endpoint, { route: read.with.route, repo: 'fixture/owned', release_id: '55' });
   assert.equal(result.code, 0, result.text); assert.equal(JSON.parse(result.outputs.data).id, 55);
   const finish = release.at(-1);
-  result = await action(t, 'REQUEST_ACTION', endpoint, { route: finish.with.route, repo: 'fixture/owned', release_id: '55', draft: 'false', make_latest: 'legacy', body: 'owned completion' });
+  const inputs = { route: finish.with.route, repo: 'fixture/owned', release_id: '55', draft: 'false', make_latest: 'legacy' };
+  // The pinned Action YAML-parses every input. Raw production-shaped notes fail
+  // before any PATCH, matching the retained main-run failure.
+  result = await action(t, 'REQUEST_ACTION', endpoint, { ...inputs, body: notes });
+  assert.equal(result.code, 1, result.text);
+  assert.match(result.text, /end of the stream or a document separator/);
+  assert.equal(draft, true); assert.ok(!events.some(e => e.startsWith('PATCH ')));
+  // GitHub toJSON emits this JSON scalar; the maintained YAML parser restores
+  // the exact original text, including LF/colons/quotes/Unicode.
+  result = await action(t, 'REQUEST_ACTION', endpoint, { ...inputs, body: JSON.stringify(notes) });
   assert.equal(result.code, 0, result.text); assert.equal(draft, false);
+  assert.equal(JSON.parse(result.outputs.data).body, notes);
+  assert.equal(finish.with.body, '${{ toJSON(steps.complete.outputs.notes) }}');
   failedLookup = true;
   result = await action(t, 'GRAPHQL_ACTION', endpoint, { query, variables: 'owner: fixture\nrepo: owned\ntag: v0.4.1' });
   assert.equal(result.code, 1, result.text);
