@@ -1,0 +1,322 @@
+name: Ordered application pipeline
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        type: string
+        required: true
+      release:
+        type: boolean
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: ${{ inputs.release && 'main-application-release' || format('pr-{0}', github.event.pull_request.number) }}
+  queue: max
+  cancel-in-progress: false
+jobs:
+  uploader:
+    name: Qualify maintained uploader
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    outputs:
+      artifact_id: ${{ steps.artifact.outputs.artifact-id }}
+      bundle_sha256: ${{ steps.build.outputs.bundle_sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.21.0'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Fetch exact maintained source, not a prebuilt distribution
+        run: |
+          git clone --config core.autocrlf=false --no-checkout https://github.com/svenstaro/upload-release-action.git "$RUNNER_TEMP/uploader-source"
+          git -C "$RUNNER_TEMP/uploader-source" checkout --detach 29e53e917877a24fad85510ded594ab3c9ca12de
+      - id: build
+        run: python release/qualify_uploader.py --source "$RUNNER_TEMP/uploader-source" --output "$RUNNER_TEMP/qualified-uploader"
+      - name: Fetch pinned upstream metadata Actions for controls
+        run: |
+          git clone --config core.autocrlf=false --no-checkout https://github.com/dorny/paths-filter.git "$RUNNER_TEMP/paths-filter"
+          git -C "$RUNNER_TEMP/paths-filter" checkout --detach ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d
+          git clone --config core.autocrlf=false --no-checkout https://github.com/octokit/graphql-action.git "$RUNNER_TEMP/graphql-action"
+          git -C "$RUNNER_TEMP/graphql-action" checkout --detach ddde8ebb2493e79f390e6449c725c21663a67505
+          git clone --config core.autocrlf=false --no-checkout https://github.com/octokit/request-action.git "$RUNNER_TEMP/request-action"
+          git -C "$RUNNER_TEMP/request-action" checkout --detach b91aabaa861c777dcdb14e2387e30eddf04619ae
+      - run: npm ci --prefix release/fixtures --ignore-scripts --no-audit --no-fund
+      - run: npm audit --prefix release/fixtures
+      - name: Exercise actual upstream metadata Actions and workflow gate wiring
+        env:
+          PATHS_ACTION: ${{ runner.temp }}/paths-filter
+          GRAPHQL_ACTION: ${{ runner.temp }}/graphql-action
+          REQUEST_ACTION: ${{ runner.temp }}/request-action
+        run: node --test release/fixtures/actions.test.mjs
+      - name: Execute actual upstream Action controls against loopback only
+        env:
+          UPLOADER_ACTION: ${{ runner.temp }}/qualified-uploader
+        run: node --test release/fixtures/uploader.test.mjs
+      - uses: actions/upload-artifact@v4
+        id: artifact
+        with:
+          name: qualified-uploader-${{ inputs.source_sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/qualified-uploader/
+          if-no-files-found: error
+          retention-days: 14
+  checks:
+    name: Lint and unit checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: ./.github/actions/release-tools
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - run: cargo test --locked --all-features
+      - run: python -m unittest discover -s release -v
+  candidate:
+    name: Freeze read-only candidate
+    needs: [checks, uploader]
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.freeze.outputs.tag }}
+      sha: ${{ steps.freeze.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/release-tools
+      - name: Read semantic candidate without creating any tag
+        id: freeze
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          git checkout -B main "$SOURCE_SHA"
+          tag=$(semantic-release -c release/python-semantic-release.toml version --print-tag)
+          python release/freeze.py candidate --tag "$tag" --sha "$SOURCE_SHA"
+  build:
+    name: Build frozen candidate
+    needs: candidate
+    runs-on: ubuntu-latest
+    outputs:
+      artifact_id: ${{ steps.artifacts.outputs.artifact-id }}
+    env:
+      TAG: ${{ needs.candidate.outputs.tag }}
+      SHA: ${{ needs.candidate.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: armv7-unknown-linux-gnueabihf,aarch64-unknown-linux-gnu
+      - name: Install pinned cross
+        run: cargo install cross --git https://github.com/cross-rs/cross --rev 8c1a8aa4b661711f4b7b6ac07c2e8929ce2f7d27 --locked
+      - run: python release/build.py build --tag "$TAG" --sha "$SHA" --output "$RUNNER_TEMP/packages"
+      - uses: actions/upload-artifact@v4
+        id: artifacts
+        with:
+          name: candidate-${{ inputs.source_sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/packages/*
+          if-no-files-found: error
+          retention-days: 14
+  integration:
+    name: Exercise retained target artifacts
+    needs: [candidate, build]
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ needs.candidate.outputs.tag }}
+      SHA: ${{ needs.candidate.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact_id }}
+          path: ${{ runner.temp }}/packages
+          merge-multiple: true
+      - run: python release/build.py integrate --tag "$TAG" --sha "$SHA" --output "$RUNNER_TEMP/packages"
+  release:
+    name: Publish verified build artifacts
+    timeout-minutes: 20
+    needs: [candidate, build, integration, uploader]
+    if: inputs.release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+    env:
+      TAG: ${{ needs.candidate.outputs.tag }}
+      SHA: ${{ needs.candidate.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+      - uses: ./.github/actions/release-tools
+      - uses: octokit/graphql-action@ddde8ebb2493e79f390e6449c725c21663a67505 # v3.0.2
+        id: merged
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          query: |
+            query($owner: String!, $repo: String!, $sha: String!) {
+              repository(owner: $owner, name: $repo) {
+                object(expression: $sha) { ... on Commit {
+                  oid associatedPullRequests(first: 10) { nodes {
+                    merged baseRefName mergeCommit { oid }
+                  } }
+                } }
+              }
+            }
+          variables: |
+            owner: ${{ github.repository_owner }}
+            repo: ${{ github.event.repository.name }}
+            sha: ${{ needs.candidate.outputs.sha }}
+      - name: Require exact merged-main admission
+        env:
+          RELEASE_OBSERVATION: ${{ steps.merged.outputs.data }}
+        run: python release/admission.py merge --sha "$SHA"
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact_id }}
+          path: ${{ runner.temp }}/packages
+          merge-multiple: true
+      - name: Verify the exact integration-tested upload inventory
+        run: python release/build.py verify --tag "$TAG" --sha "$SHA" --output "$RUNNER_TEMP/packages"
+      - name: Official tag only after every preceding job passed
+        run: |
+          set -euo pipefail
+          git checkout -B main "$SHA"
+          python release/freeze.py candidate --tag "$TAG" --sha "$SHA"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main:refs/remotes/origin/main --tags
+          git merge-base --is-ancestor "$SHA" refs/remotes/origin/main
+          test "$(semantic-release -c release/python-semantic-release.toml version --print-tag)" = "$TAG"
+          semantic-release -c release/python-semantic-release.toml version --no-commit --no-changelog --skip-build --push --no-vcs-release
+          python release/freeze.py remote --tag "$TAG" --sha "$SHA"
+      - uses: octokit/graphql-action@ddde8ebb2493e79f390e6449c725c21663a67505 # v3.0.2
+        id: lookup
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          query: |
+            query($owner: String!, $repo: String!, $tag: String!) {
+              repository(owner: $owner, name: $repo) {
+                release(tagName: $tag) {
+                  databaseId tagName isDraft description
+                  releaseAssets(first: 1) { totalCount }
+                }
+              }
+            }
+          variables: |
+            owner: ${{ github.repository_owner }}
+            repo: ${{ github.event.repository.name }}
+            tag: ${{ needs.candidate.outputs.tag }}
+      - name: Validate exact release observation
+        id: lookup_proof
+        env:
+          RELEASE_OBSERVATION: ${{ steps.lookup.outputs.data }}
+        run: python release/verify_release.py lookup --tag "$TAG" --sha "$SHA"
+      - uses: octokit/request-action@b91aabaa861c777dcdb14e2387e30eddf04619ae # v3.0.0
+        id: create
+        if: steps.lookup_proof.outputs.absent == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          route: POST /repos/{repo}/releases
+          repo: ${{ github.repository }}
+          tag_name: ${{ needs.candidate.outputs.tag }}
+          target_commitish: ${{ needs.candidate.outputs.sha }}
+          draft: true
+          name: ${{ needs.candidate.outputs.tag }}
+      - uses: octokit/request-action@b91aabaa861c777dcdb14e2387e30eddf04619ae # v3.0.0
+        id: before_upload
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          route: GET /repos/{repo}/releases/{release_id}
+          repo: ${{ github.repository }}
+          release_id: ${{ steps.create.outputs.data && fromJSON(steps.create.outputs.data).id || steps.lookup_proof.outputs.release_id }}
+      - name: Verify retained bytes and select only missing names
+        id: retained
+        env:
+          RELEASE_OBSERVATION: ${{ steps.before_upload.outputs.data }}
+          GITHUB_TOKEN: ${{ github.token }}
+          EXPECTED_ID: ${{ steps.create.outputs.data && fromJSON(steps.create.outputs.data).id || steps.lookup_proof.outputs.release_id }}
+        run: python release/verify_release.py retained --tag "$TAG" --sha "$SHA" --release-id "$EXPECTED_ID" --packages "$RUNNER_TEMP/packages" --missing "$RUNNER_TEMP/missing-packages"
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ needs.uploader.outputs.artifact_id }}
+          path: .qualified/uploader
+          merge-multiple: true
+      - name: Verify qualified upstream uploader before credentialed execution
+        env:
+          BUNDLE_SHA: ${{ needs.uploader.outputs.bundle_sha256 }}
+        run: python release/qualify_uploader.py --output .qualified/uploader --expected-bundle "$BUNDLE_SHA"
+      - uses: ./.qualified/uploader
+        if: steps.retained.outputs.draft == 'true' && steps.retained.outputs.files != ''
+        with:
+          release_id: ${{ steps.retained.outputs.release_id }}
+          repo_token: ${{ github.token }}
+          tag: ${{ needs.candidate.outputs.tag }}
+          target_commit: ${{ needs.candidate.outputs.sha }}
+          file: ${{ runner.temp }}/missing-packages/*
+          file_glob: true
+          overwrite: false
+          check_duplicates: true
+          draft: true
+          promote: false
+          prerelease: false
+          make_latest: false
+      - uses: octokit/request-action@b91aabaa861c777dcdb14e2387e30eddf04619ae # v3.0.0
+        id: after_upload
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          route: GET /repos/{repo}/releases/{release_id}
+          repo: ${{ github.repository }}
+          release_id: ${{ steps.retained.outputs.release_id }}
+      - name: Verify same ID and all remote bytes before publication
+        id: complete
+        env:
+          RELEASE_OBSERVATION: ${{ steps.after_upload.outputs.data }}
+          GITHUB_TOKEN: ${{ github.token }}
+          EXPECTED_ID: ${{ steps.retained.outputs.release_id }}
+        run: |
+          python release/verify_release.py retained --complete --tag "$TAG" --sha "$SHA" --release-id "$EXPECTED_ID" --packages "$RUNNER_TEMP/packages" --missing "$RUNNER_TEMP/missing-packages"
+          python release/freeze.py remote --tag "$TAG" --sha "$SHA"
+      - uses: octokit/request-action@b91aabaa861c777dcdb14e2387e30eddf04619ae # v3.0.0
+        if: steps.complete.outputs.draft == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          route: PATCH /repos/{repo}/releases/{release_id}
+          repo: ${{ github.repository }}
+          release_id: ${{ steps.complete.outputs.release_id }}
+          draft: false
+          make_latest: legacy
+          body: ${{ steps.complete.outputs.notes }}

@@ -1,0 +1,69 @@
+# Only Git tags carry project versions. PSR owns semantic history and tag creation.
+[semantic_release]
+tag_format = "v{version}"
+version_toml = []
+version_variables = []
+build_command = ""
+allow_zero_version = true
+major_on_zero = true
+commit_parser = "conventional-monorepo"
+[semantic_release.branches.main]
+match = "main"
+prerelease = false
+[semantic_release.commit_parser_options]
+allowed_tags = ["feat", "fix", "perf", "build", "ci", "chore", "refactor", "test", "revert"]
+minor_tags = ["feat"]
+patch_tags = ["fix", "perf", "build", "ci", "chore", "refactor", "test", "revert"]
+other_allowed_tags = []
+parse_squash_commits = false
+scope_prefix = ""
+path_filters = [
+  ".",
+  "!README.md",
+  "!AGENTS.md",
+  "!CHANGELOG.md",
+  "!LICENSE",
+  "!LICENSE-*",
+  "!docs/*.md",
+  "!docs/**/*.md",
+  "!docs/licenses/*.txt",
+  "!docs/licenses/**/*.txt",
+  "!openspec/**",
+  "!.agents/*.md",
+  "!.agents/**/*.md",
+  "!.codex/*.md",
+  "!.codex/**/*.md",
+  "!.github/pull_request_template.md",
+  "!docs/images/*.png",
+  "!docs/images/**/*.png",
+  "!docs/images/*.jpg",
+  "!docs/images/**/*.jpg",
+  "!docs/images/*.jpeg",
+  "!docs/images/**/*.jpeg",
+  "!docs/images/*.gif",
+  "!docs/images/**/*.gif",
+  "!docs/images/*.webp",
+  "!docs/images/**/*.webp",
+  "!docs/images/*.svg",
+  "!docs/images/**/*.svg",
+  "!docs/images/*.pdf",
+  "!docs/images/**/*.pdf",
+  "!docs/validation/images/*.png",
+  "!docs/validation/images/**/*.png",
+  "!docs/validation/images/*.jpg",
+  "!docs/validation/images/**/*.jpg",
+  "!docs/validation/images/*.jpeg",
+  "!docs/validation/images/**/*.jpeg",
+  "!docs/validation/images/*.gif",
+  "!docs/validation/images/**/*.gif",
+  "!docs/validation/images/*.webp",
+  "!docs/validation/images/**/*.webp",
+  "!docs/validation/images/*.svg",
+  "!docs/validation/images/**/*.svg",
+  "!docs/validation/images/*.pdf",
+  "!docs/validation/images/**/*.pdf"
+]
+
+[semantic_release.remote]
+type = "github"
+ignore_token_for_push = true

@@ -32,8 +32,19 @@ fn semantic_tag(tag: &str) -> bool {
 fn main() -> Result<(), Box<dyn Error>> {
     println!("cargo:rerun-if-env-changed=READER_BUDDY_RELEASE_TAG");
     println!("cargo:rerun-if-env-changed=READER_BUDDY_RELEASE_SHA");
-    let tag = env::var("READER_BUDDY_RELEASE_TAG").ok();
-    let sha = env::var("READER_BUDDY_RELEASE_SHA").ok();
+    println!("cargo:rerun-if-env-changed=READER_BUDDY_CANDIDATE_TAG");
+    println!("cargo:rerun-if-env-changed=READER_BUDDY_CANDIDATE_SHA");
+    let candidate_tag = env::var("READER_BUDDY_CANDIDATE_TAG").ok();
+    let candidate_sha = env::var("READER_BUDDY_CANDIDATE_SHA").ok();
+    let candidate = candidate_tag.is_some() || candidate_sha.is_some();
+    if candidate
+        && (env::var_os("READER_BUDDY_RELEASE_TAG").is_some()
+            || env::var_os("READER_BUDDY_RELEASE_SHA").is_some())
+    {
+        return Err("Candidate and published-tag metadata cannot be combined".into());
+    }
+    let tag = candidate_tag.or_else(|| env::var("READER_BUDDY_RELEASE_TAG").ok());
+    let sha = candidate_sha.or_else(|| env::var("READER_BUDDY_RELEASE_SHA").ok());
     if tag.is_some() != sha.is_some() {
         return Err("Official builds require both expected tag and SHA".into());
     }
@@ -55,7 +66,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         if !semantic_tag(tag)
             || git(&["rev-parse", "--is-shallow-repository"])? != "false"
             || git(&["rev-parse", "HEAD"])? != *sha
-            || git(&["rev-parse", &format!("refs/tags/{tag}^{{commit}}")])? != *sha
+            || (!candidate && git(&["rev-parse", &format!("refs/tags/{tag}^{{commit}}")])? != *sha)
             || !git(&["status", "--porcelain", "--untracked-files=normal"])?.is_empty()
         {
             return Err(
@@ -75,7 +86,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     emitter.add_instructions(&metadata)?.emit_and_set()?;
     let description = env::var("VERGEN_GIT_DESCRIBE").unwrap_or_default();
     let version = if let (Some(tag), Some(sha)) = (tag, sha) {
-        if description != tag
+        if (!candidate && description != tag)
             || env::var("VERGEN_GIT_SHA")? != sha
             || env::var("VERGEN_GIT_DIRTY")? != "false"
         {
