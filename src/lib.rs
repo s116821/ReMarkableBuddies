@@ -6,6 +6,7 @@ pub mod llm;
 mod measurement;
 pub mod memory;
 pub mod reader_runtime;
+pub mod retrieval;
 pub mod simulator;
 pub mod storage;
 pub mod util;
