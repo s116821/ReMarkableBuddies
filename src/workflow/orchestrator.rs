@@ -298,10 +298,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                     memory_view = enriched?;
                     info!("Got verified Q&A with optional receiving context");
                 } else {
-                    info!(
-                        "Got Q&A - Question: {} | Answer: {}",
-                        result.question, result.answer
-                    );
+                    info!("Got verified Q&A");
                 }
 
                 let memory = self.memory.clone();
@@ -453,7 +450,7 @@ impl<M: LLMEngine> Orchestrator<M> {
             }
         };
         self.workflow.check_request_progress()?;
-        info!("LLM Response: {}", response);
+        info!("Analysis response received ({} bytes)", response.len());
         attempt.check_selected()?;
         Ok(Self::parse_analysis_response(
             &response,
@@ -504,7 +501,7 @@ impl<M: LLMEngine> Orchestrator<M> {
             SCREENSHOT_VIRTUAL_HEIGHT,
         )?;
 
-        debug!("Parsed - Question: {}", question_text);
+        debug!("Parsed question ({} bytes)", question_text.len());
         debug!("Question box: {:?}", question_box);
         debug!("Selected-content center: {}", selection_center);
 
@@ -562,7 +559,10 @@ impl<M: LLMEngine> Orchestrator<M> {
             }
         };
         self.workflow.check_request_progress()?;
-        info!("Independent question reading: {}", reading);
+        info!(
+            "Independent question reading received ({} bytes)",
+            reading.len()
+        );
         attempt.check_selected()?;
         Ok((!Self::transcriptions_agree(&result.question, &reading))
             .then_some(Failure::Transcription))
