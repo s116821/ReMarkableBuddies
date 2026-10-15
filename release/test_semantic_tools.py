@@ -109,7 +109,8 @@ class SemanticToolTests(unittest.TestCase):
     def test_actual_subject_cannot_borrow_an_earlier_failed_history_bump(self):
         from semantic_source import validate_source
         self.commit("feat(REM-56): earlier failed source", "src/app.rs")
-        for subject in ("docs(REM-56): misclassified app", "unsupported message", "fix: missing scope"):
+        for subject in ("docs(REM-56): misclassified app", "unsupported message", "fix: missing scope",
+                        " fix(REM-56): leading whitespace is not normalized"):
             self.commit(subject, "src/app.rs")
             # Read-only PSR still sees the earlier untagged feat. That is not
             # permission for this ineligible current source to borrow its bump.
