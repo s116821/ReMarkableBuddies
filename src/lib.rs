@@ -1,8 +1,10 @@
 pub mod analysis;
 pub mod config;
+pub mod conversation;
 pub mod device;
 pub mod llm;
 mod measurement;
+pub mod memory;
 pub mod simulator;
 pub mod storage;
 pub mod util;

@@ -34,6 +34,12 @@ pub struct Args {
     /// Save local page-image diagnostics (independent of logging)
     #[arg(long)]
     debug_dump: bool,
+    /// One-shot local memory maintenance; no provider or tablet runtime
+    #[arg(long, value_enum, requires = "memory_input", conflicts_with_all = ["simulate", "api_key", "model", "base_url", "trigger_corner", "debug_dump", "log_level"])]
+    memory_operation: Option<remarkable_reader_buddy::memory::maintenance::Operation>,
+    /// Bounded JSON input for an explicit memory operation
+    #[arg(long, value_name = "FILE", requires = "memory_operation")]
+    memory_input: Option<std::path::PathBuf>,
 }
 
 fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_logger::Builder {
@@ -53,8 +59,21 @@ fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_lo
 }
 
 fn main() -> Result<()> {
-    dotenv().ok();
     let args = Args::parse();
+    if let Some(operation) = args.memory_operation {
+        let input = args
+            .memory_input
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("memory input absent"))?;
+        let report = remarkable_reader_buddy::memory::maintenance::run(
+            operation,
+            input,
+            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+        );
+        report.write_to(&mut std::io::stdout().lock())?;
+        return Ok(());
+    }
+    dotenv().ok();
     if let Some(path) = args.simulate {
         logging(args.log_level, std::env::var("RUST_LOG").ok().as_deref()).init();
         remarkable_reader_buddy::simulator::run_file(&path)?;
@@ -96,7 +115,17 @@ fn main() -> Result<()> {
     );
     let workflow = Workflow::new(false, effective.trigger_corner, effective.debug_dump)?;
     sleep(Duration::from_millis(1000));
-    let mut orchestrator = Orchestrator::new(workflow, llm);
+    let mut orchestrator = Orchestrator::new(
+        workflow,
+        llm,
+        remarkable_reader_buddy::conversation::Ledger::new(store.clone()),
+    );
+    if config.memory.enabled {
+        orchestrator.set_subject_memory(Some(remarkable_reader_buddy::memory::configured(
+            store.clone(),
+            &config.memory,
+        )?));
+    }
     let _sync_worker = Worker::google(store.clone(), config.sync)?;
     info!("Initialization complete; starting main loop");
     orchestrator.run_loop()
@@ -122,6 +151,8 @@ mod tests {
                 "base-url",
                 "debug-dump",
                 "log-level",
+                "memory-input",
+                "memory-operation",
                 "model",
                 "simulate",
                 "trigger-corner"
@@ -131,6 +162,7 @@ mod tests {
         assert!(args.model.is_none());
         assert!(args.trigger_corner.is_none());
         assert!(!args.debug_dump);
+        assert!(args.memory_operation.is_none() && args.memory_input.is_none());
         for flag in [
             "--once",
             "--no-trigger",
