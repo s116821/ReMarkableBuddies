@@ -3,6 +3,7 @@ pub mod config;
 pub mod device;
 pub mod llm;
 mod measurement;
+pub mod retrieval;
 pub mod simulator;
 pub mod storage;
 pub mod util;
