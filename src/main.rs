@@ -124,7 +124,8 @@ fn main() -> Result<()> {
         .filter_module("ureq_proto", log::LevelFilter::Off)
         .init();
     info!("=== ReMarkable Reader Buddy Starting ===");
-    let store =
+    // Retain this named guard through Ledger, memory, the worker and run_loop.
+    let (store, _ordinary_mode_lease) =
         match remarkable_reader_buddy::reader_runtime::ordinary_store(&config, admitted_store) {
             Ok(store) => store,
             Err(mut report) => {
