@@ -679,8 +679,8 @@ bytes. Python Semantic Release supplies candidate/tag semantics; vergen-gitcl
 embeds the frozen identity. No project version is maintained in Cargo.toml.
 
 Scoped feat increments minor; fix and supported maintenance types increment patch;
-explicit breaking syntax/footer increments major even at0.x. REM-35 still holds
-premature1.0. Documentation-only changes do not compile or release the application.
+explicit breaking syntax/footer increments major even at 0.x. REM-35 still holds
+premature 1.0. Documentation-only changes do not compile or release the application.
 Unknown, mixed, executable fixture and build/dependency paths remain relevant.
 
 Main pushes must have one first-parent commit and final exact merged-PR identity,

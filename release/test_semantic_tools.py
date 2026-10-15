@@ -106,6 +106,20 @@ class SemanticToolTests(unittest.TestCase):
         self.git("commit", "-m", "feat(REM-56): rename application to docs")
         self.assertEqual(self.candidate(), "v0.5.0")
 
+    def test_actual_subject_cannot_borrow_an_earlier_failed_history_bump(self):
+        from semantic_source import validate_source
+        self.commit("feat(REM-56): earlier failed source", "src/app.rs")
+        for subject in ("docs(REM-56): misclassified app", "unsupported message", "fix: missing scope"):
+            self.commit(subject, "src/app.rs")
+            # Read-only PSR still sees the earlier untagged feat. That is not
+            # permission for this ineligible current source to borrow its bump.
+            self.assertEqual(self.candidate(), "v0.5.0")
+            with self.assertRaisesRegex(ValueError, "Actual merged source"):
+                validate_source(self.repo, self.git("rev-parse", "HEAD"))
+            self.assertEqual(self.git("tag").splitlines(), ["v0.4.0"])
+        self.commit("fix(REM-56): supported actual source", "src/app.rs")
+        validate_source(self.repo, self.git("rev-parse", "HEAD"))
+
     def test_zero_major_breaking_is_reported_and_held_not_downgraded(self):
         self.commit("fix(REM-56)!: break\n\nBREAKING CHANGE: API", "src/app.rs")
         self.assertEqual(self.candidate(), "v1.0.0")

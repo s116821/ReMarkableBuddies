@@ -11,7 +11,10 @@ Only one final release job can tag or publish. PR/fork runs cannot enter it.
 Docs-only changes finish metadata checks without application compilation.
 
 A canonical main push must contain exactly one first-parent main commit.
-Ordinary GitHub squash and merge events qualify. Unknown/zero initial history,
+Squash and ordinary merge events satisfy this structural check, but the actual
+admitted main commit must also have a supported scoped semantic subject. A
+default nonconventional merge message refuses before build, even if older failed
+commits would otherwise supply an upstream candidate bump. Unknown/zero initial history,
 non-forward updates and ambiguous batches (including an edit/revert net-zero
 batch) refuse visibly before build/tag rather than misclassifying history.
 Final associated-PR proof binds the exact source to a merged main PR; a direct
@@ -19,13 +22,13 @@ push cannot publish. Repository protection remains owner-managed.
 
 ## Maintained tools
 
-- dorny/paths-filter4.0.3 and semantic-pull-request6.1.1 handle conservative paths
+- dorny/paths-filter 4.0.3 and semantic-pull-request 6.1.1 handle conservative paths
   and scoped PR titles. Unknown paths and executable fixtures remain relevant.
-- Python Semantic Release10.7.0 uses the hash-locked Python closure and
+- Python Semantic Release 10.7.0 uses the hash-locked Python closure and
   conventional-monorepo path exclusions. It computes candidates read-only;
   tag-only invocation happens after artifact integration, with no source
-  version, changelog/version commit, or release-job rebuild. Breaking0.x advances
-  major; the separate REM-35 hold refuses premature1.0 rather than downgrading it.
+  version, changelog/version commit, or release-job rebuild. Breaking 0.x advances
+  major; the separate REM-35 hold refuses premature 1.0 rather than downgrading it.
 - Exact GraphQL release lookup and octokit request Actions handle draft
   creation/read/finalization by ID, avoiding draft-list pagination.
 - Unmodified Svenstaro upload-release-action2.11.5 source29e53e917877a24fad85510ded594ab3c9ca12de
@@ -59,7 +62,7 @@ an Angular/Electron application rebuild. CI artifacts and production releases
 remain different evidence classes.
 
 Use Actions **Re-run failed jobs** for an interrupted final release: successful
-build artifact IDs and tested bytes are retained for14days. The same tag/draft
+build artifact IDs and tested bytes are retained for 14 days. The same tag/draft
 is observed, retained bytes are compared with the independently expected local
 packages, only missing names are uploaded, and every remote byte is checked
 before finalization. Unexpected/conflicting assets refuse; published complete
@@ -77,7 +80,7 @@ immutability/external-writer guarantee or dispatch-chronology promise.
 
 ## Local focused controls
 
-Use Python3.12, supported Node24.21 and Git. Install the maintained tools with
+Use Python 3.12, supported Node 24.21 and Git. Install the maintained tools with
 `python -m pip install --require-hashes -r release/python-tools.lock`.
 Run `python -m unittest discover -s release -v`. Rust metadata controls also need
 the declared Rust toolchain/dependency cache. Action controls require exact clones
