@@ -56,3 +56,19 @@ This uses the production LLM abstraction and Reader policy with simulated pages.
 It establishes laptop provider access and model interpretation, not native tablet
 input, typography, insertion or physical gesture fidelity. CI remains offline;
 its provider tests use a local HTTP fixture with dummy credentials.
+
+## Optional Reader preference check
+
+`cargo run -- --simulate docs/simulator/live/personalized-reader.json` runs the
+same maintained cursive input with the accepted multiline Unicode preference
+configuration and a maximum of three provider calls. Recognition and independent
+reading exclude that preference; the third call generates the verified answer
+with separate configuration context. Inspect the report and answer image for an
+unchanged source and exact question, an explanation of the selected flat-plate
+concept, the requested brief style and the fixed plain ASCII/no-Markdown contract.
+Passing scripted or loopback tests does not establish these live semantics.
+
+The simulator configuration represents an immutable startup value. It does not
+demonstrate Writer support, a running configuration reload, service restart or a
+Manager activation receipt. Saving configuration still requires a qualified
+restart before it can be called active in a running tablet process.
