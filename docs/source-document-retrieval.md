@@ -2,7 +2,7 @@
 
 This typed API receives material that its caller has already allocated. A future file/network extraction adapter must bound decoding and acquisition before constructing it; the index's validation limits are not a streaming input-allocation guarantee.
 
-`retrieval::{NormalizedDocument, Index, Cache, Provider}` is a bounded local library seam. It does not extract a PDF/EPUB/notebook, discover the current tablet document, change Reader prompts or perform research. Source-format labels record the extracting adapter's assertion; they do not establish supported extraction or native authority. The active central change is `source-document-retrieval` in ReMarkableBuddiesDocs.
+`retrieval::{NormalizedDocument, Index, Cache, Provider}` is a bounded local library seam. It does not extract a PDF/EPUB/notebook, discover the current tablet document, change Reader prompts or perform research. Source-format labels record the extracting adapter's assertion; they do not establish supported extraction or native authority. Its central capability is `normalized-source-index` in ReMarkableBuddiesDocs; broader Reader retrieval remains REM-4 work.
 
 Supply a non-nil document UUID, explicit PDF/EPUB/notebook format, lowercase SHA256 of original source bytes, an extractor revision and ordered source units. Each unit needs a positive page number or a nonblank section; repeated `(page, section)` locations refuse. The source digest is an adapter assertion, not proof of original-byte acquisition or extraction fidelity. The index separately hashes the complete normalized units, including location metadata, to prevent reuse after normalized material changes.
 
