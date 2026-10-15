@@ -8,7 +8,7 @@ reader-buddy --memory-operation query --memory-input -
 
 Set `REMARKABLE_BUDDIES_CONFIG` to the existing supported absolute configuration
 path. Send one UTF8 JSON document to stdin and close stdin (EOF). No model key,
-running Buddy service, provider call, temporary query file or tablet input is
+running Buddy service, external model/provider call, temporary query file or tablet input is
 required. Ordinary absolute regular-file input continues to work. `/dev/stdin`
 is not a substitute: existing file safety checks deliberately reject it.
 
