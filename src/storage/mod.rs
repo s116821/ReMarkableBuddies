@@ -100,6 +100,14 @@ pub struct Store {
     wake: Mutex<Option<SyncSender<()>>>,
 }
 
+impl Drop for Store {
+    fn drop(&mut self) {
+        // A concurrent subprocess fork can temporarily inherit this descriptor.
+        // Closing our copy alone would retain flock until that child execs.
+        let _ = self._lease.unlock();
+    }
+}
+
 impl Store {
     pub fn open(paths: StorePaths) -> Result<Self> {
         paths.validate()?;
