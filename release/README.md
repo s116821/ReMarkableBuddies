@@ -1,7 +1,7 @@
 # Ordered application releases
 
-Canonical requirements and the current change live in
-[ReMarkableBuddiesDocs](https://github.com/s116821/ReMarkableBuddiesDocs/tree/main/openspec/changes/ordered-ci-release).
+Canonical requirements live in the central
+[release specification](https://github.com/s116821/ReMarkableBuddiesDocs/blob/main/openspec/specs/release-versioning/spec.md).
 REM-56 supersedes the old tag-before-build/backfill pipeline.
 
 The application-only reusable pipeline runs lint/unit/tool checks, freezes a
