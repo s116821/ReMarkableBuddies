@@ -159,8 +159,13 @@ impl LLMEngine for OpenAI {
 
 fn parse_response(body_text: &str) -> Result<String> {
     let json: JsonValue = serde_json::from_str(body_text).context("Decode model response JSON")?;
-    info!("API usage: model={} usage={}", json["model"], json["usage"]);
-    debug!("Response: {}", json);
+    info!(
+        "API usage: prompt_tokens={:?} completion_tokens={:?} total_tokens={:?}",
+        json["usage"]["prompt_tokens"].as_u64(),
+        json["usage"]["completion_tokens"].as_u64(),
+        json["usage"]["total_tokens"].as_u64()
+    );
+    debug!("Provider response decoded");
 
     // Extract the response text
     let response_text = json["choices"][0]["message"]["content"]
