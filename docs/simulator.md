@@ -46,6 +46,7 @@ based; operation call numbers are one based and span the whole scenario.
 | Field | Meaning |
 |---|---|
 | `llm` | Defaults to scripted/offline. Explicit live configuration is documented in local development setup. |
+| `personalization` | Optional accepted configuration object (`schema_version: 1`, `enabled`, `text`), default disabled/empty. Validated before execution. Applied only to verified Reader answer generation, separately from recognition; no running reload or Writer support is modeled. |
 | `name`, `mode` | Nonempty name; currently only `reader` executes. |
 | `pages` | Ordered pages. `{}` is blank. `image` loads a 768x1024 PNG; optional `text` and `strokes` add deterministic text or existing JSON pen paths. |
 | `active_page` | Starting page, default zero. |

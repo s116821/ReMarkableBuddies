@@ -62,6 +62,15 @@ fn server_with_delay(
     stall: bool,
     delay: Duration,
 ) -> (String, thread::JoinHandle<Vec<Value>>) {
+    server_with_metadata(replies, stall, delay, json!({"model":"local-fixture"}))
+}
+
+fn server_with_metadata(
+    replies: Vec<String>,
+    stall: bool,
+    delay: Duration,
+    response_fields: Value,
+) -> (String, thread::JoinHandle<Vec<Value>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -113,13 +122,75 @@ fn server_with_delay(
                 continue;
             }
             thread::sleep(delay);
-            let body = json!({"model":"local-fixture","choices":[{"message":{"content":reply}}]})
-                .to_string();
+            let mut response = response_fields.clone();
+            response["choices"] = json!([{"message":{"content":reply}}]);
+            let body = response.to_string();
             write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
         }
         bodies
     });
     (endpoint, handle)
+}
+
+#[test]
+fn default_cli_logs_omit_reader_content_and_arbitrary_provider_metadata() {
+    let path = directory();
+    let question = "G unc.? PRIVATE_QUESTION_CANARY";
+    let answer = "PRIVATE_ANSWER_CANARY: Gravity measurement uncertainty.";
+    let (endpoint, handle) = server_with_metadata(
+        vec![
+            format!("QUESTION: {question}\nQUESTION_BOX: 130,35,200,50\nSELECTION_CENTER: 385,230\n---\nANSWER: {answer}"),
+            format!("TRANSCRIPTION: {question}"),
+        ],
+        false,
+        Duration::ZERO,
+        json!({"model":"PRIVATE_PROVIDER_MODEL_CANARY", "usage": {
+            "prompt_tokens":"PRIVATE_USAGE_CANARY", "completion_tokens":{"private":"PRIVATE_USAGE_OBJECT_CANARY"}, "total_tokens":23
+        }}),
+    );
+    let mut value = fixture();
+    value["expect"]["text"] = json!({"0":""});
+    value["expect"]["text_contains"] = json!({"1":[question, answer]});
+    let scenario = path.join("scenario.json");
+    std::fs::write(&scenario, serde_json::to_vec(&value).unwrap()).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_reader-buddy"))
+        .current_dir(&path)
+        .args(["--simulate", scenario.to_str().unwrap()])
+        .env("OPENAI_API_KEY", "local-test-secret-not-real")
+        .env("OPENAI_BASE_URL", &endpoint)
+        .env_remove("RUST_LOG")
+        .output()
+        .unwrap();
+    let requests = handle.join().unwrap();
+    let report: Value =
+        serde_json::from_slice(&std::fs::read(path.join("result/report.json")).unwrap()).unwrap();
+    let diagnostics = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::remove_dir_all(&path).unwrap();
+    assert!(output.status.success(), "{diagnostics}");
+    assert_eq!(requests.len(), 2);
+    assert_eq!(report["assertion_failures"], json!([]));
+    let rendered = report["pages"][1]["text"].as_str().unwrap();
+    assert!(rendered.contains(question) && rendered.contains(answer));
+    for marker in [
+        "PRIVATE_QUESTION_CANARY",
+        "PRIVATE_ANSWER_CANARY",
+        "PRIVATE_PROVIDER_MODEL_CANARY",
+        "PRIVATE_USAGE_CANARY",
+        "PRIVATE_USAGE_OBJECT_CANARY",
+    ] {
+        assert!(
+            !diagnostics.contains(marker),
+            "Routine default diagnostics leaked synthetic marker {marker}: {diagnostics}"
+        );
+    }
+    assert!(
+        diagnostics.contains("total_tokens=Some(23)"),
+        "Numeric usage diagnostics disappeared"
+    );
 }
 
 #[test]
