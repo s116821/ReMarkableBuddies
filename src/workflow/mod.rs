@@ -486,7 +486,7 @@ impl Workflow {
     pub fn render_text(&mut self, text: &str) -> Result<()> {
         self.invalidate_history();
         // Typing may partially change the page before a backend failure.
-        info!("Rendering text: {}", text);
+        info!("Rendering text ({} bytes)", text.len());
         self.device.render_text(text)?;
         Ok(())
     }
