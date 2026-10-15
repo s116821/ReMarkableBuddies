@@ -80,8 +80,9 @@ impl Envelope {
             "unsupported envelope version"
         );
         ensure!(
-            self.domain_schema_version == 1,
-            "unsupported domain schema version"
+            self.domain_schema_version == 1
+                || (self.domain_schema_version == 2 && self.namespace == Namespace::Conversation),
+            "unsupported domain schema version for namespace"
         );
         ensure!(
             ![
