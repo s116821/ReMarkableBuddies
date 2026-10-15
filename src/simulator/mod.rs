@@ -1,5 +1,7 @@
 //! Deterministic Reader scenarios through the production orchestrator.
 mod device;
+#[cfg(test)]
+mod provider_cancellation_tests;
 mod raster;
 #[cfg(test)]
 mod reader_persistence_tests;
