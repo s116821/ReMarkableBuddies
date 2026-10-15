@@ -69,7 +69,8 @@ def main():
     lock = threading.Lock()
     result = dict(tls_accepted=0, tls_rejected=0, requests=0, valid_requests=0,
                   origin_proxy_auth=False, connects=0, valid_proxy_auth=0,
-                  plaintext_origin_auth=False, failures=0)
+                  plaintext_origin_auth=False, failures=0, response_headers=0,
+                  body_bytes_attempted=0, body_bytes_sent=0, client_closed=False, send_interrupted=False)
     workers = []
 
     def record(key, count=1):
@@ -131,9 +132,60 @@ def main():
                 raise ValueError('unexpected synthetic request')
             record('valid_requests')
             body = b'{"choices":[{"message":{"content":"owned TLS transport answer"}}]}'
+            config = root / 'response.json'
+            mode = json.loads(config.read_text())['mode'] if config.exists() else 'normal'
+            maximum = 10 * 1024 * 1024
+            if mode == 'declared-overflow':
+                length = maximum + 1
+            elif mode == 'exact-bound':
+                length = maximum
+            elif mode == 'chunked-overflow':
+                length = maximum + 1
+            elif mode == 'normal':
+                length = len(body)
+            else:
+                raise ValueError('unknown owned response mode')
+            framing = (b'Transfer-Encoding: chunked' if mode == 'chunked-overflow'
+                       else b'Content-Length: ' + str(length).encode())
             stream.sendall(b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n'
-                           + b'Content-Length: ' + str(len(body)).encode()
-                           + b'\r\nConnection: close\r\n\r\n' + body)
+                           + framing + b'\r\nConnection: close\r\n\r\n')
+            record('response_headers')
+            peer_closed = False
+            if mode != 'declared-overflow':
+                # Fixed-size chunks avoid generating an oversized fixture allocation.
+                sent = 0
+                while sent < length:
+                    chunk = body if sent == 0 else b' ' * min(16384, length - sent)
+                    record('body_bytes_attempted', len(chunk))
+                    framed = (format(len(chunk), 'x').encode() + b'\r\n' + chunk + b'\r\n'
+                              if mode == 'chunked-overflow' else chunk)
+                    try:
+                        stream.sendall(framed)
+                    except (BrokenPipeError, ConnectionResetError, ssl.SSLEOFError):
+                        if mode != 'chunked-overflow':
+                            raise
+                        peer_closed = True
+                        flag('client_closed')
+                        flag('send_interrupted')
+                        break
+                    record('body_bytes_sent', len(chunk))
+                    sent += len(chunk)
+                if mode == 'chunked-overflow' and not peer_closed:
+                    # The terminating chunk is unnecessary to trigger size refusal.
+                    # Do not substitute an incomplete-body network error for the cap.
+                    try:
+                        stream.sendall(b'0\r\n\r\n')
+                    except (BrokenPipeError, ConnectionResetError, ssl.SSLEOFError):
+                        peer_closed = True
+                        flag('client_closed')
+                        flag('send_interrupted')
+            if mode in ('declared-overflow', 'chunked-overflow') and not peer_closed:
+                try:
+                    if stream.recv(1):
+                        raise ValueError('unexpected data after synthetic request')
+                except (ssl.SSLEOFError, ConnectionResetError):
+                    pass
+                flag('client_closed')
 
     listeners = []
     for _ in range(3):

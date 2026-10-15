@@ -126,10 +126,13 @@ fn transport_client_child() {
         .as_ref()
         .is_ok_and(|s| s == "owned TLS transport answer");
     let rejected = result.is_err();
+    let bound = result
+        .as_ref()
+        .is_err_and(|e| e.to_string() == "Model response exceeds bound");
     fs::write(
         path.with_file_name("witness.json"),
         serde_json::to_vec(
-            &json!({"nonce":config["nonce"], "success":success, "rejected":rejected}),
+            &json!({"nonce":config["nonce"], "success":success, "rejected":rejected, "bound":bound}),
         )
         .unwrap(),
     )
@@ -138,8 +141,25 @@ fn transport_client_child() {
 }
 
 fn qualify(name: &str, trusted: bool, wrong_name: bool, proxy: bool, bypass: bool) {
+    run_case(name, trusted, wrong_name, proxy, bypass, "normal");
+}
+fn run_case(
+    name: &str,
+    trusted: bool,
+    wrong_name: bool,
+    proxy: bool,
+    bypass: bool,
+    response_mode: &str,
+) {
     let mut fixture = Fixture::start();
     let ready = read_json(&fixture.root.join("ready.json"));
+    if response_mode != "normal" {
+        fs::write(
+            fixture.root.join("response.json"),
+            serde_json::to_vec(&json!({"mode":response_mode})).unwrap(),
+        )
+        .unwrap();
+    }
     let port = ready[if wrong_name {
         "wrong_port"
     } else {
@@ -192,7 +212,10 @@ fn qualify(name: &str, trusted: bool, wrong_name: bool, proxy: bool, bypass: boo
         !owned_root.exists(),
         "owned temporary keys/resources removed"
     );
-    let success = trusted && !wrong_name;
+    let tls_accepted = trusted && !wrong_name;
+    let bound = matches!(response_mode, "declared-overflow" | "chunked-overflow");
+    let success = tls_accepted && !bound;
+    assert_eq!(witness["bound"], bound, "{name}: exact static bound error");
     assert_eq!(witness["success"], success, "{name}: exact answer");
     assert_eq!(
         witness["rejected"], !success,
@@ -201,22 +224,22 @@ fn qualify(name: &str, trusted: bool, wrong_name: bool, proxy: bool, bypass: boo
     assert_eq!(result["failures"], 0, "{name}: fixture failure");
     assert_eq!(
         result["requests"],
-        u64::from(success),
+        u64::from(tls_accepted),
         "{name}: application receipt"
     );
     assert_eq!(
         result["valid_requests"],
-        u64::from(success),
+        u64::from(tls_accepted),
         "{name}: synthetic request/auth"
     );
     assert_eq!(
         result["tls_accepted"],
-        u64::from(success),
+        u64::from(tls_accepted),
         "{name}: TLS acceptance"
     );
     assert_eq!(
         result["tls_rejected"],
-        u64::from(!success),
+        u64::from(!tls_accepted),
         "{name}: TLS refusal"
     );
     let connects = u64::from(proxy && !bypass);
@@ -230,6 +253,30 @@ fn qualify(name: &str, trusted: bool, wrong_name: bool, proxy: bool, bypass: boo
         result["plaintext_origin_auth"], false,
         "origin authorization must stay inside TLS"
     );
+    if response_mode != "normal" {
+        const MAXIMUM: u64 = 10 * 1024 * 1024;
+        assert_eq!(result["response_headers"], 1, "response headers witnessed");
+        if bound {
+            assert_eq!(result["client_closed"], true, "client closure witnessed");
+        }
+        let expected_bytes = match response_mode {
+            "exact-bound" => MAXIMUM,
+            "declared-overflow" => 0,
+            "chunked-overflow" => MAXIMUM + 1,
+            _ => unreachable!(),
+        };
+        assert_eq!(result["body_bytes_attempted"], expected_bytes);
+        if response_mode == "chunked-overflow" {
+            // An already-refusing client can close during the final TLS write.
+            // Static client error + attempted bytes prove the boundary; a send
+            // counter is not proof that every byte was received by the client.
+            let sent = result["body_bytes_sent"].as_u64().unwrap();
+            assert!((MAXIMUM - 16384..=MAXIMUM + 1).contains(&sent));
+        } else {
+            assert_eq!(result["body_bytes_sent"], expected_bytes);
+            assert_eq!(result["send_interrupted"], false);
+        }
+    }
     eprintln!("{name}: nonce witnessed; {result}");
 }
 #[test]
@@ -255,4 +302,31 @@ fn no_proxy_bypasses_configured_https_proxy() {
 #[test]
 fn https_connect_preserves_untrusted_root_rejection() {
     qualify("connect-untrusted", false, false, true, false);
+}
+
+#[test]
+fn response_exact_bound_valid_answer_succeeds() {
+    run_case("exact-bound", true, false, false, false, "exact-bound");
+}
+#[test]
+fn response_declared_overflow_refuses_without_a_body() {
+    run_case(
+        "declared-overflow",
+        true,
+        false,
+        false,
+        false,
+        "declared-overflow",
+    );
+}
+#[test]
+fn response_chunked_overflow_refuses_with_static_bound_error() {
+    run_case(
+        "chunked-overflow",
+        true,
+        false,
+        false,
+        false,
+        "chunked-overflow",
+    );
 }
