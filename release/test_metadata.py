@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 import unittest
 
-from policy import git
+from artifacts import git
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -21,7 +21,6 @@ class MetadataTests(unittest.TestCase):
         shutil.copyfile(ROOT / "build.rs", cls.repo / "build.rs")
         (cls.repo / "Cargo.toml").write_text('''[package]
 name = "release-metadata-fixture"
-version = "0.0.0"
 edition = "2021"
 [build-dependencies]
 vergen-gitcl = { version = "=10.0.3", features = ["emit_and_set"] }
@@ -36,7 +35,7 @@ vergen-gitcl = { version = "=10.0.3", features = ["emit_and_set"] }
         git(cls.repo, "commit", "-m", "feat(REM-30): metadata fixture")
         cls.sha = git(cls.repo, "rev-parse", "HEAD")
         cls.env = {key: value for key, value in os.environ.items()
-                   if not key.startswith(("READER_BUDDY_RELEASE_", "VERGEN_", "CARGO_TARGET_DIR"))}
+                   if not key.startswith(("READER_BUDDY_RELEASE_", "READER_BUDDY_CANDIDATE_", "VERGEN_", "CARGO_TARGET_DIR"))}
         # This dependency cache is separate from the application's target dir.
         cls.env["CARGO_TARGET_DIR"] = str(Path(cls.temp.name) / "target")
 
@@ -53,6 +52,15 @@ vergen-gitcl = { version = "=10.0.3", features = ["emit_and_set"] }
         dev = self.run_metadata()
         self.assertEqual(dev.returncode, 0, dev.stderr)
         self.assertTrue(dev.stdout.strip().startswith("dev."), dev.stdout)
+        candidate = dict(READER_BUDDY_CANDIDATE_TAG="v9.8.7", READER_BUDDY_CANDIDATE_SHA=self.sha)
+        exact_candidate = self.run_metadata(**candidate)
+        self.assertEqual(exact_candidate.returncode, 0, exact_candidate.stderr)
+        self.assertEqual(exact_candidate.stdout.strip(), "9.8.7")
+        self.assertEqual(git(self.repo, "tag"), "", "Candidate build must not create a tag")
+        for invalid in [dict(candidate, READER_BUDDY_CANDIDATE_SHA="0" * 40),
+                        dict(candidate, READER_BUDDY_RELEASE_TAG="v9.8.7", READER_BUDDY_RELEASE_SHA=self.sha),
+                        dict(candidate, VERGEN_GIT_SHA=self.sha)]:
+            self.assertNotEqual(self.run_metadata(**invalid).returncode, 0)
         git(self.repo, "tag", "v9.8.7")
         official = dict(READER_BUDDY_RELEASE_TAG="v9.8.7", READER_BUDDY_RELEASE_SHA=self.sha)
         exact = self.run_metadata(**official)
