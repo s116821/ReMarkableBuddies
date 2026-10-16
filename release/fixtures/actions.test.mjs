@@ -7,7 +7,9 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync } from 'nod
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parse } from 'yaml';
 const root = fileURLToPath(new URL('../..', import.meta.url));
+const workflow = name => parse(readFileSync(path.join(root, '.github/workflows', name + '.yml'), 'utf8'));
 const pins = { PATHS_ACTION: 'ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d',
   GRAPHQL_ACTION: 'ddde8ebb2493e79f390e6449c725c21663a67505',
   REQUEST_ACTION: 'b91aabaa861c777dcdb14e2387e30eddf04619ae' };
