@@ -1,72 +1,92 @@
-# Release tooling and verification
+# Ordered application releases
 
-Requirements are public in `openspec/specs/release-versioning` and the archived
-`2026-09-22-tag-derived-releases` change proposal. The implementation uses git-cliff **2.14.2**
-for semantic version computation, release-it **19.0.6** for actual tag creation
-and vergen-gitcl **10.0.3** for Rust metadata.
-No private board, account connector, API key or development tablet is needed.
+Canonical requirements live in the central
+[release specification](https://github.com/s116821/ReMarkableBuddiesDocs/blob/main/openspec/specs/release-versioning/spec.md).
+REM-56 supersedes the old tag-before-build/backfill pipeline.
 
-Documentation exclusions cover Markdown, OpenSpec, licenses and the evidence-image
-directory. Executable simulator JSON and validation scripts under `docs/` remain
-application-relevant: their changes must still run tests and receive release handling.
+The application-only reusable pipeline runs lint/unit/tool checks, freezes a
+read-only Python Semantic Release candidate, builds packages, uploads immutable
+CI artifacts, and downloads/exercises those exact artifacts in integration.
+Only one final release job can tag or publish. PR/fork runs cannot enter it.
+Docs-only changes finish metadata checks without application compilation.
 
-Install Git, Node.js 22+, Python 3.11+, Rust 1.96+ and the pinned git-cliff binary from its public
-GitHub release (or `cargo install git-cliff --version 2.14.2 --locked`). Then run:
+A canonical main push must contain exactly one first-parent main commit.
+Squash and ordinary merge events satisfy this structural check, but the actual
+admitted main commit must also have a supported scoped semantic subject. A
+default nonconventional merge message refuses before build, even if older failed
+commits would otherwise supply an upstream candidate bump. Unknown/zero initial history,
+non-forward updates and ambiguous batches (including an edit/revert net-zero
+batch) refuse visibly before build/tag rather than misclassifying history.
+Final associated-PR proof binds the exact source to a merged main PR; a direct
+push cannot publish. Repository protection remains owner-managed.
 
-```sh
-npm ci --prefix release --ignore-scripts
-cargo fetch --locked
-python -m unittest discover -s release -v
-cargo test --locked --all-features
-cargo clippy --locked --all-targets --all-features -- -D warnings
-```
+## Maintained tools
 
-Set `GIT_CLIFF` to an absolute binary path when it is not on PATH. The regression
-repositories are temporary local repositories/remotes; all fixture tags stay there.
-Tests execute the real semantic tool and actual build.rs, including cached source
-transitions, dirty/shallow/missing Git rejection, mixed/reverted application changes,
-queued requests and retry identity. Workflow tests inspect the actual docs gates.
+- dorny/paths-filter 4.0.3 and semantic-pull-request 6.1.1 handle conservative paths
+  and scoped PR titles. Unknown paths and executable fixtures remain relevant.
+- Python Semantic Release 10.7.0 uses the hash-locked Python closure and
+  conventional-monorepo path exclusions. It computes candidates read-only;
+  tag-only invocation happens after artifact integration, with no source
+  version, changelog/version commit, or release-job rebuild. Breaking 0.x advances
+  major; the separate REM-35 hold refuses premature 1.0 rather than downgrading it.
+- Exact GraphQL release lookup and octokit request Actions handle draft
+  creation/read/finalization by ID, avoiding draft-list pagination.
+- Unmodified Svenstaro upload-release-action2.11.5 source29e53e917877a24fad85510ded594ab3c9ca12de
+  is compiled from a pinned minimal build/runtime recipe. TypeScript/ncc and
+  required supported dependencies are selected explicitly; the upstream empty
+  Jest placeholder and its unused ts-jest/lint graph are not part of this recipe.
+  The complete selected closure is audited; this does not turn the original
+  upstream audit or the SDK's other failing candidates green or prove security.
+  Source, original/selected lock, MIT license and emitted bytes are recorded.
+  Actual emitted-Action controls use loopback fake credentials only.
 
-`python release/coordinator.py plan` is read-only with respect to tags/releases;
-it temporarily checks out the selected source in a disposable Git worktree. It
-requires a complete `origin/main` history and an existing semantic baseline tag.
-`publish` is reserved for the serialized protected-main workflow. It creates an
-annotated immutable tag, builds a clean clone at that tag and publishes both archives
-only after runtime and checksum verification. Do not run it as an experimental test
-against the production remote.
+The earlier GitVersion6.8.2 equal-date failure and the SDK source-built softprops
+two-page draft-discovery limitation remain evidence, not accepted substitutions.
+Historical code/failures remain on the preserved REM-46 branches.
 
-The production workflow uses GITHUB_TOKEN with contents:write and explicit ordered
-steps. No PAT or tag-triggered second workflow is required. Its job-level lock
-includes both architecture builds and final publication. Pending GitHub jobs may replace one another; each admitted job refreshes main,
-recovers managed tags and processes every relevant unreleased squash commit in
-order, creating one semantic tag per application merge. Main CI never compiles;
-all main application builds occur after their tag is pushed. A failed run is visible and retryable from Actions
-or `gh workflow run release.yml --ref main`. A documentation push remains build-free
-even when a previous application release failed.
+## Build and retry identity
 
-Cross builds pass expected tag/SHA through Cross.toml. The official build script
-checks those expectations against real Git metadata; they are not a version override.
-The coordinator runs each target's binary with `cross run ... -- --version` before
-packaging. This is emulator verification, not proof of tablet hardware behavior.
-Native feature verification follows the separate authorized-tablet checklist.
+Controlled candidate metadata embeds the frozen future tag/version and exact
+clean source before a remote tag exists. These are unpublished CI candidates,
+not publication/installation trust. Manager retains its existing four-field
+release-profile build-info schema; official:true identifies that controlled
+recipe, and alone cannot prove a published release. Ordinary developer builds
+remain explicitly unofficial. Final remote annotated-tag/source proof and the
+complete verified release supply publication eligibility.
 
-To exercise the actual two-target builder before a release, commit the source and run:
+Build artifact IDs flow directly to integration and publication. Buddy integration
+executes extracted binaries in pinned cross-image emulation without a Cargo
+build/source mount; native tablet compatibility is separate. Manager integration
+stages the downloaded browser/native ZIPs and uses existing host checks without
+an Angular/Electron application rebuild. CI artifacts and production releases
+remain different evidence classes.
 
-```sh
-python release/verify_tagged_build.py --output /tmp/reader-fixture-packages --target-dir target
-```
+Use Actions **Re-run failed jobs** for an interrupted final release: successful
+build artifact IDs and tested bytes are retained for 14 days. The same tag/draft
+is observed, retained bytes are compared with the independently expected local
+packages, only missing names are uploaded, and every remote byte is checked
+before finalization. Unexpected/conflicting assets refuse; published complete
+bytes are verified and skipped. No failed predecessor is backfilled by a later
+success. A full rerun/expired artifact may rebuild only through all gates and
+must refuse conflicting retained bytes, never pretend they are the old build.
 
-This creates a temporary full clone, removes its remote, gives it a fixture tag,
-then runs the production build/package checks for both targets. Tags in the source
-repository remain untouched. The resulting packages are test artifacts, not releases.
-Use a suitable output path on Windows. On the tested Windows Docker Desktop setup,
-bind-mounted files appear owned by UID/GID 0; setting `CROSS_CONTAINER_UID=0` and
-`CROSS_CONTAINER_GID=0` for this trusted fixture matches that ownership. Other
-container setups should use their actual mount owner. Git's ownership checks remain
-enabled; no global or wildcard safe-directory exception is added. Clean clones use
-`core.autocrlf=false` so Linux sees the committed bytes. See cross's public
-[environment settings](https://github.com/cross-rs/cross/blob/main/docs/environment_variables.md).
+The uploader receives an exact ID, overwrite:false, check_duplicates:true,
+draft:true, promote:false and only missing files. It refuses same-name duplicates
+without DELETE. Its upstream ID404 behavior can create a replacement draft;
+the independent same-ID proof refuses finalization. It may also restore draft
+status after an external actor changes it. Native Actions queue:max serializes
+this workflow's publishers, not outside writers; there is no atomic platform
+immutability/external-writer guarantee or dispatch-chronology promise.
 
-Cargo's version is a fixed unpublished package placeholder. Do not bump it for a
-release. Future registry packaging would need its own tag-derived manifest step;
-it is not a second application version source and is outside this binary workflow.
+## Local focused controls
+
+Use Python 3.12, supported Node 24.21 and Git. Install the maintained tools with
+`python -m pip install --require-hashes -r release/python-tools.lock`.
+Run `python -m unittest discover -s release -v`. Rust metadata controls also need
+the declared Rust toolchain/dependency cache. Action controls require exact clones
+identified by PATHS_ACTION, GRAPHQL_ACTION, REQUEST_ACTION and the source-built
+UPLOADER_ACTION. See the workflow for the fixed pins and commands.
+
+No local fixture creates a production tag/release, changes repository settings,
+or operates a tablet. REM-35/full ecosystem/SDK production selection and current
+unmerged consumer parent reconciliation remain separate gates.
