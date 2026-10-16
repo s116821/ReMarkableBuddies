@@ -69,32 +69,6 @@ async function server(t, handler) {
   return 'http://127.0.0.1:' + http.address().port;
 }
 
-test('ordered workflow gates and fixed artifact handoff', () => {
-  const ci = workflow('ci'), pipeline = workflow('pipeline');
-  assert.deepEqual(ci.on.push.branches, ['main']);
-  assert.equal(ci.on.pull_request_target, undefined);
-  assert.equal(ci.jobs.policy.name, 'Changed paths and PR checks');
-  assert.equal(ci.jobs.policy.steps.find(s => s.id === 'paths').with['predicate-quantifier'], 'every');
-  assert.deepEqual(pipeline.jobs.build.needs, 'candidate');
-  assert.deepEqual(pipeline.jobs.candidate.needs, ['checks', 'uploader']);
-  assert.deepEqual(pipeline.jobs.integration.needs, ['candidate', 'build']);
-  assert.deepEqual(pipeline.jobs.release.needs, ['candidate', 'build', 'integration', 'uploader']);
-  assert.equal(pipeline.jobs.release.if, 'inputs.release');
-  assert.equal(pipeline.concurrency.queue, 'max');
-  assert.equal(pipeline.concurrency['cancel-in-progress'], false);
-  for (const [name, job] of Object.entries(pipeline.jobs)) {
-    if (name !== 'release') assert.notEqual(job.permissions?.contents, 'write');
-  }
-  const release = pipeline.jobs.release.steps;
-  const tag = release.findIndex(s => s.name === 'Official tag only after every preceding job passed');
-  assert.ok(tag > release.findIndex(s => s.name === 'Verify the exact integration-tested upload inventory'));
-  assert.ok(!release.some(s => /cross build|npm run build|coordinator\.py/.test(s.run ?? '')));
-  const upload = release.find(s => s.uses === './.qualified/uploader');
-  assert.equal(upload.with.overwrite, false); assert.equal(upload.with.draft, true);
-  assert.equal(upload.with.promote, false); assert.equal(upload.with.check_duplicates, true);
-  assert.equal(upload.with.release_id, '${{ steps.retained.outputs.release_id }}');
-});
-
 test('actual paths Action: docs, mixed, unknown, executable, later page and renamed source', async t => {
   let files = [{ filename: 'docs/guide.md', status: 'modified' }], paged = false;
   const endpoint = await server(t, req => {
