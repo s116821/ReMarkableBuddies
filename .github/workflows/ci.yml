@@ -15,27 +15,21 @@ permissions:
   contents: read
   pull-requests: read
 jobs:
-  checks:
-    name: Checks
+  title:
+    name: PR Title
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    outputs:
+      application: ${{ steps.paths.outputs.application }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
       - name: Refuse an incomplete PR file inventory
         if: github.event_name == 'pull_request' && (github.event.pull_request.changed_files <= 0 || github.event.pull_request.changed_files >= 3000)
         run: exit 1
-      - name: Require unambiguous main push range
-        if: github.event_name == 'push'
-        env:
-          BEFORE: ${{ github.event.before }}
-          SOURCE_SHA: ${{ github.sha }}
-        run: python release/admission.py range --before "$BEFORE" --sha "$SOURCE_SHA"
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d
         id: paths
         with:
@@ -66,36 +60,65 @@ jobs:
         with:
           requireScope: true
         if: github.event_name == 'pull_request' && steps.paths.outputs.application != 'true'
+  checks:
+    name: Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Require unambiguous main push range
+        if: github.event_name == 'push'
+        env:
+          BEFORE: ${{ github.event.before }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: python release/admission.py range --before "$BEFORE" --sha "$SOURCE_SHA"
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d
+        id: paths
+        with:
+          token: ${{ github.token }}
+          filters: .github/application-paths.yml
+          predicate-quantifier: every
+          base: ${{ github.event_name == 'push' && github.event.before || '' }}
+          ref: ${{ github.sha }}
+        if: github.event_name == 'push'
       - uses: actions/setup-node@v4
         with:
           node-version: 24.21.0
-        if: steps.paths.outputs.application == 'true'
+        if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-        if: steps.paths.outputs.application == 'true'
+        if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
       - uses: ./.github/actions/release-tools
-        if: steps.paths.outputs.application == 'true'
+        if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
       - run: cargo fmt --all -- --check
-        if: steps.paths.outputs.application == 'true'
+        if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
       - run: cargo clippy --locked --all-targets --all-features -- -D warnings
-        if: steps.paths.outputs.application == 'true'
+        if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
       - run: cargo test --locked --all-features
-        if: steps.paths.outputs.application == 'true'
+        if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
       - run: python -m unittest discover -s release -v
-        if: steps.paths.outputs.application == 'true'
+        if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
       - run: npm ci --prefix release/fixtures --ignore-scripts --no-audit --no-fund
-        if: steps.paths.outputs.application == 'true'
+        if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
       - run: npm audit --prefix release/fixtures
-        if: steps.paths.outputs.application == 'true'
+        if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
       - name: Verify CI stage and artifact gates
         run: node --test release/fixtures/workflow.test.mjs
-        if: steps.paths.outputs.application == 'true'
+        if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
     defaults:
       run:
         shell: bash
     outputs:
-      application: ${{ steps.paths.outputs.application }}
+      application: ${{ github.event_name == 'pull_request' && needs.title.outputs.application || steps.paths.outputs.application }}
+    needs: title
+    if: "!cancelled() && (github.event_name == 'push' || needs.title.result == 'success')"
   application:
     needs: checks
     if: needs.checks.outputs.application == 'true'

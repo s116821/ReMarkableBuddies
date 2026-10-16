@@ -17,9 +17,9 @@ test('PR and main job budgets include every matrix expansion', () => {
     assert.deepEqual(Object.keys(job.strategy.matrix), ['os'], 'Account for every added matrix dimension');
     return job.strategy.matrix.os.length;
   };
-  const pr = count(ci.jobs.checks) + count(pipeline.jobs.build) + count(pipeline.jobs.integration);
-  assert.equal(pr, manager ? 4 : 3);
-  assert.equal(pr + count(pipeline.jobs.release), manager ? 5 : 4);
+  const common = count(ci.jobs.checks) + count(pipeline.jobs.build) + count(pipeline.jobs.integration);
+  assert.equal(common + count(ci.jobs.title), manager ? 5 : 4);
+  assert.equal(common + count(pipeline.jobs.release), manager ? 5 : 4);
   for (const file of readdirSync(path.join(root, '.github/workflows')).filter(f => /\.ya?ml$/.test(f))) {
     if (['ci.yml','pipeline.yml','pr-title.yml'].includes(file)) continue;
     const triggers = parse(readFileSync(path.join(root, '.github/workflows', file), 'utf8')).on;
@@ -31,10 +31,13 @@ test('PR and main job budgets include every matrix expansion', () => {
 
 test('four stages preserve platform coverage and block dependent jobs on failure', () => {
   const ci = workflow('ci'), pipeline = workflow('pipeline');
-  assert.deepEqual(Object.keys(ci.jobs), ['checks','application']);
+  assert.deepEqual(Object.keys(ci.jobs), ['title','checks','application']);
   assert.deepEqual(Object.keys(pipeline.jobs), ['build','integration','release']);
   assert.deepEqual(ci.on.push.branches, ['main']);
   assert.equal(ci.on.pull_request_target, undefined);
+  assert.equal(ci.jobs.title.if, "github.event_name == 'pull_request'");
+  assert.equal(ci.jobs.checks.needs, 'title');
+  assert.equal(ci.jobs.checks.if, "!cancelled() && (github.event_name == 'push' || needs.title.result == 'success')");
   assert.deepEqual(ci.jobs.application.needs, 'checks');
   assert.equal(ci.jobs.application.if, "needs.checks.outputs.application == 'true'");
   assert.equal(pipeline.jobs.build.needs, undefined);
@@ -43,22 +46,16 @@ test('four stages preserve platform coverage and block dependent jobs on failure
   assert.equal(pipeline.jobs.release.if, 'inputs.release');
   assert.equal(pipeline.concurrency.queue, 'max');
   assert.equal(pipeline.concurrency['cancel-in-progress'], false);
-  for (const job of [ci.jobs.checks, ...Object.values(pipeline.jobs)]) {
+  assert.equal(ci.jobs.checks['continue-on-error'], undefined);
+  for (const job of [ci.jobs.title, ...Object.values(pipeline.jobs)]) {
     assert.equal(job['continue-on-error'], undefined);
     assert.ok(!/always\(|cancelled\(|failure\(/.test(job.if ?? ''));
   }
   assert.equal(ci.jobs.checks.strategy, undefined);
-  assert.equal(ci.jobs.checks['runs-on'], manager ? 'windows-latest' : 'ubuntu-latest');
+  assert.equal(ci.jobs.checks['runs-on'], 'ubuntu-latest');
   if (manager) {
     assert.deepEqual(pipeline.jobs.integration.strategy.matrix.os, ['ubuntu-latest','windows-latest']);
     assert.equal(pipeline.jobs.build['runs-on'], 'ubuntu-latest');
-    const steps = pipeline.jobs.build.steps;
-    const freeze = steps.findIndex(s => s.id === 'freeze');
-    const sourceChecks = ci.jobs.checks.steps.filter(s => /^npm (run lint|test|run test:release)$/.test(s.run ?? ''));
-    for (const check of sourceChecks)
-      assert.ok(steps.findIndex(s => s.run === check.run) >= 0 && steps.findIndex(s => s.run === check.run) < freeze);
-    const wired = steps.findIndex(s => /unittest discover -s tests\/wired/.test(s.run ?? ''));
-    assert.ok(wired >= 0 && wired < freeze);
   } else {
     assert.equal(pipeline.jobs.integration.strategy, undefined);
   }
@@ -66,20 +63,45 @@ test('four stages preserve platform coverage and block dependent jobs on failure
   assert.equal(pipeline.jobs.integration.defaults.run.shell, 'bash');
 });
 
+test('common source and dependency checks have exactly one owning job', () => {
+  const checks = workflow('ci').jobs.checks;
+  const pipeline = workflow('pipeline');
+  const common = /cargo (?:fmt|clippy|test)|npm (?:run lint|test|run test:release|audit)|unittest discover|node --test release\/fixtures\/workflow/;
+  const sourceChecks = checks.steps.filter(step => common.test(step.run ?? ''));
+  assert.ok(sourceChecks.length >= 4);
+  assert.equal(checks.steps.filter(step => step.run === 'npm audit --prefix release/fixtures').length, 1);
+  const tools = checks.steps.find(step => step.uses === './.github/actions/release-tools');
+  assert.notEqual(tools.with?.['audit-dependencies'], 'false');
+  for (const [jobName, job] of Object.entries(pipeline.jobs)) {
+    for (const step of job.steps) {
+      assert.ok(!common.test(step.run ?? ''), jobName + ' repeats a Checks-owned suite: ' + step.run);
+      if (step.uses === './.github/actions/release-tools')
+        assert.equal(step.with?.['audit-dependencies'], 'false', jobName + ' repeats the locked Python dependency audit');
+    }
+  }
+  const action = parse(readFileSync(path.join(root, '.github/actions/release-tools/action.yml'), 'utf8'));
+  assert.equal(action.inputs['audit-dependencies'].default, 'true');
+  const audit = action.runs.steps.find(step => /pip_audit/.test(step.run ?? ''));
+  assert.equal(audit.if, "inputs.audit-dependencies == 'true'");
+});
+
 test('docs-only runs retain title checks without compiling or entering the release queue', () => {
   const ci = workflow('ci'), pipeline = workflow('pipeline'), title = workflow('pr-title');
   assert.deepEqual(title.on.pull_request['branches-ignore'], ['main']);
   const steps = ci.jobs.checks.steps;
   assert.equal(steps.find(s => s.id === 'paths').with['predicate-quantifier'], 'every');
-  assert.equal(ci.jobs.checks.outputs.application, expr('steps.paths.outputs.application'));
-  const titleSteps = steps.filter(s => s.uses?.startsWith('amannn/'));
+  assert.equal(ci.jobs.checks.outputs.application, expr("github.event_name == 'pull_request' && needs.title.outputs.application || steps.paths.outputs.application"));
+  assert.equal(steps.find(s => s.id === 'paths').if, "github.event_name == 'push'");
+  assert.equal(ci.jobs.title.outputs.application, expr('steps.paths.outputs.application'));
+  assert.equal(ci.jobs.title.steps.find(s => s.id === 'paths').if, undefined, 'PR admission must actually classify its changed files');
+  const titleSteps = ci.jobs.title.steps.filter(s => s.uses?.startsWith('amannn/'));
   assert.equal(titleSteps.length, 2);
   assert.ok(titleSteps.some(s => s.if.includes("outputs.application == 'true'")));
   assert.ok(titleSteps.some(s => s.if.includes("outputs.application != 'true'")));
   for (const step of steps) {
     if (/cargo |npm |node --test|pip install/.test(step.run ?? '') ||
         /rust-toolchain|setup-node|\.github\/actions\/release-tools/.test(step.uses ?? ''))
-      assert.ok(step.if?.startsWith("steps.paths.outputs.application == 'true'"), step.name ?? step.run ?? step.uses);
+      assert.ok(step.if?.startsWith("(needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')"), step.name ?? step.run ?? step.uses);
   }
   assert.equal(ci.concurrency, undefined, 'Docs runs must not enter the application queue');
   assert.ok(pipeline.concurrency);

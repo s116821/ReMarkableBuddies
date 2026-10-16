@@ -31,6 +31,8 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - uses: ./.github/actions/release-tools
+        with:
+          audit-dependencies: "false"
       - name: Read semantic candidate without creating any tag
         id: freeze
         env:
@@ -128,8 +130,6 @@ jobs:
         if: runner.os == 'Linux'
       - run: npm ci --prefix release/fixtures --ignore-scripts --no-audit --no-fund
         if: runner.os == 'Linux'
-      - run: npm audit --prefix release/fixtures
-        if: runner.os == 'Linux'
       - name: Exercise actual upstream metadata Actions and workflow gate wiring
         env:
           PATHS_ACTION: ${{ runner.temp }}/paths-filter
@@ -165,6 +165,8 @@ jobs:
           ref: ${{ inputs.source_sha }}
           fetch-depth: 0
       - uses: ./.github/actions/release-tools
+        with:
+          audit-dependencies: "false"
       - uses: octokit/graphql-action@ddde8ebb2493e79f390e6449c725c21663a67505
         id: merged
         env:
