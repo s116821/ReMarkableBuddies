@@ -1,5 +1,6 @@
 pub mod analysis;
 pub mod config;
+pub mod conversation;
 pub mod device;
 pub mod llm;
 mod measurement;
