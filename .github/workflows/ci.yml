@@ -121,7 +121,7 @@ jobs:
     if: "!cancelled() && (github.event_name == 'push' || needs.title.result == 'success')"
   application:
     needs: checks
-    if: needs.checks.outputs.application == 'true'
+    if: "!cancelled() && needs.checks.result == 'success' && needs.checks.outputs.application == 'true'"
     uses: ./.github/workflows/pipeline.yml
     permissions:
       contents: write
