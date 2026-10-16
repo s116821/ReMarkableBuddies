@@ -131,7 +131,9 @@ def qualify(binary, target, bounded_read=None):
     qualification = verify_runtime(artifact, target, baseline)
     if baseline is not None:
         qualification["baseline_sha256"] = hashlib.sha256(baseline_path.read_bytes()).hexdigest()
-    return dict(target=target, elf=artifact, runtime=qualification)
+    return dict(target=target, elf=artifact, runtime=qualification,
+                remarkable_open_sdk_revision=None,
+                build_backend="legacy cross toolchain; no ReMarkableOpenSDK consumption claimed")
 
 
 if __name__ == "__main__":
