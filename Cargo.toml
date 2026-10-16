@@ -1,7 +1,6 @@
 [package]
 name = "remarkable-reader-buddy"
-# Cargo requires a package version; application versions come only from Git tags.
-version = "0.0.0"
+# Own version is intentionally omitted; release identity comes from Git history.
 publish = false
 edition = "2021"
 rust-version = "1.96"
