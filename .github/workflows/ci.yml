@@ -1,39 +1,36 @@
 name: CI
 on:
   pull_request:
-    branches: [main]
-    types: [opened, synchronize, reopened, edited]
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - edited
   push:
-    branches: [main]
+    branches:
+      - main
 permissions:
   contents: read
   pull-requests: read
 jobs:
-  policy:
-    name: Changed paths and PR checks
+  title:
+    name: PR Title
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     outputs:
       application: ${{ steps.paths.outputs.application }}
     steps:
-      # Read-only admission; application jobs never inherit write credentials.
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
       - name: Refuse an incomplete PR file inventory
         if: github.event_name == 'pull_request' && (github.event.pull_request.changed_files <= 0 || github.event.pull_request.changed_files >= 3000)
         run: exit 1
-      - name: Require unambiguous main push range
-        if: github.event_name == 'push'
-        env:
-          BEFORE: ${{ github.event.before }}
-          SOURCE_SHA: ${{ github.sha }}
-        run: python release/admission.py range --before "$BEFORE" --sha "$SOURCE_SHA"
-      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d
         id: paths
         with:
           token: ${{ github.token }}
@@ -41,7 +38,7 @@ jobs:
           predicate-quantifier: every
           base: ${{ github.event_name == 'push' && github.event.before || '' }}
           ref: ${{ github.sha }}
-      - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
+      - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50
         if: github.event_name == 'pull_request' && steps.paths.outputs.application == 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -57,9 +54,74 @@ jobs:
             refactor
             test
             revert
+      - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          requireScope: true
+        if: github.event_name == 'pull_request' && steps.paths.outputs.application != 'true'
+  checks:
+    name: Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Require unambiguous main push range
+        if: github.event_name == 'push'
+        env:
+          BEFORE: ${{ github.event.before }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: python release/admission.py range --before "$BEFORE" --sha "$SOURCE_SHA"
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d
+        id: paths
+        with:
+          token: ${{ github.token }}
+          filters: .github/application-paths.yml
+          predicate-quantifier: every
+          base: ${{ github.event_name == 'push' && github.event.before || '' }}
+          ref: ${{ github.sha }}
+        if: github.event_name == 'push'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.21.0
+        if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+        if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
+      - uses: ./.github/actions/release-tools
+        if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
+      - run: cargo fmt --all -- --check
+        if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+        if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
+      - run: cargo test --locked --all-features
+        if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
+      - run: python -m unittest discover -s release -v
+        if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
+      - run: npm ci --prefix release/fixtures --ignore-scripts --no-audit --no-fund
+        if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
+      - run: npm audit --prefix release/fixtures
+        if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
+      - name: Verify CI stage and artifact gates
+        run: node --test release/fixtures/workflow.test.mjs
+        if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      application: ${{ github.event_name == 'pull_request' && needs.title.outputs.application || steps.paths.outputs.application }}
+    needs: title
+    if: "!cancelled() && (github.event_name == 'push' || needs.title.result == 'success')"
   application:
-    needs: policy
-    if: needs.policy.outputs.application == 'true'
+    needs: checks
+    if: "!cancelled() && needs.checks.result == 'success' && needs.checks.outputs.application == 'true'"
     uses: ./.github/workflows/pipeline.yml
     permissions:
       contents: write
@@ -67,17 +129,3 @@ jobs:
     with:
       source_sha: ${{ github.sha }}
       release: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-  result:
-    name: CI result
-    if: always()
-    needs: [policy, application]
-    runs-on: ubuntu-latest
-    steps:
-      - env:
-          POLICY: ${{ needs.policy.result }}
-          APPLICATION: ${{ needs.application.result }}
-          DOCUMENTATION: ${{ needs.policy.outputs.application == 'false' }}
-        run: |
-          test "$POLICY" = success
-          if test "$DOCUMENTATION" = true; then test "$APPLICATION" = skipped
-          else test "$APPLICATION" = success; fi
