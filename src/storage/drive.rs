@@ -10,9 +10,6 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-/// Experimental REM-52 pointer transport; not connected to the sync worker.
-pub mod slot;
-
 pub const APP_SCOPE: &str = "https://www.googleapis.com/auth/drive.appdata";
 const CHUNK: usize = 256 * 1024;
 
@@ -195,7 +192,7 @@ fn now() -> u64 {
 fn parse<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     serde_json::from_slice(bytes).map_err(|_| anyhow::anyhow!("invalid Drive response"))
 }
-pub(crate) fn id(value: &str) -> Result<()> {
+fn id(value: &str) -> Result<()> {
     ensure!(
         !value.is_empty()
             && value.len() <= 256

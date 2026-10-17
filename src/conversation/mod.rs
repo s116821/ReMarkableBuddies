@@ -1,45 +1,11 @@
 //! Local-first conversation ledger. Stored facts are not native effect permissions.
-mod admission;
-mod binding_projection;
 pub mod capture_facts;
-pub mod development;
-mod intent;
-mod legacy;
-pub use development::{DevelopmentCaptureHistory, PreparedDevelopmentCapture};
-mod pending;
-#[cfg(test)]
-mod reader_dispatch;
-mod reader_plan;
-#[cfg(test)]
-mod reader_uncertainty;
-mod selected;
-mod selected_reader_write;
-pub use selected_reader_write::{
-    SelectedReaderAcknowledgment, SelectedReaderPublication, SelectedReaderText,
-    SelectedReaderWrite,
-};
-#[cfg(test)]
-mod selected_context_tests;
-mod settlement;
 mod types;
 use crate::storage::{
     digest, Conflict, Envelope, Kind, Media, Namespace, ObjectRef, Store, Uuid, FORMAT, MAX_ITEMS,
 };
-pub use admission::{HistoricalIntent, SelectedAdmission};
 use anyhow::{bail, ensure, Context, Result};
-pub use binding_projection::{
-    SelectedBindingCandidate, SelectedBindingInspection, SelectedBindingUnresolved,
-};
-pub use intent::*;
-pub use pending::{
-    PendingIntentPublication, PendingIntentRequest, PendingRequestConflict, SourceAdmission,
-};
-#[cfg(test)]
-pub(crate) use pending::{ReaderContext, ReaderPreparation};
-pub use reader_plan::{ReaderEraseRectangle, ReaderHandoff, ReaderPlan, SmartEraseInput};
-pub use selected::*;
 use serde::Serialize;
-pub use settlement::*;
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::Read,
@@ -99,11 +65,7 @@ impl Ledger {
         let envelope = Envelope {
             envelope_version: FORMAT,
             namespace,
-            domain_schema_version: match &record {
-                Record::Receipt(receipt) if receipt.admitted_intent.is_some() => INTENT_SCHEMA,
-                Record::OutcomeFact(fact) if fact.settlement.is_some() => INTENT_SCHEMA,
-                _ => SCHEMA,
-            },
+            domain_schema_version: SCHEMA,
             record_id: id,
             revision_id: Uuid::new_v4(),
             parents: parents.0,
@@ -118,18 +80,11 @@ impl Ledger {
     }
     fn decode(envelope: &Envelope) -> Result<Record> {
         ensure!(
-            matches!(envelope.domain_schema_version, SCHEMA | INTENT_SCHEMA),
+            envelope.domain_schema_version == SCHEMA,
             "unsupported conversation schema"
         );
         ensure!(envelope.kind == Kind::Value, "deleted conversation record");
         let record: Record = serde_json::from_value(envelope.payload.clone())?;
-        if envelope.domain_schema_version == INTENT_SCHEMA {
-            ensure!(
-                envelope.namespace == Namespace::Conversation
-                    && matches!(&record, Record::Receipt(_) | Record::OutcomeFact(_)),
-                "schema 2 is restricted to intent/settlement records"
-            );
-        }
         let (id, namespace, conversation) = match &record {
             Record::Root(root) => (root.id, Namespace::Conversation, root.id),
             Record::Turn(turn) => {
@@ -148,31 +103,6 @@ impl Ledger {
                 );
                 (capture.id, Namespace::Source, capture.conversation)
             }
-            Record::DevelopmentCapture(capture) => {
-                capture.validate()?;
-                (capture.id, Namespace::Source, capture.conversation)
-            }
-            Record::LegacyCapture(capture) => {
-                capture.validate()?;
-                (capture.id, Namespace::Source, capture.conversation)
-            }
-            Record::OutcomeFact(fact) => {
-                intent::validate_settlement_schema(envelope.domain_schema_version, fact)?;
-                ensure!(
-                    !fact.id.is_nil()
-                        && !fact.turn.is_nil()
-                        && (matches!(
-                            fact.outcome,
-                            Outcome::Failed | Outcome::Canceled | Outcome::ReconcileRequired
-                        ) || (fact.outcome == Outcome::Completed
-                            && envelope.domain_schema_version == 2
-                            && fact.settlement.as_ref().is_some_and(|settlement| {
-                                settlement.state == IntentSettlementState::VerifiedSubmitted
-                            }))),
-                    "invalid attempt outcome fact"
-                );
-                (fact.id, Namespace::Conversation, fact.conversation)
-            }
             Record::Binding(binding) => {
                 Self::validate_observation(&binding.receipt.source)?;
                 ensure!(
@@ -190,7 +120,6 @@ impl Ledger {
                 (export.id, Namespace::ExportAssociation, export.conversation)
             }
             Record::Receipt(receipt) => {
-                intent::validate_receipt_schema(envelope.domain_schema_version, receipt)?;
                 ensure!(
                     crate::storage::valid_digest(&receipt.fingerprint)
                         && !receipt.acknowledgment.applied_root_revision.is_nil()
@@ -211,18 +140,6 @@ impl Ledger {
         let mut media = match &record {
             Record::Source(source) => vec![source.image.clone()],
             Record::Capture(capture) => capture.facts.media()?,
-            Record::LegacyCapture(capture) => capture.media()?,
-            Record::DevelopmentCapture(capture) => capture.media()?,
-            Record::Receipt(receipt) => receipt
-                .admitted_intent
-                .as_ref()
-                .map(|i| i.media.clone())
-                .unwrap_or_default(),
-            Record::OutcomeFact(fact) => fact
-                .settlement
-                .as_ref()
-                .map(|s| s.media.clone())
-                .unwrap_or_default(),
             _ => vec![],
         };
         if let Record::Source(source) = &record {
@@ -321,7 +238,6 @@ impl Ledger {
             Record::Receipt(Receipt {
                 fingerprint: fingerprint.clone(),
                 acknowledgment: ack,
-                admitted_intent: None,
             }),
             vec![],
         )?;
@@ -425,8 +341,6 @@ impl Ledger {
             let conversation = match Self::decode(&e)? {
                 Record::Source(source) => source.conversation,
                 Record::Capture(capture) => capture.conversation,
-                Record::LegacyCapture(capture) => capture.conversation,
-                Record::DevelopmentCapture(capture) => capture.conversation,
                 _ => bail!("invalid existing source reference"),
             };
             ensure!(
@@ -586,22 +500,12 @@ impl Ledger {
                 && matches!(turn.outcome, Outcome::Prepared | Outcome::Interpreted),
             "capture request is unavailable or terminal"
         );
-        Self::sdk_images_from_evidence(*capture, |media| {
-            self.store.read_object(&ObjectRef {
+        let load = |image: &capture_facts::HistoricalImage, ordinal| -> Result<PreparedSdkImage> {
+            let media = image.media();
+            let bytes = self.store.read_object(&ObjectRef {
                 sha256: media.sha256.clone(),
                 bytes: media.bytes,
-            })
-        })
-    }
-    pub(super) fn sdk_images_from_evidence(
-        capture: CaptureEvidence,
-        mut load: impl FnMut(&Media) -> Result<Vec<u8>>,
-    ) -> Result<PreparedSdkCapture> {
-        let mut image_bytes = |image: &capture_facts::HistoricalImage,
-                               ordinal|
-         -> Result<PreparedSdkImage> {
-            let media = image.media();
-            let bytes = load(&media)?;
+            })?;
             Self::validate_image_bytes(&media, &bytes, image.dimensions[0], image.dimensions[1])?;
             Ok(PreparedSdkImage {
                 ordinal,
@@ -609,13 +513,13 @@ impl Ledger {
                 bytes,
             })
         };
-        let native_parent = image_bytes(&capture.facts.native_parent, None)?;
+        let native_parent = load(&capture.facts.native_parent, None)?;
         let images = capture
             .facts
             .images
             .iter()
             .enumerate()
-            .map(|(ordinal, image)| image_bytes(image, Some(ordinal as u32)))
+            .map(|(ordinal, image)| load(image, Some(ordinal as u32)))
             .collect::<Result<Vec<_>>>()?;
         Ok(PreparedSdkCapture {
             turn: capture.turn,
@@ -923,39 +827,7 @@ impl Ledger {
         expected_turn: ExpectedHeads,
         turn: Turn,
     ) -> Result<WriteResult> {
-        self.advance_fact(operation, expected_root, expected_turn, turn, None)
-    }
-    /// Fact-only outcome recording. Never renders, navigates or replays effects.
-    pub fn record_attempt_outcome(
-        &self,
-        operation: Uuid,
-        expected_root: ExpectedHeads,
-        expected_turn: ExpectedHeads,
-        turn: Turn,
-        reason: AttemptReason,
-    ) -> Result<WriteResult> {
-        ensure!(
-            matches!(
-                turn.outcome,
-                Outcome::Failed | Outcome::Canceled | Outcome::ReconcileRequired
-            ),
-            "attempt outcome must remain unverified"
-        );
-        self.advance_fact(operation, expected_root, expected_turn, turn, Some(reason))
-    }
-    fn advance_fact(
-        &self,
-        operation: Uuid,
-        expected_root: ExpectedHeads,
-        expected_turn: ExpectedHeads,
-        turn: Turn,
-        reason: Option<AttemptReason>,
-    ) -> Result<WriteResult> {
-        let fingerprint = if let Some(reason) = &reason {
-            Self::fingerprint(&("attempt-outcome", &turn, reason))?
-        } else {
-            Self::fingerprint(&("advance", &turn))?
-        };
+        let fingerprint = Self::fingerprint(&("advance", &turn))?;
         if let Some(prior) = self.replay(operation, &fingerprint)? {
             return Ok(prior);
         }
@@ -1000,37 +872,13 @@ impl Ledger {
                     | Outcome::ReconcileRequired,
             )
         );
-        let explicit_reconciliation = original.outcome == Outcome::ReconcileRequired
-            && matches!(
-                (&turn.outcome, &reason),
-                (
-                    Outcome::Failed,
-                    Some(AttemptReason::NoSuccessor | AttemptReason::InvalidSuccessor),
-                ) | (
-                    Outcome::ReconcileRequired,
-                    Some(AttemptReason::SubmittedUnverified | AttemptReason::DeviceUncertain),
-                )
-            );
-        let interpreted_failure = original.outcome == Outcome::Interpreted
-            && matches!(
-                (&turn.outcome, &reason),
-                (
-                    Outcome::Failed,
-                    Some(AttemptReason::ProviderFailure | AttemptReason::RequestFailed)
-                ) | (Outcome::Canceled, Some(AttemptReason::Canceled))
-            );
         ensure!(
-            permitted || explicit_reconciliation || interpreted_failure,
+            permitted,
             "invalid outcome transition; reconciliation is explicit"
         );
-        if matches!(
-            original.outcome,
-            Outcome::Generated | Outcome::ReconcileRequired | Outcome::Interpreted
-        ) {
+        if original.outcome == Outcome::Generated {
             ensure!(original.text == turn.text, "generated draft text changed");
         }
-        let outcome = turn.outcome.clone();
-        let turn_id = turn.id;
         root.updated_ms = turn.updated_ms;
         let binding = root.binding;
         let updated = self.envelope(
@@ -1047,32 +895,22 @@ impl Ledger {
             Record::Root(root),
             vec![],
         )?;
-        let mut records = vec![updated];
-        if let Some(reason) = reason {
-            let id = Uuid::new_v5(
-                &Uuid::NAMESPACE_URL,
-                format!("urn:remarkable-buddies:outcome:v1:{operation}").as_bytes(),
-            );
-            records.push(self.envelope(
-                Namespace::Conversation,
-                id,
-                ExpectedHeads::default(),
-                Record::OutcomeFact(OutcomeFact {
-                    id,
-                    conversation: root.record_id,
-                    turn: turn_id,
-                    outcome,
-                    reason,
-                    settlement: None,
-                }),
-                vec![],
-            )?);
-        }
-        self.publish(operation, fingerprint, root, records, binding)
+        self.publish(operation, fingerprint, root, vec![updated], binding)
     }
-    /// Historical receipt semantics shared by writes and selected inspection.
-    /// Successful validation never reconstructs native qualification.
-    fn validate_binding_receipt(receipt: &BindingReceipt) -> Result<()> {
+    /// Store a REM-25 association receipt. SDK qualification remains a caller gate;
+    /// no imported or synthetic record authorizes native reuse.
+    pub fn bind(
+        &self,
+        operation: Uuid,
+        expected_root: ExpectedHeads,
+        expected_binding: ExpectedHeads,
+        receipt: BindingReceipt,
+    ) -> Result<WriteResult> {
+        let fingerprint = Self::fingerprint(&("bind", &receipt))?;
+        if let Some(prior) = self.replay(operation, &fingerprint)? {
+            return Ok(prior);
+        }
+        ensure!(receipt.operation == operation, "receipt operation mismatch");
         Self::validate_observation(&receipt.source)?;
         ensure!(
             receipt.intended_target == Some(receipt.observed_page),
@@ -1114,23 +952,6 @@ impl Ledger {
             permitted == receipt.observed_order,
             "insertion receipt order mismatch"
         );
-        Ok(())
-    }
-    /// Store a REM-25 association receipt. SDK qualification remains a caller gate;
-    /// no imported or synthetic record authorizes native reuse.
-    pub fn bind(
-        &self,
-        operation: Uuid,
-        expected_root: ExpectedHeads,
-        expected_binding: ExpectedHeads,
-        receipt: BindingReceipt,
-    ) -> Result<WriteResult> {
-        let fingerprint = Self::fingerprint(&("bind", &receipt))?;
-        if let Some(prior) = self.replay(operation, &fingerprint)? {
-            return Ok(prior);
-        }
-        ensure!(receipt.operation == operation, "receipt operation mismatch");
-        Self::validate_binding_receipt(&receipt)?;
         let id = Self::binding_id(receipt.observed_document, receipt.observed_page);
         let (_, mut root) = self.live_root(receipt.conversation, Some(&expected_root))?;
         ensure!(
@@ -1413,21 +1234,6 @@ impl Ledger {
         budget: &ContextBudget,
         token_count: impl Fn(&[Turn]) -> Result<usize>,
     ) -> Result<ContextView> {
-        Self::context_token_limit(selection, budget)?;
-        let records = self.inspect(conversation, false)?;
-        Self::context_from_records(records, selection, budget, token_count, |media| {
-            self.store
-                .open_object(&ObjectRef {
-                    sha256: media.sha256.clone(),
-                    bytes: media.bytes,
-                })
-                .is_ok()
-        })
-    }
-    pub(super) fn context_token_limit(
-        selection: Option<TurnRange>,
-        budget: &ContextBudget,
-    ) -> Result<usize> {
         if let Some(range) = selection {
             ensure!(
                 range.start < range.end_exclusive,
@@ -1437,16 +1243,7 @@ impl Ledger {
         let token_limit = budget
             .provider_token_limit
             .ok_or(ContextRefusal::UnknownProviderBudget)?;
-        Ok(token_limit)
-    }
-    pub(super) fn context_from_records(
-        records: Vec<Record>,
-        selection: Option<TurnRange>,
-        budget: &ContextBudget,
-        token_count: impl Fn(&[Turn]) -> Result<usize>,
-        media_available: impl Fn(&Media) -> bool,
-    ) -> Result<ContextView> {
-        let token_limit = Self::context_token_limit(selection, budget)?;
+        let records = self.inspect(conversation, false)?;
         let turns: Vec<Turn> = records
             .iter()
             .filter_map(|r| match r {
@@ -1488,26 +1285,17 @@ impl Ledger {
             .collect::<BTreeSet<_>>();
         let mut sources = Vec::new();
         let mut captures = Vec::new();
-        let mut legacy_captures = Vec::new();
-        let mut development_captures = Vec::new();
         for record in records {
             match record {
                 Record::Source(source) if source_ids.contains(&source.id) => sources.push(source),
                 Record::Capture(capture) if source_ids.contains(&capture.id) => {
                     captures.push(*capture)
                 }
-                Record::DevelopmentCapture(capture) if source_ids.contains(&capture.id) => {
-                    development_captures.push(*capture)
-                }
-                Record::LegacyCapture(capture) if source_ids.contains(&capture.id) => {
-                    legacy_captures.push(capture)
-                }
                 _ => {}
             }
         }
         ensure!(
-            sources.len() + captures.len() + legacy_captures.len() + development_captures.len()
-                == source_ids.len(),
+            sources.len() + captures.len() == source_ids.len(),
             "source reference absent"
         );
         let mut missing_media = Vec::new();
@@ -1515,20 +1303,30 @@ impl Ledger {
         for capture in &captures {
             capture_media.extend(capture.facts.media()?);
         }
-        for capture in &development_captures {
-            capture_media.extend(capture.media()?);
-        }
-        for capture in &legacy_captures {
-            capture_media.extend(capture.media()?);
-        }
         for media in &capture_media {
-            if !media_available(media) && !missing_media.contains(media) {
+            if self
+                .store
+                .open_object(&ObjectRef {
+                    sha256: media.sha256.clone(),
+                    bytes: media.bytes,
+                })
+                .is_err()
+                && !missing_media.contains(media)
+            {
                 missing_media.push(media.clone());
             }
         }
         for source in &sources {
             for media in std::iter::once(&source.image).chain(source.parent.iter()) {
-                if !media_available(media) && !missing_media.contains(media) {
+                if self
+                    .store
+                    .open_object(&ObjectRef {
+                        sha256: media.sha256.clone(),
+                        bytes: media.bytes,
+                    })
+                    .is_err()
+                    && !missing_media.contains(media)
+                {
                     missing_media.push(media.clone());
                 }
             }
@@ -1537,8 +1335,6 @@ impl Ledger {
             turns,
             sources,
             captures,
-            legacy_captures,
-            development_captures,
             missing_media,
             selection,
         })
@@ -1559,8 +1355,6 @@ impl Ledger {
                     std::iter::once(source.image).chain(source.parent).collect()
                 }
                 Record::Capture(capture) => capture.facts.media()?,
-                Record::LegacyCapture(capture) => capture.media()?,
-                Record::DevelopmentCapture(capture) => capture.media()?,
                 _ => vec![],
             };
             for item in references {

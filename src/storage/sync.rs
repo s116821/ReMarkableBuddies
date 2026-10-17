@@ -1,5 +1,4 @@
 //! Durable selected-record projections and a bounded background worker.
-pub mod mode;
 use super::{drive::*, *};
 use crate::config::SyncPolicy;
 use serde_json::json;
@@ -67,7 +66,6 @@ pub struct SyncEngine<T: DriveTransport> {
     transport: T,
     state: State,
     cancel: Arc<AtomicBool>,
-    legacy_lease: Option<LegacyPublisherLease>,
 }
 impl<T: DriveTransport> SyncEngine<T> {
     pub fn new(
@@ -91,18 +89,12 @@ impl<T: DriveTransport> SyncEngine<T> {
             state.format == FORMAT && state.collection == policy.collection,
             "sync state binding mismatch; explicit recovery required"
         );
-        let legacy_lease = if policy.enabled {
-            Some(store.legacy_publisher_lease()?)
-        } else {
-            None
-        };
         Ok(Self {
             store,
             policy,
             transport,
             state,
             cancel,
-            legacy_lease,
         })
     }
     fn save(&self) -> Result<()> {
@@ -129,13 +121,9 @@ impl<T: DriveTransport> SyncEngine<T> {
     }
     pub fn step(&mut self) -> Result<Status> {
         if !self.policy.enabled {
-            self.legacy_lease = None;
             return Ok(Status::Disabled);
         }
         self.alive()?;
-        if self.legacy_lease.is_none() {
-            self.legacy_lease = Some(self.store.legacy_publisher_lease()?);
-        }
         let policy_fingerprint = digest(&serde_json::to_vec(&self.policy)?);
         if self.state.policy_fingerprint != policy_fingerprint {
             self.state.applied.clear();

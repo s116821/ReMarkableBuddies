@@ -88,12 +88,6 @@ pub struct Event {
 }
 
 pub struct State {
-    #[cfg(test)]
-    pub acquisition_kind: crate::device::backend::AcquisitionKind,
-    #[cfg(test)]
-    pub detail_queries: usize,
-    #[cfg(test)]
-    pub refuse_repeated_details: bool,
     verified_navigation: bool,
     pub request_pin: Option<(usize, u64, u64)>,
     pub request_lost: bool,
@@ -220,12 +214,6 @@ impl State {
             .transpose()?;
         Ok(Self {
             #[cfg(test)]
-            acquisition_kind: crate::device::backend::AcquisitionKind::LegacyUnqualified,
-            #[cfg(test)]
-            detail_queries: 0,
-            #[cfg(test)]
-            refuse_repeated_details: false,
-            #[cfg(test)]
             idle_events: VecDeque::new(),
             pages,
             initial,
@@ -321,14 +309,6 @@ fn png(image: &DynamicImage) -> Result<Vec<u8>> {
 }
 
 impl DeviceBackend for SimDevice {
-    fn acquisition_kind(&self) -> crate::device::backend::AcquisitionKind {
-        #[cfg(test)]
-        {
-            return self.0.borrow().acquisition_kind;
-        }
-        #[cfg(not(test))]
-        crate::device::backend::AcquisitionKind::LegacyUnqualified
-    }
     #[cfg(test)]
     fn wait_for_interactions(
         &mut self,
@@ -529,15 +509,6 @@ impl DeviceBackend for SimDevice {
         Ok(frame)
     }
     fn detail_images(&self) -> Result<Vec<String>> {
-        #[cfg(test)]
-        {
-            let mut state = self.0.borrow_mut();
-            state.detail_queries += 1;
-            anyhow::ensure!(
-                !state.refuse_repeated_details || state.detail_queries == 1,
-                "details changed after acquisition"
-            );
-        }
         Ok(self.0.borrow().last.details.clone())
     }
     fn wait_for_trigger(&mut self) -> Result<()> {

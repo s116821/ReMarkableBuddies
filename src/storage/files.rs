@@ -47,47 +47,6 @@ impl Source {
             }
         }
     }
-    pub(crate) fn open_with_budget(
-        path: &Path,
-        reference: &ObjectRef,
-        budget: Option<&mut super::selection::SelectedReadBudget>,
-        media: bool,
-    ) -> Result<Self> {
-        let Some(budget) = budget else {
-            return Self::open(path, reference);
-        };
-        ensure!(
-            valid_digest(&reference.sha256) && reference.bytes <= MAX_MEDIA,
-            "invalid streamed reference"
-        );
-        // Reserve content work before opening/hashing. A declared size mismatch
-        // is refused; a growing file cannot make verification read extra bytes.
-        if media {
-            budget.charge(0, 0, 0, reference.bytes)?;
-        } else {
-            budget.charge(0, 0, reference.bytes, 0)?;
-        }
-        safe_path(path)?;
-        ensure!(
-            fs::symlink_metadata(path)?.is_file(),
-            "expected regular object"
-        );
-        let mut file = File::open(path)?;
-        ensure!(
-            file.metadata()?.len() == reference.bytes,
-            "object size mismatch"
-        );
-        verify_reader((&mut file).take(reference.bytes), reference)?;
-        ensure!(
-            file.metadata()?.len() == reference.bytes,
-            "object size changed during verification"
-        );
-        file.seek(SeekFrom::Start(0))?;
-        Ok(Self::File {
-            file,
-            reference: reference.clone(),
-        })
-    }
     pub fn open(path: &Path, reference: &ObjectRef) -> Result<Self> {
         safe_path(path)?;
         ensure!(
@@ -248,31 +207,6 @@ pub fn read(path: &Path, limit: u64) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     file.take(limit + 1).read_to_end(&mut bytes)?;
     ensure!(bytes.len() as u64 <= limit, "stored file grew past bound");
-    Ok(bytes)
-}
-pub(crate) fn read_with_budget(
-    path: &Path,
-    limit: u64,
-    budget: Option<&mut super::selection::SelectedReadBudget>,
-) -> Result<Vec<u8>> {
-    let Some(budget) = budget else {
-        return read(path, limit);
-    };
-    safe_path(path)?;
-    ensure!(
-        fs::symlink_metadata(path)?.is_file(),
-        "expected regular file"
-    );
-    let mut file = File::open(path).context("open stored file")?;
-    let length = file.metadata()?.len();
-    ensure!(length <= limit, "stored file exceeds bound");
-    budget.charge(0, 0, length, 0)?;
-    let mut bytes = Vec::new();
-    (&mut file).take(length).read_to_end(&mut bytes)?;
-    ensure!(
-        bytes.len() as u64 == length && file.metadata()?.len() == length,
-        "stored file size changed during read"
-    );
     Ok(bytes)
 }
 pub fn json<T: DeserializeOwned>(path: &Path, limit: u64) -> Result<T> {
