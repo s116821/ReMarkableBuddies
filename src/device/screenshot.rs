@@ -9,12 +9,179 @@ use std::process;
 use base64::{engine::general_purpose, Engine as _};
 use image::ImageEncoder;
 
+/// A capture binding, never a request to rediscover a process by name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CaptureIdentity {
+    pid: u32,
+    start_ticks: u64,
+    boot_id: String,
+}
+
+impl CaptureIdentity {
+    pub fn new(pid: u32, start_ticks: u64, boot_id: String) -> Result<Self> {
+        anyhow::ensure!(
+            pid > 0 && start_ticks > 0,
+            "Invalid capture process identity"
+        );
+        anyhow::ensure!(
+            boot_id.len() == 36
+                && boot_id.bytes().enumerate().all(|(i, b)| {
+                    if [8, 13, 18, 23].contains(&i) {
+                        b == b'-'
+                    } else {
+                        b.is_ascii_hexdigit()
+                    }
+                }),
+            "Invalid capture boot ID"
+        );
+        Ok(Self {
+            pid,
+            start_ticks,
+            boot_id,
+        })
+    }
+
+    fn check(&self) -> Result<()> {
+        let boot = bounded_text("/proc/sys/kernel/random/boot_id", 128)?;
+        let stat = bounded_text(&format!("/proc/{}/stat", self.pid), 8192)?;
+        self.check_sample(boot.trim(), &stat)
+    }
+
+    fn check_sample(&self, boot: &str, stat: &str) -> Result<()> {
+        let (pid, start, state) = process_stat(stat)?;
+        anyhow::ensure!(
+            boot == self.boot_id && pid == self.pid && start == self.start_ticks,
+            "Capture process identity changed; expected {self:?}"
+        );
+        anyhow::ensure!(!matches!(state, "Z" | "X" | "x"), "Capture process is dead");
+        Ok(())
+    }
+}
+
+fn process_stat(stat: &str) -> Result<(u32, u64, &str)> {
+    let (prefix, suffix) = stat.rsplit_once(')').context("Malformed process stat")?;
+    let (pid, comm) = prefix
+        .split_once('(')
+        .context("Malformed process stat name")?;
+    anyhow::ensure!(comm == "xochitl", "Bound capture process is not xochitl");
+    let fields: Vec<_> = suffix.split_whitespace().collect();
+    anyhow::ensure!(
+        fields.len() >= 20 && fields[0].len() == 1,
+        "Short process stat"
+    );
+    anyhow::ensure!("RSDZTWtXxKPI".contains(fields[0]), "Invalid process state");
+    Ok((pid.trim().parse()?, fields[19].parse()?, fields[0]))
+}
+
+fn bounded_text(path: &str, limit: usize) -> Result<String> {
+    let mut bytes = Vec::new();
+    File::open(path)?
+        .take(limit as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    anyhow::ensure!(
+        bytes.len() <= limit,
+        "Capture evidence cap exceeded: {path}"
+    );
+    Ok(String::from_utf8(bytes)?)
+}
+
+const MAPS_CAP: usize = 256 * 1024;
+const SCAN_CAP: usize = 65_536;
+const MATCH_CAP: usize = 16;
+
+#[derive(Clone, Debug)]
+struct AllocationMatch {
+    address: u64,
+    header: [u8; 8],
+    vma: String,
+}
+
+// Retained in the error chain, including matches preceding a failed scan.
+#[derive(Debug)]
+struct DiscoveryEvidence {
+    maps: String,
+    scanned: usize,
+    matches: Vec<AllocationMatch>,
+    failure: String,
+}
+
+impl std::fmt::Display for DiscoveryEvidence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "RM2 discovery evidence failure={} scanned={} matches={:?} maps={:?}",
+            self.failure, self.scanned, self.matches, self.maps
+        )
+    }
+}
+impl std::error::Error for DiscoveryEvidence {}
+
 use super::DeviceModel;
 
 /// Virtual screen width - all screenshots are normalized to this size
 pub const SCREENSHOT_VIRTUAL_WIDTH: u32 = 768;
 /// Virtual screen height - all screenshots are normalized to this size  
 pub const SCREENSHOT_VIRTUAL_HEIGHT: u32 = 1024;
+
+const RM2_RGB32_BYTES: usize = 1404 * 1872 * 4;
+/// Fixed experimental envelope size; no variable native layout is admitted.
+pub const OWNED_RM2_FRAME_BYTES: usize = RM2_RGB32_BYTES + 316;
+
+/// Both views encode the same validated, owned plane. This is not native proof.
+pub struct OwnedRm2Pngs {
+    pub native: Vec<u8>,
+    pub overview: Vec<u8>,
+}
+
+fn owned_rgb32_plane<'a>(
+    envelope: &'a [u8],
+    expected_nonce: &str,
+    expected: &CaptureIdentity,
+) -> Result<&'a [u8]> {
+    anyhow::ensure!(
+        expected_nonce.len() == 32
+            && expected_nonce
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+        "Invalid selected frame nonce"
+    );
+    anyhow::ensure!(
+        envelope.len() == OWNED_RM2_FRAME_BYTES,
+        "Incomplete or extra owned frame bytes"
+    );
+    anyhow::ensure!(
+        &envelope[..8] == b"RMBRAW01" && &envelope[envelope.len() - 8..] == b"RMBEND01",
+        "Invalid owned frame framing"
+    );
+    anyhow::ensure!(
+        &envelope[8..40] == expected_nonce.as_bytes()
+            && &envelope[40..76] == expected.boot_id.as_bytes()
+            && u64::from_le_bytes(envelope[76..84].try_into()?) == u64::from(expected.pid)
+            && u64::from_le_bytes(envelope[84..92].try_into()?) == expected.start_ticks,
+        "Owned frame identity mismatch"
+    );
+    let layout: Vec<u32> = envelope[92..116]
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|word| u32::from_le_bytes(*word))
+        .collect();
+    anyhow::ensure!(
+        layout == [1404, 1872, 32, 5616, 4, RM2_RGB32_BYTES as u32],
+        "Unsupported owned RGB32 frame layout"
+    );
+    // Deliberately opaque: native ABI and address authority stay with the
+    // separately qualified producer. Equality is closure evidence, not ownership.
+    anyhow::ensure!(
+        envelope[116..204] == envelope[204..292],
+        "Native frame tuples changed"
+    );
+    anyhow::ensure!(
+        envelope[292..300] == envelope[300..308],
+        "Native allocation headers changed"
+    );
+    Ok(&envelope[308..envelope.len() - 8])
+}
 
 /// Only attached to a discovery-header EIO whose candidate is absent from a
 /// fresh maps sample. It does not identify that candidate as the framebuffer.
@@ -57,9 +224,30 @@ pub struct Screenshot {
     native_data: Vec<u8>,
     device_model: DeviceModel,
     rm2_bgra: bool,
+    identity: Option<CaptureIdentity>,
 }
 
 impl Screenshot {
+    /// Pure conversion only. The parent must first preserve producer exit zero
+    /// and the complete frame hash, and enforce its nonce/deadline/native gates.
+    /// No process lookup, device detection, native pointer parsing or memory read.
+    pub fn encode_owned_rm2_rgb32(
+        envelope: &[u8],
+        expected_nonce: &str,
+        expected: &CaptureIdentity,
+    ) -> Result<OwnedRm2Pngs> {
+        let raw = owned_rgb32_plane(envelope, expected_nonce, expected)?;
+        let _timing = crate::measurement::Span::new("capture.owned_conversion");
+        let native = Self::rm2_bgra_native_image(raw)?;
+        let native_png = Self::serialize(&native, "capture.native_png")?;
+        let overview = Self::normalize_timed(&native)?;
+        let overview_png = Self::serialize(&overview, "capture.overview_png")?;
+        Ok(OwnedRm2Pngs {
+            native: native_png,
+            overview: overview_png,
+        })
+    }
+
     pub fn new() -> Result<Screenshot> {
         let device_model = DeviceModel::detect();
         info!("Screen detected device: {}", device_model.name());
@@ -73,7 +261,19 @@ impl Screenshot {
             native_data: vec![],
             device_model,
             rm2_bgra,
+            identity: None,
         })
+    }
+
+    pub fn new_for_process(identity: CaptureIdentity) -> Result<Self> {
+        identity.check()?;
+        let mut capture = Self::new()?;
+        anyhow::ensure!(
+            capture.device_model == DeviceModel::Remarkable2 && capture.rm2_bgra,
+            "Explicit capture identity requires RM2 BGRA layout"
+        );
+        capture.identity = Some(identity);
+        Ok(capture)
     }
 
     // Firmware layout change documented by awwaiid/ghostwriter commit dd48e60.
@@ -175,6 +375,38 @@ impl Screenshot {
     }
 
     fn capture_raw(&self) -> Result<Vec<u8>> {
+        if self.rm2_bgra {
+            let identity = match &self.identity {
+                Some(identity) => identity.clone(),
+                None => {
+                    let pid: u32 = Self::find_xochitl_pid()?.parse()?;
+                    let stat = bounded_text(&format!("/proc/{pid}/stat"), 8192)?;
+                    let (actual_pid, start, _) = process_stat(&stat)?;
+                    anyhow::ensure!(actual_pid == pid, "Process stat PID mismatch");
+                    CaptureIdentity::new(
+                        pid,
+                        start,
+                        bounded_text("/proc/sys/kernel/random/boot_id", 128)?
+                            .trim()
+                            .to_owned(),
+                    )?
+                }
+            };
+            identity.check()?;
+            // Hold this exact process memory handle through discovery and read.
+            let mut mem = File::open(format!("/proc/{}/mem", identity.pid))?;
+            info!("Capture bound process={identity:?}");
+            return Self::capture_bound_rm2(
+                || identity.check(),
+                || bounded_text(&format!("/proc/{}/maps", identity.pid), MAPS_CAP),
+                |address, bytes| {
+                    mem.seek(std::io::SeekFrom::Start(address))?;
+                    mem.read_exact(bytes)?;
+                    Ok(())
+                },
+            )
+            .with_context(|| format!("Bound RM2 capture {identity:?}"));
+        }
         // Find xochitl's process
         debug!("screenshot: finding pid");
         let pid = Self::find_xochitl_pid()?;
@@ -191,6 +423,45 @@ impl Screenshot {
         // Read the framebuffer data
         debug!("screenshot: reading data");
         self.read_framebuffer(&pid, skip_bytes)
+    }
+
+    fn capture_bound_rm2(
+        mut check: impl FnMut() -> Result<()>,
+        mut sample_maps: impl FnMut() -> Result<String>,
+        mut read: impl FnMut(u64, &mut [u8]) -> Result<()>,
+    ) -> Result<Vec<u8>> {
+        check()?;
+        let maps = sample_maps()?;
+        check()?;
+        let selected = Self::scan_rm2_allocation(&maps, SCAN_CAP, MATCH_CAP, |address| {
+            let mut header = [0; 8];
+            read(address, &mut header).map_err(|error| {
+                // A fresh map sample is failure evidence only, never a retry.
+                let current = sample_maps().ok();
+                match error.downcast::<std::io::Error>() {
+                    Ok(error) => discovery_error(error, address, current.as_deref()),
+                    Err(error) => error,
+                }
+            })?;
+            Ok(header)
+        })?;
+        let mut verify = |read: &mut dyn FnMut(u64, &mut [u8]) -> Result<()>| -> Result<()> {
+            check()?;
+            anyhow::ensure!(sample_maps()? == maps, "Capture mappings changed");
+            let mut header = [0; 8];
+            read(selected.address, &mut header)?;
+            anyhow::ensure!(
+                header == selected.header,
+                "Capture allocation header changed"
+            );
+            check()?;
+            Ok(())
+        };
+        verify(&mut read)?;
+        let mut pixels = vec![0; 1404 * 1872 * 4];
+        read(selected.address + 8, &mut pixels)?;
+        verify(&mut read)?;
+        Ok(pixels)
     }
 
     fn normalized_image(&self, raw: &[u8]) -> Result<image::DynamicImage> {
@@ -244,22 +515,7 @@ impl Screenshot {
             ));
         }
         if self.rm2_bgra {
-            let pixels = raw
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|pixel| {
-                    ((77 * u32::from(pixel[2])
-                        + 150 * u32::from(pixel[1])
-                        + 29 * u32::from(pixel[0])
-                        + 128)
-                        >> 8) as u8
-                })
-                .collect();
-            return Ok(image::DynamicImage::ImageLuma8(
-                GrayImage::from_raw(1404, 1872, pixels)
-                    .ok_or_else(|| anyhow::anyhow!("Invalid BGRA framebuffer"))?,
-            ));
+            return Self::rm2_bgra_native_image(raw);
         }
         let pixels = raw
             .as_chunks::<2>()
@@ -271,6 +527,28 @@ impl Screenshot {
             .ok_or_else(|| anyhow::anyhow!("Invalid legacy framebuffer"))?;
         Ok(image::DynamicImage::ImageLuma8(
             image::imageops::flip_horizontal(&image::imageops::rotate270(&image)),
+        ))
+    }
+
+    fn rm2_bgra_native_image(raw: &[u8]) -> Result<image::DynamicImage> {
+        anyhow::ensure!(
+            raw.len() == RM2_RGB32_BYTES,
+            "Invalid BGRA framebuffer length"
+        );
+        let pixels = raw
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|pixel| {
+                ((77 * u32::from(pixel[2])
+                    + 150 * u32::from(pixel[1])
+                    + 29 * u32::from(pixel[0])
+                    + 128)
+                    >> 8) as u8
+            })
+            .collect();
+        Ok(image::DynamicImage::ImageLuma8(
+            GrayImage::from_raw(1404, 1872, pixels).context("Invalid BGRA framebuffer")?,
         ))
     }
 
@@ -286,9 +564,6 @@ impl Screenshot {
 
     fn find_framebuffer_address(&self, pid: &str) -> Result<u64> {
         let _timing = crate::measurement::Span::new("capture.address");
-        if self.rm2_bgra {
-            return self.find_rm2_bgra_allocation(pid);
-        }
         match self.device_model {
             DeviceModel::RemarkablePaperPro => {
                 // For RMPP (arm64), we need to use the approach from pointer_arm64.go
@@ -307,87 +582,117 @@ impl Screenshot {
                     .output()?;
                 let address_hex = String::from_utf8(output.stdout)?.trim().to_string();
                 let address = u64::from_str_radix(&address_hex, 16)?;
-                Ok(address + if self.rm2_bgra { 2_629_632 + 8 } else { 7 })
+                Ok(address + 7)
             }
         }
     }
 
-    fn find_rm2_bgra_allocation(&self, pid: &str) -> Result<u64> {
-        // 3.28 can place the mmap-backed pixel allocation away from fb0.
-        // Validate glibc's 32-bit mmap chunk header instead of reading through
-        // unrelated mappings at the historical fixed offset.
-        let maps = std::fs::read_to_string(format!("/proc/{pid}/maps"))?;
-        let mut mem = File::open(format!("/proc/{pid}/mem"))?;
-        Self::locate_rm2_allocation(&maps, |address| {
-            mem.seek(std::io::SeekFrom::Start(address))
-                .with_context(|| {
-                    format!("Seek RM2 allocation header pid={pid} address={address:#x}")
-                })?;
-            let mut header = [0u8; 8];
-            mem.read_exact(&mut header).map_err(|error| {
-                // Failure evidence only: no second memory read, retry, cached
-                // address, or success inferred from a later mapping snapshot.
-                let current = std::fs::read_to_string(format!("/proc/{pid}/maps"));
-                let details = match &current {
-                    Ok(current) => {
-                        let region = current.lines().find(|line| {
-                            let Some(range) = line.split_whitespace().next() else { return false; };
-                            let Some((start,end)) = range.split_once('-') else { return false; };
-                            matches!((u64::from_str_radix(start,16),u64::from_str_radix(end,16)), (Ok(start),Ok(end)) if start <= address && address < end)
-                        }).map(|line| line.split_whitespace().take(2).collect::<Vec<_>>().join(" ")).unwrap_or_else(|| "unmapped".into());
-                        format!("maps_changed={} current_region={region}", *current != maps)
-                    }
-                    Err(error) => format!("current_maps_unavailable={error}"),
-                };
-                discovery_error(error, address, current.as_deref().ok()).context(format!("Read RM2 allocation header pid={pid} address={address:#x} bytes=8; {details}"))
-            })?;
-            Ok(header)
-        })
-    }
-
+    #[cfg(test)]
     fn locate_rm2_allocation(
         maps: &str,
-        mut read_header: impl FnMut(u64) -> Result<[u8; 8]>,
+        read_header: impl FnMut(u64) -> Result<[u8; 8]>,
     ) -> Result<u64> {
-        const PAGE_SIZE: u64 = 4096;
-        let bytes = 1404_u64 * 1872 * 4;
-        let allocation_size = (bytes + 8 + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-        let mut candidates = Vec::new();
-        for line in maps.lines() {
-            let fields: Vec<_> = line.split_whitespace().collect();
-            if fields.len() != 5 || fields[1] != "rw-p" || fields[4] != "0" {
-                continue;
-            }
-            let Some((start, end)) = fields[0].split_once('-') else {
-                continue;
-            };
-            let start = u64::from_str_radix(start, 16)?;
-            let end = u64::from_str_radix(end, 16)?;
-            let Some(last_start) = end.checked_sub(allocation_size) else {
-                continue;
-            };
-            if start > last_start || start % PAGE_SIZE != 0 || end % PAGE_SIZE != 0 {
-                continue;
-            }
-            // Linux may coalesce adjacent mmap chunks into one VMA. Check only
-            // page-aligned headers whose complete allocation stays in this map.
-            for address in (start..=last_start).step_by(PAGE_SIZE as usize) {
-                let header = read_header(address).with_context(|| format!(
+        Ok(Self::scan_rm2_allocation(maps, SCAN_CAP, MATCH_CAP, read_header)?.address + 8)
+    }
+
+    fn scan_rm2_allocation(
+        maps: &str,
+        scan_cap: usize,
+        match_cap: usize,
+        mut read_header: impl FnMut(u64) -> Result<[u8; 8]>,
+    ) -> Result<AllocationMatch> {
+        let _timing = crate::measurement::Span::new("capture.address");
+        anyhow::ensure!(
+            maps.len() <= MAPS_CAP,
+            "Maps cap exceeded; discovery incomplete"
+        );
+        let mut evidence = DiscoveryEvidence {
+            maps: maps.to_owned(),
+            scanned: 0,
+            matches: vec![],
+            failure: String::new(),
+        };
+        let result = (|| -> Result<AllocationMatch> {
+            const PAGE_SIZE: u64 = 4096;
+            let bytes = 1404_u64 * 1872 * 4;
+            let allocation_size = (bytes + 8 + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+            for line in maps.lines() {
+                let fields: Vec<_> = line.split_whitespace().collect();
+                anyhow::ensure!(fields.len() >= 5, "Malformed capture mapping");
+                let (start, end) = fields[0]
+                    .split_once('-')
+                    .context("Malformed mapping range")?;
+                let start = u64::from_str_radix(start, 16)?;
+                let end = u64::from_str_radix(end, 16)?;
+                anyhow::ensure!(start < end, "Invalid mapping extent");
+                let permissions = fields[1].as_bytes();
+                anyhow::ensure!(
+                    permissions.len() == 4
+                        && matches!(permissions[0], b'r' | b'-')
+                        && matches!(permissions[1], b'w' | b'-')
+                        && matches!(permissions[2], b'x' | b'-')
+                        && matches!(permissions[3], b'p' | b's'),
+                    "Malformed mapping permissions"
+                );
+                u64::from_str_radix(fields[2], 16)?;
+                let (major, minor) = fields[3]
+                    .split_once(':')
+                    .context("Malformed mapping device")?;
+                u64::from_str_radix(major, 16)?;
+                u64::from_str_radix(minor, 16)?;
+                fields[4].parse::<u64>()?;
+                if fields.len() != 5 || fields[1] != "rw-p" || fields[4] != "0" {
+                    continue;
+                }
+                let Some(last_start) = end.checked_sub(allocation_size) else {
+                    continue;
+                };
+                if start > last_start || start % PAGE_SIZE != 0 || end % PAGE_SIZE != 0 {
+                    continue;
+                }
+                // Linux may coalesce adjacent mmap chunks into one VMA. Check only
+                // page-aligned headers whose complete allocation stays in this map.
+                for address in (start..=last_start).step_by(PAGE_SIZE as usize) {
+                    anyhow::ensure!(
+                        evidence.scanned < scan_cap,
+                        "Scan cap exceeded; discovery incomplete"
+                    );
+                    evidence.scanned += 1;
+                    let header = read_header(address).with_context(|| format!(
                     "RM2 allocation discovery candidate address={address:#x} sampled_region={start:#x}-{end:#x} permissions={}", fields[1]
                 ))?;
-                let previous = u32::from_le_bytes(header[..4].try_into()?);
-                let size = u32::from_le_bytes(header[4..].try_into()?) as u64;
-                if previous == 0 && size & 7 == 2 && size & !7 == allocation_size {
-                    candidates.push(address + 8);
+                    let previous = u32::from_le_bytes(header[..4].try_into()?);
+                    let size = u32::from_le_bytes(header[4..].try_into()?) as u64;
+                    if previous == 0 && size & 7 == 2 && size & !7 == allocation_size {
+                        anyhow::ensure!(
+                            evidence.matches.len() < match_cap,
+                            "Match evidence cap exceeded; discovery incomplete"
+                        );
+                        evidence.matches.push(AllocationMatch {
+                            address,
+                            header,
+                            vma: line.to_owned(),
+                        });
+                    }
                 }
             }
+            anyhow::ensure!(
+                evidence.matches.len() == 1,
+                "Expected one RM2 framebuffer allocation, found {}; refusing ambiguous capture",
+                evidence.matches.len()
+            );
+            let selected = evidence.matches[0].clone();
+            info!(
+                "RM2 allocation header={:#x} raw={:02x?} vma={}",
+                selected.address, selected.header, selected.vma
+            );
+            Ok(selected)
+        })();
+        if let Err(error) = &result {
+            evidence.failure = format!("{error:#}");
         }
-        anyhow::ensure!(
-            candidates.len() == 1,
-            "Expected one RM2 framebuffer allocation, found {}; refusing ambiguous capture",
-            candidates.len()
-        );
-        Ok(candidates[0])
+        debug!("{evidence}");
+        result.map_err(|error| error.context(evidence))
     }
 
     // Get memory range for RMPP based on goMarkableStream/pointer_arm64.go
@@ -698,6 +1003,325 @@ impl Screenshot {
 mod tests {
     use super::*;
 
+    fn owned_frame_fixture() -> (Vec<u8>, CaptureIdentity, &'static str) {
+        let identity = identity_fixture();
+        let nonce = "1234567890abcdef1234567890abcdef";
+        let mut envelope = Vec::with_capacity(OWNED_RM2_FRAME_BYTES);
+        envelope.extend_from_slice(b"RMBRAW01");
+        envelope.extend_from_slice(nonce.as_bytes());
+        envelope.extend_from_slice(identity.boot_id.as_bytes());
+        envelope.extend_from_slice(&u64::from(identity.pid).to_le_bytes());
+        envelope.extend_from_slice(&identity.start_ticks.to_le_bytes());
+        for word in [1404u32, 1872, 32, 5616, 4, RM2_RGB32_BYTES as u32] {
+            envelope.extend_from_slice(&word.to_le_bytes());
+        }
+        for _ in 0..2 {
+            envelope.extend_from_slice(&[0x5a; 88]);
+        }
+        for _ in 0..2 {
+            envelope.extend_from_slice(&[0xa5; 8]);
+        }
+        envelope.resize(308 + RM2_RGB32_BYTES, 255);
+        envelope.extend_from_slice(b"RMBEND01");
+        (envelope, identity, nonce)
+    }
+
+    #[test]
+    fn owned_frame_rejects_short_extra_changed_identity_layout_and_closure() {
+        let (mut envelope, identity, nonce) = owned_frame_fixture();
+        assert_eq!(envelope.len(), OWNED_RM2_FRAME_BYTES);
+        assert!(owned_rgb32_plane(&envelope, nonce, &identity).is_ok());
+        for length in [0, 7, 115, 307, OWNED_RM2_FRAME_BYTES - 1] {
+            assert!(
+                Screenshot::encode_owned_rm2_rgb32(&envelope[..length], nonce, &identity).is_err()
+            );
+        }
+        envelope.push(0);
+        assert!(Screenshot::encode_owned_rm2_rgb32(&envelope, nonce, &identity).is_err());
+        envelope.pop();
+        // Change each identity/layout/closure boundary, restoring between faults.
+        for offset in [
+            0,
+            8,
+            40,
+            76,
+            84,
+            92,
+            96,
+            100,
+            104,
+            108,
+            112,
+            116,
+            204,
+            292,
+            300,
+            OWNED_RM2_FRAME_BYTES - 8,
+        ] {
+            envelope[offset] ^= 1;
+            assert!(
+                Screenshot::encode_owned_rm2_rgb32(&envelope, nonce, &identity).is_err(),
+                "offset {offset}"
+            );
+            envelope[offset] ^= 1;
+        }
+        for format in [0u32, 5, 6, 16, 17, 18, u32::MAX] {
+            envelope[108..112].copy_from_slice(&format.to_le_bytes());
+            assert!(owned_rgb32_plane(&envelope, nonce, &identity).is_err());
+        }
+        envelope[108..112].copy_from_slice(&4u32.to_le_bytes());
+        assert!(owned_rgb32_plane(&envelope, "stale-selected-nonce", &identity).is_err());
+        let wrong =
+            CaptureIdentity::new(43, identity.start_ticks, identity.boot_id.clone()).unwrap();
+        assert!(owned_rgb32_plane(&envelope, nonce, &wrong).is_err());
+    }
+
+    #[test]
+    fn owned_rgb32_pngs_preserve_asymmetric_channels_and_same_plane() {
+        let (mut envelope, identity, nonce) = owned_frame_fixture();
+        // A colored asymmetry catches BGRA/RGBA reversal; grayscale cannot.
+        for pixel in envelope[308..308 + RM2_RGB32_BYTES].as_chunks_mut::<4>().0 {
+            pixel.copy_from_slice(&[9, 37, 211, 255]);
+        }
+        envelope[308..312].copy_from_slice(&[211, 37, 9, 255]);
+        let pngs = Screenshot::encode_owned_rm2_rgb32(&envelope, nonce, &identity).unwrap();
+        let native = image::load_from_memory(&pngs.native).unwrap();
+        let overview = image::load_from_memory(&pngs.overview).unwrap();
+        assert_eq!((native.width(), native.height()), (1404, 1872));
+        assert_eq!((overview.width(), overview.height()), (768, 1024));
+        let expected = ((77 * 211u32 + 150 * 37 + 29 * 9 + 128) >> 8) as u8;
+        let reversed = ((77 * 9u32 + 150 * 37 + 29 * 211 + 128) >> 8) as u8;
+        assert_ne!(expected, reversed);
+        assert_eq!(native.to_luma8().get_pixel(0, 0)[0], reversed);
+        assert_eq!(native.to_luma8().get_pixel(1, 0)[0], expected);
+        let normalized = Screenshot::normalize_native(&native).unwrap();
+        assert_eq!(overview.as_bytes(), normalized.as_bytes());
+    }
+
+    fn identity_fixture() -> CaptureIdentity {
+        CaptureIdentity::new(42, 123, "02b2347b-03aa-4a85-8dd7-d731aabf6f3e".into()).unwrap()
+    }
+
+    fn stat_fixture(pid: u32, start: u64, state: &str) -> String {
+        format!(
+            "{pid} (xochitl) {state} {} {start}",
+            vec!["0"; 18].join(" ")
+        )
+    }
+
+    #[test]
+    fn capture_identity_rejects_replacement_dead_process_and_malformed_samples() {
+        let identity = identity_fixture();
+        identity
+            .check_sample(&identity.boot_id, &stat_fixture(42, 123, "S"))
+            .unwrap();
+        for (boot, stat) in [
+            (identity.boot_id.as_str(), stat_fixture(43, 123, "S")),
+            (identity.boot_id.as_str(), stat_fixture(42, 124, "S")),
+            (identity.boot_id.as_str(), stat_fixture(42, 123, "Z")),
+            (
+                "12b2347b-03aa-4a85-8dd7-d731aabf6f3e",
+                stat_fixture(42, 123, "S"),
+            ),
+            (identity.boot_id.as_str(), "42 (xochitl) S 0".into()),
+            (
+                identity.boot_id.as_str(),
+                stat_fixture(42, 123, "S").replace("xochitl", "other (name)"),
+            ),
+        ] {
+            assert!(identity.check_sample(boot, &stat).is_err());
+        }
+        assert!(CaptureIdentity::new(0, 1, identity.boot_id.clone()).is_err());
+        assert!(CaptureIdentity::new(42, 0, identity.boot_id.clone()).is_err());
+        assert!(CaptureIdentity::new(42, 1, "not-a-boot".into()).is_err());
+    }
+
+    #[test]
+    fn bound_capture_refuses_changes_at_each_identity_boundary_and_clears_output() {
+        use std::cell::Cell;
+        let maps = "1000-a08000 rw-p 00000000 00:00 0\n";
+        for failure_at in 1..=6 {
+            let checks = Cell::new(0);
+            let pixel_reads = Cell::new(0);
+            let mut screenshot = Screenshot {
+                data: vec![1],
+                native_data: vec![2],
+                device_model: DeviceModel::Remarkable2,
+                rm2_bgra: true,
+                identity: None,
+            };
+            let result = screenshot.capture_fresh(|capture| {
+                let raw = Screenshot::capture_bound_rm2(
+                    || {
+                        checks.set(checks.get() + 1);
+                        anyhow::ensure!(checks.get() != failure_at, "replaced process");
+                        Ok(())
+                    },
+                    || Ok(maps.into()),
+                    |address, bytes| {
+                        if bytes.len() == 8 {
+                            bytes.copy_from_slice(&mmap_header(0, 0xa07002));
+                        } else {
+                            assert_eq!(address, 0x1008);
+                            pixel_reads.set(pixel_reads.get() + 1);
+                        }
+                        Ok(())
+                    },
+                )?;
+                capture.native_image(&raw)
+            });
+            assert!(result.is_err(), "boundary {failure_at}");
+            assert!(screenshot.data.is_empty() && screenshot.native_data.is_empty());
+            assert_eq!(pixel_reads.get(), usize::from(failure_at >= 5));
+        }
+    }
+
+    #[test]
+    fn maps_headers_and_short_reads_refuse_before_publication() {
+        let maps = "1000-a08000 rw-p 00000000 00:00 0\n";
+        for boundary in [2, 3] {
+            let mut samples = 0;
+            let result = Screenshot::capture_bound_rm2(
+                || Ok(()),
+                || {
+                    samples += 1;
+                    Ok(if samples == boundary {
+                        maps.replace("rw-p", "r--p")
+                    } else {
+                        maps.into()
+                    })
+                },
+                |_, bytes| {
+                    if bytes.len() == 8 {
+                        bytes.copy_from_slice(&mmap_header(0, 0xa07002));
+                    }
+                    Ok(())
+                },
+            );
+            assert!(result.unwrap_err().to_string().contains("mappings changed"));
+        }
+        for boundary in [2, 3] {
+            let mut headers = 0;
+            assert!(Screenshot::capture_bound_rm2(
+                || Ok(()),
+                || Ok(maps.into()),
+                |_, bytes| {
+                    if bytes.len() == 8 {
+                        headers += 1;
+                        bytes.copy_from_slice(&mmap_header(
+                            0,
+                            if headers == boundary {
+                                0xa07003
+                            } else {
+                                0xa07002
+                            },
+                        ));
+                    }
+                    Ok(())
+                }
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("header changed"));
+        }
+        assert!(Screenshot::capture_bound_rm2(
+            || Ok(()),
+            || Ok(maps.into()),
+            |_, bytes| {
+                if bytes.len() == 8 {
+                    bytes.copy_from_slice(&mmap_header(0, 0xa07002));
+                    Ok(())
+                } else {
+                    Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into())
+                }
+            }
+        )
+        .is_err());
+        assert_eq!(
+            Screenshot::capture_bound_rm2(
+                || Ok(()),
+                || Ok(maps.into()),
+                |_, bytes| {
+                    if bytes.len() == 8 {
+                        bytes.copy_from_slice(&mmap_header(0, 0xa07002));
+                    }
+                    Ok(())
+                }
+            )
+            .unwrap()
+            .len(),
+            1404 * 1872 * 4
+        );
+    }
+
+    #[test]
+    fn ambiguous_and_capped_discovery_retains_evidence_without_selecting() {
+        let maps = "1000-a09000 rw-p 00000000 00:00 0\n";
+        let error = Screenshot::scan_rm2_allocation(maps, 10, 16, |_| Ok(mmap_header(0, 0xa07002)))
+            .unwrap_err();
+        let evidence = error.downcast_ref::<DiscoveryEvidence>().unwrap();
+        assert_eq!(evidence.matches.len(), 2);
+        assert_eq!(
+            evidence
+                .matches
+                .iter()
+                .map(|m| m.address)
+                .collect::<Vec<_>>(),
+            [0x1000, 0x2000]
+        );
+        assert!(evidence
+            .matches
+            .iter()
+            .all(|m| m.vma == maps.trim() && m.header == mmap_header(0, 0xa07002)));
+        for (scan, matches) in [(1, 16), (10, 1)] {
+            let error = Screenshot::scan_rm2_allocation(maps, scan, matches, |_| {
+                Ok(mmap_header(0, 0xa07002))
+            })
+            .unwrap_err();
+            let evidence = error.downcast_ref::<DiscoveryEvidence>().unwrap();
+            assert!(evidence.failure.contains("cap exceeded"));
+            assert_eq!(
+                evidence.matches.len(),
+                1,
+                "A partial unique match must refuse"
+            );
+        }
+        assert!(
+            Screenshot::scan_rm2_allocation(&"x".repeat(MAPS_CAP + 1), 10, 16, |_| panic!(
+                "read after cap"
+            ))
+            .is_err()
+        );
+        assert!(
+            Screenshot::scan_rm2_allocation("bad mapping", 10, 16, |_| panic!(
+                "malformed map read"
+            ))
+            .is_err()
+        );
+        let mut pixel_reads = 0;
+        assert!(Screenshot::capture_bound_rm2(
+            || Ok(()),
+            || Ok(maps.into()),
+            |_, bytes| {
+                if bytes.len() == 8 {
+                    bytes.copy_from_slice(&mmap_header(0, 0xa07002));
+                } else {
+                    pixel_reads += 1;
+                }
+                Ok(())
+            }
+        )
+        .is_err());
+        assert_eq!(pixel_reads, 0, "Ambiguity must stop before pixel reading");
+        let malformed = "broken r--p 00000000 00:00 0 /file\n1000-a08000 rw-p 00000000 00:00 0\n";
+        assert!(
+            Screenshot::scan_rm2_allocation(malformed, 10, 16, |_| panic!(
+                "read after malformed map"
+            ))
+            .is_err()
+        );
+    }
+
     #[test]
     fn failed_fresh_capture_invalidates_both_previous_encoded_views() {
         let mut screenshot = Screenshot {
@@ -705,6 +1329,7 @@ mod tests {
             native_data: vec![4, 5, 6],
             device_model: DeviceModel::Remarkable2,
             rm2_bgra: true,
+            identity: None,
         };
         assert!(screenshot
             .capture_fresh(|_| anyhow::bail!("read failed"))
@@ -732,6 +1357,7 @@ mod tests {
                 native_data: vec![],
                 device_model,
                 rm2_bgra,
+                identity: None,
             };
             let len = screenshot.screen_width() as usize
                 * screenshot.screen_height() as usize
@@ -972,6 +1598,7 @@ mod tests {
             native_data: vec![],
             device_model: DeviceModel::Remarkable2,
             rm2_bgra: true,
+            identity: None,
         };
         let mut raw = vec![255; 1404 * 1872 * 4];
         raw[..4].copy_from_slice(&[17, 17, 17, 255]);
@@ -1029,6 +1656,7 @@ mod tests {
             native_data: png.into_inner(),
             device_model: DeviceModel::Remarkable2,
             rm2_bgra: true,
+            identity: None,
         };
         let tiles: Vec<_> = screenshot
             .detail_images_base64()

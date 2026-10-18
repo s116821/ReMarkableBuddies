@@ -25,6 +25,8 @@ pub mod screenshot;
 #[cfg(any(target_os = "linux", test))]
 mod status_readiness;
 pub mod status_style;
+#[cfg(all(target_os = "linux", feature = "development-input-diagnostics"))]
+mod tap_echo_raw;
 pub mod touch;
 #[cfg(any(target_os = "linux", test))]
 mod trigger_dismiss;

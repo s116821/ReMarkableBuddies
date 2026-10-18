@@ -69,6 +69,14 @@ Preserve discovered failure cases as regressions. Distinguish modeled behavior
 from hardware or vision proof; document specific limitations when a finding
 cannot be faithfully simulated. Unrelated changes need no artificial simulation.
 
+Keep simulator and SDK fixture improvements moving in parallel with bounded,
+authorized native experiments. Incomplete modeled coverage is not a prerequisite
+for exploratory hardware observations. Resolve concrete defects that threaten the
+exact experiment or its independent rollback first, then freeze and isolate its
+source, build and execution inputs from continuing fixture work. Preserve unfinished
+coverage and feed hardware findings back into the model. Report exploratory evidence
+as unqualified; required source, native, merge and release gates still apply.
+
 ## Tablet access
 
 For tablet compatibility, integration, or end-to-end Reader Buddy testing, when
@@ -115,3 +123,13 @@ interfaces, native/file-format mechanisms, injected extensions and UI automation
 Evaluate safety, maintenance and scope costs; do not silently install invasive
 dependencies or treat saved preferences as actual UI state. Record promising
 alternatives and unresolved limits rather than conducting an endless survey.
+
+## Documentation layout
+
+Put documentation under `docs/`, including reusable technical findings, research,
+reference and tool guides. Genuine OpenSpec change-specific artifacts stay in the
+standard `openspec/` structure in the repository that owns that workflow. Root
+README/CONTRIBUTING/AGENTS, license/security files and conventional tool-discovery
+files (GitHub templates, skills) are exceptions. Test data remains fixtures, not
+documentation by default. Preserve evidence/provenance and link canonical bodies;
+do not sweep unrelated historical archives or private task outputs.
