@@ -149,7 +149,7 @@ impl Ledger {
         expected: ExpectedHeads,
         mut turn: Turn,
         source: NormalizedTextSource,
-        selected: Option<Uuid>,
+        selected: Option<Turn>,
     ) -> Result<WriterPreparation> {
         source.validate()?;
         Self::validate_turn(&turn)?;
@@ -162,7 +162,12 @@ impl Ledger {
                 && turn.conversation == source.conversation,
             "invalid Writer preparation"
         );
-        let fingerprint = Self::fingerprint(&("prepare-writer-v1", &turn, &source, selected))?;
+        let fingerprint = Self::fingerprint(&(
+            "prepare-writer-v1",
+            &turn,
+            &source,
+            selected.as_ref().map(|draft| draft.id),
+        ))?;
         if let Some(prior) = self.replay(operation, &fingerprint)? {
             return Ok(WriterPreparation {
                 fresh: false,
@@ -200,14 +205,16 @@ impl Ledger {
             Record::NormalizedText(Box::new(source.clone())),
             vec![],
         )?);
-        if let Some(id) = selected {
+        if let Some(selected) = selected {
+            let id = selected.id;
             let current = self
                 .store
                 .value(Namespace::Conversation, id)?
                 .context("selected draft absent")?;
             let draft = self.writer_turn(id, turn.conversation)?;
             ensure!(
-                draft.role == Role::Assistant
+                draft == selected
+                    && draft.role == Role::Assistant
                     && draft.outcome == Outcome::Generated
                     && draft.sources == vec![source.id],
                 "invalid selected draft"

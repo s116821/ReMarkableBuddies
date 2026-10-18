@@ -363,6 +363,9 @@ pub fn run<E: LLMEngine>(
     let conversation = request.conversation();
     let operation = request.operation();
     let assembled = (|| -> Result<_> {
+        // Capture before every related read. Any append during assembly must
+        // make preparation stale instead of silently admitting unseen history.
+        let expected = ledger.expected(Namespace::Conversation, conversation)?;
         let (text, source, prior) = match request {
             Request::Generate {
                 request,
@@ -395,7 +398,6 @@ pub fn run<E: LLMEngine>(
             payload.len() <= 96 * 1024,
             "encoded Writer input exceeds bound"
         );
-        let expected = ledger.expected(Namespace::Conversation, conversation)?;
         Ok((text, source, prior, payload, expected))
     })();
     let (text, source, prior, payload, expected) = match assembled {
@@ -426,13 +428,7 @@ pub fn run<E: LLMEngine>(
         source.id,
     );
     user.correction_of = prior.as_ref().map(|t| t.id);
-    let prepared = ledger.prepare_writer(
-        operation,
-        expected,
-        user,
-        source.clone(),
-        prior.as_ref().map(|t| t.id),
-    );
+    let prepared = ledger.prepare_writer(operation, expected, user, source.clone(), prior);
     let Ok(prepared) = prepared else {
         return Report::refused(request, Failure::Storage);
     };

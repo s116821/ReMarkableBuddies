@@ -882,3 +882,56 @@ fn regeneration_with_changed_text_keeps_same_note_scope_and_advances_revision() 
     assert_ne!(notes[0].markdown, notes[1].markdown);
     assert_eq!(api.count(), 2);
 }
+
+#[test]
+fn changed_selected_draft_before_preparation_cannot_guard_new_text_and_send_old_text() {
+    use std::collections::BTreeMap;
+    let local = Local::new();
+    let (ledger, id) = local.ledger();
+    let req = request(id);
+    let api = Api::new(vec![reply("# Original\n\nx = 7 (page 1).")]);
+    let original = writer::run(&ledger, &mut api.model(), &req, &preference(), &mut || {
+        false
+    });
+    assert_eq!(original.status, Status::Generated);
+    let draft = original.draft.unwrap();
+    let refine = Request::Refine {
+        conversation: id,
+        operation: Uuid::new_v4(),
+        request: "Refine exactly the selected draft.".into(),
+        draft,
+    };
+    let mut changed = false;
+    let result = writer::run(
+        &ledger,
+        &mut api.model(),
+        &refine,
+        &preference(),
+        &mut || {
+            // The public cancellation poll is after assembly and before preparation.
+            // A valid imported successor changes only the selected draft, not root.
+            if !changed {
+                changed = true;
+                let mut e = ledger
+                    .store()
+                    .heads(Namespace::Conversation, draft)
+                    .unwrap()
+                    .pop()
+                    .unwrap();
+                e.parents = [e.revision_id].into();
+                e.revision_id = Uuid::new_v4();
+                e.operation_id = Uuid::new_v4();
+                e.payload["record"]["text"] = json!("# Imported new draft\n\nx = 8 (page 1).");
+                ledger.store().commit(vec![e], BTreeMap::new()).unwrap();
+            }
+            false
+        },
+    );
+    assert!(changed);
+    assert_eq!(result.status, Status::Refused);
+    assert_eq!(
+        api.count(),
+        1,
+        "stale cached draft must not dispatch a second provider request"
+    );
+}
