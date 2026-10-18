@@ -145,6 +145,7 @@ mod tests {
                 "api-key",
                 "base-url",
                 "debug-dump",
+                "export-note",
                 "log-level",
                 "model",
                 "personalization-operation",
@@ -156,6 +157,12 @@ mod tests {
         assert!(args.model.is_none());
         assert!(args.trigger_corner.is_none());
         assert!(!args.debug_dump);
+        assert!(!args.export_note);
+        assert!(
+            Args::try_parse_from(["reader-buddy", "--export-note"])
+                .unwrap()
+                .export_note
+        );
         for flag in [
             "--once",
             "--no-trigger",
@@ -218,6 +225,7 @@ mod tests {
                 vec!["--debug-dump"],
                 vec!["--log-level", "trace"],
                 vec!["--simulate", "scenario.json"],
+                vec!["--export-note"],
             ] {
                 assert!(Args::try_parse_from(
                     ["reader-buddy", "--personalization-operation", operation]
@@ -226,6 +234,27 @@ mod tests {
                 )
                 .is_err());
             }
+        }
+    }
+
+    #[test]
+    fn prepared_export_rejects_runtime_overrides_without_echoing_credentials() {
+        for extra in [
+            vec!["--api-key", "fixture-secret"],
+            vec!["--model", "model"],
+            vec!["--base-url", "url"],
+            vec!["--trigger-corner", "UR"],
+            vec!["--debug-dump"],
+            vec!["--log-level", "trace"],
+            vec!["--simulate", "scenario.json"],
+            vec!["--personalization-operation", "inspect"],
+        ] {
+            let error =
+                Args::try_parse_from(["reader-buddy", "--export-note"].into_iter().chain(extra))
+                    .err()
+                    .unwrap()
+                    .to_string();
+            assert!(!error.contains("fixture-secret"));
         }
     }
 
