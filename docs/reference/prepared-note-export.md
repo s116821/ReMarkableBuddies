@@ -105,7 +105,7 @@ fixture constructor is for local real-HTTP checks, never a production origin
 override. No live Mem account or tablet qualification follows from these fixtures.
 
 Source basis: the
-[central contract](https://github.com/s116821/ReMarkableBuddiesDocs/tree/docs/rem-23-prepared-note-export/openspec/changes/export-prepared-notes),
+[central contract](https://github.com/s116821/ReMarkableBuddiesDocs/blob/main/openspec/specs/prepared-note-export/spec.md),
 current implementation and focused HTTP/Store checks;
 Mem's [create](https://docs.mem.ai/api-reference/notes/create-note),
 [read](https://docs.mem.ai/api-reference/notes/read-note),
