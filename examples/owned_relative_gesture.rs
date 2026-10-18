@@ -274,7 +274,8 @@ mod owned {
         virtual_path: Vec<[i32; 2]>,
         native_path: Vec<[i32; 2]>,
     }
-    fn declared_paths(direction: &str) -> Result<(Vec<[i32; 2]>, Vec<[i32; 2]>)> {
+    type GesturePath = Vec<[i32; 2]>;
+    fn declared_paths(direction: &str) -> Result<(GesturePath, GesturePath)> {
         let (a, b) = match direction {
             "next" => (700i32, 110i32),
             "previous" => (100, 690),
@@ -1470,7 +1471,9 @@ mod owned {
                             break;
                         }
                         ensure!(
-                            n > 0 && n as usize % std::mem::size_of::<libc::input_event>() == 0,
+                            n > 0
+                                && (n as usize)
+                                    .is_multiple_of(std::mem::size_of::<libc::input_event>()),
                             "Malformed/partial input"
                         );
                         let retained = self.history.as_mut().context("No raw retention")?;
@@ -2052,6 +2055,12 @@ mod owned {
         }
         Ok(frame)
     }
+    struct WorkerEvidence<'a> {
+        responses: &'a mut File,
+        policy: &'a mut Policy,
+        transition: &'a mut bool,
+        primary: &'a mut Option<WorkerFault>,
+    }
     fn receive_worker(
         socket: &mut UnixStream,
         cutoff: i64,
@@ -2059,11 +2068,14 @@ mod owned {
         written_phase: bool,
         root: &Path,
         config: &Config,
-        responses: &mut File,
-        policy: &mut Policy,
-        transition: &mut bool,
-        primary: &mut Option<WorkerFault>,
+        evidence: WorkerEvidence<'_>,
     ) -> Result<WorkerFrame> {
+        let WorkerEvidence {
+            responses,
+            policy,
+            transition,
+            primary,
+        } = evidence;
         let frame: WorkerFrame = receive(socket, cutoff)?;
         let b = serde_json::to_vec(
             &serde_json::json!({"expected_step":step,"await_written":written_phase,"frame":frame}),
@@ -2380,10 +2392,12 @@ mod owned {
                     false,
                     root,
                     &c,
-                    &mut responses,
-                    &mut policy,
-                    &mut transition_unresolved,
-                    &mut worker_refusal,
+                    WorkerEvidence {
+                        responses: &mut responses,
+                        policy: &mut policy,
+                        transition: &mut transition_unresolved,
+                        primary: &mut worker_refusal,
+                    },
                 );
                 if received
                     .as_ref()
@@ -2469,10 +2483,12 @@ mod owned {
                     true,
                     root,
                     &c,
-                    &mut responses,
-                    &mut policy,
-                    &mut transition_unresolved,
-                    &mut worker_refusal,
+                    WorkerEvidence {
+                        responses: &mut responses,
+                        policy: &mut policy,
+                        transition: &mut transition_unresolved,
+                        primary: &mut worker_refusal,
+                    },
                 );
                 if received
                     .as_ref()
@@ -3767,10 +3783,12 @@ mod owned {
                 true,
                 &root,
                 &c,
-                &mut frames,
-                &mut p,
-                &mut transition,
-                &mut primary,
+                WorkerEvidence {
+                    responses: &mut frames,
+                    policy: &mut p,
+                    transition: &mut transition,
+                    primary: &mut primary,
+                },
             );
             assert!(result.unwrap_err().to_string().contains("DeclaredStraddle"));
             let retained: WorkerFault = serde_json::from_slice(
@@ -3846,10 +3864,12 @@ mod owned {
                 true,
                 &root,
                 &c,
-                &mut frames,
-                &mut p,
-                &mut transition,
-                &mut primary,
+                WorkerEvidence {
+                    responses: &mut frames,
+                    policy: &mut p,
+                    transition: &mut transition,
+                    primary: &mut primary,
+                },
             );
             let error = result.unwrap_err();
             let observation = error.downcast_ref::<ExpectedTerminal>().unwrap().0;

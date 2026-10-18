@@ -91,11 +91,14 @@ const ABS_MT_TRACKING_ID: u16 = 57;
 #[cfg(target_os = "linux")]
 const ABS_MT_PRESSURE: u16 = 58;
 
+#[cfg(all(target_os = "linux", test))]
+type BatchFixture = Box<dyn FnMut(&[InputEvent]) -> Result<()>>;
+
 #[cfg(target_os = "linux")]
 pub struct Touch {
     device: Option<Device>,
     #[cfg(test)]
-    batch_fixture: Option<Box<dyn FnMut(&[InputEvent]) -> Result<()>>>,
+    batch_fixture: Option<BatchFixture>,
     #[cfg(feature = "development-input-diagnostics")]
     diagnostic: Option<(i32, Box<dyn DiagnosticGestureEmitter>)>,
     device_model: DeviceModel,
