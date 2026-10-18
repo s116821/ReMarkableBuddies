@@ -3,6 +3,7 @@
 No service manager, SSH, payload load, tablet or native result is exercised.
 """
 import os
+import signal
 import importlib.util
 import json
 import hashlib
@@ -54,6 +55,105 @@ def fixture_guard_shadows(root, parent):
 
 
 class Actor(unittest.TestCase):
+    def test_full_actor_recovers_after_simulated_host_session_loss(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            (root / "clock").write_text("100\n")
+            (root / "cgroup.procs").write_text("42\n")
+            for name, data in (("guard.conf", "guard"), ("activation.conf", "activation"),
+                               ("unit-shadow.service", "unit"), ("vendor-shadow.conf", "vendor")):
+                (root / name).write_text(data)
+                (root / name).chmod(0o600)
+            overrides = '''
+parent="$root/dropins"; guard="$parent/guard"; activation="$parent/activation"
+log() { printf '%s\n' "$*" >> "$root/events"; }
+now() { cat "$root/clock"; }
+sleep() {
+    while ! test -e "$root/host.gone"; do command sleep 0.01; done
+    tick=$(cat "$root/clock"); printf '%s\n' "$((tick+10))" > "$root/clock"
+}
+validate_root() { deadline=460; }
+hashes() { :; }
+policy() { log "policy $1"; }
+same_process() { return 0; }
+sha256sum() { case "$1" in /proc/*/exe) printf '@EXEHASH@  exe\n';; *) command sha256sum "$@";; esac; }
+value() {
+    case "$1" in
+        MainPID) VALUE=42;;
+        ExecStart) if test -e "$activation"; then VALUE="$root/launch.sh"; else VALUE='path=/usr/bin/xochitl ; argv[]=/usr/bin/xochitl --system ;'; fi;;
+        DropInPaths) VALUE=/usr/lib/systemd/system/xochitl.service.d/xochitl-service-override.conf;;
+        ControlGroup) VALUE=/system.slice/xochitl.service;;
+        Job) VALUE='';; *) return 90;;
+    esac
+}
+query() {
+    log "query $*"
+    printf 'Result=success\n' > "$root/query.stdout"
+    if test "$1" = start && test -e "$activation"; then
+        printf '43 562\n' > "$root/attempt.identity"
+        : > "$root/candidate.live"
+    fi
+}
+stop_unit() { test -f "$guard"; log "$1"; }
+process_gone() { log "gone $*"; }
+cgroup_gone() { log cgroup-gone; }
+verify_stock() {
+    test ! -e "$guard"; test ! -e "$activation"; test ! -e "$unit_shadow"
+    log verified-stock; printf 'healthy\n' > "$root/stock.restored"
+}
+'''
+            prefix, boundary = (HERE / "actor.sh.in").read_text().split("# Main-only execution boundary", 1)
+            actor_text = render_fixture(root, prefix + overrides + "\n# Main-only execution boundary" + boundary)
+            (root / "actor.sh").write_text(actor_text)
+            (root / "actor.sh").chmod(0o600)
+            host_code = '''import pathlib,sys,time
+r=pathlib.Path(sys.argv[1])
+for name in ('guard.request','start.request'):
+    (r/name).write_text('1'*32)
+    (r/name).chmod(0o600)
+(r/'host.ready').touch()
+time.sleep(30)
+'''
+            import sys
+            host = subprocess.Popen([sys.executable, "-c", host_code, str(root)], start_new_session=True)
+            actor = None
+            try:
+                limit = time.monotonic() + 5
+                while not (root / "host.ready").exists() and time.monotonic() < limit:
+                    time.sleep(0.01)
+                self.assertTrue((root / "host.ready").exists())
+                with (root / "actor.stderr").open("w") as errors:
+                    actor = subprocess.Popen(["/bin/sh", str(root / "actor.sh")],
+                                             stdout=subprocess.DEVNULL, stderr=errors, start_new_session=True)
+                    limit = time.monotonic() + 5
+                    while not (root / "candidate.live").exists() and actor.poll() is None and time.monotonic() < limit:
+                        time.sleep(0.01)
+                    self.assertTrue((root / "candidate.live").exists(), (root / "actor.stderr").read_text())
+                    os.killpg(host.pid, signal.SIGTERM)
+                    self.assertEqual(host.wait(timeout=3), -signal.SIGTERM)
+                    self.assertIsNone(actor.poll(), "Actor must survive the simulated host session")
+                    (root / "host.gone").touch()
+                    self.assertEqual(actor.wait(timeout=5), 1)
+                self.assertTrue((root / "stock.restored").exists(), (root / "actor.stderr").read_text())
+                self.assertTrue((root / "diagnostic.failed").exists())
+                self.assertFalse((root / "recovery.failed").exists())
+                self.assertIn("phase=observe-first-render", (root / "diagnostic.outcome").read_text())
+                events = (root / "events").read_text().splitlines()
+                self.assertEqual(events.count("initial-stock-stop-under-guard"), 1)
+                self.assertEqual(events.count("candidate-stop-under-guard"), 1)
+                self.assertEqual(events.count("query start --no-block xochitl.service"), 2)
+                self.assertLess(events.index("candidate-stop-under-guard"), events.index("gone 43 562"))
+                self.assertLess(events.index("gone 43 562"), events.index("cgroup-gone"))
+                self.assertLess(events.index("cgroup-gone"), events.index("verified-stock"))
+                self.assertEqual(events.count("verified-stock"), 1)
+                self.assertFalse((root / "dropins").exists())
+            finally:
+                for process in (actor, host):
+                    if process is not None and process.poll() is None:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.wait(timeout=3)
+
     def test_minimal_busybox_od_failure_and_portable_actual_admission_boundary(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
