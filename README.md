@@ -675,40 +675,28 @@ acceptance criteria.
 
 ## Automated Releases
 
-This project uses [git-cliff](https://git-cliff.org/) for semantic calculation,
-[release-it](https://github.com/release-it/release-it) for tag creation, and
-[vergen-gitcl](https://docs.rs/vergen-gitcl/) for Git-derived binary versions.
-Git tags are the only application version authority; Cargo's fixed `0.0.0`
-package version is non-authoritative and the package is not published to a registry.
+The ordered pipeline runs scoped PR/path checks, lint/unit/tool qualification,
+then builds packages and exercises those retained artifacts. Only its final main
+release job creates the official annotated tag and publishes the already-tested
+bytes. Python Semantic Release supplies candidate/tag semantics; vergen-gitcl
+embeds the frozen identity. No project version is maintained in Cargo.toml.
 
-**Version Bump Rules**:
-- **Major**: scoped `!` syntax or a `BREAKING CHANGE:` footer, including 0.x to 1.0.0.
-- **Minor**: `feat(scope): ...`, including 0.x.
-- **Patch**: `fix`, `perf`, `refactor`, `build`, `ci`, `chore`, `test` or `revert` application changes, with a scope.
-- **None**: changes confined to the documentation paths in [release/cliff.toml](release/cliff.toml).
+Scoped feat increments minor; fix and supported maintenance types increment patch;
+explicit breaking syntax/footer increments major even at 0.x. REM-35 still holds
+premature 1.0. Documentation-only changes do not compile or release the application.
+Unknown, mixed, executable fixture and build/dependency paths remain relevant.
 
-The scoped PR title becomes the squash commit message. Application changes labeled
-`docs` or with unsupported types fail validation. Mixed code/docs and dependency or
-build changes are relevant. Documentation-only main pushes neither create tags nor
-compile the application, and their required PR checks still finish.
+Main pushes must have one first-parent commit and final exact merged-PR identity,
+including squash merges. Ambiguous batch/initial histories refuse. Failed earlier
+commits are never backfilled by a later success. Use Actions Re-run failed jobs to
+retain the successful build's exact artifact IDs and recover an interrupted draft.
+Only verified missing assets are uploaded, with no overwrite. Native compatibility
+and external-writer/platform immutability are separate qualifications.
 
-The release job serializes publication, refreshes all unreleased main history and
-tags each relevant merged application commit in order before building it. Each
-application merge gets its own tag; a newer documentation commit does not change its source SHA.
-Both tablet packages execute `--version` under target emulation before publication.
-`provenance.json` records their tag, SHA, version and archive checksums. Existing
-published tags remain intact; historical releases predate this verification contract.
-
-For recovery, rerun the failed Release job or use its **Run workflow** button on
-main (CLI: `gh workflow run release.yml --ref main`). It recovers incomplete managed
-tags from their exact source, without new version commits or tag replacement.
-Documentation pushes do not retry builds; the next application push also recovers
-pending work. Complete published releases are verified and skipped.
-
-Local/PR binaries report `dev.<git-description>` or `dev.unknown` if Git metadata is
-unavailable. Official builds reject missing/shallow history, dirty source, conflicting
-metadata overrides and tag/SHA mismatches. See [release testing](docs/release-workflow.md)
-for the public, isolated validation commands.
+Ordinary local builds report development/unavailable metadata; controlled CI
+candidates embed their frozen future version but are not published releases.
+See [release tools, evidence limits and recovery](release/README.md) and the linked
+central Docs contract for pins, local controls and coordinated delivery.
 
 ## Contributing
 
@@ -742,7 +730,7 @@ See LICENSE file for details.
 ## Acknowledgments
 
 - [awwaiid/ghostwriter](https://github.com/awwaiid/ghostwriter) - Core device interaction code
-- [git-cliff](https://git-cliff.org/) and [vergen](https://github.com/rustyhorde/vergen) - Semantic releases and Git build metadata
+- [Python Semantic Release](https://github.com/python-semantic-release/python-semantic-release) and [vergen](https://github.com/rustyhorde/vergen) - Semantic releases and Git build metadata
 - reMarkable community for documentation and tools
 - OpenAI for GPT vision capabilities
 

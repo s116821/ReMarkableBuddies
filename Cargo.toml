@@ -1,7 +1,6 @@
 [package]
 name = "remarkable-reader-buddy"
-# Cargo requires a package version; application versions come only from Git tags.
-version = "0.0.0"
+# Own version is intentionally omitted; release identity comes from Git history.
 publish = false
 edition = "2021"
 rust-version = "1.96"
@@ -11,9 +10,9 @@ repository = "https://github.com/s116821/ReMarkableBuddies"
 vergen-gitcl = { version = "=10.0.3", features = ["emit_and_set"] }
 
 [dependencies]
-remarkable-open-sdk = { git = "https://github.com/s116821/ReMarkableOpenSDK.git", rev = "f6b7dc8954ba9f5a284d56568765e05c38483924", default-features = false }
 tokio = { version = "1.28", features = ["full"] }
 ureq = { version = "3.0", features = ["json"] }
+reqwest = { version = "=0.13.4", default-features = false, features = ["json", "rustls", "hickory-dns"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 anyhow = "1.0"
@@ -28,6 +27,10 @@ env_logger = "0.11.6"
 log = "0.4.22"
 figment = { version = "0.10", features = ["toml", "env"] }
 toml = "0.8"
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+
+remarkable-open-sdk = { git = "https://github.com/s116821/ReMarkableOpenSDK", rev = "32b86e4fef04844cbf2ec31129bf029cc1d9899a", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.13"
@@ -41,7 +44,7 @@ path = "src/lib.rs"
 development-input-diagnostics = []
 
 [dev-dependencies]
-remarkable-open-sdk = { git = "https://github.com/s116821/ReMarkableOpenSDK.git", rev = "f6b7dc8954ba9f5a284d56568765e05c38483924", default-features = false, features = ["mock"] }
+remarkable-open-sdk = { git = "https://github.com/s116821/ReMarkableOpenSDK", rev = "32b86e4fef04844cbf2ec31129bf029cc1d9899a", default-features = false, features = ["mock"] }
 # Explicit native-evidence example only; not linked into the installed runtime.
 sha2 = "0.10"
 
