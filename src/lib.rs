@@ -10,6 +10,7 @@ pub mod simulator;
 pub mod storage;
 pub mod util;
 pub mod workflow;
+pub mod writer;
 
 // Re-export commonly used types
 pub use analysis::BoundingBox;

@@ -2,6 +2,7 @@
 pub mod capture_facts;
 mod export;
 mod types;
+mod writer;
 use crate::storage::{
     digest, Conflict, Envelope, Kind, Media, Namespace, ObjectRef, Store, Uuid, FORMAT, MAX_ITEMS,
 };
@@ -14,6 +15,7 @@ use std::{
     sync::Arc,
 };
 pub use types::*;
+pub use writer::*;
 
 pub struct Ledger {
     store: Arc<Store>,
@@ -67,7 +69,9 @@ impl Ledger {
         let envelope = Envelope {
             envelope_version: FORMAT,
             namespace,
-            domain_schema_version: if matches!(&record, Record::Export(e) if e.attempt.is_some()) {
+            domain_schema_version: if matches!(&record, Record::NormalizedText(_))
+                || matches!(&record, Record::Export(e) if e.attempt.is_some())
+            {
                 EXPORT_SCHEMA
             } else {
                 SCHEMA
@@ -93,8 +97,9 @@ impl Ledger {
         let record: Record = serde_json::from_value(envelope.payload.clone())?;
         ensure!(
             (envelope.domain_schema_version == EXPORT_SCHEMA)
-                == matches!(&record, Record::Export(e) if e.attempt.is_some()),
-            "export schema/shape mismatch"
+                == (matches!(&record, Record::NormalizedText(_))
+                    || matches!(&record, Record::Export(e) if e.attempt.is_some())),
+            "domain schema/shape mismatch"
         );
         let (id, namespace, conversation) = match &record {
             Record::Root(root) => (root.id, Namespace::Conversation, root.id),
@@ -113,6 +118,10 @@ impl Ledger {
                     "invalid historical capture identity"
                 );
                 (capture.id, Namespace::Source, capture.conversation)
+            }
+            Record::NormalizedText(source) => {
+                source.validate()?;
+                (source.id, Namespace::Source, source.conversation)
             }
             Record::Binding(binding) => {
                 Self::validate_observation(&binding.receipt.source)?;
@@ -367,6 +376,7 @@ impl Ledger {
             let conversation = match Self::decode(&e)? {
                 Record::Source(source) => source.conversation,
                 Record::Capture(capture) => capture.conversation,
+                Record::NormalizedText(source) => source.conversation,
                 _ => bail!("invalid existing source reference"),
             };
             ensure!(
@@ -1322,17 +1332,21 @@ impl Ledger {
             .collect::<BTreeSet<_>>();
         let mut sources = Vec::new();
         let mut captures = Vec::new();
+        let mut normalized_text = Vec::new();
         for record in records {
             match record {
                 Record::Source(source) if source_ids.contains(&source.id) => sources.push(source),
                 Record::Capture(capture) if source_ids.contains(&capture.id) => {
                     captures.push(*capture)
                 }
+                Record::NormalizedText(source) if source_ids.contains(&source.id) => {
+                    normalized_text.push(*source)
+                }
                 _ => {}
             }
         }
         ensure!(
-            sources.len() + captures.len() == source_ids.len(),
+            sources.len() + captures.len() + normalized_text.len() == source_ids.len(),
             "source reference absent"
         );
         let mut missing_media = Vec::new();
@@ -1372,6 +1386,7 @@ impl Ledger {
             turns,
             sources,
             captures,
+            normalized_text,
             missing_media,
             selection,
         })

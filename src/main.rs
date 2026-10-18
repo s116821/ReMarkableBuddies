@@ -35,11 +35,14 @@ pub struct Args {
     #[arg(long)]
     debug_dump: bool,
     /// Fixed local personalization maintenance; mutation JSON comes from bounded stdin
-    #[arg(long, value_enum, conflicts_with_all=["simulate","api_key","model","base_url","trigger_corner","debug_dump","log_level","export_note"])]
+    #[arg(long, value_enum, conflicts_with_all=["simulate","api_key","model","base_url","trigger_corner","debug_dump","log_level","export_note","writer_note"])]
     personalization_operation: Option<config::personalization::Operation>,
     /// Export prepared Markdown or reconcile a prior export; bounded JSON stdin
-    #[arg(long, conflicts_with_all=["simulate","api_key","model","base_url","trigger_corner","debug_dump","log_level","personalization_operation"])]
+    #[arg(long, conflicts_with_all=["simulate","api_key","model","base_url","trigger_corner","debug_dump","log_level","personalization_operation","writer_note"])]
     export_note: bool,
+    /// Generate/refine an unrendered Writer draft or prepare its export; bounded JSON stdin
+    #[arg(long, conflicts_with_all=["simulate","api_key","model","base_url","trigger_corner","debug_dump","log_level","personalization_operation","export_note"])]
+    writer_note: bool,
 }
 
 fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_logger::Builder {
@@ -60,6 +63,15 @@ fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_lo
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    if args.writer_note {
+        let report = remarkable_reader_buddy::writer::command::run(
+            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+            &mut std::io::stdin().lock(),
+        );
+        serde_json::to_writer(std::io::stdout().lock(), &report)?;
+        println!();
+        return Ok(());
+    }
     if args.export_note {
         let report = remarkable_reader_buddy::note_export::command::run(
             std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
@@ -150,7 +162,8 @@ mod tests {
                 "model",
                 "personalization-operation",
                 "simulate",
-                "trigger-corner"
+                "trigger-corner",
+                "writer-note"
             ]
         );
         let args = Args::try_parse_from(["reader-buddy"]).unwrap();
@@ -158,6 +171,12 @@ mod tests {
         assert!(args.trigger_corner.is_none());
         assert!(!args.debug_dump);
         assert!(!args.export_note);
+        assert!(!args.writer_note);
+        assert!(
+            Args::try_parse_from(["reader-buddy", "--writer-note"])
+                .unwrap()
+                .writer_note
+        );
         assert!(
             Args::try_parse_from(["reader-buddy", "--export-note"])
                 .unwrap()
@@ -226,6 +245,7 @@ mod tests {
                 vec!["--log-level", "trace"],
                 vec!["--simulate", "scenario.json"],
                 vec!["--export-note"],
+                vec!["--writer-note"],
             ] {
                 assert!(Args::try_parse_from(
                     ["reader-buddy", "--personalization-operation", operation]
@@ -248,6 +268,7 @@ mod tests {
             vec!["--log-level", "trace"],
             vec!["--simulate", "scenario.json"],
             vec!["--personalization-operation", "inspect"],
+            vec!["--writer-note"],
         ] {
             let error =
                 Args::try_parse_from(["reader-buddy", "--export-note"].into_iter().chain(extra))

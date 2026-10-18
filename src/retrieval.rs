@@ -23,7 +23,7 @@ pub struct SourceUnit {
     pub text: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct NormalizedDocument {
     pub document: Uuid,
