@@ -3945,8 +3945,18 @@ mod owned {
             let limits = live_limits();
             let (mut child, socket) = spawn_protocol_fixture(&root, &limits, "broken-report");
             assert!(socket.is_none());
+            // This test observes the fixture's terminal latch, not its startup
+            // fitting inside the production fence's 50 ms normal-exit grace.
+            // Await actual exit within the original fixture write deadline;
+            // fence still kills/reaps a hung child under the original recovery bound.
+            while now().unwrap() < limits.write {
+                if child.try_wait().unwrap().is_some() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
             let death = fence(&mut child, limits.recovery, true).unwrap();
-            assert!(death.success());
+            assert!(death.success(), "Protocol fixture exit: {death}");
             let fault: WorkerFault =
                 serde_json::from_slice(&bounded(&root.join("fault.log"), 4096).unwrap()).unwrap();
             assert_eq!(fault.step, 0);
