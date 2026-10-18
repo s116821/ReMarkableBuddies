@@ -100,6 +100,7 @@ impl Store {
                 fault: Fault::None,
             }),
             wake: Mutex::new(None),
+            export_active: std::sync::atomic::AtomicBool::new(false),
         };
         let index = store
             .recover(generation)
