@@ -35,8 +35,11 @@ pub struct Args {
     #[arg(long)]
     debug_dump: bool,
     /// Fixed local personalization maintenance; mutation JSON comes from bounded stdin
-    #[arg(long, value_enum, conflicts_with_all=["simulate","api_key","model","base_url","trigger_corner","debug_dump","log_level"])]
+    #[arg(long, value_enum, conflicts_with_all=["simulate","api_key","model","base_url","trigger_corner","debug_dump","log_level","export_note"])]
     personalization_operation: Option<config::personalization::Operation>,
+    /// Export prepared Markdown or reconcile a prior export; bounded JSON stdin
+    #[arg(long, conflicts_with_all=["simulate","api_key","model","base_url","trigger_corner","debug_dump","log_level","personalization_operation"])]
+    export_note: bool,
 }
 
 fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_logger::Builder {
@@ -57,6 +60,15 @@ fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_lo
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    if args.export_note {
+        let report = remarkable_reader_buddy::note_export::command::run(
+            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+            &mut std::io::stdin().lock(),
+        );
+        serde_json::to_writer(std::io::stdout().lock(), &report)?;
+        println!();
+        return Ok(());
+    }
     if let Some(operation) = args.personalization_operation {
         let report = config::personalization::run(
             operation,

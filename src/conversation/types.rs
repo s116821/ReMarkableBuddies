@@ -157,6 +157,9 @@ pub struct ExportAssociation {
     pub source_revision: String,
     pub operation: Uuid,
     pub outcome: Outcome,
+    /// Schema-two export attempt; absent in unchanged schema-one history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<super::ExportAttempt>,
 }
 impl ExportAssociation {
     pub fn title_marker(&self) -> String {
