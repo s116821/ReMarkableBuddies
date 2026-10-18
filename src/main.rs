@@ -34,6 +34,9 @@ pub struct Args {
     /// Save local page-image diagnostics (independent of logging)
     #[arg(long)]
     debug_dump: bool,
+    /// Fixed local personalization maintenance; mutation JSON comes from bounded stdin
+    #[arg(long, value_enum, conflicts_with_all=["simulate","api_key","model","base_url","trigger_corner","debug_dump","log_level"])]
+    personalization_operation: Option<config::personalization::Operation>,
 }
 
 fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_logger::Builder {
@@ -53,8 +56,17 @@ fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_lo
 }
 
 fn main() -> Result<()> {
-    dotenv().ok();
     let args = Args::parse();
+    if let Some(operation) = args.personalization_operation {
+        let report = config::personalization::run(
+            operation,
+            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+            &mut std::io::stdin().lock(),
+        );
+        report.write_to(&mut std::io::stdout().lock())?;
+        return Ok(());
+    }
+    dotenv().ok();
     if let Some(path) = args.simulate {
         logging(args.log_level, std::env::var("RUST_LOG").ok().as_deref()).init();
         remarkable_reader_buddy::simulator::run_file(&path)?;
@@ -123,6 +135,7 @@ mod tests {
                 "debug-dump",
                 "log-level",
                 "model",
+                "personalization-operation",
                 "simulate",
                 "trigger-corner"
             ]
@@ -173,6 +186,34 @@ mod tests {
             .unwrap()
             .to_string();
             assert!(!error.contains("fixture-secret"));
+        }
+    }
+
+    #[test]
+    fn personalization_rejects_runtime_overrides() {
+        for operation in ["inspect", "set", "disable", "clear"] {
+            assert!(Args::try_parse_from([
+                "reader-buddy",
+                "--personalization-operation",
+                operation
+            ])
+            .is_ok());
+            for extra in [
+                vec!["--api-key", "fixture-secret"],
+                vec!["--model", "model"],
+                vec!["--base-url", "url"],
+                vec!["--trigger-corner", "UR"],
+                vec!["--debug-dump"],
+                vec!["--log-level", "trace"],
+                vec!["--simulate", "scenario.json"],
+            ] {
+                assert!(Args::try_parse_from(
+                    ["reader-buddy", "--personalization-operation", operation]
+                        .into_iter()
+                        .chain(extra)
+                )
+                .is_err());
+            }
         }
     }
 

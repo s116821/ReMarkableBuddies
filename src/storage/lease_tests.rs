@@ -30,7 +30,7 @@ fn inherited_descriptor_does_not_extend_a_dropped_owners_lease() {
     let fixture = Fixture::new();
     let store = fixture.store();
     // Same open-file description as the fork-to-exec window of another thread.
-    let inherited = store._lease.try_clone().unwrap();
+    let inherited = store._lease.0.try_clone().unwrap();
     drop(store);
     let reopened = fixture.store();
     drop(inherited);

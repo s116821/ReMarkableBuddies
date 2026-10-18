@@ -3,6 +3,7 @@ pub mod drive;
 pub mod files;
 #[cfg(all(test, unix))]
 mod lease_tests;
+pub mod maintenance;
 pub mod migration;
 mod recovery;
 pub mod sync;
@@ -95,16 +96,18 @@ struct Inner {
 pub struct Store {
     pub paths: StorePaths,
     pub actor_id: Uuid,
-    _lease: File,
+    _lease: Lease,
     inner: Mutex<Inner>,
     wake: Mutex<Option<SyncSender<()>>>,
 }
 
-impl Drop for Store {
+struct Lease(File);
+
+impl Drop for Lease {
     fn drop(&mut self) {
         // A concurrent subprocess fork can temporarily inherit this descriptor.
         // Closing our copy alone would retain flock until that child execs.
-        let _ = self._lease.unlock();
+        let _ = self.0.unlock();
     }
 }
 
@@ -144,6 +147,7 @@ impl Store {
         lease
             .try_lock()
             .map_err(|_| anyhow::anyhow!("store is owned by another process"))?;
+        let lease = Lease(lease);
         for root in [&paths.cache, &paths.credentials] {
             if root.exists() && !root.join("owner.json").exists() {
                 ensure!(
