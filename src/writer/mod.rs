@@ -331,7 +331,14 @@ pub fn run<E: LLMEngine>(
                 conversation: *conversation,
                 correlation: *correlation,
                 effect_operation: *effect_operation,
-                source_scope: format!("normalized-source:{}", source.id),
+                source_scope: format!(
+                    "normalized-document:{}:{}",
+                    source.document.document,
+                    match source.selection {
+                        TextScope::Page { page } => format!("page:{page}"),
+                        TextScope::SuppliedNotebook => "supplied-notebook".into(),
+                    }
+                ),
                 source_revision: digest(&serde_json::to_vec(&(
                     &source,
                     draft.id,

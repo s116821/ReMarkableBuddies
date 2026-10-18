@@ -832,3 +832,53 @@ fn actual_one_shot_command_generates_then_prepares_without_model_credentials() {
     assert_eq!(exported["prepared_note"]["markdown"], "x = 7 (page 1).");
     assert_eq!(api.count(), 1);
 }
+
+#[test]
+fn regeneration_with_changed_text_keeps_same_note_scope_and_advances_revision() {
+    let local = Local::new();
+    let (ledger, id) = local.ledger();
+    let req = request(id);
+    let mut changed = req.clone();
+    if let Request::Generate {
+        operation,
+        document,
+        ..
+    } = &mut changed
+    {
+        *operation = Uuid::new_v4();
+        document.source_sha256 = "b".repeat(64);
+        document.units[0].text = "Updated equation: x = 8.".into();
+    }
+    let api = Api::new(vec![
+        reply("# Note\n\nx = 7 (page 1)."),
+        reply("# Note\n\nx = 8 (page 1)."),
+    ]);
+    let correlation = Uuid::new_v4();
+    let mut notes = Vec::new();
+    for input in [&req, &changed] {
+        let generated = writer::run(&ledger, &mut api.model(), input, &preference(), &mut || {
+            false
+        });
+        assert_eq!(generated.status, Status::Generated);
+        let prepare = Request::PrepareExport {
+            conversation: id,
+            draft: generated.draft.unwrap(),
+            correlation,
+            effect_operation: Uuid::new_v4(),
+        };
+        let artifact = writer::run(
+            &ledger,
+            &mut api.model(),
+            &prepare,
+            &preference(),
+            &mut || false,
+        );
+        assert_eq!(artifact.status, Status::PreparedExport);
+        notes.push(artifact.prepared_note.unwrap());
+    }
+    assert_eq!(notes[0].correlation, notes[1].correlation);
+    assert_eq!(notes[0].source_scope, notes[1].source_scope);
+    assert_ne!(notes[0].source_revision, notes[1].source_revision);
+    assert_ne!(notes[0].markdown, notes[1].markdown);
+    assert_eq!(api.count(), 2);
+}

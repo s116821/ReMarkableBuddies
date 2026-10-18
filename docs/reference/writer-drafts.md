@@ -95,6 +95,9 @@ to send it; `prepare-export` itself makes no provider or Mem call. Reuse the sta
 correlation for the same note, with a new effect UUID for a deliberate new export.
 The first draft heading becomes the note title and the exact remaining Markdown
 becomes its body. Source/draft digests stay in local association provenance.
+Export source scope is stable for the document identity and explicit page/notebook
+selection. Regenerating changed text under a new operation changes its revision,
+not that scope, so the same correlation can update the same exported note.
 
 ## Reports, cancellation and retries
 
