@@ -4,6 +4,7 @@ pub mod conversation;
 pub mod device;
 pub mod llm;
 mod measurement;
+pub mod note_export;
 pub mod retrieval;
 pub mod simulator;
 pub mod storage;
