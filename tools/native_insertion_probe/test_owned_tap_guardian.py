@@ -114,6 +114,25 @@ class GuardianFaultTests(unittest.TestCase):
                 self.assertTrue(directory.name.startswith("guardian-fixture-"))
                 shutil.rmtree(directory)
 
+    def test_read_only_slot_positions(self):
+        for mode in ("check-input-released", "check-input-x-unsupported"):
+            with self.subTest(mode=mode):
+                result = subprocess.run([str(self.fixture), mode], text=True,
+                                        capture_output=True, timeout=3)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                diagnostic = json.loads(result.stdout.splitlines()[0])
+                self.assertEqual(diagnostic["slot_positions"], {
+                    "x": [-2]*32 if mode.endswith("unsupported") else list(range(100, 132)),
+                    "y": list(range(200, 232)),
+                })
+                self.assertEqual(diagnostic["input_events"], 0)
+                self.assertEqual(diagnostic["event_reads"], 0)
+                self.assertFalse(diagnostic["tap_ready"])
+                directory = Path(result.stdout.strip().split("temporary=", 1)[1]).resolve()
+                self.assertEqual(directory.parent, Path("/tmp"))
+                self.assertTrue(directory.name.startswith("guardian-fixture-"))
+                shutil.rmtree(directory)
+
     def test_read_only_pidfd_self_check(self):
         result = subprocess.run([str(self.guardian), "--check-pidfd"], text=True,
                                 capture_output=True, timeout=3)

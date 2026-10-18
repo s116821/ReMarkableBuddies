@@ -383,6 +383,7 @@ int main(int argc,char **argv) {
             "BUILD_MODE_RM=\"public\"\nIMG_VERSION=\"3.28.0.172\"\n";
         if(!strncmp(mode,"check-input-",12)) {
             diagnostic_mode=1;assert(exclusive_record(&c,"release",actual,strlen(actual)));
+            for(int i=0;i<SLOT_COUNT;++i){kernel.x[i]=100+i;kernel.y[i]=200+i;}
             diagnostic_axis_failure=!strcmp(mode,"check-input-x-unsupported");
             if(!strcmp(mode,"check-input-contact"))kernel.id[1]=23;
             if(!strcmp(mode,"check-input-pen-touch"))pen_active=1;

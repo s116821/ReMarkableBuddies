@@ -794,7 +794,11 @@ static int check_input(void) {
     printf("],\"status\":\"%s\",\"selected_slot\":%d,\"tracking_ids\":[",
         good?"input-readonly-check-released":"input-readonly-check-refused",slot.value);
     for(int i=0;i<SLOT_COUNT;++i)printf("%s%d",i?",":"",ids?state.id[i]:-2);
-    printf("],\"axis_ranges\":{\"tracking\":[%d,%d],\"x\":[%d,%d],\"y\":[%d,%d]},"
+    printf("],\"slot_positions\":{\"x\":[");
+    for(int i=0;i<SLOT_COUNT;++i)printf("%s%d",i?",":"",xs?state.x[i]:-2);
+    printf("],\"y\":[");
+    for(int i=0;i<SLOT_COUNT;++i)printf("%s%d",i?",":"",ys?state.y[i]:-2);
+    printf("]},\"axis_ranges\":{\"tracking\":[%d,%d],\"x\":[%d,%d],\"y\":[%d,%d]},"
         "\"pen_keys\":{\"ioctl_return\":%d,\"errno\":%d,\"BTN_TOUCH\":%d,\"BTN_TOOL_PEN\":%d,\"BTN_TOOL_RUBBER\":%d},"
         "\"input_events\":0,\"event_reads\":0,\"tap_ready\":false}\n",
         tracking.minimum,tracking.maximum,x.minimum,x.maximum,y.minimum,y.maximum,
