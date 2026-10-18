@@ -1,10 +1,15 @@
 //! Local-first conversation ledger. Stored facts are not native effect permissions.
 pub mod capture_facts;
+mod historical_association;
 mod types;
 use crate::storage::{
     digest, Conflict, Envelope, Kind, Media, Namespace, ObjectRef, Store, Uuid, FORMAT, MAX_ITEMS,
 };
 use anyhow::{bail, ensure, Context, Result};
+pub use historical_association::{
+    HistoricalPageAssociation, HistoricalPageAssociationInspection,
+    HistoricalPageAssociationUnresolved,
+};
 use serde::Serialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -897,20 +902,12 @@ impl Ledger {
         )?;
         self.publish(operation, fingerprint, root, vec![updated], binding)
     }
-    /// Store a REM-25 association receipt. SDK qualification remains a caller gate;
-    /// no imported or synthetic record authorizes native reuse.
-    pub fn bind(
-        &self,
-        operation: Uuid,
-        expected_root: ExpectedHeads,
-        expected_binding: ExpectedHeads,
-        receipt: BindingReceipt,
-    ) -> Result<WriteResult> {
-        let fingerprint = Self::fingerprint(&("bind", &receipt))?;
-        if let Some(prior) = self.replay(operation, &fingerprint)? {
-            return Ok(prior);
-        }
-        ensure!(receipt.operation == operation, "receipt operation mismatch");
+    /// Share the delivered historical receipt rules between writes and reads.
+    fn validate_binding_receipt(receipt: &BindingReceipt) -> Result<()> {
+        ensure!(
+            !receipt.operation.is_nil() && !receipt.conversation.is_nil(),
+            "nil binding identity"
+        );
         Self::validate_observation(&receipt.source)?;
         ensure!(
             receipt.intended_target == Some(receipt.observed_page),
@@ -952,6 +949,24 @@ impl Ledger {
             permitted == receipt.observed_order,
             "insertion receipt order mismatch"
         );
+        Ok(())
+    }
+
+    /// Store a REM-25 association receipt. SDK qualification remains a caller gate;
+    /// no imported or synthetic record authorizes native reuse.
+    pub fn bind(
+        &self,
+        operation: Uuid,
+        expected_root: ExpectedHeads,
+        expected_binding: ExpectedHeads,
+        receipt: BindingReceipt,
+    ) -> Result<WriteResult> {
+        let fingerprint = Self::fingerprint(&("bind", &receipt))?;
+        if let Some(prior) = self.replay(operation, &fingerprint)? {
+            return Ok(prior);
+        }
+        ensure!(receipt.operation == operation, "receipt operation mismatch");
+        Self::validate_binding_receipt(&receipt)?;
         let id = Self::binding_id(receipt.observed_document, receipt.observed_page);
         let (_, mut root) = self.live_root(receipt.conversation, Some(&expected_root))?;
         ensure!(
@@ -1164,6 +1179,16 @@ impl Ledger {
                     || (e.namespace == Namespace::Conversation && e.record_id == conversation)
             },
         )?;
+        Self::inspect_snapshot(conversation, retained, &snapshot)
+    }
+
+    /// Validate a single already-cloned snapshot without another Store read.
+    fn inspect_snapshot(
+        conversation: Uuid,
+        retained: bool,
+        snapshot: &[Envelope],
+    ) -> Result<Vec<Record>> {
+        let identity = conversation.to_string();
         let roots: Vec<_> = snapshot
             .iter()
             .filter(|e| e.namespace == Namespace::Conversation && e.record_id == conversation)
@@ -1176,7 +1201,7 @@ impl Ledger {
             );
         }
         let mut records = Vec::new();
-        for e in &snapshot {
+        for e in snapshot {
             if e.kind == Kind::Tombstone {
                 continue;
             }

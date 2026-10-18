@@ -1,4 +1,5 @@
-//! Pure synthetic acquisition decisions, never native, Store or render authority.
+//! Synthetic acquisition decisions with read-only historical association input.
+//! Neither modeled nor stored inputs confer native, Store or render authority.
 //! Supplied projections are model inputs, not current-device qualification.
 use remarkable_open_sdk::{
     navigation::{LogicalDirection, NavigationReceipt},
@@ -16,9 +17,11 @@ pub enum AssociationState {
     Conflicted,
     Tombstoned,
     OtherConversation,
+    /// Stored inspection failed or lacks a complete historical association.
+    UnresolvedStored,
 }
 
-/// Observation-bound model projection; no Store implementation or receipt issuer.
+/// Observation-bound model input without current-state or effect authority.
 #[derive(Clone, Debug)]
 pub struct AssociationWitness {
     observation: PageObservation,
@@ -46,6 +49,44 @@ impl AssociationWitness {
 /// does not sandbox arbitrary trait implementations or qualify a Store adapter.
 pub trait ReadOnlyBindingLookup {
     fn lookup(&self, observation: &PageObservation, conversation: Uuid) -> AssociationWitness;
+}
+
+/// Reads the existing historical ledger, never opening a Store or minting
+/// relevant/current associations from saved data. Installed Reader is unchanged.
+pub struct HistoricalLedgerLookup<'a> {
+    ledger: &'a crate::conversation::Ledger,
+}
+impl<'a> HistoricalLedgerLookup<'a> {
+    pub fn new(ledger: &'a crate::conversation::Ledger) -> Self {
+        Self { ledger }
+    }
+}
+impl ReadOnlyBindingLookup for HistoricalLedgerLookup<'_> {
+    fn lookup(&self, observation: &PageObservation, conversation: Uuid) -> AssociationWitness {
+        use crate::conversation::{
+            HistoricalPageAssociationInspection as Inspection,
+            HistoricalPageAssociationUnresolved as Unresolved,
+        };
+        let page = observation.page();
+        let state = match self.ledger.inspect_page_association(
+            crate::storage::Uuid::from_bytes(*conversation.as_bytes()),
+            crate::storage::Uuid::from_bytes(*page.document.as_bytes()),
+            crate::storage::Uuid::from_bytes(*page.page.as_bytes()),
+        ) {
+            Ok(Inspection::HistoricalCandidate(_)) => AssociationState::Historical,
+            Ok(Inspection::Unresolved(
+                Unresolved::RootConflicted | Unresolved::BindingConflicted,
+            )) => AssociationState::Conflicted,
+            Ok(Inspection::Unresolved(
+                Unresolved::RootTombstoned | Unresolved::BindingTombstoned,
+            )) => AssociationState::Tombstoned,
+            Ok(Inspection::Unresolved(Unresolved::OtherConversation)) => {
+                AssociationState::OtherConversation
+            }
+            Ok(Inspection::Unresolved(_)) | Err(_) => AssociationState::UnresolvedStored,
+        };
+        AssociationWitness::modeled(observation.clone(), page, conversation, state)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -638,6 +679,7 @@ mod tests {
             AssociationState::Conflicted,
             AssociationState::Tombstoned,
             AssociationState::OtherConversation,
+            AssociationState::UnresolvedStored,
         ] {
             assert!(matches!(
                 begin_current(

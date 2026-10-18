@@ -6,6 +6,8 @@ mod lease_tests;
 pub mod maintenance;
 pub mod migration;
 mod recovery;
+#[cfg(test)]
+mod snapshot_status_tests;
 pub mod sync;
 pub mod types;
 use anyhow::{ensure, Context, Result};
@@ -425,6 +427,18 @@ impl Store {
         limit: usize,
         matches: impl Fn(&Envelope) -> bool,
     ) -> Result<Vec<Envelope>> {
+        self.snapshot_heads_matching_with_status(namespaces, limit, matches)
+            .map(|(_, records)| records)
+    }
+
+    /// Availability and cloned heads describe the same locked index snapshot.
+    /// Domain callers decide whether incomplete history permits their query.
+    pub(crate) fn snapshot_heads_matching_with_status(
+        &self,
+        namespaces: &[Namespace],
+        limit: usize,
+        matches: impl Fn(&Envelope) -> bool,
+    ) -> Result<(usize, Vec<Envelope>)> {
         ensure!((1..=MAX_ITEMS).contains(&limit), "invalid inspection bound");
         let inner = self
             .inner
@@ -467,7 +481,7 @@ impl Store {
                 result.push(record.clone());
             }
         }
-        Ok(result)
+        Ok((inner.index.unavailable, result))
     }
     /// Bounded retained revisions, including superseded facts; never a live lookup.
     pub fn snapshot_revisions_matching(

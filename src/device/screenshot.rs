@@ -161,8 +161,10 @@ fn owned_rgb32_plane<'a>(
         "Owned frame identity mismatch"
     );
     let layout: Vec<u32> = envelope[92..116]
-        .chunks_exact(4)
-        .map(|word| u32::from_le_bytes(word.try_into().expect("four-byte word")))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|word| u32::from_le_bytes(*word))
         .collect();
     anyhow::ensure!(
         layout == [1404, 1872, 32, 5616, 4, RM2_RGB32_BYTES as u32],
@@ -1078,7 +1080,7 @@ mod tests {
     fn owned_rgb32_pngs_preserve_asymmetric_channels_and_same_plane() {
         let (mut envelope, identity, nonce) = owned_frame_fixture();
         // A colored asymmetry catches BGRA/RGBA reversal; grayscale cannot.
-        for pixel in envelope[308..308 + RM2_RGB32_BYTES].chunks_exact_mut(4) {
+        for pixel in envelope[308..308 + RM2_RGB32_BYTES].as_chunks_mut::<4>().0 {
             pixel.copy_from_slice(&[9, 37, 211, 255]);
         }
         envelope[308..312].copy_from_slice(&[211, 37, 9, 255]);
