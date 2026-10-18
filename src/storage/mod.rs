@@ -101,6 +101,9 @@ pub struct Store {
     _lease: Lease,
     inner: Mutex<Inner>,
     wake: Mutex<Option<SyncSender<()>>>,
+    // Process-local export invocation exclusion, shared by every Ledger over
+    // this Store. Independent of the index mutex; no index lock spans HTTP.
+    pub(crate) export_active: std::sync::atomic::AtomicBool,
 }
 
 struct Lease(File);
@@ -197,6 +200,7 @@ impl Store {
                 fault: Fault::None,
             }),
             wake: Mutex::new(None),
+            export_active: std::sync::atomic::AtomicBool::new(false),
         };
         ensure!(
             files::json::<u32>(&store.generation(generation).join("format.json"), 64)? == FORMAT,

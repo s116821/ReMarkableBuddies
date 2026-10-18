@@ -1,11 +1,13 @@
 //! Local-first conversation ledger. Stored facts are not native effect permissions.
 pub mod capture_facts;
+mod export;
 mod historical_association;
 mod types;
 use crate::storage::{
     digest, Conflict, Envelope, Kind, Media, Namespace, ObjectRef, Store, Uuid, FORMAT, MAX_ITEMS,
 };
 use anyhow::{bail, ensure, Context, Result};
+pub use export::*;
 pub use historical_association::{
     HistoricalPageAssociation, HistoricalPageAssociationInspection,
     HistoricalPageAssociationUnresolved,
@@ -70,7 +72,11 @@ impl Ledger {
         let envelope = Envelope {
             envelope_version: FORMAT,
             namespace,
-            domain_schema_version: SCHEMA,
+            domain_schema_version: if matches!(&record, Record::Export(e) if e.attempt.is_some()) {
+                EXPORT_SCHEMA
+            } else {
+                SCHEMA
+            },
             record_id: id,
             revision_id: Uuid::new_v4(),
             parents: parents.0,
@@ -85,11 +91,16 @@ impl Ledger {
     }
     fn decode(envelope: &Envelope) -> Result<Record> {
         ensure!(
-            envelope.domain_schema_version == SCHEMA,
+            matches!(envelope.domain_schema_version, SCHEMA | EXPORT_SCHEMA),
             "unsupported conversation schema"
         );
         ensure!(envelope.kind == Kind::Value, "deleted conversation record");
         let record: Record = serde_json::from_value(envelope.payload.clone())?;
+        ensure!(
+            (envelope.domain_schema_version == EXPORT_SCHEMA)
+                == matches!(&record, Record::Export(e) if e.attempt.is_some()),
+            "export schema/shape mismatch"
+        );
         let (id, namespace, conversation) = match &record {
             Record::Root(root) => (root.id, Namespace::Conversation, root.id),
             Record::Turn(turn) => {
@@ -122,6 +133,7 @@ impl Ledger {
                 (binding.id, Namespace::Conversation, binding.conversation)
             }
             Record::Export(export) => {
+                export.validate_attempt()?;
                 (export.id, Namespace::ExportAssociation, export.conversation)
             }
             Record::Receipt(receipt) => {
@@ -226,9 +238,20 @@ impl Ledger {
         operation: Uuid,
         fingerprint: String,
         root: Envelope,
-        mut records: Vec<Envelope>,
+        records: Vec<Envelope>,
         binding: Option<Uuid>,
     ) -> Result<WriteResult> {
+        self.publish_observed(operation, fingerprint, root, records, binding)
+            .map(|(result, _)| result)
+    }
+    fn publish_observed(
+        &self,
+        operation: Uuid,
+        fingerprint: String,
+        root: Envelope,
+        mut records: Vec<Envelope>,
+        binding: Option<Uuid>,
+    ) -> Result<(WriteResult, bool)> {
         let ack = Acknowledgment {
             operation,
             conversation: root.record_id,
@@ -252,7 +275,10 @@ impl Ledger {
         // A committed-but-lost acknowledgment, or a concurrent identical winner,
         // is recognized before propagating stale-head/injected-error outcomes.
         if let Some(prior) = self.replay(operation, &fingerprint)? {
-            return Ok(prior);
+            // Ledger envelopes have fresh random revision/operation IDs above.
+            // Only this call's successful commit is Fresh; an error after a
+            // durable commit or a concurrent winner remains historical.
+            return Ok((prior, result.is_ok()));
         }
         result?;
         bail!("committed operation receipt unavailable")
@@ -1071,9 +1097,20 @@ impl Ledger {
         expected_export: ExpectedHeads,
         association: ExportAssociation,
     ) -> Result<WriteResult> {
+        self.associate_export_observed(operation, expected_root, expected_export, association)
+            .map(|(result, _)| result)
+    }
+    pub(crate) fn associate_export_observed(
+        &self,
+        operation: Uuid,
+        expected_root: ExpectedHeads,
+        expected_export: ExpectedHeads,
+        association: ExportAssociation,
+    ) -> Result<(WriteResult, bool)> {
+        association.validate_attempt()?;
         let fingerprint = Self::fingerprint(&("export", &association))?;
         if let Some(prior) = self.replay(operation, &fingerprint)? {
-            return Ok(prior);
+            return Ok((prior, false));
         }
         ensure!(
             association.operation == operation
@@ -1115,16 +1152,16 @@ impl Ledger {
             let Record::Export(old) = Self::decode(&prior)? else {
                 bail!("invalid export record");
             };
+            association.validate_successor(&old)?;
+        } else if association.attempt.is_some() {
             ensure!(
-                old.conversation == association.conversation
-                    && old.backend == association.backend
-                    && old.source_scope == association.source_scope
-                    && old.source_revision == association.source_revision,
-                "export immutable scope changed"
-            );
-            ensure!(
-                old.outcome == Outcome::Prepared || old.outcome == Outcome::ReconcileRequired,
-                "export already terminal"
+                association.outcome == Outcome::Prepared
+                    && association.native_note.is_none()
+                    && association
+                        .attempt
+                        .as_ref()
+                        .is_some_and(|a| a.action == ExportAction::Create),
+                "new export requires fresh prepared create"
             );
         }
         let binding = root.binding;
@@ -1142,7 +1179,7 @@ impl Ledger {
             Record::Root(root),
             vec![],
         )?;
-        self.publish(operation, fingerprint, root, vec![exported], binding)
+        self.publish_observed(operation, fingerprint, root, vec![exported], binding)
     }
     pub fn image(&self, source: Uuid) -> Result<Vec<u8>> {
         self.complete_store()?;
