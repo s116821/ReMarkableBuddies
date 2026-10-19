@@ -156,6 +156,7 @@ fn xml(bytes: &[u8], mut visit: impl FnMut(&[Node], Xml<'_>) -> Result<()>) -> R
     );
     let mut reader = NsReader::from_str(input);
     reader.config_mut().expand_empty_elements = true;
+    reader.config_mut().check_comments = true;
     let mut stack = Vec::new();
     let mut roots = 0;
     let mut declaration_seen = false;
@@ -455,7 +456,30 @@ fn body_text(bytes: &[u8]) -> Result<String> {
 fn block(name: &[u8]) -> bool {
     matches!(
         name,
-        b"p" | b"div"
+        b"article"
+            | b"aside"
+            | b"main"
+            | b"nav"
+            | b"header"
+            | b"footer"
+            | b"address"
+            | b"hgroup"
+            | b"hr"
+            | b"details"
+            | b"summary"
+            | b"dialog"
+            | b"fieldset"
+            | b"legend"
+            | b"form"
+            | b"menu"
+            | b"center"
+            | b"dir"
+            | b"caption"
+            | b"thead"
+            | b"tbody"
+            | b"tfoot"
+            | b"p"
+            | b"div"
             | b"h1"
             | b"h2"
             | b"h3"

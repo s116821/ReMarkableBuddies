@@ -337,3 +337,60 @@ fn aggregate_resource_text_and_spine_limits_refuse_without_partial_output() {
         assert!(error.to_string().contains(reason), "{error:#}");
     }
 }
+
+#[test]
+fn sectioning_blocks_and_horizontal_rules_preserve_searchable_words() {
+    let result = normalize(&ordinary("<article>alpha</article><article>beta</article><p>gamma<hr/>delta</p><span>over</span><span>lap</span>")).unwrap();
+    assert_eq!(
+        result.document.units[0].text,
+        "alpha\nbeta\ngamma\ndelta\noverlap"
+    );
+    let index = Index::build(result.document).unwrap();
+    for term in ["alpha", "beta", "gamma", "delta", "overlap"] {
+        assert!(
+            !index
+                .query(index.key(), term, 1, 4096, false)
+                .unwrap()
+                .passages
+                .is_empty(),
+            "{term}"
+        );
+    }
+    assert!(index
+        .query(index.key(), "over", 1, 4096, false)
+        .unwrap()
+        .passages
+        .is_empty());
+    for name in [
+        "aside", "main", "nav", "header", "footer", "address", "hgroup", "details", "summary",
+        "dialog", "fieldset", "legend", "form", "menu", "caption", "thead", "tbody", "tfoot",
+    ] {
+        let body = format!("<{name}>first</{name}><{name}>second</{name}>");
+        assert_eq!(
+            normalize(&ordinary(&body)).unwrap().document.units[0].text,
+            "first\nsecond",
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn malformed_comments_refuse_and_valid_comments_do_not_join_or_invent_text() {
+    assert!(normalize(&ordinary(
+        "<p>alpha</p><!-- invalid -- comment --><p>beta</p>"
+    ))
+    .is_err());
+    let result = normalize(&ordinary("<p>alpha</p><!-- valid comment --><p>beta</p>")).unwrap();
+    assert_eq!(result.document.units[0].text, "alpha\nbeta");
+    let index = Index::build(result.document).unwrap();
+    assert!(!index
+        .query(index.key(), "beta", 1, 4096, false)
+        .unwrap()
+        .passages
+        .is_empty());
+    assert!(index
+        .query(index.key(), "comment", 1, 4096, false)
+        .unwrap()
+        .passages
+        .is_empty());
+}
