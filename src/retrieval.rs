@@ -1,5 +1,6 @@
 //! Derived normalized-source retrieval; no extraction or native identity authority.
 pub mod disk;
+pub mod epub;
 use crate::storage::{digest, Uuid};
 use anyhow::{ensure, Result};
 use serde::{Deserialize, Serialize};
