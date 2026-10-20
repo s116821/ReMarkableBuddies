@@ -13,6 +13,11 @@ use std::time::Duration;
 #[command(author, version = env!("READER_BUDDY_VERSION"))]
 #[command(about = "ReMarkable Reader Buddy - AI-powered reading assistant for reMarkable tablets")]
 pub struct Args {
+    /// Private saved model/endpoint editing; never provider/runtime activation
+    #[arg(long, value_enum, conflicts_with_all = ["simulate", "inspect_owned_data", "api_key", "model", "base_url", "trigger_corner", "log_level", "debug_dump", "memory_operation", "memory_input", "sync_mode_operation", "sync_mode_input", "archive_operation", "archive_input", "personalization_operation", "export_note", "configuration_operation", "basic_settings_operation", "basic_settings_input", "restore_operation", "restore_input"])]
+    model_settings_operation: Option<config::model_settings::Operation>,
+    #[arg(long, value_name = "INPUT", requires = "model_settings_operation")]
+    model_settings_input: Option<std::path::PathBuf>,
     /// Conditional ordinary owned restore; never selected/device/runtime activation
     #[arg(long, value_enum, requires = "restore_input", conflicts_with_all = ["simulate", "inspect_owned_data", "api_key", "model", "base_url", "trigger_corner", "log_level", "debug_dump", "memory_operation", "memory_input", "sync_mode_operation", "sync_mode_input", "archive_operation", "archive_input", "personalization_operation", "export_note", "configuration_operation", "basic_settings_operation", "basic_settings_input"])]
     restore_operation: Option<remarkable_reader_buddy::restore_maintenance::Operation>,
@@ -101,6 +106,27 @@ fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_lo
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    if let Some(operation) = args.model_settings_operation {
+        let report = if operation == config::model_settings::Operation::Inspect {
+            if args.model_settings_input.is_some() {
+                config::model_settings::invalid_input(operation)
+            } else {
+                config::model_settings::inspect(
+                    std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+                )
+            }
+        } else if args.model_settings_input.as_deref() == Some(std::path::Path::new("-")) {
+            config::model_settings::run_stdin(
+                operation,
+                std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+                &mut std::io::stdin().lock(),
+            )
+        } else {
+            config::model_settings::unsupported_input(operation)
+        };
+        report.write_to(&mut std::io::stdout().lock())?;
+        return Ok(());
+    }
     if let Some(operation) = args.restore_operation {
         let report = remarkable_reader_buddy::restore_maintenance::run(
             operation,
@@ -292,6 +318,8 @@ mod tests {
                 "memory-input",
                 "memory-operation",
                 "model",
+                "model-settings-input",
+                "model-settings-operation",
                 "personalization-operation",
                 "restore-input",
                 "restore-operation",
