@@ -1,6 +1,10 @@
 //! Versioned local persistence, independent of Reader/Writer domain semantics.
 pub mod drive;
 pub mod files;
+pub mod inspection;
+#[cfg(all(test, unix))]
+mod lease_tests;
+pub mod maintenance;
 pub mod migration;
 mod recovery;
 #[cfg(test)]
@@ -9,7 +13,7 @@ pub mod selection;
 pub mod sync;
 pub mod types;
 use anyhow::{ensure, Context, Result};
-pub use recovery::BackupInspection;
+pub use recovery::{ArchivedSelectedSnapshot, BackupInspection};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -100,9 +104,22 @@ struct Inner {
 pub struct Store {
     pub paths: StorePaths,
     pub actor_id: Uuid,
-    _lease: File,
+    _lease: Lease,
     inner: Mutex<Inner>,
     wake: Mutex<Option<SyncSender<()>>>,
+    // Process-local export invocation exclusion, shared by every Ledger over
+    // this Store. Independent of the index mutex; no index lock spans HTTP.
+    pub(crate) export_active: std::sync::atomic::AtomicBool,
+}
+
+struct Lease(File);
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        // A concurrent subprocess fork can temporarily inherit this descriptor.
+        // Closing our copy alone would retain flock until that child execs.
+        let _ = self.0.unlock();
+    }
 }
 
 pub(crate) struct LegacySyncLease(Arc<Store>);
@@ -125,14 +142,6 @@ impl Drop for LegacyPublisherLease {
         }
     }
 }
-impl Drop for Store {
-    fn drop(&mut self) {
-        // A concurrent subprocess fork can temporarily inherit this descriptor.
-        // Closing our copy alone would retain flock until that child execs.
-        let _ = self._lease.unlock();
-    }
-}
-
 impl Store {
     pub(crate) fn legacy_publisher_lease(self: &Arc<Self>) -> Result<LegacyPublisherLease> {
         // Preserve the domain lease while adding publisher-only lifetime accounting.
@@ -204,6 +213,7 @@ impl Store {
         lease
             .try_lock()
             .map_err(|_| anyhow::anyhow!("store is owned by another process"))?;
+        let lease = Lease(lease);
         for root in [&paths.cache, &paths.credentials] {
             if root.exists() && !root.join("owner.json").exists() {
                 ensure!(
@@ -254,6 +264,7 @@ impl Store {
                 legacy_publisher_handles: 0,
             }),
             wake: Mutex::new(None),
+            export_active: std::sync::atomic::AtomicBool::new(false),
         };
         selection::validate_generation(&store.generation(generation), store.actor_id, generation)?;
         for directory in [
@@ -261,6 +272,7 @@ impl Store {
             store.paths.credentials.clone(),
             store.paths.data.join("sync"),
             store.paths.data.join("sync/incoming"),
+            store.paths.data.join("sync/selected-outbox"),
             store.generation(generation),
             store.generation(generation).join("objects"),
             store.generation(generation).join("commits"),
