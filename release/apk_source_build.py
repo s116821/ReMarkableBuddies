@@ -1,5 +1,5 @@
 """Actual developer source-build admission. No external artifacts or release writes."""
-import hashlib,json,os,re,shutil,subprocess,tomllib,threading,time,queue
+import hashlib,json,os,re,shutil,stat,subprocess,tomllib,threading,time,queue
 from pathlib import Path
 from apk_contract import REPOSITORY,SDK_REPOSITORY,TARGETS,Refusal,require,stable
 from process_guard import OwnedProcess
@@ -161,6 +161,20 @@ def source_identity(repo,tag):
  require(git(repo,'rev-parse',f'refs/tags/{tag}^{{commit}}')==head,'tag/source mismatch')
  return dict(repository=REPOSITORY,tag=tag,sha=head,epoch=int(git(repo,'show','-s','--format=%ct',head)))
 
+def clean_sdk_checkout(root,fragment):
+ root=root.resolve()
+ require(Path(git(root,'rev-parse','--show-toplevel')).resolve()==root,'actual SDK checkout root')
+ require(git(root,'rev-parse','HEAD')==fragment,'clean actual SDK checkout')
+ require(not git(root,'ls-files','--','.cargo-ok'),'tracked SDK completion marker')
+ def marker_identity():
+  try: info=(root/'.cargo-ok').lstat()
+  except FileNotFoundError:return None
+  require(stat.S_ISREG(info.st_mode) and info.st_nlink==1 and info.st_size==0 and not getattr(info,'st_file_attributes',0)&0x400,'invalid SDK completion marker')
+  return (info.st_dev,info.st_ino,info.st_mode,info.st_nlink,info.st_size,info.st_mtime_ns,info.st_ctime_ns)
+ before=marker_identity()
+ require(not git(root,'status','--porcelain=v1','--untracked-files=all','--','.',':(top,exclude,literal).cargo-ok'),'clean actual SDK checkout')
+ require(marker_identity()==before,'SDK completion marker changed')
+
 def cargo_identity(repo,target,sdk_tag=None,private_observations=None):
  data=json.loads(run(['cargo','metadata','--locked','--format-version','1','--filter-platform',target],repo,stdout_limit=16*1024*1024,combined_limit=None))
  if private_observations is not None: private_observations.append(data)
@@ -182,7 +196,7 @@ def cargo_identity(repo,target,sdk_tag=None,private_observations=None):
   fragment=source.rsplit('#',1)[-1]
   require(re.fullmatch('[0-9a-f]{40}',fragment),'resolved SDK source')
   manifest=Path(package['manifest_path']);root=manifest.parent
-  require(git(root,'rev-parse','HEAD')==fragment and not git(root,'status','--porcelain','--untracked-files=normal'),'clean actual SDK checkout')
+  clean_sdk_checkout(root,fragment)
   sdk=dict(ref_kind='commit-pinned',repository=SDK_REPOSITORY,sha=fragment,tag=None,manifest_sha256=sha(manifest))
   if sdk_tag:
    require(stable(sdk_tag) and git(root,'rev-parse',f'refs/tags/{sdk_tag}^{{commit}}')==fragment,'actual SDK tag resolution')
