@@ -6,18 +6,20 @@ not permission to stage a remote file or call a running Buddy service. Existing
 absolute-file Forget remains compatible and has its older DTO/receipt behavior.
 
 The full versioned wire, canonical hash recipe, golden vector and phase/status
-matrix are in the central [prepared-forget contract](https://github.com/s116821/ReMarkableBuddiesDocs/blob/64ff69baf2e066f203eadd587cb2d3864173b1a6/openspec/changes/prepare-conditional-memory-forget/contract.md).
+matrix are in the central [prepared-forget contract](https://github.com/s116821/ReMarkableBuddiesDocs/blob/7172fe318376658e07eb85d4eed892371400dfe1/openspec/changes/archive/2026-10-20-prepare-conditional-memory-forget/contract.md).
 No component-local OpenSpec copy is required.
 
 ## Three separate operations
 
-Run one fixed command with an explicit absolute config, supply one UTF8 JSON
+Set `REMARKABLE_BUDDIES_CONFIG` to the explicit absolute configuration-file path
+in the child process environment. This is the existing configuration selector;
+there is no `--config` option. Run one fixed command below, supply one UTF8 JSON
 request on stdin, close stdin and consume one report-v1:
 
 ```text
-reader-buddy --memory-operation prepare-forget --memory-input - --config ABSOLUTE_CONFIG
-reader-buddy --memory-operation forget --memory-input - --config ABSOLUTE_CONFIG
-reader-buddy --memory-operation forget-receipt --memory-input - --config ABSOLUTE_CONFIG
+reader-buddy --memory-operation prepare-forget --memory-input -
+reader-buddy --memory-operation forget --memory-input -
+reader-buddy --memory-operation forget-receipt --memory-input -
 ```
 
 `prepare-forget` takes `{prepared_version:1,operation:UUID,key:KEY}`. Generate one
