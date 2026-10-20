@@ -78,10 +78,6 @@ jobs:
     name: ${{ needs.title.outputs.body_only == 'true' && 'PR metadata (no source checks)' || 'Checks' }}
     runs-on: ubuntu-latest
     steps:
-      - name: Controlled metadata failure witness (temporary)
-        run: |
-          echo 'Expected owned metadata-admission failure witness; remove before final source validation.'
-          exit 19
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
