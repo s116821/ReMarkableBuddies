@@ -151,6 +151,33 @@ enum Input {
     InitializeSelection(super::selected::InitializeSelection),
     RegisterSelection(super::selected::RegisterSelection),
 }
+
+// New stdin wire only. Preserve the existing file Key decoder's compatibility.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InspectKeyWire {
+    profile: Uuid,
+    scope: InspectScopeWire,
+    fact: Uuid,
+}
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+enum InspectScopeWire {
+    Global {},
+    Document { document: Uuid },
+}
+impl From<InspectKeyWire> for Key {
+    fn from(wire: InspectKeyWire) -> Self {
+        Self {
+            profile: wire.profile,
+            scope: match wire.scope {
+                InspectScopeWire::Global {} => super::Scope::Global,
+                InspectScopeWire::Document { document } => super::Scope::Document { document },
+            },
+            fact: wire.fact,
+        }
+    }
+}
 impl Input {
     fn read(
         operation: Operation,
@@ -176,6 +203,7 @@ impl Input {
         input.validated(profile, selection)
     }
     fn read_stdin(
+        operation: Operation,
         input: &mut impl Read,
         profile: Uuid,
         selection: Option<&super::catalog::Identity>,
@@ -188,7 +216,14 @@ impl Input {
             bytes.len() <= MAX_RECORD,
             "memory query input exceeds bound"
         );
-        Self::Query(serde_json::from_slice(&bytes)?).validated(profile, selection)
+        let input = match operation {
+            Operation::Query => Self::Query(serde_json::from_slice(&bytes)?),
+            Operation::Inspect => {
+                Self::Inspect(serde_json::from_slice::<InspectKeyWire>(&bytes)?.into())
+            }
+            _ => anyhow::bail!("unsupported memory stdin operation"),
+        };
+        input.validated(profile, selection)
     }
     fn validated(
         self,
@@ -330,17 +365,17 @@ pub fn run(operation: Operation, input_path: &Path, config_path: Option<PathBuf>
     })
 }
 
-/// Query-only stdin transport. The caller supplies EOF and owns its I/O deadline.
+/// Read-only stdin transport. The caller supplies EOF and owns its I/O deadline.
 pub fn run_stdin(
     operation: Operation,
     input: &mut impl Read,
     config_path: Option<PathBuf>,
 ) -> Report {
-    if operation != Operation::Query {
+    if !matches!(operation, Operation::Query | Operation::Inspect) {
         return Report::new(operation, ReportStatus::Unsupported);
     }
     run_with_input(operation, config_path, |profile, selection| {
-        Input::read_stdin(input, profile, selection)
+        Input::read_stdin(operation, input, profile, selection)
     })
 }
 
@@ -488,6 +523,55 @@ fn store_open_status(error: &anyhow::Error) -> ReportStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn inspect_stdin_is_strict_at_both_levels_then_reuses_key_validation() {
+        let profile = Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap();
+        let fact = Uuid::parse_str("22222222-2222-4222-8222-222222222222").unwrap();
+        let global = serde_json::json!({"profile":profile,"scope":{"kind":"global"},"fact":fact});
+        let read =
+            |bytes: &[u8]| Input::read_stdin(Operation::Inspect, &mut &bytes[..], profile, None);
+        let Input::Inspect(key) = read(&serde_json::to_vec(&global).unwrap()).unwrap() else {
+            panic!("wrong inspection input")
+        };
+        assert_eq!(
+            key.record_id().unwrap().to_string(),
+            "aa0b8ad5-2bb5-5515-84d6-668fb768d199"
+        );
+        let mut document = global.clone();
+        document["scope"] = serde_json::json!({"kind":"document","document":Uuid::new_v4()});
+        assert!(read(&serde_json::to_vec(&document).unwrap()).is_ok());
+        for value in [
+            serde_json::json!({"profile":profile,"scope":{"kind":"global","unknown":1},"fact":fact}),
+            serde_json::json!({"profile":profile,"scope":{"kind":"document","document":Uuid::new_v4(),"unknown":1},"fact":fact}),
+            serde_json::json!({"profile":profile,"scope":{"kind":"document","document":Uuid::nil()},"fact":fact}),
+            serde_json::json!({"profile":profile,"scope":{"kind":"unknown"},"fact":fact}),
+            serde_json::json!({"profile":Uuid::new_v4(),"scope":{"kind":"global"},"fact":fact}),
+            serde_json::json!({"profile":Uuid::nil(),"scope":{"kind":"global"},"fact":fact}),
+            serde_json::json!({"profile":profile,"scope":{"kind":"global"},"fact":Uuid::nil()}),
+            serde_json::json!({"profile":profile,"scope":{"kind":"global"},"fact":fact,"unknown":1}),
+        ] {
+            assert!(read(&serde_json::to_vec(&value).unwrap()).is_err());
+        }
+        for raw in [
+            format!(
+                r#"{{"profile":"{profile}","profile":"{profile}","scope":{{"kind":"global"}},"fact":"{fact}"}}"#
+            ),
+            format!(
+                r#"{{"profile":"{profile}","scope":{{"kind":"global","kind":"global"}},"fact":"{fact}"}}"#
+            ),
+            format!(
+                r#"{{"profile":"{profile}","scope":{{"kind":"document","document":"{fact}","document":"{fact}"}},"fact":"{fact}"}}"#
+            ),
+            format!(
+                r#"{{"profile":"{profile}","scope":{{"kind":"global"}},"fact":"{fact}","fact":"{fact}"}}"#
+            ),
+        ] {
+            assert!(read(raw.as_bytes()).is_err(), "duplicate accepted");
+        }
+        // Retain the existing public/file Key decoder behavior, not just valid parity.
+        let legacy = serde_json::json!({"profile":profile,"scope":{"kind":"global","unknown":1},"fact":fact});
+        assert!(serde_json::from_value::<Key>(legacy).is_ok());
+    }
     #[test]
     fn report_holds_ordinary_mode_through_actual_output_then_releases() {
         use storage::sync::mode::SyncModeChoice;
@@ -649,7 +733,7 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
-    fn stdin_query_read_error_and_nonquery_refusal_do_not_admit_store() {
+    fn stdin_read_error_and_mutation_refusal_do_not_admit_store() {
         struct MustNotRead;
         impl Read for MustNotRead {
             fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
@@ -657,7 +741,6 @@ mod tests {
             }
         }
         for operation in [
-            Operation::Inspect,
             Operation::Put,
             Operation::Forget,
             Operation::InitializeAggregate,
@@ -692,11 +775,13 @@ mod tests {
         };
         let config_path = root.join("config.json");
         std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
-        let report = run_stdin(Operation::Query, &mut FailedRead, Some(config_path));
-        assert_eq!(report.status, ReportStatus::InvalidInput);
-        assert!(!String::from_utf8(report.encoded().unwrap())
-            .unwrap()
-            .contains("PRIVATE_STDIN_READ_ERROR"));
+        for operation in [Operation::Query, Operation::Inspect] {
+            let report = run_stdin(operation, &mut FailedRead, Some(config_path.clone()));
+            assert_eq!(report.status, ReportStatus::InvalidInput);
+            assert!(!String::from_utf8(report.encoded().unwrap())
+                .unwrap()
+                .contains("PRIVATE_STDIN_READ_ERROR"));
+        }
         assert!(!paths.data.exists() && !paths.cache.exists() && !paths.credentials.exists());
         assert_eq!(root.parent(), Some(std::env::temp_dir().as_path()));
         std::fs::remove_dir_all(root).unwrap();
@@ -722,7 +807,7 @@ mod tests {
                 Ok(())
             }
         }
-        for mode in 0..5 {
+        for mode in 0..8 {
             let root = std::env::temp_dir().join(format!("memory-handoff-{}", Uuid::new_v4()));
             let paths = storage::StorePaths {
                 data: root.join("data"),
@@ -799,8 +884,19 @@ mod tests {
                 },
                 ..Config::default()
             };
-            let (operation, input) = if mode == 1 {
-                (Operation::Inspect, Input::Inspect(fact.key.clone()))
+            let (operation, input) = if mode == 1 || mode >= 5 {
+                let input = if mode >= 5 {
+                    Input::read_stdin(
+                        Operation::Inspect,
+                        &mut serde_json::to_vec(&fact.key).unwrap().as_slice(),
+                        profile,
+                        config.memory.selection.as_ref(),
+                    )
+                    .unwrap()
+                } else {
+                    Input::Inspect(fact.key.clone())
+                };
+                (Operation::Inspect, input)
             } else {
                 (
                     Operation::Query,
@@ -823,9 +919,9 @@ mod tests {
                         registration,
                     })
                     .unwrap();
-            } else if mode == 3 {
+            } else if mode == 3 || mode == 7 {
                 report.data = Some(serde_json::json!({"forged":"private-forged-value"}));
-            } else if mode != 4 {
+            } else if mode != 4 && mode != 5 {
                 let expected = memory
                     .inspect(&fact.key)
                     .unwrap()
@@ -843,7 +939,7 @@ mod tests {
                     .unwrap();
             }
             let mut output = Vec::new();
-            if mode == 4 {
+            if mode == 4 || mode == 5 {
                 let expected = report.encoded().unwrap();
                 let mut writer = PrefixFailure(Vec::new(), 0);
                 assert!(report.write_to(&mut writer).is_err());

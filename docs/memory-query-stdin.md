@@ -42,9 +42,11 @@ JSON, invalid fields, read failure and oversize return sanitized `invalid-input`
 before Store admission. Ordinary missing configuration/profile can return
 `unavailable` before reading stdin. No input or I/O error text is echoed.
 
-Only `query` accepts the marker. Other operations return `unsupported` before
-reading stdin, loading configuration or opening Store. Their regular-file
-interfaces are unchanged; stdin is not mutation/setup authority.
+This guide describes query. `inspect` also accepts the marker through the strict
+[single-fact inspection wire](memory-fact-inspection-stdin.md). Mutation/setup
+operations return `unsupported` before reading stdin, loading configuration or
+opening Store. Their regular-file interfaces are unchanged; stdin is not
+mutation/setup authority.
 
 ## Response and currentness
 
