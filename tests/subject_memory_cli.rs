@@ -1724,3 +1724,75 @@ fn actual_prepared_forget_ambiguous_local_receipt_is_unresolved_without_republic
     let store = Store::open(f.paths()).unwrap();
     assert_eq!(store.manifests().unwrap(), before);
 }
+#[test]
+fn recorded_prepared_corpus_preserves_original_bytes_and_logical_acknowledgements() {
+    let corpus: Value = serde_json::from_str(include_str!(
+        "fixtures/prepared-forget-77e92306-corpus.json"
+    ))
+    .unwrap();
+    let manifest_raw = corpus["manifest_utf8"].as_str().unwrap();
+    assert_eq!(
+        storage::digest(manifest_raw.as_bytes()),
+        corpus["manifest_sha256"]
+    );
+    let manifest: Value = serde_json::from_str(manifest_raw).unwrap();
+    let reports = manifest["reports"].as_array().unwrap();
+    let pairs = corpus["pairs"].as_array().unwrap();
+    assert_eq!(reports.len(), 39);
+    assert_eq!(pairs.len(), 39);
+    let mut seen = BTreeSet::new();
+    let mut acknowledgements = BTreeMap::new();
+    let mut greek_previews = 0;
+    for item in reports {
+        let name = item["name"].as_str().unwrap();
+        assert!(seen.insert(name));
+        let pair = pairs.iter().find(|p| p["name"] == name).unwrap();
+        let request = pair["request_utf8"].as_str().unwrap();
+        let stdout = pair["stdout_utf8"].as_str().unwrap();
+        assert!(stdout.ends_with('\n'));
+        assert_eq!(storage::digest(request.as_bytes()), item["request_sha256"]);
+        assert_eq!(storage::digest(stdout.as_bytes()), item["stdout_sha256"]);
+        let request: Value = serde_json::from_str(request).unwrap();
+        let report: Value = serde_json::from_str(stdout).unwrap();
+        assert_eq!(report["report_version"], 1);
+        assert_eq!(report["operation"], item["operation"]);
+        assert_eq!(report["status"], item["status"]);
+        assert_eq!(report["incomplete"], item["incomplete"]);
+        if report["status"] != "ok" {
+            continue;
+        }
+        if report["operation"] == "prepare-forget" {
+            let envelope: storage::Envelope =
+                serde_json::from_value(report["data"]["preview"].clone()).unwrap();
+            envelope.validate().unwrap();
+            let fact: Fact = serde_json::from_value(envelope.payload.clone()).unwrap();
+            fact.validate().unwrap();
+            assert_eq!(fact.key.record_id().unwrap(), envelope.record_id);
+            let intent = &report["data"]["intent"];
+            assert_eq!(intent["operation"], request["operation"]);
+            assert_eq!(intent["key"], request["key"]);
+            assert_eq!(
+                intent["expected"][0]["revision"],
+                json!(envelope.revision_id)
+            );
+            assert_eq!(
+                intent["expected"][0]["sha256"],
+                storage::digest(&serde_json::to_vec(&envelope).unwrap())
+            );
+            if fact.value.contains('\u{03b1}') && fact.value.contains('\u{03b2}') {
+                greek_previews += 1;
+            }
+        } else {
+            assert_eq!(report["data"]["outcome"], "acknowledged");
+            assert_eq!(report["data"]["operation"], request["intent"]["operation"]);
+            let operation = Uuid::parse_str(report["data"]["operation"].as_str().unwrap()).unwrap();
+            let transaction =
+                Uuid::parse_str(report["data"]["transaction"].as_str().unwrap()).unwrap();
+            assert!(!operation.is_nil() && !transaction.is_nil());
+            if let Some(prior) = acknowledgements.insert(operation, transaction) {
+                assert_eq!(prior, transaction);
+            }
+        }
+    }
+    assert_eq!(greek_previews, 9);
+}
