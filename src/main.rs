@@ -13,6 +13,12 @@ use std::time::Duration;
 #[command(author, version = env!("READER_BUDDY_VERSION"))]
 #[command(about = "ReMarkable Reader Buddy - AI-powered reading assistant for reMarkable tablets")]
 pub struct Args {
+    /// Conditional ordinary owned restore; never selected/device/runtime activation
+    #[arg(long, value_enum, requires = "restore_input", conflicts_with_all = ["simulate", "inspect_owned_data", "api_key", "model", "base_url", "trigger_corner", "log_level", "debug_dump", "memory_operation", "memory_input", "sync_mode_operation", "sync_mode_input", "archive_operation", "archive_input", "personalization_operation", "export_note", "configuration_operation", "basic_settings_operation", "basic_settings_input"])]
+    restore_operation: Option<remarkable_reader_buddy::restore_maintenance::Operation>,
+    /// Exact-dash bounded JSON stdin; no file fallback
+    #[arg(long, value_name = "INPUT", requires = "restore_operation")]
+    restore_input: Option<std::path::PathBuf>,
     /// Deliberate three-field saved settings maintenance; never runtime activation
     #[arg(long, value_enum, conflicts_with_all = ["simulate", "inspect_owned_data", "api_key", "model", "base_url", "trigger_corner", "log_level", "debug_dump", "memory_operation", "memory_input", "sync_mode_operation", "sync_mode_input", "archive_operation", "archive_input", "personalization_operation", "export_note", "configuration_operation"])]
     basic_settings_operation: Option<config::basic::Operation>,
@@ -95,6 +101,18 @@ fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_lo
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    if let Some(operation) = args.restore_operation {
+        let report = remarkable_reader_buddy::restore_maintenance::run(
+            operation,
+            args.restore_input
+                .as_deref()
+                .expect("required restore input"),
+            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+            &mut std::io::stdin().lock(),
+        );
+        report.write_to(&mut std::io::stdout().lock())?;
+        return Ok(());
+    }
     if let Some(operation) = args.basic_settings_operation {
         let report = if operation == config::basic::Operation::Inspect {
             if args.basic_settings_input.is_some() {
@@ -275,6 +293,8 @@ mod tests {
                 "memory-operation",
                 "model",
                 "personalization-operation",
+                "restore-input",
+                "restore-operation",
                 "simulate",
                 "sync-mode-input",
                 "sync-mode-operation",
@@ -282,6 +302,8 @@ mod tests {
             ]
         );
         let args = Args::try_parse_from(["reader-buddy"]).unwrap();
+        assert!(args.restore_operation.is_none());
+        assert!(args.restore_input.is_none());
         assert!(args.basic_settings_operation.is_none());
         assert!(args.basic_settings_input.is_none());
         assert!(args.configuration_operation.is_none());

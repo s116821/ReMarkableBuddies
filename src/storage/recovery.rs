@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "ordinary_restore.rs"]
+pub(crate) mod ordinary_restore;
+
 /// Distinguish a proved prepublication conflict from a possible atomic publication.
 pub(crate) enum ConfigPublication {
     Verified(String),
@@ -494,6 +497,25 @@ impl Store {
         );
         selection::refuse_selected_maintenance(&self.generation(inner.generation))?;
         let next = Uuid::new_v4();
+        self.restore_locked(&mut inner, source, backup, next, false, &mut false)
+    }
+    /// The existing staging/rebuild/CURRENT writer shared by both entrypoints.
+    fn restore_locked(
+        &self,
+        inner: &mut Inner,
+        source: &Path,
+        backup: Backup,
+        next: Uuid,
+        exclusive: bool,
+        activation_attempted: &mut bool,
+    ) -> Result<()> {
+        if exclusive {
+            let root = self.generation(next);
+            files::safe_path(&root)?;
+            // The old helper intentionally permits existing directories. This
+            // new admission reserves its own empty root atomically first.
+            fs::create_dir(&root)?;
+        }
         Self::create_generation(&self.paths.data, next)?;
         let next_root = self.generation(next);
         if let Some(config) = &backup.config_snapshot {
@@ -535,11 +557,12 @@ impl Store {
             rebuilt.unavailable == 0,
             "restore contains unresolved lineage or identities"
         );
-        Self::trip(&mut inner, Fault::BeforeActivation)?;
+        Self::trip(inner, Fault::BeforeActivation)?;
+        *activation_attempted = true;
         files::atomic_json(&self.paths.data.join("CURRENT"), &next)?;
         inner.generation = next;
         inner.index = rebuilt;
-        Self::trip(&mut inner, Fault::AfterActivation)?;
+        Self::trip(inner, Fault::AfterActivation)?;
         Ok(())
     }
     pub fn snapshot_config(&self, config: &crate::config::Config) -> Result<()> {

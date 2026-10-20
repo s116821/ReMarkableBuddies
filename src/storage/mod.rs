@@ -14,6 +14,7 @@ pub mod selection;
 pub mod sync;
 pub mod types;
 use anyhow::{ensure, Context, Result};
+pub(crate) use recovery::ordinary_restore;
 #[cfg(test)]
 pub(crate) use recovery::ConfigFault;
 pub(crate) use recovery::ConfigPublication;
