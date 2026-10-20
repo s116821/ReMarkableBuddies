@@ -26,6 +26,23 @@ pub struct BackupInspection {
     pub configuration_included: bool,
 }
 
+/// Verified historical archive membership for domain-owned validation.
+/// No live token or current group/device/native authority is carried here.
+pub struct ArchivedSelectedSnapshot {
+    pub origin_actor: Uuid,
+    pub origin_generation: Uuid,
+    /// Original raw metadata identity, including noncanonical JSON bytes.
+    pub head_reference: ObjectRef,
+    pub transaction: selection::SelectionTransaction,
+    /// Order matches transaction.selected.records; retain those exact ObjectRefs.
+    pub selected_records: Vec<Envelope>,
+    /// Manifest order, then each retained manifest's record reference order.
+    pub retained_records: Vec<Envelope>,
+    pub media: BTreeMap<String, files::Source>,
+    /// Completeness of the entire archive, not only this requested scope.
+    pub complete_media: bool,
+}
+
 impl Backup {
     fn read(source: &Path) -> Result<Self> {
         let bytes = files::read(&source.join("backup.json"), MAX_METADATA as u64)?;
@@ -233,6 +250,83 @@ impl Store {
         files::safe_path(source)?;
         let backup = Backup::read(source)?;
         backup.inspect(source)
+    }
+
+    /// Inspect one archived selection for strict domain-owned payload validation.
+    /// Validates the whole format-2 archive, including unrelated scopes, before
+    /// returning historical references. Absence is not an empty winning closure.
+    /// No Store is opened, no live token is minted, and restore remains disabled.
+    pub fn inspect_selected_backup(
+        source: &Path,
+        scope: &selection::SelectionScope,
+        limit: usize,
+    ) -> Result<Option<ArchivedSelectedSnapshot>> {
+        scope.validate()?;
+        ensure!(
+            (1..=MAX_ITEMS).contains(&limit),
+            "invalid archived snapshot bound"
+        );
+        files::safe_path(source)?;
+        let backup = Backup::read(source)?;
+        let report = backup.inspect(source)?;
+        let archive = backup
+            .selected_history
+            .as_ref()
+            .context("selected inspection requires a format-2 archive")?;
+        // Preserve verified raw metadata bytes; never derive head identity from
+        // reserializing a transaction, or treat its historical pins as live ones.
+        let validated = archive.validate(source)?;
+        for reference in &archive.heads {
+            let bytes = validated
+                .metadata
+                .get(&reference.sha256)
+                .context("verified archived head is absent")?;
+            let transaction: selection::SelectionTransaction = serde_json::from_slice(bytes)?;
+            if &transaction.scope != scope {
+                continue;
+            }
+            transaction.validate(limit)?;
+            let selected_records = Self::validate_objects(source, &transaction.selected)?
+                .into_iter()
+                .map(|(record, _)| record)
+                .collect();
+            let mut retained_records = Vec::new();
+            let mut media = BTreeMap::new();
+            for manifest in &transaction.retained {
+                retained_records.extend(
+                    Self::validate_objects(source, manifest)?
+                        .into_iter()
+                        .map(|(record, _)| record),
+                );
+            }
+            for manifest in std::iter::once(&transaction.selected).chain(&transaction.retained) {
+                for item in &manifest.media {
+                    if let Some(existing) = media.get(&item.sha256) {
+                        let existing: &files::Source = existing;
+                        ensure!(
+                            existing.reference() == *item,
+                            "conflicting archived media reference"
+                        );
+                    } else {
+                        media.insert(
+                            item.sha256.clone(),
+                            files::Source::open(&source.join("objects").join(&item.sha256), item)?,
+                        );
+                    }
+                }
+            }
+            return Ok(Some(ArchivedSelectedSnapshot {
+                origin_actor: archive.origin_actor,
+                origin_generation: archive.origin_generation,
+                head_reference: reference.clone(),
+                transaction,
+                selected_records,
+                retained_records,
+                media,
+                complete_media: report.complete_media,
+            }));
+        }
+        Ok(None)
     }
 
     /// Preserve selected history as non-authoritative evidence in format 2.

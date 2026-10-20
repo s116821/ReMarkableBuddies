@@ -232,6 +232,20 @@ pub(crate) fn shared_epoch(
         _ => anyhow::bail!("selected shared intent requires current shared mode"),
     }
 }
+/// Pins absent or LocalOnly mode for an ordinary application's lifetime.
+/// This supplies no data, publisher, selected-domain, provider or native authority.
+#[must_use = "retain the ordinary mode guard through all admitted consumers"]
+pub struct OrdinaryModeLease {
+    store: Arc<Store>,
+}
+impl Drop for OrdinaryModeLease {
+    fn drop(&mut self) {
+        if let Ok(mut inner) = self.store.inner.lock() {
+            inner.mode_handles -= 1;
+        }
+    }
+}
+
 /// Holds only a mode lifetime. Provider/root qualification and actual domain
 /// admission remain required. Dropping/stopping publisher releases this lease.
 pub struct SyncModeLease {
@@ -381,6 +395,32 @@ impl Store {
         files::atomic(&path(self), &bytes)?;
         Self::trip(&mut inner, Fault::AfterCommit)?;
         Ok(receipt)
+    }
+    /// Atomically admit an ordinary lifetime without broadening publisher leases.
+    pub fn ordinary_mode_lease(
+        self: &Arc<Self>,
+        expected: &SyncModeToken,
+    ) -> Result<OrdinaryModeLease> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        let current = snapshot(self, &load(self)?)?;
+        ensure!(
+            current.token == *expected,
+            "stale ordinary mode lease token"
+        );
+        ensure!(
+            matches!(current.mode, None | Some(SyncMode::LocalOnly)),
+            "ordinary mode requires absent or LocalOnly choice"
+        );
+        inner.mode_handles = inner
+            .mode_handles
+            .checked_add(1)
+            .context("mode lease overflow")?;
+        Ok(OrdinaryModeLease {
+            store: self.clone(),
+        })
     }
     pub fn sync_mode_lease(self: &Arc<Self>, expected: &SyncModeToken) -> Result<SyncModeLease> {
         let mut inner = self
@@ -539,6 +579,128 @@ mod tests {
             .unwrap();
         assert!(store.sync_mode_lease(&snapshot.token).is_err());
     }
+    #[test]
+    fn ordinary_mode_leases_pin_none_and_local_until_last_guard_drops() {
+        for local in [false, true] {
+            let f = Fixture::new();
+            let store = f.store();
+            if local {
+                set(&store, SyncModeChoice::LocalOnly);
+            }
+            let current = store.sync_mode_snapshot().unwrap();
+            let original = fs::read(path(&store)).ok();
+            let first = store.ordinary_mode_lease(&current.token).unwrap();
+            let second = store.ordinary_mode_lease(&current.token).unwrap();
+            let data = store.legacy_sync_lease().unwrap();
+            let choice = SyncModeChoice::IsolatedBackup {
+                binding_sha256: digest(b"ordinary transition"),
+            };
+            assert!(store
+                .set_sync_mode(&current.token, Uuid::new_v4(), choice.clone())
+                .is_err());
+            assert_eq!(store.sync_mode_snapshot().unwrap().token, current.token);
+            assert_eq!(fs::read(path(&store)).ok(), original);
+            drop(first);
+            assert!(store
+                .set_sync_mode(&current.token, Uuid::new_v4(), choice.clone())
+                .is_err());
+            drop(second);
+            // The independent ordinary-data handle remains usable and must not
+            // become a mode fence as a side effect of the new guard.
+            store
+                .set_sync_mode(&current.token, Uuid::new_v4(), choice)
+                .unwrap();
+            drop(data);
+        }
+    }
+
+    #[test]
+    fn ordinary_mode_refuses_stale_foreign_nonlocal_and_malformed_without_leaking_fence() {
+        let f = Fixture::new();
+        let store = f.store();
+        let foreign = Fixture::new();
+        assert!(store
+            .ordinary_mode_lease(&foreign.store().sync_mode_snapshot().unwrap().token)
+            .is_err());
+        let old = store.sync_mode_snapshot().unwrap().token;
+        set(&store, SyncModeChoice::LocalOnly);
+        assert!(store.ordinary_mode_lease(&old).is_err());
+        for choice in [
+            SyncModeChoice::IsolatedBackup {
+                binding_sha256: digest(b"ordinary foreign backup"),
+            },
+            SyncModeChoice::SharedGroup {
+                group: Uuid::new_v4(),
+                binding_sha256: digest(b"ordinary foreign group"),
+                root_id: "chosen-root".into(),
+            },
+        ] {
+            set(&store, choice);
+            let current = store.sync_mode_snapshot().unwrap();
+            let original = fs::read(path(&store)).unwrap();
+            assert!(store.ordinary_mode_lease(&current.token).is_err());
+            assert_eq!(fs::read(path(&store)).unwrap(), original);
+            set(&store, SyncModeChoice::LocalOnly);
+        }
+        let current = store.sync_mode_snapshot().unwrap();
+        let original = fs::read(path(&store)).unwrap();
+        let broken = b"not a mode object";
+        fs::write(path(&store), broken).unwrap();
+        assert!(store.ordinary_mode_lease(&current.token).is_err());
+        assert_eq!(fs::read(path(&store)).unwrap(), broken);
+        fs::write(path(&store), original).unwrap();
+        set(&store, SyncModeChoice::LocalOnly);
+        let guard = store
+            .ordinary_mode_lease(&store.sync_mode_snapshot().unwrap().token)
+            .unwrap();
+        drop(guard);
+    }
+
+    #[test]
+    fn ordinary_mode_preserves_legacy_publisher_coexistence_and_nonmutating_replay() {
+        for publisher_first in [false, true] {
+            let f = Fixture::new();
+            let store = f.store();
+            let current = store.sync_mode_snapshot().unwrap();
+            let mut publisher = publisher_first.then(|| store.legacy_publisher_lease().unwrap());
+            let guard = store.ordinary_mode_lease(&current.token).unwrap();
+            if !publisher_first {
+                publisher = Some(store.legacy_publisher_lease().unwrap());
+            }
+            assert!(store
+                .set_sync_mode(&current.token, Uuid::new_v4(), SyncModeChoice::LocalOnly)
+                .is_err());
+            drop(guard);
+            assert!(store
+                .set_sync_mode(&current.token, Uuid::new_v4(), SyncModeChoice::LocalOnly)
+                .is_err());
+            drop(publisher);
+            let operation = Uuid::new_v4();
+            let receipt = store
+                .set_sync_mode(&current.token, operation, SyncModeChoice::LocalOnly)
+                .unwrap();
+            let local = store.sync_mode_snapshot().unwrap();
+            let guard = store.ordinary_mode_lease(&local.token).unwrap();
+            let original = fs::read(path(&store)).unwrap();
+            assert_eq!(
+                store
+                    .set_sync_mode(&current.token, operation, SyncModeChoice::LocalOnly)
+                    .unwrap()
+                    .epoch,
+                receipt.epoch
+            );
+            assert_eq!(store.sync_mode_snapshot().unwrap().token, local.token);
+            assert_eq!(fs::read(path(&store)).unwrap(), original);
+            assert!(store.legacy_publisher_lease().is_err());
+            assert!(store.legacy_sync_lease().is_ok());
+            assert!(store
+                .set_sync_mode(&local.token, Uuid::new_v4(), SyncModeChoice::LocalOnly)
+                .is_err());
+            drop(guard);
+            set(&store, SyncModeChoice::LocalOnly);
+        }
+    }
+
     #[test]
     fn sync_mode_persisted_backup_history_refuses_reuse_and_discontinuity() {
         for case in 0..3 {
