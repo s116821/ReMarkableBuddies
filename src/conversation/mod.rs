@@ -28,7 +28,9 @@ pub use binding_projection::{
 };
 pub use export::*;
 pub use intent::*;
-pub use pending::{PendingIntentPublication, PendingIntentRequest, SourceAdmission};
+pub use pending::{
+    PendingIntentPublication, PendingIntentRequest, PendingRequestConflict, SourceAdmission,
+};
 #[cfg(test)]
 pub(crate) use pending::{ReaderContext, ReaderPreparation};
 pub use reader_plan::{ReaderEraseRectangle, ReaderHandoff, ReaderPlan, SmartEraseInput};
@@ -1028,13 +1030,21 @@ impl Ledger {
                     Some(AttemptReason::SubmittedUnverified | AttemptReason::DeviceUncertain),
                 )
             );
+        let interpreted_failure = original.outcome == Outcome::Interpreted
+            && matches!(
+                (&turn.outcome, &reason),
+                (
+                    Outcome::Failed,
+                    Some(AttemptReason::ProviderFailure | AttemptReason::RequestFailed)
+                ) | (Outcome::Canceled, Some(AttemptReason::Canceled))
+            );
         ensure!(
-            permitted || explicit_reconciliation,
+            permitted || explicit_reconciliation || interpreted_failure,
             "invalid outcome transition; reconciliation is explicit"
         );
         if matches!(
             original.outcome,
-            Outcome::Generated | Outcome::ReconcileRequired
+            Outcome::Generated | Outcome::ReconcileRequired | Outcome::Interpreted
         ) {
             ensure!(original.text == turn.text, "generated draft text changed");
         }

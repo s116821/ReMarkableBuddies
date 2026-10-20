@@ -29,6 +29,34 @@ pub struct SelectedAdmission {
     gate: Arc<Mutex<()>>,
 }
 impl SelectedAdmission {
+    /// Acquire one ordered domain set. Caller revalidates its charged snapshots
+    /// inside the callback and must not reacquire any participating admission.
+    pub(crate) fn with_gates<T>(
+        admissions: &[&Self],
+        operation: impl FnOnce(&Store) -> Result<T>,
+    ) -> Result<T> {
+        let first = admissions.first().context("empty selected admission set")?;
+        let mut ordered = BTreeMap::new();
+        for admission in admissions {
+            ensure!(
+                Arc::ptr_eq(&first.store, &admission.store)
+                    && first.scope.group == admission.scope.group
+                    && first.scope.binding_sha256 == admission.scope.binding_sha256,
+                "foreign selected admission set"
+            );
+            ordered.insert(admission.scope.key_sha256.as_str(), admission);
+        }
+        let mut guards = Vec::with_capacity(ordered.len());
+        for admission in ordered.values() {
+            guards.push(
+                admission
+                    .gate
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("domain admission unavailable"))?,
+            );
+        }
+        operation(&first.store)
+    }
     /// Read evidence from one current selection; never returns effect authority.
     /// Token counting happens after admission is released, so replacement cannot
     /// mix new heads into this view or deadlock a caller reading another handle.

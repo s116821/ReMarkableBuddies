@@ -66,6 +66,18 @@ pub struct Workflow {
 }
 
 impl Workflow {
+    /// Explicit executable selected mode. Unsupported transport never opens a
+    /// RealDevice or converts historical membership into live effect authority.
+    pub(crate) fn selected_runtime(
+        admission: std::sync::Arc<crate::conversation::SelectedAdmission>,
+        debug_dump: bool,
+    ) -> Self {
+        let facade = selected_backend::SelectedBackendFacade::new(
+            admission,
+            Box::new(selected_backend::RefusingBackend::new()),
+        );
+        Self::with_selected(facade, debug_dump)
+    }
     pub fn new(
         no_draw: bool,
         trigger_corner: crate::device::touch::TriggerCorner,
@@ -92,7 +104,6 @@ impl Workflow {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn with_selected(
         facade: selected_backend::SelectedBackendFacade,
         debug_dump: bool,
@@ -199,12 +210,17 @@ impl Workflow {
     pub fn detail_images_base64(&self) -> Result<Vec<String>> {
         self.device.detail_images()
     }
+    /// Pure transport availability for startup; no request guard or acquisition.
+    pub(crate) fn reader_acquisition_kind(&self) -> crate::device::backend::AcquisitionKind {
+        self.device.acquisition_kind()
+    }
+
     /// Select first, acquire once, freeze all actual provider bytes under the guard.
     pub fn acquire_reader_evidence(&mut self) -> Result<AcquiredEvidence> {
         use crate::device::backend::AcquisitionKind;
         use base64::{engine::general_purpose::STANDARD, Engine};
         self.check_request_progress()?;
-        match self.device.acquisition_kind() {
+        match self.reader_acquisition_kind() {
             AcquisitionKind::Unsupported => anyhow::bail!("Reader acquisition unsupported"),
             AcquisitionKind::LegacyUnqualified => {
                 let (_, png) = self.capture_screenshot_with_data()?;
