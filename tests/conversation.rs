@@ -60,81 +60,6 @@ fn create(ledger: &Ledger) -> Uuid {
     ledger.create(id, Uuid::new_v4(), 10).unwrap();
     id
 }
-
-#[test]
-fn interpreted_failure_requires_matching_reason_and_preserves_verified_text_without_output_authority(
-) {
-    let fixture = Fixture::new();
-    let store = fixture.open();
-    let ledger = Ledger::new(store);
-    let conversation = create(&ledger);
-    let original = turn(conversation, Mode::Reader, "Exact verified question?");
-    ledger
-        .append(
-            Uuid::new_v4(),
-            expected(&ledger, conversation),
-            original.clone(),
-            vec![],
-        )
-        .unwrap();
-    let root = expected(&ledger, conversation);
-    let head = expected(&ledger, original.id);
-    let mut failed = original.clone();
-    failed.outcome = Outcome::Failed;
-    failed.updated_ms = 10;
-    assert!(ledger
-        .advance(Uuid::new_v4(), root.clone(), head.clone(), failed.clone())
-        .is_err());
-    assert!(ledger
-        .record_attempt_outcome(
-            Uuid::new_v4(),
-            root.clone(),
-            head.clone(),
-            failed.clone(),
-            AttemptReason::NoSuccessor
-        )
-        .is_err());
-    let mut changed = failed.clone();
-    changed.text = Some("Changed verified question?".into());
-    assert!(ledger
-        .record_attempt_outcome(
-            Uuid::new_v4(),
-            root.clone(),
-            head.clone(),
-            changed,
-            AttemptReason::ProviderFailure
-        )
-        .is_err());
-    for outcome in [Outcome::Generated, Outcome::Completed] {
-        let mut invalid = failed.clone();
-        invalid.outcome = outcome;
-        assert!(ledger
-            .advance(Uuid::new_v4(), root.clone(), head.clone(), invalid)
-            .is_err());
-    }
-    let mut canceled = failed.clone();
-    canceled.outcome = Outcome::Canceled;
-    assert!(ledger
-        .record_attempt_outcome(
-            Uuid::new_v4(),
-            root.clone(),
-            head.clone(),
-            canceled,
-            AttemptReason::ProviderFailure
-        )
-        .is_err());
-    assert!(expected(&ledger, original.id).0 == head.0);
-    ledger
-        .record_attempt_outcome(
-            Uuid::new_v4(),
-            root,
-            head,
-            failed,
-            AttemptReason::ProviderFailure,
-        )
-        .unwrap();
-    assert!(ledger.inspect(conversation, false).unwrap().iter().any(|r| matches!(r, Record::Turn(t) if t.id == original.id && t.outcome == Outcome::Failed && t.text == original.text)));
-}
 fn replicate(source: &Store, target: &Store) {
     let mut pending = source.manifests().unwrap();
     while !pending.is_empty() {
@@ -645,6 +570,7 @@ fn uncertain_export_discovery_requires_exact_unique_marker() {
         source_revision: "exact-root-r1".into(),
         operation,
         outcome: Outcome::ReconcileRequired,
+        attempt: None,
     };
     assert_eq!(
         association.title_marker(),

@@ -6,7 +6,6 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use std::time::{SystemTime, UNIX_EPOCH};
-mod selected;
 
 pub(super) struct Attempt {
     pub user: Turn,
@@ -14,8 +13,8 @@ pub(super) struct Attempt {
     evidence: Uuid,
     pub legacy_output: bool,
     development_evidence: bool,
+    #[cfg(test)]
     reader_preparation: Option<ReaderPreparation>,
-    selected: Option<selected::Selected>,
 }
 fn now() -> Result<u64> {
     SystemTime::now()
@@ -23,83 +22,6 @@ fn now() -> Result<u64> {
         .as_millis()
         .try_into()
         .context("timestamp overflow")
-}
-
-#[cfg(test)]
-pub(crate) fn assert_selected_retry_control(
-    ledger: &Ledger,
-    workflow: &super::Workflow,
-    token: crate::storage::selection::SelectionToken,
-    root: IntentRecordRef,
-    user: IntentRecordRef,
-    capture: Uuid,
-    lost_ack: bool,
-) {
-    use crate::storage::{Fault, MAX_ITEMS};
-    let mut attempt =
-        Attempt::prepare_selected(ledger, workflow, token.clone(), root, user, capture).unwrap();
-    ledger
-        .store()
-        .set_fault(if lost_ack {
-            Fault::AfterCommit
-        } else {
-            Fault::BeforeCommit
-        })
-        .unwrap();
-    assert!(attempt.interpret(ledger, "frozen request").is_err());
-    let operation = attempt.selected.as_ref().unwrap().frozen_operation(false);
-    if lost_ack {
-        assert!(attempt.interpret(ledger, "frozen request").is_err());
-        assert!(attempt.images(ledger).is_err());
-        assert_eq!(attempt.user.outcome, Outcome::Prepared);
-    } else {
-        attempt.interpret(ledger, "frozen request").unwrap();
-        assert_eq!(attempt.user.outcome, Outcome::Interpreted);
-        let current = ledger
-            .store()
-            .selected_snapshot(token.scope(), MAX_ITEMS)
-            .unwrap()
-            .unwrap();
-        assert_eq!(current.transaction.operation, operation);
-        attempt.interpret(ledger, "frozen request").unwrap();
-        assert!(attempt.interpret(ledger, "changed request").is_err());
-        assert_eq!(
-            ledger
-                .store()
-                .selected_snapshot(token.scope(), MAX_ITEMS)
-                .unwrap()
-                .unwrap()
-                .token,
-            current.token
-        );
-        ledger.store().set_fault(Fault::BeforeCommit).unwrap();
-        assert!(attempt.generated(ledger, "frozen answer".into()).is_err());
-        let generated_operation = attempt.selected.as_ref().unwrap().frozen_operation(true);
-        attempt.generated(ledger, "frozen answer".into()).unwrap();
-        assert_eq!(
-            ledger
-                .store()
-                .selected_snapshot(token.scope(), MAX_ITEMS)
-                .unwrap()
-                .unwrap()
-                .transaction
-                .operation,
-            generated_operation
-        );
-        assert!(attempt.assistant.as_ref().unwrap().sources.is_empty());
-    }
-    assert_eq!(
-        attempt.selected.as_ref().unwrap().frozen_operation(false),
-        operation
-    );
-    assert!(attempt
-        .outcome(
-            ledger,
-            false,
-            Outcome::Completed,
-            AttemptReason::SubmittedUnverified
-        )
-        .is_err());
 }
 
 /// Drives private Attempt methods with a persisted Generated draft supplied by
@@ -123,7 +45,6 @@ pub(crate) fn assert_attachment_behavior(
         legacy_output: false,
         development_evidence: false,
         reader_preparation: None,
-        selected: None,
     };
     assert!(attempt
         .dispatch_selected(workflow, 0, &ReaderHandoff::NextPage)
@@ -146,39 +67,6 @@ pub(crate) fn assert_attachment_behavior(
         .is_err());
 }
 impl Attempt {
-    pub(super) fn prepare_selected(
-        ledger: &Ledger,
-        workflow: &super::Workflow,
-        token: crate::storage::selection::SelectionToken,
-        root: IntentRecordRef,
-        user: IntentRecordRef,
-        capture: Uuid,
-    ) -> Result<Self> {
-        let (selected, user) =
-            selected::Selected::new(ledger, workflow, token, root, user, capture)?;
-        Ok(Self {
-            user,
-            assistant: None,
-            evidence: capture,
-            legacy_output: false,
-            development_evidence: workflow.development_non_output,
-            reader_preparation: None,
-            selected: Some(selected),
-        })
-    }
-    pub(super) fn check_selected(&self) -> Result<()> {
-        self.selected
-            .as_ref()
-            .map_or(Ok(()), |selected| selected.check())
-    }
-    pub(super) fn is_selected(&self) -> bool {
-        self.selected.is_some()
-    }
-    pub(super) fn memory_document(&self) -> Result<Option<Uuid>> {
-        self.selected
-            .as_ref()
-            .map_or(Ok(None), |selected| selected.document())
-    }
     pub fn prepare(ledger: &Ledger, acquired: AcquiredEvidence) -> Result<Self> {
         let timestamp = now()?;
         let conversation = Uuid::new_v4();
@@ -265,14 +153,15 @@ impl Attempt {
             evidence,
             legacy_output,
             development_evidence,
+            #[cfg(test)]
             reader_preparation: None,
-            selected: None,
         };
         attempt.user = attempt.load_turn(ledger, attempt.user.id)?;
         Ok(attempt)
     }
     /// A live context arrives only from the controlled new Pending branch.
     /// SDK fixture preparation supplies none and remains non-output.
+    #[cfg(test)]
     pub(super) fn install_reader_preparation(
         &mut self,
         preparation: ReaderPreparation,
@@ -307,6 +196,7 @@ impl Attempt {
         self.reader_preparation = Some(preparation);
         Ok(())
     }
+    #[cfg(test)]
     pub(super) fn dispatch_selected(
         &self,
         workflow: &mut super::Workflow,
@@ -317,6 +207,17 @@ impl Attempt {
             anyhow::bail!("Historical or unqualified Attempt cannot dispatch Reader output")
         };
         workflow.dispatch_reader(Some(context), ordinal, handoff)
+    }
+    fn has_reader_preparation(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.reader_preparation.is_some()
+        }
+        #[cfg(not(test))]
+        {
+            // Ordinary runtime has no qualified adapter or context attachment path.
+            false
+        }
     }
     fn load_turn(&self, ledger: &Ledger, id: Uuid) -> Result<Turn> {
         ledger
@@ -329,9 +230,6 @@ impl Attempt {
             .context("attempt turn absent")
     }
     pub fn images(&self, ledger: &Ledger) -> Result<Vec<Vec<u8>>> {
-        if let Some(selected) = &self.selected {
-            return selected.images();
-        }
         if self.development_evidence {
             Ok(ledger.stored_development_images(self.evidence)?.images)
         } else if self.legacy_output {
@@ -346,13 +244,8 @@ impl Attempt {
         }
     }
     pub fn interpret(&mut self, ledger: &Ledger, text: &str) -> Result<()> {
-        if let Some(selected) = &mut self.selected {
-            let acknowledgment = selected.write(text, false, None)?;
-            self.user = acknowledgment.written;
-            return Ok(());
-        }
         anyhow::ensure!(
-            self.reader_preparation.is_none(),
+            !self.has_reader_preparation(),
             "Selected Reader preparation requires selected domain mutation/settlement"
         );
         let mut turn = self.user.clone();
@@ -369,25 +262,8 @@ impl Attempt {
         Ok(())
     }
     pub fn generated(&mut self, ledger: &Ledger, text: String) -> Result<()> {
-        self.generated_with_memory(ledger, text, None)
-    }
-    pub(super) fn generated_with_memory(
-        &mut self,
-        ledger: &Ledger,
-        text: String,
-        memory: Option<(&dyn crate::memory::Provider, &crate::memory::QueryResult)>,
-    ) -> Result<()> {
-        if let Some(selected) = &mut self.selected {
-            let acknowledgment = selected.write(&text, true, memory)?;
-            self.assistant = Some(acknowledgment.written);
-            return Ok(());
-        }
         anyhow::ensure!(
-            memory.is_none(),
-            "composed memory publication requires selected Attempt"
-        );
-        anyhow::ensure!(
-            self.reader_preparation.is_none(),
+            !self.has_reader_preparation(),
             "Selected Reader preparation requires selected domain mutation/settlement"
         );
         let timestamp = now()?;
@@ -423,11 +299,7 @@ impl Attempt {
         reason: AttemptReason,
     ) -> Result<()> {
         anyhow::ensure!(
-            self.selected.is_none(),
-            "selected terminal publication requires controlled settlement; no ordinary fallback"
-        );
-        anyhow::ensure!(
-            self.reader_preparation.is_none(),
+            !self.has_reader_preparation(),
             "Selected Reader preparation requires selected domain mutation/settlement"
         );
         let original = if assistant {

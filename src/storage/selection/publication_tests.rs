@@ -2,6 +2,8 @@ use super::*;
 use serde_json::json;
 use std::sync::{Arc, Barrier};
 
+#[path = "outbox_tests.rs"]
+mod outbox_tests;
 #[path = "portable_tests.rs"]
 mod portable_tests;
 
@@ -576,7 +578,7 @@ fn inherited_descriptor_does_not_extend_a_dropped_owners_lease() {
     let store = f.store();
     // A duplicate descriptor models the same open-file description inherited in
     // the fork-to-exec window of another test's subprocess spawn.
-    let inherited = store._lease.try_clone().unwrap();
+    let inherited = store._lease.0.try_clone().unwrap();
     drop(store);
     let reopened = f.store();
     drop(inherited);
@@ -727,7 +729,12 @@ fn namespace_schema_boundary_survives_commit_import_selection_and_reopen() {
             envelope.namespace = namespace;
             envelope.domain_schema_version = version;
             // Deliberately opaque: domain-owner tests validate actual v2 variants.
-            let supported = version == 1 || (version == 2 && namespace == Namespace::Conversation);
+            let supported = version == 1
+                || (version == 2
+                    && matches!(
+                        namespace,
+                        Namespace::Conversation | Namespace::ExportAssociation
+                    ));
             let (manifest, objects) = closure(std::slice::from_ref(&envelope), BTreeMap::new());
             let result = store.import(manifest, objects);
             assert_eq!(result.is_ok(), supported);

@@ -10,7 +10,8 @@ use crate::llm::{openai::OpenAI, LLMEngine};
 use base64::{engine::general_purpose::STANDARD, Engine};
 
 /// Shared by the live workflow and bounded vision-comparison helper.
-pub const ANALYSIS_PROMPT: &str = "Read the handwritten question annotation on this tablet page and answer it from \
+pub const ANALYSIS_PROMPT: &str =
+    "Read the handwritten question annotation on this tablet page and answer it from \
              the technical concept selected by a hand-drawn closed outline or a deliberate \
              highlighted passage. A highlight can select content without any surrounding \
              outline and may appear gray on a grayscale tablet. Handwriting may be neat \
@@ -66,7 +67,6 @@ pub struct Orchestrator<M: LLMEngine = OpenAI> {
     llm: M,
     trigger_enabled: bool,
     ledger: Ledger,
-    memory: Option<std::sync::Arc<dyn crate::memory::Provider>>,
 }
 enum RenderOutcome {
     NoOutput(AttemptReason),
@@ -74,45 +74,17 @@ enum RenderOutcome {
 }
 
 impl<M: LLMEngine> Orchestrator<M> {
-    /// Continue an explicitly acknowledged selected input. This consumes current
-    /// stored data only; installed acquisition and native output remain separate.
-    pub fn run_selected_prepared(
-        &mut self,
-        token: crate::storage::selection::SelectionToken,
-        root: crate::conversation::IntentRecordRef,
-        user: crate::conversation::IntentRecordRef,
-        capture: crate::storage::Uuid,
-    ) -> Result<()> {
-        if let Some(memory) = &self.memory {
-            let admission = self.workflow.selected_admission()?;
-            memory.require_selected_reader(admission.as_ref())?;
-        }
-        let mut attempt =
-            Attempt::prepare_selected(&self.ledger, &self.workflow, token, root, user, capture)?;
-        self.workflow.begin_iteration()?;
-        attempt.check_selected()?;
-        self.run_prepared(&mut attempt)
-    }
     pub fn new(workflow: Workflow, llm: M, ledger: Ledger) -> Self {
         Self {
             workflow,
             llm,
             trigger_enabled: true,
             ledger,
-            memory: None,
         }
     }
 
     pub fn set_trigger_enabled(&mut self, enabled: bool) {
         self.trigger_enabled = enabled;
-    }
-
-    /// Optional receiving context; never used for recognition or automatic learning.
-    pub fn set_subject_memory(
-        &mut self,
-        memory: Option<std::sync::Arc<dyn crate::memory::Provider>>,
-    ) {
-        self.memory = memory;
     }
 
     pub fn invalidate_history(&mut self) {
@@ -217,12 +189,8 @@ impl<M: LLMEngine> Orchestrator<M> {
         // - Detect outlined or highlighted region
         // - Extract question text
         // - Generate answer
-        let result = self.analyze_and_answer(
-            attempt,
-            screenshot_base64,
-            screenshot_png_data,
-            &encoded[1..],
-        )?;
+        let result =
+            self.analyze_and_answer(screenshot_base64, screenshot_png_data, &encoded[1..])?;
 
         match result {
             None => {
@@ -237,17 +205,15 @@ impl<M: LLMEngine> Orchestrator<M> {
                 )?;
                 return Ok(());
             }
-            Some(mut result) => {
+            Some(result) => {
                 // Re-read the acknowledged stored batch; never query the device again.
                 let verification: Vec<String> = attempt
                     .images(&self.ledger)?
                     .iter()
                     .map(|bytes| STANDARD.encode(bytes))
                     .collect();
-                if let Some(failure) = self.verify_question(attempt, &result, &verification)? {
-                    info!(
-                        "Independent question reading disagreed or was uncertain; no answer written"
-                    );
+                if let Some(failure) = self.verify_question(&result, &verification)? {
+                    info!("Independent question reading disagreed or was uncertain; no answer written");
                     self.workflow.report_failure(failure)?;
                     attempt.outcome(
                         &self.ledger,
@@ -261,143 +227,66 @@ impl<M: LLMEngine> Orchestrator<M> {
                     )?;
                     return Ok(());
                 }
-                attempt.interpret(&self.ledger, &result.question)?;
-                let mut memory_view = None;
-                if self.memory.is_some() {
-                    let enriched = self.enrich_answer(attempt, &mut result, &verification);
-                    if let Err(error) = enriched {
-                        log::warn!("Subject memory answer was not completed");
-                        self.workflow.report_failure(Failure::Provider)?;
-                        attempt.outcome(
-                            &self.ledger,
-                            false,
-                            if self.workflow.input_failed() {
-                                Outcome::Canceled
-                            } else {
-                                Outcome::Failed
-                            },
-                            if self.workflow.input_failed() {
-                                AttemptReason::Canceled
-                            } else {
-                                AttemptReason::ProviderFailure
-                            },
-                        )?;
-                        return Err(error);
-                    }
-                    memory_view = Some(enriched?);
-                    info!("Got verified Q&A with optional subject memory");
-                } else {
-                    info!(
-                        "Got Q&A - Question: {} | Answer: {}",
-                        result.question, result.answer
-                    );
-                }
+                info!("Got verified Q&A");
 
-                let memory = self.memory.clone();
-                if let (Some(memory), Some(view)) = (memory, memory_view.as_ref()) {
-                    let published = if attempt.is_selected() {
-                        self.publish_answer(attempt, &result, false, Some((memory.as_ref(), view)))
-                    } else {
-                        memory.with_current(view, &mut || {
-                            self.publish_answer(attempt, &result, !view.selected(), None)
-                        })
-                    };
-                    if let Err(error) = published {
-                        if attempt.assistant.is_none() {
-                            let canceled = self.workflow.input_failed();
-                            attempt.outcome(
-                                &self.ledger,
-                                false,
-                                if canceled {
-                                    Outcome::Canceled
-                                } else {
-                                    Outcome::Failed
-                                },
-                                if canceled {
-                                    AttemptReason::Canceled
-                                } else {
-                                    AttemptReason::ProviderFailure
-                                },
-                            )?;
-                        }
-                        return Err(error);
+                attempt.interpret(&self.ledger, &result.question)?;
+                attempt.generated(
+                    &self.ledger,
+                    Workflow::compose_qa(&result.question, &result.answer, result.selection_center),
+                )?;
+                if !attempt.legacy_output {
+                    attempt.outcome(
+                        &self.ledger,
+                        true,
+                        Outcome::Failed,
+                        AttemptReason::NativeOutputUnavailable,
+                    )?;
+                    return Ok(());
+                }
+                // Persist uncertainty before the first navigation/output effect.
+                attempt.outcome(
+                    &self.ledger,
+                    true,
+                    Outcome::ReconcileRequired,
+                    AttemptReason::OutputPending,
+                )?;
+                let rendered = self.render_answer(&result);
+                let recorded = match &rendered {
+                    Ok(RenderOutcome::NoOutput(reason)) => {
+                        attempt.outcome(&self.ledger, true, Outcome::Failed, reason.clone())
                     }
-                } else {
-                    self.publish_answer(attempt, &result, true, None)?;
+                    Ok(RenderOutcome::SubmittedUnverified) => attempt.outcome(
+                        &self.ledger,
+                        true,
+                        Outcome::ReconcileRequired,
+                        AttemptReason::SubmittedUnverified,
+                    ),
+                    Err(_) => attempt.outcome(
+                        &self.ledger,
+                        true,
+                        Outcome::ReconcileRequired,
+                        AttemptReason::DeviceUncertain,
+                    ),
+                };
+                if let Err(recording) = recorded {
+                    return Err(anyhow::anyhow!(
+                        "output result {:?}; terminal recording failed: {recording:#}",
+                        rendered.as_ref().err()
+                    ));
+                }
+                if let Err(e) = rendered {
+                    error!("Error rendering answer: {}", e);
+                    if self.workflow.input_failed() {
+                        return Err(e);
+                    }
+                    // On error, retain the typed diagnostic without source feedback
+                    self.workflow.report_failure(Failure::Device)?;
+                    return Err(e);
                 }
             }
         }
 
         info!("=== Iteration Complete ===");
-        Ok(())
-    }
-
-    fn publish_answer(
-        &mut self,
-        attempt: &mut Attempt,
-        result: &AnalysisResult,
-        allow_native: bool,
-        memory: Option<(&dyn crate::memory::Provider, &crate::memory::QueryResult)>,
-    ) -> Result<()> {
-        self.workflow.check_request_progress()?;
-        attempt.check_selected()?;
-        attempt.generated_with_memory(
-            &self.ledger,
-            Workflow::compose_qa(&result.question, &result.answer, result.selection_center),
-            memory,
-        )?;
-        if attempt.is_selected() {
-            anyhow::bail!("Selected Generated draft acknowledged; qualified Pending/native output unavailable");
-        }
-        if !attempt.legacy_output || !allow_native {
-            attempt.outcome(
-                &self.ledger,
-                true,
-                Outcome::Failed,
-                AttemptReason::NativeOutputUnavailable,
-            )?;
-            return Ok(());
-        }
-        // Persist uncertainty before the first navigation/output effect.
-        attempt.outcome(
-            &self.ledger,
-            true,
-            Outcome::ReconcileRequired,
-            AttemptReason::OutputPending,
-        )?;
-        let rendered = self.render_answer(result);
-        let recorded = match &rendered {
-            Ok(RenderOutcome::NoOutput(reason)) => {
-                attempt.outcome(&self.ledger, true, Outcome::Failed, reason.clone())
-            }
-            Ok(RenderOutcome::SubmittedUnverified) => attempt.outcome(
-                &self.ledger,
-                true,
-                Outcome::ReconcileRequired,
-                AttemptReason::SubmittedUnverified,
-            ),
-            Err(_) => attempt.outcome(
-                &self.ledger,
-                true,
-                Outcome::ReconcileRequired,
-                AttemptReason::DeviceUncertain,
-            ),
-        };
-        if let Err(recording) = recorded {
-            return Err(anyhow::anyhow!(
-                "output result {:?}; terminal recording failed: {recording:#}",
-                rendered.as_ref().err()
-            ));
-        }
-        if let Err(e) = rendered {
-            error!("Error rendering answer: {}", e);
-            if self.workflow.input_failed() {
-                return Err(e);
-            }
-            // On error, retain the typed diagnostic without source feedback
-            self.workflow.report_failure(Failure::Device)?;
-            return Err(e);
-        }
         Ok(())
     }
 
@@ -410,12 +299,10 @@ impl<M: LLMEngine> Orchestrator<M> {
     /// Returns None if no clear selection/question is found.
     fn analyze_and_answer(
         &mut self,
-        attempt: &Attempt,
         screenshot_base64: &str,
         screenshot_png_data: Vec<u8>,
         details: &[String],
     ) -> Result<Option<AnalysisResult>> {
-        attempt.check_selected()?;
         info!("Sending analysis + answer proposal");
 
         self.llm.clear_content();
@@ -427,9 +314,7 @@ impl<M: LLMEngine> Orchestrator<M> {
 
         let mut progress_failed = false;
         let response = match self.llm.execute_with_progress(&mut || {
-            let result = attempt
-                .check_selected()
-                .and_then(|_| self.workflow.check_request_progress());
+            let result = self.workflow.check_request_progress();
             progress_failed |= result.is_err();
             result
         }) {
@@ -442,8 +327,7 @@ impl<M: LLMEngine> Orchestrator<M> {
             }
         };
         self.workflow.check_request_progress()?;
-        info!("LLM Response: {}", response);
-        attempt.check_selected()?;
+        info!("Analysis response received ({} bytes)", response.len());
         Ok(Self::parse_analysis_response(
             &response,
             screenshot_png_data,
@@ -493,7 +377,7 @@ impl<M: LLMEngine> Orchestrator<M> {
             SCREENSHOT_VIRTUAL_HEIGHT,
         )?;
 
-        debug!("Parsed - Question: {}", question_text);
+        debug!("Parsed question ({} bytes)", question_text.len());
         debug!("Question box: {:?}", question_box);
         debug!("Selected-content center: {}", selection_center);
 
@@ -508,11 +392,9 @@ impl<M: LLMEngine> Orchestrator<M> {
 
     fn verify_question(
         &mut self,
-        attempt: &Attempt,
         result: &AnalysisResult,
         images: &[String],
     ) -> Result<Option<Failure>> {
-        attempt.check_selected()?;
         let Some(bounds) = &result._question_box else {
             return Ok(Some(Failure::Transcription));
         };
@@ -535,9 +417,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         }
         let mut progress_failed = false;
         let reading = match self.llm.execute_with_progress(&mut || {
-            let result = attempt
-                .check_selected()
-                .and_then(|_| self.workflow.check_request_progress());
+            let result = self.workflow.check_request_progress();
             progress_failed |= result.is_err();
             result
         }) {
@@ -551,62 +431,12 @@ impl<M: LLMEngine> Orchestrator<M> {
             }
         };
         self.workflow.check_request_progress()?;
-        info!("Independent question reading: {}", reading);
-        attempt.check_selected()?;
+        info!(
+            "Independent question reading received ({} bytes)",
+            reading.len()
+        );
         Ok((!Self::transcriptions_agree(&result.question, &reading))
             .then_some(Failure::Transcription))
-    }
-
-    fn enrich_answer(
-        &mut self,
-        attempt: &Attempt,
-        result: &mut AnalysisResult,
-        images: &[String],
-    ) -> Result<crate::memory::QueryResult> {
-        attempt.check_selected()?;
-        use crate::memory::{context, Query, Status};
-        let memory = self
-            .memory
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("memory absent"))?;
-        self.workflow.check_request_progress()?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_millis()
-            .try_into()?;
-        // Selected ownership supplies historical data scope only, never native
-        // authority. Legacy capture still supplies no inferred association.
-        let mut query = Query::new(result.question.clone(), now);
-        query.document = attempt.memory_document()?;
-        let retrieved = memory
-            .query(&query)
-            .map_err(|_| anyhow::anyhow!("subject memory retrieval failed"))?;
-        self.workflow.check_request_progress()?;
-        info!(
-            "Subject memory retrieval: {:?} {:?}",
-            retrieved.status, retrieved.diagnostics
-        );
-        match retrieved.status {
-            Status::Disabled | Status::CompleteEmpty => return Ok(retrieved),
-            Status::Unavailable => anyhow::bail!("subject memory retrieval unavailable"),
-            Status::Partial if retrieved.context.facts.is_empty() => {
-                anyhow::bail!("subject memory retrieval incomplete without usable facts")
-            }
-            _ => {}
-        }
-        let answer = context::answer(
-            &mut self.llm,
-            &result.question,
-            images,
-            &retrieved,
-            &mut || {
-                attempt
-                    .check_selected()
-                    .and_then(|_| self.workflow.check_request_progress())
-            },
-        )?;
-        result.answer = answer;
-        Ok(retrieved)
     }
 
     fn transcriptions_agree(question: &str, reading: &str) -> bool {
@@ -892,9 +722,7 @@ mod tests {
             "SELECTION_CENTER: 384,512\nSELECTION_CENTER: 1,2",
             "OUTLINE_BOX: 1,2,3,4",
         ] {
-            let response = format!(
-                "QUESTION: G unc.?\nQUESTION_BOX: 130,35,200,50\n{center}\n---\nANSWER: About 14 ppm."
-            );
+            let response = format!("QUESTION: G unc.?\nQUESTION_BOX: 130,35,200,50\n{center}\n---\nANSWER: About 14 ppm.");
             assert!(
                 Orchestrator::<OpenAI>::parse_analysis_response(&response, vec![]).is_none(),
                 "{center}"

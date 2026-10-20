@@ -351,3 +351,87 @@ fn overlapping_clients_observe_one_modeled_provider_pointer() {
     assert_ne!(a.candidate_match, b.candidate_match);
     assert!(selected.lock().unwrap().is_some());
 }
+
+#[test]
+fn readonly_original_slot_observation_returns_evidence_without_republishing() {
+    let candidate = b"original candidate";
+    for same in [true, false] {
+        let observed_bytes = if same {
+            &candidate[..]
+        } else {
+            &b"other immutable winner"[..]
+        };
+        let observed = pointer(if same { "candidate" } else { "winner" }, observed_bytes);
+        let mut f = Fixture::new(|_| {
+            let mut replies = staged("candidate", candidate);
+            replies.extend([
+                reply(200, json!({"user":{"permissionId":"fixture-account"}})),
+                reply(200, slot_metadata(&observed)),
+                reply(200, metadata(&observed.descriptor_id, &tag(observed_bytes))),
+                raw(observed_bytes),
+            ]);
+            replies
+        });
+        let prepared = prepare(&mut f, candidate);
+        let result = f.client.observe_prepared_slot(&prepared).unwrap();
+        assert_eq!(
+            result.candidate_match,
+            if same {
+                PointerMatch::Same
+            } else {
+                PointerMatch::Different
+            }
+        );
+        assert_eq!(result.descriptor, observed_bytes);
+        let requests = f.finish();
+        assert!(requests
+            .iter()
+            .all(|r| r.starts_with("GET ") && !r.contains("generateIds")));
+        assert!(requests
+            .iter()
+            .any(|r| r.starts_with("GET /drive/v3/files/agreed-slot?fields=")));
+    }
+}
+#[test]
+fn readonly_original_slot_observation_refuses_missing_corrupt_and_changed_binding() {
+    let bytes = b"original descriptor";
+    for case in 0..3 {
+        let p = pointer("candidate", bytes);
+        let mut f = Fixture::new(|_| {
+            let mut replies = staged("candidate", bytes);
+            replies.push(reply(
+                200,
+                json!({"user":{"permissionId":"fixture-account"}}),
+            ));
+            if case == 0 {
+                replies.push(reply(404, json!({})));
+            } else {
+                let mut meta = slot_metadata(&p);
+                if case == 1 {
+                    meta["appProperties"]["scope_sha256"] = json!(digest(b"wrong scope"));
+                }
+                replies.push(reply(200, meta));
+                if case == 2 {
+                    replies.push(reply(200, metadata("candidate", &tag(bytes))));
+                    replies.push(raw(b"corrupt bytes"));
+                }
+            }
+            replies
+        });
+        let prepared = prepare(&mut f, bytes);
+        let error = f.client.observe_prepared_slot(&prepared).unwrap_err();
+        assert!(!format!("{error:?}").contains("fixture-private-token"));
+        assert!(f.finish().iter().all(|r| r.starts_with("GET ")));
+    }
+    for account in [false, true] {
+        let mut f = Fixture::new(|_| staged("candidate", bytes));
+        let prepared = prepare(&mut f, bytes);
+        if account {
+            f.client.credentials.account_permission_id = "different-account".into();
+        } else {
+            f.client.credentials.client_id = "different-client".into();
+        }
+        assert!(f.client.observe_prepared_slot(&prepared).is_err());
+        assert_eq!(f.finish().len(), 3); // Only initial preparation, no subsequent request.
+    }
+}

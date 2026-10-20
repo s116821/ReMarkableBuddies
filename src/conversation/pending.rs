@@ -3,8 +3,12 @@ use super::*;
 use crate::storage::selection::{SelectionPublication, SelectionToken};
 use crate::storage::{Kind, MAX_RECORD};
 use serde::{Deserialize, Serialize};
+// No qualified production source adapter exists; retain execution in recording tests.
+#[cfg(test)]
 mod reader_context;
+#[cfg(test)]
 pub(crate) use reader_context::{ReaderContext, ReaderPreparation, ReaderSourceAdmission};
+#[cfg(test)]
 use std::rc::Rc;
 pub(crate) mod sealed {
     pub trait Sealed {}
@@ -27,30 +31,6 @@ pub struct PendingIntentRequest {
     pub evidence: Vec<IntentRecordRef>,
     pub media: Vec<Media>,
 }
-impl PendingIntentRequest {
-    /// Pure historical-input validation; this never qualifies a source or effect.
-    pub(crate) fn validate_input(&self) -> Result<()> {
-        ensure!(
-            !self.operation.is_nil() && !self.conversation.is_nil() && !self.turn.is_nil(),
-            "nil pending request identity"
-        );
-        self.selection.validate()?;
-        Ledger::validate_observation(&self.source)?;
-        ensure!(
-            self.evidence.len() <= MAX_ITEMS
-                && self.media.len() <= MAX_ITEMS
-                && serde_json::to_vec(self)?.len() <= MAX_RECORD,
-            "pending request exceeds bound"
-        );
-        for reference in &self.evidence {
-            reference.validate()?;
-        }
-        for media in &self.media {
-            media.validate()?;
-        }
-        Ok(())
-    }
-}
 pub enum PendingIntentPublication {
     /// Actual publication token must be revalidated for every later handoff.
     Published {
@@ -61,15 +41,6 @@ pub enum PendingIntentPublication {
     /// Deliberately contains no live token and never starts an effect.
     Historical(HistoricalIntent),
 }
-/// Typed intent mismatch only, distinct from unavailable/corrupt custody.
-#[derive(Debug)]
-pub struct PendingRequestConflict;
-impl std::fmt::Display for PendingRequestConflict {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("pending original payload or pins conflict")
-    }
-}
-impl std::error::Error for PendingRequestConflict {}
 impl IntentSelectionEvidence {
     pub fn from_token(token: &SelectionToken) -> Self {
         Self {
@@ -148,15 +119,8 @@ fn new_record(
     Ok(envelope)
 }
 impl SelectedAdmission {
-    /// Original exact request recovery only; never publishes or mints authority.
-    pub fn recover_pending(
-        &self,
-        request: &PendingIntentRequest,
-    ) -> Result<Option<HistoricalIntent>> {
-        request.validate_input()?;
-        self.mutate(|store| recover_pending_request(store, self.scope(), request))
-    }
     /// Only this controlled new publication can mint an executable context.
+    #[cfg(test)]
     pub(crate) fn prepare_reader(
         self: &Arc<Self>,
         accepted: Option<&SelectionToken>,
@@ -283,9 +247,10 @@ fn recover_pending_request(
             evidence: intent.evidence.clone(),
             media: intent.media.clone(),
         };
-        if request != &original_request {
-            return Err(PendingRequestConflict.into());
-        }
+        ensure!(
+            request == &original_request,
+            "pending original payload or pins conflict"
+        );
         let fact_id = pending_id(request.operation);
         let fact = original
             .transaction
@@ -710,168 +675,6 @@ pub(in crate::conversation) mod tests {
             );
             Ok(())
         }
-    }
-    #[test]
-    fn executable_recovery_preserves_original_after_replacement_and_refuses_changed_or_missing() {
-        use crate::reader_runtime::{self, Operation};
-        let fixture = Fixture::new();
-        let (store, handle, token, request) = fixture.setup();
-        let check = MockSource {
-            source: request.source.clone(),
-            calls: Cell::new(0),
-            refuse_at: None,
-        };
-        let PendingIntentPublication::Published {
-            reference, receipt, ..
-        } = handle
-            .publish_pending(Some(&token), request.clone(), Some(&check))
-            .unwrap()
-        else {
-            panic!("fixture publication")
-        };
-        let original_root = receipt
-            .admitted_intent
-            .as_ref()
-            .unwrap()
-            .root_revision
-            .object
-            .clone();
-        let snapshot = store
-            .selected_snapshot(handle.scope(), MAX_ITEMS)
-            .unwrap()
-            .unwrap();
-        let mut selected = snapshot.transaction.selected.clone();
-        selected.transaction_id = Uuid::new_v4();
-        handle
-            .activate(
-                &snapshot.token,
-                SelectionChange {
-                    operation: Uuid::new_v4(),
-                    accepted_base_sha256: digest(b"runtime recovery replacement"),
-                    selected,
-                    retained: vec![],
-                },
-                BTreeMap::new(),
-            )
-            .unwrap();
-        let scope = handle.scope().clone();
-        let before = store
-            .selected_snapshot(&scope, MAX_ITEMS)
-            .unwrap()
-            .unwrap()
-            .token;
-        let config = fixture.0.join("config.json");
-        let input = fixture.0.join("input.json");
-        std::fs::write(
-            &config,
-            serde_json::to_vec(&serde_json::json!({
-                "paths": fixture.paths(), "reader": {"selection": scope}
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        drop(snapshot);
-        drop(handle);
-        drop(store);
-        let run = |request: &PendingIntentRequest| {
-            std::fs::write(
-                &input,
-                serde_json::to_vec(&serde_json::json!({"request": request})).unwrap(),
-            )
-            .unwrap();
-            let mut report =
-                reader_runtime::run(Operation::RecoverPending, &input, Some(config.clone()));
-            let mut output = vec![];
-            report.write_to(&mut output).unwrap();
-            serde_json::from_slice::<serde_json::Value>(&output).unwrap()
-        };
-        let historical = run(&request);
-        assert_eq!(historical["status"], "historical");
-        assert_eq!(historical["native_authority"], false);
-        assert_eq!(
-            historical["data"]["receipt_reference"],
-            serde_json::to_value(reference).unwrap()
-        );
-        assert!(historical["data"].get("token").is_none());
-        assert_eq!(
-            check.calls.get(),
-            2,
-            "historical recovery must not call a source check"
-        );
-        let mut changed = request.clone();
-        changed.updated_ms += 1;
-        assert_eq!(run(&changed)["status"], "invalid-input");
-        let mut unknown = request.clone();
-        unknown.operation = Uuid::new_v4();
-        assert_eq!(run(&unknown)["status"], "not-found");
-        let reopened = Store::open(fixture.paths()).unwrap();
-        assert_eq!(
-            reopened
-                .selected_snapshot(&scope, MAX_ITEMS)
-                .unwrap()
-                .unwrap()
-                .token,
-            before,
-            "recovery/changed/unknown input must not publish or refresh selection"
-        );
-        use crate::storage::sync::mode::SyncModeChoice;
-        for choice in [
-            SyncModeChoice::SharedGroup {
-                group: scope.group,
-                binding_sha256: scope.binding_sha256.clone(),
-                root_id: "original-chosen-root".into(),
-            },
-            SyncModeChoice::LocalOnly,
-            SyncModeChoice::IsolatedBackup {
-                binding_sha256: digest(b"different chosen binding"),
-            },
-            SyncModeChoice::SharedGroup {
-                group: Uuid::new_v4(),
-                binding_sha256: digest(b"new chosen binding"),
-                root_id: "replacement-chosen-root".into(),
-            },
-        ] {
-            reopened
-                .set_sync_mode(
-                    &reopened.sync_mode_snapshot().unwrap().token,
-                    Uuid::new_v4(),
-                    choice,
-                )
-                .unwrap();
-        }
-        drop(reopened);
-        assert_eq!(
-            run(&request)["status"],
-            "historical",
-            "departed mode must not grant or block original custody"
-        );
-        let mode_path = fixture.paths().data.join("sync/mode.json");
-        let valid_mode_bytes = std::fs::read(&mode_path).unwrap();
-        std::fs::write(&mode_path, b"{invalid-private-current-mode").unwrap();
-        assert_eq!(
-            run(&request)["status"],
-            "historical",
-            "historical recovery bypasses current mode admission"
-        );
-        assert_eq!(
-            std::fs::read(&mode_path).unwrap(),
-            b"{invalid-private-current-mode"
-        );
-        std::fs::write(&mode_path, valid_mode_bytes).unwrap();
-        let generation: Uuid =
-            crate::storage::files::json(&fixture.paths().data.join("CURRENT"), 128).unwrap();
-        let blob = fixture
-            .paths()
-            .data
-            .join("generations")
-            .join(generation.to_string())
-            .join("objects")
-            .join(original_root.sha256);
-        assert!(blob.starts_with(&fixture.0));
-        std::fs::rename(&blob, blob.with_extension("missing-fixture")).unwrap();
-        let missing = run(&request);
-        assert_eq!(missing["status"], "unavailable");
-        assert!(missing["data"].is_null());
     }
     #[test]
     fn settlement_must_match_the_referenced_admitted_intent() {

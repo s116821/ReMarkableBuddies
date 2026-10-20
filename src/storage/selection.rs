@@ -1,8 +1,10 @@
 //! Domain-opaque atomic selected references. No domain/native admission or worker.
 mod budget;
 pub use budget::{SelectedReadBudget, SelectedReadUsage};
+mod outbox;
 pub(crate) mod portable;
 mod publication;
+pub use outbox::{SelectedAttempt, SelectedAttemptRequest, SelectedAttemptState};
 mod retained;
 pub use retained::RetainedCommit;
 #[cfg(test)]

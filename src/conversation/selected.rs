@@ -234,128 +234,10 @@ impl SelectedDomainProjection {
     }
     /// Retained records deliberately do not enter current projection.
     pub fn from_snapshot(snapshot: &SelectedSnapshot) -> Result<Self> {
-        Self::from_mixed_records(
+        Self::from_pinned_records(
             &snapshot.selected_records,
             &snapshot.transaction.selected.records,
-            &snapshot.transaction.scope,
         )
-    }
-    /// Explicit reciprocal document partition. Domain-only projection below
-    /// stays strict; this path validates the complete mixed graph first.
-    pub(crate) fn from_mixed_records(
-        records: &[Envelope],
-        references: &[ObjectRef],
-        scope: &crate::storage::selection::SelectionScope,
-    ) -> Result<Self> {
-        if !records
-            .iter()
-            .any(|record| record.namespace == Namespace::SubjectMemory)
-        {
-            return Self::from_pinned_records(records, references);
-        }
-        ensure!(
-            records.len() == references.len() && !records.is_empty() && records.len() <= MAX_ITEMS,
-            "invalid mixed selected references"
-        );
-        let mut all = BTreeMap::new();
-        let mut candidates: BTreeMap<(Namespace, Uuid), BTreeSet<Uuid>> = BTreeMap::new();
-        let mut bytes = 0usize;
-        let mut domain = Vec::new();
-        let mut domain_refs = Vec::new();
-        let mut memory = Vec::new();
-        for (record, reference) in records.iter().zip(references) {
-            record.validate()?;
-            ensure!(
-                crate::storage::valid_digest(&reference.sha256)
-                    && reference.bytes > 0
-                    && reference.bytes <= crate::storage::MAX_RECORD as u64,
-                "invalid mixed object reference"
-            );
-            bytes = bytes
-                .checked_add(usize::try_from(reference.bytes)?)
-                .context("mixed metadata overflow")?;
-            ensure!(bytes <= MAX_METADATA, "mixed metadata exceeds bound");
-            ensure!(
-                all.insert(record.revision_id, record).is_none(),
-                "duplicate mixed revision"
-            );
-            candidates
-                .entry((record.namespace, record.record_id))
-                .or_default()
-                .insert(record.revision_id);
-            match record.namespace {
-                Namespace::SubjectMemory => memory.push(record.clone()),
-                Namespace::Conversation | Namespace::Source | Namespace::ExportAssociation => {
-                    domain.push(record.clone());
-                    domain_refs.push(reference.clone());
-                }
-                _ => anyhow::bail!("unsupported mixed selected namespace"),
-            }
-        }
-        let mut remaining: BTreeMap<_, usize> = all
-            .iter()
-            .map(|(id, record)| (*id, record.parents.len()))
-            .collect();
-        let mut children: BTreeMap<Uuid, Vec<Uuid>> = BTreeMap::new();
-        for record in records {
-            for parent in &record.parents {
-                let prior = all.get(parent).context("mixed ancestor missing")?;
-                ensure!(
-                    prior.namespace == record.namespace && prior.record_id == record.record_id,
-                    "foreign mixed parent"
-                );
-                candidates
-                    .get_mut(&(record.namespace, record.record_id))
-                    .unwrap()
-                    .remove(parent);
-                children
-                    .entry(*parent)
-                    .or_default()
-                    .push(record.revision_id);
-            }
-        }
-        let mut ready: Vec<_> = remaining
-            .iter()
-            .filter_map(|(id, count)| (*count == 0).then_some(*id))
-            .collect();
-        let mut processed = 0;
-        while let Some(id) = ready.pop() {
-            processed += 1;
-            for child in children.get(&id).into_iter().flatten() {
-                let count = remaining.get_mut(child).unwrap();
-                *count -= 1;
-                if *count == 0 {
-                    ready.push(*child);
-                }
-            }
-        }
-        ensure!(processed == records.len(), "mixed causal cycle");
-        let mut pending = Vec::new();
-        for heads in candidates.values() {
-            ensure!(heads.len() == 1, "mixed causal fork or cycle");
-            pending.extend(heads.iter().copied());
-        }
-        let mut reached = BTreeSet::new();
-        while let Some(id) = pending.pop() {
-            if reached.insert(id) {
-                pending.extend(all[&id].parents.iter().copied());
-            }
-        }
-        ensure!(reached.len() == records.len(), "unreachable mixed history");
-        let projection = Self::from_pinned_records(&domain, &domain_refs)?;
-        let owners = projection.document_ownership()?;
-        let Some(DocumentOwnership::Document(document)) = owners.values().next() else {
-            anyhow::bail!("mixed document ownership unavailable")
-        };
-        ensure!(
-            owners
-                .values()
-                .all(|owner| *owner == DocumentOwnership::Document(*document))
-                && scope.key_sha256 == crate::memory::catalog::document_key(*document)?,
-            "foreign or ambiguous mixed document"
-        );
-        crate::memory::aggregate::validate_document_partition(&memory, *document)?;
-        Ok(projection)
     }
     #[cfg(test)]
     fn from_records(records: &[Envelope]) -> Result<Self> {
@@ -371,7 +253,7 @@ impl SelectedDomainProjection {
             .collect::<Result<Vec<_>>>()?;
         Self::from_pinned_records(records, &objects)
     }
-    pub(crate) fn from_pinned_records(
+    pub(super) fn from_pinned_records(
         records: &[Envelope],
         references: &[ObjectRef],
     ) -> Result<Self> {
