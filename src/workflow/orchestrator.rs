@@ -265,11 +265,6 @@ impl<M: LLMEngine> Orchestrator<M> {
                     }
                     memory_view = Some(enriched?);
                     info!("Got verified Q&A with optional subject memory");
-                } else {
-                    info!(
-                        "Got Q&A - Question: {} | Answer: {}",
-                        result.question, result.answer
-                    );
                 }
 
                 let memory = self.memory.clone();
