@@ -253,7 +253,7 @@ impl SelectedDomainProjection {
             .collect::<Result<Vec<_>>>()?;
         Self::from_pinned_records(records, &objects)
     }
-    pub(super) fn from_pinned_records(
+    pub(crate) fn from_pinned_records(
         records: &[Envelope],
         references: &[ObjectRef],
     ) -> Result<Self> {
