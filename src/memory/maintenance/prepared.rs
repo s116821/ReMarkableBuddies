@@ -454,7 +454,7 @@ mod tests {
                     fact: Uuid::new_v4(),
                 },
                 claim: "units".into(),
-                value: "SI ÃƒÅ½Ã‚Â±".into(),
+                value: "SI \u{03b1}".into(),
                 subject: "physics".into(),
                 tags: vec![],
                 provenance: Provenance {

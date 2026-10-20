@@ -116,19 +116,25 @@ fn receipt(
         sha256: hash.clone(),
         bytes: encoded.len() as u64,
     };
-    let original = inner
+    let mut originals = inner
         .index
         .manifests
         .values()
-        .find(|m| {
+        .filter(|m| {
             m.scope == Scope::LocalTransaction
                 && m.records == [reference.clone()]
                 && m.media.is_empty()
                 && m.media_coverage.is_empty()
                 && m.record_namespaces == BTreeMap::from([(hash.clone(), envelope.namespace)])
         })
-        .map(|m| m.transaction_id)
+        .map(|m| m.transaction_id);
+    let original = originals
+        .next()
         .context("original receipt manifest unresolved")?;
+    ensure!(
+        originals.next().is_none(),
+        "original receipt manifest ambiguous"
+    );
     Ok(Some(original))
 }
 impl Store {
@@ -450,5 +456,38 @@ mod tests {
                 .is_err());
             assert_eq!(f.store.manifests().unwrap(), before);
         }
+    }
+    #[test]
+    fn prepared_receipt_refuses_multiple_accepted_manifest_ids_without_new_mutation() {
+        let f = Fixture::new();
+        let (generation, expected, envelope) = f.snapshot();
+        let mut attempted = false;
+        let original = f
+            .store
+            .conditional_commit(generation, envelope.clone(), &expected, &mut attempted)
+            .unwrap();
+        assert!(attempted);
+        let mut duplicate = f
+            .store
+            .manifests()
+            .unwrap()
+            .into_iter()
+            .find(|m| m.transaction_id == original)
+            .unwrap();
+        duplicate.transaction_id = Uuid::new_v4();
+        f.store.import(duplicate, BTreeMap::new()).unwrap();
+        let before = f.store.manifests().unwrap();
+        let error = f
+            .store
+            .conditional_receipt(generation, &envelope, &expected)
+            .unwrap_err();
+        assert_eq!(error.to_string(), "original receipt manifest ambiguous");
+        let mut attempted = false;
+        assert!(f
+            .store
+            .conditional_commit(generation, envelope, &expected, &mut attempted)
+            .is_err());
+        assert!(!attempted);
+        assert_eq!(f.store.manifests().unwrap(), before);
     }
 }

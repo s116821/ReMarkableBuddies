@@ -402,7 +402,7 @@ impl Fixture {
                 fact: Uuid::new_v4(),
             },
             claim: "physics units".into(),
-            value: "Use SI gravity units.\nÎ± and Î² stay Unicode.".into(),
+            value: "Use SI gravity units.\nα and β stay Unicode.".into(),
             subject: "physics".into(),
             tags: vec![],
             provenance: Provenance {
@@ -1247,7 +1247,7 @@ fn actual_cli_stdin_query_matches_file_for_local_and_selected_memory() {
                 "ok"
             );
         }
-        let query = Query::new("physics gravity units\r\nÎ±".into(), 100);
+        let query = Query::new("physics gravity units\r\nα".into(), 100);
         let file_report = fixture.run("query", &query);
         let bytes = serde_json::to_vec(&query).unwrap();
         let stdin_report = fixture.stdin_query(&bytes);
@@ -1689,4 +1689,38 @@ fn actual_prepared_forget_refuses_ambiguous_unsupported_and_busy_without_mutatio
         f.run("inspect", &serde_json::to_value(&fact.key).unwrap())["data"][0]["kind"],
         "value"
     );
+}
+#[test]
+fn actual_prepared_forget_ambiguous_local_receipt_is_unresolved_without_republication() {
+    let f = Fixture::new();
+    let fact = f.fact();
+    assert_eq!(
+        f.run(
+            "put",
+            &json!({"operation":Uuid::new_v4(),"expected":[],"fact":fact})
+        )["status"],
+        "ok"
+    );
+    let intent = prepare_forget(&f, &fact, "ambiguity-prepare");
+    let ack = original_intent_call(&f, "forget", "ambiguity-confirm", &intent);
+    assert_eq!(ack["status"], "ok");
+    let original = Uuid::parse_str(ack["data"]["transaction"].as_str().unwrap()).unwrap();
+    let store = Store::open(f.paths()).unwrap();
+    let mut duplicate = store
+        .manifests()
+        .unwrap()
+        .into_iter()
+        .find(|m| m.transaction_id == original)
+        .unwrap();
+    duplicate.transaction_id = Uuid::new_v4();
+    store.import(duplicate, BTreeMap::new()).unwrap();
+    let before = store.manifests().unwrap();
+    drop(store);
+    let receipt = original_intent_call(&f, "forget-receipt", "ambiguous-local-receipt", &intent);
+    assert_eq!(receipt["status"], "unavailable");
+    assert_eq!(receipt["data"]["outcome"], "unresolved");
+    let repeated = original_intent_call(&f, "forget", "ambiguous-confirm-refusal", &intent);
+    assert_eq!(repeated["data"]["outcome"], "not-dispatched");
+    let store = Store::open(f.paths()).unwrap();
+    assert_eq!(store.manifests().unwrap(), before);
 }
