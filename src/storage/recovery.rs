@@ -1,5 +1,27 @@
 use super::*;
 
+/// Distinguish a proved prepublication conflict from a possible atomic publication.
+pub(crate) enum ConfigPublication {
+    Verified(String),
+    Conflict,
+    Refused,
+    Unknown,
+}
+#[cfg(test)]
+pub(crate) enum ConfigFault {
+    AtomicCall,
+    AfterPublication,
+    ChangedReadback,
+}
+#[derive(Debug)]
+struct ConfigRevisionChanged;
+impl std::fmt::Display for ConfigRevisionChanged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("configuration revision changed")
+    }
+}
+impl std::error::Error for ConfigRevisionChanged {}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Backup {
@@ -536,6 +558,91 @@ impl Store {
         config: &crate::config::Config,
     ) -> Result<String> {
         config.validate()?;
+        self.publish_config(
+            path,
+            expected,
+            || Ok(serde_json::to_vec(config)?),
+            &mut false,
+            files::atomic,
+            false,
+        )
+    }
+
+    /// Declaration-preserving sibling of the typed writer; same CAS and atomic path.
+    pub(crate) fn replace_config_document(
+        &self,
+        path: &Path,
+        expected: &str,
+        bytes: &[u8],
+    ) -> ConfigPublication {
+        self.replace_config_document_with(path, expected, bytes, files::atomic)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_config_document_fault(
+        &self,
+        path: &Path,
+        expected: &str,
+        bytes: &[u8],
+        fault: ConfigFault,
+    ) -> ConfigPublication {
+        self.replace_config_document_with(path, expected, bytes, |path, bytes| {
+            if matches!(fault, ConfigFault::AtomicCall) {
+                anyhow::bail!("injected atomic call failure");
+            }
+            files::atomic(path, bytes)?;
+            match fault {
+                ConfigFault::AfterPublication => anyhow::bail!("injected post-publication failure"),
+                ConfigFault::ChangedReadback => files::atomic(path, b"{}"),
+                ConfigFault::AtomicCall => unreachable!(),
+            }
+        })
+    }
+
+    fn replace_config_document_with(
+        &self,
+        path: &Path,
+        expected: &str,
+        bytes: &[u8],
+        publish: impl FnOnce(&Path, &[u8]) -> Result<()>,
+    ) -> ConfigPublication {
+        let Ok((config, _)) = crate::config::inspection::document(bytes) else {
+            return ConfigPublication::Refused;
+        };
+        if config.validate().is_err()
+            || config.paths.data != self.paths.data
+            || config.paths.cache != self.paths.cache
+            || config.paths.credentials != self.paths.credentials
+            || !valid_digest(expected)
+        {
+            return ConfigPublication::Refused;
+        }
+        let mut attempted = false;
+        let result = self.publish_config(
+            path,
+            Some(expected),
+            || Ok(bytes.to_vec()),
+            &mut attempted,
+            publish,
+            true,
+        );
+        match result {
+            Ok(hash) => ConfigPublication::Verified(hash),
+            Err(_) if attempted => ConfigPublication::Unknown,
+            Err(error) if error.is::<ConfigRevisionChanged>() => ConfigPublication::Conflict,
+            Err(_) => ConfigPublication::Refused,
+        }
+    }
+
+    fn publish_config(
+        &self,
+        path: &Path,
+        expected: Option<&str>,
+        encode: impl FnOnce() -> Result<Vec<u8>>,
+        attempted: &mut bool,
+        publish: impl FnOnce(&Path, &[u8]) -> Result<()>,
+        verify: bool,
+    ) -> Result<String> {
         files::safe_path(path)?;
         ensure!(
             !path.starts_with(&self.paths.data)
@@ -552,13 +659,19 @@ impl Store {
         } else {
             None
         };
-        ensure!(
-            current.as_deref() == expected,
-            "configuration revision changed"
-        );
-        let bytes = serde_json::to_vec(config)?;
+        if current.as_deref() != expected {
+            return Err(ConfigRevisionChanged.into());
+        }
+        let bytes = encode()?;
         ensure!(bytes.len() <= MAX_RECORD, "configuration exceeds bound");
-        files::atomic(path, &bytes)?;
+        *attempted = true;
+        publish(path, &bytes)?;
+        if verify {
+            ensure!(
+                files::read(path, MAX_RECORD as u64)? == bytes,
+                "configuration readback changed"
+            );
+        }
         Ok(digest(&bytes))
     }
 }

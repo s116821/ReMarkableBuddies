@@ -90,30 +90,52 @@ pub fn run(_operation: Operation, path: Option<PathBuf>) -> Report {
     inspect_bytes(&bytes)
 }
 
-fn inspect_bytes(bytes: &[u8]) -> Report {
+pub(crate) fn document(bytes: &[u8]) -> std::result::Result<(Config, Value), Status> {
     if bytes.len() > MAX_RECORD {
-        return Report::refusal(Status::Unavailable);
+        return Err(Status::Unavailable);
     }
     // Deserialize directly, before any map can collapse duplicate typed fields.
     let Ok(config) = serde_json::from_slice::<Config>(bytes) else {
-        return Report::refusal(Status::InvalidInput);
+        return Err(Status::InvalidInput);
     };
-    let Ok(StrictValue(raw)) = serde_json::from_slice::<StrictValue>(bytes) else {
-        return Report::refusal(Status::InvalidInput);
+    let Ok(raw) = strict_json(bytes) else {
+        return Err(Status::InvalidInput);
     };
+    if !raw.is_object()
+        || ["paths", "memory", "sync", "personalization"]
+            .iter()
+            .any(|key| raw.get(key).is_some_and(|v| !v.is_object()))
+        || raw
+            .pointer("/memory/selection")
+            .is_some_and(|v| !v.is_null() && !v.is_object())
+    {
+        return Err(Status::InvalidInput);
+    }
     if config.config_schema_version != 1 || config.personalization.schema_version != 1 {
-        return Report::refusal(Status::Unsupported);
+        return Err(Status::Unsupported);
     }
     if let Some(namespaces) = raw.pointer("/sync/namespaces").and_then(Value::as_array) {
         let unique: BTreeSet<_> = namespaces.iter().filter_map(Value::as_str).collect();
         if unique.len() != namespaces.len() {
-            return Report::refusal(Status::InvalidInput);
+            return Err(Status::InvalidInput);
         }
     }
     // Intentionally excludes Config::validate/StorePaths::validate and filesystem I/O.
     if config.validate_values().is_err() {
-        return Report::refusal(Status::InvalidInput);
+        return Err(Status::InvalidInput);
     }
+    Ok((config, raw))
+}
+
+pub(super) fn strict_json(bytes: &[u8]) -> serde_json::Result<Value> {
+    serde_json::from_slice::<StrictValue>(bytes).map(|value| value.0)
+}
+
+fn inspect_bytes(bytes: &[u8]) -> Report {
+    let (config, raw) = match document(bytes) {
+        Ok(value) => value,
+        Err(status) => return Report::refusal(status),
+    };
     let mut fields = BTreeMap::new();
     let mut add = |name: &'static str, source: &str, value: Value| {
         let declared = source.split('.').try_fold(&raw, |v, key| v.get(key));
@@ -309,6 +331,57 @@ impl<'de> Deserialize<'de> for StrictValue {
 mod tests {
     use super::*;
     use std::io;
+
+    #[test]
+    fn retained_valid_wire_and_refusals_remain_byte_identical() {
+        use base64::Engine;
+        let corpus: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/saved-configuration-4bc7eb0-corpus.json"
+        ))
+        .unwrap();
+        for case in corpus["cases"].as_array().unwrap() {
+            let input = &case["input"];
+            let bytes = if let Some(text) = input["utf8"].as_str() {
+                text.as_bytes().to_vec()
+            } else if let Some(encoded) = input["base64"].as_str() {
+                base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .unwrap()
+            } else {
+                let mut bytes = input["prefix_utf8"].as_str().unwrap().as_bytes().to_vec();
+                bytes.resize(
+                    input["total_bytes"].as_u64().unwrap() as usize,
+                    input["padding_byte"].as_u64().unwrap() as u8,
+                );
+                bytes
+            };
+            let mut actual = Vec::new();
+            inspect_bytes(&bytes).write_to(&mut actual).unwrap();
+            assert_eq!(
+                actual,
+                case["stdout_utf8"].as_str().unwrap().as_bytes(),
+                "{}",
+                case["name"]
+            );
+        }
+    }
+
+    #[test]
+    fn schema_struct_arrays_refuse_without_narrowing_collection_arrays() {
+        // The scoped maintenance guard does not rewrite legacy Config deserialization.
+        assert!(serde_json::from_slice::<Config>(b"[]").is_ok());
+        for raw in [
+            r#"[]"#,
+            r#"{"paths":["/a/b","/c/d","/e/f"]}"#,
+            r#"{"memory":[]}"#,
+            r#"{"sync":[]}"#,
+            r#"{"personalization":[]}"#,
+            r#"{"memory":{"profile":"a138b641-a4aa-4ac3-b1d1-091ba27f1470","selection":["b2f1cc78-a8d8-4dc1-a3ce-a40cdff053ba","a138b641-a4aa-4ac3-b1d1-091ba27f1470","a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5"]}}"#,
+        ] {
+            assert_eq!(inspect_bytes(raw.as_bytes()).status, Status::InvalidInput);
+        }
+        assert_eq!(inspect_bytes(br#"{"sync":{"namespaces":["source","conversation"]},"memory":{"selection":null},"debug_dump":null}"#).status, Status::Ok);
+    }
 
     #[test]
     fn input_bound_is_inclusive_and_writer_never_emits_a_second_report() {
