@@ -1,13 +1,21 @@
 //! Selected output is reachable only through controlled context dispatch.
 use super::*;
-use crate::conversation::{ReaderContext, ReaderHandoff, SelectedAdmission};
-use std::{rc::Rc, sync::Arc};
+use crate::conversation::SelectedAdmission;
+#[cfg(test)]
+use crate::conversation::{ReaderContext, ReaderHandoff};
+#[cfg(test)]
+use std::rc::Rc;
+use std::sync::Arc;
+#[cfg(test)]
 mod refusing;
+#[cfg(test)]
 pub(super) use refusing::RefusingBackend;
 
 /// Process-local association only, never native qualification or stored evidence.
 #[derive(Clone)]
+#[cfg(test)]
 pub(crate) struct ReaderBackendBinding(Rc<()>);
+#[cfg(test)]
 impl ReaderBackendBinding {
     fn new() -> Self {
         Self(Rc::new(()))
@@ -22,11 +30,14 @@ impl ReaderBackendBinding {
 }
 
 pub(crate) struct SelectedBackendFacade {
+    #[cfg(test)]
     backend: Box<dyn DeviceBackend>,
     admission: Arc<SelectedAdmission>,
+    #[cfg(test)]
     binding: ReaderBackendBinding,
 }
 impl SelectedBackendFacade {
+    #[cfg(test)]
     pub(crate) fn new(admission: Arc<SelectedAdmission>, backend: Box<dyn DeviceBackend>) -> Self {
         Self {
             backend,
@@ -34,6 +45,7 @@ impl SelectedBackendFacade {
             binding: ReaderBackendBinding::new(),
         }
     }
+    #[cfg(test)]
     pub(crate) fn binding(&self) -> ReaderBackendBinding {
         self.binding.clone()
     }
@@ -48,6 +60,7 @@ impl SelectedBackendFacade {
         self.admission
             .inspect_buddy_binding(accepted, conversation, document, page)
     }
+    #[cfg(test)]
     pub(crate) fn dispatch(
         &mut self,
         context: &ReaderContext,

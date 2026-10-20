@@ -3,8 +3,12 @@ use super::*;
 use crate::storage::selection::{SelectionPublication, SelectionToken};
 use crate::storage::{Kind, MAX_RECORD};
 use serde::{Deserialize, Serialize};
+// No qualified production source adapter exists; retain execution in recording tests.
+#[cfg(test)]
 mod reader_context;
+#[cfg(test)]
 pub(crate) use reader_context::{ReaderContext, ReaderPreparation, ReaderSourceAdmission};
+#[cfg(test)]
 use std::rc::Rc;
 pub(crate) mod sealed {
     pub trait Sealed {}
@@ -116,6 +120,7 @@ fn new_record(
 }
 impl SelectedAdmission {
     /// Only this controlled new publication can mint an executable context.
+    #[cfg(test)]
     pub(crate) fn prepare_reader(
         self: &Arc<Self>,
         accepted: Option<&SelectionToken>,
