@@ -16,6 +16,9 @@ pub struct Args {
     /// Run a bounded local scenario (offline unless explicitly live)
     #[arg(long, value_name = "SCENARIO", conflicts_with_all = ["api_key", "model", "base_url", "trigger_corner", "debug_dump"])]
     simulate: Option<std::path::PathBuf>,
+    /// Report existing Buddy-owned file sizes without starting the Reader
+    #[arg(long, conflicts_with_all = ["simulate", "api_key", "model", "base_url", "trigger_corner", "debug_dump", "export_note", "personalization_operation"])]
+    inspect_owned_data: bool,
     /// API key (prefer OPENAI_API_KEY to avoid shell history/process-list exposure)
     #[arg(long)]
     api_key: Option<String>,
@@ -60,6 +63,14 @@ fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_lo
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    if args.inspect_owned_data {
+        let report = match Config::load(std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into)) {
+            Ok(config) => remarkable_reader_buddy::storage::inspection::inspect_owned_data(&config.paths),
+            Err(_) => remarkable_reader_buddy::storage::inspection::OwnedDataReport::configuration_unavailable(),
+        };
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
     if args.export_note {
         let report = remarkable_reader_buddy::note_export::command::run(
             std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
@@ -150,6 +161,7 @@ mod tests {
                 "base-url",
                 "debug-dump",
                 "export-note",
+                "inspect-owned-data",
                 "log-level",
                 "model",
                 "personalization-operation",
@@ -161,6 +173,7 @@ mod tests {
         assert!(args.model.is_none());
         assert!(args.trigger_corner.is_none());
         assert!(!args.debug_dump);
+        assert!(!args.inspect_owned_data);
         assert!(!args.export_note);
         assert!(
             Args::try_parse_from(["reader-buddy", "--export-note"])
