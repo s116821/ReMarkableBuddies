@@ -13,6 +13,9 @@ use std::time::Duration;
 #[command(author, version = env!("READER_BUDDY_VERSION"))]
 #[command(about = "ReMarkable Reader Buddy - AI-powered reading assistant for reMarkable tablets")]
 pub struct Args {
+    /// Inspect saved configuration declarations without runtime or Store startup
+    #[arg(long, value_enum, conflicts_with_all = ["simulate", "inspect_owned_data", "api_key", "model", "base_url", "trigger_corner", "log_level", "debug_dump", "memory_operation", "memory_input", "sync_mode_operation", "sync_mode_input", "archive_operation", "archive_input", "personalization_operation", "export_note"])]
+    configuration_operation: Option<config::inspection::Operation>,
     /// Run a bounded local scenario (offline unless explicitly live)
     #[arg(long, value_name = "SCENARIO", conflicts_with_all = ["api_key", "model", "base_url", "trigger_corner", "debug_dump"])]
     simulate: Option<std::path::PathBuf>,
@@ -86,6 +89,14 @@ fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_lo
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    if let Some(operation) = args.configuration_operation {
+        let report = config::inspection::run(
+            operation,
+            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+        );
+        report.write_to(&mut std::io::stdout().lock())?;
+        return Ok(());
+    }
     if let Some(operation) = args.archive_operation {
         let report = remarkable_reader_buddy::archive_maintenance::run(
             operation,
