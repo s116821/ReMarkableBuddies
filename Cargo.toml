@@ -33,7 +33,7 @@ zip = { version = "=9.0.5", default-features = false, features = ["deflate-flate
 quick-xml = "=0.42.0"
 percent-encoding = "=2.3.2"
 
-remarkable-open-sdk = { git = "https://github.com/s116821/ReMarkableOpenSDK", rev = "32b86e4fef04844cbf2ec31129bf029cc1d9899a", default-features = false }
+remarkable-open-sdk = { git = "https://github.com/s116821/ReMarkableOpenSDK", rev = "32b86e4fef04844cbf2ec31129bf029cc1d9899a", default-features = false, features = ["development-capture"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.13"
@@ -44,7 +44,7 @@ name = "remarkable_reader_buddy"
 path = "src/lib.rs"
 
 [dev-dependencies]
-remarkable-open-sdk = { git = "https://github.com/s116821/ReMarkableOpenSDK", rev = "32b86e4fef04844cbf2ec31129bf029cc1d9899a", default-features = false, features = ["mock"] }
+remarkable-open-sdk = { git = "https://github.com/s116821/ReMarkableOpenSDK", rev = "32b86e4fef04844cbf2ec31129bf029cc1d9899a", default-features = false, features = ["mock", "development-capture"] }
 # Explicit native-evidence example only; not linked into the installed runtime.
 sha2 = "0.10"
 

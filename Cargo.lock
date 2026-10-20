@@ -2573,6 +2573,8 @@ version = "0.0.0"
 source = "git+https://github.com/s116821/ReMarkableOpenSDK?rev=32b86e4fef04844cbf2ec31129bf029cc1d9899a#32b86e4fef04844cbf2ec31129bf029cc1d9899a"
 dependencies = [
  "image",
+ "serde",
+ "serde_json",
  "sha2",
 ]
 

@@ -13,6 +13,65 @@ pub struct CaptureEvidence {
     pub turn: Uuid,
     pub facts: super::capture_facts::HistoricalCapture,
 }
+/// Buddy-only history. Explicit absence never substitutes for native identity.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LegacyCapture {
+    pub schema: u32,
+    pub id: Uuid,
+    pub conversation: Uuid,
+    pub turn: Uuid,
+    pub origin: LegacyOrigin,
+    #[serde(deserialize_with = "required_absent")]
+    pub identity: (),
+    #[serde(deserialize_with = "required_absent")]
+    pub qualification: (),
+    #[serde(deserialize_with = "required_option")]
+    pub parent: Option<LegacyImage>,
+    pub images: Vec<LegacyImage>,
+}
+fn required_option<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    deserializer: D,
+) -> Result<Option<T>, D::Error> {
+    Option::deserialize(deserializer)
+}
+fn required_absent<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<(), D::Error> {
+    <()>::deserialize(deserializer)
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum LegacyOrigin {
+    LegacyUnqualified,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LegacyImage {
+    pub media: Media,
+    pub dimensions: [u32; 2],
+    pub role: LegacyImageRole,
+    #[serde(deserialize_with = "required_option")]
+    pub provider_ordinal: Option<u32>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum LegacyImageRole {
+    AcquisitionParent,
+    Overview,
+    Detail,
+}
+pub struct LegacyImageInput {
+    pub descriptor: LegacyImage,
+    pub bytes: Vec<u8>,
+}
+pub struct PreparedLegacyCapture {
+    pub evidence: LegacyCapture,
+    pub parent: Option<Vec<u8>>,
+    pub images: Vec<Vec<u8>>,
+}
+/// Owned historical bytes only, preserving the source variant's qualification.
+pub enum SelectedCaptureImages {
+    Sdk(PreparedSdkCapture),
+    Legacy(PreparedLegacyCapture),
+    Development(Box<super::PreparedDevelopmentCapture>),
+}
 #[derive(Clone, Debug)]
 pub struct PreparedSdkImage {
     /// Native parent has no provider ordinal; derivatives keep original order.
@@ -50,6 +109,31 @@ pub enum Outcome {
     Failed,
     Canceled,
     ReconcileRequired,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AttemptReason {
+    RequestFailed,
+    NativeOutputUnavailable,
+    NoSelection,
+    TranscriptionDisagreement,
+    ProviderFailure,
+    Canceled,
+    OutputPending,
+    SubmittedUnverified,
+    DeviceUncertain,
+    NoSuccessor,
+    InvalidSuccessor,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OutcomeFact {
+    pub id: Uuid,
+    pub conversation: Uuid,
+    pub turn: Uuid,
+    pub outcome: Outcome,
+    pub reason: AttemptReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settlement: Option<super::IntentSettlement>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -182,6 +266,8 @@ pub struct Acknowledgment {
 pub struct Receipt {
     pub fingerprint: String,
     pub acknowledgment: Acknowledgment,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admitted_intent: Option<super::AdmittedIntent>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(
@@ -195,6 +281,9 @@ pub enum Record {
     Turn(Turn),
     Source(ImageUse),
     Capture(Box<CaptureEvidence>),
+    LegacyCapture(LegacyCapture),
+    DevelopmentCapture(Box<super::development::DevelopmentCaptureHistory>),
+    OutcomeFact(OutcomeFact),
     Binding(Binding),
     Export(ExportAssociation),
     Receipt(Receipt),
@@ -235,6 +324,8 @@ pub struct ContextView {
     pub turns: Vec<Turn>,
     pub sources: Vec<ImageUse>,
     pub captures: Vec<CaptureEvidence>,
+    pub legacy_captures: Vec<LegacyCapture>,
+    pub development_captures: Vec<super::development::DevelopmentCaptureHistory>,
     pub missing_media: Vec<Media>,
     pub selection: Option<TurnRange>,
 }
