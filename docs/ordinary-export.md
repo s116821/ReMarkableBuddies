@@ -1,6 +1,6 @@
 # Ordinary owned archive export
 
-Use `--ordinary-export-operation prepare|apply|status --ordinary-export-input -` with one EOF-delimited strict JSON request. Input and single-LF report each have a16384-byte cap. Prepare/apply require `REMARKABLE_BUDDIES_CONFIG` to select an existing absolute configuration file; there is no default-file fallback. Status does not read that file or open a source Store.
+Use `--ordinary-export-operation prepare|apply|status --ordinary-export-input -` with one EOF-delimited strict JSON request. Input and single-LF report each have a 16384-byte cap. Prepare/apply require `REMARKABLE_BUDDIES_CONFIG` to select an existing absolute configuration file; there is no default-file fallback. Status does not read that file or open a source Store.
 
 Prepare supplies `{export_version:1,operation:UUID,destination:ABS}`. The parent must already exist, the destination must be absent and outside every owned root through lexical/canonical/case/reparse checks. Only an existing ordinary format1 unconfigured/local-only Store is admitted. No initialization, mode change, selected restore or provider/runtime action occurs. Private intent binds original file/path, actor/mode, generation/full history, raw optional stored snapshot and desired archive bytes. Apply supplies `{destination:ABS,intent:INTENT}` unchanged and refuses changed original conditions.
 
