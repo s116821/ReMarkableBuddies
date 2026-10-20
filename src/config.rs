@@ -2,6 +2,7 @@
 pub mod basic;
 pub mod inspection;
 pub mod memory_settings;
+pub mod model_credential;
 pub mod model_settings;
 pub mod personalization;
 use crate::{

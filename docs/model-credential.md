@@ -1,0 +1,13 @@
+# Declared protected model credential
+
+The Linux-only `--model-credential-operation inspect|prepare|apply|status` protocol manages only the existing `model_credential` reference in an explicit absolute `REMARKABLE_BUDDIES_CONFIG` file. Other targets report unsupported before credential access. This is a tablet-side maintenance command usable by future browser and Electron consumers, not a credential vault or provider login.
+
+Inspect has no input or stdin access. The other operations require exact `--model-credential-input -` and one strict EOF-delimited request. Request and single-LF report each cap16384 bytes; config/existing credential cap1MiB; new decoded UTF8 secret caps8192 bytes. Nonblank validation does not trim or rewrite accepted CRLF, controls or trailing contents. Never put secrets in command arguments.
+
+An existing private0700 directory and declared reference are required. Install requires an absent file and uses sealed private staging with no-clobber publication. Replacement preserves admitted0400/0600 mode. Removal targets only the admitted original. Config, path, parent, original presence/content/metadata and current existing Store/mode custody bind one conditional publication under the existing Store mutex. Unsafe aliases/owners/modes refuse without repair or fallback. No root initialization, reference edit, provider call, environment lookup or runtime reload occurs.
+
+Treat the entire binding/intent/report transport as confidential. Unsalted content hashes support offline comparison and are sensitive, even though reports never echo secret bytes. Keep original conditions and replacement text private, never commit them or copy them into logs/UI. A separately reviewed host must reduce public results and specify private buffer lifetime before using this protocol.
+
+Verified apply confirms current saved bytes/private permissions or absence only. Every operation reports runtime unverified. CLI/environment precedence remains unchanged; removal does not revoke a credential selected elsewhere or prove provider logout. Once destination publication/removal is attempted, missing/failed/truncated output remains unknown without rollback or replay. Explicit original-intent status observes current desired state and cannot establish the original publisher or settle historical uncertainty.
+
+The coordinated central `manage-declared-model-credential` contract fixes exact confidential records, fingerprint recipes, status mappings and evidence requirements. Initial reference binding, host UI, effective authentication and runtime/native qualification remain separate.

@@ -725,3 +725,22 @@ impl Store {
         Ok(digest(&bytes))
     }
 }
+
+#[cfg(target_os = "linux")]
+impl Store {
+    /// Same Store mutex as configuration/data publication; no credential-specific owner.
+    pub(crate) fn publish_declared_model_credential(
+        &self,
+        path: &std::path::Path,
+        intent: &crate::config::model_credential::linux::Intent,
+        change: &crate::config::model_credential::linux::Change,
+    ) -> crate::config::model_credential::Report {
+        let Ok(_inner) = self.inner.lock() else {
+            return crate::config::model_credential::Report::refusal(
+                crate::config::model_credential::Operation::Apply,
+                crate::config::basic::Status::Unavailable,
+            );
+        };
+        crate::config::model_credential::linux::publish_locked(path, &self.paths, intent, change)
+    }
+}
