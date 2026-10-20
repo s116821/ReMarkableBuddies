@@ -20,7 +20,8 @@ type Checked<T> = std::result::Result<T, Status>;
 #[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 enum State {
-    Absent,
+    // Empty record variants enforce unknown-field refusal; serde unit variants do not.
+    Absent {},
     Present {
         sha256: String,
         metadata_sha256: String,
@@ -48,20 +49,20 @@ enum Action {
 pub(crate) enum Change {
     Install { value: String },
     Replace { value: String },
-    Remove,
+    Remove {},
 }
 impl Change {
     fn action(&self) -> Action {
         match self {
             Self::Install { .. } => Action::Install,
             Self::Replace { .. } => Action::Replace,
-            Self::Remove => Action::Remove,
+            Self::Remove {} => Action::Remove,
         }
     }
     fn bytes(&self) -> Option<&[u8]> {
         match self {
             Self::Install { value } | Self::Replace { value } => Some(value.as_bytes()),
-            Self::Remove => None,
+            Self::Remove {} => None,
         }
     }
     fn valid(&self) -> bool {
@@ -69,14 +70,14 @@ impl Change {
             Self::Install { value } | Self::Replace { value } => {
                 value.len() <= 8192 && !value.trim().is_empty()
             }
-            Self::Remove => true,
+            Self::Remove {} => true,
         }
     }
 }
 #[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 enum Desired {
-    Absent,
+    Absent {},
     Present { sha256: String, mode: u32 },
 }
 #[derive(Clone, Deserialize, Serialize)]
@@ -122,7 +123,7 @@ impl Binding {
         .into_iter()
         .all(|s| valid_digest(s))
             && match &self.state {
-                State::Absent => true,
+                State::Absent {} => true,
                 State::Present {
                     sha256,
                     metadata_sha256,
@@ -148,7 +149,7 @@ impl Intent {
         let valid = match (&self.action, &self.base.state, &self.target) {
             (
                 Action::Install,
-                State::Absent,
+                State::Absent {},
                 Desired::Present {
                     sha256,
                     mode: 0o600,
@@ -163,7 +164,7 @@ impl Intent {
                 },
                 Desired::Present { sha256, mode },
             ) => valid_digest(sha256) && old != sha256 && old_mode == mode,
-            (Action::Remove, State::Present { .. }, Desired::Absent) => true,
+            (Action::Remove, State::Present { .. }, Desired::Absent {}) => true,
             _ => false,
         };
         if valid {
@@ -176,7 +177,7 @@ impl Intent {
         change.valid()
             && self.action == change.action()
             && match (&self.target, change.bytes()) {
-                (Desired::Absent, None) => true,
+                (Desired::Absent {}, None) => true,
                 (Desired::Present { sha256, .. }, Some(bytes)) => digest(bytes) == *sha256,
                 _ => false,
             }
@@ -272,7 +273,7 @@ fn observe(path: Option<PathBuf>) -> Checked<Observation> {
     let config_meta = fs::symlink_metadata(&path).map_err(|_| Status::Unavailable)?;
     let target = root.join(name);
     let state = match fs::symlink_metadata(&target) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => State::Absent,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => State::Absent {},
         Err(_) => return Err(Status::Unavailable),
         Ok(meta) => {
             let mode = meta.mode() & 0o7777;
@@ -388,7 +389,7 @@ pub(super) fn run(op: Operation, path: Option<PathBuf>, input: &mut impl Read) -
                     return Err(Status::Conflict);
                 }
                 let target = match (&doc.binding.state, &request.change) {
-                    (State::Absent, Change::Install { value }) => Some(Desired::Present {
+                    (State::Absent {}, Change::Install { value }) => Some(Desired::Present {
                         sha256: digest(value.as_bytes()),
                         mode: 0o600,
                     }),
@@ -402,8 +403,8 @@ pub(super) fn run(op: Operation, path: Option<PathBuf>, input: &mut impl Read) -
                             })
                         }
                     }
-                    (State::Present { .. }, Change::Remove) => Some(Desired::Absent),
-                    (State::Absent, Change::Remove) => None,
+                    (State::Present { .. }, Change::Remove {}) => Some(Desired::Absent {}),
+                    (State::Absent {}, Change::Remove {}) => None,
                     _ => return Err(Status::Conflict),
                 };
                 match target {
@@ -460,7 +461,7 @@ pub(super) fn run(op: Operation, path: Option<PathBuf>, input: &mut impl Read) -
 }
 fn desired(state: &State, target: &Desired) -> bool {
     match (state, target) {
-        (State::Absent, Desired::Absent) => true,
+        (State::Absent {}, Desired::Absent {}) => true,
         (
             State::Present { sha256, mode, .. },
             Desired::Present {
@@ -1047,17 +1048,45 @@ mod tests {
                 Status::InvalidInput
             );
         }
-        for ch in [
+        for (case, ch) in [
             json!({"action":"install","value":null}),
             json!({"action":"install","value":" \r\n "}),
             json!({"action":"remove","value":"secret"}),
             json!({"action":"install","value":"x".repeat(8193)}),
             json!({"action":"install","value":"ok","extra":true}),
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let mut x = valid.clone();
             x["change"] = ch;
-            assert_eq!(f.run(Operation::Prepare, x).status, Status::InvalidInput);
+            assert_eq!(
+                f.run(Operation::Prepare, x).status,
+                Status::InvalidInput,
+                "strict patch case {case}"
+            );
         }
+        let mut extra_state = valid.clone();
+        extra_state["base"]["state"]["extra"] = json!(true);
+        assert_eq!(
+            f.run(Operation::Prepare, extra_state).status,
+            Status::InvalidInput
+        );
+        let intent = f.prepare(change("install"));
+        let mut extra_base = json!({"intent":intent});
+        extra_base["intent"]["base"]["state"]["extra"] = json!(true);
+        assert_eq!(
+            f.run(Operation::Status, extra_base).status,
+            Status::InvalidInput
+        );
+        f.set(b"original", 0o600);
+        let intent = f.prepare(change("remove"));
+        let mut extra_target = json!({"intent":intent});
+        extra_target["intent"]["target"]["extra"] = json!(true);
+        assert_eq!(
+            f.run(Operation::Status, extra_target).status,
+            Status::InvalidInput
+        );
     }
     #[test]
     fn actual_config_writer_cannot_interleave_credential_publication_mutex() {
