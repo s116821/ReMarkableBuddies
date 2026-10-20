@@ -237,6 +237,7 @@ mod tests {
                 "archive-input",
                 "archive-operation",
                 "base-url",
+                "configuration-operation",
                 "debug-dump",
                 "export-note",
                 "inspect-owned-data",
@@ -252,6 +253,7 @@ mod tests {
             ]
         );
         let args = Args::try_parse_from(["reader-buddy"]).unwrap();
+        assert!(args.configuration_operation.is_none());
         assert!(args.model.is_none());
         assert!(args.trigger_corner.is_none());
         assert!(!args.debug_dump);
