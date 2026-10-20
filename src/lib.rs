@@ -2,6 +2,7 @@ pub mod analysis;
 pub mod config;
 pub mod conversation;
 pub mod conversation_feedback;
+pub mod conversation_layout;
 pub mod device;
 pub mod llm;
 mod measurement;
