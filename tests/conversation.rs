@@ -645,6 +645,7 @@ fn uncertain_export_discovery_requires_exact_unique_marker() {
         source_revision: "exact-root-r1".into(),
         operation,
         outcome: Outcome::ReconcileRequired,
+        attempt: None,
     };
     assert_eq!(
         association.title_marker(),

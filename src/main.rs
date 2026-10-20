@@ -15,6 +15,9 @@ pub struct Args {
     /// Run a bounded local scenario (offline unless explicitly live)
     #[arg(long, value_name = "SCENARIO", conflicts_with_all = ["api_key", "model", "base_url", "trigger_corner", "debug_dump"])]
     simulate: Option<std::path::PathBuf>,
+    /// Report existing Buddy-owned file sizes without starting the Reader
+    #[arg(long, conflicts_with_all = ["simulate", "api_key", "model", "base_url", "trigger_corner", "debug_dump", "export_note", "personalization_operation"])]
+    inspect_owned_data: bool,
     /// API key (prefer OPENAI_API_KEY to avoid shell history/process-list exposure)
     #[arg(long)]
     api_key: Option<String>,
@@ -34,16 +37,22 @@ pub struct Args {
     #[arg(long)]
     debug_dump: bool,
     /// One-shot local memory maintenance; no provider or tablet runtime
-    #[arg(long, value_enum, requires = "memory_input", conflicts_with_all = ["simulate", "api_key", "model", "base_url", "trigger_corner", "debug_dump", "log_level", "conversation_operation", "conversation_input"])]
+    #[arg(long, value_enum, requires = "memory_input", conflicts_with_all = ["simulate", "api_key", "model", "base_url", "trigger_corner", "debug_dump", "log_level", "inspect_owned_data", "export_note", "personalization_operation", "conversation_operation", "conversation_input"])]
     memory_operation: Option<remarkable_reader_buddy::memory::maintenance::Operation>,
     /// Bounded JSON input for an explicit memory operation
     #[arg(long, value_name = "FILE", requires = "memory_operation")]
     memory_input: Option<std::path::PathBuf>,
     /// One-shot selected history inspection or original-request recovery
-    #[arg(long, value_enum, requires="conversation_input", conflicts_with_all=["simulate","api_key","model","base_url","trigger_corner","debug_dump","log_level","memory_operation","memory_input"])]
+    #[arg(long, value_enum, requires="conversation_input", conflicts_with_all=["simulate","api_key","model","base_url","trigger_corner","debug_dump","log_level","memory_operation","memory_input","inspect_owned_data","export_note","personalization_operation"])]
     conversation_operation: Option<remarkable_reader_buddy::reader_runtime::Operation>,
     #[arg(long, value_name = "FILE", requires = "conversation_operation")]
     conversation_input: Option<std::path::PathBuf>,
+    /// Fixed local personalization maintenance; mutation JSON comes from bounded stdin
+    #[arg(long, value_enum, conflicts_with_all=["simulate","api_key","model","base_url","trigger_corner","debug_dump","log_level","export_note"])]
+    personalization_operation: Option<config::personalization::Operation>,
+    /// Export prepared Markdown or reconcile a prior export; bounded JSON stdin
+    #[arg(long, conflicts_with_all=["simulate","api_key","model","base_url","trigger_corner","debug_dump","log_level","personalization_operation"])]
+    export_note: bool,
 }
 
 fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_logger::Builder {
@@ -86,6 +95,32 @@ fn main() -> Result<()> {
             operation,
             input,
             std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+        );
+        report.write_to(&mut std::io::stdout().lock())?;
+        return Ok(());
+    }
+    if args.inspect_owned_data {
+        let report = match Config::load(std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into)) {
+            Ok(config) => remarkable_reader_buddy::storage::inspection::inspect_owned_data(&config.paths),
+            Err(_) => remarkable_reader_buddy::storage::inspection::OwnedDataReport::configuration_unavailable(),
+        };
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+    if args.export_note {
+        let report = remarkable_reader_buddy::note_export::command::run(
+            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+            &mut std::io::stdin().lock(),
+        );
+        serde_json::to_writer(std::io::stdout().lock(), &report)?;
+        println!();
+        return Ok(());
+    }
+    if let Some(operation) = args.personalization_operation {
+        let report = config::personalization::run(
+            operation,
+            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+            &mut std::io::stdin().lock(),
         );
         report.write_to(&mut std::io::stdout().lock())?;
         return Ok(());
@@ -183,10 +218,13 @@ mod tests {
                 "conversation-input",
                 "conversation-operation",
                 "debug-dump",
+                "export-note",
+                "inspect-owned-data",
                 "log-level",
                 "memory-input",
                 "memory-operation",
                 "model",
+                "personalization-operation",
                 "simulate",
                 "trigger-corner"
             ]
@@ -197,6 +235,13 @@ mod tests {
         assert!(!args.debug_dump);
         assert!(args.memory_operation.is_none() && args.memory_input.is_none());
         assert!(args.conversation_operation.is_none() && args.conversation_input.is_none());
+        assert!(!args.inspect_owned_data);
+        assert!(!args.export_note);
+        assert!(
+            Args::try_parse_from(["reader-buddy", "--export-note"])
+                .unwrap()
+                .export_note
+        );
         for flag in [
             "--once",
             "--no-trigger",
@@ -238,6 +283,56 @@ mod tests {
             .err()
             .unwrap()
             .to_string();
+            assert!(!error.contains("fixture-secret"));
+        }
+    }
+
+    #[test]
+    fn personalization_rejects_runtime_overrides() {
+        for operation in ["inspect", "set", "disable", "clear"] {
+            assert!(Args::try_parse_from([
+                "reader-buddy",
+                "--personalization-operation",
+                operation
+            ])
+            .is_ok());
+            for extra in [
+                vec!["--api-key", "fixture-secret"],
+                vec!["--model", "model"],
+                vec!["--base-url", "url"],
+                vec!["--trigger-corner", "UR"],
+                vec!["--debug-dump"],
+                vec!["--log-level", "trace"],
+                vec!["--simulate", "scenario.json"],
+                vec!["--export-note"],
+            ] {
+                assert!(Args::try_parse_from(
+                    ["reader-buddy", "--personalization-operation", operation]
+                        .into_iter()
+                        .chain(extra)
+                )
+                .is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn prepared_export_rejects_runtime_overrides_without_echoing_credentials() {
+        for extra in [
+            vec!["--api-key", "fixture-secret"],
+            vec!["--model", "model"],
+            vec!["--base-url", "url"],
+            vec!["--trigger-corner", "UR"],
+            vec!["--debug-dump"],
+            vec!["--log-level", "trace"],
+            vec!["--simulate", "scenario.json"],
+            vec!["--personalization-operation", "inspect"],
+        ] {
+            let error =
+                Args::try_parse_from(["reader-buddy", "--export-note"].into_iter().chain(extra))
+                    .err()
+                    .unwrap()
+                    .to_string();
             assert!(!error.contains("fixture-secret"));
         }
     }
