@@ -628,6 +628,22 @@ mod tests {
             .status,
             ReportStatus::Unsupported
         );
+        let before = store.manifests().unwrap();
+        assert_eq!(
+            execute(
+                Operation::InitializeSelection,
+                Input::InitializeSelection(super::super::selected::InitializeSelection {
+                    operation: Uuid::new_v4(),
+                    accepted_base_sha256: storage::digest(b"valid refused initialization"),
+                    registrations: vec![],
+                }),
+                &config,
+                store.clone()
+            )
+            .status,
+            ReportStatus::Unsupported
+        );
+        assert_eq!(store.manifests().unwrap().len(), before.len());
         drop(store);
         assert_eq!(root.parent(), Some(std::env::temp_dir().as_path()));
         fs::remove_dir_all(root).unwrap();
