@@ -1,10 +1,12 @@
 //! Nonsecret file settings. Credentials are selected through protected references.
+pub mod personalization;
 use crate::{
     llm::openai::DEFAULT_MODEL,
     storage::{files, Namespace, StorePaths, Uuid, MAX_MEDIA, MAX_RECORD},
     TriggerCorner,
 };
 use anyhow::{ensure, Result};
+pub use personalization::{Personalization, PersonalizationSnapshot};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -70,6 +72,7 @@ pub struct Config {
     pub sync: SyncPolicy,
     pub memory: crate::memory::Configuration,
     pub reader: crate::reader_runtime::Configuration,
+    pub personalization: Personalization,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -85,6 +88,7 @@ impl Default for Config {
             sync: SyncPolicy::default(),
             memory: crate::memory::Configuration::default(),
             reader: crate::reader_runtime::Configuration::default(),
+            personalization: Personalization::default(),
         }
     }
 }
@@ -129,6 +133,7 @@ impl Config {
                 && self.sync.namespaces.contains(&Namespace::SubjectMemory)),
             "selected memory sync requires its qualified membership adapter"
         );
+        self.personalization.validate()?;
         if let Some(model) = &self.model {
             ensure!(
                 !model.trim().is_empty() && model.len() <= 256,
@@ -160,6 +165,11 @@ impl Config {
             credential_name(name)?;
         }
         Ok(())
+    }
+
+    /// Snapshot a verified preference without changing request/history or authority.
+    pub fn personalization_snapshot(&self) -> Result<PersonalizationSnapshot> {
+        self.personalization.snapshot()
     }
 }
 

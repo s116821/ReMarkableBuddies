@@ -238,6 +238,8 @@ impl<M: LLMEngine> Orchestrator<M> {
                     )?;
                     return Ok(());
                 }
+                info!("Got verified Q&A");
+
                 attempt.interpret(&self.ledger, &result.question)?;
                 let mut memory_view = None;
                 if self.memory.is_some() {
@@ -263,11 +265,6 @@ impl<M: LLMEngine> Orchestrator<M> {
                     }
                     memory_view = Some(enriched?);
                     info!("Got verified Q&A with optional subject memory");
-                } else {
-                    info!(
-                        "Got Q&A - Question: {} | Answer: {}",
-                        result.question, result.answer
-                    );
                 }
 
                 let memory = self.memory.clone();
@@ -405,7 +402,7 @@ impl<M: LLMEngine> Orchestrator<M> {
             }
         };
         self.workflow.check_request_progress()?;
-        info!("LLM Response: {}", response);
+        info!("Analysis response received ({} bytes)", response.len());
         Ok(Self::parse_analysis_response(
             &response,
             screenshot_png_data,
@@ -455,7 +452,7 @@ impl<M: LLMEngine> Orchestrator<M> {
             SCREENSHOT_VIRTUAL_HEIGHT,
         )?;
 
-        debug!("Parsed - Question: {}", question_text);
+        debug!("Parsed question ({} bytes)", question_text.len());
         debug!("Question box: {:?}", question_box);
         debug!("Selected-content center: {}", selection_center);
 
@@ -509,7 +506,10 @@ impl<M: LLMEngine> Orchestrator<M> {
             }
         };
         self.workflow.check_request_progress()?;
-        info!("Independent question reading: {}", reading);
+        info!(
+            "Independent question reading received ({} bytes)",
+            reading.len()
+        );
         Ok((!Self::transcriptions_agree(&result.question, &reading))
             .then_some(Failure::Transcription))
     }
