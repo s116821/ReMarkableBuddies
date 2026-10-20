@@ -118,6 +118,24 @@ pub(crate) fn observe(destination: &Path, expected: &Conditions) -> Result<Optio
     }
     Ok(Some(summary(&backup)))
 }
+fn secure_reservation(destination: &Path, mut sync: impl FnMut(&Path) -> Result<()>) -> Result<()> {
+    // This path is already exclusively ours. Do not reuse or chmod a competitor.
+    files::directory(destination)?;
+    sync(destination)?;
+    sync(destination.parent().context("export parent missing")?)?;
+    Ok(())
+}
+fn create_reservation(destination: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new().mode(0o700).create(destination)
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir(destination)
+    }
+}
 impl Store {
     pub(crate) fn prepare_ordinary_export(
         &self,
@@ -151,6 +169,25 @@ impl Store {
         publish: impl FnOnce(&Path, &[u8]) -> Result<()>,
         after_marker: impl FnOnce(&Path, &[u8]) -> Result<()>,
     ) -> Result<Publication> {
+        self.apply_ordinary_export_with_sync(
+            destination,
+            expected,
+            binding,
+            (after_checks, files::sync_dir),
+            publish,
+            after_marker,
+        )
+    }
+    fn apply_ordinary_export_with_sync(
+        &self,
+        destination: &Path,
+        expected: &Conditions,
+        binding: impl FnOnce() -> Result<()>,
+        ordering: (impl FnOnce(), impl FnMut(&Path) -> Result<()>),
+        publish: impl FnOnce(&Path, &[u8]) -> Result<()>,
+        after_marker: impl FnOnce(&Path, &[u8]) -> Result<()>,
+    ) -> Result<Publication> {
+        let (after_checks, mut sync) = ordering;
         let inner = self.inner.lock().map_err(|_| Refused::Unavailable)?;
         binding()?;
         if inner.generation != expected.base_generation {
@@ -161,7 +198,7 @@ impl Store {
             return Err(Refused::Conflict.into());
         }
         after_checks();
-        fs::create_dir(destination).map_err(|e| {
+        create_reservation(destination).map_err(|e| {
             if e.kind() == std::io::ErrorKind::AlreadyExists {
                 Refused::Conflict
             } else {
@@ -170,6 +207,7 @@ impl Store {
         })?;
         let mut attempted = false;
         let result = (|| -> Result<()> {
+            secure_reservation(destination, &mut sync)?;
             files::directory(&destination.join("objects"))?;
             self.export_write_locked(
                 &inner,
@@ -482,5 +520,84 @@ mod tests {
         matching.archive_sha256 = digest(&bytes);
         matching.complete_media = true;
         assert!(observe(&dest, &matching).unwrap().is_none());
+    }
+    #[test]
+    fn exclusive_reservation_syncs_own_directory_and_parent_before_publication() {
+        use std::cell::RefCell;
+        let f = Fixture::new();
+        let store = f.open();
+        let plan = store.prepare_ordinary_export(|| Ok(())).unwrap();
+        let dest = f.root.join("export");
+        let order = RefCell::new(Vec::<PathBuf>::new());
+        let r = store
+            .apply_ordinary_export_with_sync(
+                &dest,
+                &plan.conditions,
+                || Ok(()),
+                (
+                    || {},
+                    |path: &Path| {
+                        order.borrow_mut().push(path.to_path_buf());
+                        files::sync_dir(path)
+                    },
+                ),
+                |path, bytes| {
+                    assert_eq!(*order.borrow(), vec![dest.clone(), f.root.clone()]);
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        assert_eq!(
+                            fs::metadata(&dest).unwrap().permissions().mode() & 0o777,
+                            0o700
+                        );
+                    }
+                    files::atomic(path, bytes)
+                },
+                |_, _| Ok(()),
+            )
+            .unwrap();
+        assert!(matches!(r, Publication::Verified(_)));
+    }
+    #[test]
+    fn parent_sync_failure_is_not_published_retains_private_reservation_and_source() {
+        let f = Fixture::new();
+        let store = f.open();
+        let plan = store.prepare_ordinary_export(|| Ok(())).unwrap();
+        let dest = f.root.join("partial");
+        let before = fs::read(store.paths.data.join("CURRENT")).unwrap();
+        let mut order = vec![];
+        let r = store
+            .apply_ordinary_export_with_sync(
+                &dest,
+                &plan.conditions,
+                || Ok(()),
+                (
+                    || {},
+                    |path: &Path| {
+                        order.push(path.to_path_buf());
+                        if path == f.root {
+                            anyhow::bail!("parent sync failed");
+                        }
+                        files::sync_dir(path)
+                    },
+                ),
+                |_, _| panic!("marker must not run"),
+                |_, _| panic!("readback must not run"),
+            )
+            .unwrap();
+        assert!(matches!(r, Publication::NotPublished));
+        assert_eq!(order, vec![dest.clone(), f.root.clone()]);
+        assert!(dest.is_dir());
+        assert!(!dest.join("objects").exists());
+        assert!(!dest.join("backup.json").exists());
+        assert_eq!(fs::read(store.paths.data.join("CURRENT")).unwrap(), before);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&dest).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
     }
 }
