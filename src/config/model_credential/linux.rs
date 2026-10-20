@@ -1042,4 +1042,61 @@ mod tests {
             assert_eq!(f.run(Operation::Prepare, x).status, Status::InvalidInput);
         }
     }
+    #[test]
+    fn actual_config_writer_cannot_interleave_credential_publication_mutex() {
+        use std::{sync::mpsc, time::Duration};
+        let f = Fixture::new();
+        let intent = f.prepare(change("install"));
+        let ch: Change = serde_json::from_value(change("install")).unwrap();
+        let store = Arc::new(Store::open_existing_for_config(f.paths.clone()).unwrap());
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let owner = store.clone();
+        let path = f.path.clone();
+        let first = std::thread::spawn(move || {
+            owner.credential_publication_test_hook(&path, &intent, &ch, |phase| {
+                if phase == Phase::BeforeSyscall {
+                    entered_tx.send(()).unwrap();
+                    resume_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                }
+                Ok(())
+            })
+        });
+        entered_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        let original = fs::read(&f.path).unwrap();
+        let mut next: Value = serde_json::from_slice(&original).unwrap();
+        next["debug_dump"] = json!(true);
+        let next = serde_json::to_vec(&next).unwrap();
+        let owner = store.clone();
+        let path = f.path.clone();
+        let hash = digest(&original);
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let second = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let r = owner.replace_config_document(&path, &hash, &next);
+            assert!(done_tx.send(r).is_ok());
+        });
+        started_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        // Barrier establishes the held publication lock; timeout is only a bounded
+        // negative assertion. Actual completion is required after explicit release.
+        assert!(matches!(
+            done_rx.recv_timeout(Duration::from_millis(50)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        assert_eq!(fs::read(&f.path).unwrap(), original);
+        assert!(!f.target.exists());
+        resume_tx.send(()).unwrap();
+        assert_eq!(finish(first.join().unwrap())["outcome"], "verified");
+        assert!(matches!(
+            done_rx.recv_timeout(Duration::from_secs(10)).unwrap(),
+            crate::storage::ConfigPublication::Verified(_)
+        ));
+        second.join().unwrap();
+        assert_eq!(fs::read(&f.target).unwrap(), SECRET.as_bytes());
+        assert_eq!(
+            serde_json::from_slice::<Value>(&fs::read(&f.path).unwrap()).unwrap()["debug_dump"],
+            true
+        );
+    }
 }
