@@ -127,7 +127,7 @@ pub(crate) fn document(bytes: &[u8]) -> std::result::Result<(Config, Value), Sta
     Ok((config, raw))
 }
 
-pub(super) fn strict_json(bytes: &[u8]) -> serde_json::Result<Value> {
+pub(crate) fn strict_json(bytes: &[u8]) -> serde_json::Result<Value> {
     serde_json::from_slice::<StrictValue>(bytes).map(|value| value.0)
 }
 
