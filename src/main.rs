@@ -54,6 +54,12 @@ pub struct Args {
         required_if_eq("sync_mode_operation", "choose")
     )]
     sync_mode_input: Option<std::path::PathBuf>,
+    /// Explicit offline archive inspection or selected-history export
+    #[arg(long, value_enum, requires = "archive_input", conflicts_with_all = ["simulate", "api_key", "model", "base_url", "trigger_corner", "debug_dump", "log_level", "inspect_owned_data", "export_note", "personalization_operation", "memory_operation", "memory_input", "sync_mode_operation", "sync_mode_input"])]
+    archive_operation: Option<remarkable_reader_buddy::archive_maintenance::Operation>,
+    /// Strict bounded path JSON from an absolute file or exact-dash stdin
+    #[arg(long, value_name = "FILE", requires = "archive_operation")]
+    archive_input: Option<std::path::PathBuf>,
     /// Fixed local personalization maintenance; mutation JSON comes from bounded stdin
     #[arg(long, value_enum, conflicts_with_all=["simulate","api_key","model","base_url","trigger_corner","debug_dump","log_level","export_note"])]
     personalization_operation: Option<config::personalization::Operation>,
@@ -80,6 +86,18 @@ fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_lo
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    if let Some(operation) = args.archive_operation {
+        let report = remarkable_reader_buddy::archive_maintenance::run(
+            operation,
+            args.archive_input
+                .as_deref()
+                .expect("required archive input"),
+            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+            &mut std::io::stdin().lock(),
+        );
+        report.write_to(&mut std::io::stdout().lock())?;
+        return Ok(());
+    }
     if let Some(operation) = args.sync_mode_operation {
         let report = remarkable_reader_buddy::mode_maintenance::run(
             operation,
@@ -205,6 +223,8 @@ mod tests {
             names,
             [
                 "api-key",
+                "archive-input",
+                "archive-operation",
                 "base-url",
                 "debug-dump",
                 "export-note",
