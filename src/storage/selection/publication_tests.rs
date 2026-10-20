@@ -578,7 +578,7 @@ fn inherited_descriptor_does_not_extend_a_dropped_owners_lease() {
     let store = f.store();
     // A duplicate descriptor models the same open-file description inherited in
     // the fork-to-exec window of another test's subprocess spawn.
-    let inherited = store._lease.try_clone().unwrap();
+    let inherited = store._lease.0.try_clone().unwrap();
     drop(store);
     let reopened = f.store();
     drop(inherited);
