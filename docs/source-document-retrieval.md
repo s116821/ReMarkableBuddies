@@ -14,7 +14,7 @@ Query text is nonblank, at most 2,048 UTF8 bytes/no NUL, with 1–64 distinct se
 
 `Cache` holds at most 16 document indexes in process. Installing identical material retains the previous index; different material atomically replaces that document's index after validation/building succeeds. A failed install preserves the previous entry. This is derived memory cache only, not a disk-cache, Store, sync or restore implementation. The provider trait allows the receiving code to substitute a retriever independently of its answering model.
 
-Automatic Reader ingestion, PDF/notebook extraction, turn-linked receiving context and durable citation evidence, owned disk-cache integration, semantic/reranking choices where useful, default external research with no-internet policy, and real-provider/native qualification remain unfinished central tasks. In particular, a historical source UUID and a valid index do not authorize tablet navigation or answer-page effects.
+The separate [owned local source cache](normalized-source-cache.md) can persist validated normalized inputs and rebuild this Index after restart. Automatic Reader ingestion, PDF/notebook extraction, turn-linked receiving context and durable citation evidence, Reader cache integration, semantic/reranking choices where useful, default external research with no-internet policy, and real-provider/native qualification remain unfinished central tasks. In particular, a historical source UUID and a valid index do not authorize tablet navigation or answer-page effects.
 
 ## Offline EPUB text adapter
 
