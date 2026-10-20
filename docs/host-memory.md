@@ -21,7 +21,8 @@ and optional `expires_ms`. A document scope is
 `{kind:"document",document:UUID}`. Provenance is an assertion, not independently
 verified evidence; it contains `basis` (`user-confirmed`, `source-assertion` or
 `inferred`), `description` and nullable `conversation`, `turn`, `source` UUIDs.
-Keep identity and claim unchanged when updating. Unknown or invalid fields refuse.
+Keep identity and claim unchanged when updating. Existing domain validation applies;
+the inspection stdin wire adds strict field checks as documented below.
 
 `inspect` accepts the fact key and returns revision envelopes. Preserve all current
 revision IDs when preparing an update or `forget:{operation,expected,key}`.
@@ -44,8 +45,10 @@ aggregate remains absent from queries until explicitly registered.
 All operations return one bounded report-v1 JSON line with truthful status. Missing
 stores are not created by queries, inspections or forgetting. Valid Store startup
 may recover owned state. A Busy store is never stopped or unlocked by this CLI.
-File inputs are bounded absolute regular files; only query supports stdin. See
-[query input, EOF, output and cancellation](memory-query-stdin.md) for that contract.
+File inputs remain bounded absolute regular files; query and inspect support stdin.
+See [query input, EOF, output and cancellation](memory-query-stdin.md) and
+[single-fact inspection](memory-fact-inspection-stdin.md) for their distinct wire
+contracts, raw heads and existing file compatibility.
 Mode and selected-currentness guards last through actual output; partial I/O errors
 never produce a second report. This offline interface does not activate optional
 memory in the normal Reader loop or qualify live-model/native behavior.

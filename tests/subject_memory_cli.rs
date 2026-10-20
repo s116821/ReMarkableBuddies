@@ -5,13 +5,311 @@ use remarkable_reader_buddy::{
 };
 use serde_json::{json, Value};
 use std::{
-    collections::BTreeSet, fs, io::Write, path::PathBuf, process::Command, process::Stdio,
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    io::{Read, Write},
+    path::PathBuf,
+    process::Command,
+    process::Stdio,
     sync::Arc,
+    time::{Duration, Instant},
 };
 
 struct Fixture {
     root: PathBuf,
     profile: Uuid,
+}
+
+fn inspection_fork(store: &Store, original: &storage::Envelope, payload: Value, tombstone: bool) {
+    let mut fork = original.clone();
+    fork.parents = BTreeSet::from([original.revision_id]);
+    fork.revision_id = Uuid::new_v4();
+    fork.operation_id = Uuid::new_v4();
+    fork.actor_id = Uuid::new_v4();
+    fork.kind = if tombstone {
+        storage::Kind::Tombstone
+    } else {
+        storage::Kind::Value
+    };
+    fork.payload = payload;
+    let bytes = serde_json::to_vec(&fork).unwrap();
+    let hash = storage::digest(&bytes);
+    store
+        .import(
+            storage::Manifest {
+                format: 1,
+                transaction_id: Uuid::new_v4(),
+                scope: storage::Scope::LocalTransaction,
+                records: vec![storage::ObjectRef {
+                    sha256: hash.clone(),
+                    bytes: bytes.len() as u64,
+                }],
+                record_namespaces: BTreeMap::from([(
+                    hash.clone(),
+                    storage::Namespace::SubjectMemory,
+                )]),
+                media: vec![],
+                media_coverage: vec![],
+            },
+            BTreeMap::from([(hash, bytes)]),
+        )
+        .unwrap();
+}
+fn inspection_selected_pair(f: &Fixture) -> (catalog::Identity, Fact, Fact) {
+    let identity = selected_config(f);
+    let fact = f.fact();
+    let other = f.fact();
+    let initialize = |fact: &Fact| {
+        f.run("initialize-aggregate",&json!({"operation":Uuid::new_v4(),"accepted_base_sha256":storage::digest(b"inspect-stdin aggregate"),"fact":fact}))
+    };
+    let first = initialize(&fact);
+    let second = initialize(&other);
+    assert_eq!(first["status"], "ok");
+    assert_eq!(second["status"], "ok");
+    assert_eq!(f.run("initialize-selection",&json!({"operation":Uuid::new_v4(),"accepted_base_sha256":storage::digest(b"inspect-stdin catalog"),"registrations":[first["data"]["registration"],second["data"]["registration"]]}))["status"],"ok");
+    (identity, fact, other)
+}
+
+#[test]
+fn actual_inspect_stdin_local_heads_tombstones_empty_and_opaque_are_file_compatible() {
+    let f = Fixture::new();
+    let fact = f.fact();
+    assert_eq!(
+        f.run(
+            "put",
+            &Mutation {
+                operation: Uuid::new_v4(),
+                expected: BTreeSet::new(),
+                fact: fact.clone()
+            }
+        )["status"],
+        "ok"
+    );
+    let input = serde_json::to_vec(&fact.key).unwrap();
+    let initial = f.stdin_inspect("local-value", &input);
+    assert_eq!(initial, f.run("inspect", &fact.key));
+    assert_eq!(initial["status"], "ok");
+    assert_eq!(initial["data"][0]["payload"]["value"], fact.value);
+    assert_eq!(
+        initial["data"][0]["record_id"],
+        fact.key.record_id().unwrap().to_string()
+    );
+    let mut absent = fact.key.clone();
+    absent.fact = Uuid::new_v4();
+    let empty = f.stdin_inspect("local-empty", &serde_json::to_vec(&absent).unwrap());
+    assert_eq!(empty["status"], "ok");
+    assert_eq!(empty["data"], json!([]));
+    let held = Store::open(f.paths()).unwrap();
+    assert_eq!(f.stdin_inspect("busy", &input)["status"], "busy");
+    drop(held);
+    let original: storage::Envelope = serde_json::from_value(initial["data"][0].clone()).unwrap();
+    let store = Store::open(f.paths()).unwrap();
+    inspection_fork(&store, &original, original.payload.clone(), false);
+    inspection_fork(&store, &original, Value::Null, true);
+    drop(store);
+    let conflict = f.stdin_inspect("local-conflict", &input);
+    assert_eq!(conflict, f.run("inspect", &fact.key));
+    assert_eq!(conflict["status"], "ok");
+    assert_eq!(conflict["data"].as_array().unwrap().len(), 2);
+    assert!(conflict["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|head| head["kind"] == "tombstone" && head["payload"].is_null()));
+    let store = Store::open(f.paths()).unwrap();
+    inspection_fork(
+        &store,
+        &original,
+        json!({"unsupported_future_payload":true}),
+        false,
+    );
+    drop(store);
+    let opaque = f.stdin_inspect("local-opaque", &input);
+    assert_eq!(opaque, f.run("inspect", &fact.key));
+    assert_eq!(opaque["data"].as_array().unwrap().len(), 3);
+    assert!(opaque["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|head| head["payload"]["unsupported_future_payload"] == true));
+    let expected = opaque["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|head| Uuid::parse_str(head["revision_id"].as_str().unwrap()).unwrap())
+        .collect();
+    assert_eq!(
+        f.run(
+            "forget",
+            &Forget {
+                operation: Uuid::new_v4(),
+                expected,
+                key: fact.key.clone()
+            }
+        )["status"],
+        "ok"
+    );
+    let tombstone = f.stdin_inspect("local-tombstone", &input);
+    assert_eq!(tombstone, f.run("inspect", &fact.key));
+    assert_eq!(tombstone["data"].as_array().unwrap().len(), 1);
+    assert_eq!(tombstone["data"][0]["kind"], "tombstone");
+    assert!(tombstone["data"][0]["payload"].is_null());
+    let missing = Fixture::new();
+    let key = missing.fact().key;
+    assert_eq!(
+        missing.stdin_inspect("unavailable", &serde_json::to_vec(&key).unwrap())["status"],
+        "unavailable"
+    );
+    assert!(!missing.paths().data.exists());
+}
+
+#[test]
+fn actual_inspect_stdin_strict_bounds_and_file_global_compatibility_precede_store() {
+    let f = Fixture::new();
+    let key = f.fact().key;
+    let mut bytes = serde_json::to_vec(&key).unwrap();
+    bytes.resize(storage::MAX_RECORD, b' ');
+    assert_eq!(f.stdin_inspect("", &bytes)["status"], "unavailable");
+    bytes.push(b' ');
+    assert_eq!(f.stdin_inspect("", &bytes)["status"], "invalid-input");
+    for bytes in [b"{truncated".as_slice(), b"\xff".as_slice()] {
+        assert_eq!(f.stdin_inspect("", bytes)["status"], "invalid-input");
+    }
+    let extra = json!({"profile":f.profile,"scope":{"kind":"global","unknown":"PRIVATE_SCOPE_SENTINEL"},"fact":key.fact});
+    assert_eq!(f.run("inspect", &extra)["status"], "unavailable");
+    assert_eq!(
+        f.stdin_inspect("invalid", &serde_json::to_vec(&extra).unwrap())["status"],
+        "invalid-input"
+    );
+    for value in [
+        json!({"profile":Uuid::new_v4(),"scope":{"kind":"global"},"fact":key.fact}),
+        json!({"profile":f.profile,"scope":{"kind":"document","document":Uuid::nil()},"fact":key.fact}),
+    ] {
+        assert_eq!(
+            f.stdin_inspect("", &serde_json::to_vec(&value).unwrap())["status"],
+            "invalid-input"
+        );
+    }
+    assert!(
+        !f.paths().data.exists() && !f.paths().cache.exists() && !f.paths().credentials.exists()
+    );
+}
+
+#[test]
+fn actual_inspect_stdin_selected_value_empty_tombstone_and_whole_view_refusals() {
+    let f = Fixture::new();
+    let (identity, fact, _) = inspection_selected_pair(&f);
+    let input = serde_json::to_vec(&fact.key).unwrap();
+    let value = f.stdin_inspect("selected-value", &input);
+    assert_eq!(value, f.run("inspect", &fact.key));
+    assert_eq!(value["status"], "ok");
+    let mut absent = fact.key.clone();
+    absent.fact = Uuid::new_v4();
+    let empty = f.stdin_inspect("selected-empty", &serde_json::to_vec(&absent).unwrap());
+    assert_eq!(empty["status"], "ok");
+    assert_eq!(empty["data"], json!([]));
+    let expected = value["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|head| Uuid::parse_str(head["revision_id"].as_str().unwrap()).unwrap())
+        .collect();
+    assert_eq!(
+        f.run(
+            "forget",
+            &Forget {
+                operation: Uuid::new_v4(),
+                expected,
+                key: fact.key.clone()
+            }
+        )["status"],
+        "ok"
+    );
+    let tombstone = f.stdin_inspect("selected-tombstone", &input);
+    assert_eq!(tombstone, f.run("inspect", &fact.key));
+    assert_eq!(tombstone["data"][0]["kind"], "tombstone");
+    assert!(tombstone["data"][0]["payload"].is_null());
+    // Explicit generic membership can be valid custody but invalid domain projection.
+    let store = Store::open(f.paths()).unwrap();
+    let scope = identity
+        .aggregate_scope(&catalog::Owner::GlobalFact {
+            key: fact.key.clone(),
+        })
+        .unwrap();
+    let snapshot = store.selected_snapshot(&scope, 4096).unwrap().unwrap();
+    let original = snapshot
+        .selected_records
+        .iter()
+        .find(|head| head.kind == storage::Kind::Value)
+        .unwrap();
+    let mut fork = original.clone();
+    fork.parents = BTreeSet::from([original.revision_id]);
+    fork.revision_id = Uuid::new_v4();
+    fork.operation_id = Uuid::new_v4();
+    let bytes = serde_json::to_vec(&fork).unwrap();
+    let hash = storage::digest(&bytes);
+    let mut manifest = snapshot.transaction.selected.clone();
+    manifest.transaction_id = Uuid::new_v4();
+    manifest.records.push(storage::ObjectRef {
+        sha256: hash.clone(),
+        bytes: bytes.len() as u64,
+    });
+    manifest
+        .record_namespaces
+        .insert(hash.clone(), storage::Namespace::SubjectMemory);
+    let refused_publication = store
+        .activate_selected(
+            &snapshot.token,
+            storage::selection::SelectionChange {
+                operation: Uuid::new_v4(),
+                accepted_base_sha256: snapshot.transaction.accepted_base_sha256.clone(),
+                selected: manifest,
+                retained: snapshot.transaction.retained.clone(),
+            },
+            BTreeMap::from([(hash, bytes)]),
+        )
+        .err()
+        .expect("conflicting membership must refuse");
+    assert_eq!(
+        refused_publication.to_string(),
+        "conflicted selected record membership"
+    );
+    assert_eq!(
+        store
+            .selected_snapshot(&scope, 4096)
+            .unwrap()
+            .unwrap()
+            .token,
+        snapshot.token
+    );
+    drop(store);
+    let unchanged = f.stdin_inspect("selected-after-refused-conflict", &input);
+    assert_eq!(unchanged, f.run("inspect", &fact.key));
+    assert_eq!(unchanged, tombstone);
+    // Independent owned fixture: only the OTHER registered aggregate is invalid.
+    let f = Fixture::new();
+    let (identity, fact, other) = inspection_selected_pair(&f);
+    let input = serde_json::to_vec(&fact.key).unwrap();
+    let store = Store::open(f.paths()).unwrap();
+    let scope = identity
+        .aggregate_scope(&catalog::Owner::GlobalFact {
+            key: other.key.clone(),
+        })
+        .unwrap();
+    let snapshot = store.selected_snapshot(&scope, 4096).unwrap().unwrap();
+    let mut bad = snapshot.selected_records[0].clone();
+    bad.parents = BTreeSet::from([bad.revision_id]);
+    bad.revision_id = Uuid::new_v4();
+    bad.operation_id = Uuid::new_v4();
+    bad.payload = json!({"unsupported_future_payload":true});
+    store
+        .commit_selected(&snapshot.token, Uuid::new_v4(), vec![bad], BTreeMap::new())
+        .unwrap();
+    drop(store);
+    let refused = f.stdin_inspect("selected-unrelated-refusal", &input);
+    assert_eq!(refused, f.run("inspect", &fact.key));
+    assert_eq!(refused["status"], "unavailable");
+    assert!(refused["data"].is_null());
 }
 
 #[test]
@@ -174,6 +472,80 @@ impl Fixture {
         assert!(output.stderr.is_empty());
         let report: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(report["report_version"], 1);
+        report
+    }
+    fn stdin_inspect(&self, label: &str, input: &[u8]) -> Value {
+        let command = self.command("inspect");
+        let args: Vec<_> = command.get_args().map(|a| a.to_os_string()).collect();
+        let mut replacement = Command::new(command.get_program());
+        replacement
+            .current_dir(&self.root)
+            .args(&args[..args.len() - 1])
+            .arg("-");
+        for (key, value) in command.get_envs() {
+            if let Some(value) = value {
+                replacement.env(key, value);
+            }
+        }
+        let mut child = replacement
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut pipe = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let out_reader = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            stdout
+                .take((maintenance::MAX_RESPONSE + 1) as u64)
+                .read_to_end(&mut bytes)
+                .unwrap();
+            bytes
+        });
+        let err_reader = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            stderr.take(4096).read_to_end(&mut bytes).unwrap();
+            bytes
+        });
+        let bytes = input.to_vec();
+        let sender = std::thread::spawn(move || pipe.write_all(&bytes));
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                let _ = child.wait();
+                let _ = sender.join();
+                let _ = out_reader.join();
+                let _ = err_reader.join();
+                panic!("inspection exceeded caller deadline");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if let Err(error) = sender.join().unwrap() {
+            assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+        }
+        let status = child.wait().unwrap();
+        let stdout = out_reader.join().unwrap();
+        let stderr = err_reader.join().unwrap();
+        assert!(status.success());
+        assert!(stderr.is_empty());
+        assert!(stdout.len() <= maintenance::MAX_RESPONSE);
+        assert!(stdout.ends_with(b"\n"));
+        let report: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(report["report_version"], 1);
+        assert_eq!(report["operation"], "inspect");
+        if !label.is_empty() {
+            if let Some(directory) = std::env::var_os("HOST_MEMORY_INSPECTION_REPORT_DIR") {
+                let directory = PathBuf::from(directory);
+                assert!(directory.is_absolute());
+                fs::create_dir_all(&directory).unwrap();
+                assert!(label.chars().all(|c| c.is_ascii_lowercase() || c == '-'));
+                fs::write(directory.join(format!("{label}.json")), &stdout).unwrap();
+                fs::write(directory.join(format!("{label}.request.json")), input).unwrap();
+            }
+        }
         report
     }
 }
