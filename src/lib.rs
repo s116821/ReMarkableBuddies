@@ -1,4 +1,5 @@
 pub mod analysis;
+pub mod archive_maintenance;
 pub mod config;
 pub mod conversation;
 pub mod conversation_feedback;

@@ -48,6 +48,10 @@ impl Store {
     pub(crate) fn open_existing_for_mode(paths: StorePaths) -> Result<Self, Refusal> {
         Self::open_existing_inner(paths, true)
     }
+    /// Selected archive custody only; no initialization or restore admission.
+    pub(crate) fn open_existing_for_archive(paths: StorePaths) -> Result<Self, Refusal> {
+        Self::open_existing_inner(paths, true)
+    }
     fn open_existing_inner(paths: StorePaths, selected_aware: bool) -> Result<Self, Refusal> {
         paths.validate().map_err(|_| Refusal::Unsupported)?;
         directory(&paths.data)?;
