@@ -1,10 +1,12 @@
 //! Nonsecret file settings. Credentials are selected through protected references.
+pub mod personalization;
 use crate::{
     llm::openai::DEFAULT_MODEL,
     storage::{files, Namespace, StorePaths, Uuid, MAX_MEDIA, MAX_RECORD},
     TriggerCorner,
 };
 use anyhow::{ensure, Result};
+pub use personalization::{Personalization, PersonalizationSnapshot};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -68,6 +70,7 @@ pub struct Config {
     pub paths: StorePaths,
     pub model_credential: Option<String>,
     pub sync: SyncPolicy,
+    pub personalization: Personalization,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -81,6 +84,7 @@ impl Default for Config {
             paths: StorePaths::default(),
             model_credential: None,
             sync: SyncPolicy::default(),
+            personalization: Personalization::default(),
         }
     }
 }
@@ -109,6 +113,7 @@ impl Config {
             "unsupported configuration version"
         );
         self.sync.validate()?;
+        self.personalization.validate()?;
         if let Some(model) = &self.model {
             ensure!(
                 !model.trim().is_empty() && model.len() <= 256,
@@ -140,6 +145,11 @@ impl Config {
             credential_name(name)?;
         }
         Ok(())
+    }
+
+    /// Snapshot a verified preference without changing request/history or authority.
+    pub fn personalization_snapshot(&self) -> Result<PersonalizationSnapshot> {
+        self.personalization.snapshot()
     }
 }
 
