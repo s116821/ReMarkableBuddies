@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
+import { Parser, Lexer, Evaluator, data } from '@actions/expressions';
 const root = fileURLToPath(new URL('../..', import.meta.url));
 const workflow = name => parse(readFileSync(path.join(root, '.github/workflows', name + '.yml'), 'utf8'));
 const expr = text => String.fromCharCode(36) + '{{ ' + text + ' }}';
@@ -37,8 +38,8 @@ test('four stages preserve platform coverage and block dependent jobs on failure
   assert.equal(ci.on.pull_request_target, undefined);
   assert.equal(ci.jobs.title.if, "github.event_name == 'pull_request'");
   assert.equal(ci.jobs.checks.needs, 'title');
-  assert.equal(ci.jobs.checks.if, "!cancelled() && (github.event_name == 'push' || needs.title.result == 'success')");
-  assert.deepEqual(ci.jobs.application.needs, 'checks');
+  assert.equal(ci.jobs.checks.if, "!cancelled() && (github.event_name == 'push' || needs.title.result == 'success') && needs.title.outputs.body_only != 'true'");
+  assert.deepEqual(ci.jobs.application.needs, ['title','checks']);
   assert.equal(ci.jobs.application.if, "!cancelled() && needs.checks.result == 'success' && needs.checks.outputs.application == 'true'");
   assert.equal(pipeline.jobs.build.needs, undefined);
   assert.deepEqual(pipeline.jobs.integration.needs, 'build');
@@ -61,6 +62,74 @@ test('four stages preserve platform coverage and block dependent jobs on failure
   }
   assert.equal(ci.jobs.checks.defaults.run.shell, 'bash');
   assert.equal(pipeline.jobs.integration.defaults.run.shell, 'bash');
+});
+
+function evaluate(text, context, canceled = false) {
+  const source = String(text).replace(/^\$\{\{\s*|\s*\}\}$/g, '');
+  const functions = new Map([['cancelled', {
+    name: 'cancelled', minArgs: 0, maxArgs: 0,
+    call: () => new data.BooleanData(canceled)
+  }]]);
+  const ast = new Parser(new Lexer(source).lex().tokens, Object.keys(context), [...functions.values()]).parse();
+  return new Evaluator(ast, JSON.parse(JSON.stringify(context), data.reviver), functions).evaluate();
+}
+function bodyOnly(event) {
+  const step = workflow('ci').jobs.title.steps.find(s => s.id === 'metadata');
+  const match = step.run.match(/jq -r '([\s\S]*?)' "\$GITHUB_EVENT_PATH"/);
+  assert.ok(match, 'Exercise the actual workflow jq predicate');
+  const result = spawnSync(process.env.METADATA_JQ || 'jq', ['-r', match[1]], {
+    input: JSON.stringify(event), encoding: 'utf8', windowsHide: true
+  });
+  assert.ifError(result.error); assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout.trim(), /^(true|false)$/);
+  return result.stdout.trim();
+}
+test('structured body-only predicate refuses base, mixed, missing and unknown details', () => {
+  for (const from of ['', 'old body', '{"title":"not an event key","base":{}}'])
+    assert.equal(bodyOnly({action:'edited',changes:{body:{from}}}), 'true');
+  const base = {ref:{from:'old-base'},sha:{from:'a'.repeat(40)}};
+  for (const changes of [undefined, null, {}, [], 'body', {title:{from:'old'}}, {base},
+    {body:{from:'old'},title:{from:'old'}}, {body:{from:'old'},base},
+    {body:{from:'old'},unknown:true}, {unknown:true}, {body:{}},
+    {body:{from:null}}, {body:{from:7}}, {body:{from:true}},
+    {body:{from:'old',unknown:true}}, {body:'old'}])
+    assert.equal(bodyOnly({action:'edited',changes}), 'false', JSON.stringify(changes));
+  assert.equal(bodyOnly({action:'synchronize',changes:{body:{from:'old'}}}), 'false');
+});
+test('actual names and guards isolate metadata without masking normal application results', () => {
+  const ci = workflow('ci');
+  const metadataIndex = ci.jobs.title.steps.findIndex(s => s.id === 'metadata');
+  assert.ok(metadataIndex >= 0 && metadataIndex < ci.jobs.title.steps.findIndex(s => s.uses?.startsWith('amannn/')));
+  assert.equal(ci.jobs.title.outputs.body_only, expr('steps.metadata.outputs.body_only'));
+  for (const body_only of ['true','false','']) {
+    const context = {github:{event_name:'pull_request'}, needs:{
+      title:{result:'success',outputs:{body_only,application:'true'}},
+      checks:{result:body_only==='true'?'skipped':'success',outputs:{application:'true'}}
+    }};
+    assert.equal(evaluate(ci.jobs.checks.name,context).coerceString(), body_only==='true'?'PR metadata (no source checks)':'Checks');
+    assert.equal(evaluate(ci.jobs.application.name,context).coerceString(), body_only==='true'?'PR metadata (no artifact jobs)':'application');
+    assert.equal(evaluate(ci.jobs.checks.if,context).coerceString(), body_only==='true'?'false':'true');
+    assert.equal(evaluate(ci.jobs.application.if,context).coerceString(), body_only==='true'?'false':'true');
+    context.needs.title.result='failure';
+    assert.equal(evaluate(ci.jobs.checks.if,context).coerceString(),'false');
+    if (body_only==='true') assert.notEqual(evaluate(ci.jobs.checks.name,context).coerceString(),'Checks');
+  }
+});
+test('main skipped-title and failed or canceled prerequisites keep real stage gates', () => {
+  const ci = workflow('ci');
+  const context = {github:{event_name:'push'},needs:{
+    title:{result:'skipped',outputs:{}},checks:{result:'success',outputs:{application:'true'}}
+  }};
+  assert.equal(evaluate(ci.jobs.checks.if,context).coerceString(),'true');
+  assert.equal(evaluate(ci.jobs.application.if,context).coerceString(),'true');
+  assert.equal(evaluate(ci.jobs.checks.name,context).coerceString(),'Checks');
+  assert.equal(evaluate(ci.jobs.application.name,context).coerceString(),'application');
+  for (const result of ['failure','cancelled','skipped']) {
+    context.needs.checks.result=result;
+    assert.equal(evaluate(ci.jobs.application.if,context).coerceString(),'false');
+  }
+  assert.equal(evaluate(ci.jobs.checks.if,context,true).coerceString(),'false');
+  assert.equal(evaluate(ci.jobs.application.if,context,true).coerceString(),'false');
 });
 
 test('common source and dependency checks have exactly one owning job', () => {
