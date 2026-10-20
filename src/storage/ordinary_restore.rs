@@ -865,6 +865,25 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert!(store.prepare_ordinary_restore(&archive, || Ok(())).is_err());
+        // Now make the declaration internally consistent but promise a media
+        // object that is actually absent, rather than only falsifying the flag.
+        let media_sha = raw["manifests"][0]["media_coverage"][0]["sha256"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let promised = json!({"sha256":media_sha,"bytes":27});
+        raw["manifests"][0]["media"] = json!([promised.clone()]);
+        raw["manifests"][0]["media_coverage"] =
+            json!([{"availability":"included","sha256":media_sha}]);
+        raw["objects"].as_array_mut().unwrap().push(promised);
+        fs::write(
+            archive.join("backup.json"),
+            serde_json::to_vec(&raw).unwrap(),
+        )
+        .unwrap();
+        let before = fs::read(store.paths.data.join("CURRENT")).unwrap();
+        assert!(store.prepare_ordinary_restore(&archive, || Ok(())).is_err());
+        assert_eq!(fs::read(store.paths.data.join("CURRENT")).unwrap(), before);
     }
     #[test]
     fn malformed_and_oversized_archive_metadata_never_stages_or_activates() {
