@@ -33,7 +33,7 @@ Do not send profile identity; the configured memory profile is authoritative.
 must be nonnil and is not inferred from the currently visible page. Text is
 nonblank, at most2048 UTF8 bytes and contains no NUL; multiline/Unicode text is
 preserved. `current_claims` is at most64 existing canonical claims. Match count
-is1–16; context budget is256–16384 bytes. Unknown fields and invalid domain input
+is1â€“16; context budget is256â€“16384 bytes. Unknown fields and invalid domain input
 are rejected by the same validator as file mode.
 
 The entire stdin document is at most1048576 bytes. The reader consumes at most
@@ -43,10 +43,11 @@ before Store admission. Ordinary missing configuration/profile can return
 `unavailable` before reading stdin. No input or I/O error text is echoed.
 
 This guide describes query. `inspect` also accepts the marker through the strict
-[single-fact inspection wire](memory-fact-inspection-stdin.md). Mutation/setup
+[single-fact inspection wire](memory-fact-inspection-stdin.md). Put/setup
 operations return `unsupported` before reading stdin, loading configuration or
-opening Store. Their regular-file interfaces are unchanged; stdin is not
-mutation/setup authority.
+opening Store. [Prepared forget](memory-prepared-forget.md) is a separate explicitly
+confirmed protocol; query success supplies no mutation authority. Existing regular-file
+interfaces are unchanged.
 
 ## Response and currentness
 

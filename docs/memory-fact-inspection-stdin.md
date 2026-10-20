@@ -31,8 +31,10 @@ requires matching configured SharedGroup group/binding and current registered
 selection. Missing config/profile can refuse before reading stdin. Invalid input
 refuses before Store admission; no read initializes missing storage. Normal valid
 Store opening may perform existing owned recovery. Domain-read-only is not a
-promise of filesystem immutability. Put/forget/setup selectors still refuse dash
+promise of filesystem immutability. Put/setup selectors still refuse dash
 before configuration, input reading or Store access.
+[Prepared forget](memory-prepared-forget.md) is a separate strict confirmation
+protocol; this read report alone supplies no mutation authority.
 
 ## Report
 

@@ -1,4 +1,5 @@
 //! Versioned local persistence, independent of Reader/Writer domain semantics.
+pub(crate) mod conditional;
 pub mod drive;
 pub mod files;
 pub mod inspection;
@@ -695,12 +696,28 @@ impl Store {
             .inner
             .lock()
             .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        let (receipt, changed) = self.publish_locked(&mut inner, manifest, objects, local)?;
+        drop(inner);
+        if changed {
+            self.notify_commit();
+        }
+        Ok(receipt)
+    }
+    // Callers hold exactly one inner mutex guard. Legacy publish keeps its old
+    // admission/order; conditional publication validates its extra evidence first.
+    fn publish_locked(
+        &self,
+        inner: &mut Inner,
+        manifest: Manifest,
+        objects: BTreeMap<String, Vec<u8>>,
+        local: bool,
+    ) -> Result<(Uuid, bool)> {
         let root = self.generation(inner.generation);
         if let Some(previous) = inner.index.manifests.get(&manifest.transaction_id) {
             ensure!(previous == &manifest, "transaction identity collision");
-            return Ok(manifest.transaction_id);
+            return Ok((manifest.transaction_id, false));
         }
-        Self::trip(&mut inner, Fault::BeforeObjects)?;
+        Self::trip(inner, Fault::BeforeObjects)?;
         for item in manifest.records.iter().chain(&manifest.media) {
             if let Some(bytes) = objects.get(&item.sha256) {
                 ensure!(bytes.len() as u64 == item.bytes, "object size mismatch");
@@ -711,7 +728,7 @@ impl Store {
                 )?;
             }
         }
-        Self::trip(&mut inner, Fault::AfterObjects)?;
+        Self::trip(inner, Fault::AfterObjects)?;
         let records = Self::validate_objects(&root, &manifest)?;
         Self::can_apply(&inner.index, &records)?;
         if local {
@@ -748,11 +765,11 @@ impl Store {
                     })
                     .map(|m| m.transaction_id)
                 {
-                    return Ok(prior);
+                    return Ok((prior, false));
                 }
             }
         }
-        Self::trip(&mut inner, Fault::BeforeCommit)?;
+        Self::trip(inner, Fault::BeforeCommit)?;
         files::atomic_json(
             &root
                 .join("commits")
@@ -762,15 +779,16 @@ impl Store {
         let after_commit = inner.fault == Fault::AfterCommit;
         Self::apply_index(&mut inner.index, manifest.clone(), records);
         if after_commit {
-            Self::trip(&mut inner, Fault::AfterCommit)?;
+            Self::trip(inner, Fault::AfterCommit)?;
         }
-        drop(inner);
+        Ok((manifest.transaction_id, true))
+    }
+    fn notify_commit(&self) {
         if let Ok(wake) = self.wake.lock() {
             if let Some(wake) = wake.as_ref() {
                 let _ = wake.try_send(());
             }
         }
-        Ok(manifest.transaction_id)
     }
     pub fn set_wake(&self, wake: Option<SyncSender<()>>) {
         if let Ok(mut target) = self.wake.lock() {

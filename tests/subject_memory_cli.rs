@@ -402,7 +402,7 @@ impl Fixture {
                 fact: Uuid::new_v4(),
             },
             claim: "physics units".into(),
-            value: "Use SI gravity units.\nα and β stay Unicode.".into(),
+            value: "Use SI gravity units.\nÎ± and Î² stay Unicode.".into(),
             subject: "physics".into(),
             tags: vec![],
             provenance: Provenance {
@@ -538,6 +538,80 @@ impl Fixture {
         assert_eq!(report["operation"], "inspect");
         if !label.is_empty() {
             if let Some(directory) = std::env::var_os("HOST_MEMORY_INSPECTION_REPORT_DIR") {
+                let directory = PathBuf::from(directory);
+                assert!(directory.is_absolute());
+                fs::create_dir_all(&directory).unwrap();
+                assert!(label.chars().all(|c| c.is_ascii_lowercase() || c == '-'));
+                fs::write(directory.join(format!("{label}.json")), &stdout).unwrap();
+                fs::write(directory.join(format!("{label}.request.json")), input).unwrap();
+            }
+        }
+        report
+    }
+    fn stdin_prepared(&self, operation: &str, label: &str, input: &[u8]) -> Value {
+        let command = self.command(operation);
+        let args: Vec<_> = command.get_args().map(|a| a.to_os_string()).collect();
+        let mut replacement = Command::new(command.get_program());
+        replacement
+            .current_dir(&self.root)
+            .args(&args[..args.len() - 1])
+            .arg("-");
+        for (key, value) in command.get_envs() {
+            if let Some(value) = value {
+                replacement.env(key, value);
+            }
+        }
+        let mut child = replacement
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut pipe = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let out_reader = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            stdout
+                .take((maintenance::MAX_RESPONSE + 1) as u64)
+                .read_to_end(&mut bytes)
+                .unwrap();
+            bytes
+        });
+        let err_reader = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            stderr.take(4096).read_to_end(&mut bytes).unwrap();
+            bytes
+        });
+        let bytes = input.to_vec();
+        let sender = std::thread::spawn(move || pipe.write_all(&bytes));
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                let _ = child.wait();
+                let _ = sender.join();
+                let _ = out_reader.join();
+                let _ = err_reader.join();
+                panic!("inspection exceeded caller deadline");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if let Err(error) = sender.join().unwrap() {
+            assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+        }
+        let status = child.wait().unwrap();
+        let stdout = out_reader.join().unwrap();
+        let stderr = err_reader.join().unwrap();
+        assert!(status.success());
+        assert!(stderr.is_empty());
+        assert!(stdout.len() <= maintenance::MAX_RESPONSE);
+        assert!(stdout.ends_with(b"\n"));
+        let report: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(report["report_version"], 1);
+        assert_eq!(report["operation"], operation);
+        if !label.is_empty() {
+            if let Some(directory) = std::env::var_os("HOST_MEMORY_PREPARED_REPORT_DIR") {
                 let directory = PathBuf::from(directory);
                 assert!(directory.is_absolute());
                 fs::create_dir_all(&directory).unwrap();
@@ -1173,7 +1247,7 @@ fn actual_cli_stdin_query_matches_file_for_local_and_selected_memory() {
                 "ok"
             );
         }
-        let query = Query::new("physics gravity units\r\nα".into(), 100);
+        let query = Query::new("physics gravity units\r\nÎ±".into(), 100);
         let file_report = fixture.run("query", &query);
         let bytes = serde_json::to_vec(&query).unwrap();
         let stdin_report = fixture.stdin_query(&bytes);
@@ -1227,4 +1301,392 @@ fn actual_cli_stdin_invalid_query_refuses_before_store_and_does_not_echo() {
     let fixture = Fixture::new();
     assert_eq!(fixture.stdin_query(&valid)["status"], "unavailable");
     assert!(!fixture.paths().data.exists());
+}
+
+fn prepare_forget(f: &Fixture, fact: &Fact, label: &str) -> Value {
+    let report = f.stdin_prepared(
+        "prepare-forget",
+        label,
+        &serde_json::to_vec(
+            &json!({"prepared_version":1,"operation":Uuid::new_v4(),"key":fact.key}),
+        )
+        .unwrap(),
+    );
+    assert_eq!(report["status"], "ok", "{report}");
+    assert_eq!(report["incomplete"], false);
+    assert_eq!(
+        report["data"]["preview"]["payload"],
+        serde_json::to_value(fact).unwrap()
+    );
+    report["data"]["intent"].clone()
+}
+fn original_intent_call(f: &Fixture, operation: &str, label: &str, intent: &Value) -> Value {
+    f.stdin_prepared(
+        operation,
+        label,
+        &serde_json::to_vec(&json!({"intent":intent})).unwrap(),
+    )
+}
+#[test]
+fn actual_prepared_forget_local_original_receipt_survives_later_value_without_redeleting() {
+    let f = Fixture::new();
+    let mut fact = f.fact();
+    assert_eq!(
+        f.run(
+            "put",
+            &json!({"operation":Uuid::new_v4(),"expected":[],"fact":fact})
+        )["status"],
+        "ok"
+    );
+    let intent = prepare_forget(&f, &fact, "local-prepare");
+    let absent = original_intent_call(&f, "forget-receipt", "local-receipt-absent", &intent);
+    assert_eq!(absent["status"], "unavailable");
+    assert_eq!(absent["data"]["outcome"], "unresolved");
+    let ack = original_intent_call(&f, "forget", "local-confirm", &intent);
+    assert_eq!(ack["status"], "ok", "{ack}");
+    assert_eq!(ack["data"]["outcome"], "acknowledged");
+    assert_eq!(ack["data"]["operation"], intent["operation"]);
+    let old = f.run("inspect", &serde_json::to_value(&fact.key).unwrap());
+    let tombstone = old["data"][0]["revision_id"].clone();
+    assert_eq!(old["data"][0]["kind"], "tombstone");
+    fact.value = "A later value must survive old acknowledgement".into();
+    assert_eq!(
+        f.run(
+            "put",
+            &json!({"operation":Uuid::new_v4(),"expected":[tombstone],"fact":fact})
+        )["status"],
+        "ok"
+    );
+    let store = Store::open(f.paths()).unwrap();
+    let manifests = store.manifests().unwrap();
+    drop(store);
+    let receipt = original_intent_call(&f, "forget-receipt", "local-later-receipt", &intent);
+    assert_eq!(receipt["data"], ack["data"]);
+    assert_eq!(
+        original_intent_call(&f, "forget", "local-exact-replay", &intent)["data"],
+        ack["data"]
+    );
+    let mut forged = intent.clone();
+    forged["expected"][0]["sha256"] = json!(storage::digest(b"forged original content"));
+    assert_eq!(
+        original_intent_call(&f, "forget-receipt", "local-tampered-receipt", &forged)["data"]
+            ["outcome"],
+        "unresolved"
+    );
+    assert_eq!(
+        original_intent_call(&f, "forget", "local-tampered-confirm", &forged)["data"]["outcome"],
+        "not-dispatched"
+    );
+    let now = f.run("inspect", &serde_json::to_value(&fact.key).unwrap());
+    assert_eq!(now["data"][0]["payload"]["value"], fact.value);
+    let store = Store::open(f.paths()).unwrap();
+    assert_eq!(store.manifests().unwrap(), manifests);
+}
+#[test]
+fn actual_prepared_forget_selected_predecessor_and_other_pins_bind_historical_ack() {
+    let f = Fixture::new();
+    let (_, mut fact, mut other) = inspection_selected_pair(&f);
+    let intent = prepare_forget(&f, &fact, "selected-prepare");
+    assert_eq!(
+        original_intent_call(&f, "forget-receipt", "selected-receipt-absent", &intent)["data"]
+            ["outcome"],
+        "unresolved"
+    );
+    let ack = original_intent_call(&f, "forget", "selected-confirm", &intent);
+    assert_eq!(ack["status"], "ok", "{ack}");
+    let tombstone = f.run("inspect", &serde_json::to_value(&fact.key).unwrap())["data"][0]
+        ["revision_id"]
+        .clone();
+    fact.value = "Later selected value survives".into();
+    assert_eq!(
+        f.run(
+            "put",
+            &json!({"operation":Uuid::new_v4(),"expected":[tombstone],"fact":fact})
+        )["status"],
+        "ok"
+    );
+    assert_eq!(
+        original_intent_call(&f, "forget-receipt", "selected-later-receipt", &intent)["data"],
+        ack["data"]
+    );
+    assert_eq!(
+        original_intent_call(&f, "forget", "selected-exact-replay", &intent)["data"],
+        ack["data"]
+    );
+    let mut forged = intent.clone();
+    forged["expected"][0]["sha256"] = json!(storage::digest(b"changed expected content"));
+    assert_eq!(
+        original_intent_call(&f, "forget-receipt", "selected-tampered-receipt", &forged)["data"]
+            ["outcome"],
+        "unresolved"
+    );
+    let mut forged = intent.clone();
+    forged["binding"]["domain"]["pins"][0]["accepted_base_sha256"] =
+        json!(storage::digest(b"changed accepted base"));
+    assert_eq!(
+        original_intent_call(&f, "forget-receipt", "selected-changed-pin", &forged)["data"]
+            ["outcome"],
+        "unresolved"
+    );
+    let old = f.run("inspect", &serde_json::to_value(&other.key).unwrap())["data"][0]
+        ["revision_id"]
+        .clone();
+    other.value = "Unrelated admitted aggregate changed".into();
+    assert_eq!(
+        f.run(
+            "put",
+            &json!({"operation":Uuid::new_v4(),"expected":[old],"fact":other})
+        )["status"],
+        "ok"
+    );
+    assert_eq!(
+        original_intent_call(&f, "forget-receipt", "selected-other-drift", &intent)["data"]
+            ["outcome"],
+        "unresolved"
+    );
+    assert_eq!(
+        f.run("inspect", &serde_json::to_value(&fact.key).unwrap())["data"][0]["payload"]["value"],
+        fact.value
+    );
+}
+#[test]
+fn actual_prepared_forget_binding_reentry_strict_limits_and_no_initialization() {
+    let f = Fixture::new();
+    let fact = f.fact();
+    let request = json!({"prepared_version":1,"operation":Uuid::new_v4(),"key":fact.key});
+    let valid = serde_json::to_vec(&request).unwrap();
+    assert_eq!(
+        f.stdin_prepared("prepare-forget", "missing-prepare", &valid)["status"],
+        "unavailable"
+    );
+    assert!(!f.paths().data.exists());
+    let mut malformed = request.clone();
+    malformed["key"]["scope"]["extra"] = json!(true);
+    assert_eq!(
+        f.stdin_prepared(
+            "prepare-forget",
+            "invalid-prepare",
+            &serde_json::to_vec(&malformed).unwrap()
+        )["status"],
+        "invalid-input"
+    );
+    let mut exact = valid.clone();
+    exact.resize(storage::MAX_RECORD, b' ');
+    assert_eq!(
+        f.stdin_prepared("prepare-forget", "", &exact)["status"],
+        "unavailable"
+    );
+    exact.push(b' ');
+    assert_eq!(
+        f.stdin_prepared("prepare-forget", "", &exact)["status"],
+        "invalid-input"
+    );
+    assert!(!f.paths().data.exists());
+    assert_eq!(
+        f.run(
+            "put",
+            &json!({"operation":Uuid::new_v4(),"expected":[],"fact":fact})
+        )["status"],
+        "ok"
+    );
+    let intent = prepare_forget(&f, &fact, "binding-prepare");
+    let store = Store::open(f.paths()).unwrap();
+    for choice in [
+        storage::sync::mode::SyncModeChoice::LocalOnly,
+        storage::sync::mode::SyncModeChoice::IsolatedBackup {
+            binding_sha256: storage::digest(b"different mode"),
+        },
+        storage::sync::mode::SyncModeChoice::LocalOnly,
+    ] {
+        store
+            .set_sync_mode(
+                &store.sync_mode_snapshot().unwrap().token,
+                Uuid::new_v4(),
+                choice,
+            )
+            .unwrap();
+    }
+    drop(store);
+    assert_eq!(
+        original_intent_call(&f, "forget", "mode-reentry-refusal", &intent)["data"]["outcome"],
+        "not-dispatched"
+    );
+    let intent = prepare_forget(&f, &fact, "config-prepare");
+    let path = f.root.join("config.json");
+    let mut config: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    config["memory"]["enabled"] = json!(true);
+    fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+    assert_eq!(
+        original_intent_call(&f, "forget", "config-refusal", &intent)["status"],
+        "conflict"
+    );
+    assert_eq!(
+        f.run("inspect", &serde_json::to_value(&fact.key).unwrap())["data"][0]["kind"],
+        "value"
+    );
+}
+#[test]
+fn actual_prepared_forget_same_heads_do_not_rebind_replaced_storage() {
+    let f = Fixture::new();
+    let fact = f.fact();
+    assert_eq!(
+        f.run(
+            "put",
+            &json!({"operation":Uuid::new_v4(),"expected":[],"fact":fact})
+        )["status"],
+        "ok"
+    );
+    let intent = prepare_forget(&f, &fact, "restore-prepare");
+    let store = Store::open(f.paths()).unwrap();
+    let backup = f.root.join("backup");
+    store.export(&backup).unwrap();
+    store.restore(&backup).unwrap();
+    drop(store);
+    assert_eq!(
+        original_intent_call(&f, "forget", "restored-generation-refusal", &intent)["data"]
+            ["outcome"],
+        "not-dispatched"
+    );
+    assert_eq!(
+        f.run("inspect", &serde_json::to_value(&fact.key).unwrap())["data"][0]["kind"],
+        "value"
+    );
+    for catalog in [false, true] {
+        let f = Fixture::new();
+        let (identity, fact, _) = inspection_selected_pair(&f);
+        let intent = prepare_forget(
+            &f,
+            &fact,
+            if catalog {
+                "catalog-replace-prepare"
+            } else {
+                "target-replace-prepare"
+            },
+        );
+        let store = Store::open(f.paths()).unwrap();
+        let scope = if catalog {
+            identity.scope().unwrap()
+        } else {
+            identity
+                .aggregate_scope(&catalog::Owner::GlobalFact {
+                    key: fact.key.clone(),
+                })
+                .unwrap()
+        };
+        let old = store.selected_snapshot(&scope, 4096).unwrap().unwrap();
+        store
+            .activate_selected(
+                &old.token,
+                storage::selection::SelectionChange {
+                    operation: Uuid::new_v4(),
+                    accepted_base_sha256: storage::digest(
+                        b"new acceptance with identical envelopes",
+                    ),
+                    selected: old.transaction.selected.clone(),
+                    retained: old.transaction.retained.clone(),
+                },
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let new = store.selected_snapshot(&scope, 4096).unwrap().unwrap();
+        assert!(new.selected_records == old.selected_records);
+        assert_ne!(
+            new.token.aggregate_generation(),
+            old.token.aggregate_generation()
+        );
+        drop(store);
+        // Establish the new state is still valid domain data, not a manufactured invalid fixture.
+        assert_eq!(
+            f.run("inspect", &serde_json::to_value(&fact.key).unwrap())["status"],
+            "ok"
+        );
+        let refusal = original_intent_call(
+            &f,
+            "forget",
+            if catalog {
+                "catalog-replacement-refusal"
+            } else {
+                "target-replacement-refusal"
+            },
+            &intent,
+        );
+        assert_eq!(refusal["status"], "conflict", "{refusal}");
+        assert_eq!(refusal["data"]["outcome"], "not-dispatched");
+    }
+}
+#[test]
+fn actual_prepared_forget_refuses_ambiguous_unsupported_and_busy_without_mutation() {
+    for shape in ["absent", "tombstone", "conflict", "opaque", "numeric"] {
+        let f = Fixture::new();
+        let mut fact = f.fact();
+        if shape == "numeric" {
+            fact.observed_ms = 9_007_199_254_740_992;
+        }
+        assert_eq!(
+            f.run(
+                "put",
+                &json!({"operation":Uuid::new_v4(),"expected":[],"fact":fact})
+            )["status"],
+            "ok"
+        );
+        let head = f.run("inspect", &serde_json::to_value(&fact.key).unwrap())["data"][0].clone();
+        if shape == "tombstone" {
+            assert_eq!(f.run("forget",&json!({"operation":Uuid::new_v4(),"key":fact.key,"expected":[head["revision_id"]]}))["status"],"ok");
+        }
+        if shape == "conflict" || shape == "opaque" {
+            let store = Store::open(f.paths()).unwrap();
+            let original: storage::Envelope = serde_json::from_value(head).unwrap();
+            inspection_fork(
+                &store,
+                &original,
+                if shape == "opaque" {
+                    json!({"unsupported":true})
+                } else {
+                    original.payload.clone()
+                },
+                false,
+            );
+            if shape == "conflict" {
+                inspection_fork(&store, &original, original.payload.clone(), false);
+            }
+            drop(store);
+        }
+        let mut key = fact.key.clone();
+        if shape == "absent" {
+            key.fact = Uuid::new_v4();
+        }
+        let report = f.stdin_prepared(
+            "prepare-forget",
+            &format!("shape-{shape}"),
+            &serde_json::to_vec(
+                &json!({"prepared_version":1,"operation":Uuid::new_v4(),"key":key}),
+            )
+            .unwrap(),
+        );
+        assert_eq!(report["status"], "unsupported", "{shape}: {report}");
+        assert_eq!(report["incomplete"], false);
+        assert!(report["data"].is_null());
+    }
+    let f = Fixture::new();
+    let fact = f.fact();
+    assert_eq!(
+        f.run(
+            "put",
+            &json!({"operation":Uuid::new_v4(),"expected":[],"fact":fact})
+        )["status"],
+        "ok"
+    );
+    let intent = prepare_forget(&f, &fact, "busy-prepare");
+    let store = Store::open(f.paths()).unwrap();
+    let report = original_intent_call(&f, "forget", "busy-confirm", &intent);
+    assert_eq!(report["status"], "busy");
+    assert_eq!(report["incomplete"], false);
+    assert_eq!(report["data"]["outcome"], "not-dispatched");
+    let report = original_intent_call(&f, "forget-receipt", "busy-receipt", &intent);
+    assert_eq!(report["data"]["outcome"], "unresolved");
+    drop(store);
+    assert_eq!(
+        f.run("inspect", &serde_json::to_value(&fact.key).unwrap())["data"][0]["kind"],
+        "value"
+    );
 }

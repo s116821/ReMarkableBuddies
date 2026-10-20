@@ -2,6 +2,7 @@
 mod aggregate;
 pub mod catalog;
 pub mod maintenance;
+pub(crate) mod prepared;
 pub mod selected;
 
 use crate::storage::{Envelope, Kind, Namespace, Store, Uuid, MAX_ITEMS};
