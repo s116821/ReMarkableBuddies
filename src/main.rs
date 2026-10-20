@@ -37,6 +37,12 @@ pub struct Args {
     /// Save local page-image diagnostics (independent of logging)
     #[arg(long)]
     debug_dump: bool,
+    /// One-shot local memory maintenance; no provider or tablet runtime
+    #[arg(long, value_enum, requires = "memory_input", conflicts_with_all = ["simulate", "api_key", "model", "base_url", "trigger_corner", "debug_dump", "log_level", "inspect_owned_data", "export_note", "personalization_operation"])]
+    memory_operation: Option<remarkable_reader_buddy::memory::maintenance::Operation>,
+    /// Bounded JSON input for an explicit memory operation
+    #[arg(long, value_name = "FILE", requires = "memory_operation")]
+    memory_input: Option<std::path::PathBuf>,
     /// Fixed local personalization maintenance; mutation JSON comes from bounded stdin
     #[arg(long, value_enum, conflicts_with_all=["simulate","api_key","model","base_url","trigger_corner","debug_dump","log_level","export_note"])]
     personalization_operation: Option<config::personalization::Operation>,
@@ -63,6 +69,24 @@ fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_lo
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    if let Some(operation) = args.memory_operation {
+        let input = args
+            .memory_input
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("memory input absent"))?;
+        let config_path = std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into);
+        let report = if input.as_os_str() == std::ffi::OsStr::new("-") {
+            remarkable_reader_buddy::memory::maintenance::run_stdin(
+                operation,
+                &mut std::io::stdin().lock(),
+                config_path,
+            )
+        } else {
+            remarkable_reader_buddy::memory::maintenance::run(operation, input, config_path)
+        };
+        report.write_to(&mut std::io::stdout().lock())?;
+        return Ok(());
+    }
     if args.inspect_owned_data {
         let report = match Config::load(std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into)) {
             Ok(config) => remarkable_reader_buddy::storage::inspection::inspect_owned_data(&config.paths),
@@ -163,6 +187,8 @@ mod tests {
                 "export-note",
                 "inspect-owned-data",
                 "log-level",
+                "memory-input",
+                "memory-operation",
                 "model",
                 "personalization-operation",
                 "simulate",

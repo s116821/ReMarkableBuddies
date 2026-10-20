@@ -70,6 +70,7 @@ pub struct Config {
     pub paths: StorePaths,
     pub model_credential: Option<String>,
     pub sync: SyncPolicy,
+    pub memory: crate::memory::Configuration,
     pub personalization: Personalization,
 }
 impl Default for Config {
@@ -84,6 +85,7 @@ impl Default for Config {
             paths: StorePaths::default(),
             model_credential: None,
             sync: SyncPolicy::default(),
+            memory: crate::memory::Configuration::default(),
             personalization: Personalization::default(),
         }
     }
@@ -113,6 +115,14 @@ impl Config {
             "unsupported configuration version"
         );
         self.sync.validate()?;
+        self.memory.validate()?;
+        ensure!(
+            !(self.sync.enabled
+                && (self.memory.selection.is_some()
+                    || (self.memory.enabled
+                        && self.sync.namespaces.contains(&Namespace::SubjectMemory)))),
+            "host memory requires separately qualified selected sync"
+        );
         self.personalization.validate()?;
         if let Some(model) = &self.model {
             ensure!(
