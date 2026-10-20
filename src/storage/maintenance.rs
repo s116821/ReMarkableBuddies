@@ -42,6 +42,13 @@ impl Store {
     /// Retains one lease through caller maintenance. Does not create directories,
     /// repair markers, clean staging, publish capabilities or initialize a store.
     pub fn open_existing(paths: StorePaths) -> Result<Self, Refusal> {
+        Self::open_existing_inner(paths, false)
+    }
+    /// Opt-in mode maintenance only. Preserve legacy callers' format refusal.
+    pub(crate) fn open_existing_for_mode(paths: StorePaths) -> Result<Self, Refusal> {
+        Self::open_existing_inner(paths, true)
+    }
+    fn open_existing_inner(paths: StorePaths, selected_aware: bool) -> Result<Self, Refusal> {
         paths.validate().map_err(|_| Refusal::Unsupported)?;
         directory(&paths.data)?;
         let lock_path = paths.data.join("store.lock");
@@ -87,7 +94,10 @@ impl Store {
         ] {
             directory(path)?;
         }
-        if record::<u32>(&generation_root.join("format.json"), 64)? != FORMAT {
+        if selected_aware {
+            super::selection::validate_generation(&generation_root, identity.actor, generation)
+                .map_err(|_| Refusal::Unsupported)?;
+        } else if record::<u32>(&generation_root.join("format.json"), 64)? != FORMAT {
             return Err(Refusal::Unsupported);
         }
         let store = Self {

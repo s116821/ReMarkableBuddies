@@ -51,6 +51,16 @@ pub struct SyncModeToken {
     actor: Uuid,
     sha256: String,
 }
+impl SyncModeToken {
+    /// Decode an operator's original conditional precondition, never a live lease.
+    pub(crate) fn from_maintenance_request(actor: Uuid, sha256: String) -> Result<Self> {
+        ensure!(
+            !actor.is_nil() && valid_digest(&sha256),
+            "invalid mode precondition"
+        );
+        Ok(Self { actor, sha256 })
+    }
+}
 #[derive(Clone)]
 pub struct SyncModeSnapshot {
     pub device: Option<Uuid>,
@@ -97,7 +107,7 @@ fn fresh_identity(state: &ModeState) -> Uuid {
 fn path(store: &Store) -> PathBuf {
     store.paths.data.join("sync/mode.json")
 }
-fn validate_choice(choice: &SyncModeChoice) -> Result<()> {
+pub(crate) fn validate_choice(choice: &SyncModeChoice) -> Result<()> {
     match choice {
         SyncModeChoice::LocalOnly => (),
         SyncModeChoice::IsolatedBackup { binding_sha256 } => {
