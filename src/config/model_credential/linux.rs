@@ -509,6 +509,7 @@ struct Stage {
     path: PathBuf,
     parent_identity: String,
     identity: (u64, u64),
+    sealed_metadata: String,
 }
 impl Stage {
     fn create(root: &Path, bytes: &[u8], mode: u32) -> Checked<Self> {
@@ -523,10 +524,11 @@ impl Stage {
             .open(&path)
             .map_err(|_| Status::Unavailable)?;
         let meta = file.metadata().map_err(|_| Status::Unavailable)?;
-        let stage = Self {
+        let mut stage = Self {
             path,
             parent_identity: metadata_hash(&parent(root)?, false),
             identity: (meta.dev(), meta.ino()),
+            sealed_metadata: String::new(),
         };
         let mut file = file;
         file.write_all(bytes).map_err(|_| Status::Unavailable)?;
@@ -537,7 +539,19 @@ impl Stage {
         if !meta.is_file() || !owner(&meta) || meta.nlink() != 1 || meta.mode() & 0o7777 != mode {
             return Err(Status::Unsupported);
         }
+        stage.sealed_metadata = metadata_hash(&meta, true);
         Ok(stage)
+    }
+    fn check_sealed(&self) -> Checked<()> {
+        let root = self.path.parent().ok_or(Status::Unavailable)?;
+        if metadata_hash(&parent(root)?, false) != self.parent_identity {
+            return Err(Status::Unavailable);
+        }
+        let meta = fs::symlink_metadata(&self.path).map_err(|_| Status::Unavailable)?;
+        if !meta.is_file() || metadata_hash(&meta, true) != self.sealed_metadata {
+            return Err(Status::Unsupported);
+        }
+        Ok(())
     }
     fn cleanup(&self) -> Checked<()> {
         let root = self.path.parent().ok_or(Status::Unavailable)?;
@@ -601,6 +615,9 @@ pub(crate) fn publish_with(
             return Err(Status::Conflict);
         }
         hook(Phase::BeforeSyscall)?;
+        if let Some(stage) = &stage {
+            stage.check_sealed()?;
+        }
         attempted = true;
         match (&intent.action, &stage) {
             (Action::Install, Some(stage)) => {
@@ -1098,5 +1115,70 @@ mod tests {
             serde_json::from_slice::<Value>(&fs::read(&f.path).unwrap()).unwrap()["debug_dump"],
             true
         );
+    }
+
+    #[test]
+    fn changed_or_aliased_sealed_stage_never_reaches_destination_syscall() {
+        for alias in [false, true] {
+            let f = Fixture::new();
+            let intent = f.prepare(change("install"));
+            let ch: Change = serde_json::from_value(change("install")).unwrap();
+            let report = publish_with(&f.path, &f.paths, &intent, &ch, |phase| {
+                if phase == Phase::BeforeSyscall {
+                    let stage = fs::read_dir(&f.paths.credentials)
+                        .unwrap()
+                        .map(|e| e.unwrap().path())
+                        .find(|p| {
+                            p.file_name()
+                                .unwrap()
+                                .to_string_lossy()
+                                .starts_with(".credential-stage-")
+                        })
+                        .unwrap();
+                    if alias {
+                        fs::rename(&stage, f.root.join("retained-stage")).unwrap();
+                        std::os::unix::fs::symlink(f.paths.credentials.join("other"), &stage)
+                            .unwrap();
+                    } else {
+                        fs::write(&stage, b"changed stage").unwrap();
+                    }
+                }
+                Ok(())
+            });
+            assert_eq!(finish(report)["outcome"], "not-dispatched");
+            assert!(!f.target.exists());
+            f.unchanged();
+        }
+    }
+
+    #[test]
+    fn root_alias_and_apply_only_declared_alias_checks_preserve_read_only_scope() {
+        let f = Fixture::new();
+        let moved = f.root.join("moved-credentials");
+        fs::rename(&f.paths.credentials, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, &f.paths.credentials).unwrap();
+        assert_eq!(inspect(Some(f.path.clone())).status, Status::Unsupported);
+        let f = Fixture::new();
+        let alias = f.root.join("data-alias");
+        std::os::unix::fs::symlink(&f.paths.credentials, &alias).unwrap();
+        let mut cfg: Value = serde_json::from_slice(&fs::read(&f.path).unwrap()).unwrap();
+        cfg["paths"]["data"] = json!(alias);
+        fs::write(&f.path, serde_json::to_vec(&cfg).unwrap()).unwrap();
+        // Read-only operations deliberately do not traverse the declared data alias.
+        assert_eq!(inspect(Some(f.path.clone())).status, Status::Ok);
+        let intent = f.prepare(change("install"));
+        assert_eq!(
+            f.run(
+                Operation::Apply,
+                json!({"intent":intent,"change":change("install")})
+            )
+            .status,
+            Status::Unsupported
+        );
+        assert!(!f.target.exists());
+        let mut cfg: Value = serde_json::from_slice(&fs::read(&f.path).unwrap()).unwrap();
+        cfg["paths"]["credentials"] = cfg["paths"]["cache"].clone();
+        fs::write(&f.path, serde_json::to_vec(&cfg).unwrap()).unwrap();
+        assert_eq!(inspect(Some(f.path.clone())).status, Status::Unsupported);
     }
 }

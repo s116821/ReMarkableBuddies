@@ -52,17 +52,19 @@ fn capture(
     if input.is_some() {
         cmd.args(["--model-credential-input", "-"]);
     }
-    cmd.stdin(if input.is_some() {
-        Stdio::piped()
-    } else {
-        Stdio::null()
-    })
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped());
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let bytes = input.map(|v| serde_json::to_vec(&v).unwrap());
     let before = f.inventory();
     let config = fs::read(f.root.join("config.json")).unwrap();
     let mut child = cmd.spawn().unwrap();
+    // Keep inspect's stdin open until it exits: no EOF is supplied.
+    let unused_pipe = if bytes.is_none() {
+        child.stdin.take()
+    } else {
+        None
+    };
     let writer = bytes.as_ref().map(|b| {
         let mut pipe = child.stdin.take().unwrap();
         let b = b.clone();
@@ -83,6 +85,7 @@ fn capture(
         }
     }
     let out = child.wait_with_output().unwrap();
+    drop(unused_pipe);
     assert!(out.status.success());
     assert!(out.stderr.is_empty());
     assert!(out.stdout.len() <= 16384 && out.stdout.ends_with(b"\n"));
@@ -148,6 +151,25 @@ fn actual_synthetic_cli_modes_busy_exact_bytes_and_clean_build_corpus() {
     let provenance = json!({"source_checkout_sha":String::from_utf8(source.stdout).unwrap().trim(),"executable_sha256":exe_sha,"scope":"Actual Linux host CLI against only task-owned synthetic credentials; no provider/tablet/runtime or transport-loss test."});
     emit("START", &provenance);
     let mut records = Vec::new();
+    let absent = Fixture::new();
+    buddy::storage::files::directory(&absent.paths().credentials).unwrap();
+    configure(&absent);
+    let pending = prepare(
+        &mut records,
+        "uninitialized",
+        &absent,
+        json!({"action":"install","value":SECRET}),
+    );
+    capture(
+        &mut records,
+        "uninitialized-apply",
+        &absent,
+        "apply",
+        Some(pending),
+        "unavailable",
+        "not-dispatched",
+    );
+    assert!(!absent.paths().data.exists() && !absent.paths().cache.exists());
     let f = Fixture::new();
     drop(Store::open(f.paths()).unwrap());
     configure(&f);
@@ -243,6 +265,26 @@ fn actual_synthetic_cli_modes_busy_exact_bytes_and_clean_build_corpus() {
                 json!({"action":"install","value":SECRET}),
             );
             let owner = Store::open(f.paths()).unwrap();
+            capture(
+                &mut records,
+                &format!("{name}-inspect-while-busy"),
+                &f,
+                "inspect",
+                None,
+                "ok",
+                "read-only",
+            );
+            capture(
+                &mut records,
+                &format!("{name}-prepare-while-busy"),
+                &f,
+                "prepare",
+                Some(
+                    json!({"credential_version":1,"operation":Uuid::new_v4(),"base":input["intent"]["base"],"change":{"action":"install","value":SECRET}}),
+                ),
+                "ok",
+                "prepared",
+            );
             capture(
                 &mut records,
                 &format!("{name}-busy"),
