@@ -938,4 +938,40 @@ pub(crate) mod tests {
                 .is_err());
         }
     }
+    #[test]
+    fn directory_created_after_admission_is_never_reused_and_stays_not_activated() {
+        let source = Fixture::new();
+        let archive = source.archive();
+        let target = Fixture::new();
+        let store = target.open();
+        let conditions = store
+            .prepare_ordinary_restore(&archive, || Ok(()))
+            .unwrap()
+            .conditions;
+        let current = fs::read(store.paths.data.join("CURRENT")).unwrap();
+        let reserved = store.generation(conditions.target_generation);
+        let publication = store
+            .apply_ordinary_restore_inner(
+                &archive,
+                &conditions,
+                || Ok(()),
+                || {
+                    fs::create_dir(&reserved).unwrap();
+                    fs::write(reserved.join("racing-owner-sentinel"), b"must retain").unwrap();
+                },
+                |_, _| Ok(()),
+            )
+            .unwrap();
+        assert!(matches!(publication, Publication::NotActivated));
+        assert_eq!(
+            fs::read(reserved.join("racing-owner-sentinel")).unwrap(),
+            b"must retain"
+        );
+        assert!(!reserved.join("format.json").exists());
+        assert_eq!(fs::read(store.paths.data.join("CURRENT")).unwrap(), current);
+        assert!(store
+            .observe_ordinary_restore(&conditions, || Ok(()))
+            .unwrap()
+            .is_none());
+    }
 }

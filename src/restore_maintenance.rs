@@ -206,6 +206,53 @@ fn path_hash(kind: &str, path: &Path) -> std::result::Result<String, Status> {
         .as_bytes(),
     ))
 }
+#[cfg(not(windows))]
+fn component_equal(a: &std::ffi::OsStr, b: &std::ffi::OsStr) -> std::result::Result<bool, Status> {
+    Ok(a == b)
+}
+#[cfg(windows)]
+fn component_equal(a: &std::ffi::OsStr, b: &std::ffi::OsStr) -> std::result::Result<bool, Status> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        #[link_name = "CompareStringOrdinal"]
+        fn compare_string_ordinal(
+            a: *const u16,
+            a_len: i32,
+            b: *const u16,
+            b_len: i32,
+            ignore_case: i32,
+        ) -> i32;
+    }
+    let a: Vec<_> = a.encode_wide().collect();
+    let b: Vec<_> = b.encode_wide().collect();
+    let a_len = i32::try_from(a.len()).map_err(|_| Status::InvalidInput)?;
+    let b_len = i32::try_from(b.len()).map_err(|_| Status::InvalidInput)?;
+    // SAFETY: both live UTF16 buffers and their checked explicit lengths cover
+    // the entire call. Windows ordinal case comparison is CPU-only: no source
+    // lookup, locale-dependent folding or lossy path conversion is performed.
+    let result = unsafe { compare_string_ordinal(a.as_ptr(), a_len, b.as_ptr(), b_len, 1) };
+    match result {
+        2 => Ok(true),
+        1 | 3 => Ok(false),
+        _ => Err(Status::InvalidInput),
+    }
+}
+fn path_prefix(path: &Path, parent: &Path) -> std::result::Result<bool, Status> {
+    let mut parts = path.components();
+    for expected in parent.components() {
+        let Some(actual) = parts.next() else {
+            return Ok(false);
+        };
+        if !component_equal(actual.as_os_str(), expected.as_os_str())? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+fn overlap(a: &Path, b: &Path) -> std::result::Result<bool, Status> {
+    Ok(path_prefix(a, b)? || path_prefix(b, a)?)
+}
 impl Document {
     fn load(path: Option<PathBuf>) -> std::result::Result<Self, Status> {
         let path = path.ok_or(Status::Unavailable)?;
@@ -239,12 +286,24 @@ impl Document {
             &self.config.paths.cache,
             &self.config.paths.credentials,
         ] {
-            if path.starts_with(root) || root.starts_with(path) {
+            if overlap(path, root)? {
                 return Err(Status::InvalidInput);
             }
         }
         if probe {
             files::safe_path(path).map_err(|_| Status::InvalidInput)?;
+            let source = std::fs::canonicalize(path).map_err(|_| Status::Unavailable)?;
+            for root in [
+                &self.config.paths.data,
+                &self.config.paths.cache,
+                &self.config.paths.credentials,
+            ] {
+                files::safe_path(root).map_err(|_| Status::InvalidInput)?;
+                let owned = std::fs::canonicalize(root).map_err(|_| Status::Unavailable)?;
+                if overlap(&source, &owned)? {
+                    return Err(Status::InvalidInput);
+                }
+            }
         }
         Ok(hash)
     }

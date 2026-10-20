@@ -339,3 +339,48 @@ fn actual_restore_strict_shapes_nullable_presence_caps_and_cli_inventory() {
     );
     assert_eq!(target.inventory(), before);
 }
+
+#[cfg(windows)]
+#[test]
+fn actual_restore_windows_case_alias_inside_owned_root_is_refused() {
+    let source = Fixture::new();
+    drop(Store::open(source.paths()).unwrap());
+    let source_store = Store::open_existing(source.paths()).unwrap();
+    source_store
+        .commit(vec![record(&source_store)], BTreeMap::new())
+        .unwrap();
+    let target = Fixture::new();
+    drop(Store::open(target.paths()).unwrap());
+    let inside = target.paths().data.join("inside-archive");
+    source_store.export(&inside).unwrap();
+    drop(source_store);
+    let alias = PathBuf::from(
+        inside
+            .to_str()
+            .unwrap()
+            .chars()
+            .map(|c| {
+                if c.is_ascii_uppercase() {
+                    c.to_ascii_lowercase()
+                } else {
+                    c.to_ascii_uppercase()
+                }
+            })
+            .collect::<String>(),
+    );
+    assert_eq!(
+        fs::read(alias.join("backup.json")).unwrap(),
+        fs::read(inside.join("backup.json")).unwrap()
+    );
+    let before = target.inventory();
+    for path in [&inside, &alias] {
+        let report = run(
+            &target,
+            "prepare",
+            &json!({"restore_version":1,"operation":Uuid::new_v4(),"source":path}),
+        );
+        assert_eq!(report["status"], "invalid-input");
+        assert_eq!(report["outcome"], "not-dispatched");
+        assert_eq!(target.inventory(), before);
+    }
+}
