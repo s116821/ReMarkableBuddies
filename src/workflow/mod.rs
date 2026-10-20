@@ -7,6 +7,8 @@ mod reader_attempt;
 pub mod selected_buddy;
 #[cfg(test)]
 pub(crate) use reader_attempt::assert_attachment_behavior;
+#[cfg(test)]
+pub(crate) use reader_attempt::assert_selected_retry_control;
 pub(crate) mod selected_backend;
 pub mod symbol_pool;
 pub mod xochitl_integration;
@@ -55,7 +57,6 @@ const BLANK_PAGE_SAMPLE_RATE: u32 = 2;
 pub struct Workflow {
     device: Box<dyn DeviceBackend>,
     selected: Option<selected_backend::SelectedBackendFacade>,
-    #[cfg(test)]
     development_non_output: bool,
     frame: Frame,
     debug_dump: bool,
@@ -66,6 +67,18 @@ pub struct Workflow {
 }
 
 impl Workflow {
+    /// Explicit executable selected mode. Unsupported transport never opens a
+    /// RealDevice or converts historical membership into live effect authority.
+    pub(crate) fn selected_runtime(
+        admission: std::sync::Arc<crate::conversation::SelectedAdmission>,
+        debug_dump: bool,
+    ) -> Self {
+        let facade = selected_backend::SelectedBackendFacade::new(
+            admission,
+            Box::new(selected_backend::RefusingBackend::new()),
+        );
+        Self::with_selected(facade, debug_dump)
+    }
     pub fn new(
         no_draw: bool,
         trigger_corner: crate::device::touch::TriggerCorner,
@@ -81,7 +94,6 @@ impl Workflow {
         Self {
             device,
             selected: None,
-            #[cfg(test)]
             development_non_output: false,
             frame: Frame::default(),
             debug_dump,
@@ -92,7 +104,6 @@ impl Workflow {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn with_selected(
         facade: selected_backend::SelectedBackendFacade,
         debug_dump: bool,
@@ -122,6 +133,14 @@ impl Workflow {
     }
     pub(crate) fn is_selected(&self) -> bool {
         self.selected.is_some()
+    }
+    pub(super) fn selected_admission(
+        &self,
+    ) -> Result<std::sync::Arc<crate::conversation::SelectedAdmission>> {
+        self.selected
+            .as_ref()
+            .map(|selected| selected.admission())
+            .ok_or_else(|| anyhow::anyhow!("selected Workflow absent"))
     }
     #[cfg(test)]
     pub(crate) fn dispatch_reader(
@@ -199,12 +218,17 @@ impl Workflow {
     pub fn detail_images_base64(&self) -> Result<Vec<String>> {
         self.device.detail_images()
     }
+    /// Pure transport availability for startup; no request guard or acquisition.
+    pub(crate) fn reader_acquisition_kind(&self) -> crate::device::backend::AcquisitionKind {
+        self.device.acquisition_kind()
+    }
+
     /// Select first, acquire once, freeze all actual provider bytes under the guard.
     pub fn acquire_reader_evidence(&mut self) -> Result<AcquiredEvidence> {
         use crate::device::backend::AcquisitionKind;
         use base64::{engine::general_purpose::STANDARD, Engine};
         self.check_request_progress()?;
-        match self.device.acquisition_kind() {
+        match self.reader_acquisition_kind() {
             AcquisitionKind::Unsupported => anyhow::bail!("Reader acquisition unsupported"),
             AcquisitionKind::LegacyUnqualified => {
                 let (_, png) = self.capture_screenshot_with_data()?;

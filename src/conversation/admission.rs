@@ -23,12 +23,64 @@ pub struct HistoricalIntent {
 
 /// All handles for the same Store and aggregate share admission, including a
 /// replacement binding. Callers still own qualified source/backend validation.
+#[derive(Clone)]
 pub struct SelectedAdmission {
     store: Arc<Store>,
     scope: SelectionScope,
     gate: Arc<Mutex<()>>,
 }
 impl SelectedAdmission {
+    pub(crate) fn uses_store(&self, store: &Arc<Store>) -> bool {
+        Arc::ptr_eq(&self.store, store)
+    }
+    /// Retain actual shared mode; compatibility supplies no local lifetime guard.
+    pub(crate) fn reader_mode_lease(
+        &self,
+    ) -> Result<Option<crate::storage::sync::mode::SyncModeLease>> {
+        use crate::storage::sync::mode::SyncMode;
+        let snapshot = self.store.sync_mode_snapshot()?;
+        match snapshot.mode {
+            None => Ok(None),
+            Some(SyncMode::SharedGroup {
+                group,
+                ref binding_sha256,
+                ..
+            }) if group == self.scope.group && binding_sha256 == &self.scope.binding_sha256 => {
+                let lease = self.store.sync_mode_lease(&snapshot.token)?;
+                lease.require_shared_scope(&self.scope)?;
+                Ok(Some(lease))
+            }
+            _ => anyhow::bail!("selected Reader mode unsupported"),
+        }
+    }
+    /// Acquire one ordered domain set. Caller revalidates its charged snapshots
+    /// inside the callback and must not reacquire any participating admission.
+    pub(crate) fn with_gates<T>(
+        admissions: &[&Self],
+        operation: impl FnOnce(&Store) -> Result<T>,
+    ) -> Result<T> {
+        let first = admissions.first().context("empty selected admission set")?;
+        let mut ordered = BTreeMap::new();
+        for admission in admissions {
+            ensure!(
+                Arc::ptr_eq(&first.store, &admission.store)
+                    && first.scope.group == admission.scope.group
+                    && first.scope.binding_sha256 == admission.scope.binding_sha256,
+                "foreign selected admission set"
+            );
+            ordered.insert(admission.scope.key_sha256.as_str(), admission);
+        }
+        let mut guards = Vec::with_capacity(ordered.len());
+        for admission in ordered.values() {
+            guards.push(
+                admission
+                    .gate
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("domain admission unavailable"))?,
+            );
+        }
+        operation(&first.store)
+    }
     /// Read evidence from one current selection; never returns effect authority.
     /// Token counting happens after admission is released, so replacement cannot
     /// mix new heads into this view or deadlock a caller reading another handle.
@@ -226,7 +278,7 @@ impl SelectedAdmission {
             .map_err(|_| anyhow::anyhow!("domain admission unavailable"))?;
         operation(&self.store)
     }
-    pub(super) fn scope(&self) -> &SelectionScope {
+    pub(crate) fn scope(&self) -> &SelectionScope {
         &self.scope
     }
     pub fn initialize(
