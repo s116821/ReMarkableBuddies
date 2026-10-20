@@ -250,7 +250,7 @@ fn path_prefix(path: &Path, parent: &Path) -> std::result::Result<bool, Status> 
     }
     Ok(true)
 }
-fn overlap(a: &Path, b: &Path) -> std::result::Result<bool, Status> {
+pub(crate) fn overlap(a: &Path, b: &Path) -> std::result::Result<bool, Status> {
     Ok(path_prefix(a, b)? || path_prefix(b, a)?)
 }
 impl Document {

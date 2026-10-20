@@ -866,3 +866,5 @@ impl Store {
         self.import(manifest, BTreeMap::new())
     }
 }
+
+pub(crate) use recovery::ordinary_export;
