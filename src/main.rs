@@ -43,6 +43,17 @@ pub struct Args {
     /// Bounded JSON input for an explicit memory operation
     #[arg(long, value_name = "FILE", requires = "memory_operation")]
     memory_input: Option<std::path::PathBuf>,
+    /// Explicit local storage-mode maintenance; no sync or runtime activation
+    #[arg(long, value_enum, conflicts_with_all = ["simulate", "api_key", "model", "base_url", "trigger_corner", "debug_dump", "log_level", "inspect_owned_data", "export_note", "personalization_operation", "memory_operation", "memory_input"])]
+    sync_mode_operation: Option<remarkable_reader_buddy::mode_maintenance::Operation>,
+    /// Bounded choice JSON from an absolute file or exact-dash stdin
+    #[arg(
+        long,
+        value_name = "FILE",
+        requires = "sync_mode_operation",
+        required_if_eq("sync_mode_operation", "choose")
+    )]
+    sync_mode_input: Option<std::path::PathBuf>,
     /// Fixed local personalization maintenance; mutation JSON comes from bounded stdin
     #[arg(long, value_enum, conflicts_with_all=["simulate","api_key","model","base_url","trigger_corner","debug_dump","log_level","export_note"])]
     personalization_operation: Option<config::personalization::Operation>,
@@ -69,6 +80,16 @@ fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_lo
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    if let Some(operation) = args.sync_mode_operation {
+        let report = remarkable_reader_buddy::mode_maintenance::run(
+            operation,
+            args.sync_mode_input.as_deref(),
+            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+            &mut std::io::stdin().lock(),
+        );
+        report.write_to(&mut std::io::stdout().lock())?;
+        return Ok(());
+    }
     if let Some(operation) = args.memory_operation {
         let input = args
             .memory_input
@@ -141,6 +162,8 @@ fn main() -> Result<()> {
         .init();
     info!("=== ReMarkable Reader Buddy Starting ===");
     let store = Arc::new(Store::open(config.paths.clone())?);
+    let _ordinary_runtime_lifetime =
+        remarkable_reader_buddy::mode_maintenance::admit_ordinary(&store, config.sync.enabled)?;
     store.snapshot_config(&config)?;
     files::atomic_json(
         &store.paths.data.join("effective-config.json"),
@@ -192,6 +215,8 @@ mod tests {
                 "model",
                 "personalization-operation",
                 "simulate",
+                "sync-mode-input",
+                "sync-mode-operation",
                 "trigger-corner"
             ]
         );
