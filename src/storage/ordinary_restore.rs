@@ -172,7 +172,7 @@ fn object_records(raw: &Value) -> bool {
         })
         && raw.get("record_namespaces").is_some_and(Value::is_object)
 }
-fn load_archive(source: &Path) -> Result<(Backup, String)> {
+pub(super) fn load_archive(source: &Path) -> Result<(Backup, String)> {
     files::safe_path(source).map_err(|_| Refused::InvalidInput)?;
     let bytes = files::read(&source.join("backup.json"), MAX_METADATA as u64)
         .map_err(|_| Refused::Unavailable)?;
@@ -255,6 +255,17 @@ impl Store {
         }
         history.validate()?;
         Ok(history)
+    }
+    pub(super) fn ordinary_export_fingerprint(&self, inner: &Inner) -> Result<String> {
+        ensure!(inner.index.unavailable == 0, "unavailable history");
+        let current: Uuid = files::json(&self.paths.data.join("CURRENT"), 128)?;
+        ensure!(current == inner.generation, "generation changed");
+        let history = self.ordinary_history(inner.generation)?;
+        ensure!(
+            history.manifests == inner.index.manifests,
+            "history changed"
+        );
+        history.hash()
     }
     fn ordinary_plan(
         &self,

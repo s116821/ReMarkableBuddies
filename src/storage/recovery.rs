@@ -1,5 +1,7 @@
 use super::*;
 
+#[path = "ordinary_export.rs"]
+pub(crate) mod ordinary_export;
 #[path = "ordinary_restore.rs"]
 pub(crate) mod ordinary_restore;
 
@@ -213,8 +215,26 @@ impl Store {
             inner.index.unavailable == 0,
             "unavailable commits prevent complete export"
         );
-        let root = self.generation(inner.generation);
         files::directory(&destination.join("objects"))?;
+        let backup = self.export_backup_locked(&inner)?;
+        let backup_bytes = serde_json::to_vec(&backup)?;
+        ensure!(
+            backup_bytes.len() <= MAX_METADATA,
+            "backup metadata exceeds supported restore bound"
+        );
+        self.export_write_locked(
+            &inner,
+            destination,
+            &backup,
+            &backup_bytes,
+            &mut false,
+            files::atomic,
+        )?;
+        Ok(backup.complete_media)
+    }
+    // Shared collection/serialization and publication path; old caller order stays intact.
+    fn export_backup_locked(&self, inner: &Inner) -> Result<Backup> {
+        let root = self.generation(inner.generation);
         selection::refuse_selected_maintenance(&root)?;
         let manifests: Vec<_> = inner.index.manifests.values().cloned().collect();
         let mut inventory = BTreeMap::new();
@@ -239,20 +259,26 @@ impl Store {
         } else {
             None
         };
-        let backup = Backup {
+        Ok(Backup {
             format: FORMAT,
             manifests,
             objects: inventory.values().cloned().collect(),
             complete_media,
             config_snapshot,
             selected_history: None,
-        };
-        let backup_bytes = serde_json::to_vec(&backup)?;
-        ensure!(
-            backup_bytes.len() <= MAX_METADATA,
-            "backup metadata exceeds supported restore bound"
-        );
-        for item in inventory.values() {
+        })
+    }
+    fn export_write_locked(
+        &self,
+        inner: &Inner,
+        destination: &Path,
+        backup: &Backup,
+        backup_bytes: &[u8],
+        attempted: &mut bool,
+        publish: impl FnOnce(&Path, &[u8]) -> Result<()>,
+    ) -> Result<()> {
+        let root = self.generation(inner.generation);
+        for item in &backup.objects {
             let path = root.join("objects").join(&item.sha256);
             files::safe_path(&path)?;
             files::copy_verified(
@@ -261,8 +287,9 @@ impl Store {
                 item,
             )?;
         }
-        files::atomic(&destination.join("backup.json"), &backup_bytes)?;
-        Ok(complete_media)
+        *attempted = true;
+        publish(&destination.join("backup.json"), backup_bytes)?;
+        Ok(())
     }
 
     /// Verify a complete format-1 or selected format-2 archive without opening a
