@@ -43,10 +43,11 @@ before Store admission. Ordinary missing configuration/profile can return
 `unavailable` before reading stdin. No input or I/O error text is echoed.
 
 This guide describes query. `inspect` also accepts the marker through the strict
-[single-fact inspection wire](memory-fact-inspection-stdin.md). Mutation/setup
+[single-fact inspection wire](memory-fact-inspection-stdin.md). Put/setup
 operations return `unsupported` before reading stdin, loading configuration or
-opening Store. Their regular-file interfaces are unchanged; stdin is not
-mutation/setup authority.
+opening Store. [Prepared forget](memory-prepared-forget.md) is a separate explicitly
+confirmed protocol; query success supplies no mutation authority. Existing regular-file
+interfaces are unchanged.
 
 ## Response and currentness
 

@@ -1,4 +1,5 @@
 //! Receiving selected memory over existing storage and admission, never a sync engine.
+mod prepared;
 use super::{
     aggregate::Aggregate,
     catalog::{Catalog, Identity, Owner, Record, Registration, MAX_AGGREGATES},

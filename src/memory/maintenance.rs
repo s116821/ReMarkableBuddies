@@ -1,4 +1,5 @@
 //! One-shot, bounded local maintenance. No provider, sync worker or device initialization.
+mod prepared;
 use super::{Forget, Key, Mutation, Query, Status};
 use crate::{
     config::Config,
@@ -19,6 +20,8 @@ pub const MAX_RESPONSE: usize = MAX_METADATA + 64 * 1024;
 pub enum Operation {
     Inspect,
     Query,
+    PrepareForget,
+    ForgetReceipt,
     Put,
     Forget,
     InitializeAggregate,
@@ -50,6 +53,8 @@ pub struct Report {
     mode_guard: Option<ModeGuard>,
     #[serde(skip)]
     provider_guard: Option<Arc<dyn super::Provider>>,
+    #[serde(skip)]
+    prepared: Option<prepared::Pending>,
 }
 struct ModeGuard {
     _ordinary: Option<storage::sync::mode::OrdinaryModeLease>,
@@ -59,8 +64,16 @@ impl ModeGuard {
     fn acquire(store: &Arc<Store>, config: &Config) -> anyhow::Result<Self> {
         anyhow::ensure!(!config.sync.enabled, "stop legacy sync before host memory");
         let current = store.sync_mode_snapshot()?;
+        Self::acquire_token(store, config, &current.token)
+    }
+    fn acquire_token(
+        store: &Arc<Store>,
+        config: &Config,
+        token: &storage::sync::mode::SyncModeToken,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(!config.sync.enabled, "stop legacy sync before host memory");
         if let Some(identity) = &config.memory.selection {
-            let lease = store.sync_mode_lease(&current.token)?;
+            let lease = store.sync_mode_lease(token)?;
             lease.require_shared_scope(&identity.scope()?)?;
             Ok(Self {
                 _ordinary: None,
@@ -68,7 +81,7 @@ impl ModeGuard {
             })
         } else {
             Ok(Self {
-                _ordinary: Some(store.ordinary_mode_lease(&current.token)?),
+                _ordinary: Some(store.ordinary_mode_lease(token)?),
                 _shared: None,
             })
         }
@@ -94,6 +107,7 @@ impl Report {
             pending: None,
             mode_guard: None,
             provider_guard: None,
+            prepared: None,
         }
     }
     /// Formatting only; selected current handoff requires `write_to`.
@@ -111,6 +125,9 @@ impl Report {
         Ok(bytes)
     }
     pub fn write_to(&self, writer: &mut impl std::io::Write) -> anyhow::Result<()> {
+        if let Some(prepared) = &self.prepared {
+            return prepared.write(self, writer);
+        }
         let encoded = self.encoded()?;
         let Some(pending) = &self.pending else {
             return Ok(writer.write_all(&encoded)?);
@@ -186,6 +203,9 @@ impl Input {
         selection: Option<&super::catalog::Identity>,
     ) -> anyhow::Result<Self> {
         let input = match operation {
+            Operation::PrepareForget | Operation::ForgetReceipt => {
+                anyhow::bail!("prepared operation requires stdin")
+            }
             Operation::Inspect => Self::Inspect(files::json(path, MAX_RECORD as u64)?),
             Operation::Query => Self::Query(files::json(path, MAX_RECORD as u64)?),
             Operation::Put => Self::Put(files::json(path, MAX_RECORD as u64)?),
@@ -360,17 +380,29 @@ fn preflight(config: &Config, allow_initialization: bool) -> Result<(), ReportSt
 }
 
 pub fn run(operation: Operation, input_path: &Path, config_path: Option<PathBuf>) -> Report {
+    if matches!(
+        operation,
+        Operation::PrepareForget | Operation::ForgetReceipt
+    ) {
+        return Report::new(operation, ReportStatus::Unsupported);
+    }
     run_with_input(operation, config_path, |profile, selection| {
         Input::read(operation, input_path, profile, selection)
     })
 }
 
-/// Read-only stdin transport. The caller supplies EOF and owns its I/O deadline.
+/// Bounded stdin transport. The caller supplies EOF and owns its I/O deadline.
 pub fn run_stdin(
     operation: Operation,
     input: &mut impl Read,
     config_path: Option<PathBuf>,
 ) -> Report {
+    if matches!(
+        operation,
+        Operation::PrepareForget | Operation::Forget | Operation::ForgetReceipt
+    ) {
+        return prepared::run(operation, input, config_path);
+    }
     if !matches!(operation, Operation::Query | Operation::Inspect) {
         return Report::new(operation, ReportStatus::Unsupported);
     }
@@ -742,7 +774,6 @@ mod tests {
         }
         for operation in [
             Operation::Put,
-            Operation::Forget,
             Operation::InitializeAggregate,
             Operation::InitializeSelection,
             Operation::RegisterSelection,

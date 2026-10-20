@@ -46,6 +46,8 @@ All operations return one bounded report-v1 JSON line with truthful status. Miss
 stores are not created by queries, inspections or forgetting. Valid Store startup
 may recover owned state. A Busy store is never stopped or unlocked by this CLI.
 File inputs remain bounded absolute regular files; query and inspect support stdin.
+[Prepared one-fact forget](memory-prepared-forget.md) adds a separate strict stdin
+preview/confirmation/receipt contract; raw legacy Forget JSON is not its stdin DTO.
 See [query input, EOF, output and cancellation](memory-query-stdin.md) and
 [single-fact inspection](memory-fact-inspection-stdin.md) for their distinct wire
 contracts, raw heads and existing file compatibility.
