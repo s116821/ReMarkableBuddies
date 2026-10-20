@@ -195,7 +195,7 @@ fn now() -> u64 {
 fn parse<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     serde_json::from_slice(bytes).map_err(|_| anyhow::anyhow!("invalid Drive response"))
 }
-fn id(value: &str) -> Result<()> {
+pub(crate) fn id(value: &str) -> Result<()> {
     ensure!(
         !value.is_empty()
             && value.len() <= 256

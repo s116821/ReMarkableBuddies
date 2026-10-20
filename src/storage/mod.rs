@@ -2,6 +2,9 @@
 pub mod drive;
 pub mod files;
 pub mod inspection;
+#[cfg(all(test, unix))]
+mod lease_tests;
+pub mod maintenance;
 pub mod migration;
 mod recovery;
 #[cfg(test)]
@@ -10,7 +13,7 @@ pub mod selection;
 pub mod sync;
 pub mod types;
 use anyhow::{ensure, Context, Result};
-pub use recovery::BackupInspection;
+pub use recovery::{ArchivedSelectedSnapshot, BackupInspection};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -95,13 +98,28 @@ struct Inner {
     index: Index,
     fault: Fault,
     legacy_sync_handles: usize,
+    mode_handles: usize,
+    legacy_publisher_handles: usize,
 }
 pub struct Store {
     pub paths: StorePaths,
     pub actor_id: Uuid,
-    _lease: File,
+    _lease: Lease,
     inner: Mutex<Inner>,
     wake: Mutex<Option<SyncSender<()>>>,
+    // Process-local export invocation exclusion, shared by every Ledger over
+    // this Store. Independent of the index mutex; no index lock spans HTTP.
+    pub(crate) export_active: std::sync::atomic::AtomicBool,
+}
+
+struct Lease(File);
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        // A concurrent subprocess fork can temporarily inherit this descriptor.
+        // Closing our copy alone would retain flock until that child execs.
+        let _ = self.0.unlock();
+    }
 }
 
 pub(crate) struct LegacySyncLease(Arc<Store>);
@@ -113,15 +131,38 @@ impl Drop for LegacySyncLease {
     }
 }
 
-impl Drop for Store {
+pub(crate) struct LegacyPublisherLease {
+    store: Arc<Store>,
+    _legacy: LegacySyncLease,
+}
+impl Drop for LegacyPublisherLease {
     fn drop(&mut self) {
-        // A concurrent subprocess fork can temporarily inherit this descriptor.
-        // Closing our copy alone would retain flock until that child execs.
-        let _ = self._lease.unlock();
+        if let Ok(mut inner) = self.store.inner.lock() {
+            inner.legacy_publisher_handles -= 1;
+        }
     }
 }
-
 impl Store {
+    pub(crate) fn legacy_publisher_lease(self: &Arc<Self>) -> Result<LegacyPublisherLease> {
+        // Preserve the domain lease while adding publisher-only lifetime accounting.
+        let legacy = self.legacy_sync_lease()?;
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        ensure!(
+            sync::mode::load(self)?.is_none(),
+            "explicit sync mode requires its matched worker"
+        );
+        inner.legacy_publisher_handles = inner
+            .legacy_publisher_handles
+            .checked_add(1)
+            .context("publisher lease overflow")?;
+        Ok(LegacyPublisherLease {
+            store: self.clone(),
+            _legacy: legacy,
+        })
+    }
     pub(crate) fn legacy_sync_lease(self: &Arc<Self>) -> Result<LegacySyncLease> {
         let mut inner = self
             .inner
@@ -172,6 +213,7 @@ impl Store {
         lease
             .try_lock()
             .map_err(|_| anyhow::anyhow!("store is owned by another process"))?;
+        let lease = Lease(lease);
         for root in [&paths.cache, &paths.credentials] {
             if root.exists() && !root.join("owner.json").exists() {
                 ensure!(
@@ -218,8 +260,11 @@ impl Store {
                 index: Index::default(),
                 fault: Fault::None,
                 legacy_sync_handles: 0,
+                mode_handles: 0,
+                legacy_publisher_handles: 0,
             }),
             wake: Mutex::new(None),
+            export_active: std::sync::atomic::AtomicBool::new(false),
         };
         selection::validate_generation(&store.generation(generation), store.actor_id, generation)?;
         for directory in [
@@ -227,6 +272,7 @@ impl Store {
             store.paths.credentials.clone(),
             store.paths.data.join("sync"),
             store.paths.data.join("sync/incoming"),
+            store.paths.data.join("sync/selected-outbox"),
             store.generation(generation),
             store.generation(generation).join("objects"),
             store.generation(generation).join("commits"),
@@ -312,16 +358,45 @@ impl Store {
         Ok(index)
     }
     fn validate_objects(root: &Path, manifest: &Manifest) -> Result<Vec<(Envelope, String)>> {
+        Self::validate_objects_with_budget(root, manifest, None)
+    }
+    fn validate_objects_with_budget(
+        root: &Path,
+        manifest: &Manifest,
+        mut budget: Option<&mut selection::SelectedReadBudget>,
+    ) -> Result<Vec<(Envelope, String)>> {
         manifest.validate()?;
-        for item in manifest.records.iter().chain(&manifest.media) {
-            let _ = files::Source::open(&root.join("objects").join(&item.sha256), item)?;
+        for (item, media) in manifest
+            .records
+            .iter()
+            .map(|r| (r, false))
+            .chain(manifest.media.iter().map(|r| (r, true)))
+        {
+            if let Some(budget) = budget.as_deref_mut() {
+                budget.charge(0, 1, 0, 0)?;
+            }
+            let _ = files::Source::open_with_budget(
+                &root.join("objects").join(&item.sha256),
+                item,
+                budget.as_deref_mut(),
+                media,
+            )?;
         }
         let mut records = Vec::new();
         let mut descriptors = BTreeMap::new();
         for item in &manifest.records {
             ensure!(item.bytes <= MAX_RECORD as u64, "record exceeds bound");
-            let envelope: Envelope =
-                files::json(&root.join("objects").join(&item.sha256), MAX_RECORD as u64)?;
+            let encoded = files::read_with_budget(
+                &root.join("objects").join(&item.sha256),
+                MAX_RECORD as u64,
+                budget.as_deref_mut(),
+            )?;
+            ensure!(
+                encoded.len() as u64 == item.bytes && digest(&encoded) == item.sha256,
+                "record changed after verification"
+            );
+            let envelope: Envelope = serde_json::from_slice(&encoded)
+                .map_err(|_| anyhow::anyhow!("invalid or unsupported stored JSON"))?;
             envelope.validate()?;
             ensure!(
                 manifest.record_namespaces.get(&item.sha256) == Some(&envelope.namespace),

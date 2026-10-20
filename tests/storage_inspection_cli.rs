@@ -155,3 +155,30 @@ fn actual_cli_rejects_execution_overrides_without_echoing_secret_values() {
         .unwrap();
     assert!(!output.status.success());
 }
+
+#[test]
+fn actual_cli_refuses_competing_one_shot_selectors_without_dispatch() {
+    let fixture = Fixture::new();
+    fixture.prepare();
+    let before = snapshot(&fixture.0);
+    let conflicts: &[&[&str]] = &[
+        &["--inspect-owned-data", "--export-note"],
+        &["--export-note", "--inspect-owned-data"],
+        &[
+            "--inspect-owned-data",
+            "--personalization-operation",
+            "inspect",
+        ],
+        &[
+            "--personalization-operation",
+            "inspect",
+            "--inspect-owned-data",
+        ],
+    ];
+    for flags in conflicts {
+        let output = command(&fixture).args(*flags).output().unwrap();
+        assert!(!output.status.success(), "{flags:?}");
+        assert!(output.stdout.is_empty(), "one-shot dispatch occurred");
+        assert_eq!(snapshot(&fixture.0), before);
+    }
+}

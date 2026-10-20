@@ -1,6 +1,10 @@
 //! Domain-opaque atomic selected references. No domain/native admission or worker.
+mod budget;
+pub use budget::{SelectedReadBudget, SelectedReadUsage};
+mod outbox;
 pub(crate) mod portable;
 mod publication;
+pub use outbox::{SelectedAttempt, SelectedAttemptRequest, SelectedAttemptState};
 mod retained;
 pub use retained::RetainedCommit;
 #[cfg(test)]
@@ -173,6 +177,23 @@ pub struct SelectedSnapshot {
     pub media: BTreeMap<String, files::Source>,
 }
 
+/// Already verified accepted metadata, ordered current head back to Initialize.
+/// sha256 identifies original raw bytes, not a reserialization of transaction.
+pub struct AcceptedSelectionTransaction {
+    pub sha256: String,
+    pub transaction: SelectionTransaction,
+    /// Already verified historical selected envelopes, in the original manifest
+    /// ObjectRef order. Custody evidence only, never the current winning view.
+    pub selected_records: Vec<Envelope>,
+}
+
+/// Budgeted snapshot plus its already validated lineage, without extra I/O.
+/// Historical entries are evidence and never carry live tokens of their own.
+pub struct SelectedReadSnapshot {
+    pub snapshot: SelectedSnapshot,
+    pub accepted_history: Vec<AcceptedSelectionTransaction>,
+}
+
 impl Store {
     /// Read an existing complete selection. Absence is not an empty winner or
     /// permission to bootstrap/publish. Bootstrap is a separate explicit call.
@@ -183,11 +204,38 @@ impl Store {
         scope: &SelectionScope,
         limit: usize,
     ) -> Result<Option<SelectedSnapshot>> {
+        Ok(self
+            .selected_snapshot_inner(scope, limit, None)?
+            .map(|read| read.snapshot))
+    }
+
+    /// Share this caller-owned budget across every catalogue/aggregate read.
+    /// Charges all historical/repeated I/O before reading; exhaustion refuses
+    /// without a partial snapshot. The caller discards the entire incomplete
+    /// receiving result, rather than using previously returned snapshots.
+    pub fn selected_snapshot_with_budget(
+        &self,
+        scope: &SelectionScope,
+        limit: usize,
+        budget: &mut SelectedReadBudget,
+    ) -> Result<Option<SelectedReadSnapshot>> {
+        self.selected_snapshot_inner(scope, limit, Some(budget))
+    }
+
+    fn selected_snapshot_inner(
+        &self,
+        scope: &SelectionScope,
+        limit: usize,
+        mut budget: Option<&mut SelectedReadBudget>,
+    ) -> Result<Option<SelectedReadSnapshot>> {
         scope.validate()?;
         ensure!(
             (1..=MAX_ITEMS).contains(&limit),
             "invalid selected snapshot bound"
         );
+        if let Some(budget) = budget.as_deref_mut() {
+            budget.charge(1, 0, 0, 0)?;
+        }
         let inner = self
             .inner
             .lock()
@@ -198,7 +246,14 @@ impl Store {
         if !path.exists() {
             return Ok(None);
         }
-        let transaction: SelectionTransaction = files::json(&path, MAX_METADATA as u64)?;
+        if let Some(budget) = budget.as_deref_mut() {
+            budget.charge(0, 1, 0, 0)?;
+        }
+        let head_bytes =
+            files::read_with_budget(&path, MAX_METADATA as u64, budget.as_deref_mut())?;
+        let head_sha256 = digest(&head_bytes);
+        let transaction: SelectionTransaction = serde_json::from_slice(&head_bytes)
+            .map_err(|_| anyhow::anyhow!("invalid or unsupported stored JSON"))?;
         transaction.validate(limit)?;
         ensure!(
             &transaction.scope == scope && transaction.store_generation == inner.generation,
@@ -216,20 +271,55 @@ impl Store {
         drop(inner);
         // A complete snapshot cannot issue authority after losing accepted
         // lineage, even if the current winner's own objects are still readable.
-        for accepted in publication::history(
+        let history = publication::history_with_budget(
             &root,
             transaction.store_generation,
             scope,
             transaction.clone(),
-        )? {
-            publication::validate_closure(&root, &accepted)?;
+            budget.as_deref_mut(),
+        )?;
+        let keep_history = budget.is_some();
+        let mut accepted_history = Vec::new();
+        let mut sha256 = head_sha256;
+        for transaction in history {
+            let parts = publication::validate_closure_with_budget(
+                &root,
+                &transaction,
+                budget.as_deref_mut(),
+            )?;
+            let previous = transaction.previous_sha256.clone();
+            if keep_history {
+                // Move the envelopes already parsed/charged during validation.
+                // Do not reread history or reserialize its original references.
+                let selected_records = parts
+                    .into_iter()
+                    .next()
+                    .context("validated selected closure is absent")?
+                    .1
+                    .into_iter()
+                    .map(|(record, _)| record)
+                    .collect();
+                accepted_history.push(AcceptedSelectionTransaction {
+                    sha256,
+                    transaction,
+                    selected_records,
+                });
+            }
+            let Some(previous) = previous else {
+                break;
+            };
+            sha256 = previous;
         }
-        let selected_records = Self::validate_objects(&root, &transaction.selected)?;
+        let selected_records = Self::validate_objects_with_budget(
+            &root,
+            &transaction.selected,
+            budget.as_deref_mut(),
+        )?;
         publication::closure_index(&selected_records, true)?;
         let mut retained_records = Vec::new();
         for manifest in &transaction.retained {
             retained_records.extend(
-                Self::validate_objects(&root, manifest)?
+                Self::validate_objects_with_budget(&root, manifest, budget.as_deref_mut())?
                     .into_iter()
                     .map(|(record, _)| record),
             );
@@ -244,25 +334,33 @@ impl Store {
                         "conflicting media reference"
                     );
                 } else {
+                    if let Some(budget) = budget.as_deref_mut() {
+                        budget.charge(0, 1, 0, 0)?;
+                    }
                     media.insert(
                         reference.sha256.clone(),
-                        files::Source::open(
+                        files::Source::open_with_budget(
                             &root.join("objects").join(&reference.sha256),
                             reference,
+                            budget.as_deref_mut(),
+                            true,
                         )?,
                     );
                 }
             }
         }
-        Ok(Some(SelectedSnapshot {
-            token,
-            transaction,
-            selected_records: selected_records
-                .into_iter()
-                .map(|(record, _)| record)
-                .collect(),
-            retained_records,
-            media,
+        Ok(Some(SelectedReadSnapshot {
+            accepted_history,
+            snapshot: SelectedSnapshot {
+                token,
+                transaction,
+                selected_records: selected_records
+                    .into_iter()
+                    .map(|(record, _)| record)
+                    .collect(),
+                retained_records,
+                media,
+            },
         }))
     }
 }
