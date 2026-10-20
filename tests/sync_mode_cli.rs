@@ -189,7 +189,8 @@ fn actual_choice_restart_and_original_historical_retry_preserve_intent() {
     let before = f.inventory();
     assert_eq!(f.choose(&first_request), first);
     assert_eq!(f.inventory(), before);
-    let latest = f.choose(&request(&first, local()));
+    let latest_request = request(&first, local());
+    let latest = f.choose(&latest_request);
     assert_eq!(latest["status"], "ok");
     let before = f.inventory();
     let historical = f.choose(&first_request);
@@ -198,6 +199,21 @@ fn actual_choice_restart_and_original_historical_retry_preserve_intent() {
     assert_eq!(
         historical["data"]["current_snapshot"],
         latest["data"]["current_snapshot"]
+    );
+    assert_eq!(f.inventory(), before);
+    // The same mode value under a later epoch is still not the old operation.
+    let same_mode = f.choose(&request(&latest, local()));
+    assert_ne!(
+        same_mode["data"]["current_snapshot"]["epoch"],
+        latest["data"]["current_snapshot"]["epoch"]
+    );
+    let before = f.inventory();
+    let old_local = f.choose(&latest_request);
+    assert_eq!(old_local["data"]["receipt_status"], "historical");
+    assert_eq!(old_local["data"]["receipt"], latest["data"]["receipt"]);
+    assert_eq!(
+        old_local["data"]["current_snapshot"],
+        same_mode["data"]["current_snapshot"]
     );
     assert_eq!(f.inventory(), before);
     let mut changed = first_request.clone();
