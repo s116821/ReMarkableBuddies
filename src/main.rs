@@ -37,6 +37,17 @@ pub struct Args {
     /// Save local page-image diagnostics (independent of logging)
     #[arg(long)]
     debug_dump: bool,
+    /// One-shot local memory maintenance; no provider or tablet runtime
+    #[arg(long, value_enum, requires = "memory_input", conflicts_with_all = ["simulate", "api_key", "model", "base_url", "trigger_corner", "debug_dump", "log_level", "inspect_owned_data", "export_note", "personalization_operation", "conversation_operation", "conversation_input"])]
+    memory_operation: Option<remarkable_reader_buddy::memory::maintenance::Operation>,
+    /// Bounded JSON input for an explicit memory operation
+    #[arg(long, value_name = "FILE", requires = "memory_operation")]
+    memory_input: Option<std::path::PathBuf>,
+    /// One-shot selected history inspection or original-request recovery
+    #[arg(long, value_enum, requires="conversation_input", conflicts_with_all=["simulate","api_key","model","base_url","trigger_corner","debug_dump","log_level","memory_operation","memory_input","inspect_owned_data","export_note","personalization_operation"])]
+    conversation_operation: Option<remarkable_reader_buddy::reader_runtime::Operation>,
+    #[arg(long, value_name = "FILE", requires = "conversation_operation")]
+    conversation_input: Option<std::path::PathBuf>,
     /// Fixed local personalization maintenance; mutation JSON comes from bounded stdin
     #[arg(long, value_enum, conflicts_with_all=["simulate","api_key","model","base_url","trigger_corner","debug_dump","log_level","export_note"])]
     personalization_operation: Option<config::personalization::Operation>,
@@ -63,6 +74,32 @@ fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_lo
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    if let Some(operation) = args.conversation_operation {
+        let input = args
+            .conversation_input
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("conversation input absent"))?;
+        let mut report = remarkable_reader_buddy::reader_runtime::run(
+            operation,
+            input,
+            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+        );
+        report.write_to(&mut std::io::stdout().lock())?;
+        return Ok(());
+    }
+    if let Some(operation) = args.memory_operation {
+        let input = args
+            .memory_input
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("memory input absent"))?;
+        let report = remarkable_reader_buddy::memory::maintenance::run(
+            operation,
+            input,
+            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+        );
+        report.write_to(&mut std::io::stdout().lock())?;
+        return Ok(());
+    }
     if args.inspect_owned_data {
         let report = match Config::load(std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into)) {
             Ok(config) => remarkable_reader_buddy::storage::inspection::inspect_owned_data(&config.paths),
@@ -96,6 +133,10 @@ fn main() -> Result<()> {
         return Ok(());
     }
     let config = Config::load(std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into))?;
+    if let Some(mut report) = remarkable_reader_buddy::reader_runtime::startup(&config) {
+        report.write_to(&mut std::io::stdout().lock())?;
+        return Ok(());
+    }
     let effective = config::resolve(
         &config,
         Overrides {
@@ -136,6 +177,12 @@ fn main() -> Result<()> {
         llm,
         remarkable_reader_buddy::conversation::Ledger::new(store.clone()),
     );
+    if config.memory.enabled {
+        orchestrator.set_subject_memory(Some(remarkable_reader_buddy::memory::configured(
+            store.clone(),
+            &config.memory,
+        )?));
+    }
     let _sync_worker = Worker::google(store.clone(), config.sync)?;
     info!("Initialization complete; starting main loop");
     orchestrator.run_loop()
@@ -159,10 +206,14 @@ mod tests {
             [
                 "api-key",
                 "base-url",
+                "conversation-input",
+                "conversation-operation",
                 "debug-dump",
                 "export-note",
                 "inspect-owned-data",
                 "log-level",
+                "memory-input",
+                "memory-operation",
                 "model",
                 "personalization-operation",
                 "simulate",
@@ -173,6 +224,8 @@ mod tests {
         assert!(args.model.is_none());
         assert!(args.trigger_corner.is_none());
         assert!(!args.debug_dump);
+        assert!(args.memory_operation.is_none() && args.memory_input.is_none());
+        assert!(args.conversation_operation.is_none() && args.conversation_input.is_none());
         assert!(!args.inspect_owned_data);
         assert!(!args.export_note);
         assert!(

@@ -70,6 +70,8 @@ pub struct Config {
     pub paths: StorePaths,
     pub model_credential: Option<String>,
     pub sync: SyncPolicy,
+    pub memory: crate::memory::Configuration,
+    pub reader: crate::reader_runtime::Configuration,
     pub personalization: Personalization,
 }
 impl Default for Config {
@@ -84,6 +86,8 @@ impl Default for Config {
             paths: StorePaths::default(),
             model_credential: None,
             sync: SyncPolicy::default(),
+            memory: crate::memory::Configuration::default(),
+            reader: crate::reader_runtime::Configuration::default(),
             personalization: Personalization::default(),
         }
     }
@@ -113,6 +117,22 @@ impl Config {
             "unsupported configuration version"
         );
         self.sync.validate()?;
+        self.memory.validate()?;
+        self.reader.validate()?;
+        ensure!(
+            !(self.reader.selection.is_some() && self.sync.enabled),
+            "selected Reader requires the separately qualified selected sync worker"
+        );
+        ensure!(
+            !(self.memory.selection.is_some() && self.sync.enabled),
+            "selected memory requires the separately qualified selected sync worker"
+        );
+        ensure!(
+            !(self.memory.enabled
+                && self.sync.enabled
+                && self.sync.namespaces.contains(&Namespace::SubjectMemory)),
+            "selected memory sync requires its qualified membership adapter"
+        );
         self.personalization.validate()?;
         if let Some(model) = &self.model {
             ensure!(
