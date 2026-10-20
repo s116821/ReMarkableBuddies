@@ -6,6 +6,7 @@ pub mod conversation_layout;
 pub mod device;
 pub mod llm;
 mod measurement;
+pub mod memory;
 pub mod note_export;
 pub mod retrieval;
 pub mod simulator;
