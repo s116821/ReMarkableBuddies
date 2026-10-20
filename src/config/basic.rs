@@ -165,13 +165,13 @@ enum Data {
         current: Fields,
     },
 }
-struct Custody {
+pub(super) struct Custody {
     _store: Arc<Store>,
     _ordinary: Option<OrdinaryModeLease>,
     _explicit: Option<SyncModeLease>,
 }
 impl Custody {
-    fn acquire(store: Arc<Store>) -> Result<Self> {
+    pub(super) fn acquire(store: Arc<Store>) -> Result<Self> {
         let current = store.sync_mode_snapshot()?;
         let (ordinary, explicit) = if matches!(current.mode, None | Some(SyncMode::LocalOnly)) {
             (Some(store.ordinary_mode_lease(&current.token)?), None)
@@ -268,7 +268,7 @@ impl Document {
     }
 }
 
-fn checked_document(bytes: &[u8]) -> std::result::Result<(Config, Value), Status> {
+pub(super) fn checked_document(bytes: &[u8]) -> std::result::Result<(Config, Value), Status> {
     let (config, raw) = inspection::document(bytes).map_err(|status| match status {
         inspection::Status::Unsupported => Status::Unsupported,
         inspection::Status::Unavailable => Status::Unavailable,
@@ -315,7 +315,7 @@ fn parse<T: DeserializeOwned>(bytes: &[u8]) -> std::result::Result<T, Status> {
 }
 
 /// Explicitly ordered recursive JSON, independent of serde_json Map features.
-struct Ordered<'a>(&'a Value);
+pub(super) struct Ordered<'a>(pub(super) &'a Value);
 impl Serialize for Ordered<'_> {
     fn serialize<S: serde::Serializer>(
         &self,
