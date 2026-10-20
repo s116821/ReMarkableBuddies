@@ -52,6 +52,10 @@ impl Store {
     pub(crate) fn open_existing_for_archive(paths: StorePaths) -> Result<Self, Refusal> {
         Self::open_existing_inner(paths, true)
     }
+    /// Explicit configuration publication only; never initialize or activate a mode.
+    pub(crate) fn open_existing_for_config(paths: StorePaths) -> Result<Self, Refusal> {
+        Self::open_existing_inner(paths, true)
+    }
     fn open_existing_inner(paths: StorePaths, selected_aware: bool) -> Result<Self, Refusal> {
         paths.validate().map_err(|_| Refusal::Unsupported)?;
         directory(&paths.data)?;

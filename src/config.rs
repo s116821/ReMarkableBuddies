@@ -1,4 +1,5 @@
 //! Nonsecret file settings. Credentials are selected through protected references.
+pub mod basic;
 pub mod inspection;
 pub mod personalization;
 use crate::{
