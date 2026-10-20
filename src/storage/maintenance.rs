@@ -101,6 +101,7 @@ impl Store {
             }),
             wake: Mutex::new(None),
             export_active: std::sync::atomic::AtomicBool::new(false),
+            writer_active: std::sync::atomic::AtomicBool::new(false),
         };
         let index = store
             .recover(generation)

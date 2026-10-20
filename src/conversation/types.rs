@@ -195,6 +195,7 @@ pub enum Record {
     Turn(Turn),
     Source(ImageUse),
     Capture(Box<CaptureEvidence>),
+    NormalizedText(Box<super::NormalizedTextSource>),
     Binding(Binding),
     Export(ExportAssociation),
     Receipt(Receipt),
@@ -235,6 +236,7 @@ pub struct ContextView {
     pub turns: Vec<Turn>,
     pub sources: Vec<ImageUse>,
     pub captures: Vec<CaptureEvidence>,
+    pub normalized_text: Vec<super::NormalizedTextSource>,
     pub missing_media: Vec<Media>,
     pub selection: Option<TurnRange>,
 }
