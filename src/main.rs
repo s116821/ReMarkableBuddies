@@ -13,6 +13,15 @@ use std::time::Duration;
 #[command(author, version = env!("READER_BUDDY_VERSION"))]
 #[command(about = "ReMarkable Reader Buddy - AI-powered reading assistant for reMarkable tablets")]
 pub struct Args {
+    /// Private saved credential reference only; no credential-file or runtime activation
+    #[arg(long,value_enum,conflicts_with_all=["simulate","inspect_owned_data","api_key","model","base_url","trigger_corner","log_level","debug_dump","memory_operation","memory_input","sync_mode_operation","sync_mode_input","archive_operation","archive_input","personalization_operation","export_note","configuration_operation","basic_settings_operation","basic_settings_input","restore_operation","restore_input","model_settings_operation","model_settings_input","ordinary_export_operation","ordinary_export_input","memory_settings_operation","memory_settings_input","model_credential_operation","model_credential_input"])]
+    credential_reference_operation: Option<config::credential_reference::Operation>,
+    #[arg(
+        long,
+        value_name = "INPUT",
+        requires = "credential_reference_operation"
+    )]
+    credential_reference_input: Option<std::path::PathBuf>,
     /// Protected declared credential only; confidential transport, no provider activation
     #[arg(long,value_enum,conflicts_with_all=["simulate","inspect_owned_data","api_key","model","base_url","trigger_corner","log_level","debug_dump","memory_operation","memory_input","sync_mode_operation","sync_mode_input","archive_operation","archive_input","personalization_operation","export_note","configuration_operation","basic_settings_operation","basic_settings_input","restore_operation","restore_input","model_settings_operation","model_settings_input","ordinary_export_operation","ordinary_export_input","memory_settings_operation","memory_settings_input"])]
     model_credential_operation: Option<config::model_credential::Operation>,
@@ -122,6 +131,27 @@ fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_lo
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    if let Some(operation) = args.credential_reference_operation {
+        let report = if operation == config::credential_reference::Operation::Inspect {
+            if args.credential_reference_input.is_some() {
+                config::credential_reference::invalid_input(operation)
+            } else {
+                config::credential_reference::inspect(
+                    std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+                )
+            }
+        } else if args.credential_reference_input.as_deref() == Some(std::path::Path::new("-")) {
+            config::credential_reference::run_stdin(
+                operation,
+                std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+                &mut std::io::stdin().lock(),
+            )
+        } else {
+            config::credential_reference::unsupported_input(operation)
+        };
+        report.write_to(&mut std::io::stdout().lock())?;
+        return Ok(());
+    }
     if let Some(operation) = args.model_credential_operation {
         let report = if operation == config::model_credential::Operation::Inspect {
             if args.model_credential_input.is_some() {
@@ -381,6 +411,8 @@ mod tests {
                 "basic-settings-input",
                 "basic-settings-operation",
                 "configuration-operation",
+                "credential-reference-input",
+                "credential-reference-operation",
                 "debug-dump",
                 "export-note",
                 "inspect-owned-data",
