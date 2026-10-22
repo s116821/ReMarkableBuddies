@@ -140,7 +140,11 @@ fn main() -> Result<()> {
                     std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
                 )
             }
-        } else if args.credential_reference_input.as_deref() == Some(std::path::Path::new("-")) {
+        } else if args
+            .credential_reference_input
+            .as_ref()
+            .is_some_and(|input| input.as_os_str() == std::ffi::OsStr::new("-"))
+        {
             config::credential_reference::run_stdin(
                 operation,
                 std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),

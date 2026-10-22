@@ -417,11 +417,19 @@ fn actual_flags_reject_every_other_lane_and_input_fallback() {
         assert!(out.stdout.is_empty());
         assert!(!String::from_utf8_lossy(&out.stderr).contains("PRIVATE_VALUE"));
     }
-    for selector in [None, Some("some-file.json")] {
+    for selector in [
+        None,
+        Some("some-file.json"),
+        Some("./-"),
+        Some(".\\-"),
+        Some("-/"),
+        Some("-\\"),
+        Some("-/."),
+    ] {
         let mut cmd = command(&f);
         cmd.args(["--credential-reference-operation", "prepare"]);
         if let Some(s) = selector {
-            cmd.args(["--credential-reference-input", s]);
+            cmd.arg(format!("--credential-reference-input={s}"));
         }
         let out = output(cmd, None);
         assert!(out.status.success());
