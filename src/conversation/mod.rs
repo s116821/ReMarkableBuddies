@@ -2,6 +2,7 @@
 mod admission;
 mod binding_projection;
 pub mod capture_facts;
+pub(crate) mod cleanup;
 pub mod development;
 mod intent;
 mod legacy;
