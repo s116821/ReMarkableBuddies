@@ -1,5 +1,6 @@
 //! Versioned local persistence, independent of Reader/Writer domain semantics.
 pub(crate) mod conditional;
+pub(crate) mod conversation_cleanup;
 pub mod drive;
 pub mod files;
 pub mod inspection;

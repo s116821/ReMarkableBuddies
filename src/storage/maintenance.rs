@@ -56,7 +56,22 @@ impl Store {
     pub(crate) fn open_existing_for_config(paths: StorePaths) -> Result<Self, Refusal> {
         Self::open_existing_inner(paths, true)
     }
+    pub(super) fn open_existing_for_conversation(
+        paths: StorePaths,
+        recover: impl FnOnce(&Store, Uuid) -> anyhow::Result<super::Index>,
+    ) -> Result<Self, Refusal> {
+        Self::open_existing_using(paths, false, recover)
+    }
     fn open_existing_inner(paths: StorePaths, selected_aware: bool) -> Result<Self, Refusal> {
+        Self::open_existing_using(paths, selected_aware, |store, generation| {
+            store.recover(generation)
+        })
+    }
+    fn open_existing_using(
+        paths: StorePaths,
+        selected_aware: bool,
+        recover: impl FnOnce(&Store, Uuid) -> anyhow::Result<super::Index>,
+    ) -> Result<Self, Refusal> {
         paths.validate().map_err(|_| Refusal::Unsupported)?;
         directory(&paths.data)?;
         let lock_path = paths.data.join("store.lock");
@@ -123,9 +138,7 @@ impl Store {
             wake: Mutex::new(None),
             export_active: std::sync::atomic::AtomicBool::new(false),
         };
-        let index = store
-            .recover(generation)
-            .map_err(|_| Refusal::Unsupported)?;
+        let index = recover(&store, generation).map_err(|_| Refusal::Unsupported)?;
         if index.unavailable != 0 {
             return Err(Refusal::Unsupported);
         }
