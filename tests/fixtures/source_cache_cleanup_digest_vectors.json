@@ -1,0 +1,122 @@
+{
+  "encoding_version": 1,
+  "intent_field_order": [
+    "intent_version",
+    "operation",
+    "document",
+    "config_path_sha256",
+    "config_bytes_sha256",
+    "roots_sha256",
+    "actor",
+    "generation",
+    "store_owner_sha256",
+    "cache_owner_sha256",
+    "namespace_owner_sha256",
+    "namespace_identity_sha256",
+    "entry_identity_sha256",
+    "entry_bytes",
+    "entry_sha256"
+  ],
+  "synthetic_intent_without_digest": {
+    "intent_version": 1,
+    "operation": "11111111-1111-4111-8111-111111111111",
+    "document": "22222222-2222-4222-8222-222222222222",
+    "config_path_sha256": "6f271c2fe1dc5ac9e874324da0dedb6bf009c276950e846c63a2e05653986669",
+    "config_bytes_sha256": "425a0f0a695c2549a8aeb435a23cfcd2a271e83487f064e30db562d3e5fedf2c",
+    "roots_sha256": "ee8727df37ff3db2f58a8c55f01a428a288e2403ff1fbd77ff5b8ba89bbd6e11",
+    "actor": "33333333-3333-4333-8333-333333333333",
+    "generation": "44444444-4444-4444-8444-444444444444",
+    "store_owner_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "cache_owner_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "namespace_owner_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "namespace_identity_sha256": "5556078c52063e30366f443b260b98d9cdebc2e3d23940d1ad38e7e6e25f7039",
+    "entry_identity_sha256": "c2958a611bc666c719e8fa657be0cf682fa2c9c5c87e150c18c16695b1c29f6b",
+    "entry_bytes": 123,
+    "entry_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  },
+  "vectors": [
+    {
+      "domain": "buddy-cache-config-path-v1",
+      "parts": [
+        "C:\\synthetic\\config.toml"
+      ],
+      "sha256": "6f271c2fe1dc5ac9e874324da0dedb6bf009c276950e846c63a2e05653986669"
+    },
+    {
+      "domain": "buddy-cache-config-path-v1",
+      "parts": [
+        "/synthetic/é/config.toml"
+      ],
+      "sha256": "10cfd93cb95b2e3bde61ec6d2322eb3a1b7ac1386c261ecdd63b1a394f4db6f2"
+    },
+    {
+      "domain": "buddy-cache-roots-v1",
+      "parts": [
+        "/synthetic/data",
+        "/synthetic/cache",
+        "/synthetic/credentials"
+      ],
+      "sha256": "ee8727df37ff3db2f58a8c55f01a428a288e2403ff1fbd77ff5b8ba89bbd6e11"
+    },
+    {
+      "domain": "buddy-cache-file-identity-v1",
+      "parts": [
+        "unix",
+        "1",
+        "42"
+      ],
+      "sha256": "5556078c52063e30366f443b260b98d9cdebc2e3d23940d1ad38e7e6e25f7039"
+    },
+    {
+      "domain": "buddy-cache-file-identity-v1",
+      "parts": [
+        "windows",
+        "1234",
+        "4294967298"
+      ],
+      "sha256": "c2958a611bc666c719e8fa657be0cf682fa2c9c5c87e150c18c16695b1c29f6b"
+    },
+    {
+      "domain": "buddy-source-cache-cleanup-intent-v1",
+      "parts": [
+        1,
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222",
+        "6f271c2fe1dc5ac9e874324da0dedb6bf009c276950e846c63a2e05653986669",
+        "425a0f0a695c2549a8aeb435a23cfcd2a271e83487f064e30db562d3e5fedf2c",
+        "ee8727df37ff3db2f58a8c55f01a428a288e2403ff1fbd77ff5b8ba89bbd6e11",
+        "33333333-3333-4333-8333-333333333333",
+        "44444444-4444-4444-8444-444444444444",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "5556078c52063e30366f443b260b98d9cdebc2e3d23940d1ad38e7e6e25f7039",
+        "c2958a611bc666c719e8fa657be0cf682fa2c9c5c87e150c18c16695b1c29f6b",
+        123,
+        "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      ],
+      "sha256": "f3812ffd1d7137307cefaf49712d21e50caf0cc9c2de798149200cf08a10ca49"
+    },
+    {
+      "domain": "buddy-source-cache-cleanup-intent-v1",
+      "parts": [
+        1,
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222",
+        "6f271c2fe1dc5ac9e874324da0dedb6bf009c276950e846c63a2e05653986669",
+        "425a0f0a695c2549a8aeb435a23cfcd2a271e83487f064e30db562d3e5fedf2c",
+        "ee8727df37ff3db2f58a8c55f01a428a288e2403ff1fbd77ff5b8ba89bbd6e11",
+        "33333333-3333-4333-8333-333333333333",
+        "44444444-4444-4444-8444-444444444444",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "5556078c52063e30366f443b260b98d9cdebc2e3d23940d1ad38e7e6e25f7039",
+        "c2958a611bc666c719e8fa657be0cf682fa2c9c5c87e150c18c16695b1c29f6b",
+        124,
+        "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      ],
+      "sha256": "3bc324ac60d24bca9d28dc689c4fec7a3f7e21a06603dd4c93239516675f4f7a"
+    }
+  ]
+}
