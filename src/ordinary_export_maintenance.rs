@@ -464,7 +464,7 @@ pub fn run(
     path: Option<PathBuf>,
     stdin: &mut impl Read,
 ) -> Report {
-    if input != Path::new("-") {
+    if input.as_os_str() != std::ffi::OsStr::new("-") {
         return Report::refusal(operation, Status::Unsupported);
     }
     let mut bytes = vec![];

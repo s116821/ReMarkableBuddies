@@ -186,7 +186,11 @@ fn main() -> Result<()> {
                     std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
                 )
             }
-        } else if args.memory_settings_input.as_deref() == Some(std::path::Path::new("-")) {
+        } else if args
+            .memory_settings_input
+            .as_ref()
+            .is_some_and(|input| input.as_os_str() == std::ffi::OsStr::new("-"))
+        {
             config::memory_settings::run_stdin(
                 operation,
                 std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
@@ -219,7 +223,11 @@ fn main() -> Result<()> {
                     std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
                 )
             }
-        } else if args.model_settings_input.as_deref() == Some(std::path::Path::new("-")) {
+        } else if args
+            .model_settings_input
+            .as_ref()
+            .is_some_and(|input| input.as_os_str() == std::ffi::OsStr::new("-"))
+        {
             config::model_settings::run_stdin(
                 operation,
                 std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
@@ -252,7 +260,11 @@ fn main() -> Result<()> {
                     std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
                 )
             }
-        } else if args.basic_settings_input.as_deref() == Some(std::path::Path::new("-")) {
+        } else if args
+            .basic_settings_input
+            .as_ref()
+            .is_some_and(|input| input.as_os_str() == std::ffi::OsStr::new("-"))
+        {
             config::basic::run_stdin(
                 operation,
                 std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
