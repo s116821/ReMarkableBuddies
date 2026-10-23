@@ -32,6 +32,7 @@ uuid = { version = "1", features = ["v4", "v5", "serde"] }
 zip = { version = "=9.0.5", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 quick-xml = "=0.42.0"
 percent-encoding = "=2.3.2"
+lopdf = { version = "=0.46.0", default-features = false }
 
 remarkable-open-sdk = { git = "https://github.com/s116821/ReMarkableOpenSDK", rev = "32b86e4fef04844cbf2ec31129bf029cc1d9899a", default-features = false, features = ["development-capture"] }
 
