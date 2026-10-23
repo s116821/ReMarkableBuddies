@@ -1179,7 +1179,7 @@ mod tests {
             let file = File::options().write(true).open(f.slot()).unwrap();
             file.set_len(size).unwrap();
             drop(file);
-            fs::set_permissions(f.slot(), fs::Permissions::from_mode(0)).unwrap();
+            fs::set_permissions(f.slot(), fs::Permissions::from_mode(0o0)).unwrap();
             let headers = vec![
                 f.config.clone(),
                 f.paths.data.join("identity.json"),
