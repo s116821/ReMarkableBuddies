@@ -227,3 +227,33 @@ impl<'a> DiskCache<'a> {
         Ok(true)
     }
 }
+
+/// Cleanup admission validates material without asserting independently selected freshness.
+#[cfg(target_os = "linux")]
+pub(crate) fn validate_cleanup_entry(bytes: &[u8], document: Uuid) -> Result<()> {
+    ensure!(
+        bytes.len() as u64 <= ENTRY_BYTES,
+        "Cache entry exceeds bound"
+    );
+    let raw = crate::config::inspection::strict_json(bytes)?;
+    ensure!(raw.is_object(), "Cache wrapper must be an object");
+    ensure!(
+        raw.get("key").is_some_and(|v| v.is_object())
+            && raw.get("document").is_some_and(|v| v.is_object()),
+        "Cache fields must be objects"
+    );
+    ensure!(
+        raw.pointer("/document/units")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|units| units.iter().all(|u| u.is_object())),
+        "Cache units must be objects"
+    );
+    let entry: Entry = serde_json::from_value(raw)?;
+    ensure!(
+        entry.format == 1 && entry.key.document == document,
+        "Invalid cache wrapper"
+    );
+    let index = Index::build(entry.document)?;
+    ensure!(index.key() == &entry.key, "Invalid derived cache material");
+    Ok(())
+}
