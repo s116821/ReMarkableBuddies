@@ -48,6 +48,8 @@ deleter. A changed/recreated entry is never deleted by stale confirmation.
 Every report has runtime_unverified:true; exit0 means a complete report, including
 refusal, while exit1 means report/transport failure.
 
-The central proposed contract is tracked in [Docs84](https://github.com/s116821/ReMarkableBuddiesDocs/pull/84),
-change prepare-source-cache-slot-cleanup. Linux synthetic fixtures and Windows
-unsupported-boundary controls are separate from real-device/provider qualification.
+The original contract delivery is recorded in [Docs84](https://github.com/s116821/ReMarkableBuddiesDocs/pull/84),
+change prepare-source-cache-slot-cleanup. See the current
+[canonical requirements](https://github.com/s116821/ReMarkableBuddiesDocs/blob/main/openspec/specs/prepared-source-cache-cleanup/spec.md).
+Linux synthetic fixtures and Windows unsupported-boundary controls are separate
+from real-device/provider qualification.
