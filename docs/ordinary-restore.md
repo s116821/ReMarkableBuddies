@@ -1,8 +1,7 @@
 # Conditional ordinary archive restore
 
-This new maintenance interface is a bounded producer candidate. Previously
-published v0.20.0 does not implement these selectors. It restores an ordinary
-format1 archive additively into an existing ordinary owned Store in unconfigured
+This bounded maintenance interface restores an ordinary format1 archive
+additively into an existing ordinary owned Store in unconfigured
 or local-only mode. Selected archives/stores, shared/isolated modes and clean or
 replacement-device setup remain unsupported by this interface.
 
