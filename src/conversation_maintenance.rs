@@ -11,7 +11,22 @@ use std::{
     path::{Path, PathBuf},
 };
 mod engine;
+mod inventory;
 mod service;
+pub use inventory::InventoryReport;
+
+/// Read-only candidates only; explicit selection still needs fresh inspect/prepare.
+pub fn inspect_inventory(config: Option<PathBuf>) -> InventoryReport {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = config;
+        InventoryReport::refused(inventory::InventoryStatus::Unsupported, None)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        engine::inventory(config, std::sync::Arc::new(service::System))
+    }
+}
 pub const MAX_INPUT: usize = 16384;
 pub const MAX_OUTPUT: usize = 32768;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, clap::ValueEnum)]
