@@ -60,10 +60,20 @@ fn identity(meta: &fs::Metadata) -> String {
 #[cfg(test)]
 thread_local! {
     static ACCESSES: std::cell::RefCell<Vec<(bool,PathBuf)>> = const { std::cell::RefCell::new(Vec::new()) };
+    static ALLOWED_READS: std::cell::RefCell<Option<Vec<PathBuf>>> = const { std::cell::RefCell::new(None) };
     static DENY_DURABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static FAULT: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
 }
 fn access(path: &Path, enumerate: bool) {
+    #[cfg(test)]
+    ALLOWED_READS.with(|allowed| {
+        if let Some(paths) = allowed.borrow().as_ref().filter(|_| !enumerate) {
+            assert!(
+                paths.iter().any(|p| p.as_path() == path),
+                "read outside the explicit header/selected-entry admission"
+            );
+        }
+    });
     #[cfg(test)]
     DENY_DURABLE.with(|deny| {
         if deny.get() {
@@ -538,6 +548,7 @@ mod tests {
     impl Drop for Fixture {
         fn drop(&mut self) {
             DENY_DURABLE.with(|v| v.set(false));
+            ALLOWED_READS.with(|v| *v.borrow_mut() = None);
             FAULT.with(|v| v.set(0));
             if !std::thread::panicking() {
                 let root = self.root.canonicalize().unwrap();
@@ -552,7 +563,9 @@ mod tests {
             }
         }
     }
-    fn snapshot(root: &Path) -> std::collections::BTreeMap<PathBuf, (Vec<u8>, u32)> {
+    fn snapshot(
+        root: &Path,
+    ) -> std::collections::BTreeMap<PathBuf, (Vec<u8>, u32, std::time::SystemTime)> {
         use std::os::unix::fs::PermissionsExt;
         let mut map = std::collections::BTreeMap::new();
         for e in fs::read_dir(root).unwrap() {
@@ -562,7 +575,7 @@ mod tests {
                 map.extend(snapshot(&p));
             } else if m.is_file() {
                 let bytes = fs::read(&p).unwrap();
-                map.insert(p, (bytes, m.permissions().mode()));
+                map.insert(p, (bytes, m.permissions().mode(), m.modified().unwrap()));
             }
         }
         map
@@ -764,5 +777,221 @@ mod tests {
         assert_eq!(output.calls, 2);
         assert!(lease(&f.paths.data.join("store.lock")).is_ok());
         assert!(lease(&f.paths.cache.join(KIND).join("cache.lock")).is_ok());
+    }
+    #[test]
+    fn exact_known_read_allowlist_excludes_all_other_payloads() {
+        let f = Fixture::new();
+        let ns = f.paths.cache.join(KIND);
+        let headers = vec![
+            f.config.clone(),
+            f.paths.data.join("identity.json"),
+            f.paths.data.join("CURRENT"),
+            f.paths
+                .data
+                .join("generations")
+                .join(f.generation.to_string())
+                .join("format.json"),
+            f.paths.cache.join("owner.json"),
+            ns.join("owner.json"),
+            f.slot(),
+        ];
+        ALLOWED_READS.with(|v| *v.borrow_mut() = Some(headers.clone()));
+        let i = f.prepare();
+        assert_eq!(f.confirmed(Operation::Status, &i).status, Status::Unchanged);
+        assert_eq!(f.confirmed(Operation::Apply, &i).status, Status::Applied);
+        ACCESSES.with(|v| {
+            assert!(v.borrow().iter().all(|(enumerate, p)| if *enumerate {
+                p == &ns
+            } else {
+                headers.contains(p)
+            }))
+        });
+    }
+    #[test]
+    fn actor_roots_generation_namespace_path_and_changed_valid_bytes_refuse() {
+        for which in 0..7 {
+            let mut f = Fixture::new();
+            let i = f.prepare();
+            let ns = f.paths.cache.join(KIND);
+            match which {
+                0 => {
+                    let mut c: Config =
+                        serde_json::from_slice(&fs::read(&f.config).unwrap()).unwrap();
+                    c.paths.cache = f.root.join("missing-cache");
+                    fs::write(&f.config, serde_json::to_vec(&c).unwrap()).unwrap();
+                }
+                1 => {
+                    let actor = Uuid::new_v4();
+                    for p in [
+                        f.paths.data.join("identity.json"),
+                        f.paths.cache.join("owner.json"),
+                        ns.join("owner.json"),
+                    ] {
+                        let mut v: serde_json::Value =
+                            serde_json::from_slice(&fs::read(&p).unwrap()).unwrap();
+                        v["actor"] = json!(actor);
+                        fs::write(p, serde_json::to_vec(&v).unwrap()).unwrap();
+                    }
+                }
+                2 => {
+                    let gen = Uuid::new_v4();
+                    let p = f.paths.data.join("generations").join(gen.to_string());
+                    fs::create_dir(&p).unwrap();
+                    fs::write(p.join("format.json"), b"1").unwrap();
+                    fs::write(
+                        f.paths.data.join("CURRENT"),
+                        serde_json::to_vec(&gen).unwrap(),
+                    )
+                    .unwrap();
+                }
+                3 => {
+                    let old = f.root.join("old-namespace");
+                    fs::rename(&ns, &old).unwrap();
+                    fs::create_dir(&ns).unwrap();
+                    for name in [
+                        "owner.json".to_owned(),
+                        "cache.lock".to_owned(),
+                        format!("{}.json", f.document),
+                    ] {
+                        fs::copy(old.join(&name), ns.join(name)).unwrap();
+                    }
+                }
+                4 => {
+                    let new = f.root.join("alternate-config.json");
+                    fs::copy(&f.config, &new).unwrap();
+                    f.config = new;
+                }
+                5 => {
+                    let p = ns.join("owner.json");
+                    let mut v: serde_json::Value =
+                        serde_json::from_slice(&fs::read(&p).unwrap()).unwrap();
+                    v["kind"] = json!("other-kind");
+                    fs::write(p, serde_json::to_vec(&v).unwrap()).unwrap();
+                }
+                _ => {
+                    let mut v: serde_json::Value =
+                        serde_json::from_slice(&fs::read(f.slot()).unwrap()).unwrap();
+                    v["document"]["units"][0]["text"] = json!("changed valid derived material");
+                    let material: NormalizedDocument =
+                        serde_json::from_value(v["document"].clone()).unwrap();
+                    v["key"] = serde_json::to_value(Index::build(material).unwrap().key()).unwrap();
+                    fs::write(f.slot(), serde_json::to_vec(&v).unwrap()).unwrap();
+                }
+            }
+            let before = snapshot(&f.root);
+            for op in [Operation::Status, Operation::Apply] {
+                let r = f.confirmed(op, &i);
+                assert!(matches!(
+                    r.status,
+                    Status::Conflict | Status::Unavailable | Status::Unsupported
+                ));
+                assert!(!r.possible_effect);
+            }
+            assert_eq!(snapshot(&f.root), before);
+            assert!(f.slot().exists());
+        }
+    }
+    #[test]
+    fn capacity_header_bound_object_shape_and_namespace_reparse_refuse() {
+        for which in 0..5 {
+            let f = Fixture::new();
+            let i = f.prepare();
+            let ns = f.paths.cache.join(KIND);
+            match which {
+                0 => {
+                    for _ in 0..16 {
+                        fs::write(
+                            ns.join(format!("{}.json", Uuid::new_v4())),
+                            b"unselected payload must not be read",
+                        )
+                        .unwrap();
+                    }
+                }
+                1 => {
+                    let p = f.paths.cache.join("owner.json");
+                    let mut b = fs::read(&p).unwrap();
+                    b.resize(1025, b' ');
+                    fs::write(p, b).unwrap();
+                }
+                2 => {
+                    fs::write(
+                        f.paths.data.join("identity.json"),
+                        serde_json::to_vec(&json!([1, Uuid::new_v4()])).unwrap(),
+                    )
+                    .unwrap();
+                }
+                3 => {
+                    let old = f.root.join("old-namespace");
+                    fs::rename(&ns, &old).unwrap();
+                    std::os::unix::fs::symlink(&old, &ns).unwrap();
+                }
+                _ => {
+                    let mut v: serde_json::Value =
+                        serde_json::from_slice(&fs::read(f.slot()).unwrap()).unwrap();
+                    v["document"]["units"][0] = json!([1, null, "sequence alias"]);
+                    fs::write(f.slot(), serde_json::to_vec(&v).unwrap()).unwrap();
+                }
+            }
+            let before = snapshot(&f.root);
+            assert_eq!(
+                f.confirmed(Operation::Apply, &i).status,
+                Status::Unsupported
+            );
+            assert_eq!(snapshot(&f.root), before);
+            assert!(f.slot().exists());
+        }
+    }
+    #[test]
+    fn replacing_a_held_named_lock_refuses_before_observation() {
+        for store in [true, false] {
+            let f = Fixture::new();
+            let c = Custody::open(Some(f.config.clone())).unwrap();
+            let path = if store {
+                f.paths.data.join("store.lock")
+            } else {
+                f.paths.cache.join(KIND).join("cache.lock")
+            };
+            fs::rename(&path, f.root.join("old-lock")).unwrap();
+            fs::write(&path, []).unwrap();
+            let req = Request {
+                document: f.document,
+                operation: Uuid::new_v4(),
+                original: None,
+            };
+            assert!(matches!(c.observe(&req), Err(Status::Conflict)));
+            assert!(f.slot().exists());
+        }
+    }
+    #[test]
+    fn malformed_utf8_duplicates_shapes_ids_and_bounds_access_no_paths() {
+        let f = Fixture::new();
+        let bodies = vec![
+            vec![0xff],
+            b"[]".to_vec(),
+            b"{} {}".to_vec(),
+            b"{\"request_version\":1,\"request_version\":1}".to_vec(),
+            b"{\"request_version\":1,\"intent\":[]}".to_vec(),
+            b"{\"request_version\":1,\"document\":\"00000000-0000-0000-0000-000000000000\"}"
+                .to_vec(),
+            vec![b'x'; MAX_IO + 1],
+        ];
+        for op in [
+            Operation::Inspect,
+            Operation::Prepare,
+            Operation::Apply,
+            Operation::Status,
+        ] {
+            for bytes in &bodies {
+                ACCESSES.with(|v| v.borrow_mut().clear());
+                let r = super::super::run(
+                    op,
+                    Path::new("-"),
+                    Some(f.root.join("never-read-config")),
+                    &mut bytes.as_slice(),
+                );
+                assert_eq!(r.status, Status::InvalidInput);
+                ACCESSES.with(|v| assert!(v.borrow().is_empty()));
+            }
+        }
     }
 }
