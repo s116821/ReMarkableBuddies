@@ -283,7 +283,7 @@ impl Custody {
         {
             return Err(Status::Unsupported);
         }
-        let result = Intent {
+        Ok(Intent {
             intent_version: 1,
             operation: req.operation.to_string(),
             document: req.document.to_string(),
@@ -303,8 +303,7 @@ impl Custody {
             entry_bytes: 0,
             entry_sha256: String::new(),
             intent_sha256: String::new(),
-        };
-        Ok(result)
+        })
     }
     fn observe(&self, req: &Request) -> Admission<(Intent, bool)> {
         let mut result = self.headers(req)?;
@@ -362,12 +361,12 @@ pub(super) fn run(operation: Operation, config: Option<PathBuf>, req: Request) -
             return r;
         }
     };
-    if first.0.intent_sha256 != current.intent_sha256 || first.1 != present {
-        r.status = Status::Conflict;
-    } else if req
-        .original
-        .as_ref()
-        .is_some_and(|o| !o.same_headers(&current))
+    if first.0.intent_sha256 != current.intent_sha256
+        || first.1 != present
+        || req
+            .original
+            .as_ref()
+            .is_some_and(|o| !o.same_headers(&current))
     {
         r.status = Status::Conflict;
     } else if !present {
@@ -562,7 +561,8 @@ mod tests {
             if m.is_dir() {
                 map.extend(snapshot(&p));
             } else if m.is_file() {
-                map.insert(p, (fs::read(&p).unwrap(), m.permissions().mode()));
+                let bytes = fs::read(&p).unwrap();
+                map.insert(p, (bytes, m.permissions().mode()));
             }
         }
         map
