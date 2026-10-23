@@ -13,6 +13,9 @@ use std::time::Duration;
 #[command(author, version = env!("READER_BUDDY_VERSION"))]
 #[command(about = "ReMarkable Reader Buddy - AI-powered reading assistant for reMarkable tablets")]
 pub struct Args {
+    /// Linux-only metadata candidates; no payload reads or cleanup authority
+    #[arg(long, conflicts_with_all=["source_cache_operation","source_cache_input","simulate","inspect_owned_data","api_key","model","base_url","trigger_corner","log_level","debug_dump","memory_operation","memory_input","sync_mode_operation","sync_mode_input","archive_operation","archive_input","personalization_operation","export_note","configuration_operation","basic_settings_operation","basic_settings_input","restore_operation","restore_input","model_settings_operation","model_settings_input","ordinary_export_operation","ordinary_export_input","memory_settings_operation","memory_settings_input","model_credential_operation","model_credential_input","credential_reference_operation","credential_reference_input"])]
+    inspect_source_cache: bool,
     /// Linux-only prepared deletion of one owned derived source-cache slot
     #[arg(long, value_enum, requires="source_cache_input", conflicts_with_all=["simulate","inspect_owned_data","api_key","model","base_url","trigger_corner","log_level","debug_dump","memory_operation","memory_input","sync_mode_operation","sync_mode_input","archive_operation","archive_input","personalization_operation","export_note","configuration_operation","basic_settings_operation","basic_settings_input","restore_operation","restore_input","model_settings_operation","model_settings_input","ordinary_export_operation","ordinary_export_input","memory_settings_operation","memory_settings_input","model_credential_operation","model_credential_input","credential_reference_operation","credential_reference_input"])]
     source_cache_operation: Option<remarkable_reader_buddy::source_cache_maintenance::Operation>,
@@ -136,6 +139,12 @@ fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_lo
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    if args.inspect_source_cache {
+        return remarkable_reader_buddy::source_cache_inventory::run(
+            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+        )
+        .write_to(&mut std::io::stdout().lock());
+    }
     if let Some(operation) = args.source_cache_operation {
         return remarkable_reader_buddy::source_cache_maintenance::run(
             operation,
@@ -486,6 +495,7 @@ mod tests {
                 "debug-dump",
                 "export-note",
                 "inspect-owned-data",
+                "inspect-source-cache",
                 "log-level",
                 "memory-input",
                 "memory-operation",
@@ -510,6 +520,7 @@ mod tests {
             ]
         );
         let args = Args::try_parse_from(["reader-buddy"]).unwrap();
+        assert!(!args.inspect_source_cache);
         assert!(args.source_cache_operation.is_none());
         assert!(args.source_cache_input.is_none());
         assert!(args.restore_operation.is_none());

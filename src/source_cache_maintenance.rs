@@ -11,7 +11,7 @@ use std::{
     path::{Path, PathBuf},
 };
 #[cfg(target_os = "linux")]
-mod linux;
+pub(crate) mod linux;
 pub const MAX_IO: usize = 16384;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum, Serialize)]
 #[serde(rename_all = "kebab-case")]

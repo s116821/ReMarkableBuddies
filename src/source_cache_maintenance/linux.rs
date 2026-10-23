@@ -33,13 +33,31 @@ impl Drop for Lease {
         let _ = self.0.unlock();
     }
 }
-pub(super) struct Custody {
+pub(crate) struct Custody {
     config_path: PathBuf,
     config: Config,
     root: PathBuf,
     directory: File,
     store: Lease,
     cache: Lease,
+}
+#[derive(PartialEq, Eq)]
+struct Headers {
+    config_path_sha256: String,
+    config_bytes_sha256: String,
+    roots_sha256: String,
+    actor: Uuid,
+    generation: Uuid,
+    store_owner_sha256: String,
+    cache_owner_sha256: String,
+    namespace_owner_sha256: String,
+    namespace_identity_sha256: String,
+}
+#[derive(PartialEq, Eq)]
+struct SlotMetadata {
+    document: Uuid,
+    apparent_bytes: u64,
+    identity: String,
 }
 fn bad<T>(_: T) -> Status {
     Status::Unsupported
@@ -224,8 +242,11 @@ impl Custody {
         check_named(&self.directory, &self.root)
     }
     fn scan(&self) -> Admission<()> {
+        self.slot_names().map(|_| ())
+    }
+    fn slot_names(&self) -> Admission<Vec<Uuid>> {
         access(&self.root, true);
-        let mut slots = 0;
+        let mut slots = Vec::new();
         for (n, item) in fs::read_dir(&self.root).map_err(unavailable)?.enumerate() {
             if n >= 18 {
                 return Err(Status::Unsupported);
@@ -240,15 +261,17 @@ impl Custody {
             if matches!(name, "owner.json" | "cache.lock") {
                 continue;
             }
-            uuid(name.strip_suffix(".json").ok_or(Status::Unsupported)?).map_err(bad)?;
-            slots += 1;
-            if slots > 16 {
+            let document =
+                uuid(name.strip_suffix(".json").ok_or(Status::Unsupported)?).map_err(bad)?;
+            slots.push(document);
+            if slots.len() > 16 {
                 return Err(Status::Unsupported);
             }
         }
-        Ok(())
+        slots.sort_unstable();
+        Ok(slots)
     }
-    fn headers(&self, req: &Request) -> Admission<Intent> {
+    fn header_fields(&self) -> Admission<Headers> {
         self.check_leases()?;
         let path = canonical(&self.config_path)?;
         let config = read(&self.config_path, MAX_RECORD as u64)?;
@@ -293,27 +316,58 @@ impl Custody {
         {
             return Err(Status::Unsupported);
         }
-        Ok(Intent {
-            intent_version: 1,
-            operation: req.operation.to_string(),
-            document: req.document.to_string(),
+        Ok(Headers {
             config_path_sha256: frame(
                 "buddy-cache-config-path-v1",
                 &[path.to_str().ok_or(Status::Unsupported)?.into()],
             ),
             config_bytes_sha256: digest(&config),
             roots_sha256: roots(&self.config.paths)?,
-            actor: owner.actor.to_string(),
-            generation: generation.to_string(),
+            actor: owner.actor,
+            generation,
             store_owner_sha256: digest(&store_owner),
             cache_owner_sha256: digest(&cache_owner),
             namespace_owner_sha256: digest(&namespace_owner),
             namespace_identity_sha256: identity(&self.directory.metadata().map_err(unavailable)?),
+        })
+    }
+    fn headers(&self, req: &Request) -> Admission<Intent> {
+        let h = self.header_fields()?;
+        Ok(Intent {
+            intent_version: 1,
+            operation: req.operation.to_string(),
+            document: req.document.to_string(),
+            config_path_sha256: h.config_path_sha256,
+            config_bytes_sha256: h.config_bytes_sha256,
+            roots_sha256: h.roots_sha256,
+            actor: h.actor.to_string(),
+            generation: h.generation.to_string(),
+            store_owner_sha256: h.store_owner_sha256,
+            cache_owner_sha256: h.cache_owner_sha256,
+            namespace_owner_sha256: h.namespace_owner_sha256,
+            namespace_identity_sha256: h.namespace_identity_sha256,
             entry_identity_sha256: String::new(),
             entry_bytes: 0,
             entry_sha256: String::new(),
             intent_sha256: String::new(),
         })
+    }
+    fn inventory_metadata(&self) -> Admission<Vec<SlotMetadata>> {
+        let mut result = Vec::new();
+        for document in self.slot_names()? {
+            let path = self.root.join(format!("{document}.json"));
+            files::safe_path(&path).map_err(bad)?;
+            let m = fs::symlink_metadata(&path).map_err(unavailable)?;
+            if !m.is_file() || m.len() > ENTRY_BYTES {
+                return Err(Status::Unsupported);
+            }
+            result.push(SlotMetadata {
+                document,
+                apparent_bytes: m.len(),
+                identity: identity(&m),
+            });
+        }
+        Ok(result)
     }
     fn observe(&self, req: &Request) -> Admission<(Intent, bool)> {
         let mut result = self.headers(req)?;
@@ -424,6 +478,69 @@ pub(super) fn run(operation: Operation, config: Option<PathBuf>, req: Request) -
     }
     r.custody = Some(custody);
     r
+}
+
+#[cfg(test)]
+type InventoryHook = Box<dyn FnOnce(&Custody)>;
+#[cfg(test)]
+thread_local! { static INVENTORY_HOOK: std::cell::RefCell<Option<InventoryHook>> = const { std::cell::RefCell::new(None) }; }
+/// Shared header custody only; never fabricates a cleanup intent or reads a slot.
+pub(crate) fn inventory(config: Option<PathBuf>) -> crate::source_cache_inventory::Report {
+    use crate::source_cache_inventory::{
+        Entry, Report as InventoryReport, Status as InventoryStatus,
+    };
+    fn status(s: Status) -> InventoryStatus {
+        match s {
+            Status::Busy => InventoryStatus::Busy,
+            Status::Conflict => InventoryStatus::Conflict,
+            Status::Unavailable => InventoryStatus::Unavailable,
+            _ => InventoryStatus::Unsupported,
+        }
+    }
+    let c = match Custody::open(config) {
+        Ok(c) => c,
+        Err(s) => return InventoryReport::refused(status(s)),
+    };
+    let observation = (|| -> Admission<(Headers, Vec<SlotMetadata>, u64)> {
+        let first = c.header_fields()?;
+        let slots = c.inventory_metadata()?;
+        #[cfg(test)]
+        INVENTORY_HOOK.with(|h| {
+            if let Some(hook) = h.borrow_mut().take() {
+                hook(&c);
+            }
+        });
+        let middle = c.header_fields()?;
+        let again = c.inventory_metadata()?;
+        let last = c.header_fields()?;
+        if first != middle || middle != last || slots != again {
+            return Err(Status::Conflict);
+        }
+        let total = slots.iter().try_fold(0u64, |sum, s| {
+            sum.checked_add(s.apparent_bytes).ok_or(Status::Unsupported)
+        })?;
+        if total > 16 * ENTRY_BYTES {
+            return Err(Status::Unsupported);
+        }
+        c.check_leases()?;
+        Ok((last, slots, total))
+    })();
+    match observation {
+        Ok((h, slots, total)) => InventoryReport::ready(
+            h.actor,
+            h.generation,
+            slots
+                .into_iter()
+                .map(|s| Entry {
+                    document: s.document,
+                    apparent_bytes: s.apparent_bytes,
+                })
+                .collect(),
+            total,
+            c,
+        ),
+        Err(s) => InventoryReport::refused_with_custody(status(s), c),
+    }
 }
 
 #[cfg(test)]
@@ -549,6 +666,7 @@ mod tests {
         fn drop(&mut self) {
             DENY_DURABLE.with(|v| v.set(false));
             ALLOWED_READS.with(|v| *v.borrow_mut() = None);
+            INVENTORY_HOOK.with(|v| *v.borrow_mut() = None);
             FAULT.with(|v| v.set(0));
             if !std::thread::panicking() {
                 let root = self.root.canonicalize().unwrap();
@@ -993,5 +1111,250 @@ mod tests {
                 ACCESSES.with(|v| assert!(v.borrow().is_empty()));
             }
         }
+    }
+    fn inventory_json(f: &Fixture) -> serde_json::Value {
+        let mut b = Vec::new();
+        crate::source_cache_inventory::run(Some(f.config.clone()))
+            .write_to(&mut b)
+            .unwrap();
+        assert!(b.len() <= 8192);
+        serde_json::from_slice(&b).unwrap()
+    }
+    #[test]
+    fn inventory_empty_one_sixteen_sorted_and_metadata_only_payloads() {
+        for count in [0, 1, 16] {
+            let f = Fixture::new();
+            fs::remove_file(f.slot()).unwrap();
+            let ns = f.paths.cache.join(KIND);
+            let mut expected = Vec::new();
+            for n in (1..=count).rev() {
+                let id = Uuid::from_u128(n as u128);
+                let path = ns.join(format!("{id}.json"));
+                fs::write(&path, vec![b'x'; n]).unwrap();
+                expected.push((id.to_string(), n as u64));
+            }
+            expected.sort();
+            let before = snapshot(&f.root);
+            let headers = vec![
+                f.config.clone(),
+                f.paths.data.join("identity.json"),
+                f.paths.data.join("CURRENT"),
+                f.paths
+                    .data
+                    .join("generations")
+                    .join(f.generation.to_string())
+                    .join("format.json"),
+                f.paths.cache.join("owner.json"),
+                ns.join("owner.json"),
+            ];
+            ALLOWED_READS.with(|v| *v.borrow_mut() = Some(headers));
+            let v = inventory_json(&f);
+            assert_eq!(v["status"], "ok");
+            assert_eq!(v["entries"].as_array().unwrap().len(), count);
+            assert_eq!(
+                v["total_apparent_bytes"],
+                expected.iter().map(|p| p.1).sum::<u64>()
+            );
+            for (row, (id, len)) in v["entries"].as_array().unwrap().iter().zip(expected) {
+                assert_eq!(row["document"], id);
+                assert_eq!(row["apparent_bytes"], len);
+                assert_eq!(row.as_object().unwrap().len(), 2);
+            }
+            for key in [
+                "cleanup_authority",
+                "entry_payloads_read",
+                "entry_payloads_validated",
+                "source_freshness_verified",
+            ] {
+                assert_eq!(v[key], false);
+            }
+            assert_eq!(snapshot(&f.root), before);
+        }
+    }
+    #[test]
+    fn inventory_zero_maximum_unreadable_and_corrupt_are_only_metadata() {
+        use std::os::unix::fs::PermissionsExt;
+        for size in [0, ENTRY_BYTES] {
+            let f = Fixture::new();
+            let file = File::options().write(true).open(f.slot()).unwrap();
+            file.set_len(size).unwrap();
+            drop(file);
+            fs::set_permissions(f.slot(), fs::Permissions::from_mode(0o0)).unwrap();
+            let headers = vec![
+                f.config.clone(),
+                f.paths.data.join("identity.json"),
+                f.paths.data.join("CURRENT"),
+                f.paths
+                    .data
+                    .join("generations")
+                    .join(f.generation.to_string())
+                    .join("format.json"),
+                f.paths.cache.join("owner.json"),
+                f.paths.cache.join(KIND).join("owner.json"),
+            ];
+            ALLOWED_READS.with(|v| *v.borrow_mut() = Some(headers));
+            let before = fs::metadata(f.slot()).unwrap();
+            let v = inventory_json(&f);
+            let after = fs::metadata(f.slot()).unwrap();
+            assert_eq!(before.permissions().mode(), after.permissions().mode());
+            assert_eq!(before.modified().unwrap(), after.modified().unwrap());
+            assert_eq!(v["status"], "ok");
+            assert_eq!(v["total_apparent_bytes"], size);
+            assert_eq!(v["entry_payloads_validated"], false);
+            fs::set_permissions(f.slot(), fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+    #[test]
+    fn inventory_bad_capacity_names_markers_sizes_and_links_have_no_partial_list() {
+        for which in 0..7 {
+            let f = Fixture::new();
+            let ns = f.paths.cache.join(KIND);
+            match which {
+                0 => {
+                    for _ in 0..16 {
+                        fs::write(ns.join(format!("{}.json", Uuid::new_v4())), []).unwrap();
+                    }
+                }
+                1 => fs::write(ns.join("unknown"), b"sentinel").unwrap(),
+                2 => fs::write(ns.join(format!(".stage-{}", Uuid::new_v4())), []).unwrap(),
+                3 => {
+                    File::options()
+                        .write(true)
+                        .open(f.slot())
+                        .unwrap()
+                        .set_len(ENTRY_BYTES + 1)
+                        .unwrap();
+                }
+                4 => {
+                    fs::write(ns.join("owner.json"), b"[]").unwrap();
+                }
+                5 => {
+                    fs::remove_file(f.slot()).unwrap();
+                    std::os::unix::fs::symlink(f.root.join("original.pdf"), f.slot()).unwrap();
+                }
+                _ => {
+                    fs::write(ns.join("00000000-0000-0000-0000-000000000000.json"), []).unwrap();
+                }
+            }
+            let before = if which == 3 {
+                None
+            } else {
+                Some(snapshot(&f.root))
+            };
+            let v = inventory_json(&f);
+            assert_eq!(v["status"], "unsupported");
+            assert!(v["entries"].is_null());
+            assert!(v["total_apparent_bytes"].is_null());
+            if let Some(before) = before {
+                assert_eq!(snapshot(&f.root), before);
+            }
+        }
+    }
+    #[test]
+    fn inventory_existing_busy_and_missing_leases_refuse_without_creation() {
+        for store in [true, false] {
+            let f = Fixture::new();
+            let p = if store {
+                f.paths.data.join("store.lock")
+            } else {
+                f.paths.cache.join(KIND).join("cache.lock")
+            };
+            let held = lease(&p).unwrap();
+            assert_eq!(inventory_json(&f)["status"], "busy");
+            drop(held);
+            fs::remove_file(&p).unwrap();
+            let v = inventory_json(&f);
+            assert_eq!(v["status"], "unavailable");
+            assert!(v["entries"].is_null());
+            assert!(!p.exists());
+        }
+    }
+    #[test]
+    fn inventory_bracket_changes_discard_metadata_not_mutate_or_retry() {
+        for which in 0..6 {
+            let f = Fixture::new();
+            let document = f.document;
+            INVENTORY_HOOK.with(|h| {
+                *h.borrow_mut() = Some(Box::new(move |c| match which {
+                    0 => {
+                        File::options()
+                            .write(true)
+                            .open(c.root.join(format!("{document}.json")))
+                            .unwrap()
+                            .set_len(1)
+                            .unwrap();
+                    }
+                    1 => {
+                        let mut b = fs::read(&c.config_path).unwrap();
+                        b.push(b' ');
+                        fs::write(&c.config_path, b).unwrap();
+                    }
+                    2 => {
+                        let p = c.root.join("owner.json");
+                        let mut b = fs::read(&p).unwrap();
+                        b.push(b' ');
+                        fs::write(p, b).unwrap();
+                    }
+                    3 => {
+                        let p = c.root.join("cache.lock");
+                        fs::rename(&p, c.root.join("replaced-lock")).unwrap();
+                        fs::write(p, []).unwrap();
+                    }
+                    4 => {
+                        let p = c.root.join(format!("{document}.json"));
+                        let replacement = c.root.join("replacement");
+                        fs::write(&replacement, fs::read(&p).unwrap()).unwrap();
+                        fs::rename(replacement, p).unwrap();
+                    }
+                    _ => {
+                        fs::remove_file(c.root.join(format!("{document}.json"))).unwrap();
+                    }
+                }))
+            });
+            let v = inventory_json(&f);
+            assert!(matches!(
+                v["status"].as_str(),
+                Some("conflict" | "unsupported")
+            ));
+            for key in ["entries", "actor", "generation", "total_apparent_bytes"] {
+                assert!(v[key].is_null());
+            }
+        }
+    }
+    #[test]
+    fn inventory_output_failure_keeps_both_leases_and_preserves_all_bytes() {
+        let f = Fixture::new();
+        let before = snapshot(&f.root);
+        let report = crate::source_cache_inventory::run(Some(f.config.clone()));
+        struct Fail<'a> {
+            f: &'a Fixture,
+            calls: usize,
+        }
+        impl Write for Fail<'_> {
+            fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+                assert!(matches!(
+                    lease(&self.f.paths.data.join("store.lock")),
+                    Err(Status::Busy)
+                ));
+                assert!(matches!(
+                    lease(&self.f.paths.cache.join(KIND).join("cache.lock")),
+                    Err(Status::Busy)
+                ));
+                self.calls += 1;
+                if self.calls == 1 {
+                    Ok(b.len().min(9))
+                } else {
+                    Err(io::Error::other("synthetic inventory output failure"))
+                }
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut output = Fail { f: &f, calls: 0 };
+        assert!(report.write_to(&mut output).is_err());
+        assert_eq!(output.calls, 2);
+        assert_eq!(snapshot(&f.root), before);
+        assert!(lease(&f.paths.data.join("store.lock")).is_ok());
     }
 }
