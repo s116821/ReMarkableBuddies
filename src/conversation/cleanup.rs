@@ -102,8 +102,9 @@ pub(crate) fn eligible(
                 turns.push((e, t));
                 summary.turns += 1;
             }
-            Record::Source(s) => {
-                ensure!(s.conversation == target, "foreign source");
+            record if source_link(record).is_some() => {
+                let (_, conversation, _) = source_link(record).context("source link")?;
+                ensure!(conversation == target, "foreign source");
                 summary.source_records += 1;
             }
             Record::Export(a) => {
@@ -130,29 +131,33 @@ pub(crate) fn eligible(
     let current_sources: BTreeMap<_, _> = snapshot
         .current
         .iter()
-        .filter_map(|e| match decoded.get(&e.revision_id) {
-            Some(Record::Source(source)) => Some((source.id, source)),
-            _ => None,
+        .filter_map(|e| {
+            decoded
+                .get(&e.revision_id)
+                .and_then(|record| source_link(record).map(|(id, _, _)| (id, record)))
         })
         .collect();
     for (_, turn) in &turns {
-        for source in &turn.sources {
+        for source_id in &turn.sources {
             budget.charge(0, 1)?;
-            let source = current_sources.get(source).context("turn source absent")?;
-            Ledger::validate_source(source, turn)?;
+            let record = current_sources
+                .get(source_id)
+                .context("turn source absent")?;
+            validate_source_link(record, turn)?;
         }
     }
-    for source in current_sources.values() {
+    for (source_id, record) in &current_sources {
         budget.charge(0, 1)?;
+        let (_, _, turn_id) = source_link(record).context("source shape")?;
         let (_, turn) = turns
             .iter()
-            .find(|(_, t)| t.id == source.turn)
+            .find(|(_, t)| t.id == turn_id)
             .context("source turn absent")?;
         ensure!(
-            turn.sources.contains(&source.id),
+            turn.sources.contains(source_id),
             "unreferenced source record"
         );
-        Ledger::validate_source(source, turn)?;
+        validate_source_link(record, turn)?;
     }
     let mut exchanges = BTreeMap::<Uuid, Vec<(&Envelope, &Turn)>>::new();
     for (e, t) in &turns {
@@ -394,5 +399,28 @@ pub(crate) fn original_binding(e: &Envelope, target: Uuid, id: Uuid) -> Result<(
         binding.conversation == target && binding.id == id && e.record_id == id,
         "original binding identity"
     );
+    Ok(())
+}
+
+fn source_link(record: &Record) -> Option<(Uuid, Uuid, Uuid)> {
+    match record {
+        Record::Source(s) => Some((s.id, s.conversation, s.turn)),
+        Record::Capture(s) => Some((s.id, s.conversation, s.turn)),
+        Record::LegacyCapture(s) => Some((s.id, s.conversation, s.turn)),
+        Record::DevelopmentCapture(s) => Some((s.id, s.conversation, s.turn)),
+        _ => None,
+    }
+}
+fn validate_source_link(record: &Record, turn: &Turn) -> Result<()> {
+    let (id, conversation, turn_id) = source_link(record).context("source shape")?;
+    ensure!(
+        conversation == turn.conversation && turn_id == turn.id && turn.sources.contains(&id),
+        "source identity/linkage mismatch"
+    );
+    // Ledger::decode already applies each variant's original historical shape,
+    // provenance and descriptor validation. Never reconstruct live SDK authority.
+    if let Record::Source(source) = record {
+        Ledger::validate_source(source, turn)?;
+    }
     Ok(())
 }

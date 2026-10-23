@@ -73,7 +73,9 @@ impl Custody {
     pub(super) fn check(&mut self) -> std::result::Result<(), Status> {
         self.document.check().map_err(|_| Status::Conflict)?;
         self.session.check().map_err(|_| Status::Conflict)?;
-        self.observer.inactive()
+        self.observer.inactive()?;
+        self.document.check().map_err(|_| Status::Conflict)?;
+        self.session.check().map_err(|_| Status::Conflict)
     }
 }
 fn error_status(e: &anyhow::Error) -> Status {

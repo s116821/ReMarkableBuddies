@@ -58,18 +58,23 @@ impl Store {
     }
     pub(super) fn open_existing_for_conversation(
         paths: StorePaths,
+        admit: impl FnOnce(&StorePaths, &std::fs::File) -> anyhow::Result<()>,
         recover: impl FnOnce(&Store, Uuid) -> anyhow::Result<super::Index>,
     ) -> Result<Self, Refusal> {
-        Self::open_existing_using(paths, false, recover)
+        Self::open_existing_using(paths, false, admit, recover)
     }
     fn open_existing_inner(paths: StorePaths, selected_aware: bool) -> Result<Self, Refusal> {
-        Self::open_existing_using(paths, selected_aware, |store, generation| {
-            store.recover(generation)
-        })
+        Self::open_existing_using(
+            paths,
+            selected_aware,
+            |_, _| Ok(()),
+            |store, generation| store.recover(generation),
+        )
     }
     fn open_existing_using(
         paths: StorePaths,
         selected_aware: bool,
+        admit: impl FnOnce(&StorePaths, &std::fs::File) -> anyhow::Result<()>,
         recover: impl FnOnce(&Store, Uuid) -> anyhow::Result<super::Index>,
     ) -> Result<Self, Refusal> {
         paths.validate().map_err(|_| Refusal::Unsupported)?;
@@ -91,6 +96,7 @@ impl Store {
         })?;
         // Unlock even if validation fails before a Store can be constructed.
         let lease = Lease(lease);
+        admit(&paths, &lease.0).map_err(|_| Refusal::Unsupported)?;
         let identity: Identity = record(&paths.data.join("identity.json"), MAX_RECORD as u64)?;
         if identity.format != FORMAT || identity.actor.is_nil() {
             return Err(Refusal::Unsupported);

@@ -681,3 +681,466 @@ fn synthetic_used_image_survives_logical_deletion_byte_exact() {
         assert_eq!(after.get(&p), Some(&b));
     }
 }
+
+#[test]
+fn original_apply_and_status_reject_semantically_equal_manifest_rewrite() {
+    let f = Fixture::new();
+    let i = f.prepared();
+    let r = f.confirm(Operation::Apply, &i);
+    assert_eq!(r.status, Status::Acknowledged);
+    let tx = r.receipt.as_ref().unwrap().transaction;
+    drop(r);
+    let path = f
+        .paths
+        .data
+        .join("generations")
+        .join(&i.generation)
+        .join("commits")
+        .join(format!("{tx}.json"));
+    let old = fs::read(&path).unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&old).unwrap();
+    let changed = serde_json::to_vec_pretty(&value).unwrap();
+    assert_ne!(old, changed);
+    fs::write(path, changed).unwrap();
+    let before = f.state();
+    for op in [Operation::Apply, Operation::Status] {
+        let report = f.confirm(op, &i);
+        assert_eq!(report.status, Status::Conflict);
+        assert!(report.receipt.is_none());
+        drop(report);
+        assert_eq!(before, f.state());
+    }
+}
+struct ChangedOnObservation {
+    config: PathBuf,
+    lock: PathBuf,
+    at: usize,
+    calls: std::sync::atomic::AtomicUsize,
+    replace_lock: bool,
+}
+impl service::Observer for ChangedOnObservation {
+    fn inactive(&self) -> std::result::Result<(), Status> {
+        if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1 == self.at {
+            if self.replace_lock {
+                let old = self.lock.with_extension("synthetic-held-lock");
+                assert_eq!(old.parent(), self.lock.parent());
+                fs::rename(&self.lock, old).unwrap();
+                fs::write(&self.lock, []).unwrap();
+            } else {
+                let mut b = fs::read(&self.config).unwrap();
+                b.push(b' ');
+                fs::write(&self.config, b).unwrap();
+            }
+        }
+        Ok(())
+    }
+}
+#[test]
+fn final_observer_configuration_change_clears_prepared_and_postattempt_fields() {
+    for apply in [false, true] {
+        let f = Fixture::new();
+        let (op, request, at) = if apply {
+            let i = f.prepared();
+            (Operation::Apply, Request::Confirm(Box::new(i)), 4)
+        } else {
+            (
+                Operation::Prepare,
+                Request::Prepare(Uuid::new_v4().to_string(), f.conversation.to_string()),
+                3,
+            )
+        };
+        let observer = Arc::new(ChangedOnObservation {
+            config: f.config.clone(),
+            lock: f.paths.data.join("store.lock"),
+            at,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            replace_lock: false,
+        });
+        let report = engine::run(op, Some(f.config.clone()), request, observer);
+        assert_eq!(
+            report.status,
+            if apply {
+                Status::Acknowledged
+            } else {
+                Status::Prepared
+            }
+        );
+        let mut out = Vec::new();
+        report.write_to(&mut out).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["status"], if apply { "unknown" } else { "conflict" });
+        assert_eq!(v["possible_effect"], apply);
+        for key in ["intent", "receipt", "summary", "current_state"] {
+            assert!(v[key].is_null());
+        }
+    }
+}
+#[cfg(unix)]
+#[test]
+fn final_observer_named_lock_replacement_cannot_emit_prepared() {
+    let f = Fixture::new();
+    let observer = Arc::new(ChangedOnObservation {
+        config: f.config.clone(),
+        lock: f.paths.data.join("store.lock"),
+        at: 3,
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        replace_lock: true,
+    });
+    let report = engine::run(
+        Operation::Prepare,
+        Some(f.config.clone()),
+        Request::Prepare(Uuid::new_v4().to_string(), f.conversation.to_string()),
+        observer,
+    );
+    assert_eq!(report.status, Status::Prepared);
+    let mut out = Vec::new();
+    report.write_to(&mut out).unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["status"], "conflict");
+    assert!(v["intent"].is_null());
+    assert_eq!(v["possible_effect"], false);
+}
+
+use remarkable_open_sdk::{
+    capture::{synthetic::*, *},
+    mock::MockPlatform,
+    Platform,
+};
+use std::{io::Cursor, time::Duration};
+fn sdk(id: Uuid) -> remarkable_open_sdk::Uuid {
+    remarkable_open_sdk::Uuid::parse(&id.to_string()).unwrap()
+}
+fn png(image: &image::DynamicImage) -> Vec<u8> {
+    let mut bytes = Cursor::new(Vec::new());
+    image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+    bytes.into_inner()
+}
+fn batch(device: Uuid, document: Uuid, page: Uuid) -> CapturedBatch {
+    let source = MockPlatform::new(sdk(device), sdk(document), vec![sdk(page)], sdk(page))
+        .observe_page()
+        .unwrap();
+    let native = image::DynamicImage::ImageRgba8(image::RgbaImage::from_fn(4, 6, |x, y| {
+        image::Rgba([(x * 40) as u8, (y * 30) as u8, 10, 255])
+    }));
+    let acquisition = Acquisition {
+        before: source.clone(),
+        after: source.clone(),
+        rendered_owner: source.clone(),
+        render_generation: u64::MAX,
+        buffer_generation: u64::MAX,
+        input_changed: false,
+        interval: [
+            Duration::new((1u64 << 53) + 1, 123_456_789),
+            Duration::new(u64::MAX - 1, 999_999_999),
+        ],
+        viewport_revision: "fixture-viewport".into(),
+        conversion_procedure: "fixture-rgba8".into(),
+        procedure_revision: "fixture-generation-check".into(),
+        native_png: png(&native),
+        native_transform: Affine::new([0.25, -0.0, 0.0, 1.0 / 6.0, -0.0, 0.0]).unwrap(),
+        valid_source_region: SourceRegion {
+            x: -0.0,
+            y: 0.0,
+            width: 4.0,
+            height: 6.0,
+        },
+        target: Some([-0.0, 0.5]),
+    };
+    let request = CaptureRequest::new(
+        remarkable_open_sdk::OperationId(sdk(Uuid::new_v4())),
+        source,
+        Duration::new(u64::MAX, 0),
+        false,
+    );
+    let images = vec![
+        remarkable_open_sdk::capture::synthetic::ImageInput {
+            role: ImageRole::Overview,
+            crop: PixelRect {
+                x: 0,
+                y: 0,
+                width: 4,
+                height: 6,
+            },
+            output_dimensions: [2, 3],
+            filter: ResizeFilter::Nearest,
+            png: png(&native.resize_exact(2, 3, image::imageops::FilterType::Nearest)),
+        },
+        remarkable_open_sdk::capture::synthetic::ImageInput {
+            role: ImageRole::Detail(7),
+            crop: PixelRect {
+                x: 0,
+                y: 2,
+                width: 4,
+                height: 2,
+            },
+            output_dimensions: [4, 2],
+            filter: ResizeFilter::Nearest,
+            png: png(&native.crop_imm(0, 2, 4, 2)),
+        },
+    ];
+    validate_batch(&request, acquisition, images, CaptureLimits::default()).unwrap()
+}
+
+fn development_capture_fixture() -> (
+    remarkable_open_sdk::development_capture::ReadOnlyDevelopmentCapture,
+    Vec<u8>,
+    Vec<u8>,
+) {
+    use remarkable_open_sdk::development_capture::*;
+    let expected = ExpectedCaptureBinding {
+        nonce: "0123456789abcdef0123456789abcdef".into(),
+        attempt_pid: "42".into(),
+        attempt_start: "100".into(),
+        root_device: "19".into(),
+        root_inode: "200".into(),
+        document_id: "00000000-0000-4000-8000-000000000001".into(),
+        expected_order: vec!["00000000-0000-4000-8000-000000000002".into()],
+    };
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgba8(2, 3)
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .unwrap();
+    let png = encoded.into_inner();
+    let raw = serde_json::to_vec_pretty(&serde_json::json!({
+        "kind":"development-capture-observation", "version":2,
+        "nonce":expected.nonce, "attempt_pid":expected.attempt_pid, "attempt_start":expected.attempt_start,
+        "root_device":expected.root_device, "root_inode":expected.root_inode, "setup_profile":"main-dev-facts-120s",
+        "setup_budget_ms":120000, "capture_budget_ms":5000,
+        "accepted_ms":100, "baseline_ms":101, "grab_start_ms":102, "grab_end_ms":103, "post_read_ms":104, "completed_ms":105,
+        "document_id":expected.document_id, "page_id":expected.expected_order[0], "page_index":0,
+        "begin_epoch":"1", "end_epoch":"1", "width":2, "height":3, "dpr":1,
+        "image_width":2, "image_height":3, "png_bytes":png.len(), "png_sha256":crate::storage::digest(&png),
+        "image_status":"available", "gui_callback_completed":true, "scope_current":true,
+        "atomic_snapshot":false, "native_authority":false, "render_authority":false, "ui_acknowledged":false,
+        "observed_order":false, "discovery_scope":DISCOVERY_SCOPE
+    })).unwrap();
+    let capture =
+        ReadOnlyDevelopmentCapture::from_collected_v11(&expected, raw.clone(), png.clone())
+            .unwrap();
+    (capture, raw, png)
+}
+
+fn populated_variant(f: &Fixture, variant: &str) -> (Uuid, Uuid) {
+    let store = Arc::new(Store::open(f.paths.clone()).unwrap());
+    let ledger = Ledger::new(store);
+    let exchange = Uuid::new_v4();
+    let mut u = user(f.conversation, exchange);
+    let turn_id = u.id;
+    let source_id = if variant == "image" {
+        let bytes = png(&image::DynamicImage::new_rgba8(2, 3));
+        let image = storage::Media {
+            sha256: digest(&bytes),
+            bytes: bytes.len() as u64,
+            media_type: "image/png".into(),
+        };
+        ledger.stage_image(&image, bytes.as_slice()).unwrap();
+        let id = Uuid::new_v4();
+        u.sources = vec![id];
+        let source = ImageUse {
+            id,
+            conversation: f.conversation,
+            turn: u.id,
+            image,
+            observation: observation(),
+            width: 2,
+            height: 3,
+            purpose: "synthetic variant".into(),
+            ordinal: 0,
+            parent: None,
+            parent_dimensions: None,
+            crop: None,
+            transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            target: None,
+            captured_ms: 1,
+        };
+        ledger
+            .append(
+                Uuid::new_v4(),
+                ledger
+                    .expected(Namespace::Conversation, f.conversation)
+                    .unwrap(),
+                u,
+                vec![source],
+            )
+            .unwrap();
+        id
+    } else {
+        u.outcome = Outcome::Prepared;
+        u.text = None;
+        let id = match variant {
+            "legacy" => {
+                let bytes = png(&image::DynamicImage::new_rgba8(2, 3));
+                let id = Uuid::new_v4();
+                let input = LegacyImageInput {
+                    descriptor: LegacyImage {
+                        media: storage::Media {
+                            sha256: digest(&bytes),
+                            bytes: bytes.len() as u64,
+                            media_type: "image/png".into(),
+                        },
+                        dimensions: [2, 3],
+                        role: LegacyImageRole::Overview,
+                        provider_ordinal: Some(0),
+                    },
+                    bytes,
+                };
+                ledger
+                    .prepare_legacy(
+                        Uuid::new_v4(),
+                        ledger
+                            .expected(Namespace::Conversation, f.conversation)
+                            .unwrap(),
+                        u,
+                        id,
+                        None,
+                        vec![input],
+                    )
+                    .unwrap();
+                id
+            }
+            "sdk" => {
+                let batch = batch(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+                ledger
+                    .prepare_sdk_fixture(
+                        Uuid::new_v4(),
+                        ledger
+                            .expected(Namespace::Conversation, f.conversation)
+                            .unwrap(),
+                        u,
+                        &batch,
+                    )
+                    .unwrap()
+                    .capture
+            }
+            "development" => {
+                let (capture, _, _) = development_capture_fixture();
+                let id = Uuid::new_v4();
+                ledger
+                    .prepare_development(
+                        Uuid::new_v4(),
+                        ledger
+                            .expected(Namespace::Conversation, f.conversation)
+                            .unwrap(),
+                        u,
+                        id,
+                        &capture,
+                    )
+                    .unwrap();
+                id
+            }
+            _ => panic!("unknown synthetic variant"),
+        };
+        let e = ledger
+            .store()
+            .value(Namespace::Conversation, turn_id)
+            .unwrap()
+            .unwrap();
+        let Record::Turn(mut interpreted) = serde_json::from_value(e.payload).unwrap() else {
+            panic!("turn")
+        };
+        interpreted.outcome = Outcome::Interpreted;
+        interpreted.text = Some("synthetic interpreted capture".into());
+        ledger
+            .advance(
+                Uuid::new_v4(),
+                ledger
+                    .expected(Namespace::Conversation, f.conversation)
+                    .unwrap(),
+                ledger.expected(Namespace::Conversation, turn_id).unwrap(),
+                interpreted,
+            )
+            .unwrap();
+        id
+    };
+    let text = "synthetic completed capture";
+    let a = Turn {
+        id: Uuid::new_v4(),
+        conversation: f.conversation,
+        exchange,
+        sequence: 0,
+        role: Role::Assistant,
+        mode: Mode::Reader,
+        outcome: Outcome::Completed,
+        text: Some(text.into()),
+        sources: vec![],
+        correction_of: None,
+        created_ms: 2,
+        updated_ms: 2,
+        completion: Some(CompletionEvidence {
+            native_operation: Uuid::new_v4(),
+            exact_text: text.into(),
+            observation: observation(),
+            procedure: "synthetic only".into(),
+        }),
+    };
+    ledger
+        .append(
+            Uuid::new_v4(),
+            ledger
+                .expected(Namespace::Conversation, f.conversation)
+                .unwrap(),
+            a,
+            vec![],
+        )
+        .unwrap();
+    (source_id, turn_id)
+}
+#[test]
+fn every_supported_source_variant_keeps_original_provenance_and_media() {
+    for variant in ["image", "legacy", "sdk", "development"] {
+        let f = Fixture::new();
+        let _ = populated_variant(&f, variant);
+        let before = f.state();
+        let intent = f.prepared();
+        assert_eq!(intent.summary.source_records, 1);
+        let r = f.confirm(Operation::Apply, &intent);
+        assert_eq!(r.status, Status::Acknowledged, "variant{variant}");
+        drop(r);
+        let after = f.state();
+        for (p, b) in before {
+            assert_eq!(
+                after.get(&p),
+                Some(&b),
+                "variant{variant} rewrote historical bytes"
+            );
+        }
+    }
+}
+#[test]
+fn every_source_variant_refuses_orphan_foreign_and_changed_turn_links() {
+    for variant in ["image", "legacy", "sdk", "development"] {
+        for defect in ["orphan", "foreign", "turn"] {
+            let f = Fixture::new();
+            let (source, turn) = populated_variant(&f, variant);
+            let store = Store::open(f.paths.clone()).unwrap();
+            let (namespace, id) = if defect == "orphan" {
+                (Namespace::Conversation, turn)
+            } else {
+                (Namespace::Source, source)
+            };
+            let mut e = store.value(namespace, id).unwrap().unwrap();
+            let parent = e.revision_id;
+            e.revision_id = Uuid::new_v4();
+            e.operation_id = Uuid::new_v4();
+            e.actor_id = store.actor_id;
+            e.parents = BTreeSet::from([parent]);
+            match defect {
+                "orphan" => e.payload["record"]["sources"] = serde_json::json!([]),
+                "foreign" => {
+                    e.payload["record"]["conversation"] = serde_json::json!(Uuid::new_v4())
+                }
+                _ => e.payload["record"]["turn"] = serde_json::json!(Uuid::new_v4()),
+            };
+            store.commit(vec![e], BTreeMap::new()).unwrap();
+            drop(store);
+            let before = f.state();
+            let r = f.call(
+                Operation::Prepare,
+                Request::Prepare(Uuid::new_v4().to_string(), f.conversation.to_string()),
+            );
+            assert_eq!(r.status, Status::Conflict, "variant{variant}/{defect}");
+            drop(r);
+            assert_eq!(before, f.state());
+        }
+    }
+}

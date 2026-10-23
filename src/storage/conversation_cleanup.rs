@@ -129,6 +129,7 @@ struct Inventory {
     files: BTreeMap<String, Fact>,
     manifests: Vec<Manifest>,
     records: BTreeMap<String, Envelope>,
+    manifest_sha256: BTreeMap<Uuid, String>,
 }
 fn add(v: &mut u64, n: u64, max: u64) -> Result<()> {
     *v = v.checked_add(n).context("inventory overflow")?;
@@ -236,6 +237,7 @@ fn inventory(
                 ensure!(prior == (r.bytes, record), "inconsistent reference");
             }
         }
+        inv.manifest_sha256.insert(m.transaction_id, digest(&bytes));
         inv.manifests.push(m);
     }
     for (sha, f) in &inv.files {
@@ -387,46 +389,129 @@ fn rebuild(inv: &Inventory, budget: &mut Budget) -> Result<Index> {
     }
     Ok(index)
 }
+struct Headers {
+    facts: Vec<(Fact, String)>,
+    actor: Uuid,
+    generation: Uuid,
+}
+impl Headers {
+    fn capture(paths: &StorePaths, budget: &mut Budget) -> Result<Self> {
+        let mut facts = Vec::new();
+        fn read<T: serde::de::DeserializeOwned>(
+            path: &Path,
+            limit: u64,
+            budget: &mut Budget,
+            facts: &mut Vec<(Fact, String)>,
+        ) -> Result<T> {
+            let f = file(path)?;
+            let bytes = f.read(budget, limit)?;
+            inspection::strict_json(&bytes)?;
+            let value = serde_json::from_slice(&bytes)?;
+            facts.push((f, digest(&bytes)));
+            Ok(value)
+        }
+        let identity: Identity = read(&paths.data.join("identity.json"), MIB, budget, &mut facts)?;
+        ensure!(
+            identity.format == FORMAT && !identity.actor.is_nil(),
+            "invalid initial identity"
+        );
+        for root in [&paths.cache, &paths.credentials] {
+            let owner: Identity = read(&root.join("owner.json"), MIB, budget, &mut facts)?;
+            ensure!(
+                owner.actor == identity.actor && owner.format == FORMAT,
+                "foreign initial owner"
+            );
+        }
+        let generation: Uuid = read(&paths.data.join("CURRENT"), 128, budget, &mut facts)?;
+        ensure!(!generation.is_nil(), "nil initial generation");
+        let format: u32 = read(
+            &paths
+                .data
+                .join("generations")
+                .join(generation.to_string())
+                .join("format.json"),
+            64,
+            budget,
+            &mut facts,
+        )?;
+        ensure!(format == FORMAT, "initial generation not ordinary");
+        Ok(Self {
+            facts,
+            actor: identity.actor,
+            generation,
+        })
+    }
+    fn check(&self, budget: &mut Budget) -> Result<()> {
+        for (fact, sha) in &self.facts {
+            let bytes = fact.read(budget, fact.len)?;
+            ensure!(digest(&bytes) == *sha, "admitted header content changed");
+        }
+        Ok(())
+    }
+}
 pub(crate) struct Session {
     pub store: Arc<Store>,
     inventory: Inventory,
     pub budget: Budget,
-    headers: Vec<(Fact, String)>,
+    headers: Headers,
 }
 impl Session {
     pub(crate) fn open(paths: StorePaths, known: &BTreeMap<String, u64>) -> Result<Self> {
-        let mut budget = Budget::default();
+        Self::open_observed(paths, known, |_, _| Ok(()))
+    }
+    fn open_observed(
+        paths: StorePaths,
+        known: &BTreeMap<String, u64>,
+        during: impl FnOnce(&Store, Uuid) -> Result<()>,
+    ) -> Result<Self> {
+        use std::cell::RefCell;
+        let budget = RefCell::new(Budget::default());
+        let headers = RefCell::new(None::<Headers>);
         let mut saved = None;
-        let store = Store::open_existing_for_conversation(paths, |s, g| {
-            Self::check_lock(s)?;
-            let inv = inventory(s, g, &mut budget, known)?;
-            let index = rebuild(&inv, &mut budget)?;
-            saved = Some(inv);
-            Ok(index)
-        })?;
-        let store = Arc::new(store);
-        let mut headers = Vec::new();
-        let generation = store
-            .inner
-            .lock()
-            .map_err(|_| anyhow::anyhow!("mutex"))?
-            .generation;
-        for p in [
-            store.paths.data.join("identity.json"),
-            store.paths.data.join("CURRENT"),
-            store.generation(generation).join("format.json"),
-            store.paths.cache.join("owner.json"),
-            store.paths.credentials.join("owner.json"),
-        ] {
-            let f = file(&p)?;
-            let bytes = f.read(&mut budget, MIB)?;
-            headers.push((f, digest(&bytes)));
-        }
+        let store = Store::open_existing_for_conversation(
+            paths,
+            |paths, held| {
+                let named = file(&paths.data.join("store.lock"))?;
+                ensure!(
+                    named.identity == identity(&held.metadata()?),
+                    "initial lock changed"
+                );
+                let h = Headers::capture(paths, &mut budget.borrow_mut())?;
+                // The unchanged typed constructor rereads these five headers.
+                // Reserve its worst-case bounded reads before they can occur.
+                budget.borrow_mut().charge(3 * (MIB + 1) + 129 + 65, 5)?;
+                *headers.borrow_mut() = Some(h);
+                Ok(())
+            },
+            |s, g| {
+                Self::check_lock(s)?;
+                {
+                    let h = headers.borrow();
+                    let h = h.as_ref().context("initial headers absent")?;
+                    ensure!(
+                        h.actor == s.actor_id && h.generation == g,
+                        "initial admission changed"
+                    );
+                    h.check(&mut budget.borrow_mut())?;
+                }
+                let inv = inventory(s, g, &mut budget.borrow_mut(), known)?;
+                during(s, g)?;
+                let index = rebuild(&inv, &mut budget.borrow_mut())?;
+                headers
+                    .borrow()
+                    .as_ref()
+                    .context("initial headers absent")?
+                    .check(&mut budget.borrow_mut())?;
+                Self::check_lock(s)?;
+                saved = Some(inv);
+                Ok(index)
+            },
+        )?;
         let mut session = Self {
-            store,
+            store: Arc::new(store),
             inventory: saved.context("inventory absent")?,
-            budget,
-            headers,
+            budget: budget.into_inner(),
+            headers: headers.into_inner().context("headers absent")?,
         };
         session.check()?;
         Ok(session)
@@ -439,10 +524,7 @@ impl Session {
     }
     pub(crate) fn check(&mut self) -> Result<()> {
         Self::check_lock(&self.store)?;
-        for (f, _) in &self.headers {
-            self.budget.charge(0, 1)?;
-            f.check()?;
-        }
+        self.headers.check(&mut self.budget)?;
         for f in self.inventory.files.values() {
             self.budget.charge(0, 1)?;
             f.check()?;
@@ -670,6 +752,13 @@ impl Session {
         self.budget.charge(0, plan.records.len() as u64)?;
         if let Some(m) = inner.index.manifests.get(&plan.manifest.transaction_id) {
             ensure!(m == &plan.manifest, "changed original transaction");
+            ensure!(
+                self.inventory
+                    .manifest_sha256
+                    .get(&plan.manifest.transaction_id)
+                    == Some(&digest(&serde_json::to_vec(&plan.manifest)?)),
+                "original manifest bytes changed"
+            );
             for e in &plan.records {
                 ensure!(
                     inner
@@ -1036,10 +1125,14 @@ mod shared_reference_tests {
             .unwrap();
         }
         let mut budget = Budget::default();
-        let result = Store::open_existing_for_conversation(paths.clone(), |s, g| {
-            let inv = inventory(s, g, &mut budget, &BTreeMap::new())?;
-            rebuild(&inv, &mut budget)
-        });
+        let result = Store::open_existing_for_conversation(
+            paths.clone(),
+            |_, _| Ok(()),
+            |s, g| {
+                let inv = inventory(s, g, &mut budget, &BTreeMap::new())?;
+                rebuild(&inv, &mut budget)
+            },
+        );
         assert!(result.is_err());
         assert!(budget.exhausted);
         assert!(budget.bytes <= 512 * MIB && budget.visits <= 65536);
@@ -1049,5 +1142,100 @@ mod shared_reference_tests {
         );
         let lock = File::open(paths.data.join("store.lock")).unwrap();
         assert!(lock.try_lock().is_ok());
+    }
+}
+
+#[cfg(test)]
+mod header_race_tests {
+    use super::*;
+    struct Temp(PathBuf);
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                return;
+            }
+            let p = self.0.canonicalize().unwrap();
+            assert!(
+                p.starts_with(std::env::temp_dir().canonicalize().unwrap())
+                    && p.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with("buddy-cleanup-headers-v1-")
+            );
+            fs::remove_dir_all(p).unwrap();
+        }
+    }
+    fn fixture() -> (Temp, StorePaths) {
+        let t =
+            Temp(std::env::temp_dir().join(format!("buddy-cleanup-headers-v1-{}", Uuid::new_v4())));
+        let p = StorePaths {
+            data: t.0.join("data"),
+            cache: t.0.join("cache"),
+            credentials: t.0.join("credentials"),
+        };
+        drop(Store::open(p.clone()).unwrap());
+        (t, p)
+    }
+    fn change(paths: &StorePaths, g: Uuid, kind: usize) -> PathBuf {
+        let path = match kind {
+            0 => paths.data.join("CURRENT"),
+            1 => paths.data.join("identity.json"),
+            2 => paths.cache.join("owner.json"),
+            3 => paths.credentials.join("owner.json"),
+            _ => paths
+                .data
+                .join("generations")
+                .join(g.to_string())
+                .join("format.json"),
+        };
+        let old = file(&path).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        let next = match kind {
+            0 => serde_json::to_vec(&Uuid::new_v4()).unwrap(),
+            4 => b"2".to_vec(),
+            _ => serde_json::to_vec(&Identity {
+                format: FORMAT,
+                actor: Uuid::new_v4(),
+            })
+            .unwrap(),
+        };
+        assert_eq!(next.len(), bytes.len());
+        fs::write(&path, &next).unwrap();
+        let f = OpenOptions::new().write(true).open(&path).unwrap();
+        f.set_times(std::fs::FileTimes::new().set_modified(old.modified.unwrap()))
+            .unwrap();
+        old.check().unwrap();
+        assert_ne!(digest(&bytes), digest(&next));
+        path
+    }
+    #[test]
+    fn initial_header_bytes_survive_recovery_or_admission_refuses() {
+        for kind in 0..5 {
+            let (_t, p) = fixture();
+            let mut touched = None;
+            let result = Session::open_observed(p.clone(), &BTreeMap::new(), |s, g| {
+                touched = Some(change(&s.paths, g, kind));
+                Ok(())
+            });
+            assert!(
+                result.is_err(),
+                "changed header{kind} became a new baseline"
+            );
+            assert!(touched.unwrap().exists());
+            let lock = File::open(p.data.join("store.lock")).unwrap();
+            assert!(lock.try_lock().is_ok());
+        }
+    }
+    #[test]
+    fn later_same_length_same_metadata_header_rewrite_is_not_accepted() {
+        for kind in 0..5 {
+            let (_t, p) = fixture();
+            let mut session = Session::open(p.clone(), &BTreeMap::new()).unwrap();
+            let g = session.generation().unwrap();
+            let path = change(&p, g, kind);
+            let changed = fs::read(&path).unwrap();
+            assert!(session.check().is_err());
+            assert_eq!(fs::read(path).unwrap(), changed);
+        }
     }
 }

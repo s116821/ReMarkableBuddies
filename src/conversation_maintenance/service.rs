@@ -94,6 +94,7 @@ fn decode(b: &[u8]) -> Result<(), Status> {
     }
 }
 fn observe(path: &Path, args: &[&str], timeout: Duration) -> Result<(), Status> {
+    let start = Instant::now();
     let mut child = Command::new(path)
         .args(args)
         .env_clear()
@@ -122,7 +123,6 @@ fn observe(path: &Path, args: &[&str], timeout: Duration) -> Result<(), Status> 
     }
     let a = reader(out, tx.clone(), false);
     let b = reader(err, tx, true);
-    let start = Instant::now();
     let mut streams = Vec::new();
     let mut result = None;
     while start.elapsed() < timeout {
