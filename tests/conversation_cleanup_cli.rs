@@ -155,3 +155,41 @@ fn parser_and_missing_config_refuse_before_any_service() {
     }
     assert_eq!(fs::read_dir(&f.0).unwrap().count(), 0);
 }
+
+#[test]
+fn malformed_and_oversized_bodies_never_reach_configuration_or_service() {
+    let f = Fixture::new();
+    let cases = vec![
+        ("inspect", b"[]".to_vec()),
+        ("prepare", b"{}".to_vec()),
+        (
+            "inspect",
+            b"{\"request_version\":1,\"request_version\":1}".to_vec(),
+        ),
+        ("status", vec![b' '; 16385]),
+        (
+            "inspect",
+            b"{\"request_version\":1,\"conversation\":\"00000000-0000-0000-0000-000000000000\"}"
+                .to_vec(),
+        ),
+        ("apply", b"{\"intent\":[]}".to_vec()),
+    ];
+    for (op, body) in cases {
+        let mut c = spawn(&f, op, "-", &[]);
+        let write = c.stdin.take().unwrap().write_all(&body);
+        if cfg!(target_os = "linux") {
+            write.unwrap();
+        }
+        let out = collect(c);
+        record("malformed-or-overflow", op, "-", Some(&body), &[], &out);
+        assert_eq!(
+            report(&out)["status"],
+            if cfg!(target_os = "linux") {
+                "invalid-input"
+            } else {
+                "unsupported"
+            }
+        );
+    }
+    assert_eq!(fs::read_dir(&f.0).unwrap().count(), 0);
+}

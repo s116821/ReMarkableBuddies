@@ -370,6 +370,104 @@ fn synthetic_lost_ack_partial_objects_and_original_status_never_republish() {
         }
     }
 }
+
+#[test]
+fn before_objects_fault_has_no_effect_and_original_status_remains_unchanged() {
+    use storage::conversation_cleanup::{Plan, Session};
+    let f = Fixture::new();
+    let i = f.prepared();
+    let plan = Plan::new(&i).unwrap();
+    let before = f.state();
+    let mut session = Session::open(f.paths.clone(), &plan.known()).unwrap();
+    let mode = session.store.sync_mode_snapshot().unwrap();
+    let guard = session.store.ordinary_mode_lease(&mode.token).unwrap();
+    let snapshot = session.snapshot(f.conversation).unwrap();
+    session.reserve(&i, &plan, &snapshot).unwrap();
+    session.store.set_fault(Fault::BeforeObjects).unwrap();
+    let mut attempted = false;
+    assert!(session.publish(&i, &plan, &mut attempted).is_err());
+    assert!(attempted); // Dispatch began; caller must report uncertainty.
+    drop(guard);
+    drop(session);
+    assert_eq!(before, f.state());
+    let report = f.confirm(Operation::Status, &i);
+    assert_eq!(report.status, Status::Unchanged);
+    assert!(!report.possible_effect && report.receipt.is_none());
+    drop(report);
+    assert_eq!(before, f.state());
+}
+
+#[test]
+fn corrupt_original_receipt_and_changed_derived_identity_never_acknowledge() {
+    for defect in ["corrupt-object", "changed-manifest", "changed-derived"] {
+        let f = Fixture::new();
+        let i = f.prepared();
+        drop(f.confirm(Operation::Apply, &i));
+        let plan = storage::conversation_cleanup::Plan::new(&i).unwrap();
+        let g = f.paths.data.join("generations").join(&i.generation);
+        match defect {
+            "corrupt-object" => {
+                let receipt = plan.manifest.records.last().unwrap();
+                fs::write(g.join("objects").join(&receipt.sha256), b"corrupt original").unwrap();
+            }
+            "changed-manifest" => {
+                let mut manifest = plan.manifest.clone();
+                manifest.records.reverse();
+                fs::write(
+                    g.join("commits")
+                        .join(format!("{}.json", manifest.transaction_id)),
+                    serde_json::to_vec(&manifest).unwrap(),
+                )
+                .unwrap();
+            }
+            _ => {
+                fs::remove_file(
+                    g.join("commits")
+                        .join(format!("{}.json", plan.manifest.transaction_id)),
+                )
+                .unwrap();
+                let mut e = plan.records[0].clone();
+                e.actor_id = Uuid::new_v4();
+                let b = serde_json::to_vec(&e).unwrap();
+                let sha = digest(&b);
+                fs::write(g.join("objects").join(&sha), &b).unwrap();
+                let m = Manifest {
+                    format: 1,
+                    transaction_id: Uuid::new_v4(),
+                    scope: Scope::LocalTransaction,
+                    records: vec![ObjectRef {
+                        sha256: sha.clone(),
+                        bytes: b.len() as u64,
+                    }],
+                    record_namespaces: BTreeMap::from([(sha, Namespace::Conversation)]),
+                    media: vec![],
+                    media_coverage: vec![],
+                };
+                fs::write(
+                    g.join("commits").join(format!("{}.json", m.transaction_id)),
+                    serde_json::to_vec(&m).unwrap(),
+                )
+                .unwrap();
+            }
+        }
+        let before = f.state();
+        for op in [Operation::Apply, Operation::Status] {
+            let r = f.confirm(op, &i);
+            assert_eq!(
+                r.status,
+                if defect == "corrupt-object" {
+                    Status::Unsupported
+                } else {
+                    Status::Conflict
+                },
+                "{defect}"
+            );
+            assert!(r.receipt.is_none());
+            drop(r);
+            assert_eq!(before, f.state());
+        }
+    }
+}
 #[test]
 fn synthetic_historical_ack_survives_later_revision_and_conflict() {
     let f = Fixture::new();
@@ -447,8 +545,171 @@ fn synthetic_commit_entry_headroom_refuses_before_prepare() {
 }
 
 #[test]
-fn synthetic_historical_binding_is_tombstoned_without_history_loss() {
+fn actual_commit_entry_boundary_still_allows_original_receipt_reopen() {
     let f = Fixture::new();
+    let generation: Uuid = storage::files::json(&f.paths.data.join("CURRENT"), 128).unwrap();
+    let commits = f
+        .paths
+        .data
+        .join("generations")
+        .join(generation.to_string())
+        .join("commits");
+    let existing = fs::read_dir(&commits).unwrap().count();
+    for _ in existing..4094 {
+        fs::write(commits.join(format!(".stage-{}", Uuid::new_v4())), []).unwrap();
+    }
+    let i = f.prepared();
+    let r = f.confirm(Operation::Apply, &i);
+    assert_eq!(r.status, Status::Acknowledged);
+    drop(r);
+    assert_eq!(fs::read_dir(&commits).unwrap().count(), 4095);
+    let after = f.state();
+    for op in [Operation::Apply, Operation::Status] {
+        let r = f.confirm(op, &i);
+        assert_eq!(r.status, Status::Acknowledged);
+        drop(r);
+        assert_eq!(after, f.state());
+    }
+}
+
+#[test]
+fn completed_export_associations_are_retained_and_unsettled_exports_refuse() {
+    for outcome in [
+        Outcome::Completed,
+        Outcome::Prepared,
+        Outcome::Failed,
+        Outcome::Canceled,
+        Outcome::ReconcileRequired,
+    ] {
+        let f = Fixture::new();
+        let store = Arc::new(Store::open(f.paths.clone()).unwrap());
+        let ledger = Ledger::new(store);
+        let operation = Uuid::new_v4();
+        ledger
+            .associate_export(
+                operation,
+                ledger
+                    .expected(Namespace::Conversation, f.conversation)
+                    .unwrap(),
+                ExpectedHeads::default(),
+                ExportAssociation {
+                    id: Uuid::new_v4(),
+                    conversation: f.conversation,
+                    backend: "synthetic".into(),
+                    native_note: if outcome == Outcome::Completed {
+                        Some("synthetic-note-retain".into())
+                    } else {
+                        None
+                    },
+                    source_scope: "synthetic".into(),
+                    source_revision: "synthetic".into(),
+                    operation,
+                    outcome: outcome.clone(),
+                    attempt: None,
+                },
+            )
+            .unwrap();
+        drop(ledger);
+        let before = f.state();
+        if outcome == Outcome::Completed {
+            let i = f.prepared();
+            assert_eq!(i.summary.export_associations, 1);
+            drop(f.confirm(Operation::Apply, &i));
+            let after = f.state();
+            for (p, b) in before {
+                assert_eq!(after.get(&p), Some(&b));
+            }
+        } else {
+            let r = f.call(
+                Operation::Prepare,
+                Request::Prepare(Uuid::new_v4().to_string(), f.conversation.to_string()),
+            );
+            assert_eq!(r.status, Status::Conflict);
+            drop(r);
+            assert_eq!(before, f.state());
+        }
+    }
+}
+
+#[test]
+fn orphan_contradictory_and_ambiguous_outcome_facts_refuse() {
+    for defect in ["orphan", "contradictory", "ambiguous"] {
+        let f = Fixture::new();
+        let store = Arc::new(Store::open(f.paths.clone()).unwrap());
+        let ledger = Ledger::new(store.clone());
+        let mut turn = user(f.conversation, Uuid::new_v4());
+        turn.outcome = Outcome::Prepared;
+        turn.text = None;
+        let id = turn.id;
+        ledger
+            .append(
+                Uuid::new_v4(),
+                ledger
+                    .expected(Namespace::Conversation, f.conversation)
+                    .unwrap(),
+                turn,
+                vec![],
+            )
+            .unwrap();
+        let mut e = store.value(Namespace::Conversation, id).unwrap().unwrap();
+        e.parents = BTreeSet::from([e.revision_id]);
+        e.revision_id = Uuid::new_v4();
+        e.operation_id = Uuid::new_v4();
+        e.payload["record"]["outcome"] = serde_json::json!("failed");
+        let fact_id = Uuid::new_v4();
+        let fact = OutcomeFact {
+            id: fact_id,
+            conversation: f.conversation,
+            turn: if defect == "orphan" {
+                Uuid::new_v4()
+            } else {
+                id
+            },
+            outcome: if defect == "contradictory" {
+                Outcome::Canceled
+            } else {
+                Outcome::Failed
+            },
+            reason: AttemptReason::RequestFailed,
+            settlement: None,
+        };
+        let envelope = Envelope {
+            envelope_version: 1,
+            namespace: Namespace::Conversation,
+            domain_schema_version: 1,
+            record_id: fact_id,
+            revision_id: Uuid::new_v4(),
+            parents: BTreeSet::new(),
+            operation_id: Uuid::new_v4(),
+            actor_id: store.actor_id,
+            kind: Kind::Value,
+            payload: serde_json::to_value(Record::OutcomeFact(fact)).unwrap(),
+            media_descriptors: vec![],
+        };
+        let mut records = vec![e, envelope.clone()];
+        if defect == "ambiguous" {
+            let mut another = envelope;
+            another.record_id = Uuid::new_v4();
+            another.revision_id = Uuid::new_v4();
+            another.operation_id = Uuid::new_v4();
+            another.payload["record"]["id"] = serde_json::json!(another.record_id);
+            records.push(another);
+        }
+        store.commit(records, BTreeMap::new()).unwrap();
+        drop(ledger);
+        drop(store);
+        let before = f.state();
+        let r = f.call(
+            Operation::Prepare,
+            Request::Prepare(Uuid::new_v4().to_string(), f.conversation.to_string()),
+        );
+        assert_eq!(r.status, Status::Conflict, "{defect}");
+        drop(r);
+        assert_eq!(before, f.state());
+    }
+}
+
+fn bind_historical_fixture(f: &Fixture) -> Uuid {
     let store = Arc::new(Store::open(f.paths.clone()).unwrap());
     let ledger = Ledger::new(store);
     let source = observation();
@@ -481,6 +742,12 @@ fn synthetic_historical_binding_is_tombstoned_without_history_loss() {
         )
         .unwrap();
     drop(ledger);
+    binding
+}
+#[test]
+fn synthetic_historical_binding_is_tombstoned_without_history_loss() {
+    let f = Fixture::new();
+    let binding = bind_historical_fixture(&f);
     let before = f.state();
     let intent = f.prepared();
     assert_eq!(intent.binding.as_ref().unwrap().id, binding.to_string());
@@ -540,6 +807,121 @@ fn synthetic_terminal_failed_request_uses_same_manifest_fact() {
     let intent = f.prepared();
     assert_eq!(before, f.state());
     drop(f.confirm(Operation::Apply, &intent));
+}
+
+#[test]
+fn missing_foreign_conflicted_and_changed_original_bindings_refuse() {
+    for defect in ["missing", "foreign", "conflict", "changed-original"] {
+        let f = Fixture::new();
+        let binding = bind_historical_fixture(&f);
+        let intent = f.prepared();
+        let store = Store::open(f.paths.clone()).unwrap();
+        let mut e = store
+            .value(Namespace::Conversation, binding)
+            .unwrap()
+            .unwrap();
+        e.parents = if defect == "conflict" {
+            e.parents.clone()
+        } else {
+            BTreeSet::from([e.revision_id])
+        };
+        e.revision_id = Uuid::new_v4();
+        e.operation_id = Uuid::new_v4();
+        match defect {
+            "missing" => {
+                e.kind = Kind::Tombstone;
+                e.payload = serde_json::Value::Null;
+            }
+            "foreign" => {
+                let foreign = Uuid::new_v4();
+                e.payload["record"]["conversation"] = serde_json::json!(foreign);
+                e.payload["record"]["receipt"]["conversation"] = serde_json::json!(foreign);
+            }
+            _ => {
+                e.payload["record"]["receipt"]["persisted_revision"] =
+                    serde_json::json!("changed synthetic evidence")
+            }
+        }
+        if defect == "conflict" {
+            // Import deliberately models a competing retained branch; the normal
+            // local commit correctly rejects stale expected parents itself.
+            let b = serde_json::to_vec(&e).unwrap();
+            let sha = digest(&b);
+            store
+                .import(
+                    Manifest {
+                        format: 1,
+                        transaction_id: Uuid::new_v4(),
+                        scope: Scope::LocalTransaction,
+                        records: vec![ObjectRef {
+                            sha256: sha.clone(),
+                            bytes: b.len() as u64,
+                        }],
+                        record_namespaces: BTreeMap::from([(sha.clone(), Namespace::Conversation)]),
+                        media: vec![],
+                        media_coverage: vec![],
+                    },
+                    BTreeMap::from([(sha, b)]),
+                )
+                .unwrap();
+        } else {
+            store.commit(vec![e], BTreeMap::new()).unwrap();
+        }
+        drop(store);
+        let before = f.state();
+        let r = if defect == "changed-original" {
+            f.confirm(Operation::Apply, &intent)
+        } else {
+            f.call(
+                Operation::Prepare,
+                Request::Prepare(Uuid::new_v4().to_string(), f.conversation.to_string()),
+            )
+        };
+        assert_eq!(r.status, Status::Conflict, "{defect}");
+        drop(r);
+        assert_eq!(before, f.state());
+    }
+}
+
+#[test]
+fn shared_isolated_and_legacy_sync_enabled_never_grant_local_deletion() {
+    use storage::sync::mode::SyncModeChoice;
+    for choice in [
+        SyncModeChoice::IsolatedBackup {
+            binding_sha256: "a".repeat(64),
+        },
+        SyncModeChoice::SharedGroup {
+            group: Uuid::new_v4(),
+            binding_sha256: "b".repeat(64),
+            root_id: "synthetic-owned-root".into(),
+        },
+    ] {
+        let f = Fixture::new();
+        let store = Store::open(f.paths.clone()).unwrap();
+        let token = store.sync_mode_snapshot().unwrap().token;
+        store.set_sync_mode(&token, Uuid::new_v4(), choice).unwrap();
+        drop(store);
+        let before = f.state();
+        let r = f.call(
+            Operation::Prepare,
+            Request::Prepare(Uuid::new_v4().to_string(), f.conversation.to_string()),
+        );
+        assert_eq!(r.status, Status::Unsupported);
+        drop(r);
+        assert_eq!(before, f.state());
+    }
+    let f = Fixture::new();
+    let mut config: Config = serde_json::from_slice(&fs::read(&f.config).unwrap()).unwrap();
+    config.sync.enabled = true;
+    fs::write(&f.config, serde_json::to_vec(&config).unwrap()).unwrap();
+    let before = f.state();
+    let r = f.call(
+        Operation::Prepare,
+        Request::Prepare(Uuid::new_v4().to_string(), f.conversation.to_string()),
+    );
+    assert_eq!(r.status, Status::Unavailable);
+    drop(r);
+    assert_eq!(before, f.state());
 }
 #[test]
 fn synthetic_output_failure_holds_lock_and_cannot_emit_second_report() {
@@ -1142,5 +1524,427 @@ fn every_source_variant_refuses_orphan_foreign_and_changed_turn_links() {
             drop(r);
             assert_eq!(before, f.state());
         }
+    }
+}
+
+#[test]
+fn matching_tombstone_without_original_receipt_is_unresolved_not_acknowledged() {
+    let f = Fixture::new();
+    let intent = f.prepared();
+    let report = f.confirm(Operation::Apply, &intent);
+    assert_eq!(report.status, Status::Acknowledged);
+    drop(report);
+    let plan = storage::conversation_cleanup::Plan::new(&intent).unwrap();
+    let commits = f
+        .paths
+        .data
+        .join("generations")
+        .join(&intent.generation)
+        .join("commits");
+    fs::remove_file(commits.join(format!("{}.json", plan.manifest.transaction_id))).unwrap();
+    // Separate deliberate fixture publication: a matching tombstone is evidence of
+    // current state, never proof of the original deterministic transaction.
+    let root = &plan.manifest.records[0];
+    let other = Manifest {
+        format: 1,
+        transaction_id: Uuid::new_v4(),
+        scope: Scope::LocalTransaction,
+        records: vec![root.clone()],
+        record_namespaces: BTreeMap::from([(root.sha256.clone(), Namespace::Conversation)]),
+        media: vec![],
+        media_coverage: vec![],
+    };
+    fs::write(
+        commits.join(format!("{}.json", other.transaction_id)),
+        serde_json::to_vec(&other).unwrap(),
+    )
+    .unwrap();
+    let before = f.state();
+    for op in [Operation::Status, Operation::Apply] {
+        let r = f.confirm(op, &intent);
+        assert_eq!(r.status, Status::Unresolved);
+        assert!(r.receipt.is_none());
+        assert!(r.possible_effect);
+        drop(r);
+        assert_eq!(before, f.state());
+    }
+}
+
+#[test]
+fn already_used_operation_refuses_preparation_before_any_publication() {
+    let f = Fixture::new();
+    let store = Store::open(f.paths.clone()).unwrap();
+    let receipts = store
+        .snapshot_heads_matching(&[Namespace::Conversation], 4096, |e| {
+            e.payload["record_kind"] == "receipt"
+        })
+        .unwrap();
+    let operation = receipts[0].payload["record"]["acknowledgment"]["operation"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    drop(store);
+    let before = f.state();
+    let report = f.call(
+        Operation::Prepare,
+        Request::Prepare(operation, f.conversation.to_string()),
+    );
+    assert_eq!(report.status, Status::Conflict);
+    assert!(report.intent.is_none());
+    drop(report);
+    assert_eq!(before, f.state());
+}
+
+#[test]
+fn complete_closed_request_shapes_and_intent_mutations_refuse() {
+    let id = "11111111-1111-4111-8111-111111111111";
+    for body in [
+        serde_json::json!({"request_version":2,"conversation":id}),
+        serde_json::json!({"request_version":1,"conversation":"00000000-0000-0000-0000-000000000000"}),
+        serde_json::json!({"request_version":1,"conversation":"ABCDEFAB-1111-4111-8111-111111111111"}),
+        serde_json::json!({"request_version":1,"conversation":id,"unknown":"synthetic-private-value"}),
+        serde_json::json!({"request_version":1.0,"conversation":id}),
+        serde_json::json!({"request_version":true,"conversation":id}),
+    ] {
+        assert!(parse(Operation::Inspect, &serde_json::to_vec(&body).unwrap()).is_err());
+    }
+    let vectors: serde_json::Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/conversation_cleanup_digest_vectors.json"
+    ))
+    .unwrap();
+    let mut original = vectors["cases"][1]["original_fields"].clone();
+    original["intent_sha256"] = vectors["cases"][1]["intent_sha256"].clone();
+    for key in ["binding", "root", "summary"] {
+        for value in [serde_json::json!([]), serde_json::json!({"unknown":1})] {
+            let mut changed = original.clone();
+            changed[key] = value;
+            assert!(parse(
+                Operation::Apply,
+                &serde_json::to_vec(&serde_json::json!({"intent":changed})).unwrap()
+            )
+            .is_err());
+        }
+    }
+    for key in ["binding", "summary", "root", "intent_sha256"] {
+        let mut changed = original.clone();
+        changed.as_object_mut().unwrap().remove(key);
+        assert!(parse(
+            Operation::Status,
+            &serde_json::to_vec(&serde_json::json!({"intent":changed})).unwrap()
+        )
+        .is_err());
+    }
+    let mut changed = original.clone();
+    changed["summary"]["turns"] = serde_json::json!(4097);
+    assert!(parse(
+        Operation::Apply,
+        &serde_json::to_vec(&serde_json::json!({"intent":changed})).unwrap()
+    )
+    .is_err());
+    let mut changed: Intent = serde_json::from_value(original).unwrap();
+    changed.root.sha256 = "1".repeat(64);
+    assert!(changed.validate().is_err());
+}
+#[test]
+fn existing_only_missing_markers_and_unknown_layouts_never_initialize_or_repair() {
+    for kind in 0..9 {
+        let f = Fixture::new();
+        let generation: Uuid = storage::files::json(&f.paths.data.join("CURRENT"), 128).unwrap();
+        let g = f
+            .paths
+            .data
+            .join("generations")
+            .join(generation.to_string());
+        match kind {
+            0 => fs::remove_file(f.paths.data.join("identity.json")).unwrap(),
+            1 => fs::remove_file(f.paths.data.join("CURRENT")).unwrap(),
+            2 => fs::remove_file(f.paths.cache.join("owner.json")).unwrap(),
+            3 => fs::remove_file(f.paths.credentials.join("owner.json")).unwrap(),
+            4 => fs::remove_file(f.paths.data.join("store.lock")).unwrap(),
+            5 => fs::write(g.join("format.json"), b"2").unwrap(),
+            6 => fs::write(g.join("selection-feature.json"), b"{}").unwrap(),
+            7 => fs::write(g.join("unknown-entry"), b"retain").unwrap(),
+            _ => fs::write(g.join("objects").join("unknown-object"), b"retain").unwrap(),
+        }
+        let before = f.state();
+        let r = f.call(
+            Operation::Prepare,
+            Request::Prepare(Uuid::new_v4().to_string(), f.conversation.to_string()),
+        );
+        assert!(matches!(
+            r.status,
+            Status::Unavailable | Status::Unsupported | Status::Conflict
+        ));
+        assert!(!r.possible_effect && r.intent.is_none());
+        drop(r);
+        assert_eq!(before, f.state(), "layout{kind} repaired");
+    }
+}
+#[test]
+fn explicit_local_mode_is_supported_and_changed_mode_or_generation_is_not() {
+    use storage::sync::mode::SyncModeChoice;
+    let f = Fixture::new();
+    let store = Store::open(f.paths.clone()).unwrap();
+    let mode = store.sync_mode_snapshot().unwrap();
+    store
+        .set_sync_mode(&mode.token, Uuid::new_v4(), SyncModeChoice::LocalOnly)
+        .unwrap();
+    drop(store);
+    let i = f.prepared();
+    drop(f.confirm(Operation::Apply, &i));
+    let f = Fixture::new();
+    let i = f.prepared();
+    let store = Store::open(f.paths.clone()).unwrap();
+    let mode = store.sync_mode_snapshot().unwrap();
+    store
+        .set_sync_mode(&mode.token, Uuid::new_v4(), SyncModeChoice::LocalOnly)
+        .unwrap();
+    drop(store);
+    let before = f.state();
+    assert_eq!(f.confirm(Operation::Apply, &i).status, Status::Conflict);
+    assert_eq!(before, f.state());
+    let f = Fixture::new();
+    let i = f.prepared();
+    let g = Uuid::new_v4();
+    let root = f.paths.data.join("generations").join(g.to_string());
+    fs::create_dir(&root).unwrap();
+    fs::create_dir(root.join("objects")).unwrap();
+    fs::create_dir(root.join("commits")).unwrap();
+    fs::write(root.join("format.json"), b"1").unwrap();
+    fs::write(
+        f.paths.data.join("CURRENT"),
+        serde_json::to_vec(&g).unwrap(),
+    )
+    .unwrap();
+    let before = f.state();
+    assert_eq!(f.confirm(Operation::Apply, &i).status, Status::Conflict);
+    assert_eq!(before, f.state());
+}
+#[test]
+fn retained_schema_two_is_refused_even_with_current_schema_one() {
+    let f = Fixture::new();
+    let store = Store::open(f.paths.clone()).unwrap();
+    let mut e = store
+        .value(Namespace::Conversation, f.conversation)
+        .unwrap()
+        .unwrap();
+    e.parents = BTreeSet::from([e.revision_id]);
+    e.revision_id = Uuid::new_v4();
+    e.operation_id = Uuid::new_v4();
+    e.domain_schema_version = 2;
+    store.commit(vec![e.clone()], BTreeMap::new()).unwrap();
+    e.parents = BTreeSet::from([e.revision_id]);
+    e.revision_id = Uuid::new_v4();
+    e.operation_id = Uuid::new_v4();
+    e.domain_schema_version = 1;
+    store.commit(vec![e], BTreeMap::new()).unwrap();
+    drop(store);
+    let before = f.state();
+    let r = f.call(
+        Operation::Prepare,
+        Request::Prepare(Uuid::new_v4().to_string(), f.conversation.to_string()),
+    );
+    assert_eq!(r.status, Status::Conflict);
+    drop(r);
+    assert_eq!(before, f.state());
+}
+#[test]
+fn ordinary_staging_and_unrelated_original_documents_remain_unchanged() {
+    let f = Fixture::new();
+    let g: Uuid = storage::files::json(&f.paths.data.join("CURRENT"), 128).unwrap();
+    let root = f.paths.data.join("generations").join(g.to_string());
+    let stage = root
+        .join("objects")
+        .join(format!(".stage-{}", Uuid::new_v4()));
+    fs::write(&stage, b"retain incomplete bytes").unwrap();
+    fs::write(f.root.join("original.pdf"), b"synthetic unrelated original").unwrap();
+    let before = f.state();
+    let i = f.prepared();
+    drop(f.confirm(Operation::Apply, &i));
+    let after = f.state();
+    for (p, b) in before {
+        assert_eq!(after.get(&p), Some(&b));
+    }
+    assert_eq!(fs::read(stage).unwrap(), b"retain incomplete bytes");
+}
+
+#[test]
+fn settled_exchange_variants_and_ambiguous_or_pending_states_are_distinct() {
+    for terminal in [Outcome::Failed, Outcome::Canceled] {
+        let f = Fixture::new();
+        let store = Arc::new(Store::open(f.paths.clone()).unwrap());
+        let ledger = Ledger::new(store);
+        let exchange = Uuid::new_v4();
+        let u = user(f.conversation, exchange);
+        ledger
+            .append(
+                Uuid::new_v4(),
+                ledger
+                    .expected(Namespace::Conversation, f.conversation)
+                    .unwrap(),
+                u,
+                vec![],
+            )
+            .unwrap();
+        let mut a = user(f.conversation, exchange);
+        a.id = Uuid::new_v4();
+        a.role = Role::Assistant;
+        a.outcome = Outcome::Generated;
+        a.text = Some("synthetic draft".into());
+        let id = a.id;
+        ledger
+            .append(
+                Uuid::new_v4(),
+                ledger
+                    .expected(Namespace::Conversation, f.conversation)
+                    .unwrap(),
+                a,
+                vec![],
+            )
+            .unwrap();
+        let e = ledger
+            .store()
+            .value(Namespace::Conversation, id)
+            .unwrap()
+            .unwrap();
+        let Record::Turn(mut a) = serde_json::from_value(e.payload).unwrap() else {
+            panic!("turn")
+        };
+        a.outcome = terminal;
+        ledger
+            .record_attempt_outcome(
+                Uuid::new_v4(),
+                ledger
+                    .expected(Namespace::Conversation, f.conversation)
+                    .unwrap(),
+                ledger.expected(Namespace::Conversation, id).unwrap(),
+                a,
+                AttemptReason::ProviderFailure,
+            )
+            .unwrap();
+        drop(ledger);
+        let i = f.prepared();
+        assert_eq!(i.summary.turns, 2);
+    }
+    for defect in [
+        "duplicate-user",
+        "duplicate-assistant",
+        "wrong-exchange",
+        "wrong-mode",
+        "pending",
+        "uncertain",
+    ] {
+        let f = Fixture::new();
+        append_pair(&f, true);
+        let store = Store::open(f.paths.clone()).unwrap();
+        let mut turns = store
+            .snapshot_heads_matching(&[Namespace::Conversation], 4096, |e| {
+                e.payload["record_kind"] == "turn"
+            })
+            .unwrap();
+        turns.sort_by_key(|e| e.payload["record"]["sequence"].as_u64());
+        let mut e = if defect == "duplicate-user" {
+            turns[0].clone()
+        } else {
+            turns[1].clone()
+        };
+        let old = e.revision_id;
+        e.revision_id = Uuid::new_v4();
+        e.operation_id = Uuid::new_v4();
+        e.parents = BTreeSet::from([old]);
+        match defect {
+            "duplicate-user" => {
+                let mut root = store
+                    .value(Namespace::Conversation, f.conversation)
+                    .unwrap()
+                    .unwrap();
+                root.parents = BTreeSet::from([root.revision_id]);
+                root.revision_id = Uuid::new_v4();
+                root.operation_id = Uuid::new_v4();
+                root.payload["record"]["next_sequence"] = serde_json::json!(3);
+                e.record_id = Uuid::new_v4();
+                e.payload["record"]["id"] = serde_json::json!(e.record_id);
+                e.parents.clear();
+                e.payload["record"]["sequence"] = serde_json::json!(2);
+                store.commit(vec![root, e], BTreeMap::new()).unwrap();
+            }
+            "duplicate-assistant" => {
+                let mut root = store
+                    .value(Namespace::Conversation, f.conversation)
+                    .unwrap()
+                    .unwrap();
+                root.parents = BTreeSet::from([root.revision_id]);
+                root.revision_id = Uuid::new_v4();
+                root.operation_id = Uuid::new_v4();
+                root.payload["record"]["next_sequence"] = serde_json::json!(3);
+                e.record_id = Uuid::new_v4();
+                e.payload["record"]["id"] = serde_json::json!(e.record_id);
+                e.parents.clear();
+                e.payload["record"]["sequence"] = serde_json::json!(2);
+                store.commit(vec![root, e], BTreeMap::new()).unwrap();
+            }
+            "wrong-exchange" => {
+                e.payload["record"]["exchange"] = serde_json::json!(Uuid::new_v4());
+                store.commit(vec![e], BTreeMap::new()).unwrap();
+            }
+            "wrong-mode" => {
+                e.payload["record"]["mode"] = serde_json::json!("writer");
+                store.commit(vec![e], BTreeMap::new()).unwrap();
+            }
+            _ => {
+                e.payload["record"]["outcome"] = serde_json::json!(if defect == "pending" {
+                    "generated"
+                } else {
+                    "reconcile-required"
+                });
+                e.payload["record"]["completion"] = serde_json::Value::Null;
+                store.commit(vec![e], BTreeMap::new()).unwrap();
+            }
+        }
+        drop(store);
+        let before = f.state();
+        let r = f.call(
+            Operation::Prepare,
+            Request::Prepare(Uuid::new_v4().to_string(), f.conversation.to_string()),
+        );
+        assert_eq!(r.status, Status::Conflict, "defect{defect}");
+        drop(r);
+        assert_eq!(before, f.state());
+    }
+}
+#[cfg(unix)]
+#[test]
+fn symlink_and_hardlinked_owned_payloads_refuse_without_following_or_repair() {
+    for hardlink in [false, true] {
+        let f = Fixture::new();
+        let g: Uuid = storage::files::json(&f.paths.data.join("CURRENT"), 128).unwrap();
+        let objects = f
+            .paths
+            .data
+            .join("generations")
+            .join(g.to_string())
+            .join("objects");
+        let path = fs::read_dir(&objects)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let other = f.root.join("outside-owned-payload");
+        if hardlink {
+            fs::hard_link(&path, &other).unwrap();
+        } else {
+            fs::rename(&path, &other).unwrap();
+            std::os::unix::fs::symlink(&other, &path).unwrap();
+        }
+        let content = fs::read(&other).unwrap();
+        let r = f.call(
+            Operation::Prepare,
+            Request::Prepare(Uuid::new_v4().to_string(), f.conversation.to_string()),
+        );
+        assert!(matches!(r.status, Status::Unsupported | Status::Conflict));
+        assert!(!r.possible_effect);
+        drop(r);
+        assert_eq!(fs::read(other).unwrap(), content);
     }
 }

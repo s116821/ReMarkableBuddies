@@ -187,6 +187,32 @@ mod tests {
             decode(b"LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=1\n"),
             Err(Status::Busy)
         );
+        for active in [
+            "activating",
+            "deactivating",
+            "failed",
+            "reloading",
+            "maintenance",
+        ] {
+            let body =
+                format!("LoadState=loaded\nActiveState={active}\nSubState=dead\nMainPID=0\n");
+            assert_eq!(decode(body.as_bytes()), Err(Status::Busy));
+        }
+        for load in ["not-found", "error", "bad-setting", "masked"] {
+            let body =
+                format!("LoadState={load}\nActiveState=inactive\nSubState=dead\nMainPID=0\n");
+            assert_eq!(decode(body.as_bytes()), Err(Status::Busy));
+        }
+        for bad in [
+            "LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=00\n",
+            "LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=-1\n",
+            "LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=4294967296\n",
+            "LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nExtra=1\n",
+            "LoadState=unknown\nActiveState=inactive\nSubState=dead\nMainPID=0\n",
+        ] {
+            assert_eq!(decode(bad.as_bytes()), Err(Status::Unavailable));
+        }
+        assert_eq!(decode(&[0xff]), Err(Status::Unavailable));
     }
 }
 
@@ -247,6 +273,80 @@ mod child_controls {
             decode(
                 b"LoadState=loaded\nActiveState=inactive\nSubState=unknown-synthetic\nMainPID=0\n"
             ),
+            Err(Status::Unavailable)
+        );
+    }
+}
+
+#[cfg(test)]
+mod process_fixture_tests {
+    use super::*;
+    struct Temp(std::path::PathBuf);
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                return;
+            }
+            let p = self.0.canonicalize().unwrap();
+            assert!(
+                p.starts_with(std::env::temp_dir().canonicalize().unwrap())
+                    && p.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with("buddy-cleanup-process-v1-")
+            );
+            std::fs::remove_dir_all(p).unwrap();
+        }
+    }
+    #[test]
+    fn synthetic_process_success_errors_limits_environment_and_null_input() {
+        let temp = Temp(std::env::temp_dir().join(format!(
+            "buddy-cleanup-process-v1-{}",
+            crate::storage::Uuid::new_v4()
+        )));
+        std::fs::create_dir(&temp.0).unwrap();
+        let exe = temp
+            .0
+            .join(format!("synthetic-unit{}", std::env::consts::EXE_SUFFIX));
+        let output = Command::new("rustc")
+            .args([
+                "--edition=2021",
+                "--crate-name",
+                "conversation_service_fixture",
+            ])
+            .arg(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/conversation_service_fixture.rs"),
+            )
+            .arg("-o")
+            .arg(&exe)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(observe(&exe, &["good"], Duration::from_secs(3)), Ok(()));
+        assert_eq!(
+            observe(&exe, &["busy"], Duration::from_secs(3)),
+            Err(Status::Busy)
+        );
+        for mode in ["stderr", "duplicate", "overflow", "nonzero"] {
+            assert_eq!(
+                observe(&exe, &[mode], Duration::from_secs(3)),
+                Err(Status::Unavailable),
+                "mode{mode}"
+            );
+        }
+        let start = Instant::now();
+        assert_eq!(
+            observe(&exe, &["wait"], Duration::from_millis(250)),
+            Err(Status::Unavailable)
+        );
+        assert!(start.elapsed() < Duration::from_secs(3));
+        assert_eq!(
+            observe(&temp.0.join("missing-program"), &[], Duration::from_secs(3)),
             Err(Status::Unavailable)
         );
     }

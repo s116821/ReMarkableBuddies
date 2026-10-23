@@ -816,21 +816,28 @@ impl Session {
             }
             return Ok(true);
         }
+        // Exact derived records under another/partial transaction establish
+        // possible current state, never the original receipt or fresh dispatch.
         for e in &plan.records {
-            ensure!(
-                !inner.index.records.contains_key(&e.revision_id)
-                    && !inner.index.operations.contains_key(&e.operation_id),
-                "partial/changed original receipt"
-            );
+            let expected = digest(&serde_json::to_vec(e)?);
+            if let Some((stored, sha)) = inner.index.records.get(&e.revision_id) {
+                ensure!(stored == e && *sha == expected, "changed partial record");
+            }
+            if let Some(sha) = inner.index.operations.get(&e.operation_id) {
+                ensure!(*sha == expected, "changed partial operation");
+            }
         }
         let receipt = plan.records.last().context("receipt absent")?;
-        ensure!(
-            !inner
-                .index
-                .heads
-                .contains_key(&(receipt.namespace, receipt.record_id)),
-            "operation reused"
-        );
+        if let Some(heads) = inner
+            .index
+            .heads
+            .get(&(receipt.namespace, receipt.record_id))
+        {
+            ensure!(
+                *heads == BTreeSet::from([receipt.revision_id]),
+                "operation reused"
+            );
+        }
         Ok(false)
     }
     pub(crate) fn partial(&self, plan: &Plan) -> bool {
@@ -899,6 +906,14 @@ impl Session {
                 .manifests
                 .contains_key(&plan.manifest.transaction_id),
             "transaction collision"
+        );
+        let receipt = plan.records.last().context("receipt absent")?;
+        ensure!(
+            !inner
+                .index
+                .heads
+                .contains_key(&(receipt.namespace, receipt.record_id)),
+            "operation already used"
         );
         for e in &plan.records {
             ensure!(
@@ -1237,5 +1252,234 @@ mod header_race_tests {
             assert!(session.check().is_err());
             assert_eq!(fs::read(path).unwrap(), changed);
         }
+    }
+}
+
+#[cfg(test)]
+mod reservation_boundary_tests {
+    use super::*;
+    use crate::{
+        conversation::{BindingReceipt, ExpectedHeads, Ledger, SourceObservation},
+        conversation_maintenance::{Binding, Expected, Summary},
+    };
+    struct Temp(PathBuf);
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                return;
+            }
+            let p = self.0.canonicalize().unwrap();
+            assert!(
+                p.starts_with(std::env::temp_dir().canonicalize().unwrap())
+                    && p.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with("buddy-cleanup-reservation-v1-")
+            );
+            fs::remove_dir_all(p).unwrap();
+        }
+    }
+    fn fixture(
+        bound: bool,
+    ) -> (
+        Temp,
+        Session,
+        Snapshot,
+        Intent,
+        Plan,
+        sync::mode::OrdinaryModeLease,
+    ) {
+        let t = Temp(
+            std::env::temp_dir().join(format!("buddy-cleanup-reservation-v1-{}", Uuid::new_v4())),
+        );
+        let paths = StorePaths {
+            data: t.0.join("data"),
+            cache: t.0.join("cache"),
+            credentials: t.0.join("credentials"),
+        };
+        let store = Arc::new(Store::open(paths.clone()).unwrap());
+        let ledger = Ledger::new(store);
+        let conversation = Uuid::new_v4();
+        ledger.create(conversation, Uuid::new_v4(), 1).unwrap();
+        if bound {
+            let document = Uuid::new_v4();
+            let page = Uuid::new_v4();
+            let target = Uuid::new_v4();
+            let operation = Uuid::new_v4();
+            let source = SourceObservation {
+                document,
+                page,
+                session: "synthetic".into(),
+                visit: "synthetic".into(),
+                content_revision: None,
+                order_revision: None,
+                capability_revision: "synthetic".into(),
+                evidence_procedure: "synthetic".into(),
+            };
+            let claim = BindingReceipt {
+                operation,
+                conversation,
+                request_fingerprint: "synthetic".into(),
+                adapter_fingerprint: "synthetic".into(),
+                source,
+                intended_target: Some(target),
+                observed_document: document,
+                observed_page: target,
+                expected_order: vec![page],
+                observed_order: vec![page, target],
+                persisted_revision: "synthetic".into(),
+                observed_ms: 1,
+                evidence_origin: "synthetic".into(),
+            };
+            ledger
+                .bind(
+                    operation,
+                    ledger
+                        .expected(Namespace::Conversation, conversation)
+                        .unwrap(),
+                    ExpectedHeads::default(),
+                    claim,
+                )
+                .unwrap();
+        }
+        drop(ledger);
+        let mut session = Session::open(paths, &BTreeMap::new()).unwrap();
+        let snapshot = session.snapshot(conversation).unwrap();
+        let root = snapshot
+            .current
+            .iter()
+            .find(|e| e.record_id == conversation)
+            .unwrap();
+        let binding = root.payload["record"]["binding"].as_str().map(|id| {
+            let e = snapshot
+                .current
+                .iter()
+                .find(|e| e.record_id.to_string() == id)
+                .unwrap();
+            Binding {
+                id: id.into(),
+                revision: e.revision_id.to_string(),
+                sha256: digest(&serde_json::to_vec(e).unwrap()),
+            }
+        });
+        let mode = session.store.sync_mode_snapshot().unwrap();
+        let guard = session.store.ordinary_mode_lease(&mode.token).unwrap();
+        let mode_sha = serde_json::to_value(&mode.token).unwrap()["sha256"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let mut i = Intent {
+            intent_version: 1,
+            operation: Uuid::new_v4().to_string(),
+            conversation: conversation.to_string(),
+            config_path_sha256: "a".repeat(64),
+            config_bytes_sha256: "b".repeat(64),
+            roots_sha256: "c".repeat(64),
+            actor: session.store.actor_id.to_string(),
+            generation: snapshot.generation.to_string(),
+            mode_sha256: mode_sha,
+            target_history_sha256: history_hash(&snapshot).unwrap(),
+            root: Expected {
+                revision: root.revision_id.to_string(),
+                sha256: digest(&serde_json::to_vec(root).unwrap()),
+            },
+            binding,
+            summary: Summary::default(),
+            intent_sha256: String::new(),
+        };
+        i.intent_sha256 = i.hash().unwrap();
+        let plan = Plan::new(&i).unwrap();
+        (t, session, snapshot, i, plan, guard)
+    }
+    #[test]
+    fn every_inventory_reservation_boundary_refuses_before_mutation_or_fits() {
+        // Inject numeric inventory boundaries, not fake physical hundreds-of-MiB
+        // files. Real inventory parsing and committed reopen are tested separately.
+        for bound in [false, true] {
+            for kind in 0..5 {
+                for extra in [0, 1, 2] {
+                    let (_t, mut session, snapshot, i, plan, _guard) = fixture(bound);
+                    let n = plan.records.len() as u64;
+                    let r = plan.objects.values().map(|b| b.len() as u64).sum::<u64>();
+                    let m = serde_json::to_vec(&plan.manifest).unwrap().len() as u64;
+                    let (limit, delta) = match kind {
+                        0 => (4096, 2),
+                        1 => (8192, n + 1),
+                        2 => (8 * MIB, 2 * m),
+                        3 => (256 * MIB, 2 * r),
+                        _ => (32 * MIB, 2 * r),
+                    };
+                    let used = if extra == 2 {
+                        limit
+                    } else {
+                        limit - delta + extra
+                    };
+                    match kind {
+                        0 => session.inventory.commits = used,
+                        1 => session.inventory.objects = used,
+                        2 => session.inventory.manifest_bytes = used,
+                        3 => session.inventory.object_bytes = used,
+                        _ => session.inventory.record_bytes = used,
+                    };
+                    let before = session.store.inner.lock().unwrap().index.manifests.len();
+                    assert_eq!(
+                        session.reserve(&i, &plan, &snapshot).is_ok(),
+                        extra == 0,
+                        "bound{bound}/kind{kind}/extra{extra}"
+                    );
+                    assert_eq!(
+                        before,
+                        session.store.inner.lock().unwrap().index.manifests.len()
+                    );
+                    assert!(!session
+                        .store
+                        .generation(snapshot.generation)
+                        .join("commits")
+                        .join(format!("{}.json", plan.manifest.transaction_id))
+                        .exists());
+                }
+            }
+        }
+    }
+    #[test]
+    fn target_count_and_exact_encoded_byte_headroom_are_enforced() {
+        for bound in [false, true] {
+            let (_t, mut session, mut snapshot, i, plan, _guard) = fixture(bound);
+            let sample = snapshot.history[0].clone();
+            snapshot
+                .history
+                .resize(4096 - plan.records.len(), sample.clone());
+            assert!(session.reserve(&i, &plan, &snapshot).is_ok());
+            snapshot.history.push(sample);
+            assert!(session.reserve(&i, &plan, &snapshot).is_err());
+        }
+        for extra in [0, 1] {
+            let (_t, mut session, mut snapshot, i, plan, _guard) = fixture(false);
+            let mut padding = snapshot.history[0].clone();
+            padding.payload = serde_json::Value::String(String::new());
+            let mut prospective = snapshot.history.clone();
+            prospective.push(padding.clone());
+            prospective.extend(plan.records.clone());
+            let baseline = serde_json::to_vec(&prospective).unwrap().len();
+            padding.payload =
+                serde_json::Value::String("x".repeat(8 * MIB as usize - baseline + extra));
+            snapshot.history.push(padding);
+            assert_eq!(session.reserve(&i, &plan, &snapshot).is_ok(), extra == 0);
+        }
+    }
+    #[test]
+    fn active_legacy_publisher_handle_is_not_external_maintenance_authority() {
+        let (_t, mut session, snapshot, i, plan, _guard) = fixture(false);
+        session.reserve(&i, &plan, &snapshot).unwrap();
+        let publisher = session.store.legacy_publisher_lease().unwrap();
+        let before = session.store.inner.lock().unwrap().index.manifests.len();
+        let mut attempted = false;
+        assert!(session.publish(&i, &plan, &mut attempted).is_err());
+        assert!(!attempted);
+        assert_eq!(
+            before,
+            session.store.inner.lock().unwrap().index.manifests.len()
+        );
+        drop(publisher);
     }
 }
