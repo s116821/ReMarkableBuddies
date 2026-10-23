@@ -505,7 +505,7 @@ pub fn run(
     reader: &mut impl Read,
 ) -> Report {
     let execute = || -> std::result::Result<Report, Status> {
-        if input != Path::new("-") {
+        if input.as_os_str() != std::ffi::OsStr::new("-") {
             return Err(Status::InvalidInput);
         }
         let mut bytes = Vec::new();
