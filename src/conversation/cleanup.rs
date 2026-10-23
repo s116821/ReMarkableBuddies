@@ -387,6 +387,15 @@ pub(crate) fn original_root(e: &Envelope, target: Uuid) -> Result<Option<Uuid>> 
     );
     Ok(root.binding)
 }
+
+/// Classifies owned ordinary values without evaluating descendant eligibility.
+pub(crate) fn inventory_value_is_root(e: &Envelope) -> Result<bool> {
+    ensure!(
+        e.namespace == Namespace::Conversation && e.domain_schema_version == SCHEMA,
+        "ordinary conversation value required"
+    );
+    Ok(matches!(Ledger::decode(e)?, Record::Root(_)))
+}
 pub(crate) fn original_binding(e: &Envelope, target: Uuid, id: Uuid) -> Result<()> {
     ensure!(
         e.namespace == Namespace::Conversation && e.domain_schema_version == SCHEMA,

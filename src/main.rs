@@ -13,6 +13,9 @@ use std::time::Duration;
 #[command(author, version = env!("READER_BUDDY_VERSION"))]
 #[command(about = "ReMarkable Reader Buddy - AI-powered reading assistant for reMarkable tablets")]
 pub struct Args {
+    /// Linux-only ordinary root candidates; requires a fresh separate cleanup preview
+    #[arg(long,conflicts_with_all=["conversation_operation","conversation_input","inspect_source_cache","source_cache_operation","source_cache_input","simulate","inspect_owned_data","api_key","model","base_url","trigger_corner","log_level","debug_dump","memory_operation","memory_input","sync_mode_operation","sync_mode_input","archive_operation","archive_input","personalization_operation","export_note","configuration_operation","basic_settings_operation","basic_settings_input","restore_operation","restore_input","model_settings_operation","model_settings_input","ordinary_export_operation","ordinary_export_input","memory_settings_operation","memory_settings_input","model_credential_operation","model_credential_input","credential_reference_operation","credential_reference_input"])]
+    inspect_conversations: bool,
     /// Deliberate Linux-only logical deletion of one ordinary historical conversation
     #[arg(long,value_enum,requires="conversation_input",conflicts_with_all=["inspect_source_cache","source_cache_operation","source_cache_input","simulate","inspect_owned_data","api_key","model","base_url","trigger_corner","log_level","debug_dump","memory_operation","memory_input","sync_mode_operation","sync_mode_input","archive_operation","archive_input","personalization_operation","export_note","configuration_operation","basic_settings_operation","basic_settings_input","restore_operation","restore_input","model_settings_operation","model_settings_input","ordinary_export_operation","ordinary_export_input","memory_settings_operation","memory_settings_input","model_credential_operation","model_credential_input","credential_reference_operation","credential_reference_input"])]
     conversation_operation: Option<remarkable_reader_buddy::conversation_maintenance::Operation>,
@@ -146,6 +149,12 @@ fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_lo
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    if args.inspect_conversations {
+        return remarkable_reader_buddy::conversation_maintenance::inspect_inventory(
+            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+        )
+        .write_to(&mut std::io::stdout().lock());
+    }
     if let Some(operation) = args.conversation_operation {
         return remarkable_reader_buddy::conversation_maintenance::run(
             operation,
@@ -542,6 +551,7 @@ mod tests {
                 "credential-reference-operation",
                 "debug-dump",
                 "export-note",
+                "inspect-conversations",
                 "inspect-owned-data",
                 "inspect-source-cache",
                 "log-level",
@@ -568,6 +578,7 @@ mod tests {
             ]
         );
         let args = Args::try_parse_from(["reader-buddy"]).unwrap();
+        assert!(!args.inspect_conversations);
         assert!(args.conversation_operation.is_none());
         assert!(args.conversation_input.is_none());
         assert!(!args.inspect_source_cache);
@@ -600,6 +611,47 @@ mod tests {
             assert!(
                 Args::try_parse_from(["reader-buddy", flag]).is_err(),
                 "{flag}"
+            );
+        }
+    }
+
+    #[test]
+    fn conversation_inventory_conflicts_with_every_existing_argument() {
+        let command = Args::command();
+        for argument in command.get_arguments() {
+            let Some(long) = argument.get_long() else {
+                continue;
+            };
+            if long == "inspect-conversations" {
+                continue;
+            }
+            let mut argv = vec![
+                "reader-buddy".to_owned(),
+                "--inspect-conversations".into(),
+                format!("--{long}"),
+            ];
+            if argument.get_action().takes_values() {
+                let value = argument
+                    .get_value_parser()
+                    .possible_values()
+                    .and_then(|mut values| values.next())
+                    .map(|v| v.get_name().to_owned())
+                    .unwrap_or_else(|| {
+                        if long == "log-level" {
+                            "info".into()
+                        } else {
+                            "synthetic-inventory-conflict".into()
+                        }
+                    });
+                argv.push(value);
+            }
+            let error = Args::try_parse_from(argv)
+                .err()
+                .expect("inventory must reject ignored arguments");
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::ArgumentConflict,
+                "{long}: {error}"
             );
         }
     }

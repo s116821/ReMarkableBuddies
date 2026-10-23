@@ -83,6 +83,10 @@ use std::{
     fs,
     sync::Arc,
 };
+mod inventory_controls {
+    use super::*;
+    include!("inventory_tests.rs");
+}
 struct Inactive;
 impl service::Observer for Inactive {
     fn inactive(&self) -> std::result::Result<(), Status> {

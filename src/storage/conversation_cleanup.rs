@@ -555,6 +555,77 @@ pub(crate) struct Snapshot {
     pub manifests: Vec<Manifest>,
     pub raw_hashes: BTreeMap<Uuid, String>,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CandidateRefusal {
+    TooLarge,
+    Unsupported,
+    Conflict,
+    Unavailable,
+}
+impl Session {
+    pub(crate) fn candidate_roots(&mut self) -> std::result::Result<Vec<Uuid>, CandidateRefusal> {
+        use CandidateRefusal::*;
+        let inner = self.store.inner.lock().map_err(|_| Unavailable)?;
+        // Boolean type facts only: no copied text, bindings or native identities.
+        let mut kinds = BTreeMap::<Uuid, (bool, bool)>::new();
+        for (e, sha) in inner.index.records.values() {
+            self.budget.charge(0, 1).map_err(|_| Unavailable)?;
+            if e.namespace != Namespace::Conversation {
+                continue;
+            }
+            if e.domain_schema_version != 1 {
+                return Err(Unsupported);
+            }
+            if e.kind == Kind::Tombstone {
+                continue;
+            }
+            // The already-admitted raw object length pays for this additional
+            // typed decode/clone BEFORE it happens. Never serialize to find size.
+            let bytes = self.inventory.files.get(sha).ok_or(Unavailable)?.len;
+            self.budget.charge(bytes, 1).map_err(|_| Unavailable)?;
+            let root = crate::conversation::cleanup::inventory_value_is_root(e)
+                .map_err(|_| Unsupported)?;
+            let entry = kinds.entry(e.record_id).or_default();
+            if root {
+                entry.0 = true;
+            } else {
+                entry.1 = true;
+            }
+        }
+        let mut candidates = Vec::new();
+        for (id, (root, other)) in kinds {
+            self.budget.charge(0, 1).map_err(|_| Unavailable)?;
+            if !root {
+                continue;
+            }
+            if other {
+                return Err(Conflict);
+            }
+            let heads = inner
+                .index
+                .heads
+                .get(&(Namespace::Conversation, id))
+                .ok_or(Conflict)?;
+            if heads.len() != 1 {
+                return Err(Conflict);
+            }
+            for revision in heads {
+                self.budget.charge(0, 1).map_err(|_| Unavailable)?;
+                let (e, _) = inner.index.records.get(revision).ok_or(Unavailable)?;
+                if e.kind == Kind::Value {
+                    candidates.push(id);
+                }
+            }
+        }
+        // All roots/heads were classified first; never expose a truncated prefix.
+        if candidates.len() > 16 {
+            return Err(TooLarge);
+        }
+        candidates.sort_by_key(Uuid::to_string);
+        Ok(candidates)
+    }
+}
 fn snapshot(inner: &Inner, conversation: Uuid, budget: &mut Budget) -> Result<Snapshot> {
     let id = conversation.to_string();
     let mut keys = BTreeSet::from([(Namespace::Conversation, conversation)]);
