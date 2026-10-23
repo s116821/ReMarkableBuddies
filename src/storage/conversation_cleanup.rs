@@ -7,6 +7,14 @@ use crate::{
 };
 use std::{fs::Metadata, io::Read};
 const MIB: u64 = 1024 * 1024;
+#[derive(Debug)]
+pub(crate) struct WorkExhausted(&'static str);
+impl std::fmt::Display for WorkExhausted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+impl std::error::Error for WorkExhausted {}
 #[derive(Clone, Default, Debug)]
 pub(crate) struct Budget {
     pub bytes: u64,
@@ -15,7 +23,9 @@ pub(crate) struct Budget {
 }
 impl Budget {
     pub(crate) fn charge(&mut self, bytes: u64, visits: u64) -> Result<()> {
-        ensure!(!self.exhausted, "conversation recovery budget exhausted");
+        if self.exhausted {
+            return Err(WorkExhausted("conversation recovery budget exhausted").into());
+        }
         match (
             self.bytes.checked_add(bytes),
             self.visits.checked_add(visits),
@@ -27,7 +37,7 @@ impl Budget {
             }
             _ => {
                 self.exhausted = true;
-                anyhow::bail!("conversation recovery work exhausted")
+                Err(WorkExhausted("conversation recovery work exhausted").into())
             }
         }
     }

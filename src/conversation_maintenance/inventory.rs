@@ -124,7 +124,7 @@ impl InventoryReport {
     }
     pub fn write_to(mut self, out: &mut impl Write) -> Result<()> {
         if let Some(custody) = &mut self.custody {
-            if let Err(s) = custody.check() {
+            if let Err(s) = custody.check_inventory() {
                 self.wire = Wire::refused(InventoryStatus::observation(s));
             }
         }

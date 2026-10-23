@@ -343,6 +343,69 @@ fn inventory_storage_work_exhausts_before_the_real_typed_decoder_and_never_reset
     }
 }
 #[test]
+fn inventory_exhausted_discovery_emits_unavailable_and_holds_custody_through_output() {
+    struct CheckedOutput {
+        paths: StorePaths,
+        bytes: Vec<u8>,
+    }
+    impl std::io::Write for CheckedOutput {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            assert!(Store::open_existing(self.paths.clone()).is_err());
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    for byte_limit in [true, false] {
+        let f = Fixture::new();
+        let before = f.state();
+        let report =
+            engine::inventory_at_work_limit(Some(f.config.clone()), Arc::new(Inactive), byte_limit);
+        let mut out = CheckedOutput {
+            paths: f.paths.clone(),
+            bytes: vec![],
+        };
+        report.write_to(&mut out).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&out.bytes).unwrap();
+        assert_eq!(value["status"], "unavailable");
+        assert_eq!(value["complete"], false);
+        assert!(value["candidates"].is_null() && value["candidate_count"].is_null());
+        assert_eq!(value["service_observation"], "unverified");
+        drop(Store::open_existing(f.paths.clone()).unwrap());
+        assert_eq!(before, f.state());
+    }
+}
+#[test]
+fn inventory_real_config_change_is_still_conflict_after_discovery_exhaustion() {
+    for byte_limit in [true, false] {
+        let f = Fixture::new();
+        let report =
+            engine::inventory_at_work_limit(Some(f.config.clone()), Arc::new(Inactive), byte_limit);
+        let mut bytes = fs::read(&f.config).unwrap();
+        bytes.push(b' ');
+        fs::write(&f.config, &bytes).unwrap();
+        assert_eq!(encoded(report)["status"], "conflict");
+        assert_eq!(fs::read(&f.config).unwrap(), bytes);
+        drop(Store::open_existing(f.paths.clone()).unwrap());
+    }
+}
+#[cfg(unix)]
+#[test]
+fn inventory_real_lock_replacement_is_still_conflict_after_discovery_exhaustion() {
+    for byte_limit in [true, false] {
+        let f = Fixture::new();
+        let report =
+            engine::inventory_at_work_limit(Some(f.config.clone()), Arc::new(Inactive), byte_limit);
+        let lock = f.paths.data.join("store.lock");
+        let held = lock.with_extension("synthetic-held-lock");
+        fs::rename(&lock, held).unwrap();
+        fs::write(&lock, []).unwrap();
+        assert_eq!(encoded(report)["status"], "conflict");
+    }
+}
+#[test]
 fn inventory_does_not_need_publication_headroom_and_keeps_staging_documents_and_modes() {
     let f = Fixture::new();
     let g: Uuid = storage::files::json(&f.paths.data.join("CURRENT"), 128).unwrap();

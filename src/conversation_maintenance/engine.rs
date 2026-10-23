@@ -110,6 +110,23 @@ impl Custody {
         self.document.check().map_err(|_| Status::Conflict)?;
         self.session.check().map_err(|_| Status::Conflict)
     }
+    pub(super) fn check_inventory(&mut self) -> std::result::Result<(), Status> {
+        fn session_status(error: anyhow::Error) -> Status {
+            if error
+                .downcast_ref::<storage::conversation_cleanup::WorkExhausted>()
+                .is_some()
+            {
+                Status::Unavailable
+            } else {
+                Status::Conflict
+            }
+        }
+        self.document.check().map_err(|_| Status::Conflict)?;
+        self.session.check().map_err(session_status)?;
+        self.observer.inactive()?;
+        self.document.check().map_err(|_| Status::Conflict)?;
+        self.session.check().map_err(session_status)
+    }
 }
 fn error_status(e: &anyhow::Error) -> Status {
     if let Some(r) = e.downcast_ref::<storage::maintenance::Refusal>() {
@@ -157,6 +174,13 @@ pub(super) fn inventory(
     path: Option<PathBuf>,
     observer: Arc<dyn service::Observer>,
 ) -> inventory::InventoryReport {
+    inventory_controlled(path, observer, |_| {})
+}
+fn inventory_controlled(
+    path: Option<PathBuf>,
+    observer: Arc<dyn service::Observer>,
+    before_discovery: impl FnOnce(&mut Session),
+) -> inventory::InventoryReport {
     use inventory::{InventoryReport, InventoryStatus};
     let doc = match Document::load_with_reads(path, Some(Arc::new(AtomicUsize::new(5)))) {
         Ok(doc) => doc,
@@ -170,13 +194,28 @@ pub(super) fn inventory(
         Ok(c) => c,
         Err(s) => return InventoryReport::refused(InventoryStatus::admission(s), None),
     };
-    if let Err(s) = custody.check() {
+    if let Err(s) = custody.check_inventory() {
         return InventoryReport::refused(InventoryStatus::observation(s), Some(custody));
     }
+    before_discovery(&mut custody.session);
     match custody.session.candidate_roots() {
         Ok(ids) => InventoryReport::complete(ids, custody),
         Err(r) => InventoryReport::refused(InventoryStatus::discovery(r), Some(custody)),
     }
+}
+#[cfg(test)]
+pub(super) fn inventory_at_work_limit(
+    path: Option<PathBuf>,
+    observer: Arc<dyn service::Observer>,
+    byte_limit: bool,
+) -> inventory::InventoryReport {
+    inventory_controlled(path, observer, |session| {
+        if byte_limit {
+            session.budget.bytes = 512 * 1024 * 1024;
+        } else {
+            session.budget.visits = 65536;
+        }
+    })
 }
 pub(super) fn run(
     op: Operation,
