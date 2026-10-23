@@ -28,8 +28,14 @@ impl Document {
     }
     fn read_config(path: &Path, reads: Option<&AtomicUsize>) -> Result<Vec<u8>> {
         if let Some(reads) = reads {
+            let remaining = reads.load(Ordering::Relaxed);
+            let next = remaining
+                .checked_sub(1)
+                .ok_or_else(|| anyhow::anyhow!("configuration read schedule exhausted"))?;
+            // One attempt, no retry/read on contention. Compatible with the MSRV
+            // and newer compilers that deprecate AtomicUsize::fetch_update.
             reads
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+                .compare_exchange(remaining, next, Ordering::Relaxed, Ordering::Relaxed)
                 .map_err(|_| anyhow::anyhow!("configuration read schedule exhausted"))?;
         }
         files::read(path, MAX_RECORD as u64)
