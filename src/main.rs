@@ -425,6 +425,46 @@ mod tests {
     use log::{Level, LevelFilter, Log, Metadata};
 
     #[test]
+    fn source_cache_requires_input_and_rejects_other_execution_modes() {
+        for args in [
+            vec!["reader-buddy", "--source-cache-operation", "inspect"],
+            vec!["reader-buddy", "--source-cache-input", "-"],
+        ] {
+            assert!(Args::try_parse_from(args).is_err());
+        }
+        for extra in [
+            vec!["--api-key", "private-fixture-sentinel"],
+            vec!["--model", "private-fixture-sentinel"],
+            vec!["--simulate", "private-fixture-sentinel"],
+            vec!["--inspect-owned-data"],
+            vec!["--export-note"],
+            vec!["--credential-reference-operation", "inspect"],
+            vec!["--memory-settings-operation", "inspect"],
+        ] {
+            let mut args = vec![
+                "reader-buddy",
+                "--source-cache-operation",
+                "inspect",
+                "--source-cache-input",
+                "-",
+            ];
+            args.extend(extra);
+            let error = Args::try_parse_from(args)
+                .err()
+                .expect("execution modes conflict");
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+            assert!(!error.to_string().contains("private-fixture-sentinel"));
+        }
+        assert!(Args::try_parse_from([
+            "reader-buddy",
+            "--source-cache-operation",
+            "inspect",
+            "--source-cache-input",
+            "-"
+        ])
+        .is_ok());
+    }
+    #[test]
     fn exact_requested_interface_and_defaults() {
         let mut names: Vec<_> = Args::command()
             .get_arguments()
@@ -462,12 +502,16 @@ mod tests {
                 "restore-input",
                 "restore-operation",
                 "simulate",
+                "source-cache-input",
+                "source-cache-operation",
                 "sync-mode-input",
                 "sync-mode-operation",
                 "trigger-corner"
             ]
         );
         let args = Args::try_parse_from(["reader-buddy"]).unwrap();
+        assert!(args.source_cache_operation.is_none());
+        assert!(args.source_cache_input.is_none());
         assert!(args.restore_operation.is_none());
         assert!(args.restore_input.is_none());
         assert!(args.basic_settings_operation.is_none());
