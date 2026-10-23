@@ -223,7 +223,7 @@ fn restore_module_keeps_invalid_input_without_reader_or_config() {
     use buddy::restore_maintenance::{self as entry, Operation, Status};
     for selector in NONLITERAL {
         let result = entry::run(Operation::Prepare, Path::new(selector), None, &mut NoRead);
-        assert_eq!(result.status, Status::InvalidInput);
+        assert!(matches!(result.status, Status::InvalidInput));
     }
 }
 #[test]
@@ -243,7 +243,7 @@ fn clean_host_executable_provenance() {
         &json!({
             "source_checkout_sha":String::from_utf8(source.stdout).unwrap().trim(),
             "executable_sha256":digest(&fs::read(exe).unwrap()),
-            "scope":"Fresh held-stdin tests of five existing strict stdin-only lanes. Empty child environment and owned empty working directories; no Config, Store, credential, provider or tablet operation."
+            "scope":"Fresh held-stdin tests of five existing strict stdin-only lanes. Empty child environment and owned empty working directories; no Config file selected/read and no Store, credential, provider or tablet work."
         }),
     );
 }
