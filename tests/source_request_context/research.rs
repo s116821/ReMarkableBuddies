@@ -711,7 +711,10 @@ fn actual_index_memory_history_and_source_are_seen_without_new_queries_or_writes
     let before = snapshot(&fixture.0);
     let provider = Synthetic::new(|r| {
         assert_eq!(r.context.source_context().request(), &request);
-        assert_eq!(r.context.source_context().history(), [history.clone()]);
+        assert_eq!(
+            r.context.source_context().history(),
+            std::slice::from_ref(&history)
+        );
         assert_eq!(
             &r.context.source_context().retrieval().unwrap().source,
             index.key()
