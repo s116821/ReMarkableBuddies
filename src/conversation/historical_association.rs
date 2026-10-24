@@ -134,7 +134,8 @@ impl Ledger {
         Self::validate_binding_receipt(&binding.receipt)?;
         // Preserve the delivered ledger's full chronology/record validation,
         // using only this same snapshot (including any queried foreign head).
-        Self::inspect_snapshot(conversation, false, &snapshot)?;
+        let records = Self::inspect_snapshot(conversation, false, &snapshot)?;
+        self.validate_snapshot_evidence(&records, &snapshot)?;
         Ok(HistoricalCandidate(Box::new(HistoricalPageAssociation {
             root_revision: roots[0].revision_id,
             binding_revision: bindings[0].revision_id,

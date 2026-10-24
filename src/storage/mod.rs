@@ -1,22 +1,34 @@
 //! Versioned local persistence, independent of Reader/Writer domain semantics.
+pub(crate) mod captured;
+pub(crate) mod conditional;
+pub(crate) mod conversation_cleanup;
 pub mod drive;
 pub mod files;
+pub mod inspection;
 #[cfg(all(test, unix))]
 mod lease_tests;
 pub mod maintenance;
 pub mod migration;
 mod recovery;
 #[cfg(test)]
+mod selected_projection_tests;
+pub mod selection;
+#[cfg(test)]
 mod snapshot_status_tests;
 pub mod sync;
 pub mod types;
 use anyhow::{ensure, Context, Result};
+pub(crate) use recovery::ordinary_restore;
+#[cfg(test)]
+pub(crate) use recovery::ConfigFault;
+pub(crate) use recovery::ConfigPublication;
+pub use recovery::{ArchivedSelectedSnapshot, BackupInspection};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
-    sync::{mpsc::SyncSender, Mutex},
+    sync::{mpsc::SyncSender, Arc, Mutex},
 };
 pub use types::*;
 pub const CONTRACT_V1: &str = include_str!("contract-v1.json");
@@ -88,12 +100,18 @@ struct Index {
     operations: BTreeMap<Uuid, String>,
     heads: BTreeMap<(Namespace, Uuid), BTreeSet<Uuid>>,
     manifests: BTreeMap<Uuid, Manifest>,
+    // Derived from accepted manifests, rebuilt on recovery; no on-disk format.
+    record_refs: BTreeMap<String, ObjectRef>,
+    record_transactions: BTreeMap<String, BTreeSet<Uuid>>,
     unavailable: usize,
 }
 struct Inner {
     generation: Uuid,
     index: Index,
     fault: Fault,
+    legacy_sync_handles: usize,
+    mode_handles: usize,
+    legacy_publisher_handles: usize,
 }
 pub struct Store {
     pub paths: StorePaths,
@@ -116,6 +134,26 @@ impl Drop for Lease {
     }
 }
 
+pub(crate) struct LegacySyncLease(Arc<Store>);
+impl Drop for LegacySyncLease {
+    fn drop(&mut self) {
+        if let Ok(mut inner) = self.0.inner.lock() {
+            inner.legacy_sync_handles -= 1;
+        }
+    }
+}
+
+pub(crate) struct LegacyPublisherLease {
+    store: Arc<Store>,
+    _legacy: LegacySyncLease,
+}
+impl Drop for LegacyPublisherLease {
+    fn drop(&mut self) {
+        if let Ok(mut inner) = self.store.inner.lock() {
+            inner.legacy_publisher_handles -= 1;
+        }
+    }
+}
 impl Store {
     /// Serialize domain-owned local journal IO under the existing Store lease.
     /// The callback may perform bounded owned-file IO, never network/native work.
@@ -130,6 +168,41 @@ impl Store {
         action(&self.paths.data, self.actor_id)
     }
 
+    pub(crate) fn legacy_publisher_lease(self: &Arc<Self>) -> Result<LegacyPublisherLease> {
+        // Preserve the domain lease while adding publisher-only lifetime accounting.
+        let legacy = self.legacy_sync_lease()?;
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        ensure!(
+            sync::mode::load(self)?.is_none(),
+            "explicit sync mode requires its matched worker"
+        );
+        inner.legacy_publisher_handles = inner
+            .legacy_publisher_handles
+            .checked_add(1)
+            .context("publisher lease overflow")?;
+        Ok(LegacyPublisherLease {
+            store: self.clone(),
+            _legacy: legacy,
+        })
+    }
+    pub(crate) fn legacy_sync_lease(self: &Arc<Self>) -> Result<LegacySyncLease> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        ensure!(
+            !selection::has_selected(&self.generation(inner.generation))?,
+            "selected storage requires coordinated sync, not the legacy all-history worker"
+        );
+        inner.legacy_sync_handles = inner
+            .legacy_sync_handles
+            .checked_add(1)
+            .context("sync lease overflow")?;
+        Ok(LegacySyncLease(self.clone()))
+    }
     pub fn open(paths: StorePaths) -> Result<Self> {
         paths.validate()?;
         let identity_path = paths.data.join("identity.json");
@@ -211,22 +284,25 @@ impl Store {
                 generation,
                 index: Index::default(),
                 fault: Fault::None,
+                legacy_sync_handles: 0,
+                mode_handles: 0,
+                legacy_publisher_handles: 0,
             }),
             wake: Mutex::new(None),
             export_active: std::sync::atomic::AtomicBool::new(false),
         };
-        ensure!(
-            files::json::<u32>(&store.generation(generation).join("format.json"), 64)? == FORMAT,
-            "unsupported generation format"
-        );
+        selection::validate_generation(&store.generation(generation), store.actor_id, generation)?;
         for directory in [
             store.paths.data.clone(),
             store.paths.credentials.clone(),
             store.paths.data.join("sync"),
             store.paths.data.join("sync/incoming"),
+            store.paths.data.join("sync/selected-outbox"),
             store.generation(generation),
             store.generation(generation).join("objects"),
             store.generation(generation).join("commits"),
+            store.generation(generation).join("selections"),
+            store.generation(generation).join("selection-history"),
         ] {
             files::cleanup_staging(&directory)?;
         }
@@ -244,7 +320,7 @@ impl Store {
         files::atomic_json(
             &store.paths.data.join("capabilities.json"),
             &serde_json::json!({
-            "contract_version": 1, "schema_file":"contract-v1.json", "store_versions": [1], "envelope_versions": [1], "config_versions": [1],
+            "contract_version": 1, "schema_file":"contract-v1.json", "store_versions": [1, 2], "selected_store_feature": "actor-generation-bound-v1", "envelope_versions": [1], "config_versions": [1],
                 "paths": store.paths, "lock": "stable-inode-exclusive-os-lease", "linux_lock": "flock",
                 "maintenance": "stop-confirm-lock-stage-commit-release-restart", "namespaces": ["conversation","source","export-association","subject-memory","handwriting"], "sync": "optional-immutable-drive-v1"
             }),
@@ -288,6 +364,7 @@ impl Store {
                 Err(_) => index.unavailable += 1,
             }
         }
+        pending.extend(selection::recover_selected(&root, generation)?);
         while !pending.is_empty() {
             let before = pending.len();
             pending.retain(|(manifest, records)| {
@@ -306,16 +383,45 @@ impl Store {
         Ok(index)
     }
     fn validate_objects(root: &Path, manifest: &Manifest) -> Result<Vec<(Envelope, String)>> {
+        Self::validate_objects_with_budget(root, manifest, None)
+    }
+    fn validate_objects_with_budget(
+        root: &Path,
+        manifest: &Manifest,
+        mut budget: Option<&mut selection::SelectedReadBudget>,
+    ) -> Result<Vec<(Envelope, String)>> {
         manifest.validate()?;
-        for item in manifest.records.iter().chain(&manifest.media) {
-            let _ = files::Source::open(&root.join("objects").join(&item.sha256), item)?;
+        for (item, media) in manifest
+            .records
+            .iter()
+            .map(|r| (r, false))
+            .chain(manifest.media.iter().map(|r| (r, true)))
+        {
+            if let Some(budget) = budget.as_deref_mut() {
+                budget.charge(0, 1, 0, 0)?;
+            }
+            let _ = files::Source::open_with_budget(
+                &root.join("objects").join(&item.sha256),
+                item,
+                budget.as_deref_mut(),
+                media,
+            )?;
         }
         let mut records = Vec::new();
         let mut descriptors = BTreeMap::new();
         for item in &manifest.records {
             ensure!(item.bytes <= MAX_RECORD as u64, "record exceeds bound");
-            let envelope: Envelope =
-                files::json(&root.join("objects").join(&item.sha256), MAX_RECORD as u64)?;
+            let encoded = files::read_with_budget(
+                &root.join("objects").join(&item.sha256),
+                MAX_RECORD as u64,
+                budget.as_deref_mut(),
+            )?;
+            ensure!(
+                encoded.len() as u64 == item.bytes && digest(&encoded) == item.sha256,
+                "record changed after verification"
+            );
+            let envelope: Envelope = serde_json::from_slice(&encoded)
+                .map_err(|_| anyhow::anyhow!("invalid or unsupported stored JSON"))?;
             envelope.validate()?;
             ensure!(
                 manifest.record_namespaces.get(&item.sha256) == Some(&envelope.namespace),
@@ -391,6 +497,16 @@ impl Store {
         Ok(())
     }
     fn apply_index(index: &mut Index, manifest: Manifest, records: Vec<(Envelope, String)>) {
+        for reference in &manifest.records {
+            index
+                .record_refs
+                .insert(reference.sha256.clone(), reference.clone());
+            index
+                .record_transactions
+                .entry(reference.sha256.clone())
+                .or_default()
+                .insert(manifest.transaction_id);
+        }
         for (e, hash) in records {
             index.operations.insert(e.operation_id, hash.clone());
             index.records.insert(e.revision_id, (e, hash));
@@ -423,7 +539,13 @@ impl Store {
             .get(&(namespace, record))
             .into_iter()
             .flatten()
-            .filter_map(|id| inner.index.records.get(id).map(|p| p.0.clone()))
+            .filter_map(|id| {
+                inner.index.records.get(id).map(|p| {
+                    #[cfg(test)]
+                    captured::head_cloned();
+                    p.0.clone()
+                })
+            })
             .collect())
     }
     pub fn value(&self, namespace: Namespace, record: Uuid) -> Result<Option<Envelope>> {
@@ -574,6 +696,13 @@ impl Store {
         Ok(())
     }
     pub fn commit(&self, records: Vec<Envelope>, media: BTreeMap<String, Vec<u8>>) -> Result<Uuid> {
+        let (manifest, objects) = Self::ordinary_transaction(records, media)?;
+        self.publish(manifest, objects, true)
+    }
+    fn ordinary_transaction(
+        records: Vec<Envelope>,
+        media: BTreeMap<String, Vec<u8>>,
+    ) -> Result<(Manifest, BTreeMap<String, Vec<u8>>)> {
         let mut objects = media;
         let mut refs = Vec::new();
         let mut record_namespaces = BTreeMap::new();
@@ -610,7 +739,7 @@ impl Store {
                 .map(|h| Coverage::Included { sha256: h.clone() })
                 .collect(),
         };
-        self.publish(manifest, objects, true)
+        Ok((manifest, objects))
     }
     pub fn import(&self, manifest: Manifest, objects: BTreeMap<String, Vec<u8>>) -> Result<Uuid> {
         self.publish(manifest, objects, false)
@@ -626,12 +755,28 @@ impl Store {
             .inner
             .lock()
             .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        let (receipt, changed) = self.publish_locked(&mut inner, manifest, objects, local)?;
+        drop(inner);
+        if changed {
+            self.notify_commit();
+        }
+        Ok(receipt)
+    }
+    // Callers hold exactly one inner mutex guard. Legacy publish keeps its old
+    // admission/order; conditional publication validates its extra evidence first.
+    fn publish_locked(
+        &self,
+        inner: &mut Inner,
+        manifest: Manifest,
+        objects: BTreeMap<String, Vec<u8>>,
+        local: bool,
+    ) -> Result<(Uuid, bool)> {
         let root = self.generation(inner.generation);
         if let Some(previous) = inner.index.manifests.get(&manifest.transaction_id) {
             ensure!(previous == &manifest, "transaction identity collision");
-            return Ok(manifest.transaction_id);
+            return Ok((manifest.transaction_id, false));
         }
-        Self::trip(&mut inner, Fault::BeforeObjects)?;
+        Self::trip(inner, Fault::BeforeObjects)?;
         for item in manifest.records.iter().chain(&manifest.media) {
             if let Some(bytes) = objects.get(&item.sha256) {
                 ensure!(bytes.len() as u64 == item.bytes, "object size mismatch");
@@ -642,7 +787,7 @@ impl Store {
                 )?;
             }
         }
-        Self::trip(&mut inner, Fault::AfterObjects)?;
+        Self::trip(inner, Fault::AfterObjects)?;
         let records = Self::validate_objects(&root, &manifest)?;
         Self::can_apply(&inner.index, &records)?;
         if local {
@@ -679,11 +824,11 @@ impl Store {
                     })
                     .map(|m| m.transaction_id)
                 {
-                    return Ok(prior);
+                    return Ok((prior, false));
                 }
             }
         }
-        Self::trip(&mut inner, Fault::BeforeCommit)?;
+        Self::trip(inner, Fault::BeforeCommit)?;
         files::atomic_json(
             &root
                 .join("commits")
@@ -693,15 +838,16 @@ impl Store {
         let after_commit = inner.fault == Fault::AfterCommit;
         Self::apply_index(&mut inner.index, manifest.clone(), records);
         if after_commit {
-            Self::trip(&mut inner, Fault::AfterCommit)?;
+            Self::trip(inner, Fault::AfterCommit)?;
         }
-        drop(inner);
+        Ok((manifest.transaction_id, true))
+    }
+    fn notify_commit(&self) {
         if let Ok(wake) = self.wake.lock() {
             if let Some(wake) = wake.as_ref() {
                 let _ = wake.try_send(());
             }
         }
-        Ok(manifest.transaction_id)
     }
     pub fn set_wake(&self, wake: Option<SyncSender<()>>) {
         if let Ok(mut target) = self.wake.lock() {
@@ -775,3 +921,5 @@ impl Store {
         self.import(manifest, BTreeMap::new())
     }
 }
+
+pub(crate) use recovery::ordinary_export;

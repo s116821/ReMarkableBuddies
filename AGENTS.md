@@ -133,3 +133,17 @@ README/CONTRIBUTING/AGENTS, license/security files and conventional tool-discove
 files (GitHub templates, skills) are exceptions. Test data remains fixtures, not
 documentation by default. Preserve evidence/provenance and link canonical bodies;
 do not sweep unrelated historical archives or private task outputs.
+## Conditional supervised native integration
+
+The October 1 REM-25 direction supersedes categorical XOVI production bans. It is
+an unselected candidate where robust direct/native mechanisms are insufficient.
+A tiny independent Buddy Supervisor and normal runtime may be separate processes
+in this repository and the same release/Manager installation, with internally
+managed vetted payload. Cold boot stays stock; only the first supported Buddy
+gesture may activate a compatibility-gated session with bounded readiness/heartbeat,
+crash-loop detection and automatic stock rollback. Require UI-independent recovery,
+Manager-owned disable/update/uninstall and reboot to stock. Discard stale handles
+and reacquire/validate source and cancellation after any activation restart.
+No broad UI replacement or injection permission follows from read-only research.
+SDK adapter/capability contracts belong to ReMarkableOpenSDK's own OpenSpec;
+Buddy/Manager product requirements remain in ReMarkableBuddiesDocs.

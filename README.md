@@ -727,6 +727,7 @@ See LICENSE file for details.
 - **[Technical Documentation](docs/TECHNICAL.md)** - Architecture, implementation details, and TODOs
 - **[Workflow Diagrams](docs/WORKFLOW_DIAGRAM.md)** - Visual CI/CD and app workflow diagrams
 - **[Prepared note export](docs/reference/prepared-note-export.md)** - Explicit Mem export, stable correlation, re-export and reconciliation
+- **[Maintenance guides](docs/maintenance.md)** - Saved configuration, memory, archives, caches and conversation maintenance
 
 ## Acknowledgments
 

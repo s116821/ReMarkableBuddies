@@ -21,7 +21,7 @@
         "payload": {},
         "media_descriptors": {"type": "array", "maxItems": 4096, "items": {"type": "object", "additionalProperties": false, "required": ["sha256", "bytes", "media_type"], "properties": {"sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "bytes": {"type": "integer", "minimum": 0, "maximum": 268435456}, "media_type": {"type": "string", "minLength": 1, "maxLength": 128}}}}
       },
-      "allOf": [{"if": {"properties": {"domain_schema_version": {"const": 2}}}, "then": {"properties": {"namespace": {"const": "export-association"}}}}]
+      "allOf": [{"if": {"properties": {"domain_schema_version": {"const": 2}}}, "then": {"properties": {"namespace": {"enum": ["conversation", "export-association"]}}}}]
     },
     "config": {
       "$id": "urn:remarkable-buddies:config:v1",

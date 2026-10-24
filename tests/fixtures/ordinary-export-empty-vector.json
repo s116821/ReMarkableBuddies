@@ -1,0 +1,7 @@
+{
+  "basis": "Independent Python synthetic empty format1 serialization reference, not producer execution",
+  "backup_utf8": "{\"format\":1,\"manifests\":[],\"objects\":[],\"complete_media\":true,\"config_snapshot\":null}",
+  "backup_bytes": 85,
+  "archive_sha256": "2d61ecb63ec1e95d63e178bad36e1a04131c04e586a00c829782f62c7daa1d61",
+  "empty_history_sha256": "19bf4c537633f421ba1fcec5e6897e9a29a392d701b7fe2ecdce93c21ec1272b"
+}
