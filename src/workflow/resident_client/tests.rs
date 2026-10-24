@@ -96,7 +96,7 @@ fn exact_original_survives_restart_and_rejects_replacement_identity() {
     let store = f.open();
     let saved = attempts(&store).unwrap();
     assert_eq!(saved.len(), 1);
-    assert_eq!(saved[0].request, original);
+    assert_eq!(*saved[0].request.frame(), original);
     assert!(!saved[0].known_not_dispatched && saved[0].reply.is_none());
     assert!(claim(&store, conversation, &request(52, 15)).is_err());
 }
@@ -113,7 +113,7 @@ fn store_generation_restore_cannot_erase_local_reservation() {
     claim(&store, conversation, &original).unwrap();
     store.restore(&backup).unwrap();
     assert_ne!(fs::read(store.paths.data.join("CURRENT")).unwrap(), before);
-    assert_eq!(attempts(&store).unwrap()[0].request, original);
+    assert_eq!(*attempts(&store).unwrap()[0].request.frame(), original);
     assert!(claim(&store, conversation, &request(51, 14)).is_err());
 }
 
@@ -290,6 +290,124 @@ fn retained_attempt_capacity_refuses_without_evicting_history() {
     assert_eq!(fs::read(path).unwrap(), bytes);
 }
 
+const V1_REQUEST: &[u8] = include_bytes!("fixtures/v1-insertion.bin");
+const V1_RESPONSE: &[u8] = include_bytes!("fixtures/v1-insertion-observed.bin");
+fn legacy_state(store: &Store, conversation: Uuid, outcome: Outcome) -> State {
+    State {
+        format: 1,
+        actor: store.actor_id,
+        attempts: vec![Attempt {
+            conversation,
+            frame: STANDARD.encode(V1_REQUEST),
+            sha256: crate::storage::digest(V1_REQUEST),
+            outcome,
+        }],
+    }
+}
+
+#[test]
+fn v1_bytes_and_reservations_survive_upgrade_restart_and_append() {
+    for outcome in [
+        Outcome::Reserved {},
+        Outcome::HistoricalReply {
+            frame: STANDARD.encode(V1_RESPONSE),
+        },
+        Outcome::NotDispatched {},
+    ] {
+        let f = Fixture::new();
+        let store = f.open();
+        let conversation = Uuid::new_v4();
+        let backup = f.0.join("before-journal");
+        store.export(&backup).unwrap();
+        let state = legacy_state(&store, conversation, outcome.clone());
+        let path = store.paths.data.join(JOURNAL_FILE);
+        persist(&path, &state).unwrap();
+        let first: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        store.restore(&backup).unwrap();
+        drop(store);
+        let store = f.open();
+        let saved = attempts(&store).unwrap();
+        assert_eq!(saved[0].request.wire_revision(), 1);
+        assert_eq!(saved[0].request.encoded(), V1_REQUEST);
+        assert_ne!(
+            saved[0].request.fingerprint(),
+            saved[0].request.frame().fingerprint().unwrap()
+        );
+        // Re-encoding the old operation cannot complete or reserve it again.
+        let original = saved[0].request.frame().clone();
+        assert!(finish(&store, &original, Outcome::NotDispatched {}).is_err());
+        assert!(claim(&store, Uuid::new_v4(), &original).is_err());
+        let before = fs::read(&path).unwrap();
+        if matches!(outcome, Outcome::NotDispatched {}) {
+            claim(&store, conversation, &request(70, 14)).unwrap();
+        } else {
+            assert!(claim(&store, conversation, &request(70, 14)).is_err());
+            assert_eq!(fs::read(&path).unwrap(), before);
+        }
+        claim(&store, Uuid::new_v4(), &request(71, 15)).unwrap();
+        let appended: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(appended["attempts"][0], first["attempts"][0]);
+        assert_eq!(
+            attempts(&store)
+                .unwrap()
+                .last()
+                .unwrap()
+                .request
+                .wire_revision(),
+            2
+        );
+    }
+}
+
+#[test]
+fn mixed_revision_and_reencoded_digest_refuse_without_rewriting_history() {
+    let f = Fixture::new();
+    let store = f.open();
+    let conversation = Uuid::new_v4();
+    let original = HistoricalFrame::decode(V1_REQUEST).unwrap();
+    let response = HistoricalFrame::decode(V1_RESPONSE).unwrap();
+    let mixed = legacy_state(
+        &store,
+        conversation,
+        Outcome::HistoricalReply {
+            frame: encode(response.frame()).unwrap(),
+        },
+    );
+    let mut wrong_digest = legacy_state(&store, conversation, Outcome::Reserved {});
+    wrong_digest.attempts[0].sha256 = digest(original.frame()).unwrap();
+    let mut inverse = legacy_state(
+        &store,
+        conversation,
+        Outcome::HistoricalReply {
+            frame: STANDARD.encode(V1_RESPONSE),
+        },
+    );
+    inverse.attempts[0].frame = encode(original.frame()).unwrap();
+    inverse.attempts[0].sha256 = digest(original.frame()).unwrap();
+    let mut wrong_response = response.frame().clone();
+    let Message::Response { request_sha256, .. } = &mut wrong_response.message else {
+        panic!()
+    };
+    *request_sha256 = original.frame().fingerprint().unwrap();
+    let mut wrong_bytes = wrong_response.encode().unwrap();
+    wrong_bytes[8..10].copy_from_slice(&1u16.to_be_bytes());
+    let wrong_correlation = legacy_state(
+        &store,
+        conversation,
+        Outcome::HistoricalReply {
+            frame: STANDARD.encode(wrong_bytes),
+        },
+    );
+    let path = store.paths.data.join(JOURNAL_FILE);
+    for state in [&mixed, &wrong_digest, &inverse, &wrong_correlation] {
+        let bytes = serde_json::to_vec(state).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        assert!(attempts(&store).is_err());
+        assert!(claim(&store, Uuid::new_v4(), &request(72, 16)).is_err());
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+}
 #[cfg(target_os = "linux")]
 mod sockets {
     use super::*;
@@ -363,6 +481,104 @@ mod sockets {
         stream
     }
 
+    #[test]
+    fn retained_v1_reconciles_read_only_over_v2_without_replay_or_rewrite() {
+        let f = Fixture::new();
+        let store = f.open();
+        let conversation = Uuid::new_v4();
+        let state = legacy_state(&store, conversation, Outcome::Reserved {});
+        let path = store.paths.data.join(JOURNAL_FILE);
+        persist(&path, &state).unwrap();
+        let before = fs::read(&path).unwrap();
+        let old = HistoricalFrame::decode(V1_REQUEST).unwrap();
+        let Message::Request(Command::InsertAfter(insertion)) = old.frame().message.clone() else {
+            panic!()
+        };
+        let expected = insertion.clone();
+        let (listener, directory, uid) = endpoint(&f);
+        let peer = thread::spawn(move || {
+            let mut stream = accept(&listener);
+            let call = read(&mut stream); // Strict v2 decoder in read().
+            assert_eq!(call.operation, OperationId(id(51)));
+            assert_eq!(
+                call.message,
+                Message::Request(Command::Reconcile(expected.clone()))
+            );
+            send(
+                &mut stream,
+                &response(
+                    &call,
+                    Reply::Reconciled {
+                        current: expected.source,
+                        target_present: false,
+                    },
+                ),
+            );
+            let mut eof = [0];
+            assert_eq!(stream.read(&mut eof).unwrap(), 0);
+        });
+        let mut connection = ResidentConnection::connect(
+            store.clone(),
+            directory,
+            uid,
+            runtime_scope(),
+            OperationId(id(50)),
+            end(),
+        )
+        .unwrap();
+        assert!(matches!(
+            connection
+                .reconcile(conversation, OperationId(id(51)), end())
+                .unwrap(),
+            Reply::Reconciled {
+                target_present: false,
+                ..
+            }
+        ));
+        assert_eq!(fs::read(&path).unwrap(), before);
+        let failure = connection
+            .insert_after(conversation, OperationId(id(52)), insertion, end())
+            .unwrap_err();
+        assert_eq!(failure.lost, LostRequest::NoPendingMutation);
+        connection.close();
+        peer.join().unwrap();
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(attempts(&store).unwrap()[0].request.encoded(), V1_REQUEST);
+        assert!(attempts(&store).unwrap()[0].reply.is_none());
+    }
+
+    #[test]
+    fn malformed_legacy_evidence_refuses_before_connect() {
+        let f = Fixture::new();
+        let store = f.open();
+        let response = HistoricalFrame::decode(V1_RESPONSE).unwrap();
+        let state = legacy_state(
+            &store,
+            Uuid::new_v4(),
+            Outcome::HistoricalReply {
+                frame: encode(response.frame()).unwrap(),
+            },
+        );
+        let bytes = serde_json::to_vec(&state).unwrap();
+        let path = store.paths.data.join(JOURNAL_FILE);
+        fs::write(&path, &bytes).unwrap();
+        let (listener, directory, uid) = endpoint(&f);
+        listener.set_nonblocking(true).unwrap();
+        assert!(ResidentConnection::connect(
+            store,
+            directory,
+            uid,
+            runtime_scope(),
+            OperationId(id(50)),
+            end()
+        )
+        .is_err());
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        assert_eq!(fs::read(path).unwrap(), bytes);
+    }
     #[test]
     fn lost_native_reply_reopens_only_for_original_target_reconciliation() {
         let f = Fixture::new();
@@ -521,10 +737,10 @@ mod sockets {
                     failure.lost,
                     LostRequest::Indeterminate {
                         operation: OperationId(id(51)),
-                        request_sha256: saved[0].request.fingerprint().unwrap(),
+                        request_sha256: saved[0].request.fingerprint(),
                     }
                 );
-                assert_eq!(saved[0].request.operation, OperationId(id(51)));
+                assert_eq!(saved[0].request.frame().operation, OperationId(id(51)));
                 assert_eq!(
                     saved[0].reply.is_some(),
                     point == PublicationPoint::AfterOutcome

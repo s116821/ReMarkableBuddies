@@ -5,7 +5,9 @@
 use crate::storage::{files, Store, Uuid};
 use anyhow::{bail, ensure, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
-use remarkable_open_sdk::native_adapter::{Command, Frame, Message, Reply, MAX_FRAME};
+#[cfg(any(target_os = "linux", test))]
+use remarkable_open_sdk::native_adapter::Frame;
+use remarkable_open_sdk::native_adapter::{Command, HistoricalFrame, Message, Reply, MAX_FRAME};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -38,7 +40,8 @@ fn publication_fault(point: PublicationPoint) -> Result<()> {
 #[derive(Clone, Debug)]
 pub struct HistoricalAttempt {
     pub conversation: Uuid,
-    pub request: Frame,
+    /// Original wire revision/bytes/digest; never re-encode to validate history.
+    pub request: HistoricalFrame,
     /// A local client proof, never reconstructed from lack of a native reply.
     pub known_not_dispatched: bool,
     pub reply: Option<Reply>,
@@ -66,7 +69,7 @@ struct State {
     actor: Uuid,
     attempts: Vec<Attempt>,
 }
-fn decode(encoded: &str) -> Result<Frame> {
+fn decode(encoded: &str) -> Result<HistoricalFrame> {
     ensure!(
         encoded.len() <= (MAX_FRAME + 4).div_ceil(3) * 4,
         "native frame exceeds bound"
@@ -82,9 +85,10 @@ fn decode(encoded: &str) -> Result<Frame> {
         u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize == bytes.len() - 4,
         "native frame prefix mismatch"
     );
-    let frame = Frame::decode(&bytes[4..]).map_err(|_| anyhow::anyhow!("invalid native frame"))?;
+    let frame =
+        HistoricalFrame::decode(&bytes).map_err(|_| anyhow::anyhow!("invalid native frame"))?;
     ensure!(
-        frame.encode().ok().as_ref() == Some(&bytes) && STANDARD.encode(&bytes) == encoded,
+        STANDARD.encode(frame.encoded()) == encoded,
         "noncanonical native frame"
     );
     Ok(frame)
@@ -97,6 +101,7 @@ fn encode(frame: &Frame) -> Result<String> {
             .map_err(|_| anyhow::anyhow!("invalid native frame"))?,
     ))
 }
+#[cfg(any(target_os = "linux", test))]
 fn digest(frame: &Frame) -> Result<String> {
     Ok(crate::storage::digest(
         &frame
@@ -104,7 +109,13 @@ fn digest(frame: &Frame) -> Result<String> {
             .map_err(|_| anyhow::anyhow!("invalid native frame"))?,
     ))
 }
-fn validate_reply(request: &Frame, reply: &Frame) -> Result<Reply> {
+fn validate_reply(original: &HistoricalFrame, response: &HistoricalFrame) -> Result<Reply> {
+    ensure!(
+        original.wire_revision() == response.wire_revision(),
+        "native reply revision mismatch"
+    );
+    let request = original.frame();
+    let reply = response.frame();
     ensure!(
         request.scope == reply.scope
             && request.sequence == reply.sequence
@@ -119,7 +130,7 @@ fn validate_reply(request: &Frame, reply: &Frame) -> Result<Reply> {
         bail!("expected native response")
     };
     ensure!(
-        request.fingerprint().ok().as_ref() == Some(request_sha256),
+        original.fingerprint() == *request_sha256,
         "native reply digest mismatch"
     );
     let Message::Request(Command::InsertAfter(insertion)) = &request.message else {
@@ -147,11 +158,14 @@ impl Attempt {
         ensure!(!self.conversation.is_nil(), "nil native conversation");
         let request = decode(&self.frame)?;
         ensure!(
-            matches!(request.message, Message::Request(Command::InsertAfter(_))),
+            matches!(
+                request.frame().message,
+                Message::Request(Command::InsertAfter(_))
+            ),
             "journal contains non-insertion"
         );
         ensure!(
-            digest(&request)? == self.sha256,
+            crate::storage::digest(request.encoded()) == self.sha256,
             "native attempt digest mismatch"
         );
         let reply = match &self.outcome {
@@ -187,7 +201,7 @@ impl State {
         for attempt in &self.attempts {
             let value = attempt.historical()?;
             ensure!(
-                operations.insert(value.request.operation),
+                operations.insert(value.request.frame().operation),
                 "duplicate native operation"
             );
             ensure!(
@@ -255,7 +269,7 @@ fn reserve(store: &Store, conversation: Uuid, request: &Frame, expected: [u8; 32
         ensure!(state.attempts.len() < MAX_ATTEMPTS, "native journal full");
         for prior in state.validate(actor)? {
             ensure!(
-                prior.request.operation != request.operation,
+                prior.request.frame().operation != request.operation,
                 "native operation already consumed"
             );
             ensure!(
@@ -416,7 +430,9 @@ mod linux {
                 .rev()
                 .find(|a| a.conversation == conversation)
                 .context("native attempt missing")?;
-            let Message::Request(Command::InsertAfter(insertion)) = original.request.message else {
+            let Message::Request(Command::InsertAfter(insertion)) =
+                original.request.frame().message.clone()
+            else {
                 unreachable!()
             };
             self.client
