@@ -1,5 +1,8 @@
 //! Immutable ordinary historical data, never selected/native or model admission.
-use super::{ContextBudget, ContextRefusal, Ledger, Mode, Outcome, Record, Role, Turn, TurnRange};
+use super::{
+    resolution::{self, SourceDirective},
+    ContextBudget, ContextRefusal, Ledger, Mode, Outcome, Record, Role, Turn, TurnRange,
+};
 use crate::{
     retrieval::{IndexKey, Provider, Retrieved},
     storage::{valid_digest, Media, ObjectRef, Uuid},
@@ -514,6 +517,35 @@ impl Ledger {
         let records = self
             .inspect(conversation, false)
             .map_err(|_| ReceivingRefusal::InvalidHistory)?;
+        self.assemble_request_context(
+            conversation,
+            request_turn,
+            selection,
+            source,
+            budget,
+            retrieval,
+            token_count,
+            records,
+        )
+    }
+    /// Resolve a declaration inside the same validated records used for assembly.
+    /// The returned frame is historical, not permission or unchanged current state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn source_request_context_with_directive(
+        &self,
+        conversation: Uuid,
+        request_turn: Uuid,
+        selection: Option<TurnRange>,
+        directive: SourceDirective,
+        budget: ReceivingBudget,
+        retrieval: Option<&dyn Provider>,
+        token_count: impl Fn(&str) -> Result<usize>,
+    ) -> Result<FrozenRequestContext> {
+        validate_budget(&budget)?;
+        let records = self
+            .inspect(conversation, false)
+            .map_err(|_| ReceivingRefusal::InvalidHistory)?;
+        let source = resolution::for_frame(&records, conversation, request_turn, directive)?;
         self.assemble_request_context(
             conversation,
             request_turn,

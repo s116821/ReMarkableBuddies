@@ -1,4 +1,6 @@
 //! Real local Store/Index fixtures. Counters are declared synthetic byte counts.
+#[path = "request_evidence/declared_receiving.rs"]
+mod declared_receiving;
 use anyhow::Result;
 use remarkable_reader_buddy::conversation::resolution::{SourceDirective, SourceResolutionRefusal};
 use remarkable_reader_buddy::{

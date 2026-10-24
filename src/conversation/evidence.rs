@@ -1,5 +1,9 @@
 //! Durable ordinary historical selections. These facts confer no effect authority.
-use super::{receiving::*, *};
+use super::{
+    receiving::*,
+    resolution::{SourceDirective, SourceResolutionRefusal},
+    *,
+};
 pub use crate::storage::captured::RecordRef;
 use crate::storage::{
     captured::{Captured, ReadBudget},
@@ -139,6 +143,49 @@ impl Ledger {
         token_count: impl Fn(&str) -> Result<usize>,
     ) -> Result<PreparedRequestEvidence> {
         validate_budget(&budget)?;
+        let (capture, records) = self.capture_request_records(conversation)?;
+        self.prepare_captured_evidence(
+            conversation,
+            request_turn,
+            selection,
+            source,
+            budget,
+            retrieval,
+            token_count,
+            capture,
+            records,
+        )
+    }
+    /// Declare and assemble against one capture; publication keeps existing guards.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_request_evidence_with_directive(
+        &self,
+        conversation: Uuid,
+        request_turn: Uuid,
+        selection: Option<TurnRange>,
+        directive: SourceDirective,
+        budget: ReceivingBudget,
+        retrieval: Option<&dyn crate::retrieval::Provider>,
+        token_count: impl Fn(&str) -> Result<usize>,
+    ) -> Result<PreparedRequestEvidence> {
+        validate_budget(&budget)?;
+        let (capture, records) = self
+            .capture_request_records(conversation)
+            .map_err(|_| SourceResolutionRefusal::HistoryUnavailable)?;
+        let source = super::resolution::for_frame(&records, conversation, request_turn, directive)?;
+        self.prepare_captured_evidence(
+            conversation,
+            request_turn,
+            selection,
+            source,
+            budget,
+            retrieval,
+            token_count,
+            capture,
+            records,
+        )
+    }
+    fn capture_request_records(&self, conversation: Uuid) -> Result<(Captured, Vec<Record>)> {
         self.complete_store()?;
         let capture = self.store.capture(conversation, matches)?;
         let envelopes = capture
@@ -148,6 +195,21 @@ impl Ledger {
             .collect::<Vec<_>>();
         let records = Self::inspect_snapshot(conversation, false, &envelopes)?;
         self.validate_evidence_records(&records)?;
+        Ok((capture, records))
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_captured_evidence(
+        &self,
+        conversation: Uuid,
+        request_turn: Uuid,
+        selection: Option<TurnRange>,
+        source: RequestSource,
+        budget: ReceivingBudget,
+        retrieval: Option<&dyn crate::retrieval::Provider>,
+        token_count: impl Fn(&str) -> Result<usize>,
+        capture: Captured,
+        records: Vec<Record>,
+    ) -> Result<PreparedRequestEvidence> {
         let context = self.assemble_request_context(
             conversation,
             request_turn,

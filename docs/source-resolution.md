@@ -46,6 +46,11 @@ them. Each follow-up queries the local source anew when the caller invokes
 receiving. To carry that new selection forward again, explicitly record its
 evidence and declare the chosen operation for a later request.
 
+For one receiving snapshot, the optional
+[declared receiving/preparation methods](declared-source-receiving.md) consume the
+directive inside their own validated records. The standalone resolver retains its
+separate-call boundary and does not freeze subsequent receiving.
+
 Resolution makes no Provider/model/device calls, invokes no tokenizer and writes
 no records. It reuses bounded historical evidence validation and ordinary
 inspection (4096 records and existing metadata/reference work bounds), with a
