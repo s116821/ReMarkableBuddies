@@ -117,6 +117,19 @@ impl Drop for Lease {
 }
 
 impl Store {
+    /// Serialize domain-owned local journal IO under the existing Store lease.
+    /// The callback may perform bounded owned-file IO, never network/native work.
+    pub(crate) fn with_owned_local_io<T>(
+        &self,
+        action: impl FnOnce(&std::path::Path, Uuid) -> Result<T>,
+    ) -> Result<T> {
+        let _guard = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex poisoned"))?;
+        action(&self.paths.data, self.actor_id)
+    }
+
     pub fn open(paths: StorePaths) -> Result<Self> {
         paths.validate()?;
         let identity_path = paths.data.join("identity.json");

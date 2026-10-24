@@ -2,6 +2,7 @@ pub mod history;
 pub mod indicator;
 mod navigation;
 pub mod orchestrator;
+pub mod resident_client;
 pub mod sdk_acquisition;
 pub mod sdk_buddy_decision;
 pub mod symbol_pool;

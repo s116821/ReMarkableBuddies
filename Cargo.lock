@@ -832,7 +832,7 @@ dependencies = [
  "bitvec",
  "cfg-if",
  "libc",
- "nix",
+ "nix 0.29.0",
 ]
 
 [[package]]
@@ -1734,6 +1734,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "memoffset"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
+dependencies = [
+ "autocfg",
+]
+
+[[package]]
 name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1828,6 +1837,19 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
+]
+
+[[package]]
+name = "nix"
+version = "0.31.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
+dependencies = [
+ "bitflags 2.13.2",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
+ "memoffset",
 ]
 
 [[package]]
@@ -2549,9 +2571,10 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 [[package]]
 name = "remarkable-open-sdk"
 version = "0.0.0"
-source = "git+https://github.com/s116821/ReMarkableOpenSDK?rev=32b86e4fef04844cbf2ec31129bf029cc1d9899a#32b86e4fef04844cbf2ec31129bf029cc1d9899a"
+source = "git+https://github.com/s116821/ReMarkableOpenSDK?rev=095f6c73777195b2bee56321a81857346a76ebde#095f6c73777195b2bee56321a81857346a76ebde"
 dependencies = [
  "image",
+ "nix 0.31.3",
  "sha2",
 ]
 
@@ -2570,7 +2593,7 @@ dependencies = [
  "image",
  "imageproc",
  "log",
- "nix",
+ "nix 0.29.0",
  "remarkable-open-sdk",
  "reqwest",
  "resvg",
