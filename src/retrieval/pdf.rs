@@ -1,4 +1,5 @@
 //! Offline supported PDF text layer; not rendering, OCR or native authority.
+mod unicode;
 use super::{Index, NormalizedDocument, SourceFormat, SourceUnit};
 use crate::storage::{digest, Uuid};
 use anyhow::{bail, ensure, Context, Result};
@@ -16,7 +17,7 @@ const PAGE_CONTENT: usize = 1024 * 1024;
 const TOTAL_CONTENT: usize = 8 * 1024 * 1024;
 const PAGE_TEXT: usize = 512 * 1024;
 const TOTAL_TEXT: usize = 4 * 1024 * 1024;
-pub const EXTRACTOR_REVISION: &str = "pdf-simple-latin-r1-lopdf-0.46.0";
+pub const EXTRACTOR_REVISION: &str = "pdf-explicit-unicode-r2-lopdf-0.46.0";
 
 #[derive(Debug, Serialize)]
 pub struct PdfText {
@@ -151,11 +152,19 @@ impl Simple {
         }
     }
 }
+enum Font {
+    Simple(Simple),
+    Unicode(std::sync::Arc<unicode::Map>),
+}
 struct Resources {
-    fonts: BTreeMap<Vec<u8>, Simple>,
+    fonts: BTreeMap<Vec<u8>, Font>,
     images: BTreeSet<Vec<u8>>,
 }
-fn resources(doc: &Document, source: Option<&Dictionary>) -> Result<Resources> {
+fn resources(
+    doc: &Document,
+    source: Option<&Dictionary>,
+    unicode: &mut unicode::Cache,
+) -> Result<Resources> {
     let mut admitted = Resources {
         fonts: BTreeMap::new(),
         images: BTreeSet::new(),
@@ -170,6 +179,11 @@ fn resources(doc: &Document, source: Option<&Dictionary>) -> Result<Resources> {
         for (alias, object) in fonts {
             ensure!(alias.len() <= 128, "PDF font alias bound");
             let font = dictionary(doc, object)?;
+            if font.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"Type0") {
+                let map = unicode.font(doc, object, font)?;
+                admitted.fonts.insert(alias.clone(), Font::Unicode(map));
+                continue;
+            }
             absent(
                 font,
                 &[
@@ -212,7 +226,7 @@ fn resources(doc: &Document, source: Option<&Dictionary>) -> Result<Resources> {
                 Some(b"MacRomanEncoding") => Simple::MacRoman,
                 _ => bail!("Unsupported PDF font encoding"),
             };
-            admitted.fonts.insert(alias.clone(), encoding);
+            admitted.fonts.insert(alias.clone(), Font::Simple(encoding));
         }
     }
     if source.has(b"XObject") {
@@ -331,8 +345,19 @@ impl Text<'_> {
         }
         Ok(())
     }
-    fn shown(&mut self, bytes: &[u8], font: Option<Simple>) -> Result<()> {
-        let font = font.context("PDF shown text has no selected font")?;
+    fn shown(&mut self, bytes: &[u8], font: Option<&Font>) -> Result<()> {
+        let font = match font.context("PDF shown text has no selected font")? {
+            Font::Simple(font) => *font,
+            Font::Unicode(map) => {
+                ensure!(bytes.len().is_multiple_of(2), "Truncated PDF Unicode code");
+                for code in bytes.as_chunks::<2>().0 {
+                    for ch in map.text(u16::from_be_bytes([code[0], code[1]]))?.chars() {
+                        self.push(ch)?;
+                    }
+                }
+                return Ok(());
+            }
+        };
         // Only trusted literals enter this getter. Input dictionaries never do.
         let mut trusted = Dictionary::new();
         trusted.set("Type", Object::Name(b"Font".to_vec()));
@@ -422,7 +447,7 @@ fn extract(
                     .map_err(|_| anyhow::anyhow!("Invalid PDF font alias"))?;
                 ensure!(number(&args[1])? > 0.0, "Invalid PDF font size");
                 font = Some(
-                    *resources
+                    resources
                         .fonts
                         .get(alias)
                         .context("Missing PDF font resource")?,
@@ -593,8 +618,9 @@ pub fn normalize(document: Uuid, mut input: impl Read) -> Result<PdfText> {
     let (mut total_content, mut total_text, mut total_ops) = (0, 0, 0);
     let mut units = Vec::new();
     let mut textless_pages = Vec::new();
+    let mut unicode = unicode::Cache::default();
     for (offset, page) in ordered.pages.iter().enumerate() {
-        let resources = resources(&doc, page.resources)?;
+        let resources = resources(&doc, page.resources, &mut unicode)?;
         let content = content(&doc, page.dict, &mut total_content)?;
         let text = extract(&content, &resources, &mut total_text, &mut total_ops)?;
         let page = (offset + 1) as u32;

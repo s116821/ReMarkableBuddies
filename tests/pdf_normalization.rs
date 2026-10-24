@@ -1,4 +1,6 @@
 //! Authored PDF fixtures through the maintained writer; no personal documents.
+#[path = "pdf_normalization/unicode.rs"]
+mod unicode;
 use lopdf::{
     dictionary, Document, EncryptionState, EncryptionVersion, Object, ObjectId, Permissions, Stream,
 };
