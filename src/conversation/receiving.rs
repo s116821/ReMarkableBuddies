@@ -104,6 +104,11 @@ pub(super) struct Frame {
     missing_media: Vec<Media>,
 }
 
+/// Only use after the ordinary historical evidence validator has admitted the frame.
+pub(super) fn recorded_source(json: &str) -> Result<SourceAssociation> {
+    Ok(serde_json::from_str::<Frame>(json)?.source)
+}
+
 #[derive(Debug)]
 pub struct FrozenRequestContext {
     frame: Frame,

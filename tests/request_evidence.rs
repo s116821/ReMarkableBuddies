@@ -1,5 +1,6 @@
 //! Real local Store/Index fixtures. Counters are declared synthetic byte counts.
 use anyhow::Result;
+use remarkable_reader_buddy::conversation::resolution::{SourceDirective, SourceResolutionRefusal};
 use remarkable_reader_buddy::{
     conversation::{evidence::*, receiving::*, *},
     retrieval::{
@@ -1257,4 +1258,414 @@ fn persisted_sdk_fixture_keeps_exact_synthetic_qualification_across_restart() {
         .record
         .frame_json
         .contains(capture_facts::SDK_SOURCE));
+}
+
+fn inherit(prior: &Turn, operation: Option<Uuid>, expected: Option<IndexKey>) -> SourceDirective {
+    SourceDirective::Inherit {
+        request_turn: prior.id,
+        operation,
+        expected,
+    }
+}
+fn resolution_error(result: Result<RequestSource>, expected: SourceResolutionRefusal) {
+    let error = result.unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<SourceResolutionRefusal>(),
+        Some(&expected)
+    );
+    assert_eq!(
+        error.chain().count(),
+        1,
+        "raw internal error chain must not escape"
+    );
+}
+fn record_bound(l: &Ledger, r: &Turn, s: &ImageUse, index: &Index, ms: u64) -> Uuid {
+    let p = l
+        .prepare_request_evidence(
+            r.conversation,
+            r.id,
+            None,
+            association(r, s, index.key()),
+            budget(),
+            Some(index),
+            counter,
+        )
+        .unwrap();
+    let op = Uuid::new_v4();
+    l.persist_request_evidence(op, ms, &p).unwrap();
+    op
+}
+
+#[test]
+fn resolve_named_disagreeing_choices_changes_and_no_document_without_effects() {
+    let f = Fixture::new();
+    let l = f.ledger();
+    let c = create(&l);
+    let doc = Uuid::new_v4();
+    let (r, s) = with_source(&l, user(c, "acceleration"), doc);
+    let index = Index::build(document(doc, "v1")).unwrap();
+    let old = record_bound(&l, &r, &s, &index, 1);
+    let blank = Uuid::new_v4();
+    l.persist_request_evidence(blank, 9999, &no_document(&l, &r))
+        .unwrap();
+    let (different, other_source) = with_source(&l, user(c, "changed source"), Uuid::new_v4());
+    let other_index = Index::build(document(other_source.observation.document, "other")).unwrap();
+    let current = append(&l, user(c, "orbit"), vec![]);
+    let before = serde_json::to_value(l.store().manifests().unwrap()).unwrap();
+    let spy = Spy::new(&index);
+    let choice = l
+        .resolve_request_source(
+            c,
+            current.id,
+            inherit(&r, Some(old), Some(index.key().clone())),
+        )
+        .unwrap();
+    assert!(spy.calls.borrow().is_empty());
+    match &choice {
+        RequestSource::Original {
+            origin_turn,
+            source_record,
+            expected,
+        } => {
+            assert_eq!(*origin_turn, r.id);
+            assert_eq!(*source_record, s.id);
+            assert_eq!(expected, index.key());
+        }
+        _ => panic!("latest no-document must not override named original"),
+    }
+    assert!(matches!(
+        l.resolve_request_source(c, current.id, inherit(&r, Some(blank), None))
+            .unwrap(),
+        RequestSource::NoDocument
+    ));
+    resolution_error(
+        l.resolve_request_source(c, current.id, inherit(&r, None, Some(index.key().clone()))),
+        SourceResolutionRefusal::AnchorRequired,
+    );
+    assert!(matches!(
+        l.resolve_request_source(
+            c,
+            current.id,
+            SourceDirective::Explicit(RequestSource::NoDocument)
+        )
+        .unwrap(),
+        RequestSource::NoDocument
+    ));
+    let changed = l
+        .resolve_request_source(
+            c,
+            current.id,
+            SourceDirective::Explicit(association(&different, &other_source, other_index.key())),
+        )
+        .unwrap();
+    assert!(
+        matches!(changed, RequestSource::Original { source_record, .. } if source_record == other_source.id)
+    );
+    assert_eq!(
+        serde_json::to_value(l.store().manifests().unwrap()).unwrap(),
+        before
+    );
+    let context = l
+        .source_request_context(c, current.id, None, choice, budget(), Some(&spy), counter)
+        .unwrap();
+    assert_eq!(spy.calls.borrow().len(), 1);
+    assert_eq!(context.request().text.as_deref(), Some("orbit"));
+    assert_eq!(context.retrieval().unwrap().passages[0].page, Some(9));
+    assert_eq!(
+        serde_json::to_value(l.store().manifests().unwrap()).unwrap(),
+        before
+    );
+}
+
+#[test]
+fn resolve_independent_new_key_and_subsequent_provider_staleness_admission() {
+    let f = Fixture::new();
+    let l = f.ledger();
+    let c = create(&l);
+    let doc = Uuid::new_v4();
+    let (r, s) = with_source(&l, user(c, "acceleration"), doc);
+    let old_index = Index::build(document(doc, "v1")).unwrap();
+    let op = record_bound(&l, &r, &s, &old_index, 1);
+    let current = append(&l, user(c, "orbit"), vec![]);
+    let new_index = Index::build(document(doc, "v2")).unwrap();
+    let choice = l
+        .resolve_request_source(
+            c,
+            current.id,
+            inherit(&r, Some(op), Some(new_index.key().clone())),
+        )
+        .unwrap();
+    assert_ne!(new_index.key(), old_index.key());
+    let context = l
+        .source_request_context(
+            c,
+            current.id,
+            None,
+            choice,
+            budget(),
+            Some(&new_index),
+            counter,
+        )
+        .unwrap();
+    assert_eq!(&context.retrieval().unwrap().source, new_index.key());
+    let stale = l
+        .resolve_request_source(
+            c,
+            current.id,
+            inherit(&r, Some(op), Some(old_index.key().clone())),
+        )
+        .unwrap();
+    assert!(l
+        .source_request_context(
+            c,
+            current.id,
+            None,
+            stale,
+            budget(),
+            Some(&new_index),
+            counter
+        )
+        .is_err());
+    resolution_error(
+        l.resolve_request_source(c, current.id, inherit(&r, Some(op), None)),
+        SourceResolutionRefusal::IndependentKeyRequired,
+    );
+    for case in 0..5 {
+        let mut key = new_index.key().clone();
+        match case {
+            0 => key.document = Uuid::new_v4(),
+            1 => key.source_sha256 = "bad".into(),
+            2 => key.normalized_sha256.clear(),
+            3 => key.extractor_revision = "\nprivate-error".into(),
+            4 => key.document = Uuid::nil(),
+            _ => unreachable!(),
+        }
+        resolution_error(
+            l.resolve_request_source(c, current.id, inherit(&r, Some(op), Some(key))),
+            SourceResolutionRefusal::InvalidSource,
+        );
+    }
+}
+
+#[test]
+fn resolve_same_content_successor_but_changed_or_missing_source_refuses() {
+    for change in 0..3 {
+        let f = Fixture::new();
+        let l = f.ledger();
+        let c = create(&l);
+        let doc = Uuid::new_v4();
+        let (r, s) = with_source(&l, user(c, "acceleration"), doc);
+        let index = Index::build(document(doc, "v1")).unwrap();
+        let op = record_bound(&l, &r, &s, &index, 1);
+        let current = append(&l, user(c, "orbit"), vec![]);
+        let mut e = l.store().value(Namespace::Source, s.id).unwrap().unwrap();
+        e.parents = [e.revision_id].into();
+        e.revision_id = Uuid::new_v4();
+        e.operation_id = Uuid::new_v4();
+        match change {
+            0 => {}
+            1 => {
+                let mut updated = s.clone();
+                updated.purpose = "changed source content".into();
+                e.payload = serde_json::to_value(Record::Source(updated)).unwrap();
+            }
+            2 => {
+                e.kind = Kind::Tombstone;
+                e.payload = serde_json::Value::Null;
+                e.media_descriptors.clear();
+            }
+            _ => unreachable!(),
+        }
+        l.store().commit(vec![e], BTreeMap::new()).unwrap();
+        let before = serde_json::to_value(l.store().manifests().unwrap()).unwrap();
+        let result = l.resolve_request_source(
+            c,
+            current.id,
+            inherit(&r, Some(op), Some(index.key().clone())),
+        );
+        match change {
+            0 => assert!(
+                matches!(result.unwrap(), RequestSource::Original { source_record, .. } if source_record == s.id)
+            ),
+            1 => resolution_error(result, SourceResolutionRefusal::ChangedSource),
+            2 => resolution_error(result, SourceResolutionRefusal::InvalidSource),
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            serde_json::to_value(l.store().manifests().unwrap()).unwrap(),
+            before
+        );
+    }
+}
+
+#[test]
+fn resolve_anchor_required_even_one_choice_and_invalid_chronology_never_falls_back() {
+    let f = Fixture::new();
+    let l = f.ledger();
+    let c = create(&l);
+    let r = append(&l, user(c, "first"), vec![]);
+    let op = Uuid::new_v4();
+    l.persist_request_evidence(op, 1, &no_document(&l, &r))
+        .unwrap();
+    let current = append(&l, user(c, "second"), vec![]);
+    resolution_error(
+        l.resolve_request_source(c, current.id, inherit(&r, None, None)),
+        SourceResolutionRefusal::AnchorRequired,
+    );
+    resolution_error(
+        l.resolve_request_source(c, r.id, inherit(&r, Some(op), None)),
+        SourceResolutionRefusal::NotEarlier,
+    );
+    let future_op = Uuid::new_v4();
+    l.persist_request_evidence(future_op, 1, &no_document(&l, &current))
+        .unwrap();
+    resolution_error(
+        l.resolve_request_source(c, r.id, inherit(&current, Some(future_op), None)),
+        SourceResolutionRefusal::NotEarlier,
+    );
+    for bad in [Uuid::nil(), Uuid::new_v4()] {
+        resolution_error(
+            l.resolve_request_source(c, current.id, inherit(&r, Some(bad), None)),
+            SourceResolutionRefusal::AnchorUnavailable,
+        );
+    }
+    let foreign = create(&l);
+    let other = append(&l, user(foreign, "foreign"), vec![]);
+    resolution_error(
+        l.resolve_request_source(foreign, other.id, inherit(&r, Some(op), None)),
+        SourceResolutionRefusal::AnchorUnavailable,
+    );
+    resolution_error(
+        l.resolve_request_source(
+            c,
+            Uuid::new_v4(),
+            SourceDirective::Explicit(RequestSource::NoDocument),
+        ),
+        SourceResolutionRefusal::InvalidRequest,
+    );
+    let key = Index::build(document(Uuid::new_v4(), "v1"))
+        .unwrap()
+        .key()
+        .clone();
+    resolution_error(
+        l.resolve_request_source(c, current.id, inherit(&r, Some(op), Some(key))),
+        SourceResolutionRefusal::UnexpectedKey,
+    );
+    l.delete(c, Uuid::new_v4(), heads(&l, c), None).unwrap();
+    resolution_error(
+        l.resolve_request_source(c, current.id, inherit(&r, Some(op), None)),
+        SourceResolutionRefusal::HistoryUnavailable,
+    );
+}
+
+#[test]
+fn resolve_reopened_metadata_only_history_and_sanitized_corruption() {
+    let f = Fixture::new();
+    let l = f.ledger();
+    let c = create(&l);
+    let doc = Uuid::new_v4();
+    let (r, s) = with_source(&l, user(c, "acceleration"), doc);
+    let index = Index::build(document(doc, "v1")).unwrap();
+    let op = record_bound(&l, &r, &s, &index, 1);
+    let current = append(&l, user(c, "orbit"), vec![]);
+    let target_f = Fixture::new();
+    let target = target_f.ledger();
+    replicate(l.store(), target.store(), true, false);
+    drop(l);
+    let l = f.ledger();
+    for ledger in [&l, &target] {
+        let before = serde_json::to_value(ledger.store().manifests().unwrap()).unwrap();
+        assert!(matches!(ledger.resolve_request_source(c, current.id,
+            inherit(&r, Some(op), Some(index.key().clone()))).unwrap(), RequestSource::Original { source_record, .. } if source_record == s.id));
+        assert_eq!(
+            serde_json::to_value(ledger.store().manifests().unwrap()).unwrap(),
+            before
+        );
+    }
+    let read = l.request_evidence(c, r.id, op).unwrap().unwrap();
+    let generation: Uuid = files::json(&f.0.join("data/CURRENT"), 128).unwrap();
+    let path =
+        f.0.join("data/generations")
+            .join(generation.to_string())
+            .join("objects")
+            .join(&read.record.turns[0].object.sha256);
+    assert!(path
+        .canonicalize()
+        .unwrap()
+        .starts_with(f.0.canonicalize().unwrap()));
+    fs::write(path, b"private source details must not escape").unwrap();
+    let error = l
+        .resolve_request_source(
+            c,
+            current.id,
+            inherit(&r, Some(op), Some(index.key().clone())),
+        )
+        .unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<SourceResolutionRefusal>(),
+        Some(&SourceResolutionRefusal::AnchorUnavailable)
+    );
+    assert_eq!(
+        format!("{error:#}"),
+        "source inheritance anchor unavailable"
+    );
+    let error = l
+        .resolve_request_source(
+            c,
+            current.id,
+            SourceDirective::Explicit(RequestSource::NoDocument),
+        )
+        .unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<SourceResolutionRefusal>(),
+        Some(&SourceResolutionRefusal::HistoryUnavailable)
+    );
+    assert_eq!(error.chain().count(), 1);
+}
+
+#[test]
+fn resolve_explicit_invalid_source_and_non_reader_request_are_sanitized() {
+    let f = Fixture::new();
+    let l = f.ledger();
+    let c = create(&l);
+    let first = append(&l, user(c, "earlier"), vec![]);
+    let (later, source) = with_source(&l, user(c, "later"), Uuid::new_v4());
+    let index = Index::build(document(source.observation.document, "v1")).unwrap();
+    resolution_error(
+        l.resolve_request_source(
+            c,
+            first.id,
+            SourceDirective::Explicit(association(&later, &source, index.key())),
+        ),
+        SourceResolutionRefusal::InvalidSource,
+    );
+    let mut writer = user(c, "writer");
+    writer.mode = Mode::Writer;
+    let writer = append(&l, writer, vec![]);
+    resolution_error(
+        l.resolve_request_source(
+            c,
+            writer.id,
+            SourceDirective::Explicit(RequestSource::NoDocument),
+        ),
+        SourceResolutionRefusal::InvalidRequest,
+    );
+    resolution_error(
+        l.resolve_request_source(
+            Uuid::nil(),
+            first.id,
+            SourceDirective::Explicit(RequestSource::NoDocument),
+        ),
+        SourceResolutionRefusal::InvalidRequest,
+    );
+    let mut key = index.key().clone();
+    key.extractor_revision = "x".repeat(1024 * 1024);
+    resolution_error(
+        l.resolve_request_source(
+            c,
+            later.id,
+            SourceDirective::Explicit(association(&later, &source, &key)),
+        ),
+        SourceResolutionRefusal::InvalidSource,
+    );
 }
