@@ -3,6 +3,8 @@
 mod memory;
 #[path = "source_request_context/ranking.rs"]
 mod ranking;
+#[path = "source_request_context/research.rs"]
+mod research;
 use anyhow::{bail, Result};
 use remarkable_reader_buddy::{
     conversation::{receiving::*, *},
