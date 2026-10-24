@@ -1,5 +1,5 @@
 //! Read-only declared inheritance. Never active intent or current effect authority.
-use super::{receiving::*, Ledger, Mode, Outcome, Record, Role, Turn};
+use super::{evidence::RequestEvidence, receiving::*, Ledger, Mode, Outcome, Record, Role, Turn};
 use crate::{retrieval::IndexKey, storage::Uuid};
 use anyhow::{ensure, Result};
 use std::fmt;
@@ -109,72 +109,125 @@ impl Ledger {
         let records = self
             .inspect(conversation, false)
             .map_err(|_| Refusal::HistoryUnavailable)?;
-        let current = request(&records, conversation, request_turn)?;
-        match directive {
-            SourceDirective::Explicit(choice) => {
-                match original(&records, current, choice, 512 * 1024)
-                    .map_err(|_| Refusal::InvalidSource)?
-                {
-                    SourceAssociation::NoDocument => Ok(RequestSource::NoDocument),
-                    SourceAssociation::Original {
-                        origin_turn,
-                        source_record,
-                        expected,
-                    } => Ok(RequestSource::Original {
-                        origin_turn,
-                        source_record: source_id(&source_record).ok_or(Refusal::InvalidSource)?,
-                        expected,
-                    }),
-                }
+        from_records(
+            conversation,
+            request_turn,
+            directive,
+            &records,
+            anchor.as_ref(),
+        )
+    }
+}
+
+/// Only callers that have validated the complete ordinary snapshot may use this.
+fn from_records(
+    conversation: Uuid,
+    request_turn: Uuid,
+    directive: SourceDirective,
+    records: &[Record],
+    historical: Option<&RequestEvidence>,
+) -> Result<RequestSource> {
+    use SourceResolutionRefusal as Refusal;
+    ensure!(
+        !conversation.is_nil() && !request_turn.is_nil(),
+        Refusal::InvalidRequest
+    );
+    let current = request(records, conversation, request_turn)?;
+    match directive {
+        SourceDirective::Explicit(choice) => {
+            match original(records, current, choice, 512 * 1024)
+                .map_err(|_| Refusal::InvalidSource)?
+            {
+                SourceAssociation::NoDocument => Ok(RequestSource::NoDocument),
+                SourceAssociation::Original {
+                    origin_turn,
+                    source_record,
+                    expected,
+                } => Ok(RequestSource::Original {
+                    origin_turn,
+                    source_record: source_id(&source_record).ok_or(Refusal::InvalidSource)?,
+                    expected,
+                }),
             }
-            SourceDirective::Inherit { expected, .. } => {
-                let anchor = anchor.ok_or(Refusal::AnchorUnavailable)?;
-                // Historical readback and current inspection are separate reads.
-                // A disappeared/replaced anchor must not survive that boundary.
-                ensure!(
-                    records.iter().any(
-                        |r| matches!(r, Record::RequestEvidence(fact) if fact.as_ref() == &anchor)
-                    ),
-                    Refusal::AnchorUnavailable
-                );
-                let prior = request(&records, conversation, anchor.request_turn)?;
-                ensure!(prior.sequence < current.sequence, Refusal::NotEarlier);
-                match recorded_source(&anchor.frame_json).map_err(|_| Refusal::AnchorUnavailable)? {
-                    SourceAssociation::NoDocument => {
-                        ensure!(expected.is_none(), Refusal::UnexpectedKey);
-                        Ok(RequestSource::NoDocument)
+        }
+        SourceDirective::Inherit {
+            request_turn: prior_request,
+            operation,
+            expected,
+        } => {
+            let operation = operation.ok_or(Refusal::AnchorRequired)?;
+            ensure!(
+                !prior_request.is_nil() && !operation.is_nil(),
+                Refusal::AnchorUnavailable
+            );
+            let anchor = records
+                .iter()
+                .find_map(|record| match record {
+                    Record::RequestEvidence(fact)
+                        if fact.operation == operation
+                            && fact.request_turn == prior_request
+                            && fact.conversation == conversation
+                            && fact.id == RequestEvidence::identity(operation) =>
+                    {
+                        Some(fact.as_ref())
                     }
-                    SourceAssociation::Original {
+                    _ => None,
+                })
+                .ok_or(Refusal::AnchorUnavailable)?;
+            if let Some(historical) = historical {
+                // Preserve standalone readback/current-snapshot equality.
+                ensure!(anchor == historical, Refusal::AnchorUnavailable);
+            }
+            let prior = request(records, conversation, anchor.request_turn)?;
+            ensure!(prior.sequence < current.sequence, Refusal::NotEarlier);
+            match recorded_source(&anchor.frame_json).map_err(|_| Refusal::AnchorUnavailable)? {
+                SourceAssociation::NoDocument => {
+                    ensure!(expected.is_none(), Refusal::UnexpectedKey);
+                    Ok(RequestSource::NoDocument)
+                }
+                SourceAssociation::Original {
+                    origin_turn,
+                    source_record,
+                    ..
+                } => {
+                    let source_identity =
+                        source_id(&source_record).ok_or(Refusal::InvalidSource)?;
+                    let choice = RequestSource::Original {
                         origin_turn,
-                        source_record,
-                        ..
-                    } => {
-                        let source_identity =
-                            source_id(&source_record).ok_or(Refusal::InvalidSource)?;
-                        let choice = RequestSource::Original {
-                            origin_turn,
-                            source_record: source_identity,
-                            expected: expected.ok_or(Refusal::IndependentKeyRequired)?,
-                        };
-                        let SourceAssociation::Original {
-                            origin_turn,
-                            source_record: current_source,
-                            expected,
-                        } = original(&records, current, choice, 512 * 1024)
-                            .map_err(|_| Refusal::InvalidSource)?
-                        else {
-                            return Err(Refusal::InvalidSource.into());
-                        };
-                        ensure!(current_source == source_record, Refusal::ChangedSource);
-                        Ok(RequestSource::Original {
-                            origin_turn,
-                            source_record: source_identity,
-                            expected,
-                        })
-                    }
+                        source_record: source_identity,
+                        expected: expected.ok_or(Refusal::IndependentKeyRequired)?,
+                    };
+                    let SourceAssociation::Original {
+                        origin_turn,
+                        source_record: current_source,
+                        expected,
+                    } = original(records, current, choice, 512 * 1024)
+                        .map_err(|_| Refusal::InvalidSource)?
+                    else {
+                        return Err(Refusal::InvalidSource.into());
+                    };
+                    ensure!(current_source == source_record, Refusal::ChangedSource);
+                    Ok(RequestSource::Original {
+                        origin_turn,
+                        source_record: source_identity,
+                        expected,
+                    })
                 }
             }
         }
+    }
+}
+
+/// Explicit frames retain their original receiving validation/order/refusals.
+pub(super) fn for_frame(
+    records: &[Record],
+    conversation: Uuid,
+    request_turn: Uuid,
+    directive: SourceDirective,
+) -> Result<RequestSource> {
+    match directive {
+        SourceDirective::Explicit(source) => Ok(source),
+        inherited => from_records(conversation, request_turn, inherited, records, None),
     }
 }
 
