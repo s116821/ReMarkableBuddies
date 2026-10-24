@@ -1,4 +1,5 @@
 //! Immutable ordinary historical data, never selected/native or model admission.
+pub mod memory;
 use super::{
     resolution::{self, SourceDirective},
     ContextBudget, ContextRefusal, Ledger, Mode, Outcome, Record, Role, Turn, TurnRange,

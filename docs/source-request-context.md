@@ -8,6 +8,9 @@ or admit selected Reader effects. The central capability is
 
 For explicit durable publication, use the separate
 [request-evidence API](request-evidence.md). This receiving API remains read-only.
+For optional ordinary associative memory, consume the frozen frame through
+[historical source and memory composition](source-memory-context.md), which keeps
+the original frame unchanged and bounds the combined data without model dispatch.
 
 The request must already be a nonblank interpreted Reader user turn. The frame
 keeps that request separately from verbatim eligible history through its sequence;
