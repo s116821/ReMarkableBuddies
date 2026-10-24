@@ -2,6 +2,7 @@
 pub mod disk;
 pub mod epub;
 pub mod pdf;
+mod ranking;
 use crate::storage::{digest, Uuid};
 use anyhow::{ensure, Result};
 use serde::{Deserialize, Serialize};
@@ -72,13 +73,15 @@ pub struct Retrieved {
 struct Chunk {
     unit: usize,
     range: [usize; 2],
-    terms: BTreeSet<String>,
+    terms: BTreeMap<String, usize>,
+    tokens: usize,
 }
 
 pub struct Index {
     key: IndexKey,
     units: Vec<SourceUnit>,
     chunks: Vec<Chunk>,
+    ranking: ranking::Corpus,
 }
 
 /// Receiving code can substitute a retriever without coupling it to an LLM.
@@ -94,10 +97,13 @@ pub trait Provider {
 }
 
 pub(crate) fn terms(text: &str) -> BTreeSet<String> {
+    tokens(text).collect()
+}
+
+fn tokens(text: &str) -> impl Iterator<Item = String> + '_ {
     text.split(|c: char| !c.is_alphanumeric())
         .filter(|word| !word.is_empty())
         .map(str::to_lowercase)
-        .collect()
 }
 
 impl Index {
@@ -181,19 +187,23 @@ impl Index {
                         end = start + offset + character.len_utf8();
                     }
                 }
+                let (terms, tokens) = ranking::frequencies(&value.text[start..end])?;
                 chunks.push(Chunk {
                     unit,
                     range: [start, end],
-                    terms: terms(&value.text[start..end]),
+                    terms,
+                    tokens,
                 });
                 ensure!(chunks.len() <= 8192, "source chunk count exceeds bound");
                 start = end;
             }
         }
+        let ranking = ranking::Corpus::build(&chunks)?;
         Ok(Self {
             key,
             units: document.units,
             chunks,
+            ranking,
         })
     }
 
@@ -229,11 +239,11 @@ impl Index {
             .iter()
             .enumerate()
             .filter_map(|(ordinal, chunk)| {
-                let score = chunk.terms.intersection(&words).count();
-                (score > 0).then_some((ordinal, score))
+                let score = self.ranking.score(chunk, &words);
+                (score > 0.0).then_some((ordinal, score))
             })
             .collect();
-        ranked.sort_by_key(|&(ordinal, score)| (std::cmp::Reverse(score), ordinal));
+        ranked.sort_by(|(a, x), (b, y)| y.total_cmp(x).then_with(|| a.cmp(b)));
         let direct: BTreeSet<_> = ranked.iter().map(|&(ordinal, _)| ordinal).collect();
         let mut candidates: Vec<_> = ranked.iter().map(|&(ordinal, _)| ordinal).collect();
         if neighbors {
