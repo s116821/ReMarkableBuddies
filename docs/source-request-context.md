@@ -72,5 +72,7 @@ callback record replacement and adversarial Provider outputs. SDK/development fa
 are synthetic historical fixtures. No tablet, external provider or live model is
 contacted. These fixtures qualify the read-only receiving API. Durable context
 selection evidence is available through the separate
-[request-evidence API](request-evidence.md). Automatic inheritance, router/Reader
+[request-evidence API](request-evidence.md). A separate read-only
+[source resolver](source-resolution.md) carries forward caller-named historical
+choices. Automatic runtime inheritance, router/Reader
 integration, model dispatch and research policy remain unfinished.
