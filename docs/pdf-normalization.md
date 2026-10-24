@@ -29,7 +29,10 @@ for system-font lookup. Success validates the declared text layer, not a valid
 TrueType program or the appearance/visibility of its glyphs.
 
 The ToUnicode profile requires a complete ordinary CMapType2 wrapper and bounded
-CIDSystemInfo/CMapName metadata. Its source codes and codespace endpoints are
+CIDSystemInfo/CMapName metadata. CMap-body system information is a direct dictionary
+with direct string/string/integer fields; it cannot resolve PDF object references.
+Ordinary PDF font/stream metadata retains its separate permitted reference handling.
+Its source codes and codespace endpoints are
 exactly two decoded hexadecimal bytes. It supports bfchar and bfrange with either
 explicit target arrays or a single two-byte BMP increment without overflow or
 surrogate crossing. Individual targets contain 2–16 even UTF16-BE bytes with valid

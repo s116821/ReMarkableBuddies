@@ -174,6 +174,36 @@ impl Cache {
             supplement,
         })
     }
+    // CMap programs contain literal metadata, not PDF resource lookups. No
+    // Document is available here, so nested references cannot acquire semantics.
+    fn direct_info(&mut self, value: &Object) -> Result<SystemInfo> {
+        let dict = value
+            .as_dict()
+            .map_err(|_| anyhow::anyhow!("CMap body requires a direct system info dictionary"))?;
+        self.keys(dict, &[b"Registry", b"Ordering", b"Supplement"])?;
+        let registry = string(
+            dict.get(b"Registry")
+                .context("Missing PDF character registry")?,
+            128,
+        )?
+        .to_vec();
+        let ordering = string(
+            dict.get(b"Ordering")
+                .context("Missing PDF character ordering")?,
+            128,
+        )?
+        .to_vec();
+        let supplement = integer(
+            dict.get(b"Supplement")
+                .context("Missing PDF character supplement")?,
+        )?;
+        ensure!(supplement >= 0, "Invalid PDF character supplement");
+        Ok(SystemInfo {
+            registry,
+            ordering,
+            supplement,
+        })
+    }
     fn opaque(&mut self, doc: &Document, value: &Object) -> Result<()> {
         reference(value)?;
         let stream = resolve(doc, value)?
@@ -497,7 +527,7 @@ impl Cache {
                     cmap_type = true;
                 }
                 b"CMapName" => cmap_name = Some(name(&args[1], 128)?.to_vec()),
-                b"CIDSystemInfo" => info = Some(self.info(doc, &args[1])?),
+                b"CIDSystemInfo" => info = Some(self.direct_info(&args[1])?),
                 b"WMode" => {
                     ensure!(integer(&args[1])? == 0, "Unsupported PDF CMap writing mode");
                 }

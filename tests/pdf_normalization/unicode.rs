@@ -554,6 +554,70 @@ fn typed_parser_normalization_and_opaque_programs_do_not_claim_raw_syntax_or_ren
 }
 
 #[test]
+fn cmap_body_object_references_refuse_even_when_pdf_targets_have_expected_types() {
+    let mut accepted = Vec::new();
+    for (field, literal, target) in [
+        (
+            "Registry",
+            "/Registry (Adobe)",
+            Object::string_literal("Adobe"),
+        ),
+        ("Ordering", "/Ordering (UCS)", Object::string_literal("UCS")),
+        ("Supplement", "/Supplement 0", Object::Integer(0)),
+    ] {
+        let (mut book, ids) = unicode_book(&[ALPHA, SHOWN], ONE);
+        // The first page is genuinely valid before the later map is encountered.
+        book.doc.get_dictionary_mut(book.pages[0]).unwrap().set(
+            "Resources",
+            dictionary! { "Font" => dictionary! { "F1" => book.font } },
+        );
+        let reference = book.doc.add_object(target);
+        let body = String::from_utf8(cmap(ONE)).unwrap().replace(
+            literal,
+            &format!("/{field} {} {} R", reference.0, reference.1),
+        );
+        book.doc.objects.insert(
+            ids.map,
+            Stream::new(dictionary! {}, body.into_bytes()).into(),
+        );
+        if pdf::normalize(Uuid::from_u128(1), book.bytes().as_slice()).is_ok() {
+            accepted.push(field);
+        }
+    }
+    assert!(
+        accepted.is_empty(),
+        "unsupported CMap references accepted: {accepted:?}"
+    );
+}
+
+#[test]
+fn ordinary_font_and_stream_system_info_still_resolves_permitted_pdf_references() {
+    let (mut book, ids) = unicode_book(&[SHOWN], ONE);
+    let registry = book.doc.add_object(Object::string_literal("Adobe"));
+    let identity = book.doc.add_object(Object::string_literal("Identity"));
+    let ucs = book.doc.add_object(Object::string_literal("UCS"));
+    let zero = book.doc.add_object(Object::Integer(0));
+    let font_info = book.doc.add_object(
+        dictionary! { "Registry" => registry, "Ordering" => identity, "Supplement" => zero },
+    );
+    let stream_info = book.doc.add_object(
+        dictionary! { "Registry" => registry, "Ordering" => ucs, "Supplement" => zero },
+    );
+    book.doc
+        .get_dictionary_mut(ids.descendant)
+        .unwrap()
+        .set("CIDSystemInfo", font_info);
+    book.doc
+        .get_object_mut(ids.map)
+        .unwrap()
+        .as_stream_mut()
+        .unwrap()
+        .dict
+        .set("CIDSystemInfo", stream_info);
+    assert_eq!(normalize(&mut book).document.units[0].text, "α");
+}
+
+#[test]
 fn operation_eligibility_and_document_totals_precede_semantic_projection() {
     let (mut book, ids) = unicode_book(&[SHOWN], ONE);
     book.doc.objects.insert(
