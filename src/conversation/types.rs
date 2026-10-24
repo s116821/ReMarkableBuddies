@@ -329,7 +329,7 @@ pub struct ContextView {
     pub missing_media: Vec<Media>,
     pub selection: Option<TurnRange>,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 pub struct TurnRange {
     pub start: u64,
     pub end_exclusive: u64,
