@@ -96,6 +96,9 @@ impl SelectedDomainProjection {
                     document = Some(binding.receipt.source.document);
                 }
                 Record::Export(_) => {}
+                Record::RequestEvidence(_) => {
+                    anyhow::bail!("ordinary request evidence excluded from selected projection")
+                }
                 Record::Receipt(receipt) => {
                     let ack = &receipt.acknowledgment;
                     ensure!(
@@ -427,6 +430,7 @@ impl SelectedDomainProjection {
 pub(super) fn conversation_id(record: &Record) -> Uuid {
     match record {
         Record::Root(r) => r.id,
+        Record::RequestEvidence(r) => r.conversation,
         Record::Turn(r) => r.conversation,
         Record::Source(r) => r.conversation,
         Record::Capture(r) => r.conversation,

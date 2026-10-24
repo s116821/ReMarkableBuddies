@@ -6,6 +6,9 @@ It does not dispatch a model, write Store records, identify a live tablet page,
 or admit selected Reader effects. The central capability is
 `source-request-context` in ReMarkableBuddiesDocs.
 
+For explicit durable publication, use the separate
+[request-evidence API](request-evidence.md). This receiving API remains read-only.
+
 The request must already be a nonblank interpreted Reader user turn. The frame
 keeps that request separately from verbatim eligible history through its sequence;
 future turns never enter it. An explicit `TurnRange` must include the request and
