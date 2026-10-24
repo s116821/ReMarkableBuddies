@@ -70,5 +70,7 @@ keys, source changes, follow-ups reaching different pages, no-document zero-quer
 checks, an imported omission outside the history range, exact byte/token boundaries,
 callback record replacement and adversarial Provider outputs. SDK/development facts
 are synthetic historical fixtures. No tablet, external provider or live model is
-contacted. Durable passage/citation evidence, automatic inheritance, router/Reader
+contacted. These fixtures qualify the read-only receiving API. Durable context
+selection evidence is available through the separate
+[request-evidence API](request-evidence.md). Automatic inheritance, router/Reader
 integration, model dispatch and research policy remain unfinished.
