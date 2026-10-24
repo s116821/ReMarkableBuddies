@@ -5,6 +5,9 @@ returns `FrozenSourceMemoryContext`. It combines data only: no Ledger read, sour
 query, record publication, model prompt/call, device action or configuration lookup.
 The central capability is `source-memory-context` in ReMarkableBuddiesDocs.
 
+The separate [declared research stage](declared-research-context.md) can consume
+this frozen object while preserving its exact bytes and historical classification.
+
 Import `conversation::receiving::memory::{MemoryInput, MemoryOptions,
 CombinedBudget}`. Supply `MemoryInput::Disabled`, or `MemoryInput::Query` with an
 existing `memory::Provider`, explicit nonnil profile and options. Enabled query text

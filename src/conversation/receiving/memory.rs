@@ -1,4 +1,5 @@
 //! Transient ordinary historical data composition, without model/effect admission.
+pub mod research;
 use super::{encoded, Frame, FrozenRequestContext, SourceAssociation, FRAME_BYTES};
 use crate::{memory, storage::Uuid};
 use anyhow::{ensure, Result};
