@@ -91,6 +91,55 @@ fn capture_records(
     }
     Ok(records)
 }
+fn admitted_heads(
+    inner: &Inner,
+    namespace: Namespace,
+    record: Uuid,
+    limit: usize,
+) -> Result<Vec<&Envelope>> {
+    let Some(heads) = inner.index.heads.get(&(namespace, record)) else {
+        return Ok(vec![]);
+    };
+    ensure!(
+        heads.len() <= limit.min(MAX_ITEMS),
+        "historical head count bound"
+    );
+    let mut bytes = 0u64;
+    for revision in heads {
+        let (_, hash) = inner
+            .index
+            .records
+            .get(revision)
+            .context("historical head absent")?;
+        bytes = bytes
+            .checked_add(
+                inner
+                    .index
+                    .record_refs
+                    .get(hash)
+                    .context("historical object absent")?
+                    .bytes,
+            )
+            .context("head byte overflow")?;
+        ensure!(bytes <= MAX_METADATA as u64, "historical head byte bound");
+    }
+    Ok(heads.iter().map(|id| &inner.index.records[id].0).collect())
+}
+#[cfg(test)]
+thread_local! { static HEAD_CLONES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+#[cfg(test)]
+pub(crate) fn head_cloned() {
+    HEAD_CLONES.with(|n| n.set(n.get() + 1));
+}
+#[cfg(test)]
+pub(crate) fn take_head_clones() -> usize {
+    HEAD_CLONES.with(|n| n.replace(0))
+}
+fn clone_head(envelope: &Envelope) -> Envelope {
+    #[cfg(test)]
+    head_cloned();
+    envelope.clone()
+}
 impl Store {
     pub(crate) fn bounded_heads(
         &self,
@@ -102,36 +151,28 @@ impl Store {
             .inner
             .lock()
             .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
-        let Some(heads) = inner.index.heads.get(&(namespace, record)) else {
-            return Ok(vec![]);
-        };
-        ensure!(
-            heads.len() <= limit.min(MAX_ITEMS),
-            "historical head count bound"
-        );
-        let mut bytes = 0u64;
-        for revision in heads {
-            let (_, hash) = inner
-                .index
-                .records
-                .get(revision)
-                .context("historical head absent")?;
-            bytes = bytes
-                .checked_add(
-                    inner
-                        .index
-                        .record_refs
-                        .get(hash)
-                        .context("historical object absent")?
-                        .bytes,
-                )
-                .context("head byte overflow")?;
-            ensure!(bytes <= MAX_METADATA as u64, "historical head byte bound");
-        }
-        Ok(heads
-            .iter()
-            .map(|id| inner.index.records[id].0.clone())
+        Ok(admitted_heads(&inner, namespace, record, limit)?
+            .into_iter()
+            .map(clone_head)
             .collect())
+    }
+    /// Admit both sets before cloning either, under one mutex observation.
+    pub(crate) fn bounded_head_pair(
+        &self,
+        namespace: Namespace,
+        first: Uuid,
+        second: Uuid,
+    ) -> Result<[Option<Envelope>; 2]> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        let first = admitted_heads(&inner, namespace, first, 1)?;
+        let second = admitted_heads(&inner, namespace, second, 1)?;
+        Ok([
+            first.first().map(|e| clone_head(e)),
+            second.first().map(|e| clone_head(e)),
+        ])
     }
     pub(crate) fn capture(
         self: &Arc<Self>,

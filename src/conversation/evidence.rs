@@ -331,29 +331,67 @@ impl Ledger {
         attempted?;
         bail!("evidence receipt unavailable after publication")
     }
+    fn operation_heads(&self, operation: Uuid) -> Result<[Option<Envelope>; 2]> {
+        let pair = self.store.bounded_head_pair(
+            Namespace::Conversation,
+            RequestEvidence::identity(operation),
+            Self::receipt_id(operation),
+        )?;
+        // Test observation is after the Store guard is dropped, never a callback
+        // under its mutex. Publication may occur here without tearing the pair.
+        #[cfg(test)]
+        tests::after_operation_snapshot(&pair);
+        Ok(pair)
+    }
     fn replay_evidence(
         &self,
-        fact: &RequestEvidence,
+        input: &RequestEvidence,
         fingerprint: &str,
     ) -> Result<Option<WriteResult>> {
-        let Some(prior) = self.replay_with_bounds(fact.operation, fingerprint, true)? else {
-            ensure!(
-                self.store
-                    .bounded_heads(Namespace::Conversation, fact.id, 1)?
-                    .is_empty(),
-                "evidence without receipt"
-            );
-            return Ok(None);
+        self.complete_store()?;
+        let pair = self.operation_heads(input.operation)?;
+        let [fact, receipt] = pair;
+        let (fact, receipt) = match (fact, receipt) {
+            (None, None) => return Ok(None),
+            (Some(fact), Some(receipt)) => (fact, receipt),
+            _ => bail!("incomplete request-evidence operation"),
         };
-        let historical = self
-            .request_evidence(fact.conversation, fact.request_turn, fact.operation)?
-            .context("evidence receipt missing fact")?;
+        let Record::Receipt(stored_receipt) = Self::decode(&receipt)? else {
+            bail!("invalid evidence receipt");
+        };
+        ensure!(
+            stored_receipt.fingerprint == fingerprint
+                && stored_receipt.acknowledgment.operation == input.operation,
+            "operation fingerprint conflict"
+        );
+        let historical = self.read_evidence_pair(
+            input.conversation,
+            input.request_turn,
+            input.operation,
+            &fact,
+            &receipt,
+            &mut ReadBudget::default(),
+        )?;
         ensure!(
             historical.record.fingerprint()? == fingerprint
-                && historical.acknowledgment == prior.historical,
+                && historical.acknowledgment == stored_receipt.acknowledgment,
             "evidence replay mismatch"
         );
-        Ok(Some(prior))
+        let ack = historical.acknowledgment;
+        Ok(Some(WriteResult {
+            current_root: self.store.bounded_heads(
+                Namespace::Conversation,
+                ack.conversation,
+                MAX_ITEMS,
+            )?,
+            current_binding: match ack.binding {
+                Some(id) => self
+                    .store
+                    .bounded_heads(Namespace::Conversation, id, MAX_ITEMS)?,
+                None => vec![],
+            },
+            historical: ack,
+        }))
     }
     pub fn request_evidence(
         &self,
@@ -366,24 +404,34 @@ impl Ledger {
             !conversation.is_nil() && !request_turn.is_nil() && !operation.is_nil(),
             "nil historical identity"
         );
-        let heads = self.store.heads(
-            Namespace::Conversation,
-            RequestEvidence::identity(operation),
-        )?;
-        if heads.is_empty() {
-            ensure!(
-                self.store
-                    .bounded_heads(Namespace::Conversation, Self::receipt_id(operation), 1)?
-                    .is_empty(),
-                "receipt without evidence"
-            );
-            return Ok(None);
+        let [fact, receipt] = self.operation_heads(operation)?;
+        match (fact, receipt) {
+            (None, None) => Ok(None),
+            (Some(fact), Some(receipt)) => self
+                .read_evidence_pair(
+                    conversation,
+                    request_turn,
+                    operation,
+                    &fact,
+                    &receipt,
+                    &mut ReadBudget::default(),
+                )
+                .map(Some),
+            _ => bail!("incomplete request-evidence operation"),
         }
-        ensure!(
-            heads.len() == 1 && heads[0].parents.is_empty(),
-            "conflicted or mutable evidence"
-        );
-        let Record::RequestEvidence(fact) = Self::decode(&heads[0])? else {
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn read_evidence_pair(
+        &self,
+        conversation: Uuid,
+        request_turn: Uuid,
+        operation: Uuid,
+        envelope: &Envelope,
+        receipt: &Envelope,
+        budget: &mut ReadBudget,
+    ) -> Result<HistoricalRequestEvidence> {
+        ensure!(envelope.parents.is_empty(), "mutable evidence");
+        let Record::RequestEvidence(fact) = Self::decode(envelope)? else {
             bail!("wrong evidence kind");
         };
         ensure!(
@@ -392,13 +440,12 @@ impl Ledger {
                 && fact.operation == operation,
             "historical evidence identity mismatch"
         );
-        let mut budget = ReadBudget::default();
-        let (ack, media) = self.validate_evidence(&fact, &mut budget)?;
-        Ok(Some(HistoricalRequestEvidence {
+        let (ack, media) = self.validate_evidence_pair(&fact, envelope, receipt, budget)?;
+        Ok(HistoricalRequestEvidence {
             record: *fact,
             acknowledgment: ack,
             unavailable_media: media,
-        }))
+        })
     }
     pub(super) fn validate_evidence_records(&self, records: &[Record]) -> Result<()> {
         let mut budget = ReadBudget::default();
@@ -414,6 +461,21 @@ impl Ledger {
         fact: &RequestEvidence,
         budget: &mut ReadBudget,
     ) -> Result<(Acknowledgment, Vec<Media>)> {
+        let [envelope, receipt] = self.operation_heads(fact.operation)?;
+        self.validate_evidence_pair(
+            fact,
+            &envelope.context("evidence head absent")?,
+            &receipt.context("evidence receipt absent")?,
+            budget,
+        )
+    }
+    fn validate_evidence_pair(
+        &self,
+        fact: &RequestEvidence,
+        envelope: &Envelope,
+        receipt: &Envelope,
+        budget: &mut ReadBudget,
+    ) -> Result<(Acknowledgment, Vec<Media>)> {
         fact.validate_shape()?;
         let mut records = Vec::new();
         for reference in std::iter::once(&fact.root)
@@ -425,27 +487,18 @@ impl Ledger {
             )?);
         }
         let media = validate_records(fact, &records)?;
-        let heads = self
-            .store
-            .bounded_heads(Namespace::Conversation, fact.id, 1)?;
         ensure!(
-            heads.len() == 1
-                && heads[0].parents.is_empty()
-                && Self::decode(&heads[0])? == Record::RequestEvidence(Box::new(fact.clone())),
+            envelope.parents.is_empty()
+                && Self::decode(envelope)? == Record::RequestEvidence(Box::new(fact.clone())),
             "evidence head mismatch"
         );
         let transaction = self
             .store
-            .original_transaction(heads[0].revision_id, budget)?;
+            .original_transaction(envelope.revision_id, budget)?;
         let ack = validate_transaction(fact, &transaction)?;
         validate_root_successor(fact, &records[0], &transaction)?;
-        let receipt_heads = self.store.bounded_heads(
-            Namespace::Conversation,
-            Self::receipt_id(fact.operation),
-            1,
-        )?;
         ensure!(
-            receipt_heads.len() == 1 && transaction.iter().any(|e| e == &receipt_heads[0]),
+            transaction.iter().any(|e| e == receipt),
             "receipt head mismatch"
         );
         let unavailable = media
@@ -678,3 +731,7 @@ pub(super) fn validate_transaction(
     );
     Ok(receipt.acknowledgment)
 }
+
+#[cfg(test)]
+#[path = "evidence_tests.rs"]
+mod tests;

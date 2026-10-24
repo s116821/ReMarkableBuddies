@@ -21,6 +21,9 @@ changes. Counter and Provider callbacks run outside Store locks. Unrelated
 conversations can change independently. A stale preparation refuses; obtain a new
 preparation rather than silently requerying or shortening context.
 
+Historical lookup and retry observe the fact and receipt together in one bounded
+Store snapshot. A concurrent complete publication cannot appear as a torn orphan.
+
 An identical committed retry returns the original acknowledgment, including after
 a lost acknowledgment, concurrent winner, restart or logical deletion. Reusing an
 operation for different frame/count/limits/timestamp refuses. Historical retries

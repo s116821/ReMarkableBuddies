@@ -524,7 +524,13 @@ impl Store {
             .get(&(namespace, record))
             .into_iter()
             .flatten()
-            .filter_map(|id| inner.index.records.get(id).map(|p| p.0.clone()))
+            .filter_map(|id| {
+                inner.index.records.get(id).map(|p| {
+                    #[cfg(test)]
+                    captured::head_cloned();
+                    p.0.clone()
+                })
+            })
             .collect())
     }
     pub fn value(&self, namespace: Namespace, record: Uuid) -> Result<Option<Envelope>> {

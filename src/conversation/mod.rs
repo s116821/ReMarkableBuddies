@@ -279,27 +279,13 @@ impl Ledger {
         Ok(digest(&serde_json::to_vec(value)?))
     }
     fn replay(&self, operation: Uuid, fingerprint: &str) -> Result<Option<WriteResult>> {
-        self.replay_with_bounds(operation, fingerprint, false)
-    }
-    fn replay_with_bounds(
-        &self,
-        operation: Uuid,
-        fingerprint: &str,
-        bounded: bool,
-    ) -> Result<Option<WriteResult>> {
         self.complete_store()?;
         ensure!(!operation.is_nil(), "nil domain operation identity");
         ensure!(!operation.is_nil(), "nil operation identity");
-        let receipt = if bounded {
-            self.store
-                .bounded_heads(Namespace::Conversation, Self::receipt_id(operation), 1)?
-                .pop()
-                .filter(|e| e.kind == Kind::Value)
-        } else {
-            self.store
-                .value(Namespace::Conversation, Self::receipt_id(operation))?
-        };
-        let Some(e) = receipt else {
+        let Some(e) = self
+            .store
+            .value(Namespace::Conversation, Self::receipt_id(operation))?
+        else {
             return Ok(None);
         };
         let Record::Receipt(receipt) = Self::decode(&e)? else {
@@ -314,27 +300,13 @@ impl Ledger {
             "operation receipt identity mismatch"
         );
         let current_binding = match receipt.acknowledgment.binding {
-            Some(id) => {
-                if bounded {
-                    self.store
-                        .bounded_heads(Namespace::Conversation, id, MAX_ITEMS)?
-                } else {
-                    self.store.heads(Namespace::Conversation, id)?
-                }
-            }
+            Some(id) => self.store.heads(Namespace::Conversation, id)?,
             None => vec![],
         };
         Ok(Some(WriteResult {
-            current_root: if bounded {
-                self.store.bounded_heads(
-                    Namespace::Conversation,
-                    receipt.acknowledgment.conversation,
-                    MAX_ITEMS,
-                )?
-            } else {
-                self.store
-                    .heads(Namespace::Conversation, receipt.acknowledgment.conversation)?
-            },
+            current_root: self
+                .store
+                .heads(Namespace::Conversation, receipt.acknowledgment.conversation)?,
             current_binding,
             historical: receipt.acknowledgment,
         }))
