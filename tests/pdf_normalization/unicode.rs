@@ -1,4 +1,6 @@
 use super::*;
+#[path = "unicode/single_byte.rs"]
+mod single_byte;
 use lopdf::Dictionary;
 use std::path::PathBuf;
 
@@ -111,7 +113,7 @@ fn declared_unicode_mixed_pages_ranges_ligatures_and_supplementary_text_reach_ac
     assert_eq!(normalized.document.source_sha256, digest(&bytes));
     assert_eq!(
         normalized.document.extractor_revision,
-        "pdf-explicit-unicode-r2-lopdf-0.46.0"
+        "pdf-fixed-width-unicode-r3-lopdf-0.46.0"
     );
     assert_eq!(normalized.document.units[0].text, "α orbit fi 😀 AB βγ");
     assert_eq!(normalized.document.units[2].text, "alpha acceleration");

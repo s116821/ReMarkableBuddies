@@ -17,7 +17,7 @@ const PAGE_CONTENT: usize = 1024 * 1024;
 const TOTAL_CONTENT: usize = 8 * 1024 * 1024;
 const PAGE_TEXT: usize = 512 * 1024;
 const TOTAL_TEXT: usize = 4 * 1024 * 1024;
-pub const EXTRACTOR_REVISION: &str = "pdf-explicit-unicode-r2-lopdf-0.46.0";
+pub const EXTRACTOR_REVISION: &str = "pdf-fixed-width-unicode-r3-lopdf-0.46.0";
 
 #[derive(Debug, Serialize)]
 pub struct PdfText {
@@ -181,6 +181,13 @@ fn resources(
             let font = dictionary(doc, object)?;
             if font.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"Type0") {
                 let map = unicode.font(doc, object, font)?;
+                admitted.fonts.insert(alias.clone(), Font::Unicode(map));
+                continue;
+            }
+            if font.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"TrueType")
+                && font.has(b"ToUnicode")
+            {
+                let map = unicode.simple_font(doc, object, font)?;
                 admitted.fonts.insert(alias.clone(), Font::Unicode(map));
                 continue;
             }
@@ -349,13 +356,7 @@ impl Text<'_> {
         let font = match font.context("PDF shown text has no selected font")? {
             Font::Simple(font) => *font,
             Font::Unicode(map) => {
-                ensure!(bytes.len().is_multiple_of(2), "Truncated PDF Unicode code");
-                for code in bytes.as_chunks::<2>().0 {
-                    for ch in map.text(u16::from_be_bytes([code[0], code[1]]))?.chars() {
-                        self.push(ch)?;
-                    }
-                }
-                return Ok(());
+                return map.emit(bytes, |ch| self.push(ch));
             }
         };
         // Only trusted literals enter this getter. Input dictionaries never do.

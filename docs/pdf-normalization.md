@@ -4,7 +4,7 @@
 and returns `PdfText { document, textless_pages }`. The document uses the existing
 [normalized index](source-document-retrieval.md) and [owned cache](normalized-source-cache.md)
 contracts. It hashes exact original bytes and records extractor revision
-`pdf-explicit-unicode-r2-lopdf-0.46.0`. Every page stays in declared page-tree order,
+`pdf-fixed-width-unicode-r3-lopdf-0.46.0`. Every page stays in declared page-tree order,
 including blank/image-only units; `page` is a one-based ordinal, not a printed
 label or the tablet's current page. Entirely textless documents refuse.
 
@@ -28,18 +28,39 @@ external-file references refused. They are never interpreted, rendered or used
 for system-font lookup. Success validates the declared text layer, not a valid
 TrueType program or the appearance/visibility of its glyphs.
 
+An additional single-byte branch admits indirect simple TrueType fonts with
+explicit WinAnsiEncoding name metadata, nonempty BaseFont, matching FontDescriptor,
+FirstChar/LastChar integers0..255 and exactly that many finite Widths entries
+(at most256). Ordinary bounded same-document metadata references are allowed.
+The font requires an indirect ToUnicode stream whose entries all lie within its
+declared character range, including when another font already cached the map.
+Top-level fields are closed to Type/Subtype/BaseFont/Encoding/FirstChar/LastChar/
+Widths/FontDescriptor/ToUnicode and optional Name. The existing descriptor profile
+applies, with CIDSet forbidden for this branch; optional FontFile2 stays opaque.
+Other encodings, Differences, Type1 ToUnicode and other font kinds remain refused.
+Widths/encoding metadata do not supply a glyph, layout or missing-code fallback.
+
 The ToUnicode profile requires a complete ordinary CMapType2 wrapper and bounded
 CIDSystemInfo/CMapName metadata. CMap-body system information is a direct dictionary
 with direct string/string/integer fields; it cannot resolve PDF object references.
 Ordinary PDF font/stream metadata retains its separate permitted reference handling.
-Its source codes and codespace endpoints are
-exactly two decoded hexadecimal bytes. It supports bfchar and bfrange with either
+Its source codes and codespace endpoints are exactly two decoded hexadecimal bytes
+for Type0 and exactly one for simple TrueType. Mixed/variable widths refuse. It
+supports bfchar and bfrange with either
 explicit target arrays or a single two-byte BMP increment without overflow or
 surrogate crossing. Individual targets contain 2–16 even UTF16-BE bytes with valid
 pairing; supplementary characters and multi-scalar ligatures use bfchar/arrays.
-Unknown codes, odd/truncated shown strings, invalid targets, U+FFFD, overlapping
+Unknown codes, truncated two-byte shown strings, invalid targets, U+FFFD, overlapping
 entries/codespaces, mismatched counts, usecmap and unknown/vertical operations
-refuse the whole document. No earlier page escapes after a later failure.
+refuse the whole document. Odd shown byte counts are valid single-byte sequences;
+two-byte fonts still refuse truncated pairs. No earlier page escapes after a later
+failure. Maps retain their width under the same immutable ObjectId cache key;
+incompatible reuse refuses in either order without decoding/counting a map twice.
+The aggregate font/map/metadata budgets below cover both Unicode branches.
+
+All fresh PDF normalization uses revision r3, including old simple/Type0 inputs.
+Existing r1/r2 derived entries are not upgraded in place, and their old expected
+IndexKeys cannot query newly normalized r3 material. Stored schemas are unchanged.
 
 The same maintained strict typed operation parser handles bounded map syntax.
 The adapter validates map semantics and reserves each range before expansion;
