@@ -270,6 +270,82 @@ fn append_pair(f: &Fixture, complete: bool) {
             .unwrap();
     }
 }
+
+#[test]
+fn request_evidence_cleanup_validates_refs_and_keeps_settled_rules() {
+    use crate::conversation::receiving::{ReceivingBudget, RequestSource};
+    for malformed in [false, true] {
+        let f = Fixture::new();
+        append_pair(&f, true);
+        let ledger = Ledger::new(Arc::new(Store::open(f.paths.clone()).unwrap()));
+        let request = ledger
+            .inspect(f.conversation, false)
+            .unwrap()
+            .into_iter()
+            .find_map(|r| match r {
+                Record::Turn(t) if t.role == Role::User => Some(t.id),
+                _ => None,
+            })
+            .unwrap();
+        let prepared = ledger
+            .prepare_request_evidence(
+                f.conversation,
+                request,
+                None,
+                RequestSource::NoDocument,
+                ReceivingBudget {
+                    context: ContextBudget {
+                        max_turns: 64,
+                        max_text_bytes: 65536,
+                        provider_token_limit: Some(1000000),
+                    },
+                    max_encoded_bytes: 524288,
+                    max_passages: 2,
+                    max_passage_bytes: 16384,
+                    neighbors: false,
+                },
+                None,
+                |text| Ok(text.len()),
+            )
+            .unwrap();
+        let operation = Uuid::new_v4();
+        ledger
+            .persist_request_evidence(operation, 8, &prepared)
+            .unwrap();
+        if malformed {
+            let id = crate::conversation::evidence::RequestEvidence::identity(operation);
+            let mut e = ledger
+                .store()
+                .value(Namespace::Conversation, id)
+                .unwrap()
+                .unwrap();
+            e.parents = BTreeSet::from([e.revision_id]);
+            e.revision_id = Uuid::new_v4();
+            e.operation_id = Uuid::new_v4();
+            e.payload["record"]["root"]["object"]["sha256"] = "a".repeat(64).into();
+            ledger.store().commit(vec![e], BTreeMap::new()).unwrap();
+        }
+        drop(ledger);
+        let report = f.call(
+            Operation::Prepare,
+            Request::Prepare(Uuid::new_v4().to_string(), f.conversation.to_string()),
+        );
+        if malformed {
+            assert_ne!(report.status, Status::Prepared);
+        } else {
+            assert_eq!(
+                report.status,
+                Status::Prepared,
+                "{}",
+                serde_json::to_string(&report).unwrap()
+            );
+            let intent = report.intent.as_ref().unwrap().clone();
+            drop(report);
+            let applied = f.confirm(Operation::Apply, &intent);
+            assert_eq!(applied.status, Status::Acknowledged);
+        }
+    }
+}
 #[test]
 fn synthetic_empty_and_interpreted_completed_preserve_history_and_exact_retry() {
     for pair in [false, true] {

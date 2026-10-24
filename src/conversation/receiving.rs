@@ -5,7 +5,7 @@ use crate::{
     storage::{valid_digest, Media, ObjectRef, Uuid},
 };
 use anyhow::{ensure, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
     fmt,
@@ -27,7 +27,8 @@ pub enum RequestSource {
     },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReceivingBudget {
     /// Eligible context through the request, including the request itself.
     pub context: ContextBudget,
@@ -37,8 +38,8 @@ pub struct ReceivingBudget {
     pub neighbors: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum SourceAssociation {
     NoDocument,
     Original {
@@ -88,10 +89,11 @@ impl fmt::Display for ReceivingRefusal {
 }
 impl std::error::Error for ReceivingRefusal {}
 
-#[derive(Debug, Serialize)]
-struct Frame {
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Frame {
     schema: u32,
-    scope: &'static str,
+    scope: String,
     conversation: Uuid,
     request: Turn,
     history: Vec<Turn>,
@@ -154,7 +156,7 @@ impl Write for Capped {
         Ok(())
     }
 }
-fn encoded(value: &(impl Serialize + ?Sized), limit: usize) -> Result<String> {
+pub(super) fn encoded(value: &(impl Serialize + ?Sized), limit: usize) -> Result<String> {
     let mut out = Capped {
         bytes: Vec::new(),
         limit,
@@ -175,7 +177,155 @@ fn count(text: &str, counter: &impl Fn(&str) -> Result<usize>) -> Result<usize> 
     ensure!(count > 0, ReceivingRefusal::CounterUnavailable);
     Ok(count)
 }
-fn validate_budget(budget: &ReceivingBudget) -> Result<usize> {
+
+/// Structural replay only: no Provider and no invented historical tokenizer.
+pub(super) fn validate_historical(
+    json: &str,
+    conversation: Uuid,
+    request_turn: Uuid,
+    budget: &ReceivingBudget,
+    records: &[Record],
+) -> Result<Vec<Media>> {
+    validate_budget(budget)?;
+    let mut frame: Frame = serde_json::from_str(json)?;
+    ensure!(
+        encoded(&frame, budget.max_encoded_bytes)? == json
+            && frame.schema == 1
+            && frame.scope == "ordinary-historical"
+            && frame.conversation == conversation,
+        "invalid historical frame encoding"
+    );
+    let request = records
+        .iter()
+        .find_map(|r| match r {
+            Record::Turn(t) if t.id == request_turn => Some(t),
+            _ => None,
+        })
+        .ok_or(ReceivingRefusal::InvalidRequest)?;
+    ensure!(
+        &frame.request == request
+            && request.conversation == conversation
+            && request.mode == Mode::Reader
+            && request.role == Role::User
+            && request.outcome == Outcome::Interpreted
+            && request
+                .text
+                .as_ref()
+                .is_some_and(|s| !s.trim().is_empty() && s.len() <= budget.context.max_text_bytes),
+        ReceivingRefusal::InvalidRequest
+    );
+    if let Some(range) = frame.selection {
+        ensure!(
+            range.start <= request.sequence
+                && request.sequence.checked_add(1) == Some(range.end_exclusive),
+            ReceivingRefusal::InvalidSelection
+        );
+    }
+    let choice = match &frame.source {
+        SourceAssociation::NoDocument => RequestSource::NoDocument,
+        SourceAssociation::Original {
+            origin_turn,
+            source_record,
+            expected,
+        } => RequestSource::Original {
+            origin_turn: *origin_turn,
+            source_record: source_id(source_record).ok_or(ReceivingRefusal::OriginalUnavailable)?,
+            expected: expected.clone(),
+        },
+    };
+    ensure!(
+        original(records, request, choice, budget.max_encoded_bytes)? == frame.source,
+        ReceivingRefusal::AssociationMismatch
+    );
+    let mut view = Ledger::context_records(
+        records.to_vec(),
+        frame.selection,
+        &budget.context,
+        None,
+        |m| !frame.missing_media.contains(m),
+    )?;
+    ensure!(
+        view.turns.last() == Some(request),
+        ReceivingRefusal::InvalidHistory
+    );
+    view.turns.pop();
+    ensure!(
+        view.turns == frame.history,
+        ReceivingRefusal::InvalidHistory
+    );
+    let mut source_ids = frame
+        .history
+        .iter()
+        .chain(std::iter::once(request))
+        .flat_map(|t| t.sources.iter().copied())
+        .collect::<BTreeSet<_>>();
+    if let SourceAssociation::Original { source_record, .. } = &frame.source {
+        source_ids.insert(source_id(source_record).ok_or(ReceivingRefusal::OriginalUnavailable)?);
+    }
+    let supplied = records
+        .iter()
+        .filter_map(source_id)
+        .collect::<BTreeSet<_>>();
+    ensure!(source_ids == supplied, "extra or absent historical source");
+    let mut media = Vec::new();
+    for record in records.iter().filter(|r| source_id(r).is_some()) {
+        // Also verify source ownership against its referenced origin turn.
+        let (owner, turn) = match record {
+            Record::Source(s) => (s.conversation, s.turn),
+            Record::Capture(s) => (s.conversation, s.turn),
+            Record::LegacyCapture(s) => (s.conversation, s.turn),
+            Record::DevelopmentCapture(s) => (s.conversation, s.turn),
+            _ => unreachable!(),
+        };
+        ensure!(owner == conversation && records.iter().any(|r| matches!(r, Record::Turn(t) if t.id == turn && t.sources.contains(&source_id(record).unwrap()))), "foreign historical source");
+        for m in source_media(record)? {
+            if !media.contains(&m) {
+                media.push(m);
+            }
+        }
+    }
+    if let SourceAssociation::Original { source_record, .. } = &frame.source {
+        for m in source_media(source_record)? {
+            if frame.missing_media.contains(&m) && !view.missing_media.contains(&m) {
+                view.missing_media.push(m);
+            }
+        }
+    }
+    ensure!(
+        view.missing_media == frame.missing_media,
+        "contradictory historical missing media"
+    );
+    let retrieval = frame.retrieval.take();
+    let base = encoded(&frame, budget.max_encoded_bytes)?;
+    match (&frame.source, retrieval) {
+        (SourceAssociation::NoDocument, None) => {}
+        (SourceAssociation::Original { expected, .. }, Some(result)) => {
+            let text = request
+                .text
+                .as_deref()
+                .ok_or(ReceivingRefusal::InvalidRequest)?;
+            let words = crate::retrieval::terms(text);
+            ensure!(
+                text.len() <= 2048
+                    && !text.contains('\0')
+                    && !words.is_empty()
+                    && words.len() <= 64,
+                ReceivingRefusal::InvalidRequest
+            );
+            let room = budget
+                .max_encoded_bytes
+                .checked_sub(base.len())
+                .and_then(|n| n.checked_add(4))
+                .ok_or(ReceivingRefusal::EncodedLimit)?
+                .min(budget.max_passage_bytes);
+            ensure!(room >= 512, ReceivingRefusal::EncodedLimit);
+            validate_retrieval(&result, expected, budget.max_passages, room)?;
+        }
+        _ => return Err(ReceivingRefusal::InvalidRetrieval.into()),
+    }
+    Ok(media)
+}
+pub(super) fn validate_budget(budget: &ReceivingBudget) -> Result<usize> {
     let tokens = budget
         .context
         .provider_token_limit
@@ -203,7 +353,7 @@ fn validate_key(key: &IndexKey) -> Result<()> {
     );
     Ok(())
 }
-fn source_id(record: &Record) -> Option<Uuid> {
+pub(super) fn source_id(record: &Record) -> Option<Uuid> {
     match record {
         Record::Source(source) => Some(source.id),
         Record::Capture(source) => Some(source.id),
@@ -212,7 +362,7 @@ fn source_id(record: &Record) -> Option<Uuid> {
         _ => None,
     }
 }
-fn source_media(record: &Record) -> Result<Vec<Media>> {
+pub(super) fn source_media(record: &Record) -> Result<Vec<Media>> {
     match record {
         Record::Source(source) => Ok(std::iter::once(source.image.clone())
             .chain(source.parent.clone())
@@ -223,7 +373,7 @@ fn source_media(record: &Record) -> Result<Vec<Media>> {
         _ => Err(ReceivingRefusal::OriginalUnavailable.into()),
     }
 }
-fn original(
+pub(super) fn original(
     records: &[Record],
     request: &Turn,
     choice: RequestSource,
@@ -291,7 +441,7 @@ fn original(
     })
 }
 
-fn validate_retrieval(
+pub(super) fn validate_retrieval(
     result: &Retrieved,
     key: &IndexKey,
     count: usize,
@@ -355,10 +505,34 @@ impl Ledger {
         retrieval: Option<&dyn Provider>,
         token_count: impl Fn(&str) -> Result<usize>,
     ) -> Result<FrozenRequestContext> {
-        let token_limit = validate_budget(&budget)?;
+        validate_budget(&budget)?;
         let records = self
             .inspect(conversation, false)
             .map_err(|_| ReceivingRefusal::InvalidHistory)?;
+        self.assemble_request_context(
+            conversation,
+            request_turn,
+            selection,
+            source,
+            budget,
+            retrieval,
+            token_count,
+            records,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn assemble_request_context(
+        &self,
+        conversation: Uuid,
+        request_turn: Uuid,
+        selection: Option<TurnRange>,
+        source: RequestSource,
+        budget: ReceivingBudget,
+        retrieval: Option<&dyn Provider>,
+        token_count: impl Fn(&str) -> Result<usize>,
+        records: Vec<Record>,
+    ) -> Result<FrozenRequestContext> {
+        let token_limit = validate_budget(&budget)?;
         let request = records
             .iter()
             .find_map(|record| match record {
@@ -445,7 +619,7 @@ impl Ledger {
         }
         let mut frame = Frame {
             schema: 1,
-            scope: "ordinary-historical",
+            scope: "ordinary-historical".into(),
             conversation,
             request,
             history: view.turns,

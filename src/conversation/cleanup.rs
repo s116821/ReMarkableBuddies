@@ -9,6 +9,7 @@ pub(crate) fn eligible(
     target: Uuid,
     budget: &mut crate::storage::conversation_cleanup::Budget,
 ) -> Result<(Expected, Option<ExpectedBinding>, Summary)> {
+    evidence::validate_cleanup(snapshot)?;
     let mut by_hash = BTreeMap::new();
     for e in &snapshot.history {
         budget.charge(0, 1)?;

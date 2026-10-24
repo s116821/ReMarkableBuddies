@@ -1,4 +1,5 @@
 //! Versioned local persistence, independent of Reader/Writer domain semantics.
+pub(crate) mod captured;
 pub(crate) mod conditional;
 pub(crate) mod conversation_cleanup;
 pub mod drive;
@@ -97,6 +98,9 @@ struct Index {
     operations: BTreeMap<Uuid, String>,
     heads: BTreeMap<(Namespace, Uuid), BTreeSet<Uuid>>,
     manifests: BTreeMap<Uuid, Manifest>,
+    // Derived from accepted manifests, rebuilt on recovery; no on-disk format.
+    record_refs: BTreeMap<String, ObjectRef>,
+    record_transactions: BTreeMap<String, BTreeSet<Uuid>>,
     unavailable: usize,
 }
 struct Inner {
@@ -478,6 +482,16 @@ impl Store {
         Ok(())
     }
     fn apply_index(index: &mut Index, manifest: Manifest, records: Vec<(Envelope, String)>) {
+        for reference in &manifest.records {
+            index
+                .record_refs
+                .insert(reference.sha256.clone(), reference.clone());
+            index
+                .record_transactions
+                .entry(reference.sha256.clone())
+                .or_default()
+                .insert(manifest.transaction_id);
+        }
         for (e, hash) in records {
             index.operations.insert(e.operation_id, hash.clone());
             index.records.insert(e.revision_id, (e, hash));
@@ -649,6 +663,13 @@ impl Store {
         Ok(())
     }
     pub fn commit(&self, records: Vec<Envelope>, media: BTreeMap<String, Vec<u8>>) -> Result<Uuid> {
+        let (manifest, objects) = Self::ordinary_transaction(records, media)?;
+        self.publish(manifest, objects, true)
+    }
+    fn ordinary_transaction(
+        records: Vec<Envelope>,
+        media: BTreeMap<String, Vec<u8>>,
+    ) -> Result<(Manifest, BTreeMap<String, Vec<u8>>)> {
         let mut objects = media;
         let mut refs = Vec::new();
         let mut record_namespaces = BTreeMap::new();
@@ -685,7 +706,7 @@ impl Store {
                 .map(|h| Coverage::Included { sha256: h.clone() })
                 .collect(),
         };
-        self.publish(manifest, objects, true)
+        Ok((manifest, objects))
     }
     pub fn import(&self, manifest: Manifest, objects: BTreeMap<String, Vec<u8>>) -> Result<Uuid> {
         self.publish(manifest, objects, false)

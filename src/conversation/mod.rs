@@ -7,6 +7,7 @@ pub mod development;
 mod intent;
 mod legacy;
 pub use development::{DevelopmentCaptureHistory, PreparedDevelopmentCapture};
+pub mod evidence;
 mod export;
 mod pending;
 #[cfg(test)]
@@ -43,6 +44,8 @@ use std::{
     sync::Arc,
 };
 pub use types::*;
+
+type TurnCounter<'a> = dyn Fn(&[Turn]) -> Result<usize> + 'a;
 
 pub struct Ledger {
     store: Arc<Store>,
@@ -136,6 +139,10 @@ impl Ledger {
         }
         let (id, namespace, conversation) = match &record {
             Record::Root(root) => (root.id, Namespace::Conversation, root.id),
+            Record::RequestEvidence(fact) => {
+                fact.validate_shape()?;
+                (fact.id, Namespace::Conversation, fact.conversation)
+            }
             Record::Turn(turn) => {
                 Self::validate_turn(turn)?;
                 (turn.id, Namespace::Conversation, turn.conversation)
@@ -272,13 +279,27 @@ impl Ledger {
         Ok(digest(&serde_json::to_vec(value)?))
     }
     fn replay(&self, operation: Uuid, fingerprint: &str) -> Result<Option<WriteResult>> {
+        self.replay_with_bounds(operation, fingerprint, false)
+    }
+    fn replay_with_bounds(
+        &self,
+        operation: Uuid,
+        fingerprint: &str,
+        bounded: bool,
+    ) -> Result<Option<WriteResult>> {
         self.complete_store()?;
         ensure!(!operation.is_nil(), "nil domain operation identity");
         ensure!(!operation.is_nil(), "nil operation identity");
-        let Some(e) = self
-            .store
-            .value(Namespace::Conversation, Self::receipt_id(operation))?
-        else {
+        let receipt = if bounded {
+            self.store
+                .bounded_heads(Namespace::Conversation, Self::receipt_id(operation), 1)?
+                .pop()
+                .filter(|e| e.kind == Kind::Value)
+        } else {
+            self.store
+                .value(Namespace::Conversation, Self::receipt_id(operation))?
+        };
+        let Some(e) = receipt else {
             return Ok(None);
         };
         let Record::Receipt(receipt) = Self::decode(&e)? else {
@@ -293,13 +314,27 @@ impl Ledger {
             "operation receipt identity mismatch"
         );
         let current_binding = match receipt.acknowledgment.binding {
-            Some(id) => self.store.heads(Namespace::Conversation, id)?,
+            Some(id) => {
+                if bounded {
+                    self.store
+                        .bounded_heads(Namespace::Conversation, id, MAX_ITEMS)?
+                } else {
+                    self.store.heads(Namespace::Conversation, id)?
+                }
+            }
             None => vec![],
         };
         Ok(Some(WriteResult {
-            current_root: self
-                .store
-                .heads(Namespace::Conversation, receipt.acknowledgment.conversation)?,
+            current_root: if bounded {
+                self.store.bounded_heads(
+                    Namespace::Conversation,
+                    receipt.acknowledgment.conversation,
+                    MAX_ITEMS,
+                )?
+            } else {
+                self.store
+                    .heads(Namespace::Conversation, receipt.acknowledgment.conversation)?
+            },
             current_binding,
             historical: receipt.acknowledgment,
         }))
@@ -1365,6 +1400,16 @@ impl Ledger {
                     || (e.namespace == Namespace::Conversation && e.record_id == conversation)
             },
         )?;
+        let records = Self::inspect_snapshot(conversation, retained, &snapshot)?;
+        self.validate_evidence_records(&records)?;
+        Ok(records)
+    }
+    fn inspect_snapshot(
+        conversation: Uuid,
+        retained: bool,
+        snapshot: &[Envelope],
+    ) -> Result<Vec<Record>> {
+        let identity = conversation.to_string();
         let roots: Vec<_> = snapshot
             .iter()
             .filter(|e| e.namespace == Namespace::Conversation && e.record_id == conversation)
@@ -1377,7 +1422,7 @@ impl Ledger {
             );
         }
         let mut records = Vec::new();
-        for e in &snapshot {
+        for e in snapshot {
             if e.kind == Kind::Tombstone {
                 continue;
             }
@@ -1468,6 +1513,21 @@ impl Ledger {
         token_count: impl Fn(&[Turn]) -> Result<usize>,
         media_available: impl Fn(&Media) -> bool,
     ) -> Result<ContextView> {
+        Self::context_records(
+            records,
+            selection,
+            budget,
+            Some(&token_count),
+            media_available,
+        )
+    }
+    pub(super) fn context_records(
+        records: Vec<Record>,
+        selection: Option<TurnRange>,
+        budget: &ContextBudget,
+        token_count: Option<&TurnCounter<'_>>,
+        media_available: impl Fn(&Media) -> bool,
+    ) -> Result<ContextView> {
         let token_limit = Self::context_token_limit(selection, budget)?;
         let turns: Vec<Turn> = records
             .iter()
@@ -1495,14 +1555,16 @@ impl Ledger {
             }
             .into());
         }
-        let tokens = token_count(&turns)?;
-        if tokens > token_limit {
-            return Err(ContextRefusal::SelectionRequired {
-                turns: turns.len(),
-                text_bytes: bytes,
-                tokens: Some(tokens),
+        if let Some(token_count) = token_count {
+            let tokens = token_count(&turns)?;
+            if tokens > token_limit {
+                return Err(ContextRefusal::SelectionRequired {
+                    turns: turns.len(),
+                    text_bytes: bytes,
+                    tokens: Some(tokens),
+                }
+                .into());
             }
-            .into());
         }
         let source_ids = turns
             .iter()

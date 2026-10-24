@@ -278,6 +278,7 @@ pub struct Receipt {
 )]
 pub enum Record {
     Root(Root),
+    RequestEvidence(Box<super::evidence::RequestEvidence>),
     Turn(Turn),
     Source(ImageUse),
     Capture(Box<CaptureEvidence>),
@@ -312,7 +313,8 @@ pub struct WriteResult {
     pub current_root: Vec<crate::storage::Envelope>,
     pub current_binding: Vec<crate::storage::Envelope>,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContextBudget {
     pub max_text_bytes: usize,
     pub max_turns: usize,
@@ -329,7 +331,8 @@ pub struct ContextView {
     pub missing_media: Vec<Media>,
     pub selection: Option<TurnRange>,
 }
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct TurnRange {
     pub start: u64,
     pub end_exclusive: u64,
