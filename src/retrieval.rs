@@ -93,7 +93,7 @@ pub trait Provider {
     ) -> Result<Retrieved>;
 }
 
-fn terms(text: &str) -> BTreeSet<String> {
+pub(crate) fn terms(text: &str) -> BTreeSet<String> {
     text.split(|c: char| !c.is_alphanumeric())
         .filter(|word| !word.is_empty())
         .map(str::to_lowercase)
