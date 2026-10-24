@@ -206,7 +206,7 @@ impl Query {
             max_context_bytes: 8192,
         }
     }
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         ensure!(text(&self.text, 2048), "invalid memory query");
         ensure!(
             self.document.is_none_or(|id| !id.is_nil()),
