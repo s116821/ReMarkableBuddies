@@ -8,13 +8,35 @@ Supply a non-nil document UUID, explicit PDF/EPUB/notebook format, lowercase SHA
 
 Input limits are 4 MiB total source text, 512 KiB per unit, 4,096 units, 512 bytes per section and 128 bytes per extractor revision. UTF8 source bytes remain unchanged; chunks are at most 2,048 bytes, prefer a whitespace boundary in their latter half and retain half-open original-unit byte ranges. Empty text units are allowed and contribute no passages. Invalid identity, digest, locations, unsupported controls or bounds refuse before index installation replaces an existing entry.
 
-Keep the returned `IndexKey` and pass that exact key when querying. A changed document, format, original digest, extractor or normalized digest refuses rather than querying a stale index. Each query scans the full index anew; a follow-up can reach material outside the previous result set. Initial scoring counts distinct shared case-folded alphanumeric terms, with source order breaking ties. This is lexical ranking, not semantic retrieval, evidence verification or model effectiveness.
+Keep the returned `IndexKey` and pass that exact key when querying. A changed document, format, original digest, extractor or normalized digest refuses rather than querying a stale index. Each query scans the full index anew; a follow-up can reach material outside the previous result set. Ranking uses fixed BM25 over the existing lowercase alphanumeric tokens. This is lexical ranking, not semantic retrieval, evidence verification or model effectiveness.
+
+Only chunks with searchable tokens contribute to corpus statistics. For a distinct
+query term, `N` is searchable chunks, `df` containing chunks, `tf` occurrences in
+the candidate, `L` its total token count and `avgL` mean searchable chunk length.
+Its contribution is `ln(1+(N-df+0.5)/(df+0.5)) * tf*2.2 /
+(tf+1.2*(0.25+0.75*L/avgL))`. Contributions sum in sorted query-term order;
+positive exact-term matches sort descending, with source order for exactly equal
+scores. An empty searchable corpus returns no matches. Repeated query terms do
+not boost rank; repeated source terms saturate and longer passages are normalized.
+Lowercasing is unchanged and is not full Unicode case folding. There is no stemming,
+stopword filtering, synonym expansion or confidence score. Near floating-point ties
+may order differently across math implementations; no cross-platform bitwise
+equivalence is promised.
+
+Statistics are derived from the admitted source bounds, with checked token counts
+and at most8,192chunks*64query-term lookups per query before sorting candidates.
+They do not change source keys or the normalized disk format. A reopened cache
+rebuilds statistics; fresh results may rank differently after a software upgrade,
+while previously frozen or persisted historical passages remain unchanged. Authored
+fixtures contrast rare-topic/focused technical passages with old overlap-only
+ordering. Those declared expectations are not a real-user relevance study, a
+semantic/answer-quality claim or a hard process CPU/memory/deadline guarantee.
 
 Query text is nonblank, at most 2,048 UTF8 bytes/no NUL, with 1–64 distinct searchable terms. Request 1–16 passages and 512–16,384 bytes of **complete serialized JSON**, including provenance and escaping. All direct candidates precede optional immediate same-unit neighbors. Chunks selected by multiple candidates are emitted once. Unrepresentable passages are omitted with `budget_limited: true`; a result that cannot fit even one direct match refuses. No matches returns an empty passage list with the source key, without a false incomplete flag. Passage text is never partially truncated to fit. Scores are deliberately not confidence estimates.
 
 `Cache` holds at most 16 document indexes in process. Installing identical material retains the previous index; different material atomically replaces that document's index after validation/building succeeds. A failed install preserves the previous entry. This is derived memory cache only, not a disk-cache, Store, sync or restore implementation. The provider trait allows the receiving code to substitute a retriever independently of its answering model.
 
-The separate [owned local source cache](normalized-source-cache.md) can persist validated normalized inputs and rebuild this Index after restart. The [offline PDF adapter](pdf-normalization.md) supplies a deliberately narrow text-layer profile. The [historical request context](source-request-context.md) queries an explicitly referenced original source and freezes exact request/history with passage provenance under complete output limits. Automatic Reader ingestion, broader PDF/notebook extraction, automatic source inheritance and durable citation evidence, Reader cache integration, semantic/reranking choices where useful, default external research with no-internet policy, and real-provider/native qualification remain unfinished central tasks. In particular, a historical source UUID and a valid index do not authorize tablet navigation or answer-page effects.
+The separate [owned local source cache](normalized-source-cache.md) can persist validated normalized inputs and rebuild this Index after restart. The [offline PDF adapter](pdf-normalization.md) supplies a deliberately narrow text-layer profile. The [historical request context](source-request-context.md) queries an explicitly referenced original source and freezes exact request/history with passage provenance under complete output limits. Ordinary declared inheritance and durable historical request evidence are delivered through that context's separate APIs, and optional [historical source/memory composition](source-memory-context.md) is available. Automatic Reader ingestion, broader PDF/notebook extraction, native source association, installed Reader cache/model integration, semantic retrieval, default external research with no-internet policy, and real-provider/native qualification remain unfinished central tasks. In particular, a historical source UUID and a valid index do not authorize tablet navigation or answer-page effects.
 
 ## Offline EPUB text adapter
 
