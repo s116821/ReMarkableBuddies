@@ -203,6 +203,7 @@ fn resolve(context: &FrozenResearchContext, id: &str) -> Result<Citation> {
         }
         b'R' => {
             let report = context.research();
+            let basis = report.basis().ok_or(AnswerRefusal::InvalidOutput)?;
             let source = report
                 .sources()
                 .get(index)
@@ -211,8 +212,11 @@ fn resolve(context: &FrozenResearchContext, id: &str) -> Result<Citation> {
                 id: id.into(),
                 url: source.url.clone(),
                 title: source.title.clone(),
-                basis: report.basis().ok_or(AnswerRefusal::InvalidOutput)?,
-                authority: "provider-asserted-unverified",
+                basis,
+                authority: match basis {
+                    EvidenceBasis::Synthetic => "synthetic-unverified-research",
+                    EvidenceBasis::ProviderAsserted => "provider-asserted-unverified",
+                },
             }
         }
         _ => unreachable!(),

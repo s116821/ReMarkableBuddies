@@ -83,6 +83,7 @@ def case(binary, mode):
                 assert record["draft"]["context_sha256"] == record["context_sha256"]
                 assert record["draft"]["prompt_sha256"] == record["prompt_sha256"]
                 assert record["draft"]["citations"][2]["basis"] == "synthetic"
+                assert record["draft"]["citations"][2]["authority"] == "synthetic-unverified-research"
             else:
                 assert result.returncode != 0 and record["status"] == "failed"
                 assert record["draft"] is None

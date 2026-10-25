@@ -831,3 +831,55 @@ fn actual_existing_engine_errors_raw_output_caps_and_finite_timeout_do_not_yield
     assert!(!s.finished.load(Ordering::Acquire));
     assert_eq!(s.finish(), 1);
 }
+
+#[test]
+fn research_citation_authority_preserves_both_captured_origins() {
+    struct Origin(rr::EvidenceBasis);
+    impl rr::Provider for Origin {
+        fn research(&self, request: &rr::ResearchRequest<'_>) -> Result<rr::ResearchResult> {
+            let mut result = rr::Provider::research(&Research(Cell::new(0)), request)?;
+            result.basis = self.0;
+            Ok(result)
+        }
+    }
+    for (basis, authority) in [
+        (
+            rr::EvidenceBasis::Synthetic,
+            "synthetic-unverified-research",
+        ),
+        (
+            rr::EvidenceBasis::ProviderAsserted,
+            "provider-asserted-unverified",
+        ),
+    ] {
+        let f = Fixture::new();
+        let (prior, _, _, _) = super::saved_policy::frozen(&f);
+        let context = prior
+            .with_research(
+                rr::ResearchInput {
+                    policy: rr::ResearchPolicy::Required,
+                    directive: rr::ResearchDirective::UsePolicy,
+                    provider: Some(&Origin(basis)),
+                    options: rr::ResearchOptions {
+                        now_ms: 100,
+                        max_queries: 2,
+                        max_sources: 2,
+                        max_evidence_bytes: 16384,
+                    },
+                },
+                super::saved_policy::limits(),
+                counter,
+            )
+            .unwrap();
+        let answer = run(&context, &mut Engine::new(output("captured [R1]", &["R1"]))).unwrap();
+        let report: Value = serde_json::from_str(answer.encoded_json()).unwrap();
+        assert_eq!(
+            report["citations"][0]["basis"],
+            serde_json::to_value(basis).unwrap()
+        );
+        assert_eq!(
+            report["citations"][0]["authority"], authority,
+            "captured basis={basis:?}"
+        );
+    }
+}
