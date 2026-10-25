@@ -53,3 +53,5 @@ native-page qualification. Individual guides identify remaining companion work.
 Prepared-operation guides explain which original confirmation data to retain and
 how to reconcile incomplete output. Follow those rules before another deliberate
 action.
+
+Concrete research acquisition: [OpenAI web research](openai-web-research.md).

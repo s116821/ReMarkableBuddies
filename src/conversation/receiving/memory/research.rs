@@ -1,4 +1,5 @@
-//! Declared historical research data; no network client or runtime admission.
+//! Declared historical research composition; acquisition is explicitly selected.
+pub mod openai;
 use super::{CombinedBudget, CombinedFrame, FrozenSourceMemoryContext};
 use crate::{
     conversation::receiving::encoded,
