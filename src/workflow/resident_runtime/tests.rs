@@ -37,6 +37,7 @@ impl Fixture {
             adapter: artifact(self.0.join("adapter")),
             directory: self.0.join("run"),
             environment: BTreeMap::from([("LANG".into(), "C".into())]),
+            arguments: Vec::new(),
             operation_budget_ms: 1000,
         }
     }
@@ -45,22 +46,24 @@ impl Fixture {
         mode: &str,
         timeout: Duration,
     ) -> std::result::Result<ResidentRuntime, StartupFailure> {
-        ResidentRuntime::launch_inner(
-            self.store(),
-            self.launch(),
-            Instant::now() + timeout,
-            |command| {
-                // Owned protocol fixture, explicitly no actual LD_PRELOAD/native code.
-                command
-                    .env_remove("LD_PRELOAD")
-                    .arg("-S")
-                    .arg("-c")
-                    .arg(include_str!(
-                        "../../../tests/fixtures/resident_runtime_child.py"
-                    ))
-                    .arg(mode);
-            },
-        )
+        let mut input = self.launch();
+        input.arguments = [
+            "-S",
+            "-c",
+            include_str!("../../../tests/fixtures/resident_runtime_child.py"),
+            mode,
+            "--system",
+            "two words",
+            "",
+            "$(not-a-command); *",
+            "λ",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        ResidentRuntime::launch_inner(self.store(), input, Instant::now() + timeout, |command| {
+            // Owned protocol fixture, explicitly no actual LD_PRELOAD/native code.
+            command.env_remove("LD_PRELOAD");
+        })
     }
     fn preserved_and_reaped(&self, failure: StartupFailure) {
         let report = failure.shutdown.expect("child was launched");
@@ -332,4 +335,27 @@ fn replaced_directory_refuses_connection_and_cleanup_stays_in_the_owned_inode() 
     assert!(report.reaped && report.error.is_none(), "{report:?}");
     assert!(old.join("shutdown.txt").exists());
     assert_eq!(fs::read_dir(fixture.0.join("run")).unwrap().count(), 0);
+}
+
+#[test]
+fn invalid_arguments_refuse_before_directory_creation() {
+    for arguments in [
+        vec!["embedded\0nul".to_owned()],
+        vec![String::new(); 17],
+        vec!["a".repeat(16 * 1024 + 1)],
+        vec!["λ".repeat(8 * 1024 + 1)],
+    ] {
+        let fixture = Fixture::new();
+        let mut input = fixture.launch();
+        input.arguments = arguments;
+        let error = ResidentRuntime::launch(
+            fixture.store(),
+            input,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .err()
+        .expect("invalid arguments refuse");
+        assert!(error.shutdown.is_none());
+        assert!(!fixture.0.join("run").exists());
+    }
 }

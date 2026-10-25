@@ -10,6 +10,7 @@ import uuid
 
 root = pathlib.Path(os.environ["RSDK_ACTIVATION_DIRECTORY"])
 mode = sys.argv[1]
+assert sys.argv[2:] == ["--system", "two words", "", "$(not-a-command); *", "λ"]
 assert "LD_PRELOAD" not in os.environ  # fixture-only launch, explicitly removed
 assert not any(key in os.environ for key in ("LD_AUDIT", "LD_LIBRARY_PATH", "QT_PLUGIN_PATH", "QML_IMPORT_PATH", "HOSTNAME"))
 admission = (root / "admission.bin").read_bytes()

@@ -39,6 +39,8 @@ pub struct Launch {
     pub directory: PathBuf,
     /// Explicit approved ordinary values; all ambient environment is discarded.
     pub environment: BTreeMap<String, String>,
+    /// Approved argv[1..], preserving exact boundaries without a shell.
+    pub arguments: Vec<String>,
     pub operation_budget_ms: u32,
 }
 
@@ -303,6 +305,20 @@ impl Prepared {
         );
         let environment = environment(&input.environment)?;
         ensure!(
+            input.arguments.len() <= 16,
+            "resident argument count exceeds bound"
+        );
+        let argument_bytes = input.arguments.iter().try_fold(0usize, |total, argument| {
+            ensure!(!argument.contains('\0'), "resident argument contains NUL");
+            total
+                .checked_add(argument.len())
+                .context("resident argument byte count overflow")
+        })?;
+        ensure!(
+            argument_bytes <= 16 * 1024,
+            "resident arguments exceed bound"
+        );
+        ensure!(
             (1..=30_000).contains(&input.operation_budget_ms),
             "resident operation bound invalid"
         );
@@ -407,6 +423,7 @@ impl Prepared {
         File::open(parent)?.sync_all()?;
         let mut command = Command::new(&artifacts[1].path);
         command
+            .args(&input.arguments)
             .current_dir("/")
             .env_clear()
             .envs(environment)
