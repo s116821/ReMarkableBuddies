@@ -57,3 +57,5 @@ action.
 Concrete research acquisition: [OpenAI web research](openai-web-research.md).
 
 Consume complete context with an explicit model: [Researched answers](researched-answer.md).
+
+Index explicitly supplied historical PNG pages: [Notebook image normalization](notebook-image-normalization.md).

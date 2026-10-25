@@ -1,6 +1,7 @@
 //! Derived normalized-source retrieval; no extraction or native identity authority.
 pub mod disk;
 pub mod epub;
+pub mod notebook;
 pub mod pdf;
 mod ranking;
 use crate::storage::{digest, Uuid};
