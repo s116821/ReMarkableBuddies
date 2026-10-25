@@ -495,7 +495,7 @@ pub(crate) async fn export_with_owner(
         attempt: Some(attempt),
     };
     event(&mut control, ExportPhase::BeforeAdmission, ledger);
-    if *canceled.borrow() {
+    if control.is_some() && *canceled.borrow() {
         return report(&a, ExportStatus::CanceledNoEffect);
     }
     let admission = if let Some(c) = control.as_deref_mut() {
