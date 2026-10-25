@@ -674,7 +674,7 @@ pub fn run_any_file(path: &Path) -> Result<()> {
     #[serde(untagged)]
     enum AnyScenario {
         Reader(Box<Scenario>),
-        Writer(writer::Scenario),
+        Writer(Box<writer::Scenario>),
     }
     let bytes = std::fs::read(path)?;
     ensure!(bytes.len() <= 1024 * 1024, "scenario exceeds 1 MiB");
