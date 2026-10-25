@@ -1,7 +1,7 @@
 #!/bin/sh
 # Explicit development-host fixture. Never starts/stops the real Reader or Buddy.
 # Usage: sh recovery_lifecycle.sh <fresh 32 lowercase hex nonce> <case>
-# Cases: clean, crash, watchdog, stop, recovery-retry.
+# Cases: clean, crash, watchdog, stop, recovery-retry, populated-delete.
 # All units expire independently. Evidence remains in /run/buddy-recovery-NONCE.
 set -eu
 umask 077
@@ -9,9 +9,9 @@ nonce=${1-}
 mode=${2-}
 case "$nonce" in ''|*[!0-9a-f]*) exit 64;; esac
 [ "${#nonce}" -eq 32 ] || exit 64
-case "$mode" in clean|crash|watchdog|stop|recovery-retry) ;; *) exit 64;; esac
+case "$mode" in clean|crash|watchdog|stop|recovery-retry|populated-delete) ;; *) exit 64;; esac
 [ "$(id -u)" -eq 0 ] || exit 77
-for command in systemctl systemd-notify journalctl stat sha256sum awk; do
+for command in systemctl systemd-notify journalctl stat sha256sum awk rmdir; do
     command -v "$command" >/dev/null || exit 69
 done
 awk '$5 == "/sys/fs/cgroup/unified" && / - cgroup2 / { found=1 } END { exit !found }' /proc/self/mountinfo
@@ -96,6 +96,8 @@ actor)
         [ "$n" -lt 50 ] || exit 70
         n=$((n+1)); sleep .1
     done
+    systemctl show "$actor" -p InvocationID -p ExecMainPID \
+        -p ExecMainStartTimestampMonotonic > "$root/actor-incarnation-before.txt"
     systemctl stop "$stock"
     group=$(systemctl show "$actor" -p ControlGroup --value)
     [ "$group" = "/system.slice/$actor" ] || exit 71
@@ -106,9 +108,29 @@ actor)
     child=$!
     printf '%s\n' "$child" > "$root/child.pid"
     cat "/proc/$child/stat" > "$root/child-before.stat"
+    if [ "$mode" = populated-delete ]; then
+        # One nonrecursive removal attempt against this actor's own populated
+        # group. Never retry or generalize deletion to another path.
+        path=/sys/fs/cgroup/unified$group
+        cat "/proc/$$/cgroup" > "$root/parent-before.cgroup"
+        cat "/proc/$child/cgroup" > "$root/child-before.cgroup"
+        for membership in parent-before.cgroup child-before.cgroup; do
+            [ "$(awk -F: '$1 == "0" { print $0 }' "$root/$membership")" = "0::$group" ] || exit 91
+        done
+        grep -qx 'populated 1' "$root/group-before.events" || exit 92
+        code=0
+        LC_ALL=C rmdir "$path" 2> "$root/populated-delete.stderr" || code=$?
+        printf '%s\n' "$code" > "$root/populated-delete.exit"
+        [ "$code" -ne 0 ] || exit 93
+        grep -q 'Device or resource busy' "$root/populated-delete.stderr" || exit 94
+        stat -c '%d:%i' "$path" > "$root/group-after-delete.identity"
+        cmp -s "$root/group-before.identity" "$root/group-after-delete.identity" || exit 95
+        cat "$path/cgroup.events" > "$root/group-after-delete.events"
+        grep -qx 'populated 1' "$root/group-after-delete.events" || exit 96
+    fi
     touch "$root/armed"
     case "$mode" in
-        clean|recovery-retry) exit 0;;
+        clean|recovery-retry|populated-delete) exit 0;;
         crash) kill -KILL "$$";;
         watchdog|stop) wait "$child";;
     esac
@@ -118,6 +140,8 @@ recovery)
     printf 'attempt\n' >> "$root/recovery-attempts.txt"
     state=$(systemctl show "$actor" -p ActiveState --value)
     case "$state" in inactive|failed) ;; *) exit 72;; esac
+    systemctl show "$actor" -p InvocationID -p ExecMainPID \
+        -p ExecMainStartTimestampMonotonic >> "$root/actor-incarnation-recovery.txt"
     child=$(cat "$root/child.pid")
     [ ! -e "/proc/$child" ] || exit 73
     group=$(cat "$root/actor-group.txt")
@@ -244,7 +268,7 @@ done
 [ ! -e "/proc/$(cat "$root/child.pid")" ] || exit 85
 systemctl show "$actor" -p Result -p ActiveState -p SubState > "$root/actor-result.txt"
 case "$mode" in
-    clean|stop|recovery-retry) grep -qx 'Result=success' "$root/actor-result.txt";;
+    clean|stop|recovery-retry|populated-delete) grep -qx 'Result=success' "$root/actor-result.txt";;
     crash) grep -qx 'Result=signal' "$root/actor-result.txt";;
     watchdog) grep -qx 'Result=watchdog' "$root/actor-result.txt";;
 esac

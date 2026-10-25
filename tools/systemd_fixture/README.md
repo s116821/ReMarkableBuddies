@@ -60,7 +60,12 @@ sh recovery_lifecycle.sh FRESH_32_LOWERCASE_HEX_NONCE clean
 
 Replace the placeholder with a newly generated nonce for each run. Other cases
 are `crash`, `watchdog`, `stop`, and `recovery-retry`. Never reuse a run directory
-or unit name. All three units have independent runtime/start/stop bounds. The
+or unit name. `populated-delete` additionally attempts one nonrecursive removal
+of only the actor's exact group while the actor and its child belong to it. It
+requires the busy diagnostic and unchanged group identity/population before
+normal exit and recovery. This establishes direct populated-group refusal only;
+it does not test a child-only nested group or privileged migration.
+All three units have independent runtime/start/stop bounds. The
 driver verifies distinct recovery invocations and exactly two fake-stock starts
 (initial plus restoration), including a helper failure before restoration and a
 second restoration request after success. Cleanup stops only its own units,
@@ -81,3 +86,11 @@ All owned units were stopped and removed; real stock/Buddy identities and stock
 hashes remained identical. PID1 removed the actor's group before every helper
 invocation. Detailed evidence and remaining product gates live in the coordinated
 Docs change `qualify-open-pdf-capture/resident-supervisor-fixture-result.md`.
+
+The current script also samples the actor's InvocationID, ExecMainPID and
+ExecMainStartTimestampMonotonic before fake-stock stop and at each recovery call.
+A separate fresh clean run showed these fields retained on the first recovery
+and fully cleared on the second. Recovery cannot assume PID1 retains the original
+incarnation indefinitely. The coordinated design defines the additional original
+lease, deleted-group and activation-latch checks required for that case; this
+fixture does not implement or authorize production recovery.

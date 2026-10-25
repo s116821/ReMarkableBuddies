@@ -65,8 +65,10 @@ impl Fixture {
             command.env_remove("LD_PRELOAD");
         })
     }
-    fn preserved_and_reaped(&self, failure: StartupFailure) {
-        let report = failure.shutdown.expect("child was launched");
+    fn preserved_and_reaped(&self, mode: &str, failure: StartupFailure) {
+        let report = failure.shutdown.as_ref().unwrap_or_else(|| {
+            panic!("post-spawn scenario {mode} failed before launch: {failure:?}")
+        });
         assert!(report.reaped, "{report:?}");
         assert!(!Path::new(&format!("/proc/{}", report.pid)).exists());
         for name in [
@@ -143,18 +145,30 @@ fn startup_faults_keep_evidence_and_stop_only_the_owned_child() {
     ] {
         let fixture = Fixture::new();
         let started = Instant::now();
-        let result = fixture.start(mode, Duration::from_millis(800));
+        // This includes hashing/copying/synchronizing the real interpreter.
+        // Keep setup margin while the timeout fixtures still delay for 10s.
+        let result = fixture.start(mode, Duration::from_secs(3));
         let failure = match result {
             Err(error) => error,
             Ok(_) => panic!("unexpected success: {mode}"),
         };
-        fixture.preserved_and_reaped(failure);
+        fixture.preserved_and_reaped(mode, failure);
         assert!(
-            started.elapsed() < Duration::from_secs(4),
+            started.elapsed() < Duration::from_secs(6),
             "startup/cleanup must not renew: {mode}"
         );
         assert!(Path::new(&format!("/proc/{}", std::process::id())).exists());
     }
+}
+
+#[test]
+fn expired_startup_deadline_refuses_before_directory_or_child() {
+    let fixture = Fixture::new();
+    let failure = ResidentRuntime::launch(fixture.store(), fixture.launch(), Instant::now())
+        .err()
+        .expect("expired deadline must refuse");
+    assert!(failure.shutdown.is_none(), "{failure:?}");
+    assert!(!fixture.0.join("run").exists());
 }
 
 #[test]
