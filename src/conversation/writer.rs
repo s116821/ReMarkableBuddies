@@ -273,7 +273,7 @@ impl Ledger {
         operation: Uuid,
         prepared: WriterPreparation,
         mut turn: Turn,
-    ) -> Result<WriteResult> {
+    ) -> Result<(WriteResult, Option<WriterSelection>)> {
         ensure!(
             prepared.fresh
                 && turn.role == Role::Assistant
@@ -293,14 +293,21 @@ impl Ledger {
             .checked_add(1)
             .context("sequence exhausted")?;
         root.updated_ms = turn.updated_ms;
+        let generated = turn.outcome == Outcome::Generated;
+        let source = prepared
+            .guards
+            .iter()
+            .find(|e| e.namespace == Namespace::Source)
+            .cloned();
         let mut records = prepared.guards;
-        records.push(self.envelope(
+        let draft = self.envelope(
             Namespace::Conversation,
             turn.id,
             ExpectedHeads::default(),
             Record::Turn(turn),
             vec![],
-        )?);
+        )?;
+        records.push(draft.clone());
         let binding = root.binding;
         let root_envelope = self.envelope(
             Namespace::Conversation,
@@ -309,6 +316,17 @@ impl Ledger {
             Record::Root(root),
             vec![],
         )?;
-        self.publish(operation, fingerprint, root_envelope, records, binding)
+        let selection = if generated {
+            Some(WriterSelection::published(
+                &root_envelope,
+                &draft,
+                &source.context("Writer source guard absent")?,
+            )?)
+        } else {
+            None
+        };
+        let (result, fresh) =
+            self.publish_observed(operation, fingerprint, root_envelope, records, binding)?;
+        Ok((result, if fresh { selection } else { None }))
     }
 }

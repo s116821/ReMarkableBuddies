@@ -6,6 +6,7 @@ mod reader_persistence_tests;
 pub mod scenario;
 #[cfg(test)]
 mod smart_erase_tests;
+pub mod writer;
 
 use crate::{LLMEngine, OpenAI, Orchestrator, Workflow};
 use anyhow::{ensure, Context, Result};
@@ -460,8 +461,10 @@ pub fn run_file(path: &Path) -> Result<Report> {
     let scenario: Scenario = serde_json::from_slice(
         &std::fs::read(path).with_context(|| format!("Read scenario {}", path.display()))?,
     )?;
-    let root = path.parent().unwrap_or_else(|| Path::new("."));
-    let run = execute(&scenario, root)?;
+    save_reader(&scenario, path.parent().unwrap_or_else(|| Path::new(".")))
+}
+fn save_reader(scenario: &Scenario, root: &Path) -> Result<Report> {
+    let run = execute(scenario, root)?;
     let output = root.join(&scenario.output);
     std::fs::create_dir_all(&output)?;
     for (index, image) in run.images.iter().enumerate() {
@@ -661,6 +664,28 @@ mod request_retirement_tests {
             assert_eq!(state.borrow().request_pin, original);
             state.borrow_mut().visit += 1;
             assert!(device.capture().is_err());
+        }
+    }
+}
+
+/// Strict union dispatch retains Reader schemas and its existing report renderer.
+pub fn run_any_file(path: &Path) -> Result<()> {
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum AnyScenario {
+        Reader(Scenario),
+        Writer(writer::Scenario),
+    }
+    let bytes = std::fs::read(path)?;
+    ensure!(bytes.len() <= 1024 * 1024, "scenario exceeds 1 MiB");
+    match serde_json::from_slice::<AnyScenario>(&bytes)? {
+        AnyScenario::Reader(scenario) => {
+            scenario.validate()?;
+            save_reader(&scenario, path.parent().unwrap_or_else(|| Path::new(".")))?;
+            Ok(())
+        }
+        AnyScenario::Writer(scenario) => {
+            writer::save(&scenario, path.parent().unwrap_or_else(|| Path::new(".")))
         }
     }
 }

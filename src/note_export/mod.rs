@@ -3,7 +3,11 @@ pub mod command;
 pub mod mem;
 mod run;
 use crate::{conversation::ExportAssociation, storage::Uuid};
+pub use run::ExportObservation;
 pub use run::{export, reconcile};
+pub(crate) use run::{
+    export_with_owner, reconcile_with_owner, ExportControl, ExportPhase, Owner as ExportOwner,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -94,7 +98,7 @@ impl PreparedNote {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 pub struct RemoteNote {
     pub id: String,
     pub title: String,

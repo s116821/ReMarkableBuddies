@@ -159,7 +159,7 @@ fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_lo
 fn main() -> Result<()> {
     let args = Args::parse();
     if args.writer_note {
-        let report = remarkable_reader_buddy::writer::command::run(
+        let report = remarkable_reader_buddy::writer::command::dispatch(
             std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
             &mut std::io::stdin().lock(),
         );
@@ -445,7 +445,7 @@ fn main() -> Result<()> {
     dotenv().ok();
     if let Some(path) = args.simulate {
         logging(args.log_level, std::env::var("RUST_LOG").ok().as_deref()).init();
-        remarkable_reader_buddy::simulator::run_file(&path)?;
+        remarkable_reader_buddy::simulator::run_any_file(&path)?;
         return Ok(());
     }
     let config = Config::load(std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into))?;

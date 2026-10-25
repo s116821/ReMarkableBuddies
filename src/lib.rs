@@ -17,6 +17,7 @@ pub mod storage;
 pub mod util;
 pub mod workflow;
 pub mod writer;
+pub mod writer_flow;
 
 // Re-export commonly used types
 pub use analysis::BoundingBox;
