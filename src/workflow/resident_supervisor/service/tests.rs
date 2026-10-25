@@ -44,6 +44,25 @@ fn encode(fields: &BTreeMap<String, String>) -> Vec<u8> {
         .collect::<String>()
         .into_bytes()
 }
+
+#[test]
+fn stock_start_is_fixed_nonblocking_and_never_replaces_a_job() {
+    let command = start_command();
+    assert_eq!(command.get_program(), "/bin/systemctl");
+    assert_eq!(
+        command.get_args().collect::<Vec<_>>(),
+        [
+            "--system",
+            "--no-pager",
+            "--no-ask-password",
+            "--no-block",
+            "--job-mode=fail",
+            "start",
+            "--",
+            "xochitl.service",
+        ]
+    );
+}
 fn cleared(mut snapshot: Snapshot) -> Snapshot {
     for (key, value) in [
         ("InvocationID", ""),

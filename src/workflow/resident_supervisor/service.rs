@@ -1,4 +1,4 @@
-//! Bounded PID1 observations. No service mutation or native activation authority.
+//! Bounded PID1 observations and the recovery module's fixed stock-start command.
 use super::{validate_invocation, validate_unit, GroupObservation, Lease, LeaseRecord};
 use anyhow::{ensure, Context, Result};
 use nix::libc;
@@ -13,7 +13,7 @@ use std::{
 
 const LIMIT: usize = 16 * 1024;
 const POLL: Duration = Duration::from_millis(5);
-const STATE: &[&str] = &[
+pub(super) const STATE: &[&str] = &[
     "Id",
     "LoadState",
     "ActiveState",
@@ -26,7 +26,9 @@ const STATE: &[&str] = &[
     "Job",
     "ControlGroup",
 ];
-const POLICY: &[&str] = &[
+pub(super) const POLICY: &[&str] = &[
+    "Type",
+    "NeedDaemonReload",
     "KillMode",
     "Delegate",
     "Restart",
@@ -60,7 +62,10 @@ impl PolicySnapshot {
 }
 
 impl Snapshot {
-    fn parse(bytes: &[u8], unit: &str) -> Result<Self> {
+    pub(super) fn property(&self, key: &str) -> Option<&str> {
+        self.fields.get(key).map(String::as_str)
+    }
+    pub(super) fn parse(bytes: &[u8], unit: &str) -> Result<Self> {
         validate_unit(unit)?;
         ensure!(bytes.len() <= LIMIT, "service output exceeds bound");
         let input = std::str::from_utf8(bytes)?;
@@ -248,6 +253,28 @@ fn command(unit: &str) -> Command {
         command.arg(format!("--property={property}"));
     }
     command.args(["--", unit]);
+    command
+}
+
+/// Only the installed recovery admission path may request this mutation. A
+/// command failure does not imply that PID1 rejected or canceled the start job.
+pub(super) fn start_stock(deadline: Instant) -> Result<()> {
+    let output = run(start_command(), deadline)?;
+    ensure!(output.is_empty(), "unexpected stock-start command output");
+    Ok(())
+}
+fn start_command() -> Command {
+    let mut command = Command::new("/bin/systemctl");
+    command.args([
+        "--system",
+        "--no-pager",
+        "--no-ask-password",
+        "--no-block",
+        "--job-mode=fail",
+        "start",
+        "--",
+        "xochitl.service",
+    ]);
     command
 }
 

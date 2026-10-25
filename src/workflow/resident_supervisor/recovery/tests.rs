@@ -1,0 +1,470 @@
+use super::*;
+use std::{
+    collections::VecDeque,
+    process::{Child, Command, Stdio},
+};
+
+fn snapshot(active: &str, sub: &str, pid: u32, job: &str) -> service::Snapshot {
+    let mut fields: BTreeMap<String, String> = service::STATE
+        .iter()
+        .chain(service::POLICY)
+        .map(|key| ((*key).to_owned(), String::new()))
+        .collect();
+    for (key, value) in [
+        ("Id", STOCK),
+        ("LoadState", "loaded"),
+        ("ActiveState", active),
+        ("SubState", sub),
+        ("ControlPID", "0"),
+        ("Job", job),
+        ("ControlGroup", "/system.slice/xochitl.service"),
+        ("InvocationID", "12121212121212121212121212121212"),
+        ("ExecMainStartTimestampMonotonic", "1234"),
+    ] {
+        fields.insert(key.into(), value.into());
+    }
+    fields.insert("MainPID".into(), pid.to_string());
+    fields.insert("ExecMainPID".into(), pid.to_string());
+    parse(fields)
+}
+fn parse(fields: BTreeMap<String, String>) -> service::Snapshot {
+    let unit = fields["Id"].clone();
+    let bytes = fields
+        .into_iter()
+        .map(|(k, v)| format!("{k}={v}\n"))
+        .collect::<String>();
+    service::Snapshot::parse(bytes.as_bytes(), &unit).unwrap()
+}
+fn deadline() -> Instant {
+    Instant::now() + Duration::from_secs(5)
+}
+fn ready() -> service::Snapshot {
+    snapshot("active", "running", 42, "")
+}
+fn stopped() -> service::Snapshot {
+    snapshot("inactive", "dead", 0, "")
+}
+fn pending() -> service::Snapshot {
+    snapshot("activating", "start", 42, "1234")
+}
+
+struct Fake {
+    snapshots: VecDeque<service::Snapshot>,
+    starts: usize,
+    admissions: usize,
+    empty_checks: usize,
+    fail_admission: Option<usize>,
+    populated: bool,
+    fail_start: bool,
+    fail_verify: bool,
+}
+impl Fake {
+    fn new(snapshots: Vec<service::Snapshot>) -> Self {
+        Self {
+            snapshots: snapshots.into(),
+            starts: 0,
+            admissions: 0,
+            empty_checks: 0,
+            fail_admission: None,
+            populated: false,
+            fail_start: false,
+            fail_verify: false,
+        }
+    }
+}
+impl Backend for Fake {
+    fn admit(&mut self, _: Instant) -> Result<()> {
+        self.admissions += 1;
+        ensure!(
+            self.fail_admission != Some(self.admissions),
+            "admission lost"
+        );
+        Ok(())
+    }
+    fn stock(&mut self, _: Instant) -> Result<service::Snapshot> {
+        self.snapshots
+            .pop_front()
+            .context("unexpected extra sample")
+    }
+    fn start(&mut self, _: Instant) -> Result<()> {
+        self.starts += 1;
+        ensure!(!self.fail_start, "command outcome unknown");
+        Ok(())
+    }
+    fn empty_stock_group(&mut self, _: Instant) -> Result<()> {
+        self.empty_checks += 1;
+        ensure!(!self.populated, "stock group populated");
+        Ok(())
+    }
+    fn verify(&mut self, _: &service::Snapshot, _: Instant) -> Result<ProcessIdentity> {
+        ensure!(!self.fail_verify, "stock executable or group mismatch");
+        Ok(ProcessIdentity {
+            pid: 42,
+            start_ticks: 100,
+        })
+    }
+    fn pace(&mut self, _: Instant) {}
+}
+
+#[test]
+fn restoration_starts_once_then_observes_and_verifies() {
+    let mut b = Fake::new(vec![stopped(), stopped(), pending(), ready(), ready()]);
+    let result = restore(&mut b, deadline()).unwrap();
+    assert!(result.start_requested);
+    assert_eq!(result.process.pid, 42);
+    assert_eq!((b.starts, b.empty_checks), (1, 1));
+    assert!(b.snapshots.is_empty());
+}
+#[test]
+fn active_or_already_starting_stock_is_never_restarted() {
+    for samples in [vec![ready(), ready()], vec![pending(), ready(), ready()]] {
+        let mut b = Fake::new(samples);
+        assert!(!restore(&mut b, deadline()).unwrap().start_requested);
+        assert_eq!((b.starts, b.empty_checks), (0, 0));
+    }
+}
+#[test]
+fn admission_group_and_concurrent_job_refuse_before_command() {
+    for mode in 0..4 {
+        let mut b = Fake::new(vec![stopped(), stopped()]);
+        match mode {
+            0 => b.fail_admission = Some(1),
+            1 => b.fail_admission = Some(2),
+            2 => b.populated = true,
+            _ => b.snapshots[1] = pending(),
+        }
+        assert!(restore(&mut b, deadline()).is_err());
+        assert_eq!(b.starts, 0);
+    }
+}
+#[test]
+fn command_uncertainty_or_failed_start_does_not_retry() {
+    let mut uncertain = Fake::new(vec![stopped(), stopped()]);
+    uncertain.fail_start = true;
+    assert!(restore(&mut uncertain, deadline())
+        .unwrap_err()
+        .to_string()
+        .contains("unknown"));
+    assert_eq!(uncertain.starts, 1);
+    let mut failed = Fake::new(vec![stopped(), stopped(), stopped()]);
+    assert!(restore(&mut failed, deadline())
+        .unwrap_err()
+        .to_string()
+        .contains("no retry"));
+    assert_eq!(failed.starts, 1);
+    let mut prior = Fake::new(vec![pending(), stopped()]);
+    assert!(restore(&mut prior, deadline()).is_err());
+    assert_eq!(prior.starts, 0);
+}
+#[test]
+fn completion_requires_process_and_closing_admission_and_stock() {
+    for mode in 0..3 {
+        let mut b = Fake::new(vec![ready(), ready()]);
+        match mode {
+            0 => b.fail_verify = true,
+            1 => b.fail_admission = Some(2),
+            _ => b.snapshots[1] = stopped(),
+        }
+        assert!(restore(&mut b, deadline()).is_err());
+        assert_eq!(b.starts, 0);
+    }
+    let mut b = Fake::new(vec![]);
+    assert!(restore(&mut b, Instant::now()).is_err());
+    assert_eq!(b.admissions, 0);
+}
+#[test]
+fn unknown_or_incomplete_stock_state_is_not_ready_or_startable() {
+    for s in [
+        snapshot("deactivating", "stop", 42, ""),
+        snapshot("active", "exited", 0, ""),
+        snapshot("inactive", "dead", 42, ""),
+        snapshot("active", "running", 0, ""),
+    ] {
+        assert!(stock_state(&s).is_err());
+    }
+}
+
+#[test]
+fn empty_group_checks_real_files_and_refuses_missing_events_and_links() {
+    let root = std::env::temp_dir().join(format!("buddy-recovery-group-{}", uuid::Uuid::new_v4()));
+    fs::create_dir(&root).unwrap();
+    let slice = File::open(&root).unwrap();
+    assert!(empty_group(&slice).unwrap().is_none());
+    let group = root.join(STOCK);
+    fs::create_dir(&group).unwrap();
+    assert!(empty_group(&slice).is_err());
+    fs::write(group.join("cgroup.events"), "populated 1\n").unwrap();
+    assert!(empty_group(&slice).is_err());
+    fs::write(group.join("cgroup.events"), "populated 0\n").unwrap();
+    assert!(empty_group(&slice).unwrap().is_some());
+    fs::remove_file(group.join("cgroup.events")).unwrap();
+    fs::remove_dir(&group).unwrap();
+    std::os::unix::fs::symlink("/does-not-exist", &group).unwrap();
+    assert!(empty_group(&slice).is_err());
+    fs::remove_file(&group).unwrap();
+    fs::remove_dir(&root).unwrap();
+}
+
+struct OwnedChild(Child);
+impl Drop for OwnedChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+#[test]
+fn actual_running_executable_argv_incarnation_and_loader_environment() {
+    let executable = fs::canonicalize("/usr/bin/python3").unwrap();
+    let executable = executable.to_str().unwrap();
+    let script = "import time; time.sleep(30)";
+    let digest = sha256(&fs::read(executable).unwrap());
+    for bad_environment in [false, true] {
+        let mut command = Command::new(executable);
+        command
+            .args(["-c", script])
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if bad_environment {
+            command.env("LD_RECOVERY_TEST", "1");
+        }
+        let child = OwnedChild(command.spawn().unwrap());
+        let limit = deadline();
+        let process = loop {
+            if let Ok(process) = ProcessIdentity::read(child.0.id()) {
+                if fs::read_link(format!("/proc/{}/exe", process.pid))
+                    .ok()
+                    .as_deref()
+                    == Some(Path::new(executable))
+                {
+                    break process;
+                }
+            }
+            assert!(Instant::now() < limit, "fixture did not exec");
+            thread::sleep(Duration::from_millis(5));
+        };
+        let argv = [executable, "-c", script];
+        let result = verify_process(&process, executable, digest, &argv, limit);
+        if bad_environment {
+            assert!(result.unwrap_err().to_string().contains("loader override"));
+        } else {
+            result.unwrap();
+            assert!(verify_process(&process, executable, [1; 32], &argv, deadline()).is_err());
+            assert!(
+                verify_process(&process, executable, digest, &[executable], deadline()).is_err()
+            );
+            let changed = ProcessIdentity {
+                start_ticks: process.start_ticks + 1,
+                ..process
+            };
+            assert!(verify_process(&changed, executable, digest, &argv, deadline()).is_err());
+        }
+    }
+}
+
+#[test]
+fn bounded_reads_and_trusted_artifact_paths_refuse_unsafe_inputs() {
+    assert!(bounded_bytes(&mut &b"12345"[..], 4, deadline()).is_err());
+    assert!(bounded_bytes(&mut &b""[..], 4, Instant::now()).is_err());
+    assert_eq!(
+        bounded_bytes(&mut &b"1234"[..], 4, deadline()).unwrap(),
+        b"1234"
+    );
+    // /tmp is writable by other users, even when its final file is protected.
+    let path = std::env::temp_dir().join(format!("buddy-recovery-path-{}", uuid::Uuid::new_v4()));
+    fs::write(&path, b"x").unwrap();
+    assert!(Pinned::open(&path).is_err());
+    fs::remove_file(path).unwrap();
+    assert!(trusted_file(Path::new("/usr/bin/../bin/python3")).is_err());
+}
+
+#[test]
+fn nested_policy_json_rejects_duplicate_missing_and_unknown_fields() {
+    #[derive(Deserialize)]
+    struct Policy {
+        #[serde(deserialize_with = "policy_fields")]
+        fields: BTreeMap<String, String>,
+    }
+    let properties = service::POLICY
+        .iter()
+        .map(|key| format!("\"{key}\":\"\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    let good = format!("{{\"fields\":{{{properties}}}}}");
+    assert_eq!(
+        serde_json::from_str::<Policy>(&good).unwrap().fields.len(),
+        service::POLICY.len()
+    );
+    for bad in [
+        format!("{{\"fields\":{{{properties},\"Type\":\"oneshot\"}}}}"),
+        format!("{{\"fields\":{{{properties},\"Unknown\":\"x\"}}}}"),
+        "{\"fields\":{\"Type\":\"oneshot\"}}".to_owned(),
+    ] {
+        assert!(serde_json::from_str::<Policy>(&bad).is_err());
+    }
+}
+
+fn profile(record: &LeaseRecord) -> Profile {
+    fn policy(fragment: &str) -> BTreeMap<String, String> {
+        let mut p: BTreeMap<_, _> = service::POLICY
+            .iter()
+            .map(|k| ((*k).into(), String::new()))
+            .collect();
+        for (key, value) in [
+            ("FragmentPath", fragment),
+            ("NeedDaemonReload", "no"),
+            ("KillMode", "control-group"),
+            ("Delegate", "no"),
+            ("SendSIGKILL", "yes"),
+            ("Restart", "no"),
+            ("DefaultDependencies", "yes"),
+            ("Conflicts", "shutdown.target"),
+        ] {
+            p.insert(key.into(), value.into());
+        }
+        p
+    }
+    let mut buddy_policy = policy(BUDDY_UNIT);
+    buddy_policy.insert("Type".into(), "notify".into());
+    buddy_policy.insert("OnSuccess".into(), HELPER.into());
+    buddy_policy.insert("OnFailure".into(), HELPER.into());
+    buddy_policy.insert("WatchdogUSec".into(), "2min".into());
+    let mut helper_policy = policy(HELPER_UNIT);
+    helper_policy.insert("Type".into(), "oneshot".into());
+    helper_policy.insert("Conflicts".into(), format!("shutdown.target {BUDDY}"));
+    helper_policy.insert("After".into(), BUDDY.into());
+    let mut stock_policy = policy(STOCK_UNIT);
+    stock_policy.insert("DropInPaths".into(), STOCK_DROPIN.into());
+    Profile {
+        version: 1,
+        firmware: "3.28.0.172".into(),
+        kernel: "5.4.70-v1.6.3-rm11x".into(),
+        native_profile_sha256: record.profile_sha256,
+        adapter_sha256: record.adapter_sha256,
+        app_sha256: [7; 32],
+        buddy_unit_sha256: [8; 32],
+        helper_unit_sha256: [9; 32],
+        stock_executable_sha256: record.stock.executable_sha256,
+        stock_unit_sha256: record.stock.unit_sha256,
+        stock_dropin_sha256: record.stock.dropin_sha256,
+        buddy_policy,
+        helper_policy,
+        stock_policy,
+    }
+}
+
+#[test]
+fn profile_is_bound_to_original_artifacts_and_complete_loaded_policy() {
+    let fixture = crate::workflow::resident_supervisor::tests::Fixture::new();
+    let record = fixture.record();
+    profile(&record).validate(&record).unwrap();
+    for mode in 0..10 {
+        let mut p = profile(&record);
+        match mode {
+            0 => p.native_profile_sha256 = [0; 32],
+            1 => p.adapter_sha256 = [0; 32],
+            2 => p.stock_executable_sha256 = [0; 32],
+            3 => p.stock_unit_sha256 = [0; 32],
+            4 => p.stock_dropin_sha256 = [0; 32],
+            5 => {
+                p.helper_policy.insert("After".into(), "".into());
+            }
+            6 => {
+                p.buddy_policy.insert("Restart".into(), "on-failure".into());
+            }
+            7 => {
+                p.stock_policy
+                    .insert("NeedDaemonReload".into(), "yes".into());
+            }
+            8 => {
+                p.helper_policy.remove("Delegate");
+            }
+            _ => p.version = 2,
+        }
+        assert!(p.validate(&record).is_err(), "case {mode}");
+    }
+    let mut old = record.clone();
+    old.version = 1;
+    assert!(old.validate().is_err());
+    let mut missing = serde_json::to_value(&record).unwrap();
+    missing
+        .as_object_mut()
+        .unwrap()
+        .remove("recovery_profile_sha256");
+    assert!(serde_json::from_value::<LeaseRecord>(missing).is_err());
+}
+
+#[test]
+fn helper_requires_actual_main_process_invocation_and_oneshot_start() {
+    let fixture = crate::workflow::resident_supervisor::tests::Fixture::new();
+    let p = profile(&fixture.record());
+    let process = ProcessIdentity {
+        pid: 42,
+        start_ticks: 100,
+    };
+    let mut fields: BTreeMap<String, String> = service::STATE
+        .iter()
+        .map(|k| ((*k).into(), String::new()))
+        .collect();
+    fields.extend(p.helper_policy.clone());
+    for (key, value) in [
+        ("Id", HELPER),
+        ("LoadState", "loaded"),
+        ("ActiveState", "activating"),
+        ("SubState", "start"),
+        ("MainPID", "42"),
+        ("ExecMainPID", "42"),
+        ("ControlPID", "0"),
+        ("ExecMainStartTimestampMonotonic", "1234"),
+        ("InvocationID", "12121212121212121212121212121212"),
+        (
+            "ControlGroup",
+            "/system.slice/reader-buddy-stock-recovery.service",
+        ),
+        ("Job", "42"),
+    ] {
+        fields.insert(key.into(), value.into());
+    }
+    helper_state(&parse(fields.clone()), &process, &p.helper_policy).unwrap();
+    for (key, value) in [
+        ("MainPID", "41"),
+        ("ExecMainPID", "41"),
+        ("InvocationID", ""),
+        ("ExecMainStartTimestampMonotonic", "0"),
+        ("ActiveState", "active"),
+        ("SubState", "running"),
+        ("Type", "simple"),
+        ("ControlPID", "41"),
+        ("ControlGroup", "/wrong"),
+        ("NeedDaemonReload", "yes"),
+    ] {
+        let mut changed = fields.clone();
+        changed.insert(key.into(), value.into());
+        assert!(
+            helper_state(&parse(changed), &process, &p.helper_policy).is_err(),
+            "{key}"
+        );
+    }
+}
+
+#[test]
+fn firmware_uses_observed_image_version_without_shell_evaluation() {
+    assert_eq!(
+        firmware_version("ID=codex\nVERSION_ID=5.8.203\nIMG_VERSION=\"3.28.0.172\"\n").unwrap(),
+        "3.28.0.172"
+    );
+    assert_eq!(
+        firmware_version("IMG_VERSION=3.28.0.172\n").unwrap(),
+        "3.28.0.172"
+    );
+    for input in [
+        "VERSION_ID=5.8.203\n",
+        "IMG_VERSION=3\nIMG_VERSION=4\n",
+        "IMG_VERSION=\"3\n",
+        "IMG_VERSION=$(uname)\n",
+        "IMG_VERSION=\n",
+    ] {
+        assert!(firmware_version(input).is_err());
+    }
+}

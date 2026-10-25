@@ -17,6 +17,7 @@ use uuid::Uuid;
 const RECORD_LIMIT: u64 = 32 * 1024;
 const LEASE_NAME: &str = "activation.json";
 
+pub mod recovery;
 pub mod service;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -57,16 +58,28 @@ pub struct ProcessIdentity {
 }
 impl ProcessIdentity {
     fn current() -> Result<Self> {
-        let stat = text(&PathBuf::from("/proc/self/stat"), 4096)?;
+        Self::read(std::process::id())
+    }
+    fn read(pid: u32) -> Result<Self> {
+        ensure!(pid > 1, "invalid process PID");
+        let stat = text(&PathBuf::from(format!("/proc/{pid}/stat")), 4096)?;
+        ensure!(
+            stat.split_whitespace().next() == Some(pid.to_string().as_str()),
+            "process PID mismatch"
+        );
+        let state = stat
+            .rsplit_once(')')
+            .and_then(|(_, rest)| rest.split_whitespace().next());
+        ensure!(
+            !matches!(state, None | Some("Z" | "X" | "x")),
+            "process is not live"
+        );
         let start_ticks = stat
             .rsplit_once(')')
             .and_then(|(_, rest)| rest.split_whitespace().nth(19))
             .context("invalid process stat")?
             .parse()?;
-        let result = Self {
-            pid: std::process::id(),
-            start_ticks,
-        };
+        let result = Self { pid, start_ticks };
         result.validate()?;
         Ok(result)
     }
@@ -117,10 +130,23 @@ impl GroupBaseline {
     /// Capture only this process's actual membership. The integration caller must
     /// additionally prove that it is the admitted Buddy unit's current MainPID.
     pub fn capture(mount_path: &Path, unit: &str) -> Result<Self> {
+        Self::capture_process(mount_path, unit, std::process::id())
+    }
+    fn capture_process(mount_path: &Path, unit: &str, pid: u32) -> Result<Self> {
         validate_unit(unit)?;
-        let parent = ProcessIdentity::current()?;
+        let parent = ProcessIdentity::read(pid)?;
         let context = GroupContext::read(mount_path)?;
-        let membership = text(Path::new("/proc/self/cgroup"), 16 * 1024)?;
+        for (name, expected) in [
+            ("mnt", &context.identity.mount_namespace),
+            ("cgroup", &context.identity.cgroup_namespace),
+        ] {
+            ensure!(
+                Identity::of(&fs::metadata(format!("/proc/{pid}/ns/{name}"))?) == *expected,
+                "process namespace mismatch"
+            );
+        }
+        let membership_path = PathBuf::from(format!("/proc/{pid}/cgroup"));
+        let membership = text(&membership_path, 16 * 1024)?;
         validate_membership(&membership, unit)?;
         let group = open_at(&context.slice, unit, true, false)?;
         ensure!(populated(&group)?, "caller group is not populated");
@@ -137,11 +163,11 @@ impl GroupBaseline {
             "group changed during capture"
         );
         ensure!(
-            baseline.parent == ProcessIdentity::current()?,
+            baseline.parent == ProcessIdentity::read(pid)?,
             "caller changed during capture"
         );
         ensure!(
-            text(Path::new("/proc/self/cgroup"), 16 * 1024)? == membership,
+            text(&membership_path, 16 * 1024)? == membership,
             "caller membership changed during capture"
         );
         Ok(baseline)
@@ -164,18 +190,37 @@ impl GroupBaseline {
             self.parent == ProcessIdentity::current()?,
             "lease caller mismatch"
         );
-        validate_membership(
-            &text(Path::new("/proc/self/cgroup"), 16 * 1024)?,
-            &self.unit,
-        )?;
+        self.current_process()
+    }
+
+    fn current_process(&self) -> Result<()> {
+        let membership = PathBuf::from(format!("/proc/{}/cgroup", self.parent.pid));
+        let check = || -> Result<()> {
+            ensure!(
+                ProcessIdentity::read(self.parent.pid)? == self.parent,
+                "group process incarnation changed"
+            );
+            validate_membership(&text(&membership, 16 * 1024)?, &self.unit)?;
+            for (name, expected) in [
+                ("mnt", &self.context.mount_namespace),
+                ("cgroup", &self.context.cgroup_namespace),
+            ] {
+                ensure!(
+                    Identity::of(&fs::metadata(format!(
+                        "/proc/{}/ns/{name}",
+                        self.parent.pid
+                    ))?) == *expected,
+                    "group process namespace changed"
+                );
+            }
+            Ok(())
+        };
+        check()?;
         ensure!(
             self.observe()? == GroupObservation::Populated,
             "caller no longer owns populated group"
         );
-        validate_membership(
-            &text(Path::new("/proc/self/cgroup"), 16 * 1024)?,
-            &self.unit,
-        )
+        check()
     }
 
     fn observe_with(
@@ -317,6 +362,7 @@ pub struct LeaseRecord {
     stock: StockBaseline,
     profile_sha256: [u8; 32],
     adapter_sha256: [u8; 32],
+    recovery_profile_sha256: [u8; 32],
 }
 impl LeaseRecord {
     pub fn new(
@@ -326,9 +372,10 @@ impl LeaseRecord {
         stock: StockBaseline,
         profile_sha256: [u8; 32],
         adapter_sha256: [u8; 32],
+        recovery_profile_sha256: [u8; 32],
     ) -> Result<Self> {
         let record = Self {
-            version: 1,
+            version: 2,
             activation: Uuid::new_v4(),
             group,
             buddy_invocation,
@@ -336,6 +383,7 @@ impl LeaseRecord {
             stock,
             profile_sha256,
             adapter_sha256,
+            recovery_profile_sha256,
         };
         record.validate()?;
         Ok(record)
@@ -360,7 +408,7 @@ impl LeaseRecord {
     }
     fn validate(&self) -> Result<()> {
         ensure!(
-            self.version == 1 && !self.activation.is_nil(),
+            self.version == 2 && !self.activation.is_nil(),
             "unsupported or empty lease"
         );
         self.group.validate()?;
@@ -374,6 +422,7 @@ impl LeaseRecord {
         for digest in [
             self.profile_sha256,
             self.adapter_sha256,
+            self.recovery_profile_sha256,
             self.stock.executable_sha256,
             self.stock.unit_sha256,
             self.stock.dropin_sha256,
