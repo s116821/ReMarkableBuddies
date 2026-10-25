@@ -21,10 +21,50 @@ fn charge(used: &mut usize, add: usize, limit: usize, error: &'static str) -> Re
     Ok(())
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Width {
+    One,
+    Two,
+}
+impl Width {
+    fn bytes(self) -> usize {
+        match self {
+            Self::One => 1,
+            Self::Two => 2,
+        }
+    }
+    fn code(self, bytes: &[u8]) -> Result<u16> {
+        ensure!(
+            bytes.len() == self.bytes(),
+            "Unsupported PDF Unicode code width"
+        );
+        Ok(match self {
+            Self::One => u16::from(bytes[0]),
+            Self::Two => u16::from_be_bytes([bytes[0], bytes[1]]),
+        })
+    }
+}
 pub(super) struct Map {
     entries: BTreeMap<u16, String>,
+    width: Width,
 }
 impl Map {
+    pub(super) fn emit(
+        &self,
+        bytes: &[u8],
+        mut emit: impl FnMut(char) -> Result<()>,
+    ) -> Result<()> {
+        ensure!(
+            bytes.len().is_multiple_of(self.width.bytes()),
+            "Truncated PDF Unicode code"
+        );
+        for bytes in bytes.chunks_exact(self.width.bytes()) {
+            for ch in self.text(self.width.code(bytes)?)?.chars() {
+                emit(ch)?;
+            }
+        }
+        Ok(())
+    }
     pub(super) fn text(&self, code: u16) -> Result<&str> {
         self.entries
             .get(&code)
@@ -86,10 +126,8 @@ fn hex(value: &Object) -> Result<&[u8]> {
         _ => bail!("PDF Unicode mapping requires hexadecimal strings"),
     }
 }
-fn code(value: &Object) -> Result<u16> {
-    let bytes = hex(value)?;
-    ensure!(bytes.len() == 2, "Unsupported PDF Unicode code width");
-    Ok(u16::from_be_bytes([bytes[0], bytes[1]]))
+fn code(value: &Object, width: Width) -> Result<u16> {
+    width.code(hex(value)?)
 }
 fn target(bytes: &[u8]) -> Result<String> {
     ensure!(
@@ -331,6 +369,10 @@ impl Cache {
     ) -> Result<Arc<Map>> {
         let id = reference(object)?;
         if let Some(map) = self.fonts.get(&id) {
+            ensure!(
+                map.width == Width::Two,
+                "PDF Unicode cached font width mismatch"
+            );
             return Ok(map.clone());
         }
         ensure!(self.fonts.len() < 64, "PDF Unicode font count bound");
@@ -431,13 +473,114 @@ impl Cache {
         let map = self.map(
             doc,
             font.get(b"ToUnicode").context("Missing PDF Unicode map")?,
+            Width::Two,
         )?;
         self.fonts.insert(id, map.clone());
         Ok(map)
     }
-    fn map(&mut self, doc: &Document, object: &Object) -> Result<Arc<Map>> {
+    pub(super) fn simple_font(
+        &mut self,
+        doc: &Document,
+        object: &Object,
+        font: &Dictionary,
+    ) -> Result<Arc<Map>> {
+        let id = reference(object)?;
+        if let Some(map) = self.fonts.get(&id) {
+            ensure!(
+                map.width == Width::One,
+                "PDF Unicode cached font width mismatch"
+            );
+            return Ok(map.clone());
+        }
+        ensure!(self.fonts.len() < 64, "PDF Unicode font count bound");
+        self.keys(
+            font,
+            &[
+                b"Type",
+                b"Subtype",
+                b"BaseFont",
+                b"Encoding",
+                b"FirstChar",
+                b"LastChar",
+                b"Widths",
+                b"FontDescriptor",
+                b"ToUnicode",
+                b"Name",
+            ],
+        )?;
+        ensure!(
+            font.has_type(b"Font")
+                && font.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"TrueType")
+                && name(
+                    resolve(
+                        doc,
+                        font.get(b"Encoding")
+                            .context("Missing PDF simple encoding")?
+                    )?,
+                    128
+                )? == b"WinAnsiEncoding",
+            "Unsupported PDF single-byte font profile"
+        );
+        let base = name(
+            resolve(
+                doc,
+                font.get(b"BaseFont")
+                    .context("Missing PDF Unicode base font")?,
+            )?,
+            128,
+        )?;
+        if let Ok(value) = font.get(b"Name") {
+            name(resolve(doc, value)?, 128)?;
+        }
+        let first = integer(resolve(
+            doc,
+            font.get(b"FirstChar")
+                .context("Missing PDF first character")?,
+        )?)?;
+        let last = integer(resolve(
+            doc,
+            font.get(b"LastChar")
+                .context("Missing PDF last character")?,
+        )?)?;
+        ensure!(
+            (0..=255).contains(&first) && (first..=255).contains(&last),
+            "Invalid PDF font character range"
+        );
+        let widths = self.array(
+            doc,
+            font.get(b"Widths").context("Missing PDF simple widths")?,
+        )?;
+        ensure!(
+            widths.len() == (last - first + 1) as usize,
+            "Invalid PDF simple width count"
+        );
+        for value in widths {
+            number(resolve(doc, value)?)?;
+        }
+        let descriptor = font
+            .get(b"FontDescriptor")
+            .context("Missing PDF font descriptor")?;
+        absent(dictionary(doc, descriptor)?, &[b"CIDSet"])?;
+        self.descriptor(doc, descriptor, base)?;
+        let map = self.map(
+            doc,
+            font.get(b"ToUnicode").context("Missing PDF Unicode map")?,
+            Width::One,
+        )?;
+        // This is font-local admission, including when map() returns a cache hit.
+        ensure!(
+            map.entries
+                .keys()
+                .all(|code| (first as u16..=last as u16).contains(code)),
+            "PDF Unicode map outside font character range"
+        );
+        self.fonts.insert(id, map.clone());
+        Ok(map)
+    }
+    fn map(&mut self, doc: &Document, object: &Object, width: Width) -> Result<Arc<Map>> {
         let id = reference(object)?;
         if let Some(map) = self.maps.get(&id) {
+            ensure!(map.width == width, "PDF Unicode cached map width mismatch");
             return Ok(map.clone());
         }
         ensure!(self.maps.len() < 64, "PDF Unicode map count bound");
@@ -485,7 +628,7 @@ impl Cache {
             16384,
             "PDF cumulative CMap operation bound",
         )?;
-        let map = Arc::new(self.project(doc, stream, parsed)?);
+        let map = Arc::new(self.project(doc, stream, parsed, width)?);
         self.maps.insert(id, map.clone());
         Ok(map)
     }
@@ -494,6 +637,7 @@ impl Cache {
         doc: &Document,
         stream: &Stream,
         parsed: Content<Vec<lopdf::content::Operation>>,
+        width: Width,
     ) -> Result<Map> {
         let ops = parsed.operations;
         let mut at = 0;
@@ -556,7 +700,7 @@ impl Cache {
         let args = take(&ops, &mut at, "endcodespacerange", 2 * count)?;
         let mut spaces = Vec::new();
         for pair in args.as_chunks::<2>().0 {
-            let (lo, hi) = (code(&pair[0])?, code(&pair[1])?);
+            let (lo, hi) = (code(&pair[0], width)?, code(&pair[1], width)?);
             ensure!(lo <= hi, "Invalid PDF codespace range");
             spaces.push((lo, hi));
         }
@@ -577,14 +721,14 @@ impl Cache {
                     let args = take(&ops, &mut at, "endbfchar", 2 * count)?;
                     builder.reserve(self, count)?;
                     for pair in args.as_chunks::<2>().0 {
-                        builder.insert(self, code(&pair[0])?, target(hex(&pair[1])?)?)?;
+                        builder.insert(self, code(&pair[0], width)?, target(hex(&pair[1])?)?)?;
                     }
                 }
                 "beginbfrange" => {
                     let count = section_count(&ops, &mut at, "beginbfrange", 100)?;
                     let args = take(&ops, &mut at, "endbfrange", 3 * count)?;
                     for triple in args.as_chunks::<3>().0 {
-                        let (lo, hi) = (code(&triple[0])?, code(&triple[1])?);
+                        let (lo, hi) = (code(&triple[0], width)?, code(&triple[1], width)?);
                         ensure!(lo <= hi, "Invalid PDF Unicode source range");
                         let length = usize::from(hi) - usize::from(lo) + 1;
                         // This happens before a single range element is expanded.
@@ -643,6 +787,7 @@ impl Cache {
         );
         Ok(Map {
             entries: builder.entries,
+            width,
         })
     }
 }
