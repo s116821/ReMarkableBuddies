@@ -1,0 +1,1498 @@
+{
+  "fixture_version": 1,
+  "source_commit": "093bf450b35cede5ae01386d872b198072873bbf",
+  "executable_sha256": "db7e3bbbfdc8dfc62de6386099bb001ec0fb21f409c11718846f377da1300485",
+  "scope": "Actual Windows CLI, task-owned synthetic Stores; independent parent vectors compared. No tablet/provider/runtime activation or transport-loss test.",
+  "records": [
+    {
+      "name": "missing-parent-clear-only-is-exact-noop-inspect",
+      "command": [
+        "--memory-settings-operation",
+        "inspect"
+      ],
+      "stdin_base64": null,
+      "stdin_sha256": null,
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"schema_version\":1,\"base_sha256\":\"15821fc6f9351fbca6c153cc43066a4b4da5e756133fc3cf00e90eb49f06ec5b\",\"config_path_sha256\":\"82c6dc3e8e55f9f7117b6ce5134dfb0198911cdc3f70486c16824f771bdb7c8c\",\"current\":{\"enabled\":{\"origin\":\"default\",\"value\":false},\"profile\":{\"origin\":\"default\",\"present\":false}}}}\n",
+      "stdout_sha256": "aa42ba2feae34d5a39902d6a35302527d64fc611cf2ebc22055f4fdaa8de8209",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "15821fc6f9351fbca6c153cc43066a4b4da5e756133fc3cf00e90eb49f06ec5b",
+      "config_after_sha256": "15821fc6f9351fbca6c153cc43066a4b4da5e756133fc3cf00e90eb49f06ec5b"
+    },
+    {
+      "name": "missing-parent-clear-only-is-exact-noop-prepare",
+      "command": [
+        "--memory-settings-operation",
+        "prepare",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtZW1vcnlfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiMjRiZjExNDctMDY1OC00Y2EwLWFhZDgtMTkyYjFjMTI5NmI3IiwiYmFzZV9zaGEyNTYiOiIxNTgyMWZjNmY5MzUxZmJjYTZjMTUzY2M0MzA2NmE0YjRkYTVlNzU2MTMzZmMzY2YwMGU5MGViNDlmMDZlYzViIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiODJjNmRjM2U4ZTU1ZjlmNzExN2I2Y2U1MTM0ZGZiMDE5ODkxMWNkYzNmNzA0ODZjMTY4MjRmNzcxYmRiN2M4YyIsImNoYW5nZXMiOnsiZW5hYmxlZCI6eyJhY3Rpb24iOiJjbGVhciJ9LCJwcm9maWxlIjp7ImFjdGlvbiI6ImNsZWFyIn19fQ==",
+      "stdin_sha256": "80587fa43af06fe26ddeb624fe95e83279cf26eecf309e9ffabf7d8461761c1b",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"ok\",\"outcome\":\"no-change\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"current\":{\"enabled\":{\"origin\":\"default\",\"value\":false},\"profile\":{\"origin\":\"default\",\"present\":false}},\"base_sha256\":\"15821fc6f9351fbca6c153cc43066a4b4da5e756133fc3cf00e90eb49f06ec5b\",\"changes_sha256\":\"8ceb9c6055ec2323fe6ee629b44693b660f2e77d689c2c336b3c15ee2feb7d26\"}}\n",
+      "stdout_sha256": "b5e397e948fdba2ed339ab57991eb7954b103a24d1a161b1638a70201f3926e3",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "15821fc6f9351fbca6c153cc43066a4b4da5e756133fc3cf00e90eb49f06ec5b",
+      "config_after_sha256": "15821fc6f9351fbca6c153cc43066a4b4da5e756133fc3cf00e90eb49f06ec5b"
+    },
+    {
+      "name": "existing-empty-parent-remains-present-inspect",
+      "command": [
+        "--memory-settings-operation",
+        "inspect"
+      ],
+      "stdin_base64": null,
+      "stdin_sha256": null,
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"schema_version\":1,\"base_sha256\":\"cbf2bf21ecf4fd62e7751ab5d36a408fc959f9b162e30f06ac91a748cda577d7\",\"config_path_sha256\":\"6b9bb7cce71abbefa6f3ddb0f02512cc49e85159149f08522d471c42e9077a3e\",\"current\":{\"enabled\":{\"origin\":\"default\",\"value\":false},\"profile\":{\"origin\":\"default\",\"present\":false}}}}\n",
+      "stdout_sha256": "d632c621ba1c4bcb5bd1eb630ab23c2d99ccbb3b1eb6054879042961c9f5d1d7",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "cbf2bf21ecf4fd62e7751ab5d36a408fc959f9b162e30f06ac91a748cda577d7",
+      "config_after_sha256": "cbf2bf21ecf4fd62e7751ab5d36a408fc959f9b162e30f06ac91a748cda577d7"
+    },
+    {
+      "name": "existing-empty-parent-remains-present-prepare",
+      "command": [
+        "--memory-settings-operation",
+        "prepare",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtZW1vcnlfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiNWQ1ODNkNjMtZTQwZi00N2Q1LTk5ZTItMmIyODQ1YTAxNzQ0IiwiYmFzZV9zaGEyNTYiOiJjYmYyYmYyMWVjZjRmZDYyZTc3NTFhYjVkMzZhNDA4ZmM5NTlmOWIxNjJlMzBmMDZhYzkxYTc0OGNkYTU3N2Q3IiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiNmI5YmI3Y2NlNzFhYmJlZmE2ZjNkZGIwZjAyNTEyY2M0OWU4NTE1OTE0OWYwODUyMmQ0NzFjNDJlOTA3N2EzZSIsImNoYW5nZXMiOnsiZW5hYmxlZCI6eyJhY3Rpb24iOiJjbGVhciJ9LCJwcm9maWxlIjp7ImFjdGlvbiI6ImNsZWFyIn19fQ==",
+      "stdin_sha256": "7fcf13897a23422ea42c7997c1b1fe9f879c59e784b2e06b7481e592b52937fa",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"ok\",\"outcome\":\"no-change\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"current\":{\"enabled\":{\"origin\":\"default\",\"value\":false},\"profile\":{\"origin\":\"default\",\"present\":false}},\"base_sha256\":\"cbf2bf21ecf4fd62e7751ab5d36a408fc959f9b162e30f06ac91a748cda577d7\",\"changes_sha256\":\"8ceb9c6055ec2323fe6ee629b44693b660f2e77d689c2c336b3c15ee2feb7d26\"}}\n",
+      "stdout_sha256": "3f545ceb9d6faf28747b2fa5a5b1f0899d5e5d59d34550aa05b35f5f217aca62",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "cbf2bf21ecf4fd62e7751ab5d36a408fc959f9b162e30f06ac91a748cda577d7",
+      "config_after_sha256": "cbf2bf21ecf4fd62e7751ab5d36a408fc959f9b162e30f06ac91a748cda577d7"
+    },
+    {
+      "name": "explicit-false-differs-from-default-inspect",
+      "command": [
+        "--memory-settings-operation",
+        "inspect"
+      ],
+      "stdin_base64": null,
+      "stdin_sha256": null,
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"schema_version\":1,\"base_sha256\":\"4d3851bf5d8735d62068a44286a5ca9c62006e457251e6bf3be277f6d91057a2\",\"config_path_sha256\":\"152b7ea3d60df1ada69d4dbbb6ac0d828eb0366ae5050ce8194f82ad1d6ffa3a\",\"current\":{\"enabled\":{\"origin\":\"default\",\"value\":false},\"profile\":{\"origin\":\"default\",\"present\":false}}}}\n",
+      "stdout_sha256": "1ceb43fe43f637b52bdac00d60bcb3a42789c0ed991ec7bf6306efcc34f3bf75",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "4d3851bf5d8735d62068a44286a5ca9c62006e457251e6bf3be277f6d91057a2",
+      "config_after_sha256": "4d3851bf5d8735d62068a44286a5ca9c62006e457251e6bf3be277f6d91057a2"
+    },
+    {
+      "name": "explicit-false-differs-from-default-prepare",
+      "command": [
+        "--memory-settings-operation",
+        "prepare",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtZW1vcnlfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiZmVmYWMzOWMtOTM4Mi00MjAxLTljZmUtNDc4OWQ0MmNmZWE1IiwiYmFzZV9zaGEyNTYiOiI0ZDM4NTFiZjVkODczNWQ2MjA2OGE0NDI4NmE1Y2E5YzYyMDA2ZTQ1NzI1MWU2YmYzYmUyNzdmNmQ5MTA1N2EyIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiMTUyYjdlYTNkNjBkZjFhZGE2OWQ0ZGJiYjZhYzBkODI4ZWIwMzY2YWU1MDUwY2U4MTk0ZjgyYWQxZDZmZmEzYSIsImNoYW5nZXMiOnsiZW5hYmxlZCI6eyJhY3Rpb24iOiJzZXQiLCJ2YWx1ZSI6ZmFsc2V9fX0=",
+      "stdin_sha256": "4a7e1ad83a0b2c550621c979137eaa6748d6cb78c3248dcd80690032c33414f9",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"ok\",\"outcome\":\"prepared\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"before\":{\"enabled\":{\"origin\":\"default\",\"value\":false},\"profile\":{\"origin\":\"default\",\"present\":false}},\"after\":{\"enabled\":{\"origin\":\"declared\",\"value\":false},\"profile\":{\"origin\":\"default\",\"present\":false}},\"intent\":{\"memory_settings_version\":1,\"operation\":\"fefac39c-9382-4201-9cfe-4789d42cfea5\",\"base_sha256\":\"4d3851bf5d8735d62068a44286a5ca9c62006e457251e6bf3be277f6d91057a2\",\"target_sha256\":\"1d3cb3a6cae7501b768f1eb65f9b65338cffcc1efa613b260ff67e3fbc3dec37\",\"config_path_sha256\":\"152b7ea3d60df1ada69d4dbbb6ac0d828eb0366ae5050ce8194f82ad1d6ffa3a\",\"changes_sha256\":\"2729c24fb938610999526031eae2b689781cfa79f4f8ccd03e54b6f71c57c826\"}}}\n",
+      "stdout_sha256": "6d6ea8ae27b74ef8edfe24f55008a6b59f3f67ef1ae145b0faae96cd438f7be7",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "4d3851bf5d8735d62068a44286a5ca9c62006e457251e6bf3be277f6d91057a2",
+      "config_after_sha256": "4d3851bf5d8735d62068a44286a5ca9c62006e457251e6bf3be277f6d91057a2"
+    },
+    {
+      "name": "explicit-false-differs-from-default-status-before",
+      "command": [
+        "--memory-settings-operation",
+        "status",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibWVtb3J5X3NldHRpbmdzX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6ImZlZmFjMzljLTkzODItNDIwMS05Y2ZlLTQ3ODlkNDJjZmVhNSIsImJhc2Vfc2hhMjU2IjoiNGQzODUxYmY1ZDg3MzVkNjIwNjhhNDQyODZhNWNhOWM2MjAwNmU0NTcyNTFlNmJmM2JlMjc3ZjZkOTEwNTdhMiIsInRhcmdldF9zaGEyNTYiOiIxZDNjYjNhNmNhZTc1MDFiNzY4ZjFlYjY1ZjliNjUzMzhjZmZjYzFlZmE2MTNiMjYwZmY2N2UzZmJjM2RlYzM3IiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiMTUyYjdlYTNkNjBkZjFhZGE2OWQ0ZGJiYjZhYzBkODI4ZWIwMzY2YWU1MDUwY2U4MTk0ZjgyYWQxZDZmZmEzYSIsImNoYW5nZXNfc2hhMjU2IjoiMjcyOWMyNGZiOTM4NjEwOTk5NTI2MDMxZWFlMmI2ODk3ODFjZmE3OWY0ZjhjY2QwM2U1NGI2ZjcxYzU3YzgyNiJ9fQ==",
+      "stdin_sha256": "1dac0c1b91ed207c76b46e1f057f515d399bf115b4aa05281405a4f908918a7f",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"status\",\"status\":\"ok\",\"outcome\":\"unresolved\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "5acdf15d758fc98bb9afa2de9f7691103b32522841bd31e83068274ce0944352",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "4d3851bf5d8735d62068a44286a5ca9c62006e457251e6bf3be277f6d91057a2",
+      "config_after_sha256": "4d3851bf5d8735d62068a44286a5ca9c62006e457251e6bf3be277f6d91057a2"
+    },
+    {
+      "name": "explicit-false-differs-from-default-apply",
+      "command": [
+        "--memory-settings-operation",
+        "apply",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibWVtb3J5X3NldHRpbmdzX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6ImZlZmFjMzljLTkzODItNDIwMS05Y2ZlLTQ3ODlkNDJjZmVhNSIsImJhc2Vfc2hhMjU2IjoiNGQzODUxYmY1ZDg3MzVkNjIwNjhhNDQyODZhNWNhOWM2MjAwNmU0NTcyNTFlNmJmM2JlMjc3ZjZkOTEwNTdhMiIsInRhcmdldF9zaGEyNTYiOiIxZDNjYjNhNmNhZTc1MDFiNzY4ZjFlYjY1ZjliNjUzMzhjZmZjYzFlZmE2MTNiMjYwZmY2N2UzZmJjM2RlYzM3IiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiMTUyYjdlYTNkNjBkZjFhZGE2OWQ0ZGJiYjZhYzBkODI4ZWIwMzY2YWU1MDUwY2U4MTk0ZjgyYWQxZDZmZmEzYSIsImNoYW5nZXNfc2hhMjU2IjoiMjcyOWMyNGZiOTM4NjEwOTk5NTI2MDMxZWFlMmI2ODk3ODFjZmE3OWY0ZjhjY2QwM2U1NGI2ZjcxYzU3YzgyNiJ9LCJjaGFuZ2VzIjp7ImVuYWJsZWQiOnsiYWN0aW9uIjoic2V0IiwidmFsdWUiOmZhbHNlfX19",
+      "stdin_sha256": "0441ca8f2174c9d92d245284aefbcf6240fb81e6513493f9fe0df8602d190d6a",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"ok\",\"outcome\":\"verified\",\"disk_readback_verified\":true,\"runtime_activation\":\"unverified\",\"data\":{\"target_sha256\":\"1d3cb3a6cae7501b768f1eb65f9b65338cffcc1efa613b260ff67e3fbc3dec37\",\"current\":{\"enabled\":{\"origin\":\"declared\",\"value\":false},\"profile\":{\"origin\":\"default\",\"present\":false}}}}\n",
+      "stdout_sha256": "30ff48c7a452cdbaa40d6aff8b979caecbb4417e6e9b8e70f0cf62e07bebc8db",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "4d3851bf5d8735d62068a44286a5ca9c62006e457251e6bf3be277f6d91057a2",
+      "config_after_sha256": "1d3cb3a6cae7501b768f1eb65f9b65338cffcc1efa613b260ff67e3fbc3dec37"
+    },
+    {
+      "name": "explicit-false-differs-from-default-status-after",
+      "command": [
+        "--memory-settings-operation",
+        "status",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibWVtb3J5X3NldHRpbmdzX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6ImZlZmFjMzljLTkzODItNDIwMS05Y2ZlLTQ3ODlkNDJjZmVhNSIsImJhc2Vfc2hhMjU2IjoiNGQzODUxYmY1ZDg3MzVkNjIwNjhhNDQyODZhNWNhOWM2MjAwNmU0NTcyNTFlNmJmM2JlMjc3ZjZkOTEwNTdhMiIsInRhcmdldF9zaGEyNTYiOiIxZDNjYjNhNmNhZTc1MDFiNzY4ZjFlYjY1ZjliNjUzMzhjZmZjYzFlZmE2MTNiMjYwZmY2N2UzZmJjM2RlYzM3IiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiMTUyYjdlYTNkNjBkZjFhZGE2OWQ0ZGJiYjZhYzBkODI4ZWIwMzY2YWU1MDUwY2U4MTk0ZjgyYWQxZDZmZmEzYSIsImNoYW5nZXNfc2hhMjU2IjoiMjcyOWMyNGZiOTM4NjEwOTk5NTI2MDMxZWFlMmI2ODk3ODFjZmE3OWY0ZjhjY2QwM2U1NGI2ZjcxYzU3YzgyNiJ9fQ==",
+      "stdin_sha256": "1dac0c1b91ed207c76b46e1f057f515d399bf115b4aa05281405a4f908918a7f",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"status\",\"status\":\"ok\",\"outcome\":\"desired-file-observed\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"observed_sha256\":\"1d3cb3a6cae7501b768f1eb65f9b65338cffcc1efa613b260ff67e3fbc3dec37\",\"current\":{\"enabled\":{\"origin\":\"declared\",\"value\":false},\"profile\":{\"origin\":\"default\",\"present\":false}}}}\n",
+      "stdout_sha256": "9b2b6bc54bf656c406e1af17e85bdbcaf906f76511728056100bf3d92eb99caa",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "1d3cb3a6cae7501b768f1eb65f9b65338cffcc1efa613b260ff67e3fbc3dec37",
+      "config_after_sha256": "1d3cb3a6cae7501b768f1eb65f9b65338cffcc1efa613b260ff67e3fbc3dec37"
+    },
+    {
+      "name": "clear-last-boolean-retains-parent-inspect",
+      "command": [
+        "--memory-settings-operation",
+        "inspect"
+      ],
+      "stdin_base64": null,
+      "stdin_sha256": null,
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"schema_version\":1,\"base_sha256\":\"e93b87fb81541776eb8b8fef4bbaa402c1de60d739664a1ac6820881adad004e\",\"config_path_sha256\":\"94be43cd0766507870dc07cdce2d3e3caf654bb0944950fdf0bd53034ade8b69\",\"current\":{\"enabled\":{\"origin\":\"declared\",\"value\":false},\"profile\":{\"origin\":\"default\",\"present\":false}}}}\n",
+      "stdout_sha256": "b0e403a6fb2d78e33a6689e4129d44de15c3647986b57cc0b3255aeda3bb4953",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "e93b87fb81541776eb8b8fef4bbaa402c1de60d739664a1ac6820881adad004e",
+      "config_after_sha256": "e93b87fb81541776eb8b8fef4bbaa402c1de60d739664a1ac6820881adad004e"
+    },
+    {
+      "name": "clear-last-boolean-retains-parent-prepare",
+      "command": [
+        "--memory-settings-operation",
+        "prepare",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtZW1vcnlfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiMGQzZGRkY2MtYTllMS00MWE3LTgzZmQtNTIwYjA2ODU4ZjVkIiwiYmFzZV9zaGEyNTYiOiJlOTNiODdmYjgxNTQxNzc2ZWI4YjhmZWY0YmJhYTQwMmMxZGU2MGQ3Mzk2NjRhMWFjNjgyMDg4MWFkYWQwMDRlIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiOTRiZTQzY2QwNzY2NTA3ODcwZGMwN2NkY2UyZDNlM2NhZjY1NGJiMDk0NDk1MGZkZjBiZDUzMDM0YWRlOGI2OSIsImNoYW5nZXMiOnsiZW5hYmxlZCI6eyJhY3Rpb24iOiJjbGVhciJ9fX0=",
+      "stdin_sha256": "691066bfcdaed0350e438584f1084a7a279495abd87e23dfa6f002408550b135",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"ok\",\"outcome\":\"prepared\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"before\":{\"enabled\":{\"origin\":\"declared\",\"value\":false},\"profile\":{\"origin\":\"default\",\"present\":false}},\"after\":{\"enabled\":{\"origin\":\"default\",\"value\":false},\"profile\":{\"origin\":\"default\",\"present\":false}},\"intent\":{\"memory_settings_version\":1,\"operation\":\"0d3dddcc-a9e1-41a7-83fd-520b06858f5d\",\"base_sha256\":\"e93b87fb81541776eb8b8fef4bbaa402c1de60d739664a1ac6820881adad004e\",\"target_sha256\":\"9ea0854df05ca8dc1da22d137bd38fa7e132f4b0c36841976cedce0e0fac94d3\",\"config_path_sha256\":\"94be43cd0766507870dc07cdce2d3e3caf654bb0944950fdf0bd53034ade8b69\",\"changes_sha256\":\"ff09f4e6d6514ff35f6c72f5f6e1bf0672b453e7c4f07eb410504c14841bdbc6\"}}}\n",
+      "stdout_sha256": "20700f6dd1583a3d059ff8d1b646c529fc52450b24054cb9ebf804988a5aa358",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "e93b87fb81541776eb8b8fef4bbaa402c1de60d739664a1ac6820881adad004e",
+      "config_after_sha256": "e93b87fb81541776eb8b8fef4bbaa402c1de60d739664a1ac6820881adad004e"
+    },
+    {
+      "name": "clear-last-boolean-retains-parent-status-before",
+      "command": [
+        "--memory-settings-operation",
+        "status",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibWVtb3J5X3NldHRpbmdzX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6IjBkM2RkZGNjLWE5ZTEtNDFhNy04M2ZkLTUyMGIwNjg1OGY1ZCIsImJhc2Vfc2hhMjU2IjoiZTkzYjg3ZmI4MTU0MTc3NmViOGI4ZmVmNGJiYWE0MDJjMWRlNjBkNzM5NjY0YTFhYzY4MjA4ODFhZGFkMDA0ZSIsInRhcmdldF9zaGEyNTYiOiI5ZWEwODU0ZGYwNWNhOGRjMWRhMjJkMTM3YmQzOGZhN2UxMzJmNGIwYzM2ODQxOTc2Y2VkY2UwZTBmYWM5NGQzIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiOTRiZTQzY2QwNzY2NTA3ODcwZGMwN2NkY2UyZDNlM2NhZjY1NGJiMDk0NDk1MGZkZjBiZDUzMDM0YWRlOGI2OSIsImNoYW5nZXNfc2hhMjU2IjoiZmYwOWY0ZTZkNjUxNGZmMzVmNmM3MmY1ZjZlMWJmMDY3MmI0NTNlN2M0ZjA3ZWI0MTA1MDRjMTQ4NDFiZGJjNiJ9fQ==",
+      "stdin_sha256": "9ecd2ff2b2f66340e905d745a65129278f1192fb7732a12d1e896df6f224dde9",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"status\",\"status\":\"ok\",\"outcome\":\"unresolved\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "5acdf15d758fc98bb9afa2de9f7691103b32522841bd31e83068274ce0944352",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "e93b87fb81541776eb8b8fef4bbaa402c1de60d739664a1ac6820881adad004e",
+      "config_after_sha256": "e93b87fb81541776eb8b8fef4bbaa402c1de60d739664a1ac6820881adad004e"
+    },
+    {
+      "name": "clear-last-boolean-retains-parent-apply",
+      "command": [
+        "--memory-settings-operation",
+        "apply",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibWVtb3J5X3NldHRpbmdzX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6IjBkM2RkZGNjLWE5ZTEtNDFhNy04M2ZkLTUyMGIwNjg1OGY1ZCIsImJhc2Vfc2hhMjU2IjoiZTkzYjg3ZmI4MTU0MTc3NmViOGI4ZmVmNGJiYWE0MDJjMWRlNjBkNzM5NjY0YTFhYzY4MjA4ODFhZGFkMDA0ZSIsInRhcmdldF9zaGEyNTYiOiI5ZWEwODU0ZGYwNWNhOGRjMWRhMjJkMTM3YmQzOGZhN2UxMzJmNGIwYzM2ODQxOTc2Y2VkY2UwZTBmYWM5NGQzIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiOTRiZTQzY2QwNzY2NTA3ODcwZGMwN2NkY2UyZDNlM2NhZjY1NGJiMDk0NDk1MGZkZjBiZDUzMDM0YWRlOGI2OSIsImNoYW5nZXNfc2hhMjU2IjoiZmYwOWY0ZTZkNjUxNGZmMzVmNmM3MmY1ZjZlMWJmMDY3MmI0NTNlN2M0ZjA3ZWI0MTA1MDRjMTQ4NDFiZGJjNiJ9LCJjaGFuZ2VzIjp7ImVuYWJsZWQiOnsiYWN0aW9uIjoiY2xlYXIifX19",
+      "stdin_sha256": "02b4f1dfbc6bff8f0b78f03a184dc676048965057daac32821768d5ff6b47d0d",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"ok\",\"outcome\":\"verified\",\"disk_readback_verified\":true,\"runtime_activation\":\"unverified\",\"data\":{\"target_sha256\":\"9ea0854df05ca8dc1da22d137bd38fa7e132f4b0c36841976cedce0e0fac94d3\",\"current\":{\"enabled\":{\"origin\":\"default\",\"value\":false},\"profile\":{\"origin\":\"default\",\"present\":false}}}}\n",
+      "stdout_sha256": "c0957562329bc508d8f9d384431b17549c02dac3184e38c92b258e96123e544c",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "e93b87fb81541776eb8b8fef4bbaa402c1de60d739664a1ac6820881adad004e",
+      "config_after_sha256": "9ea0854df05ca8dc1da22d137bd38fa7e132f4b0c36841976cedce0e0fac94d3"
+    },
+    {
+      "name": "clear-last-boolean-retains-parent-status-after",
+      "command": [
+        "--memory-settings-operation",
+        "status",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibWVtb3J5X3NldHRpbmdzX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6IjBkM2RkZGNjLWE5ZTEtNDFhNy04M2ZkLTUyMGIwNjg1OGY1ZCIsImJhc2Vfc2hhMjU2IjoiZTkzYjg3ZmI4MTU0MTc3NmViOGI4ZmVmNGJiYWE0MDJjMWRlNjBkNzM5NjY0YTFhYzY4MjA4ODFhZGFkMDA0ZSIsInRhcmdldF9zaGEyNTYiOiI5ZWEwODU0ZGYwNWNhOGRjMWRhMjJkMTM3YmQzOGZhN2UxMzJmNGIwYzM2ODQxOTc2Y2VkY2UwZTBmYWM5NGQzIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiOTRiZTQzY2QwNzY2NTA3ODcwZGMwN2NkY2UyZDNlM2NhZjY1NGJiMDk0NDk1MGZkZjBiZDUzMDM0YWRlOGI2OSIsImNoYW5nZXNfc2hhMjU2IjoiZmYwOWY0ZTZkNjUxNGZmMzVmNmM3MmY1ZjZlMWJmMDY3MmI0NTNlN2M0ZjA3ZWI0MTA1MDRjMTQ4NDFiZGJjNiJ9fQ==",
+      "stdin_sha256": "9ecd2ff2b2f66340e905d745a65129278f1192fb7732a12d1e896df6f224dde9",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"status\",\"status\":\"ok\",\"outcome\":\"desired-file-observed\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"observed_sha256\":\"9ea0854df05ca8dc1da22d137bd38fa7e132f4b0c36841976cedce0e0fac94d3\",\"current\":{\"enabled\":{\"origin\":\"default\",\"value\":false},\"profile\":{\"origin\":\"default\",\"present\":false}}}}\n",
+      "stdout_sha256": "511515cc0640a09d041bad98a1f41b9280170495068cc7254e53067b1ad8a30f",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "9ea0854df05ca8dc1da22d137bd38fa7e132f4b0c36841976cedce0e0fac94d3",
+      "config_after_sha256": "9ea0854df05ca8dc1da22d137bd38fa7e132f4b0c36841976cedce0e0fac94d3"
+    },
+    {
+      "name": "clear-declared-null-profile-retains-parent-inspect",
+      "command": [
+        "--memory-settings-operation",
+        "inspect"
+      ],
+      "stdin_base64": null,
+      "stdin_sha256": null,
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"schema_version\":1,\"base_sha256\":\"934169000b577191366c559959e10292b51725cd0363d21c44f0eef7924e1d65\",\"config_path_sha256\":\"cf0f2b0c48dfc6f073610a89b708c52d646f1fcbc7dc60e244ffe06a3a9c76da\",\"current\":{\"enabled\":{\"origin\":\"default\",\"value\":false},\"profile\":{\"origin\":\"declared-null\",\"present\":false}}}}\n",
+      "stdout_sha256": "f8b5408741e8c9b8db3bf78cacd624263e7e4ecc76d8843c9505e9d052efebf6",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "934169000b577191366c559959e10292b51725cd0363d21c44f0eef7924e1d65",
+      "config_after_sha256": "934169000b577191366c559959e10292b51725cd0363d21c44f0eef7924e1d65"
+    },
+    {
+      "name": "clear-declared-null-profile-retains-parent-prepare",
+      "command": [
+        "--memory-settings-operation",
+        "prepare",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtZW1vcnlfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiYzg1NDM5MjYtODE5My00ZjcxLWFkZWEtNzNhMjY5NjM4MzhlIiwiYmFzZV9zaGEyNTYiOiI5MzQxNjkwMDBiNTc3MTkxMzY2YzU1OTk1OWUxMDI5MmI1MTcyNWNkMDM2M2QyMWM0NGYwZWVmNzkyNGUxZDY1IiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiY2YwZjJiMGM0OGRmYzZmMDczNjEwYTg5YjcwOGM1MmQ2NDZmMWZjYmM3ZGM2MGUyNDRmZmUwNmEzYTljNzZkYSIsImNoYW5nZXMiOnsicHJvZmlsZSI6eyJhY3Rpb24iOiJjbGVhciJ9fX0=",
+      "stdin_sha256": "12439464bee0e2c7bf95db7a72081a07e017b198006e1473b7a192f7e6cc5906",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"ok\",\"outcome\":\"prepared\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"before\":{\"enabled\":{\"origin\":\"default\",\"value\":false},\"profile\":{\"origin\":\"declared-null\",\"present\":false}},\"after\":{\"enabled\":{\"origin\":\"default\",\"value\":false},\"profile\":{\"origin\":\"default\",\"present\":false}},\"intent\":{\"memory_settings_version\":1,\"operation\":\"c8543926-8193-4f71-adea-73a26963838e\",\"base_sha256\":\"934169000b577191366c559959e10292b51725cd0363d21c44f0eef7924e1d65\",\"target_sha256\":\"75e883a55a027eb5dd8c7b1a99c6adfea13934572b4f4179131135889cd4d16e\",\"config_path_sha256\":\"cf0f2b0c48dfc6f073610a89b708c52d646f1fcbc7dc60e244ffe06a3a9c76da\",\"changes_sha256\":\"502df815fb56eeb0743cc1998d087714234dde6a74c79384fa5d7c17754fde15\"}}}\n",
+      "stdout_sha256": "692a6f9d0397b0f28a235c11d2f0349840841976da8403c6b94ef5c3b1e7763d",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "934169000b577191366c559959e10292b51725cd0363d21c44f0eef7924e1d65",
+      "config_after_sha256": "934169000b577191366c559959e10292b51725cd0363d21c44f0eef7924e1d65"
+    },
+    {
+      "name": "clear-declared-null-profile-retains-parent-status-before",
+      "command": [
+        "--memory-settings-operation",
+        "status",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibWVtb3J5X3NldHRpbmdzX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6ImM4NTQzOTI2LTgxOTMtNGY3MS1hZGVhLTczYTI2OTYzODM4ZSIsImJhc2Vfc2hhMjU2IjoiOTM0MTY5MDAwYjU3NzE5MTM2NmM1NTk5NTllMTAyOTJiNTE3MjVjZDAzNjNkMjFjNDRmMGVlZjc5MjRlMWQ2NSIsInRhcmdldF9zaGEyNTYiOiI3NWU4ODNhNTVhMDI3ZWI1ZGQ4YzdiMWE5OWM2YWRmZWExMzkzNDU3MmI0ZjQxNzkxMzExMzU4ODljZDRkMTZlIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiY2YwZjJiMGM0OGRmYzZmMDczNjEwYTg5YjcwOGM1MmQ2NDZmMWZjYmM3ZGM2MGUyNDRmZmUwNmEzYTljNzZkYSIsImNoYW5nZXNfc2hhMjU2IjoiNTAyZGY4MTVmYjU2ZWViMDc0M2NjMTk5OGQwODc3MTQyMzRkZGU2YTc0Yzc5Mzg0ZmE1ZDdjMTc3NTRmZGUxNSJ9fQ==",
+      "stdin_sha256": "31551ebbd4ec0ff12f72a0995c2e59cef18b0b38efc1d949aa73cc86cf4117d4",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"status\",\"status\":\"ok\",\"outcome\":\"unresolved\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "5acdf15d758fc98bb9afa2de9f7691103b32522841bd31e83068274ce0944352",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "934169000b577191366c559959e10292b51725cd0363d21c44f0eef7924e1d65",
+      "config_after_sha256": "934169000b577191366c559959e10292b51725cd0363d21c44f0eef7924e1d65"
+    },
+    {
+      "name": "clear-declared-null-profile-retains-parent-apply",
+      "command": [
+        "--memory-settings-operation",
+        "apply",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibWVtb3J5X3NldHRpbmdzX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6ImM4NTQzOTI2LTgxOTMtNGY3MS1hZGVhLTczYTI2OTYzODM4ZSIsImJhc2Vfc2hhMjU2IjoiOTM0MTY5MDAwYjU3NzE5MTM2NmM1NTk5NTllMTAyOTJiNTE3MjVjZDAzNjNkMjFjNDRmMGVlZjc5MjRlMWQ2NSIsInRhcmdldF9zaGEyNTYiOiI3NWU4ODNhNTVhMDI3ZWI1ZGQ4YzdiMWE5OWM2YWRmZWExMzkzNDU3MmI0ZjQxNzkxMzExMzU4ODljZDRkMTZlIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiY2YwZjJiMGM0OGRmYzZmMDczNjEwYTg5YjcwOGM1MmQ2NDZmMWZjYmM3ZGM2MGUyNDRmZmUwNmEzYTljNzZkYSIsImNoYW5nZXNfc2hhMjU2IjoiNTAyZGY4MTVmYjU2ZWViMDc0M2NjMTk5OGQwODc3MTQyMzRkZGU2YTc0Yzc5Mzg0ZmE1ZDdjMTc3NTRmZGUxNSJ9LCJjaGFuZ2VzIjp7InByb2ZpbGUiOnsiYWN0aW9uIjoiY2xlYXIifX19",
+      "stdin_sha256": "1bfcc38080c6420d03f109af6a02b1f45f6ea760d398e3f4126130c252c52602",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"ok\",\"outcome\":\"verified\",\"disk_readback_verified\":true,\"runtime_activation\":\"unverified\",\"data\":{\"target_sha256\":\"75e883a55a027eb5dd8c7b1a99c6adfea13934572b4f4179131135889cd4d16e\",\"current\":{\"enabled\":{\"origin\":\"default\",\"value\":false},\"profile\":{\"origin\":\"default\",\"present\":false}}}}\n",
+      "stdout_sha256": "3fcf32d2bb68d9d9c6fb3658c4c5d768f5ea757b7ff752492bbf8d2b4681c8e9",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "934169000b577191366c559959e10292b51725cd0363d21c44f0eef7924e1d65",
+      "config_after_sha256": "75e883a55a027eb5dd8c7b1a99c6adfea13934572b4f4179131135889cd4d16e"
+    },
+    {
+      "name": "clear-declared-null-profile-retains-parent-status-after",
+      "command": [
+        "--memory-settings-operation",
+        "status",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibWVtb3J5X3NldHRpbmdzX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6ImM4NTQzOTI2LTgxOTMtNGY3MS1hZGVhLTczYTI2OTYzODM4ZSIsImJhc2Vfc2hhMjU2IjoiOTM0MTY5MDAwYjU3NzE5MTM2NmM1NTk5NTllMTAyOTJiNTE3MjVjZDAzNjNkMjFjNDRmMGVlZjc5MjRlMWQ2NSIsInRhcmdldF9zaGEyNTYiOiI3NWU4ODNhNTVhMDI3ZWI1ZGQ4YzdiMWE5OWM2YWRmZWExMzkzNDU3MmI0ZjQxNzkxMzExMzU4ODljZDRkMTZlIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiY2YwZjJiMGM0OGRmYzZmMDczNjEwYTg5YjcwOGM1MmQ2NDZmMWZjYmM3ZGM2MGUyNDRmZmUwNmEzYTljNzZkYSIsImNoYW5nZXNfc2hhMjU2IjoiNTAyZGY4MTVmYjU2ZWViMDc0M2NjMTk5OGQwODc3MTQyMzRkZGU2YTc0Yzc5Mzg0ZmE1ZDdjMTc3NTRmZGUxNSJ9fQ==",
+      "stdin_sha256": "31551ebbd4ec0ff12f72a0995c2e59cef18b0b38efc1d949aa73cc86cf4117d4",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"status\",\"status\":\"ok\",\"outcome\":\"desired-file-observed\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"observed_sha256\":\"75e883a55a027eb5dd8c7b1a99c6adfea13934572b4f4179131135889cd4d16e\",\"current\":{\"enabled\":{\"origin\":\"default\",\"value\":false},\"profile\":{\"origin\":\"default\",\"present\":false}}}}\n",
+      "stdout_sha256": "50bfe67ea84cb9e54ffe9571db7f838898433aea3d8c3601e06b784f3871a725",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "75e883a55a027eb5dd8c7b1a99c6adfea13934572b4f4179131135889cd4d16e",
+      "config_after_sha256": "75e883a55a027eb5dd8c7b1a99c6adfea13934572b4f4179131135889cd4d16e"
+    },
+    {
+      "name": "missing-parent-set-does-not-create-cleared-sibling-inspect",
+      "command": [
+        "--memory-settings-operation",
+        "inspect"
+      ],
+      "stdin_base64": null,
+      "stdin_sha256": null,
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"schema_version\":1,\"base_sha256\":\"23f39a84552c6adac885d5f26a8bc7ab6f9fb198e22e016e8d3a0d148eacf846\",\"config_path_sha256\":\"edb7bd597f934a7965bd8c672177e65dca8431c846d20af48f0aeb58b4637968\",\"current\":{\"enabled\":{\"origin\":\"default\",\"value\":false},\"profile\":{\"origin\":\"default\",\"present\":false}}}}\n",
+      "stdout_sha256": "77b683d2c5dc8e085fe0e8c3d46e074cee42d84222f4708dc5a55db0fdad5fa0",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "23f39a84552c6adac885d5f26a8bc7ab6f9fb198e22e016e8d3a0d148eacf846",
+      "config_after_sha256": "23f39a84552c6adac885d5f26a8bc7ab6f9fb198e22e016e8d3a0d148eacf846"
+    },
+    {
+      "name": "missing-parent-set-does-not-create-cleared-sibling-prepare",
+      "command": [
+        "--memory-settings-operation",
+        "prepare",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtZW1vcnlfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiYjU5MzI4NDUtMjZiOC00NzQ3LWEyMWMtYmIwY2IzZGM3NDAwIiwiYmFzZV9zaGEyNTYiOiIyM2YzOWE4NDU1MmM2YWRhYzg4NWQ1ZjI2YThiYzdhYjZmOWZiMTk4ZTIyZTAxNmU4ZDNhMGQxNDhlYWNmODQ2IiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiZWRiN2JkNTk3ZjkzNGE3OTY1YmQ4YzY3MjE3N2U2NWRjYTg0MzFjODQ2ZDIwYWY0OGYwYWViNThiNDYzNzk2OCIsImNoYW5nZXMiOnsiZW5hYmxlZCI6eyJhY3Rpb24iOiJjbGVhciJ9LCJwcm9maWxlIjp7ImFjdGlvbiI6InNldCIsInZhbHVlIjoiMTIzRTQ1NjctRTg5Qi0xMkQzLUE0NTYtNDI2NjE0MTc0MDAwIn19fQ==",
+      "stdin_sha256": "edfe3559aefd4e97ed4711b02ba0e54d90c87f1a86a5e61c97f2784130d7c8ae",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"ok\",\"outcome\":\"prepared\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"before\":{\"enabled\":{\"origin\":\"default\",\"value\":false},\"profile\":{\"origin\":\"default\",\"present\":false}},\"after\":{\"enabled\":{\"origin\":\"default\",\"value\":false},\"profile\":{\"origin\":\"declared\",\"present\":true}},\"intent\":{\"memory_settings_version\":1,\"operation\":\"b5932845-26b8-4747-a21c-bb0cb3dc7400\",\"base_sha256\":\"23f39a84552c6adac885d5f26a8bc7ab6f9fb198e22e016e8d3a0d148eacf846\",\"target_sha256\":\"2ef982dcd0f241f282f121da822330124332918b2c22c3a4ce00028dc3dde407\",\"config_path_sha256\":\"edb7bd597f934a7965bd8c672177e65dca8431c846d20af48f0aeb58b4637968\",\"changes_sha256\":\"e7c08e0c725a4520eccdd345b94da827879b2f8ce323f261b0e94dd62005ede8\"}}}\n",
+      "stdout_sha256": "6a1a7c2a9cd8c9016e1187f527def4b4a2df96c4ee9cd0dd338ad924f0572528",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "23f39a84552c6adac885d5f26a8bc7ab6f9fb198e22e016e8d3a0d148eacf846",
+      "config_after_sha256": "23f39a84552c6adac885d5f26a8bc7ab6f9fb198e22e016e8d3a0d148eacf846"
+    },
+    {
+      "name": "missing-parent-set-does-not-create-cleared-sibling-status-before",
+      "command": [
+        "--memory-settings-operation",
+        "status",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibWVtb3J5X3NldHRpbmdzX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6ImI1OTMyODQ1LTI2YjgtNDc0Ny1hMjFjLWJiMGNiM2RjNzQwMCIsImJhc2Vfc2hhMjU2IjoiMjNmMzlhODQ1NTJjNmFkYWM4ODVkNWYyNmE4YmM3YWI2ZjlmYjE5OGUyMmUwMTZlOGQzYTBkMTQ4ZWFjZjg0NiIsInRhcmdldF9zaGEyNTYiOiIyZWY5ODJkY2QwZjI0MWYyODJmMTIxZGE4MjIzMzAxMjQzMzI5MThiMmMyMmMzYTRjZTAwMDI4ZGMzZGRlNDA3IiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiZWRiN2JkNTk3ZjkzNGE3OTY1YmQ4YzY3MjE3N2U2NWRjYTg0MzFjODQ2ZDIwYWY0OGYwYWViNThiNDYzNzk2OCIsImNoYW5nZXNfc2hhMjU2IjoiZTdjMDhlMGM3MjVhNDUyMGVjY2RkMzQ1Yjk0ZGE4Mjc4NzliMmY4Y2UzMjNmMjYxYjBlOTRkZDYyMDA1ZWRlOCJ9fQ==",
+      "stdin_sha256": "0b2d9021ec0b49003a4759f9493df3ae41938746e72c4b4a7e6956dc5756dadd",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"status\",\"status\":\"ok\",\"outcome\":\"unresolved\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "5acdf15d758fc98bb9afa2de9f7691103b32522841bd31e83068274ce0944352",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "23f39a84552c6adac885d5f26a8bc7ab6f9fb198e22e016e8d3a0d148eacf846",
+      "config_after_sha256": "23f39a84552c6adac885d5f26a8bc7ab6f9fb198e22e016e8d3a0d148eacf846"
+    },
+    {
+      "name": "missing-parent-set-does-not-create-cleared-sibling-apply",
+      "command": [
+        "--memory-settings-operation",
+        "apply",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibWVtb3J5X3NldHRpbmdzX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6ImI1OTMyODQ1LTI2YjgtNDc0Ny1hMjFjLWJiMGNiM2RjNzQwMCIsImJhc2Vfc2hhMjU2IjoiMjNmMzlhODQ1NTJjNmFkYWM4ODVkNWYyNmE4YmM3YWI2ZjlmYjE5OGUyMmUwMTZlOGQzYTBkMTQ4ZWFjZjg0NiIsInRhcmdldF9zaGEyNTYiOiIyZWY5ODJkY2QwZjI0MWYyODJmMTIxZGE4MjIzMzAxMjQzMzI5MThiMmMyMmMzYTRjZTAwMDI4ZGMzZGRlNDA3IiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiZWRiN2JkNTk3ZjkzNGE3OTY1YmQ4YzY3MjE3N2U2NWRjYTg0MzFjODQ2ZDIwYWY0OGYwYWViNThiNDYzNzk2OCIsImNoYW5nZXNfc2hhMjU2IjoiZTdjMDhlMGM3MjVhNDUyMGVjY2RkMzQ1Yjk0ZGE4Mjc4NzliMmY4Y2UzMjNmMjYxYjBlOTRkZDYyMDA1ZWRlOCJ9LCJjaGFuZ2VzIjp7ImVuYWJsZWQiOnsiYWN0aW9uIjoiY2xlYXIifSwicHJvZmlsZSI6eyJhY3Rpb24iOiJzZXQiLCJ2YWx1ZSI6IjEyM0U0NTY3LUU4OUItMTJEMy1BNDU2LTQyNjYxNDE3NDAwMCJ9fX0=",
+      "stdin_sha256": "8fd51e77764a126b610650cb12237956629f07281b550fdc13586b4c62b8930c",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"ok\",\"outcome\":\"verified\",\"disk_readback_verified\":true,\"runtime_activation\":\"unverified\",\"data\":{\"target_sha256\":\"2ef982dcd0f241f282f121da822330124332918b2c22c3a4ce00028dc3dde407\",\"current\":{\"enabled\":{\"origin\":\"default\",\"value\":false},\"profile\":{\"origin\":\"declared\",\"present\":true}}}}\n",
+      "stdout_sha256": "c364493ce52f17bd64d6d7ce8b6de912d36d47716b21f07506b62470de6c4eda",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "23f39a84552c6adac885d5f26a8bc7ab6f9fb198e22e016e8d3a0d148eacf846",
+      "config_after_sha256": "2ef982dcd0f241f282f121da822330124332918b2c22c3a4ce00028dc3dde407"
+    },
+    {
+      "name": "missing-parent-set-does-not-create-cleared-sibling-status-after",
+      "command": [
+        "--memory-settings-operation",
+        "status",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibWVtb3J5X3NldHRpbmdzX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6ImI1OTMyODQ1LTI2YjgtNDc0Ny1hMjFjLWJiMGNiM2RjNzQwMCIsImJhc2Vfc2hhMjU2IjoiMjNmMzlhODQ1NTJjNmFkYWM4ODVkNWYyNmE4YmM3YWI2ZjlmYjE5OGUyMmUwMTZlOGQzYTBkMTQ4ZWFjZjg0NiIsInRhcmdldF9zaGEyNTYiOiIyZWY5ODJkY2QwZjI0MWYyODJmMTIxZGE4MjIzMzAxMjQzMzI5MThiMmMyMmMzYTRjZTAwMDI4ZGMzZGRlNDA3IiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiZWRiN2JkNTk3ZjkzNGE3OTY1YmQ4YzY3MjE3N2U2NWRjYTg0MzFjODQ2ZDIwYWY0OGYwYWViNThiNDYzNzk2OCIsImNoYW5nZXNfc2hhMjU2IjoiZTdjMDhlMGM3MjVhNDUyMGVjY2RkMzQ1Yjk0ZGE4Mjc4NzliMmY4Y2UzMjNmMjYxYjBlOTRkZDYyMDA1ZWRlOCJ9fQ==",
+      "stdin_sha256": "0b2d9021ec0b49003a4759f9493df3ae41938746e72c4b4a7e6956dc5756dadd",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"status\",\"status\":\"ok\",\"outcome\":\"desired-file-observed\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"observed_sha256\":\"2ef982dcd0f241f282f121da822330124332918b2c22c3a4ce00028dc3dde407\",\"current\":{\"enabled\":{\"origin\":\"default\",\"value\":false},\"profile\":{\"origin\":\"declared\",\"present\":true}}}}\n",
+      "stdout_sha256": "1f9400d0acb47c7e8a5dd7a4329cffc5e6561486f1d3f789a8cc469ad9e612aa",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "2ef982dcd0f241f282f121da822330124332918b2c22c3a4ce00028dc3dde407",
+      "config_after_sha256": "2ef982dcd0f241f282f121da822330124332918b2c22c3a4ce00028dc3dde407"
+    },
+    {
+      "name": "clear-preserves-explicit-null-selection-inspect",
+      "command": [
+        "--memory-settings-operation",
+        "inspect"
+      ],
+      "stdin_base64": null,
+      "stdin_sha256": null,
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"schema_version\":1,\"base_sha256\":\"22dc324e9f7e0fdf8bcf6292735923b0e97b2bc0efce45560f87d9303e37d07a\",\"config_path_sha256\":\"7d131c1d647e4fd0c1298ae6cca847f607d2c79be82bbf4871308a0c78e63c5d\",\"current\":{\"enabled\":{\"origin\":\"declared\",\"value\":false},\"profile\":{\"origin\":\"declared-null\",\"present\":false}}}}\n",
+      "stdout_sha256": "eb32b49b9455af1b0ff97893b8ee64b671bcb0a3ace464b0b4ce6736963fe2b6",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "22dc324e9f7e0fdf8bcf6292735923b0e97b2bc0efce45560f87d9303e37d07a",
+      "config_after_sha256": "22dc324e9f7e0fdf8bcf6292735923b0e97b2bc0efce45560f87d9303e37d07a"
+    },
+    {
+      "name": "clear-preserves-explicit-null-selection-prepare",
+      "command": [
+        "--memory-settings-operation",
+        "prepare",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtZW1vcnlfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiMDkzODI0MjgtNGFhMS00ZDAxLTk0MjEtMjNiNzM3ZGE2MDg4IiwiYmFzZV9zaGEyNTYiOiIyMmRjMzI0ZTlmN2UwZmRmOGJjZjYyOTI3MzU5MjNiMGU5N2IyYmMwZWZjZTQ1NTYwZjg3ZDkzMDNlMzdkMDdhIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiN2QxMzFjMWQ2NDdlNGZkMGMxMjk4YWU2Y2NhODQ3ZjYwN2QyYzc5YmU4MmJiZjQ4NzEzMDhhMGM3OGU2M2M1ZCIsImNoYW5nZXMiOnsiZW5hYmxlZCI6eyJhY3Rpb24iOiJjbGVhciJ9LCJwcm9maWxlIjp7ImFjdGlvbiI6ImNsZWFyIn19fQ==",
+      "stdin_sha256": "9ef1d5c29b3beb32db1b0b5fb1b838516bab904ddfbb44a4b373bc0db4914c01",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"ok\",\"outcome\":\"prepared\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"before\":{\"enabled\":{\"origin\":\"declared\",\"value\":false},\"profile\":{\"origin\":\"declared-null\",\"present\":false}},\"after\":{\"enabled\":{\"origin\":\"default\",\"value\":false},\"profile\":{\"origin\":\"default\",\"present\":false}},\"intent\":{\"memory_settings_version\":1,\"operation\":\"09382428-4aa1-4d01-9421-23b737da6088\",\"base_sha256\":\"22dc324e9f7e0fdf8bcf6292735923b0e97b2bc0efce45560f87d9303e37d07a\",\"target_sha256\":\"564c1896d2c792f00fe5a2e5c701b35ff85896132e77248ddf87fa6f8cb01f3c\",\"config_path_sha256\":\"7d131c1d647e4fd0c1298ae6cca847f607d2c79be82bbf4871308a0c78e63c5d\",\"changes_sha256\":\"8ceb9c6055ec2323fe6ee629b44693b660f2e77d689c2c336b3c15ee2feb7d26\"}}}\n",
+      "stdout_sha256": "0664e8562c7313691dffe95b674a76f57d552a862048949559edebeb08aee782",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "22dc324e9f7e0fdf8bcf6292735923b0e97b2bc0efce45560f87d9303e37d07a",
+      "config_after_sha256": "22dc324e9f7e0fdf8bcf6292735923b0e97b2bc0efce45560f87d9303e37d07a"
+    },
+    {
+      "name": "clear-preserves-explicit-null-selection-status-before",
+      "command": [
+        "--memory-settings-operation",
+        "status",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibWVtb3J5X3NldHRpbmdzX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6IjA5MzgyNDI4LTRhYTEtNGQwMS05NDIxLTIzYjczN2RhNjA4OCIsImJhc2Vfc2hhMjU2IjoiMjJkYzMyNGU5ZjdlMGZkZjhiY2Y2MjkyNzM1OTIzYjBlOTdiMmJjMGVmY2U0NTU2MGY4N2Q5MzAzZTM3ZDA3YSIsInRhcmdldF9zaGEyNTYiOiI1NjRjMTg5NmQyYzc5MmYwMGZlNWEyZTVjNzAxYjM1ZmY4NTg5NjEzMmU3NzI0OGRkZjg3ZmE2ZjhjYjAxZjNjIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiN2QxMzFjMWQ2NDdlNGZkMGMxMjk4YWU2Y2NhODQ3ZjYwN2QyYzc5YmU4MmJiZjQ4NzEzMDhhMGM3OGU2M2M1ZCIsImNoYW5nZXNfc2hhMjU2IjoiOGNlYjljNjA1NWVjMjMyM2ZlNmVlNjI5YjQ0NjkzYjY2MGYyZTc3ZDY4OWMyYzMzNmIzYzE1ZWUyZmViN2QyNiJ9fQ==",
+      "stdin_sha256": "2756f57dd942e02dfb8615988f406e13366cfee32557f84ba1ea27daef1b7e5f",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"status\",\"status\":\"ok\",\"outcome\":\"unresolved\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "5acdf15d758fc98bb9afa2de9f7691103b32522841bd31e83068274ce0944352",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "22dc324e9f7e0fdf8bcf6292735923b0e97b2bc0efce45560f87d9303e37d07a",
+      "config_after_sha256": "22dc324e9f7e0fdf8bcf6292735923b0e97b2bc0efce45560f87d9303e37d07a"
+    },
+    {
+      "name": "clear-preserves-explicit-null-selection-apply",
+      "command": [
+        "--memory-settings-operation",
+        "apply",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibWVtb3J5X3NldHRpbmdzX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6IjA5MzgyNDI4LTRhYTEtNGQwMS05NDIxLTIzYjczN2RhNjA4OCIsImJhc2Vfc2hhMjU2IjoiMjJkYzMyNGU5ZjdlMGZkZjhiY2Y2MjkyNzM1OTIzYjBlOTdiMmJjMGVmY2U0NTU2MGY4N2Q5MzAzZTM3ZDA3YSIsInRhcmdldF9zaGEyNTYiOiI1NjRjMTg5NmQyYzc5MmYwMGZlNWEyZTVjNzAxYjM1ZmY4NTg5NjEzMmU3NzI0OGRkZjg3ZmE2ZjhjYjAxZjNjIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiN2QxMzFjMWQ2NDdlNGZkMGMxMjk4YWU2Y2NhODQ3ZjYwN2QyYzc5YmU4MmJiZjQ4NzEzMDhhMGM3OGU2M2M1ZCIsImNoYW5nZXNfc2hhMjU2IjoiOGNlYjljNjA1NWVjMjMyM2ZlNmVlNjI5YjQ0NjkzYjY2MGYyZTc3ZDY4OWMyYzMzNmIzYzE1ZWUyZmViN2QyNiJ9LCJjaGFuZ2VzIjp7ImVuYWJsZWQiOnsiYWN0aW9uIjoiY2xlYXIifSwicHJvZmlsZSI6eyJhY3Rpb24iOiJjbGVhciJ9fX0=",
+      "stdin_sha256": "34fd0773f739fd915381a9d0bfa25fc42fa3e1f04d63e4f567017ff63baf4b4b",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"ok\",\"outcome\":\"verified\",\"disk_readback_verified\":true,\"runtime_activation\":\"unverified\",\"data\":{\"target_sha256\":\"564c1896d2c792f00fe5a2e5c701b35ff85896132e77248ddf87fa6f8cb01f3c\",\"current\":{\"enabled\":{\"origin\":\"default\",\"value\":false},\"profile\":{\"origin\":\"default\",\"present\":false}}}}\n",
+      "stdout_sha256": "fb7eb49331aae99260b6e3256637b46e9255c5a54eb8fa3f4ea9bedcc49ba1c5",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "22dc324e9f7e0fdf8bcf6292735923b0e97b2bc0efce45560f87d9303e37d07a",
+      "config_after_sha256": "564c1896d2c792f00fe5a2e5c701b35ff85896132e77248ddf87fa6f8cb01f3c"
+    },
+    {
+      "name": "clear-preserves-explicit-null-selection-status-after",
+      "command": [
+        "--memory-settings-operation",
+        "status",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibWVtb3J5X3NldHRpbmdzX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6IjA5MzgyNDI4LTRhYTEtNGQwMS05NDIxLTIzYjczN2RhNjA4OCIsImJhc2Vfc2hhMjU2IjoiMjJkYzMyNGU5ZjdlMGZkZjhiY2Y2MjkyNzM1OTIzYjBlOTdiMmJjMGVmY2U0NTU2MGY4N2Q5MzAzZTM3ZDA3YSIsInRhcmdldF9zaGEyNTYiOiI1NjRjMTg5NmQyYzc5MmYwMGZlNWEyZTVjNzAxYjM1ZmY4NTg5NjEzMmU3NzI0OGRkZjg3ZmE2ZjhjYjAxZjNjIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiN2QxMzFjMWQ2NDdlNGZkMGMxMjk4YWU2Y2NhODQ3ZjYwN2QyYzc5YmU4MmJiZjQ4NzEzMDhhMGM3OGU2M2M1ZCIsImNoYW5nZXNfc2hhMjU2IjoiOGNlYjljNjA1NWVjMjMyM2ZlNmVlNjI5YjQ0NjkzYjY2MGYyZTc3ZDY4OWMyYzMzNmIzYzE1ZWUyZmViN2QyNiJ9fQ==",
+      "stdin_sha256": "2756f57dd942e02dfb8615988f406e13366cfee32557f84ba1ea27daef1b7e5f",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"status\",\"status\":\"ok\",\"outcome\":\"desired-file-observed\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"observed_sha256\":\"564c1896d2c792f00fe5a2e5c701b35ff85896132e77248ddf87fa6f8cb01f3c\",\"current\":{\"enabled\":{\"origin\":\"default\",\"value\":false},\"profile\":{\"origin\":\"default\",\"present\":false}}}}\n",
+      "stdout_sha256": "4338b4c9bcd8debb27aecea02a12ddb1ceaefc99234630c483d8cdd968d03d3a",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "564c1896d2c792f00fe5a2e5c701b35ff85896132e77248ddf87fa6f8cb01f3c",
+      "config_after_sha256": "564c1896d2c792f00fe5a2e5c701b35ff85896132e77248ddf87fa6f8cb01f3c"
+    },
+    {
+      "name": "same-spelling-is-exact-file-noop-inspect",
+      "command": [
+        "--memory-settings-operation",
+        "inspect"
+      ],
+      "stdin_base64": null,
+      "stdin_sha256": null,
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"schema_version\":1,\"base_sha256\":\"ba3537f45960f32b97ceb2ea926f140952fcfc9bec992d3dde0931a40c572a2b\",\"config_path_sha256\":\"9a739b0683c49bff20b7e2bd86a721f38725ef46dbd1eb21f6dea1c90a5b1c8f\",\"current\":{\"enabled\":{\"origin\":\"declared\",\"value\":false},\"profile\":{\"origin\":\"declared\",\"present\":true}}}}\n",
+      "stdout_sha256": "a77ca273a17429dbadfb1f8e1f7bae61fc750053e3ad083319f36608cb945a84",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "ba3537f45960f32b97ceb2ea926f140952fcfc9bec992d3dde0931a40c572a2b",
+      "config_after_sha256": "ba3537f45960f32b97ceb2ea926f140952fcfc9bec992d3dde0931a40c572a2b"
+    },
+    {
+      "name": "same-spelling-is-exact-file-noop-prepare",
+      "command": [
+        "--memory-settings-operation",
+        "prepare",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtZW1vcnlfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiZTc1ZmEzNDctZjBkMS00NWU2LWE1NzQtYzRmMGI5NDI0MTRkIiwiYmFzZV9zaGEyNTYiOiJiYTM1MzdmNDU5NjBmMzJiOTdjZWIyZWE5MjZmMTQwOTUyZmNmYzliZWM5OTJkM2RkZTA5MzFhNDBjNTcyYTJiIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiOWE3MzliMDY4M2M0OWJmZjIwYjdlMmJkODZhNzIxZjM4NzI1ZWY0NmRiZDFlYjIxZjZkZWExYzkwYTViMWM4ZiIsImNoYW5nZXMiOnsicHJvZmlsZSI6eyJhY3Rpb24iOiJzZXQiLCJ2YWx1ZSI6IjEyM0U0NTY3LUU4OUItMTJEMy1BNDU2LTQyNjYxNDE3NDAwMCJ9fX0=",
+      "stdin_sha256": "bcad9ccc70b4ae122b33361f40d3ba0b87a25d773332ee655db1af4245a57df0",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"ok\",\"outcome\":\"no-change\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"current\":{\"enabled\":{\"origin\":\"declared\",\"value\":false},\"profile\":{\"origin\":\"declared\",\"present\":true}},\"base_sha256\":\"ba3537f45960f32b97ceb2ea926f140952fcfc9bec992d3dde0931a40c572a2b\",\"changes_sha256\":\"babc04e6648ad78bc4b7e0641c935131e1f2782368fbeaff68c623a60b5cbc85\"}}\n",
+      "stdout_sha256": "6579613ec5dbf13c96b4f4a266466f291c5cab66b4ee88e36d3f9d94679e15b6",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "ba3537f45960f32b97ceb2ea926f140952fcfc9bec992d3dde0931a40c572a2b",
+      "config_after_sha256": "ba3537f45960f32b97ceb2ea926f140952fcfc9bec992d3dde0931a40c572a2b"
+    },
+    {
+      "name": "accepted-different-spelling-is-a-raw-value-change-inspect",
+      "command": [
+        "--memory-settings-operation",
+        "inspect"
+      ],
+      "stdin_base64": null,
+      "stdin_sha256": null,
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"schema_version\":1,\"base_sha256\":\"eecd94e64c88a8c561afc1271903225c5bf973923eb5633da839703af7f91da0\",\"config_path_sha256\":\"abfdfdfbf8c68fc6e63ea1bae751637a23f551528fae8b60556deecfd7ead709\",\"current\":{\"enabled\":{\"origin\":\"default\",\"value\":false},\"profile\":{\"origin\":\"declared\",\"present\":true}}}}\n",
+      "stdout_sha256": "5eebdb1e18462526c386e8a20fa9aac408f29b7cce6e4f2cba6bb10c415ec785",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "eecd94e64c88a8c561afc1271903225c5bf973923eb5633da839703af7f91da0",
+      "config_after_sha256": "eecd94e64c88a8c561afc1271903225c5bf973923eb5633da839703af7f91da0"
+    },
+    {
+      "name": "accepted-different-spelling-is-a-raw-value-change-prepare",
+      "command": [
+        "--memory-settings-operation",
+        "prepare",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtZW1vcnlfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiMzkxMTk2NmYtYjA5NS00ZWYwLWJkYTAtNmE4OTk2ZDY3NTU5IiwiYmFzZV9zaGEyNTYiOiJlZWNkOTRlNjRjODhhOGM1NjFhZmMxMjcxOTAzMjI1YzViZjk3MzkyM2ViNTYzM2RhODM5NzAzYWY3ZjkxZGEwIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiYWJmZGZkZmJmOGM2OGZjNmU2M2VhMWJhZTc1MTYzN2EyM2Y1NTE1MjhmYWU4YjYwNTU2ZGVlY2ZkN2VhZDcwOSIsImNoYW5nZXMiOnsicHJvZmlsZSI6eyJhY3Rpb24iOiJzZXQiLCJ2YWx1ZSI6IjEyM0U0NTY3LUU4OUItMTJEMy1BNDU2LTQyNjYxNDE3NDAwMCJ9fX0=",
+      "stdin_sha256": "a6d457936e1c87bdaae640af43be55930b481771a8dd753fa7dce512f6b167ff",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"ok\",\"outcome\":\"prepared\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"before\":{\"enabled\":{\"origin\":\"default\",\"value\":false},\"profile\":{\"origin\":\"declared\",\"present\":true}},\"after\":{\"enabled\":{\"origin\":\"default\",\"value\":false},\"profile\":{\"origin\":\"declared\",\"present\":true}},\"intent\":{\"memory_settings_version\":1,\"operation\":\"3911966f-b095-4ef0-bda0-6a8996d67559\",\"base_sha256\":\"eecd94e64c88a8c561afc1271903225c5bf973923eb5633da839703af7f91da0\",\"target_sha256\":\"b0fb4a296e5e67e5ddd736d8fec3af81fea302c2cc84d5777d35b738bbf33b31\",\"config_path_sha256\":\"abfdfdfbf8c68fc6e63ea1bae751637a23f551528fae8b60556deecfd7ead709\",\"changes_sha256\":\"babc04e6648ad78bc4b7e0641c935131e1f2782368fbeaff68c623a60b5cbc85\"}}}\n",
+      "stdout_sha256": "98fbf234d3bed8c98d810ca4bfa7c5bf5212b92c659487d9465d5a4044d15bce",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "eecd94e64c88a8c561afc1271903225c5bf973923eb5633da839703af7f91da0",
+      "config_after_sha256": "eecd94e64c88a8c561afc1271903225c5bf973923eb5633da839703af7f91da0"
+    },
+    {
+      "name": "accepted-different-spelling-is-a-raw-value-change-status-before",
+      "command": [
+        "--memory-settings-operation",
+        "status",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibWVtb3J5X3NldHRpbmdzX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6IjM5MTE5NjZmLWIwOTUtNGVmMC1iZGEwLTZhODk5NmQ2NzU1OSIsImJhc2Vfc2hhMjU2IjoiZWVjZDk0ZTY0Yzg4YThjNTYxYWZjMTI3MTkwMzIyNWM1YmY5NzM5MjNlYjU2MzNkYTgzOTcwM2FmN2Y5MWRhMCIsInRhcmdldF9zaGEyNTYiOiJiMGZiNGEyOTZlNWU2N2U1ZGRkNzM2ZDhmZWMzYWY4MWZlYTMwMmMyY2M4NGQ1Nzc3ZDM1YjczOGJiZjMzYjMxIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiYWJmZGZkZmJmOGM2OGZjNmU2M2VhMWJhZTc1MTYzN2EyM2Y1NTE1MjhmYWU4YjYwNTU2ZGVlY2ZkN2VhZDcwOSIsImNoYW5nZXNfc2hhMjU2IjoiYmFiYzA0ZTY2NDhhZDc4YmM0YjdlMDY0MWM5MzUxMzFlMWYyNzgyMzY4ZmJlYWZmNjhjNjIzYTYwYjVjYmM4NSJ9fQ==",
+      "stdin_sha256": "127d0d1d8fbe8ede1eb9ce76b9d980865fe059f2cb91f23b07dbd6ba16351f31",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"status\",\"status\":\"ok\",\"outcome\":\"unresolved\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "5acdf15d758fc98bb9afa2de9f7691103b32522841bd31e83068274ce0944352",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "eecd94e64c88a8c561afc1271903225c5bf973923eb5633da839703af7f91da0",
+      "config_after_sha256": "eecd94e64c88a8c561afc1271903225c5bf973923eb5633da839703af7f91da0"
+    },
+    {
+      "name": "accepted-different-spelling-is-a-raw-value-change-apply",
+      "command": [
+        "--memory-settings-operation",
+        "apply",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibWVtb3J5X3NldHRpbmdzX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6IjM5MTE5NjZmLWIwOTUtNGVmMC1iZGEwLTZhODk5NmQ2NzU1OSIsImJhc2Vfc2hhMjU2IjoiZWVjZDk0ZTY0Yzg4YThjNTYxYWZjMTI3MTkwMzIyNWM1YmY5NzM5MjNlYjU2MzNkYTgzOTcwM2FmN2Y5MWRhMCIsInRhcmdldF9zaGEyNTYiOiJiMGZiNGEyOTZlNWU2N2U1ZGRkNzM2ZDhmZWMzYWY4MWZlYTMwMmMyY2M4NGQ1Nzc3ZDM1YjczOGJiZjMzYjMxIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiYWJmZGZkZmJmOGM2OGZjNmU2M2VhMWJhZTc1MTYzN2EyM2Y1NTE1MjhmYWU4YjYwNTU2ZGVlY2ZkN2VhZDcwOSIsImNoYW5nZXNfc2hhMjU2IjoiYmFiYzA0ZTY2NDhhZDc4YmM0YjdlMDY0MWM5MzUxMzFlMWYyNzgyMzY4ZmJlYWZmNjhjNjIzYTYwYjVjYmM4NSJ9LCJjaGFuZ2VzIjp7InByb2ZpbGUiOnsiYWN0aW9uIjoic2V0IiwidmFsdWUiOiIxMjNFNDU2Ny1FODlCLTEyRDMtQTQ1Ni00MjY2MTQxNzQwMDAifX19",
+      "stdin_sha256": "e05b3cf0a3db895423d6a5d7f8ef26b15c4d7080ac6a02e943991e1a3b49698d",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"ok\",\"outcome\":\"verified\",\"disk_readback_verified\":true,\"runtime_activation\":\"unverified\",\"data\":{\"target_sha256\":\"b0fb4a296e5e67e5ddd736d8fec3af81fea302c2cc84d5777d35b738bbf33b31\",\"current\":{\"enabled\":{\"origin\":\"default\",\"value\":false},\"profile\":{\"origin\":\"declared\",\"present\":true}}}}\n",
+      "stdout_sha256": "13f7b28b61aa01eea72a4a6185b16b572aa3f992402225e00c7095761014379a",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "eecd94e64c88a8c561afc1271903225c5bf973923eb5633da839703af7f91da0",
+      "config_after_sha256": "b0fb4a296e5e67e5ddd736d8fec3af81fea302c2cc84d5777d35b738bbf33b31"
+    },
+    {
+      "name": "accepted-different-spelling-is-a-raw-value-change-status-after",
+      "command": [
+        "--memory-settings-operation",
+        "status",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibWVtb3J5X3NldHRpbmdzX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6IjM5MTE5NjZmLWIwOTUtNGVmMC1iZGEwLTZhODk5NmQ2NzU1OSIsImJhc2Vfc2hhMjU2IjoiZWVjZDk0ZTY0Yzg4YThjNTYxYWZjMTI3MTkwMzIyNWM1YmY5NzM5MjNlYjU2MzNkYTgzOTcwM2FmN2Y5MWRhMCIsInRhcmdldF9zaGEyNTYiOiJiMGZiNGEyOTZlNWU2N2U1ZGRkNzM2ZDhmZWMzYWY4MWZlYTMwMmMyY2M4NGQ1Nzc3ZDM1YjczOGJiZjMzYjMxIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiYWJmZGZkZmJmOGM2OGZjNmU2M2VhMWJhZTc1MTYzN2EyM2Y1NTE1MjhmYWU4YjYwNTU2ZGVlY2ZkN2VhZDcwOSIsImNoYW5nZXNfc2hhMjU2IjoiYmFiYzA0ZTY2NDhhZDc4YmM0YjdlMDY0MWM5MzUxMzFlMWYyNzgyMzY4ZmJlYWZmNjhjNjIzYTYwYjVjYmM4NSJ9fQ==",
+      "stdin_sha256": "127d0d1d8fbe8ede1eb9ce76b9d980865fe059f2cb91f23b07dbd6ba16351f31",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"status\",\"status\":\"ok\",\"outcome\":\"desired-file-observed\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"observed_sha256\":\"b0fb4a296e5e67e5ddd736d8fec3af81fea302c2cc84d5777d35b738bbf33b31\",\"current\":{\"enabled\":{\"origin\":\"default\",\"value\":false},\"profile\":{\"origin\":\"declared\",\"present\":true}}}}\n",
+      "stdout_sha256": "f36e5022006413bb1891d6310dba1bc7530870d6124005c676aad93dc1939076",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "b0fb4a296e5e67e5ddd736d8fec3af81fea302c2cc84d5777d35b738bbf33b31",
+      "config_after_sha256": "b0fb4a296e5e67e5ddd736d8fec3af81fea302c2cc84d5777d35b738bbf33b31"
+    },
+    {
+      "name": "setting-true-and-profile-together-is-consistent-inspect",
+      "command": [
+        "--memory-settings-operation",
+        "inspect"
+      ],
+      "stdin_base64": null,
+      "stdin_sha256": null,
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"schema_version\":1,\"base_sha256\":\"d2dcffda06b0347a766011932220ce65f5924c409fde079d621407c127d1c027\",\"config_path_sha256\":\"5285dac0e475fabafce892dd3ea43e2aec7fad0022893788770123771718fe6a\",\"current\":{\"enabled\":{\"origin\":\"default\",\"value\":false},\"profile\":{\"origin\":\"default\",\"present\":false}}}}\n",
+      "stdout_sha256": "239f732f2d376d354bf3a94b8a20efc863604ebafbbcdeada1ed1a518614349c",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "d2dcffda06b0347a766011932220ce65f5924c409fde079d621407c127d1c027",
+      "config_after_sha256": "d2dcffda06b0347a766011932220ce65f5924c409fde079d621407c127d1c027"
+    },
+    {
+      "name": "setting-true-and-profile-together-is-consistent-prepare",
+      "command": [
+        "--memory-settings-operation",
+        "prepare",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtZW1vcnlfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiZTdiODU2NjMtYjJkNS00NmNiLWI0ZTQtNjkzZjQ2NTQ5YWIwIiwiYmFzZV9zaGEyNTYiOiJkMmRjZmZkYTA2YjAzNDdhNzY2MDExOTMyMjIwY2U2NWY1OTI0YzQwOWZkZTA3OWQ2MjE0MDdjMTI3ZDFjMDI3IiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiNTI4NWRhYzBlNDc1ZmFiYWZjZTg5MmRkM2VhNDNlMmFlYzdmYWQwMDIyODkzNzg4NzcwMTIzNzcxNzE4ZmU2YSIsImNoYW5nZXMiOnsiZW5hYmxlZCI6eyJhY3Rpb24iOiJzZXQiLCJ2YWx1ZSI6dHJ1ZX0sInByb2ZpbGUiOnsiYWN0aW9uIjoic2V0IiwidmFsdWUiOiIxMjNFNDU2Ny1FODlCLTEyRDMtQTQ1Ni00MjY2MTQxNzQwMDAifX19",
+      "stdin_sha256": "614846f3953c70b21d0206d460f12a901bfbcdee85bba91388193bc1a713bfd3",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"ok\",\"outcome\":\"prepared\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"before\":{\"enabled\":{\"origin\":\"default\",\"value\":false},\"profile\":{\"origin\":\"default\",\"present\":false}},\"after\":{\"enabled\":{\"origin\":\"declared\",\"value\":true},\"profile\":{\"origin\":\"declared\",\"present\":true}},\"intent\":{\"memory_settings_version\":1,\"operation\":\"e7b85663-b2d5-46cb-b4e4-693f46549ab0\",\"base_sha256\":\"d2dcffda06b0347a766011932220ce65f5924c409fde079d621407c127d1c027\",\"target_sha256\":\"b6ad8e58f7e1fcb41ea34dcd98bc47a27fe25d20fd4bd9f3463e468debf030f0\",\"config_path_sha256\":\"5285dac0e475fabafce892dd3ea43e2aec7fad0022893788770123771718fe6a\",\"changes_sha256\":\"eb760e429bd11cdebf432a7dbb2f43588474e78112b042d244fd671d188dec0d\"}}}\n",
+      "stdout_sha256": "fac800ab3b831a0ff8beed5a15990ffbe27ab177376dc2c6078e2412720af3a0",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "d2dcffda06b0347a766011932220ce65f5924c409fde079d621407c127d1c027",
+      "config_after_sha256": "d2dcffda06b0347a766011932220ce65f5924c409fde079d621407c127d1c027"
+    },
+    {
+      "name": "setting-true-and-profile-together-is-consistent-status-before",
+      "command": [
+        "--memory-settings-operation",
+        "status",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibWVtb3J5X3NldHRpbmdzX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6ImU3Yjg1NjYzLWIyZDUtNDZjYi1iNGU0LTY5M2Y0NjU0OWFiMCIsImJhc2Vfc2hhMjU2IjoiZDJkY2ZmZGEwNmIwMzQ3YTc2NjAxMTkzMjIyMGNlNjVmNTkyNGM0MDlmZGUwNzlkNjIxNDA3YzEyN2QxYzAyNyIsInRhcmdldF9zaGEyNTYiOiJiNmFkOGU1OGY3ZTFmY2I0MWVhMzRkY2Q5OGJjNDdhMjdmZTI1ZDIwZmQ0YmQ5ZjM0NjNlNDY4ZGViZjAzMGYwIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiNTI4NWRhYzBlNDc1ZmFiYWZjZTg5MmRkM2VhNDNlMmFlYzdmYWQwMDIyODkzNzg4NzcwMTIzNzcxNzE4ZmU2YSIsImNoYW5nZXNfc2hhMjU2IjoiZWI3NjBlNDI5YmQxMWNkZWJmNDMyYTdkYmIyZjQzNTg4NDc0ZTc4MTEyYjA0MmQyNDRmZDY3MWQxODhkZWMwZCJ9fQ==",
+      "stdin_sha256": "f5312f2b62c9161835bec01b23d833613952c9c5f947c6594a6cdfc16b322c85",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"status\",\"status\":\"ok\",\"outcome\":\"unresolved\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "5acdf15d758fc98bb9afa2de9f7691103b32522841bd31e83068274ce0944352",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "d2dcffda06b0347a766011932220ce65f5924c409fde079d621407c127d1c027",
+      "config_after_sha256": "d2dcffda06b0347a766011932220ce65f5924c409fde079d621407c127d1c027"
+    },
+    {
+      "name": "setting-true-and-profile-together-is-consistent-apply",
+      "command": [
+        "--memory-settings-operation",
+        "apply",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibWVtb3J5X3NldHRpbmdzX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6ImU3Yjg1NjYzLWIyZDUtNDZjYi1iNGU0LTY5M2Y0NjU0OWFiMCIsImJhc2Vfc2hhMjU2IjoiZDJkY2ZmZGEwNmIwMzQ3YTc2NjAxMTkzMjIyMGNlNjVmNTkyNGM0MDlmZGUwNzlkNjIxNDA3YzEyN2QxYzAyNyIsInRhcmdldF9zaGEyNTYiOiJiNmFkOGU1OGY3ZTFmY2I0MWVhMzRkY2Q5OGJjNDdhMjdmZTI1ZDIwZmQ0YmQ5ZjM0NjNlNDY4ZGViZjAzMGYwIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiNTI4NWRhYzBlNDc1ZmFiYWZjZTg5MmRkM2VhNDNlMmFlYzdmYWQwMDIyODkzNzg4NzcwMTIzNzcxNzE4ZmU2YSIsImNoYW5nZXNfc2hhMjU2IjoiZWI3NjBlNDI5YmQxMWNkZWJmNDMyYTdkYmIyZjQzNTg4NDc0ZTc4MTEyYjA0MmQyNDRmZDY3MWQxODhkZWMwZCJ9LCJjaGFuZ2VzIjp7ImVuYWJsZWQiOnsiYWN0aW9uIjoic2V0IiwidmFsdWUiOnRydWV9LCJwcm9maWxlIjp7ImFjdGlvbiI6InNldCIsInZhbHVlIjoiMTIzRTQ1NjctRTg5Qi0xMkQzLUE0NTYtNDI2NjE0MTc0MDAwIn19fQ==",
+      "stdin_sha256": "3eefd936a54e94c840b8f158443dbeb0d26176d9d52cc9402dbc1f84f051fc64",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"ok\",\"outcome\":\"verified\",\"disk_readback_verified\":true,\"runtime_activation\":\"unverified\",\"data\":{\"target_sha256\":\"b6ad8e58f7e1fcb41ea34dcd98bc47a27fe25d20fd4bd9f3463e468debf030f0\",\"current\":{\"enabled\":{\"origin\":\"declared\",\"value\":true},\"profile\":{\"origin\":\"declared\",\"present\":true}}}}\n",
+      "stdout_sha256": "4764745ef19580910f732875ff3e1a0cd98d7e980c85d2e4e82e1de21ea4bb6e",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "d2dcffda06b0347a766011932220ce65f5924c409fde079d621407c127d1c027",
+      "config_after_sha256": "b6ad8e58f7e1fcb41ea34dcd98bc47a27fe25d20fd4bd9f3463e468debf030f0"
+    },
+    {
+      "name": "setting-true-and-profile-together-is-consistent-status-after",
+      "command": [
+        "--memory-settings-operation",
+        "status",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibWVtb3J5X3NldHRpbmdzX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6ImU3Yjg1NjYzLWIyZDUtNDZjYi1iNGU0LTY5M2Y0NjU0OWFiMCIsImJhc2Vfc2hhMjU2IjoiZDJkY2ZmZGEwNmIwMzQ3YTc2NjAxMTkzMjIyMGNlNjVmNTkyNGM0MDlmZGUwNzlkNjIxNDA3YzEyN2QxYzAyNyIsInRhcmdldF9zaGEyNTYiOiJiNmFkOGU1OGY3ZTFmY2I0MWVhMzRkY2Q5OGJjNDdhMjdmZTI1ZDIwZmQ0YmQ5ZjM0NjNlNDY4ZGViZjAzMGYwIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiNTI4NWRhYzBlNDc1ZmFiYWZjZTg5MmRkM2VhNDNlMmFlYzdmYWQwMDIyODkzNzg4NzcwMTIzNzcxNzE4ZmU2YSIsImNoYW5nZXNfc2hhMjU2IjoiZWI3NjBlNDI5YmQxMWNkZWJmNDMyYTdkYmIyZjQzNTg4NDc0ZTc4MTEyYjA0MmQyNDRmZDY3MWQxODhkZWMwZCJ9fQ==",
+      "stdin_sha256": "f5312f2b62c9161835bec01b23d833613952c9c5f947c6594a6cdfc16b322c85",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"status\",\"status\":\"ok\",\"outcome\":\"desired-file-observed\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"observed_sha256\":\"b6ad8e58f7e1fcb41ea34dcd98bc47a27fe25d20fd4bd9f3463e468debf030f0\",\"current\":{\"enabled\":{\"origin\":\"declared\",\"value\":true},\"profile\":{\"origin\":\"declared\",\"present\":true}}}}\n",
+      "stdout_sha256": "7c5e096778be84095eb33d4fc9a0e0e3e7a2d4629e37b19254ab74f1ec0e0081",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "b6ad8e58f7e1fcb41ea34dcd98bc47a27fe25d20fd4bd9f3463e468debf030f0",
+      "config_after_sha256": "b6ad8e58f7e1fcb41ea34dcd98bc47a27fe25d20fd4bd9f3463e468debf030f0"
+    },
+    {
+      "name": "clearing-profile-while-enabled-is-invalid-inspect",
+      "command": [
+        "--memory-settings-operation",
+        "inspect"
+      ],
+      "stdin_base64": null,
+      "stdin_sha256": null,
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"schema_version\":1,\"base_sha256\":\"32fbc60aec0bafd5b12537bff721c8a7e1c08cbaea3b446ee06e1bb90d4c6c99\",\"config_path_sha256\":\"2d9bdf5ccdc174a8b22d4d5bc00011297cc70085ca465b1fd11725c5d7569453\",\"current\":{\"enabled\":{\"origin\":\"declared\",\"value\":true},\"profile\":{\"origin\":\"declared\",\"present\":true}}}}\n",
+      "stdout_sha256": "b5fb3beb14b3ce746ff6611d591148ea7affa1baa7969065ed4c445a9dc45a7c",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "32fbc60aec0bafd5b12537bff721c8a7e1c08cbaea3b446ee06e1bb90d4c6c99",
+      "config_after_sha256": "32fbc60aec0bafd5b12537bff721c8a7e1c08cbaea3b446ee06e1bb90d4c6c99"
+    },
+    {
+      "name": "clearing-profile-while-enabled-is-invalid-prepare",
+      "command": [
+        "--memory-settings-operation",
+        "prepare",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtZW1vcnlfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiMzkwNGRkZmQtZDVlYS00YTU3LTllZmMtMDZkNmQwOWQwYWQyIiwiYmFzZV9zaGEyNTYiOiIzMmZiYzYwYWVjMGJhZmQ1YjEyNTM3YmZmNzIxYzhhN2UxYzA4Y2JhZWEzYjQ0NmVlMDZlMWJiOTBkNGM2Yzk5IiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiMmQ5YmRmNWNjZGMxNzRhOGIyMmQ0ZDViYzAwMDExMjk3Y2M3MDA4NWNhNDY1YjFmZDExNzI1YzVkNzU2OTQ1MyIsImNoYW5nZXMiOnsicHJvZmlsZSI6eyJhY3Rpb24iOiJjbGVhciJ9fX0=",
+      "stdin_sha256": "8d423c5e01192c9d4058f88449ae48c037be79fd82c7a673811c1a402249f757",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "dcada7fb674c564d3fa0e6bd129084ac20b5f3b1501715e5eaa1db0f61c5db9b",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "32fbc60aec0bafd5b12537bff721c8a7e1c08cbaea3b446ee06e1bb90d4c6c99",
+      "config_after_sha256": "32fbc60aec0bafd5b12537bff721c8a7e1c08cbaea3b446ee06e1bb90d4c6c99"
+    },
+    {
+      "name": "explicit-disable-and-clear-profile-together-inspect",
+      "command": [
+        "--memory-settings-operation",
+        "inspect"
+      ],
+      "stdin_base64": null,
+      "stdin_sha256": null,
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"schema_version\":1,\"base_sha256\":\"f92bfca788d995813fc3b9514cf57ae67a513ab46317b901533d8a6a55fc58d9\",\"config_path_sha256\":\"d9801cb90e2f49f6fec9a4a33a5e94402f9bf7fb9b8fea01215ec1c111625418\",\"current\":{\"enabled\":{\"origin\":\"declared\",\"value\":true},\"profile\":{\"origin\":\"declared\",\"present\":true}}}}\n",
+      "stdout_sha256": "111a7c811412b7e322f756fa680a220578c9243711cec98065954c3fc6503abc",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "f92bfca788d995813fc3b9514cf57ae67a513ab46317b901533d8a6a55fc58d9",
+      "config_after_sha256": "f92bfca788d995813fc3b9514cf57ae67a513ab46317b901533d8a6a55fc58d9"
+    },
+    {
+      "name": "explicit-disable-and-clear-profile-together-prepare",
+      "command": [
+        "--memory-settings-operation",
+        "prepare",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtZW1vcnlfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiODBiMzEzZTMtYzQ1Ni00YmMyLWI1MjMtYjhlOTUyMjgxYTRmIiwiYmFzZV9zaGEyNTYiOiJmOTJiZmNhNzg4ZDk5NTgxM2ZjM2I5NTE0Y2Y1N2FlNjdhNTEzYWI0NjMxN2I5MDE1MzNkOGE2YTU1ZmM1OGQ5IiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiZDk4MDFjYjkwZTJmNDlmNmZlYzlhNGEzM2E1ZTk0NDAyZjliZjdmYjliOGZlYTAxMjE1ZWMxYzExMTYyNTQxOCIsImNoYW5nZXMiOnsiZW5hYmxlZCI6eyJhY3Rpb24iOiJzZXQiLCJ2YWx1ZSI6ZmFsc2V9LCJwcm9maWxlIjp7ImFjdGlvbiI6ImNsZWFyIn19fQ==",
+      "stdin_sha256": "3bb191c44ab7ed36a66111f179964d452bfe602ffdf6aa13dd3636bc657a5e42",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"ok\",\"outcome\":\"prepared\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"before\":{\"enabled\":{\"origin\":\"declared\",\"value\":true},\"profile\":{\"origin\":\"declared\",\"present\":true}},\"after\":{\"enabled\":{\"origin\":\"declared\",\"value\":false},\"profile\":{\"origin\":\"default\",\"present\":false}},\"intent\":{\"memory_settings_version\":1,\"operation\":\"80b313e3-c456-4bc2-b523-b8e952281a4f\",\"base_sha256\":\"f92bfca788d995813fc3b9514cf57ae67a513ab46317b901533d8a6a55fc58d9\",\"target_sha256\":\"05b50da7a7a477f2e738eabdf5c5941c9d668f3779b31b8d568894935689bacd\",\"config_path_sha256\":\"d9801cb90e2f49f6fec9a4a33a5e94402f9bf7fb9b8fea01215ec1c111625418\",\"changes_sha256\":\"d6c6fa66034baabce168fe020412f93c63521df6a9a22e3d715ddd59094add51\"}}}\n",
+      "stdout_sha256": "f287cf76b08253cfadd4899c211eaea3d1a803a3c64c4d8a1637122f9e83662e",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "f92bfca788d995813fc3b9514cf57ae67a513ab46317b901533d8a6a55fc58d9",
+      "config_after_sha256": "f92bfca788d995813fc3b9514cf57ae67a513ab46317b901533d8a6a55fc58d9"
+    },
+    {
+      "name": "explicit-disable-and-clear-profile-together-status-before",
+      "command": [
+        "--memory-settings-operation",
+        "status",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibWVtb3J5X3NldHRpbmdzX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6IjgwYjMxM2UzLWM0NTYtNGJjMi1iNTIzLWI4ZTk1MjI4MWE0ZiIsImJhc2Vfc2hhMjU2IjoiZjkyYmZjYTc4OGQ5OTU4MTNmYzNiOTUxNGNmNTdhZTY3YTUxM2FiNDYzMTdiOTAxNTMzZDhhNmE1NWZjNThkOSIsInRhcmdldF9zaGEyNTYiOiIwNWI1MGRhN2E3YTQ3N2YyZTczOGVhYmRmNWM1OTQxYzlkNjY4ZjM3NzliMzFiOGQ1Njg4OTQ5MzU2ODliYWNkIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiZDk4MDFjYjkwZTJmNDlmNmZlYzlhNGEzM2E1ZTk0NDAyZjliZjdmYjliOGZlYTAxMjE1ZWMxYzExMTYyNTQxOCIsImNoYW5nZXNfc2hhMjU2IjoiZDZjNmZhNjYwMzRiYWFiY2UxNjhmZTAyMDQxMmY5M2M2MzUyMWRmNmE5YTIyZTNkNzE1ZGRkNTkwOTRhZGQ1MSJ9fQ==",
+      "stdin_sha256": "8198e92a1edf537527b743fbdb0ad6a0f989c9082d3352e265fff31b64ae7725",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"status\",\"status\":\"ok\",\"outcome\":\"unresolved\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "5acdf15d758fc98bb9afa2de9f7691103b32522841bd31e83068274ce0944352",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "f92bfca788d995813fc3b9514cf57ae67a513ab46317b901533d8a6a55fc58d9",
+      "config_after_sha256": "f92bfca788d995813fc3b9514cf57ae67a513ab46317b901533d8a6a55fc58d9"
+    },
+    {
+      "name": "explicit-disable-and-clear-profile-together-apply",
+      "command": [
+        "--memory-settings-operation",
+        "apply",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibWVtb3J5X3NldHRpbmdzX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6IjgwYjMxM2UzLWM0NTYtNGJjMi1iNTIzLWI4ZTk1MjI4MWE0ZiIsImJhc2Vfc2hhMjU2IjoiZjkyYmZjYTc4OGQ5OTU4MTNmYzNiOTUxNGNmNTdhZTY3YTUxM2FiNDYzMTdiOTAxNTMzZDhhNmE1NWZjNThkOSIsInRhcmdldF9zaGEyNTYiOiIwNWI1MGRhN2E3YTQ3N2YyZTczOGVhYmRmNWM1OTQxYzlkNjY4ZjM3NzliMzFiOGQ1Njg4OTQ5MzU2ODliYWNkIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiZDk4MDFjYjkwZTJmNDlmNmZlYzlhNGEzM2E1ZTk0NDAyZjliZjdmYjliOGZlYTAxMjE1ZWMxYzExMTYyNTQxOCIsImNoYW5nZXNfc2hhMjU2IjoiZDZjNmZhNjYwMzRiYWFiY2UxNjhmZTAyMDQxMmY5M2M2MzUyMWRmNmE5YTIyZTNkNzE1ZGRkNTkwOTRhZGQ1MSJ9LCJjaGFuZ2VzIjp7ImVuYWJsZWQiOnsiYWN0aW9uIjoic2V0IiwidmFsdWUiOmZhbHNlfSwicHJvZmlsZSI6eyJhY3Rpb24iOiJjbGVhciJ9fX0=",
+      "stdin_sha256": "2c81b531929365a363cc4ab5e12075881f18fa9afda65213e3af27ae4121a743",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"ok\",\"outcome\":\"verified\",\"disk_readback_verified\":true,\"runtime_activation\":\"unverified\",\"data\":{\"target_sha256\":\"05b50da7a7a477f2e738eabdf5c5941c9d668f3779b31b8d568894935689bacd\",\"current\":{\"enabled\":{\"origin\":\"declared\",\"value\":false},\"profile\":{\"origin\":\"default\",\"present\":false}}}}\n",
+      "stdout_sha256": "9ac0e39bf53ab540683227e5e071c7bc9c122c6f95b784d05d3eb7db942e1bb2",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "f92bfca788d995813fc3b9514cf57ae67a513ab46317b901533d8a6a55fc58d9",
+      "config_after_sha256": "05b50da7a7a477f2e738eabdf5c5941c9d668f3779b31b8d568894935689bacd"
+    },
+    {
+      "name": "explicit-disable-and-clear-profile-together-status-after",
+      "command": [
+        "--memory-settings-operation",
+        "status",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibWVtb3J5X3NldHRpbmdzX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6IjgwYjMxM2UzLWM0NTYtNGJjMi1iNTIzLWI4ZTk1MjI4MWE0ZiIsImJhc2Vfc2hhMjU2IjoiZjkyYmZjYTc4OGQ5OTU4MTNmYzNiOTUxNGNmNTdhZTY3YTUxM2FiNDYzMTdiOTAxNTMzZDhhNmE1NWZjNThkOSIsInRhcmdldF9zaGEyNTYiOiIwNWI1MGRhN2E3YTQ3N2YyZTczOGVhYmRmNWM1OTQxYzlkNjY4ZjM3NzliMzFiOGQ1Njg4OTQ5MzU2ODliYWNkIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiZDk4MDFjYjkwZTJmNDlmNmZlYzlhNGEzM2E1ZTk0NDAyZjliZjdmYjliOGZlYTAxMjE1ZWMxYzExMTYyNTQxOCIsImNoYW5nZXNfc2hhMjU2IjoiZDZjNmZhNjYwMzRiYWFiY2UxNjhmZTAyMDQxMmY5M2M2MzUyMWRmNmE5YTIyZTNkNzE1ZGRkNTkwOTRhZGQ1MSJ9fQ==",
+      "stdin_sha256": "8198e92a1edf537527b743fbdb0ad6a0f989c9082d3352e265fff31b64ae7725",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"status\",\"status\":\"ok\",\"outcome\":\"desired-file-observed\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"observed_sha256\":\"05b50da7a7a477f2e738eabdf5c5941c9d668f3779b31b8d568894935689bacd\",\"current\":{\"enabled\":{\"origin\":\"declared\",\"value\":false},\"profile\":{\"origin\":\"default\",\"present\":false}}}}\n",
+      "stdout_sha256": "e880608ddb83e9ce1120a0fa0c003b2f8db5ff3b255ebd69d89fc88221fc02e0",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "05b50da7a7a477f2e738eabdf5c5941c9d668f3779b31b8d568894935689bacd",
+      "config_after_sha256": "05b50da7a7a477f2e738eabdf5c5941c9d668f3779b31b8d568894935689bacd"
+    },
+    {
+      "name": "clear-both-enabled-and-profile-retains-parent-inspect",
+      "command": [
+        "--memory-settings-operation",
+        "inspect"
+      ],
+      "stdin_base64": null,
+      "stdin_sha256": null,
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"schema_version\":1,\"base_sha256\":\"9b9256b73249a5a713183db94093d58d19b1210641c7bf25ea5eab86ed60dbc7\",\"config_path_sha256\":\"a0ede90ac26197a5b071bb24fb75230a427ca3968eca8ce9bc88c9fa54661014\",\"current\":{\"enabled\":{\"origin\":\"declared\",\"value\":true},\"profile\":{\"origin\":\"declared\",\"present\":true}}}}\n",
+      "stdout_sha256": "e0c12d1c9a6e10103f75f992ae8ebccff511051745d3be9d8e7474ebabed09c2",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "9b9256b73249a5a713183db94093d58d19b1210641c7bf25ea5eab86ed60dbc7",
+      "config_after_sha256": "9b9256b73249a5a713183db94093d58d19b1210641c7bf25ea5eab86ed60dbc7"
+    },
+    {
+      "name": "clear-both-enabled-and-profile-retains-parent-prepare",
+      "command": [
+        "--memory-settings-operation",
+        "prepare",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtZW1vcnlfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiN2QwOTVlZDYtN2Q1Yi00NTg5LWI4MjItYTM2M2U3M2I3MGM0IiwiYmFzZV9zaGEyNTYiOiI5YjkyNTZiNzMyNDlhNWE3MTMxODNkYjk0MDkzZDU4ZDE5YjEyMTA2NDFjN2JmMjVlYTVlYWI4NmVkNjBkYmM3IiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiYTBlZGU5MGFjMjYxOTdhNWIwNzFiYjI0ZmI3NTIzMGE0MjdjYTM5NjhlY2E4Y2U5YmM4OGM5ZmE1NDY2MTAxNCIsImNoYW5nZXMiOnsiZW5hYmxlZCI6eyJhY3Rpb24iOiJjbGVhciJ9LCJwcm9maWxlIjp7ImFjdGlvbiI6ImNsZWFyIn19fQ==",
+      "stdin_sha256": "56ba1553a05bceed61b52522633f5dc07e247ea657c6c599c8fee25642f5e8da",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"ok\",\"outcome\":\"prepared\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"before\":{\"enabled\":{\"origin\":\"declared\",\"value\":true},\"profile\":{\"origin\":\"declared\",\"present\":true}},\"after\":{\"enabled\":{\"origin\":\"default\",\"value\":false},\"profile\":{\"origin\":\"default\",\"present\":false}},\"intent\":{\"memory_settings_version\":1,\"operation\":\"7d095ed6-7d5b-4589-b822-a363e73b70c4\",\"base_sha256\":\"9b9256b73249a5a713183db94093d58d19b1210641c7bf25ea5eab86ed60dbc7\",\"target_sha256\":\"11cb10dc612de033aa92c56520979c9c843aef2ded0102976f46be0711fb77ef\",\"config_path_sha256\":\"a0ede90ac26197a5b071bb24fb75230a427ca3968eca8ce9bc88c9fa54661014\",\"changes_sha256\":\"8ceb9c6055ec2323fe6ee629b44693b660f2e77d689c2c336b3c15ee2feb7d26\"}}}\n",
+      "stdout_sha256": "15e3971df8c09b0317f9c419813e64c1ac16b852d2bb09c31999ecaf4f4e59d6",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "9b9256b73249a5a713183db94093d58d19b1210641c7bf25ea5eab86ed60dbc7",
+      "config_after_sha256": "9b9256b73249a5a713183db94093d58d19b1210641c7bf25ea5eab86ed60dbc7"
+    },
+    {
+      "name": "clear-both-enabled-and-profile-retains-parent-status-before",
+      "command": [
+        "--memory-settings-operation",
+        "status",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibWVtb3J5X3NldHRpbmdzX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6IjdkMDk1ZWQ2LTdkNWItNDU4OS1iODIyLWEzNjNlNzNiNzBjNCIsImJhc2Vfc2hhMjU2IjoiOWI5MjU2YjczMjQ5YTVhNzEzMTgzZGI5NDA5M2Q1OGQxOWIxMjEwNjQxYzdiZjI1ZWE1ZWFiODZlZDYwZGJjNyIsInRhcmdldF9zaGEyNTYiOiIxMWNiMTBkYzYxMmRlMDMzYWE5MmM1NjUyMDk3OWM5Yzg0M2FlZjJkZWQwMTAyOTc2ZjQ2YmUwNzExZmI3N2VmIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiYTBlZGU5MGFjMjYxOTdhNWIwNzFiYjI0ZmI3NTIzMGE0MjdjYTM5NjhlY2E4Y2U5YmM4OGM5ZmE1NDY2MTAxNCIsImNoYW5nZXNfc2hhMjU2IjoiOGNlYjljNjA1NWVjMjMyM2ZlNmVlNjI5YjQ0NjkzYjY2MGYyZTc3ZDY4OWMyYzMzNmIzYzE1ZWUyZmViN2QyNiJ9fQ==",
+      "stdin_sha256": "2d185c10a69c7ef2c10e3c719f4c3bd14edce33ccc79739950f8f1522dbfa9ef",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"status\",\"status\":\"ok\",\"outcome\":\"unresolved\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "5acdf15d758fc98bb9afa2de9f7691103b32522841bd31e83068274ce0944352",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "9b9256b73249a5a713183db94093d58d19b1210641c7bf25ea5eab86ed60dbc7",
+      "config_after_sha256": "9b9256b73249a5a713183db94093d58d19b1210641c7bf25ea5eab86ed60dbc7"
+    },
+    {
+      "name": "clear-both-enabled-and-profile-retains-parent-apply",
+      "command": [
+        "--memory-settings-operation",
+        "apply",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibWVtb3J5X3NldHRpbmdzX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6IjdkMDk1ZWQ2LTdkNWItNDU4OS1iODIyLWEzNjNlNzNiNzBjNCIsImJhc2Vfc2hhMjU2IjoiOWI5MjU2YjczMjQ5YTVhNzEzMTgzZGI5NDA5M2Q1OGQxOWIxMjEwNjQxYzdiZjI1ZWE1ZWFiODZlZDYwZGJjNyIsInRhcmdldF9zaGEyNTYiOiIxMWNiMTBkYzYxMmRlMDMzYWE5MmM1NjUyMDk3OWM5Yzg0M2FlZjJkZWQwMTAyOTc2ZjQ2YmUwNzExZmI3N2VmIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiYTBlZGU5MGFjMjYxOTdhNWIwNzFiYjI0ZmI3NTIzMGE0MjdjYTM5NjhlY2E4Y2U5YmM4OGM5ZmE1NDY2MTAxNCIsImNoYW5nZXNfc2hhMjU2IjoiOGNlYjljNjA1NWVjMjMyM2ZlNmVlNjI5YjQ0NjkzYjY2MGYyZTc3ZDY4OWMyYzMzNmIzYzE1ZWUyZmViN2QyNiJ9LCJjaGFuZ2VzIjp7ImVuYWJsZWQiOnsiYWN0aW9uIjoiY2xlYXIifSwicHJvZmlsZSI6eyJhY3Rpb24iOiJjbGVhciJ9fX0=",
+      "stdin_sha256": "ec9276a780acfb7cdba0509fc264832780d60ce9a49547f430862229aac52239",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"ok\",\"outcome\":\"verified\",\"disk_readback_verified\":true,\"runtime_activation\":\"unverified\",\"data\":{\"target_sha256\":\"11cb10dc612de033aa92c56520979c9c843aef2ded0102976f46be0711fb77ef\",\"current\":{\"enabled\":{\"origin\":\"default\",\"value\":false},\"profile\":{\"origin\":\"default\",\"present\":false}}}}\n",
+      "stdout_sha256": "634eb10d559d68d96b0d2a37155ba1f820f265e64d4365ce4802ed779ab5b381",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "9b9256b73249a5a713183db94093d58d19b1210641c7bf25ea5eab86ed60dbc7",
+      "config_after_sha256": "11cb10dc612de033aa92c56520979c9c843aef2ded0102976f46be0711fb77ef"
+    },
+    {
+      "name": "clear-both-enabled-and-profile-retains-parent-status-after",
+      "command": [
+        "--memory-settings-operation",
+        "status",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibWVtb3J5X3NldHRpbmdzX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6IjdkMDk1ZWQ2LTdkNWItNDU4OS1iODIyLWEzNjNlNzNiNzBjNCIsImJhc2Vfc2hhMjU2IjoiOWI5MjU2YjczMjQ5YTVhNzEzMTgzZGI5NDA5M2Q1OGQxOWIxMjEwNjQxYzdiZjI1ZWE1ZWFiODZlZDYwZGJjNyIsInRhcmdldF9zaGEyNTYiOiIxMWNiMTBkYzYxMmRlMDMzYWE5MmM1NjUyMDk3OWM5Yzg0M2FlZjJkZWQwMTAyOTc2ZjQ2YmUwNzExZmI3N2VmIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiYTBlZGU5MGFjMjYxOTdhNWIwNzFiYjI0ZmI3NTIzMGE0MjdjYTM5NjhlY2E4Y2U5YmM4OGM5ZmE1NDY2MTAxNCIsImNoYW5nZXNfc2hhMjU2IjoiOGNlYjljNjA1NWVjMjMyM2ZlNmVlNjI5YjQ0NjkzYjY2MGYyZTc3ZDY4OWMyYzMzNmIzYzE1ZWUyZmViN2QyNiJ9fQ==",
+      "stdin_sha256": "2d185c10a69c7ef2c10e3c719f4c3bd14edce33ccc79739950f8f1522dbfa9ef",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"status\",\"status\":\"ok\",\"outcome\":\"desired-file-observed\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"observed_sha256\":\"11cb10dc612de033aa92c56520979c9c843aef2ded0102976f46be0711fb77ef\",\"current\":{\"enabled\":{\"origin\":\"default\",\"value\":false},\"profile\":{\"origin\":\"default\",\"present\":false}}}}\n",
+      "stdout_sha256": "65a038540aa2074be2ef7d70e38fdc41a6fe2bfa9bc3228268bd59d31dda7ce4",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "11cb10dc612de033aa92c56520979c9c843aef2ded0102976f46be0711fb77ef",
+      "config_after_sha256": "11cb10dc612de033aa92c56520979c9c843aef2ded0102976f46be0711fb77ef"
+    },
+    {
+      "name": "enabling-without-profile-refuses-inspect",
+      "command": [
+        "--memory-settings-operation",
+        "inspect"
+      ],
+      "stdin_base64": null,
+      "stdin_sha256": null,
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"schema_version\":1,\"base_sha256\":\"8cf3131f3fed4cd2165b632a071a13c13388366f312de9944ab3b30855e370fe\",\"config_path_sha256\":\"bf5d52d214df917603c63fefa228e34a76d2a6c42fa2f015c28420618265d7ae\",\"current\":{\"enabled\":{\"origin\":\"default\",\"value\":false},\"profile\":{\"origin\":\"default\",\"present\":false}}}}\n",
+      "stdout_sha256": "e33dac1fa8040254181fd3baf27572e5be693ad998a1441f435ec508e0298d46",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "8cf3131f3fed4cd2165b632a071a13c13388366f312de9944ab3b30855e370fe",
+      "config_after_sha256": "8cf3131f3fed4cd2165b632a071a13c13388366f312de9944ab3b30855e370fe"
+    },
+    {
+      "name": "enabling-without-profile-refuses-prepare",
+      "command": [
+        "--memory-settings-operation",
+        "prepare",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtZW1vcnlfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiMjg4M2JkZTUtMjBkOC00ZmU5LWIwMWUtM2JhZGRlYWJiZjRkIiwiYmFzZV9zaGEyNTYiOiI4Y2YzMTMxZjNmZWQ0Y2QyMTY1YjYzMmEwNzFhMTNjMTMzODgzNjZmMzEyZGU5OTQ0YWIzYjMwODU1ZTM3MGZlIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiYmY1ZDUyZDIxNGRmOTE3NjAzYzYzZmVmYTIyOGUzNGE3NmQyYTZjNDJmYTJmMDE1YzI4NDIwNjE4MjY1ZDdhZSIsImNoYW5nZXMiOnsiZW5hYmxlZCI6eyJhY3Rpb24iOiJzZXQiLCJ2YWx1ZSI6dHJ1ZX19fQ==",
+      "stdin_sha256": "d18f4471236d05c789ff0ea35102d1d5aa33239200f4de3cdb372dbf027e35e4",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "dcada7fb674c564d3fa0e6bd129084ac20b5f3b1501715e5eaa1db0f61c5db9b",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "8cf3131f3fed4cd2165b632a071a13c13388366f312de9944ab3b30855e370fe",
+      "config_after_sha256": "8cf3131f3fed4cd2165b632a071a13c13388366f312de9944ab3b30855e370fe"
+    },
+    {
+      "name": "original-null-parent-is-not-repaired-inspect",
+      "command": [
+        "--memory-settings-operation",
+        "inspect"
+      ],
+      "stdin_base64": null,
+      "stdin_sha256": null,
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"invalid-input\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "b4ab27dbdf700f84d07ee4b7cfe7613523607ba816b93db75055a7495eb0adb5",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "47fc6424d7ddda378053f3cb6ea76c6f86d1bf73a3c799c4990802041d3742f5",
+      "config_after_sha256": "47fc6424d7ddda378053f3cb6ea76c6f86d1bf73a3c799c4990802041d3742f5"
+    },
+    {
+      "name": "original-null-parent-is-not-repaired-prepare",
+      "command": [
+        "--memory-settings-operation",
+        "prepare",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtZW1vcnlfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiN2RhMzVmMWMtYjFjZS00NGRhLWI0MTAtNzUyYjBiZWYxZWNlIiwiYmFzZV9zaGEyNTYiOiI0N2ZjNjQyNGQ3ZGRkYTM3ODA1M2YzY2I2ZWE3NmM2Zjg2ZDFiZjczYTNjNzk5YzQ5OTA4MDIwNDFkMzc0MmY1IiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiNGZhNDY3YTQwZTczMTk3Mjg5NGQ4ZTIyZjYxODdmN2MzZTZkNTczMDMwNTRhYTE1N2UzZDIzNDVlMmZmNTVmYyIsImNoYW5nZXMiOnsiZW5hYmxlZCI6eyJhY3Rpb24iOiJzZXQiLCJ2YWx1ZSI6ZmFsc2V9fX0=",
+      "stdin_sha256": "0925163bb2df3f62d7de7c9178ed391514ed66ff393854f1c4da319dc5581991",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "dcada7fb674c564d3fa0e6bd129084ac20b5f3b1501715e5eaa1db0f61c5db9b",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "47fc6424d7ddda378053f3cb6ea76c6f86d1bf73a3c799c4990802041d3742f5",
+      "config_after_sha256": "47fc6424d7ddda378053f3cb6ea76c6f86d1bf73a3c799c4990802041d3742f5"
+    },
+    {
+      "name": "original-array-parent-is-not-repaired-inspect",
+      "command": [
+        "--memory-settings-operation",
+        "inspect"
+      ],
+      "stdin_base64": null,
+      "stdin_sha256": null,
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"invalid-input\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "b4ab27dbdf700f84d07ee4b7cfe7613523607ba816b93db75055a7495eb0adb5",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "d5a1f2478a41c12f71e13d3834e91e22168c3f5c518e7bacefea928809ba7683",
+      "config_after_sha256": "d5a1f2478a41c12f71e13d3834e91e22168c3f5c518e7bacefea928809ba7683"
+    },
+    {
+      "name": "original-array-parent-is-not-repaired-prepare",
+      "command": [
+        "--memory-settings-operation",
+        "prepare",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtZW1vcnlfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiYjU1NjE4N2MtOTdkNS00MDE5LWJiN2QtZTcxNzAyYzRkZmUxIiwiYmFzZV9zaGEyNTYiOiJkNWExZjI0NzhhNDFjMTJmNzFlMTNkMzgzNGU5MWUyMjE2OGMzZjVjNTE4ZTdiYWNlZmVhOTI4ODA5YmE3NjgzIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiMzUyMTA5Y2E2NWZjOTY4MmIwYWM2Y2NjMGM5M2Q5MDAzZGU0NmZiOGUzMjg3MDJjNTNjMjYzMzA5N2NmMWE1MyIsImNoYW5nZXMiOnsiZW5hYmxlZCI6eyJhY3Rpb24iOiJzZXQiLCJ2YWx1ZSI6ZmFsc2V9fX0=",
+      "stdin_sha256": "6299ed456614bc1d380c9f409223ab4de72787c5ec59e09e1cdccc3c3be375de",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "dcada7fb674c564d3fa0e6bd129084ac20b5f3b1501715e5eaa1db0f61c5db9b",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "d5a1f2478a41c12f71e13d3834e91e22168c3f5c518e7bacefea928809ba7683",
+      "config_after_sha256": "d5a1f2478a41c12f71e13d3834e91e22168c3f5c518e7bacefea928809ba7683"
+    },
+    {
+      "name": "original-null-boolean-is-not-repaired-inspect",
+      "command": [
+        "--memory-settings-operation",
+        "inspect"
+      ],
+      "stdin_base64": null,
+      "stdin_sha256": null,
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"invalid-input\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "b4ab27dbdf700f84d07ee4b7cfe7613523607ba816b93db75055a7495eb0adb5",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "5ad37b5c0c9637af738e781d63df72b14e8f890f02c050ac80abe799c5fcc2f6",
+      "config_after_sha256": "5ad37b5c0c9637af738e781d63df72b14e8f890f02c050ac80abe799c5fcc2f6"
+    },
+    {
+      "name": "original-null-boolean-is-not-repaired-prepare",
+      "command": [
+        "--memory-settings-operation",
+        "prepare",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtZW1vcnlfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiMDg4NTJlNjMtOGYxYi00NjM4LTkyNjUtNjI1YTc1ODczYmNiIiwiYmFzZV9zaGEyNTYiOiI1YWQzN2I1YzBjOTYzN2FmNzM4ZTc4MWQ2M2RmNzJiMTRlOGY4OTBmMDJjMDUwYWM4MGFiZTc5OWM1ZmNjMmY2IiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiMTU2Yjk4NmM5MzhhMDJjZGRmZjE2NmI0ZWQwN2IyMGQ4NjQ3YmY0YjlkMDJkY2Y4Yjg5MGQ0NGE1M2M5Y2U0ZiIsImNoYW5nZXMiOnsiZW5hYmxlZCI6eyJhY3Rpb24iOiJzZXQiLCJ2YWx1ZSI6ZmFsc2V9fX0=",
+      "stdin_sha256": "aa21d30b974da8665731be3b87701e7cc71570521a220edb1df4ee5e8dfeecae",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "dcada7fb674c564d3fa0e6bd129084ac20b5f3b1501715e5eaa1db0f61c5db9b",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "5ad37b5c0c9637af738e781d63df72b14e8f890f02c050ac80abe799c5fcc2f6",
+      "config_after_sha256": "5ad37b5c0c9637af738e781d63df72b14e8f890f02c050ac80abe799c5fcc2f6"
+    },
+    {
+      "name": "original-missing-required-profile-is-not-repaired-inspect",
+      "command": [
+        "--memory-settings-operation",
+        "inspect"
+      ],
+      "stdin_base64": null,
+      "stdin_sha256": null,
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"invalid-input\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "b4ab27dbdf700f84d07ee4b7cfe7613523607ba816b93db75055a7495eb0adb5",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "268c064cbb8e6a21e34d199fa2ad4c5639748d1117f745ae166d02bd137c5cca",
+      "config_after_sha256": "268c064cbb8e6a21e34d199fa2ad4c5639748d1117f745ae166d02bd137c5cca"
+    },
+    {
+      "name": "original-missing-required-profile-is-not-repaired-prepare",
+      "command": [
+        "--memory-settings-operation",
+        "prepare",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtZW1vcnlfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiZWE2MTJjNWQtMjEzZi00ODFlLTg4YzAtOGZkODhlMzgyZjQzIiwiYmFzZV9zaGEyNTYiOiIyNjhjMDY0Y2JiOGU2YTIxZTM0ZDE5OWZhMmFkNGM1NjM5NzQ4ZDExMTdmNzQ1YWUxNjZkMDJiZDEzN2M1Y2NhIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiZTUyMmY5NmI3MWQwMzkxOWYzMjA5MmMyZGFkOWFhMGUwMDVlNDZhM2I0YWRkNTI5N2EwOWNiZWRiMjVhNTczMCIsImNoYW5nZXMiOnsicHJvZmlsZSI6eyJhY3Rpb24iOiJzZXQiLCJ2YWx1ZSI6IjEyM0U0NTY3LUU4OUItMTJEMy1BNDU2LTQyNjYxNDE3NDAwMCJ9fX0=",
+      "stdin_sha256": "e484dd07530a9dd1b0118a79addb60c5f8921796cf73cb0b378e9c8d3be76aa0",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "dcada7fb674c564d3fa0e6bd129084ac20b5f3b1501715e5eaa1db0f61c5db9b",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "268c064cbb8e6a21e34d199fa2ad4c5639748d1117f745ae166d02bd137c5cca",
+      "config_after_sha256": "268c064cbb8e6a21e34d199fa2ad4c5639748d1117f745ae166d02bd137c5cca"
+    },
+    {
+      "name": "strict-inspect",
+      "command": [
+        "--memory-settings-operation",
+        "inspect"
+      ],
+      "stdin_base64": null,
+      "stdin_sha256": null,
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"schema_version\":1,\"base_sha256\":\"5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031\",\"config_path_sha256\":\"e54c40885f42024abd4f9a25d2b065886ba05d5fe44de581ea04663ebe7d79e2\",\"current\":{\"enabled\":{\"origin\":\"default\",\"value\":false},\"profile\":{\"origin\":\"default\",\"present\":false}}}}\n",
+      "stdout_sha256": "2c443cea0367d3d74563b4851c492c574d2e6fe341bb3a65d5e897810bd5ebf6",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031",
+      "config_after_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031"
+    },
+    {
+      "name": "strict-prepare",
+      "command": [
+        "--memory-settings-operation",
+        "prepare",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtZW1vcnlfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiNWYwZjliMDUtZjkyOS00MWVhLThhY2MtMTQzODQ3OTY0NmYwIiwiYmFzZV9zaGEyNTYiOiI1YjI5Yjk3NzRkNDEyZTU2NjI3MzBkY2I5NmE2NWNiNDQxNjNjNDFhZmNkMGU0NTJhMDQ5ODI0MmRjZDM5MDMxIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiZTU0YzQwODg1ZjQyMDI0YWJkNGY5YTI1ZDJiMDY1ODg2YmEwNWQ1ZmU0NGRlNTgxZWEwNDY2M2ViZTdkNzllMiIsImNoYW5nZXMiOnsiZW5hYmxlZCI6eyJhY3Rpb24iOiJzZXQiLCJ2YWx1ZSI6dHJ1ZX0sInByb2ZpbGUiOnsiYWN0aW9uIjoic2V0IiwidmFsdWUiOiIxMjNFNDU2Ny1FODlCLTEyRDMtQTQ1Ni00MjY2MTQxNzQwMDAifX19",
+      "stdin_sha256": "ff24b7824225de77b087d366f9330f8c6b6e9ca9882297664d5e6f72a79c79ed",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"ok\",\"outcome\":\"prepared\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"before\":{\"enabled\":{\"origin\":\"default\",\"value\":false},\"profile\":{\"origin\":\"default\",\"present\":false}},\"after\":{\"enabled\":{\"origin\":\"declared\",\"value\":true},\"profile\":{\"origin\":\"declared\",\"present\":true}},\"intent\":{\"memory_settings_version\":1,\"operation\":\"5f0f9b05-f929-41ea-8acc-1438479646f0\",\"base_sha256\":\"5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031\",\"target_sha256\":\"ad617330236e526ceb34d5a020380bd7342d8e175e4153340526d2daea1c701e\",\"config_path_sha256\":\"e54c40885f42024abd4f9a25d2b065886ba05d5fe44de581ea04663ebe7d79e2\",\"changes_sha256\":\"eb760e429bd11cdebf432a7dbb2f43588474e78112b042d244fd671d188dec0d\"}}}\n",
+      "stdout_sha256": "45fc6e1dea17ab9545be177bc5485638c1018eeb5fb9cc46fb73ad1beb56c51f",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031",
+      "config_after_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031"
+    },
+    {
+      "name": "forged-base_sha256",
+      "command": [
+        "--memory-settings-operation",
+        "apply",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibWVtb3J5X3NldHRpbmdzX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6IjVmMGY5YjA1LWY5MjktNDFlYS04YWNjLTE0Mzg0Nzk2NDZmMCIsImJhc2Vfc2hhMjU2IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsInRhcmdldF9zaGEyNTYiOiJhZDYxNzMzMDIzNmU1MjZjZWIzNGQ1YTAyMDM4MGJkNzM0MmQ4ZTE3NWU0MTUzMzQwNTI2ZDJkYWVhMWM3MDFlIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiZTU0YzQwODg1ZjQyMDI0YWJkNGY5YTI1ZDJiMDY1ODg2YmEwNWQ1ZmU0NGRlNTgxZWEwNDY2M2ViZTdkNzllMiIsImNoYW5nZXNfc2hhMjU2IjoiZWI3NjBlNDI5YmQxMWNkZWJmNDMyYTdkYmIyZjQzNTg4NDc0ZTc4MTEyYjA0MmQyNDRmZDY3MWQxODhkZWMwZCJ9LCJjaGFuZ2VzIjp7ImVuYWJsZWQiOnsiYWN0aW9uIjoic2V0IiwidmFsdWUiOnRydWV9LCJwcm9maWxlIjp7ImFjdGlvbiI6InNldCIsInZhbHVlIjoiMTIzRTQ1NjctRTg5Qi0xMkQzLUE0NTYtNDI2NjE0MTc0MDAwIn19fQ==",
+      "stdin_sha256": "74892e7f92bd71b901ea0b661e6eb7bdf69eaa1f484ffce7eff0a00650d60186",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"conflict\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "f63c557f2b0f378ab3181a82e272ad0171ac0683d6401ccad78a4eaca997a7ab",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031",
+      "config_after_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031"
+    },
+    {
+      "name": "forged-config_path_sha256",
+      "command": [
+        "--memory-settings-operation",
+        "apply",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibWVtb3J5X3NldHRpbmdzX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6IjVmMGY5YjA1LWY5MjktNDFlYS04YWNjLTE0Mzg0Nzk2NDZmMCIsImJhc2Vfc2hhMjU2IjoiNWIyOWI5Nzc0ZDQxMmU1NjYyNzMwZGNiOTZhNjVjYjQ0MTYzYzQxYWZjZDBlNDUyYTA0OTgyNDJkY2QzOTAzMSIsInRhcmdldF9zaGEyNTYiOiJhZDYxNzMzMDIzNmU1MjZjZWIzNGQ1YTAyMDM4MGJkNzM0MmQ4ZTE3NWU0MTUzMzQwNTI2ZDJkYWVhMWM3MDFlIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsImNoYW5nZXNfc2hhMjU2IjoiZWI3NjBlNDI5YmQxMWNkZWJmNDMyYTdkYmIyZjQzNTg4NDc0ZTc4MTEyYjA0MmQyNDRmZDY3MWQxODhkZWMwZCJ9LCJjaGFuZ2VzIjp7ImVuYWJsZWQiOnsiYWN0aW9uIjoic2V0IiwidmFsdWUiOnRydWV9LCJwcm9maWxlIjp7ImFjdGlvbiI6InNldCIsInZhbHVlIjoiMTIzRTQ1NjctRTg5Qi0xMkQzLUE0NTYtNDI2NjE0MTc0MDAwIn19fQ==",
+      "stdin_sha256": "a7755965fb9e0abd4090d54401447f7276279fe4ee844a34aa5a896e8da0afeb",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"conflict\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "f63c557f2b0f378ab3181a82e272ad0171ac0683d6401ccad78a4eaca997a7ab",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031",
+      "config_after_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031"
+    },
+    {
+      "name": "forged-target_sha256",
+      "command": [
+        "--memory-settings-operation",
+        "apply",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibWVtb3J5X3NldHRpbmdzX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6IjVmMGY5YjA1LWY5MjktNDFlYS04YWNjLTE0Mzg0Nzk2NDZmMCIsImJhc2Vfc2hhMjU2IjoiNWIyOWI5Nzc0ZDQxMmU1NjYyNzMwZGNiOTZhNjVjYjQ0MTYzYzQxYWZjZDBlNDUyYTA0OTgyNDJkY2QzOTAzMSIsInRhcmdldF9zaGEyNTYiOiIwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiZTU0YzQwODg1ZjQyMDI0YWJkNGY5YTI1ZDJiMDY1ODg2YmEwNWQ1ZmU0NGRlNTgxZWEwNDY2M2ViZTdkNzllMiIsImNoYW5nZXNfc2hhMjU2IjoiZWI3NjBlNDI5YmQxMWNkZWJmNDMyYTdkYmIyZjQzNTg4NDc0ZTc4MTEyYjA0MmQyNDRmZDY3MWQxODhkZWMwZCJ9LCJjaGFuZ2VzIjp7ImVuYWJsZWQiOnsiYWN0aW9uIjoic2V0IiwidmFsdWUiOnRydWV9LCJwcm9maWxlIjp7ImFjdGlvbiI6InNldCIsInZhbHVlIjoiMTIzRTQ1NjctRTg5Qi0xMkQzLUE0NTYtNDI2NjE0MTc0MDAwIn19fQ==",
+      "stdin_sha256": "383c4c9e05544c90e4108a84683c66d8649a058017a0e989fe06bd44477bc184",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "5160ee218c635824c6271a2c9984dc7c0729aee94d04cee79e2cb357de2ae39d",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031",
+      "config_after_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031"
+    },
+    {
+      "name": "forged-changes_sha256",
+      "command": [
+        "--memory-settings-operation",
+        "apply",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibWVtb3J5X3NldHRpbmdzX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6IjVmMGY5YjA1LWY5MjktNDFlYS04YWNjLTE0Mzg0Nzk2NDZmMCIsImJhc2Vfc2hhMjU2IjoiNWIyOWI5Nzc0ZDQxMmU1NjYyNzMwZGNiOTZhNjVjYjQ0MTYzYzQxYWZjZDBlNDUyYTA0OTgyNDJkY2QzOTAzMSIsInRhcmdldF9zaGEyNTYiOiJhZDYxNzMzMDIzNmU1MjZjZWIzNGQ1YTAyMDM4MGJkNzM0MmQ4ZTE3NWU0MTUzMzQwNTI2ZDJkYWVhMWM3MDFlIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiZTU0YzQwODg1ZjQyMDI0YWJkNGY5YTI1ZDJiMDY1ODg2YmEwNWQ1ZmU0NGRlNTgxZWEwNDY2M2ViZTdkNzllMiIsImNoYW5nZXNfc2hhMjU2IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCJ9LCJjaGFuZ2VzIjp7ImVuYWJsZWQiOnsiYWN0aW9uIjoic2V0IiwidmFsdWUiOnRydWV9LCJwcm9maWxlIjp7ImFjdGlvbiI6InNldCIsInZhbHVlIjoiMTIzRTQ1NjctRTg5Qi0xMkQzLUE0NTYtNDI2NjE0MTc0MDAwIn19fQ==",
+      "stdin_sha256": "9c6833a28411e6a17da1c16d45398e688c07a3272006871791177a84d9677db3",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "5160ee218c635824c6271a2c9984dc7c0729aee94d04cee79e2cb357de2ae39d",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031",
+      "config_after_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031"
+    },
+    {
+      "name": "owner-busy",
+      "command": [
+        "--memory-settings-operation",
+        "apply",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibWVtb3J5X3NldHRpbmdzX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6IjVmMGY5YjA1LWY5MjktNDFlYS04YWNjLTE0Mzg0Nzk2NDZmMCIsImJhc2Vfc2hhMjU2IjoiNWIyOWI5Nzc0ZDQxMmU1NjYyNzMwZGNiOTZhNjVjYjQ0MTYzYzQxYWZjZDBlNDUyYTA0OTgyNDJkY2QzOTAzMSIsInRhcmdldF9zaGEyNTYiOiJhZDYxNzMzMDIzNmU1MjZjZWIzNGQ1YTAyMDM4MGJkNzM0MmQ4ZTE3NWU0MTUzMzQwNTI2ZDJkYWVhMWM3MDFlIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiZTU0YzQwODg1ZjQyMDI0YWJkNGY5YTI1ZDJiMDY1ODg2YmEwNWQ1ZmU0NGRlNTgxZWEwNDY2M2ViZTdkNzllMiIsImNoYW5nZXNfc2hhMjU2IjoiZWI3NjBlNDI5YmQxMWNkZWJmNDMyYTdkYmIyZjQzNTg4NDc0ZTc4MTEyYjA0MmQyNDRmZDY3MWQxODhkZWMwZCJ9LCJjaGFuZ2VzIjp7ImVuYWJsZWQiOnsiYWN0aW9uIjoic2V0IiwidmFsdWUiOnRydWV9LCJwcm9maWxlIjp7ImFjdGlvbiI6InNldCIsInZhbHVlIjoiMTIzRTQ1NjctRTg5Qi0xMkQzLUE0NTYtNDI2NjE0MTc0MDAwIn19fQ==",
+      "stdin_sha256": "d5a67e6153cb2c5a3c48a814511a5dcc0874438d366ea83c2a5246fc20a667bf",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"busy\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "c374bd070b4d82d4eab71625bfe8a9e6c4a9665a29339202d820c5099c71df57",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031",
+      "config_after_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031"
+    },
+    {
+      "name": "status-while-owner-busy",
+      "command": [
+        "--memory-settings-operation",
+        "status",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibWVtb3J5X3NldHRpbmdzX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6IjVmMGY5YjA1LWY5MjktNDFlYS04YWNjLTE0Mzg0Nzk2NDZmMCIsImJhc2Vfc2hhMjU2IjoiNWIyOWI5Nzc0ZDQxMmU1NjYyNzMwZGNiOTZhNjVjYjQ0MTYzYzQxYWZjZDBlNDUyYTA0OTgyNDJkY2QzOTAzMSIsInRhcmdldF9zaGEyNTYiOiJhZDYxNzMzMDIzNmU1MjZjZWIzNGQ1YTAyMDM4MGJkNzM0MmQ4ZTE3NWU0MTUzMzQwNTI2ZDJkYWVhMWM3MDFlIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiZTU0YzQwODg1ZjQyMDI0YWJkNGY5YTI1ZDJiMDY1ODg2YmEwNWQ1ZmU0NGRlNTgxZWEwNDY2M2ViZTdkNzllMiIsImNoYW5nZXNfc2hhMjU2IjoiZWI3NjBlNDI5YmQxMWNkZWJmNDMyYTdkYmIyZjQzNTg4NDc0ZTc4MTEyYjA0MmQyNDRmZDY3MWQxODhkZWMwZCJ9fQ==",
+      "stdin_sha256": "1186163762b8c705c39fa18623119a7147948bccbf5a1c667aa98361cfed7238",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"status\",\"status\":\"ok\",\"outcome\":\"unresolved\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "5acdf15d758fc98bb9afa2de9f7691103b32522841bd31e83068274ce0944352",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031",
+      "config_after_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031"
+    },
+    {
+      "name": "strict-empty",
+      "command": [
+        "--memory-settings-operation",
+        "prepare",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtZW1vcnlfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiNmJjODI1MWQtNjg5Zi00YzgxLTkxMjQtZDQ3ODAwMjVlOWZmIiwiYmFzZV9zaGEyNTYiOiI1YjI5Yjk3NzRkNDEyZTU2NjI3MzBkY2I5NmE2NWNiNDQxNjNjNDFhZmNkMGU0NTJhMDQ5ODI0MmRjZDM5MDMxIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiZTU0YzQwODg1ZjQyMDI0YWJkNGY5YTI1ZDJiMDY1ODg2YmEwNWQ1ZmU0NGRlNTgxZWEwNDY2M2ViZTdkNzllMiIsImNoYW5nZXMiOnt9fQ==",
+      "stdin_sha256": "afabaa9bf9133154bde3ce6324d3b9cc21927048585f5666cc75bd40a13d45f4",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "dcada7fb674c564d3fa0e6bd129084ac20b5f3b1501715e5eaa1db0f61c5db9b",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031",
+      "config_after_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031"
+    },
+    {
+      "name": "strict-unknown",
+      "command": [
+        "--memory-settings-operation",
+        "prepare",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtZW1vcnlfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiOTM0MzMxNDMtNWE0YS00YWUwLTlkNzUtMjRlMzJkNzU2MmMwIiwiYmFzZV9zaGEyNTYiOiI1YjI5Yjk3NzRkNDEyZTU2NjI3MzBkY2I5NmE2NWNiNDQxNjNjNDFhZmNkMGU0NTJhMDQ5ODI0MmRjZDM5MDMxIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiZTU0YzQwODg1ZjQyMDI0YWJkNGY5YTI1ZDJiMDY1ODg2YmEwNWQ1ZmU0NGRlNTgxZWEwNDY2M2ViZTdkNzllMiIsImNoYW5nZXMiOnsic2VsZWN0aW9uIjp7ImFjdGlvbiI6ImNsZWFyIn19fQ==",
+      "stdin_sha256": "360a1bc65341056176fd883a9f538246e338c78f5e1ea2200d5fe9ea3a276b01",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "dcada7fb674c564d3fa0e6bd129084ac20b5f3b1501715e5eaa1db0f61c5db9b",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031",
+      "config_after_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031"
+    },
+    {
+      "name": "strict-null-enabled",
+      "command": [
+        "--memory-settings-operation",
+        "prepare",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtZW1vcnlfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiMWNkY2Q0NDQtMjQ2Ny00N2Q5LWE2NjQtM2Q5NTdhNTQ4OTNiIiwiYmFzZV9zaGEyNTYiOiI1YjI5Yjk3NzRkNDEyZTU2NjI3MzBkY2I5NmE2NWNiNDQxNjNjNDFhZmNkMGU0NTJhMDQ5ODI0MmRjZDM5MDMxIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiZTU0YzQwODg1ZjQyMDI0YWJkNGY5YTI1ZDJiMDY1ODg2YmEwNWQ1ZmU0NGRlNTgxZWEwNDY2M2ViZTdkNzllMiIsImNoYW5nZXMiOnsiZW5hYmxlZCI6eyJhY3Rpb24iOiJzZXQiLCJ2YWx1ZSI6bnVsbH19fQ==",
+      "stdin_sha256": "0a7bb44ced67f77b984c0c754a40519158b151bf602def45863e6f0022275017",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "dcada7fb674c564d3fa0e6bd129084ac20b5f3b1501715e5eaa1db0f61c5db9b",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031",
+      "config_after_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031"
+    },
+    {
+      "name": "strict-string-enabled",
+      "command": [
+        "--memory-settings-operation",
+        "prepare",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtZW1vcnlfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiMGQ2MjIyODEtNTZiYy00YzUwLWExNWItYzkzMjZiMzM1ZmM4IiwiYmFzZV9zaGEyNTYiOiI1YjI5Yjk3NzRkNDEyZTU2NjI3MzBkY2I5NmE2NWNiNDQxNjNjNDFhZmNkMGU0NTJhMDQ5ODI0MmRjZDM5MDMxIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiZTU0YzQwODg1ZjQyMDI0YWJkNGY5YTI1ZDJiMDY1ODg2YmEwNWQ1ZmU0NGRlNTgxZWEwNDY2M2ViZTdkNzllMiIsImNoYW5nZXMiOnsiZW5hYmxlZCI6eyJhY3Rpb24iOiJzZXQiLCJ2YWx1ZSI6ImZhbHNlIn19fQ==",
+      "stdin_sha256": "cc47dd360fafe07d3dadcabd1cf7aad30eb2f2d9f7e10660706ca12e516d7057",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "dcada7fb674c564d3fa0e6bd129084ac20b5f3b1501715e5eaa1db0f61c5db9b",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031",
+      "config_after_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031"
+    },
+    {
+      "name": "strict-null-profile",
+      "command": [
+        "--memory-settings-operation",
+        "prepare",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtZW1vcnlfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiNWI4ZWMyMjAtMDY4ZC00NzgyLTg3MzMtODMzYzYzNWJmYTUyIiwiYmFzZV9zaGEyNTYiOiI1YjI5Yjk3NzRkNDEyZTU2NjI3MzBkY2I5NmE2NWNiNDQxNjNjNDFhZmNkMGU0NTJhMDQ5ODI0MmRjZDM5MDMxIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiZTU0YzQwODg1ZjQyMDI0YWJkNGY5YTI1ZDJiMDY1ODg2YmEwNWQ1ZmU0NGRlNTgxZWEwNDY2M2ViZTdkNzllMiIsImNoYW5nZXMiOnsicHJvZmlsZSI6eyJhY3Rpb24iOiJzZXQiLCJ2YWx1ZSI6bnVsbH19fQ==",
+      "stdin_sha256": "d7c5714e471385e39d8552aa51725965dc5cb501b75c736de15338aa0c75a1bc",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "dcada7fb674c564d3fa0e6bd129084ac20b5f3b1501715e5eaa1db0f61c5db9b",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031",
+      "config_after_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031"
+    },
+    {
+      "name": "strict-nil-profile",
+      "command": [
+        "--memory-settings-operation",
+        "prepare",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtZW1vcnlfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiZTBhMDA5ZjItNmYwNi00ZmVkLTgwZTUtNWU1MWNmYmRjNWY5IiwiYmFzZV9zaGEyNTYiOiI1YjI5Yjk3NzRkNDEyZTU2NjI3MzBkY2I5NmE2NWNiNDQxNjNjNDFhZmNkMGU0NTJhMDQ5ODI0MmRjZDM5MDMxIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiZTU0YzQwODg1ZjQyMDI0YWJkNGY5YTI1ZDJiMDY1ODg2YmEwNWQ1ZmU0NGRlNTgxZWEwNDY2M2ViZTdkNzllMiIsImNoYW5nZXMiOnsicHJvZmlsZSI6eyJhY3Rpb24iOiJzZXQiLCJ2YWx1ZSI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMCJ9fX0=",
+      "stdin_sha256": "d864d420142ad0ceb97103230b537bca600ad23a192efa30f255016e6f34e289",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "dcada7fb674c564d3fa0e6bd129084ac20b5f3b1501715e5eaa1db0f61c5db9b",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031",
+      "config_after_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031"
+    },
+    {
+      "name": "strict-number-profile",
+      "command": [
+        "--memory-settings-operation",
+        "prepare",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtZW1vcnlfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiMjljYzgwY2EtZjRkMS00NmMwLTg1OTYtNDZkZDg0N2JmMmE1IiwiYmFzZV9zaGEyNTYiOiI1YjI5Yjk3NzRkNDEyZTU2NjI3MzBkY2I5NmE2NWNiNDQxNjNjNDFhZmNkMGU0NTJhMDQ5ODI0MmRjZDM5MDMxIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiZTU0YzQwODg1ZjQyMDI0YWJkNGY5YTI1ZDJiMDY1ODg2YmEwNWQ1ZmU0NGRlNTgxZWEwNDY2M2ViZTdkNzllMiIsImNoYW5nZXMiOnsicHJvZmlsZSI6eyJhY3Rpb24iOiJzZXQiLCJ2YWx1ZSI6MTJ9fX0=",
+      "stdin_sha256": "5279d2cc4db027b28d7798df55a41358145965ab90b801525c0482427fd2272c",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "dcada7fb674c564d3fa0e6bd129084ac20b5f3b1501715e5eaa1db0f61c5db9b",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031",
+      "config_after_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031"
+    },
+    {
+      "name": "strict-clear-extra",
+      "command": [
+        "--memory-settings-operation",
+        "prepare",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtZW1vcnlfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiYjc1ZmEyY2UtNmNiZi00NWQxLWExZmQtNjc3YmU0MzkyNzQ2IiwiYmFzZV9zaGEyNTYiOiI1YjI5Yjk3NzRkNDEyZTU2NjI3MzBkY2I5NmE2NWNiNDQxNjNjNDFhZmNkMGU0NTJhMDQ5ODI0MmRjZDM5MDMxIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiZTU0YzQwODg1ZjQyMDI0YWJkNGY5YTI1ZDJiMDY1ODg2YmEwNWQ1ZmU0NGRlNTgxZWEwNDY2M2ViZTdkNzllMiIsImNoYW5nZXMiOnsiZW5hYmxlZCI6eyJhY3Rpb24iOiJjbGVhciIsImV4dHJhIjp0cnVlfX19",
+      "stdin_sha256": "b7c4ff2c5e071ff6aecbeb26dbff7414b98044b15702352c6a248c58b7a27834",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "dcada7fb674c564d3fa0e6bd129084ac20b5f3b1501715e5eaa1db0f61c5db9b",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031",
+      "config_after_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031"
+    },
+    {
+      "name": "strict-duplicate",
+      "command": [
+        "--memory-settings-operation",
+        "prepare",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtZW1vcnlfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiNWYwZjliMDUtZjkyOS00MWVhLThhY2MtMTQzODQ3OTY0NmYwIiwiYmFzZV9zaGEyNTYiOiI1YjI5Yjk3NzRkNDEyZTU2NjI3MzBkY2I5NmE2NWNiNDQxNjNjNDFhZmNkMGU0NTJhMDQ5ODI0MmRjZDM5MDMxIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiZTU0YzQwODg1ZjQyMDI0YWJkNGY5YTI1ZDJiMDY1ODg2YmEwNWQ1ZmU0NGRlNTgxZWEwNDY2M2ViZTdkNzllMiIsImNoYW5nZXMiOnsiZW5hYmxlZCI6eyJhY3Rpb24iOiJzZXQiLCJ2YWx1ZSI6dHJ1ZX0sInByb2ZpbGUiOnsiYWN0aW9uIjoic2V0IiwidmFsdWUiOiIxMjNFNDU2Ny1FODlCLTEyRDMtQTQ1Ni00MjY2MTQxNzQwMDAifX0sIm1lbW9yeV9zZXR0aW5nc192ZXJzaW9uIjoxfQ==",
+      "stdin_sha256": "8285e1e8cab781ddbef6230bb28d4ba0a04679df8c3138b2de022e3ef00ae64d",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "dcada7fb674c564d3fa0e6bd129084ac20b5f3b1501715e5eaa1db0f61c5db9b",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031",
+      "config_after_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031"
+    },
+    {
+      "name": "strict-invalid-utf8",
+      "command": [
+        "--memory-settings-operation",
+        "prepare",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "/w==",
+      "stdin_sha256": "a8100ae6aa1940d0b663bb31cd466142ebbdbd5187131b92d93818987832eb89",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "dcada7fb674c564d3fa0e6bd129084ac20b5f3b1501715e5eaa1db0f61c5db9b",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031",
+      "config_after_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031"
+    },
+    {
+      "name": "strict-array",
+      "command": [
+        "--memory-settings-operation",
+        "prepare",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "W10=",
+      "stdin_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "dcada7fb674c564d3fa0e6bd129084ac20b5f3b1501715e5eaa1db0f61c5db9b",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031",
+      "config_after_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031"
+    },
+    {
+      "name": "strict-exact-cap",
+      "command": [
+        "--memory-settings-operation",
+        "prepare",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtZW1vcnlfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiNWYwZjliMDUtZjkyOS00MWVhLThhY2MtMTQzODQ3OTY0NmYwIiwiYmFzZV9zaGEyNTYiOiI1YjI5Yjk3NzRkNDEyZTU2NjI3MzBkY2I5NmE2NWNiNDQxNjNjNDFhZmNkMGU0NTJhMDQ5ODI0MmRjZDM5MDMxIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiZTU0YzQwODg1ZjQyMDI0YWJkNGY5YTI1ZDJiMDY1ODg2YmEwNWQ1ZmU0NGRlNTgxZWEwNDY2M2ViZTdkNzllMiIsImNoYW5nZXMiOnsiZW5hYmxlZCI6eyJhY3Rpb24iOiJzZXQiLCJ2YWx1ZSI6dHJ1ZX0sInByb2ZpbGUiOnsiYWN0aW9uIjoic2V0IiwidmFsdWUiOiIxMjNFNDU2Ny1FODlCLTEyRDMtQTQ1Ni00MjY2MTQxNzQwMDAifX19ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIA==",
+      "stdin_sha256": "e68a024cf7784d4a1c19adcbc06fe473a6704308bb3a0a29a6b474bc6135eda4",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"ok\",\"outcome\":\"prepared\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"before\":{\"enabled\":{\"origin\":\"default\",\"value\":false},\"profile\":{\"origin\":\"default\",\"present\":false}},\"after\":{\"enabled\":{\"origin\":\"declared\",\"value\":true},\"profile\":{\"origin\":\"declared\",\"present\":true}},\"intent\":{\"memory_settings_version\":1,\"operation\":\"5f0f9b05-f929-41ea-8acc-1438479646f0\",\"base_sha256\":\"5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031\",\"target_sha256\":\"ad617330236e526ceb34d5a020380bd7342d8e175e4153340526d2daea1c701e\",\"config_path_sha256\":\"e54c40885f42024abd4f9a25d2b065886ba05d5fe44de581ea04663ebe7d79e2\",\"changes_sha256\":\"eb760e429bd11cdebf432a7dbb2f43588474e78112b042d244fd671d188dec0d\"}}}\n",
+      "stdout_sha256": "45fc6e1dea17ab9545be177bc5485638c1018eeb5fb9cc46fb73ad1beb56c51f",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031",
+      "config_after_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031"
+    },
+    {
+      "name": "strict-over-cap",
+      "command": [
+        "--memory-settings-operation",
+        "prepare",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtZW1vcnlfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiNWYwZjliMDUtZjkyOS00MWVhLThhY2MtMTQzODQ3OTY0NmYwIiwiYmFzZV9zaGEyNTYiOiI1YjI5Yjk3NzRkNDEyZTU2NjI3MzBkY2I5NmE2NWNiNDQxNjNjNDFhZmNkMGU0NTJhMDQ5ODI0MmRjZDM5MDMxIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiZTU0YzQwODg1ZjQyMDI0YWJkNGY5YTI1ZDJiMDY1ODg2YmEwNWQ1ZmU0NGRlNTgxZWEwNDY2M2ViZTdkNzllMiIsImNoYW5nZXMiOnsiZW5hYmxlZCI6eyJhY3Rpb24iOiJzZXQiLCJ2YWx1ZSI6dHJ1ZX0sInByb2ZpbGUiOnsiYWN0aW9uIjoic2V0IiwidmFsdWUiOiIxMjNFNDU2Ny1FODlCLTEyRDMtQTQ1Ni00MjY2MTQxNzQwMDAifX19ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICA=",
+      "stdin_sha256": "1cee2d24afe26f8c222a6d9b1b245e7f9b73162f7c8c2372fd74c11872dda177",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "dcada7fb674c564d3fa0e6bd129084ac20b5f3b1501715e5eaa1db0f61c5db9b",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031",
+      "config_after_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031"
+    },
+    {
+      "name": "strict-status-patch-refused",
+      "command": [
+        "--memory-settings-operation",
+        "status",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibWVtb3J5X3NldHRpbmdzX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6IjVmMGY5YjA1LWY5MjktNDFlYS04YWNjLTE0Mzg0Nzk2NDZmMCIsImJhc2Vfc2hhMjU2IjoiNWIyOWI5Nzc0ZDQxMmU1NjYyNzMwZGNiOTZhNjVjYjQ0MTYzYzQxYWZjZDBlNDUyYTA0OTgyNDJkY2QzOTAzMSIsInRhcmdldF9zaGEyNTYiOiJhZDYxNzMzMDIzNmU1MjZjZWIzNGQ1YTAyMDM4MGJkNzM0MmQ4ZTE3NWU0MTUzMzQwNTI2ZDJkYWVhMWM3MDFlIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiZTU0YzQwODg1ZjQyMDI0YWJkNGY5YTI1ZDJiMDY1ODg2YmEwNWQ1ZmU0NGRlNTgxZWEwNDY2M2ViZTdkNzllMiIsImNoYW5nZXNfc2hhMjU2IjoiZWI3NjBlNDI5YmQxMWNkZWJmNDMyYTdkYmIyZjQzNTg4NDc0ZTc4MTEyYjA0MmQyNDRmZDY3MWQxODhkZWMwZCJ9LCJjaGFuZ2VzIjp7ImVuYWJsZWQiOnsiYWN0aW9uIjoic2V0IiwidmFsdWUiOnRydWV9LCJwcm9maWxlIjp7ImFjdGlvbiI6InNldCIsInZhbHVlIjoiMTIzRTQ1NjctRTg5Qi0xMkQzLUE0NTYtNDI2NjE0MTc0MDAwIn19fQ==",
+      "stdin_sha256": "d5a67e6153cb2c5a3c48a814511a5dcc0874438d366ea83c2a5246fc20a667bf",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"status\",\"status\":\"invalid-input\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "b7576da97de499f125d49471cc08928b2ceb156b443e14feb5e07060b83f5136",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031",
+      "config_after_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031"
+    },
+    {
+      "name": "strict-apply",
+      "command": [
+        "--memory-settings-operation",
+        "apply",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibWVtb3J5X3NldHRpbmdzX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6IjVmMGY5YjA1LWY5MjktNDFlYS04YWNjLTE0Mzg0Nzk2NDZmMCIsImJhc2Vfc2hhMjU2IjoiNWIyOWI5Nzc0ZDQxMmU1NjYyNzMwZGNiOTZhNjVjYjQ0MTYzYzQxYWZjZDBlNDUyYTA0OTgyNDJkY2QzOTAzMSIsInRhcmdldF9zaGEyNTYiOiJhZDYxNzMzMDIzNmU1MjZjZWIzNGQ1YTAyMDM4MGJkNzM0MmQ4ZTE3NWU0MTUzMzQwNTI2ZDJkYWVhMWM3MDFlIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiZTU0YzQwODg1ZjQyMDI0YWJkNGY5YTI1ZDJiMDY1ODg2YmEwNWQ1ZmU0NGRlNTgxZWEwNDY2M2ViZTdkNzllMiIsImNoYW5nZXNfc2hhMjU2IjoiZWI3NjBlNDI5YmQxMWNkZWJmNDMyYTdkYmIyZjQzNTg4NDc0ZTc4MTEyYjA0MmQyNDRmZDY3MWQxODhkZWMwZCJ9LCJjaGFuZ2VzIjp7ImVuYWJsZWQiOnsiYWN0aW9uIjoic2V0IiwidmFsdWUiOnRydWV9LCJwcm9maWxlIjp7ImFjdGlvbiI6InNldCIsInZhbHVlIjoiMTIzRTQ1NjctRTg5Qi0xMkQzLUE0NTYtNDI2NjE0MTc0MDAwIn19fQ==",
+      "stdin_sha256": "d5a67e6153cb2c5a3c48a814511a5dcc0874438d366ea83c2a5246fc20a667bf",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"ok\",\"outcome\":\"verified\",\"disk_readback_verified\":true,\"runtime_activation\":\"unverified\",\"data\":{\"target_sha256\":\"ad617330236e526ceb34d5a020380bd7342d8e175e4153340526d2daea1c701e\",\"current\":{\"enabled\":{\"origin\":\"declared\",\"value\":true},\"profile\":{\"origin\":\"declared\",\"present\":true}}}}\n",
+      "stdout_sha256": "cf6c6daa9ec625c00e0974f41706afbb71212715e03ae7847104768b85881cfc",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "5b29b9774d412e5662730dcb96a65cb44163c41afcd0e452a0498242dcd39031",
+      "config_after_sha256": "ad617330236e526ceb34d5a020380bd7342d8e175e4153340526d2daea1c701e"
+    },
+    {
+      "name": "strict-spent",
+      "command": [
+        "--memory-settings-operation",
+        "apply",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibWVtb3J5X3NldHRpbmdzX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6IjVmMGY5YjA1LWY5MjktNDFlYS04YWNjLTE0Mzg0Nzk2NDZmMCIsImJhc2Vfc2hhMjU2IjoiNWIyOWI5Nzc0ZDQxMmU1NjYyNzMwZGNiOTZhNjVjYjQ0MTYzYzQxYWZjZDBlNDUyYTA0OTgyNDJkY2QzOTAzMSIsInRhcmdldF9zaGEyNTYiOiJhZDYxNzMzMDIzNmU1MjZjZWIzNGQ1YTAyMDM4MGJkNzM0MmQ4ZTE3NWU0MTUzMzQwNTI2ZDJkYWVhMWM3MDFlIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiZTU0YzQwODg1ZjQyMDI0YWJkNGY5YTI1ZDJiMDY1ODg2YmEwNWQ1ZmU0NGRlNTgxZWEwNDY2M2ViZTdkNzllMiIsImNoYW5nZXNfc2hhMjU2IjoiZWI3NjBlNDI5YmQxMWNkZWJmNDMyYTdkYmIyZjQzNTg4NDc0ZTc4MTEyYjA0MmQyNDRmZDY3MWQxODhkZWMwZCJ9LCJjaGFuZ2VzIjp7ImVuYWJsZWQiOnsiYWN0aW9uIjoic2V0IiwidmFsdWUiOnRydWV9LCJwcm9maWxlIjp7ImFjdGlvbiI6InNldCIsInZhbHVlIjoiMTIzRTQ1NjctRTg5Qi0xMkQzLUE0NTYtNDI2NjE0MTc0MDAwIn19fQ==",
+      "stdin_sha256": "d5a67e6153cb2c5a3c48a814511a5dcc0874438d366ea83c2a5246fc20a667bf",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"conflict\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "f63c557f2b0f378ab3181a82e272ad0171ac0683d6401ccad78a4eaca997a7ab",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "ad617330236e526ceb34d5a020380bd7342d8e175e4153340526d2daea1c701e",
+      "config_after_sha256": "ad617330236e526ceb34d5a020380bd7342d8e175e4153340526d2daea1c701e"
+    },
+    {
+      "name": "uninitialized-inspect",
+      "command": [
+        "--memory-settings-operation",
+        "inspect"
+      ],
+      "stdin_base64": null,
+      "stdin_sha256": null,
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"schema_version\":1,\"base_sha256\":\"4538c7e574be8204e74814d0f8af0cf7a145e1d03d3096569e4c346a5b9a9fbe\",\"config_path_sha256\":\"0e43197e553803cb2d76fdded7bd5ee510ffa95439985a37308d42fd5995f08a\",\"current\":{\"enabled\":{\"origin\":\"default\",\"value\":false},\"profile\":{\"origin\":\"default\",\"present\":false}}}}\n",
+      "stdout_sha256": "6772ac8b9b1b2efe3beabb77166d97959279f0352e940309748219cfb7ac506b",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "4538c7e574be8204e74814d0f8af0cf7a145e1d03d3096569e4c346a5b9a9fbe",
+      "config_after_sha256": "4538c7e574be8204e74814d0f8af0cf7a145e1d03d3096569e4c346a5b9a9fbe"
+    },
+    {
+      "name": "uninitialized-prepare",
+      "command": [
+        "--memory-settings-operation",
+        "prepare",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtZW1vcnlfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiNjA2MTUyOTctMWY5YS00YzViLWI3NjItZjQ0NTFlNDVlZjBlIiwiYmFzZV9zaGEyNTYiOiI0NTM4YzdlNTc0YmU4MjA0ZTc0ODE0ZDBmOGFmMGNmN2ExNDVlMWQwM2QzMDk2NTY5ZTRjMzQ2YTViOWE5ZmJlIiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiMGU0MzE5N2U1NTM4MDNjYjJkNzZmZGRlZDdiZDVlZTUxMGZmYTk1NDM5OTg1YTM3MzA4ZDQyZmQ1OTk1ZjA4YSIsImNoYW5nZXMiOnsiZW5hYmxlZCI6eyJhY3Rpb24iOiJzZXQiLCJ2YWx1ZSI6dHJ1ZX0sInByb2ZpbGUiOnsiYWN0aW9uIjoic2V0IiwidmFsdWUiOiIxMjNFNDU2Ny1FODlCLTEyRDMtQTQ1Ni00MjY2MTQxNzQwMDAifX19",
+      "stdin_sha256": "ea6b328ad8365a4f2adbde8c5ce53d1012019f1334abeb7b33156d09b88b9f3c",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"ok\",\"outcome\":\"prepared\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"before\":{\"enabled\":{\"origin\":\"default\",\"value\":false},\"profile\":{\"origin\":\"default\",\"present\":false}},\"after\":{\"enabled\":{\"origin\":\"declared\",\"value\":true},\"profile\":{\"origin\":\"declared\",\"present\":true}},\"intent\":{\"memory_settings_version\":1,\"operation\":\"60615297-1f9a-4c5b-b762-f4451e45ef0e\",\"base_sha256\":\"4538c7e574be8204e74814d0f8af0cf7a145e1d03d3096569e4c346a5b9a9fbe\",\"target_sha256\":\"8df4627511b504c9b21f5943f524562db449b4d123c839ce5ca3de60c2bf6295\",\"config_path_sha256\":\"0e43197e553803cb2d76fdded7bd5ee510ffa95439985a37308d42fd5995f08a\",\"changes_sha256\":\"eb760e429bd11cdebf432a7dbb2f43588474e78112b042d244fd671d188dec0d\"}}}\n",
+      "stdout_sha256": "8198c6569fce0d6de044e270b192ad8bd0752d335b60515e16cdb627d59b51ea",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "4538c7e574be8204e74814d0f8af0cf7a145e1d03d3096569e4c346a5b9a9fbe",
+      "config_after_sha256": "4538c7e574be8204e74814d0f8af0cf7a145e1d03d3096569e4c346a5b9a9fbe"
+    },
+    {
+      "name": "uninitialized-apply",
+      "command": [
+        "--memory-settings-operation",
+        "apply",
+        "--memory-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibWVtb3J5X3NldHRpbmdzX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6IjYwNjE1Mjk3LTFmOWEtNGM1Yi1iNzYyLWY0NDUxZTQ1ZWYwZSIsImJhc2Vfc2hhMjU2IjoiNDUzOGM3ZTU3NGJlODIwNGU3NDgxNGQwZjhhZjBjZjdhMTQ1ZTFkMDNkMzA5NjU2OWU0YzM0NmE1YjlhOWZiZSIsInRhcmdldF9zaGEyNTYiOiI4ZGY0NjI3NTExYjUwNGM5YjIxZjU5NDNmNTI0NTYyZGI0NDliNGQxMjNjODM5Y2U1Y2EzZGU2MGMyYmY2Mjk1IiwiY29uZmlnX3BhdGhfc2hhMjU2IjoiMGU0MzE5N2U1NTM4MDNjYjJkNzZmZGRlZDdiZDVlZTUxMGZmYTk1NDM5OTg1YTM3MzA4ZDQyZmQ1OTk1ZjA4YSIsImNoYW5nZXNfc2hhMjU2IjoiZWI3NjBlNDI5YmQxMWNkZWJmNDMyYTdkYmIyZjQzNTg4NDc0ZTc4MTEyYjA0MmQyNDRmZDY3MWQxODhkZWMwZCJ9LCJjaGFuZ2VzIjp7ImVuYWJsZWQiOnsiYWN0aW9uIjoic2V0IiwidmFsdWUiOnRydWV9LCJwcm9maWxlIjp7ImFjdGlvbiI6InNldCIsInZhbHVlIjoiMTIzRTQ1NjctRTg5Qi0xMkQzLUE0NTYtNDI2NjE0MTc0MDAwIn19fQ==",
+      "stdin_sha256": "51f0d75cbc175d8124ac3e170f26d2e3548a0dc07fe28452e89b2c5293d99584",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"unavailable\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "08375596d3dce4ce15580b6769359f37de1e1623ad34ea191154d508ca2911e4",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "4538c7e574be8204e74814d0f8af0cf7a145e1d03d3096569e4c346a5b9a9fbe",
+      "config_after_sha256": "4538c7e574be8204e74814d0f8af0cf7a145e1d03d3096569e4c346a5b9a9fbe"
+    }
+  ]
+}

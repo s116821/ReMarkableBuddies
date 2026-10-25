@@ -1,0 +1,401 @@
+{
+  "fixture_version": 1,
+  "source_commit": "4bc7eb0c6bf55af8392ee36a8eb3a7ca400a5389",
+  "capture_executable_sha256": "281fb6ea67c4028fae95a9c657e7058a0a1037c2d726bf2c4ced31bdba77d211",
+  "scope": "Actual Windows host CLI on synthetic files; no tablet/provider/Store. Byte caps represented by exact prefix/padding recipe.",
+  "command": [
+    "--configuration-operation",
+    "inspect"
+  ],
+  "cases": [
+    {
+      "name": "default",
+      "input": {
+        "utf8": "{}"
+      },
+      "input_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"runtime_activation\":\"unverified\",\"snapshot\":{\"schema_version\":1,\"config_sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"byte_basis\":\"saved-file-bytes\",\"validation_basis\":\"typed-values-only\",\"declared_roots_validated\":false,\"fields\":{\"base_url\":{\"origin\":\"default\",\"value\":false},\"config_schema_version\":{\"origin\":\"default\",\"value\":1},\"debug_dump\":{\"origin\":\"default\",\"value\":null},\"log_level\":{\"origin\":\"default\",\"value\":null},\"memory.enabled\":{\"origin\":\"default\",\"value\":false},\"memory.profile\":{\"origin\":\"default\",\"value\":false},\"memory.selection\":{\"origin\":\"default\",\"value\":false},\"model\":{\"origin\":\"default\",\"value\":false},\"model_credential\":{\"origin\":\"default\",\"value\":false},\"paths.cache\":{\"origin\":\"default\",\"value\":true},\"paths.credentials\":{\"origin\":\"default\",\"value\":true},\"paths.data\":{\"origin\":\"default\",\"value\":true},\"personalization.enabled\":{\"origin\":\"default\",\"value\":false},\"personalization.schema_version\":{\"origin\":\"default\",\"value\":1},\"personalization.text\":{\"origin\":\"default\",\"value\":false},\"personalization.text_bytes\":{\"origin\":\"default\",\"value\":0},\"sync.batch_items\":{\"origin\":\"default\",\"value\":32},\"sync.collection\":{\"origin\":\"default\",\"value\":false},\"sync.create_new\":{\"origin\":\"default\",\"value\":false},\"sync.enabled\":{\"origin\":\"default\",\"value\":false},\"sync.max_media_bytes\":{\"origin\":\"default\",\"value\":33554432},\"sync.media\":{\"origin\":\"default\",\"value\":false},\"sync.namespaces\":{\"origin\":\"default\",\"value\":[]},\"sync.poll_seconds\":{\"origin\":\"default\",\"value\":60},\"trigger_corner\":{\"origin\":\"default\",\"value\":null}},\"unsupported\":[\"reader-enablement\",\"writer-enablement\",\"retrieval-policy\",\"research-policy\",\"mem-destination\",\"handwriting-settings\"]}}\n",
+      "stdout_sha256": "039206efb25590741a616b5ae66d27d484ad45d74b5cbb7db648ae6327ff4564",
+      "exit_code": 0,
+      "stderr_utf8": ""
+    },
+    {
+      "name": "explicit-null-options",
+      "input": {
+        "utf8": "{\"model\":null,\"base_url\":null,\"model_credential\":null,\"trigger_corner\":null,\"log_level\":null,\"debug_dump\":null,\"memory\":{\"profile\":null,\"selection\":null},\"sync\":{\"collection\":null}}"
+      },
+      "input_sha256": "70d71d7bea69eee5f3d644e1090bfc42484ac267db3f2a39036e1c688febacf7",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"runtime_activation\":\"unverified\",\"snapshot\":{\"schema_version\":1,\"config_sha256\":\"70d71d7bea69eee5f3d644e1090bfc42484ac267db3f2a39036e1c688febacf7\",\"byte_basis\":\"saved-file-bytes\",\"validation_basis\":\"typed-values-only\",\"declared_roots_validated\":false,\"fields\":{\"base_url\":{\"origin\":\"declared-null\",\"value\":false},\"config_schema_version\":{\"origin\":\"default\",\"value\":1},\"debug_dump\":{\"origin\":\"declared-null\",\"value\":null},\"log_level\":{\"origin\":\"declared-null\",\"value\":null},\"memory.enabled\":{\"origin\":\"default\",\"value\":false},\"memory.profile\":{\"origin\":\"declared-null\",\"value\":false},\"memory.selection\":{\"origin\":\"declared-null\",\"value\":false},\"model\":{\"origin\":\"declared-null\",\"value\":false},\"model_credential\":{\"origin\":\"declared-null\",\"value\":false},\"paths.cache\":{\"origin\":\"default\",\"value\":true},\"paths.credentials\":{\"origin\":\"default\",\"value\":true},\"paths.data\":{\"origin\":\"default\",\"value\":true},\"personalization.enabled\":{\"origin\":\"default\",\"value\":false},\"personalization.schema_version\":{\"origin\":\"default\",\"value\":1},\"personalization.text\":{\"origin\":\"default\",\"value\":false},\"personalization.text_bytes\":{\"origin\":\"default\",\"value\":0},\"sync.batch_items\":{\"origin\":\"default\",\"value\":32},\"sync.collection\":{\"origin\":\"declared-null\",\"value\":false},\"sync.create_new\":{\"origin\":\"default\",\"value\":false},\"sync.enabled\":{\"origin\":\"default\",\"value\":false},\"sync.max_media_bytes\":{\"origin\":\"default\",\"value\":33554432},\"sync.media\":{\"origin\":\"default\",\"value\":false},\"sync.namespaces\":{\"origin\":\"default\",\"value\":[]},\"sync.poll_seconds\":{\"origin\":\"default\",\"value\":60},\"trigger_corner\":{\"origin\":\"declared-null\",\"value\":null}},\"unsupported\":[\"reader-enablement\",\"writer-enablement\",\"retrieval-policy\",\"research-policy\",\"mem-destination\",\"handwriting-settings\"]}}\n",
+      "stdout_sha256": "0b78d09ec4fa8d320661a0af1beaf4565b2cba43074ffb4040f0097a748a550d",
+      "exit_code": 0,
+      "stderr_utf8": ""
+    },
+    {
+      "name": "empty-defaulted-objects",
+      "input": {
+        "utf8": "{\"memory\":{},\"sync\":{},\"personalization\":{}}"
+      },
+      "input_sha256": "f8675090f627732f3c847a0aed897213f36c2fe986e51e14e92737cc4c8ca146",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"runtime_activation\":\"unverified\",\"snapshot\":{\"schema_version\":1,\"config_sha256\":\"f8675090f627732f3c847a0aed897213f36c2fe986e51e14e92737cc4c8ca146\",\"byte_basis\":\"saved-file-bytes\",\"validation_basis\":\"typed-values-only\",\"declared_roots_validated\":false,\"fields\":{\"base_url\":{\"origin\":\"default\",\"value\":false},\"config_schema_version\":{\"origin\":\"default\",\"value\":1},\"debug_dump\":{\"origin\":\"default\",\"value\":null},\"log_level\":{\"origin\":\"default\",\"value\":null},\"memory.enabled\":{\"origin\":\"default\",\"value\":false},\"memory.profile\":{\"origin\":\"default\",\"value\":false},\"memory.selection\":{\"origin\":\"default\",\"value\":false},\"model\":{\"origin\":\"default\",\"value\":false},\"model_credential\":{\"origin\":\"default\",\"value\":false},\"paths.cache\":{\"origin\":\"default\",\"value\":true},\"paths.credentials\":{\"origin\":\"default\",\"value\":true},\"paths.data\":{\"origin\":\"default\",\"value\":true},\"personalization.enabled\":{\"origin\":\"default\",\"value\":false},\"personalization.schema_version\":{\"origin\":\"default\",\"value\":1},\"personalization.text\":{\"origin\":\"default\",\"value\":false},\"personalization.text_bytes\":{\"origin\":\"default\",\"value\":0},\"sync.batch_items\":{\"origin\":\"default\",\"value\":32},\"sync.collection\":{\"origin\":\"default\",\"value\":false},\"sync.create_new\":{\"origin\":\"default\",\"value\":false},\"sync.enabled\":{\"origin\":\"default\",\"value\":false},\"sync.max_media_bytes\":{\"origin\":\"default\",\"value\":33554432},\"sync.media\":{\"origin\":\"default\",\"value\":false},\"sync.namespaces\":{\"origin\":\"default\",\"value\":[]},\"sync.poll_seconds\":{\"origin\":\"default\",\"value\":60},\"trigger_corner\":{\"origin\":\"default\",\"value\":null}},\"unsupported\":[\"reader-enablement\",\"writer-enablement\",\"retrieval-policy\",\"research-policy\",\"mem-destination\",\"handwriting-settings\"]}}\n",
+      "stdout_sha256": "a0a7bc37d4617132af50a7b175346eaf5149f07300d2c1591d0ff2626fdc0144",
+      "exit_code": 0,
+      "stderr_utf8": ""
+    },
+    {
+      "name": "declared-safe-scalars",
+      "input": {
+        "utf8": "{\"config_schema_version\":1,\"trigger_corner\":\"LL\",\"log_level\":\"trace\",\"debug_dump\":false,\"memory\":{\"enabled\":true,\"profile\":\"a138b641-a4aa-4ac3-b1d1-091ba27f1470\"},\"sync\":{\"enabled\":false,\"media\":true,\"create_new\":true,\"collection\":\"c173dd73-907b-44d6-a08b-402924459b2f\",\"max_media_bytes\":268435456,\"poll_seconds\":3600,\"batch_items\":128,\"namespaces\":[\"conversation\",\"source\",\"export-association\",\"subject-memory\",\"handwriting\"]},\"personalization\":{\"schema_version\":1,\"enabled\":true,\"text\":\"synthetic Greek \u03b1\\nsecond line\"}}"
+      },
+      "input_sha256": "151fd2c4c4a63b8ee7aee9689991675f246f05d74b9fe79734b5edfe9508b90d",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"runtime_activation\":\"unverified\",\"snapshot\":{\"schema_version\":1,\"config_sha256\":\"151fd2c4c4a63b8ee7aee9689991675f246f05d74b9fe79734b5edfe9508b90d\",\"byte_basis\":\"saved-file-bytes\",\"validation_basis\":\"typed-values-only\",\"declared_roots_validated\":false,\"fields\":{\"base_url\":{\"origin\":\"default\",\"value\":false},\"config_schema_version\":{\"origin\":\"declared\",\"value\":1},\"debug_dump\":{\"origin\":\"declared\",\"value\":false},\"log_level\":{\"origin\":\"declared\",\"value\":\"trace\"},\"memory.enabled\":{\"origin\":\"declared\",\"value\":true},\"memory.profile\":{\"origin\":\"declared\",\"value\":true},\"memory.selection\":{\"origin\":\"default\",\"value\":false},\"model\":{\"origin\":\"default\",\"value\":false},\"model_credential\":{\"origin\":\"default\",\"value\":false},\"paths.cache\":{\"origin\":\"default\",\"value\":true},\"paths.credentials\":{\"origin\":\"default\",\"value\":true},\"paths.data\":{\"origin\":\"default\",\"value\":true},\"personalization.enabled\":{\"origin\":\"declared\",\"value\":true},\"personalization.schema_version\":{\"origin\":\"declared\",\"value\":1},\"personalization.text\":{\"origin\":\"declared\",\"value\":true},\"personalization.text_bytes\":{\"origin\":\"declared\",\"value\":30},\"sync.batch_items\":{\"origin\":\"declared\",\"value\":128},\"sync.collection\":{\"origin\":\"declared\",\"value\":true},\"sync.create_new\":{\"origin\":\"declared\",\"value\":true},\"sync.enabled\":{\"origin\":\"declared\",\"value\":false},\"sync.max_media_bytes\":{\"origin\":\"declared\",\"value\":268435456},\"sync.media\":{\"origin\":\"declared\",\"value\":true},\"sync.namespaces\":{\"origin\":\"declared\",\"value\":[\"conversation\",\"export-association\",\"handwriting\",\"source\",\"subject-memory\"]},\"sync.poll_seconds\":{\"origin\":\"declared\",\"value\":3600},\"trigger_corner\":{\"origin\":\"declared\",\"value\":\"LL\"}},\"unsupported\":[\"reader-enablement\",\"writer-enablement\",\"retrieval-policy\",\"research-policy\",\"mem-destination\",\"handwriting-settings\"]}}\n",
+      "stdout_sha256": "04391d74f13e640e8bc4dfa4c6ac7e0ebe3643f2188ba937e32796f31e5c65cd",
+      "exit_code": 0,
+      "stderr_utf8": ""
+    },
+    {
+      "name": "private-sentinels",
+      "input": {
+        "utf8": "{\"model\":\"model-secret-sentinel\",\"base_url\":\"https://user:password-sentinel@invalid/?token=query-sentinel#fragment-sentinel\",\"model_credential\":\"protected-reference-sentinel\",\"paths\":{\"data\":\"/proc/path-secret-sentinel\",\"cache\":\"/proc/path-secret-sentinel\",\"credentials\":\"/unopened/credential-path-sentinel\"},\"memory\":{\"profile\":\"a138b641-a4aa-4ac3-b1d1-091ba27f1470\",\"selection\":{\"profile\":\"a138b641-a4aa-4ac3-b1d1-091ba27f1470\",\"group\":\"b2f1cc78-a8d8-4dc1-a3ce-a40cdff053ba\",\"binding_sha256\":\"a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5\"}},\"sync\":{\"collection\":\"c173dd73-907b-44d6-a08b-402924459b2f\"},\"personalization\":{\"text\":\"personal-text-secret-sentinel\u03b1\"}}"
+      },
+      "input_sha256": "34a44c2698dd1cd2713d3b39c13a497c5022b9808822c40c13cbce1d3218d982",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"runtime_activation\":\"unverified\",\"snapshot\":{\"schema_version\":1,\"config_sha256\":\"34a44c2698dd1cd2713d3b39c13a497c5022b9808822c40c13cbce1d3218d982\",\"byte_basis\":\"saved-file-bytes\",\"validation_basis\":\"typed-values-only\",\"declared_roots_validated\":false,\"fields\":{\"base_url\":{\"origin\":\"declared\",\"value\":true},\"config_schema_version\":{\"origin\":\"default\",\"value\":1},\"debug_dump\":{\"origin\":\"default\",\"value\":null},\"log_level\":{\"origin\":\"default\",\"value\":null},\"memory.enabled\":{\"origin\":\"default\",\"value\":false},\"memory.profile\":{\"origin\":\"declared\",\"value\":true},\"memory.selection\":{\"origin\":\"declared\",\"value\":true},\"model\":{\"origin\":\"declared\",\"value\":true},\"model_credential\":{\"origin\":\"declared\",\"value\":true},\"paths.cache\":{\"origin\":\"declared\",\"value\":true},\"paths.credentials\":{\"origin\":\"declared\",\"value\":true},\"paths.data\":{\"origin\":\"declared\",\"value\":true},\"personalization.enabled\":{\"origin\":\"default\",\"value\":false},\"personalization.schema_version\":{\"origin\":\"default\",\"value\":1},\"personalization.text\":{\"origin\":\"declared\",\"value\":true},\"personalization.text_bytes\":{\"origin\":\"declared\",\"value\":31},\"sync.batch_items\":{\"origin\":\"default\",\"value\":32},\"sync.collection\":{\"origin\":\"declared\",\"value\":true},\"sync.create_new\":{\"origin\":\"default\",\"value\":false},\"sync.enabled\":{\"origin\":\"default\",\"value\":false},\"sync.max_media_bytes\":{\"origin\":\"default\",\"value\":33554432},\"sync.media\":{\"origin\":\"default\",\"value\":false},\"sync.namespaces\":{\"origin\":\"default\",\"value\":[]},\"sync.poll_seconds\":{\"origin\":\"default\",\"value\":60},\"trigger_corner\":{\"origin\":\"default\",\"value\":null}},\"unsupported\":[\"reader-enablement\",\"writer-enablement\",\"retrieval-policy\",\"research-policy\",\"mem-destination\",\"handwriting-settings\"]}}\n",
+      "stdout_sha256": "88bdeea74f9477213c87217df5de8ca3ce848b56db9fc46802a488595667c262",
+      "exit_code": 0,
+      "stderr_utf8": ""
+    },
+    {
+      "name": "explicit-empty-personalization",
+      "input": {
+        "utf8": "{\"personalization\":{\"text\":\"\",\"enabled\":true}}"
+      },
+      "input_sha256": "28ec796ae8af87bb69676973ec51020ad07d1fe0afe98c2708486168a23ac0fd",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"runtime_activation\":\"unverified\",\"snapshot\":{\"schema_version\":1,\"config_sha256\":\"28ec796ae8af87bb69676973ec51020ad07d1fe0afe98c2708486168a23ac0fd\",\"byte_basis\":\"saved-file-bytes\",\"validation_basis\":\"typed-values-only\",\"declared_roots_validated\":false,\"fields\":{\"base_url\":{\"origin\":\"default\",\"value\":false},\"config_schema_version\":{\"origin\":\"default\",\"value\":1},\"debug_dump\":{\"origin\":\"default\",\"value\":null},\"log_level\":{\"origin\":\"default\",\"value\":null},\"memory.enabled\":{\"origin\":\"default\",\"value\":false},\"memory.profile\":{\"origin\":\"default\",\"value\":false},\"memory.selection\":{\"origin\":\"default\",\"value\":false},\"model\":{\"origin\":\"default\",\"value\":false},\"model_credential\":{\"origin\":\"default\",\"value\":false},\"paths.cache\":{\"origin\":\"default\",\"value\":true},\"paths.credentials\":{\"origin\":\"default\",\"value\":true},\"paths.data\":{\"origin\":\"default\",\"value\":true},\"personalization.enabled\":{\"origin\":\"declared\",\"value\":true},\"personalization.schema_version\":{\"origin\":\"default\",\"value\":1},\"personalization.text\":{\"origin\":\"declared\",\"value\":false},\"personalization.text_bytes\":{\"origin\":\"declared\",\"value\":0},\"sync.batch_items\":{\"origin\":\"default\",\"value\":32},\"sync.collection\":{\"origin\":\"default\",\"value\":false},\"sync.create_new\":{\"origin\":\"default\",\"value\":false},\"sync.enabled\":{\"origin\":\"default\",\"value\":false},\"sync.max_media_bytes\":{\"origin\":\"default\",\"value\":33554432},\"sync.media\":{\"origin\":\"default\",\"value\":false},\"sync.namespaces\":{\"origin\":\"default\",\"value\":[]},\"sync.poll_seconds\":{\"origin\":\"default\",\"value\":60},\"trigger_corner\":{\"origin\":\"default\",\"value\":null}},\"unsupported\":[\"reader-enablement\",\"writer-enablement\",\"retrieval-policy\",\"research-policy\",\"mem-destination\",\"handwriting-settings\"]}}\n",
+      "stdout_sha256": "069902699163806bd60011c448c372b55accaba9c23c9ffcfd4d48bfef8d0a61",
+      "exit_code": 0,
+      "stderr_utf8": ""
+    },
+    {
+      "name": "disabled-personalization-keeps-summary",
+      "input": {
+        "utf8": "{\"personalization\":{\"text\":\"synthetic text\",\"enabled\":false}}"
+      },
+      "input_sha256": "774e9ac50b0103811a0f78999c4a2d464222b2c820fcd2fdb45ddf6647134bfa",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"runtime_activation\":\"unverified\",\"snapshot\":{\"schema_version\":1,\"config_sha256\":\"774e9ac50b0103811a0f78999c4a2d464222b2c820fcd2fdb45ddf6647134bfa\",\"byte_basis\":\"saved-file-bytes\",\"validation_basis\":\"typed-values-only\",\"declared_roots_validated\":false,\"fields\":{\"base_url\":{\"origin\":\"default\",\"value\":false},\"config_schema_version\":{\"origin\":\"default\",\"value\":1},\"debug_dump\":{\"origin\":\"default\",\"value\":null},\"log_level\":{\"origin\":\"default\",\"value\":null},\"memory.enabled\":{\"origin\":\"default\",\"value\":false},\"memory.profile\":{\"origin\":\"default\",\"value\":false},\"memory.selection\":{\"origin\":\"default\",\"value\":false},\"model\":{\"origin\":\"default\",\"value\":false},\"model_credential\":{\"origin\":\"default\",\"value\":false},\"paths.cache\":{\"origin\":\"default\",\"value\":true},\"paths.credentials\":{\"origin\":\"default\",\"value\":true},\"paths.data\":{\"origin\":\"default\",\"value\":true},\"personalization.enabled\":{\"origin\":\"declared\",\"value\":false},\"personalization.schema_version\":{\"origin\":\"default\",\"value\":1},\"personalization.text\":{\"origin\":\"declared\",\"value\":true},\"personalization.text_bytes\":{\"origin\":\"declared\",\"value\":14},\"sync.batch_items\":{\"origin\":\"default\",\"value\":32},\"sync.collection\":{\"origin\":\"default\",\"value\":false},\"sync.create_new\":{\"origin\":\"default\",\"value\":false},\"sync.enabled\":{\"origin\":\"default\",\"value\":false},\"sync.max_media_bytes\":{\"origin\":\"default\",\"value\":33554432},\"sync.media\":{\"origin\":\"default\",\"value\":false},\"sync.namespaces\":{\"origin\":\"default\",\"value\":[]},\"sync.poll_seconds\":{\"origin\":\"default\",\"value\":60},\"trigger_corner\":{\"origin\":\"default\",\"value\":null}},\"unsupported\":[\"reader-enablement\",\"writer-enablement\",\"retrieval-policy\",\"research-policy\",\"mem-destination\",\"handwriting-settings\"]}}\n",
+      "stdout_sha256": "0d97ae5ed5f3c55adc9e8e640db8db37e817b27f3ce7fef40ddfa662178d94b0",
+      "exit_code": 0,
+      "stderr_utf8": ""
+    },
+    {
+      "name": "maximum-personalization",
+      "input": {
+        "utf8": "{\"personalization\":{\"text\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"}}"
+      },
+      "input_sha256": "891643bd33d7efc32309dfabd7617a16066035ba18bd81400c1e405efcced62d",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"runtime_activation\":\"unverified\",\"snapshot\":{\"schema_version\":1,\"config_sha256\":\"891643bd33d7efc32309dfabd7617a16066035ba18bd81400c1e405efcced62d\",\"byte_basis\":\"saved-file-bytes\",\"validation_basis\":\"typed-values-only\",\"declared_roots_validated\":false,\"fields\":{\"base_url\":{\"origin\":\"default\",\"value\":false},\"config_schema_version\":{\"origin\":\"default\",\"value\":1},\"debug_dump\":{\"origin\":\"default\",\"value\":null},\"log_level\":{\"origin\":\"default\",\"value\":null},\"memory.enabled\":{\"origin\":\"default\",\"value\":false},\"memory.profile\":{\"origin\":\"default\",\"value\":false},\"memory.selection\":{\"origin\":\"default\",\"value\":false},\"model\":{\"origin\":\"default\",\"value\":false},\"model_credential\":{\"origin\":\"default\",\"value\":false},\"paths.cache\":{\"origin\":\"default\",\"value\":true},\"paths.credentials\":{\"origin\":\"default\",\"value\":true},\"paths.data\":{\"origin\":\"default\",\"value\":true},\"personalization.enabled\":{\"origin\":\"default\",\"value\":false},\"personalization.schema_version\":{\"origin\":\"default\",\"value\":1},\"personalization.text\":{\"origin\":\"declared\",\"value\":true},\"personalization.text_bytes\":{\"origin\":\"declared\",\"value\":16384},\"sync.batch_items\":{\"origin\":\"default\",\"value\":32},\"sync.collection\":{\"origin\":\"default\",\"value\":false},\"sync.create_new\":{\"origin\":\"default\",\"value\":false},\"sync.enabled\":{\"origin\":\"default\",\"value\":false},\"sync.max_media_bytes\":{\"origin\":\"default\",\"value\":33554432},\"sync.media\":{\"origin\":\"default\",\"value\":false},\"sync.namespaces\":{\"origin\":\"default\",\"value\":[]},\"sync.poll_seconds\":{\"origin\":\"default\",\"value\":60},\"trigger_corner\":{\"origin\":\"default\",\"value\":null}},\"unsupported\":[\"reader-enablement\",\"writer-enablement\",\"retrieval-policy\",\"research-policy\",\"mem-destination\",\"handwriting-settings\"]}}\n",
+      "stdout_sha256": "5166c8e574d66e610decf7c87d1d753cbe756987789e5f09382a8099f23fbc24",
+      "exit_code": 0,
+      "stderr_utf8": ""
+    },
+    {
+      "name": "minimum-sync-bounds",
+      "input": {
+        "utf8": "{\"sync\":{\"max_media_bytes\":0,\"poll_seconds\":5,\"batch_items\":1}}"
+      },
+      "input_sha256": "0a5b6b561ece159a9894628a056eecbab0940d4e2319c698ac0c34d5bba4b0d7",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"runtime_activation\":\"unverified\",\"snapshot\":{\"schema_version\":1,\"config_sha256\":\"0a5b6b561ece159a9894628a056eecbab0940d4e2319c698ac0c34d5bba4b0d7\",\"byte_basis\":\"saved-file-bytes\",\"validation_basis\":\"typed-values-only\",\"declared_roots_validated\":false,\"fields\":{\"base_url\":{\"origin\":\"default\",\"value\":false},\"config_schema_version\":{\"origin\":\"default\",\"value\":1},\"debug_dump\":{\"origin\":\"default\",\"value\":null},\"log_level\":{\"origin\":\"default\",\"value\":null},\"memory.enabled\":{\"origin\":\"default\",\"value\":false},\"memory.profile\":{\"origin\":\"default\",\"value\":false},\"memory.selection\":{\"origin\":\"default\",\"value\":false},\"model\":{\"origin\":\"default\",\"value\":false},\"model_credential\":{\"origin\":\"default\",\"value\":false},\"paths.cache\":{\"origin\":\"default\",\"value\":true},\"paths.credentials\":{\"origin\":\"default\",\"value\":true},\"paths.data\":{\"origin\":\"default\",\"value\":true},\"personalization.enabled\":{\"origin\":\"default\",\"value\":false},\"personalization.schema_version\":{\"origin\":\"default\",\"value\":1},\"personalization.text\":{\"origin\":\"default\",\"value\":false},\"personalization.text_bytes\":{\"origin\":\"default\",\"value\":0},\"sync.batch_items\":{\"origin\":\"declared\",\"value\":1},\"sync.collection\":{\"origin\":\"default\",\"value\":false},\"sync.create_new\":{\"origin\":\"default\",\"value\":false},\"sync.enabled\":{\"origin\":\"default\",\"value\":false},\"sync.max_media_bytes\":{\"origin\":\"declared\",\"value\":0},\"sync.media\":{\"origin\":\"default\",\"value\":false},\"sync.namespaces\":{\"origin\":\"default\",\"value\":[]},\"sync.poll_seconds\":{\"origin\":\"declared\",\"value\":5},\"trigger_corner\":{\"origin\":\"default\",\"value\":null}},\"unsupported\":[\"reader-enablement\",\"writer-enablement\",\"retrieval-policy\",\"research-policy\",\"mem-destination\",\"handwriting-settings\"]}}\n",
+      "stdout_sha256": "0e60be742717fa9ca5d0090ff772b17db974499b1570ffd2b65442308bc42b9c",
+      "exit_code": 0,
+      "stderr_utf8": ""
+    },
+    {
+      "name": "unsupported-config-version",
+      "input": {
+        "utf8": "{\"config_schema_version\":2}"
+      },
+      "input_sha256": "259ce59b4c6470356dc6c5f4c13d72a521b96ab28fb82fdfa2dc2fce60458d2e",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"unsupported\",\"runtime_activation\":\"unverified\",\"snapshot\":null}\n",
+      "stdout_sha256": "9855923587781f44e2d13be142c6fa8c8c261949de56a846f32742296bc091e7",
+      "exit_code": 0,
+      "stderr_utf8": ""
+    },
+    {
+      "name": "unsupported-personalization-version",
+      "input": {
+        "utf8": "{\"personalization\":{\"schema_version\":2}}"
+      },
+      "input_sha256": "836a89f488e24a3c47a326823f4b8f3df55a1e7830413b860ba146a5398cf68f",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"unsupported\",\"runtime_activation\":\"unverified\",\"snapshot\":null}\n",
+      "stdout_sha256": "9855923587781f44e2d13be142c6fa8c8c261949de56a846f32742296bc091e7",
+      "exit_code": 0,
+      "stderr_utf8": ""
+    },
+    {
+      "name": "duplicate-null-model",
+      "input": {
+        "utf8": "{\"model\":null,\"model\":null}"
+      },
+      "input_sha256": "8d7300ca7db8735f8e22f7f5da6b28668b985066e1419c0fd1bdaf000ca482aa",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"invalid-input\",\"runtime_activation\":\"unverified\",\"snapshot\":null}\n",
+      "stdout_sha256": "bd6de3092319e80027c3c5a7685b893d87d6c91e709ee97b2eb6fbeb6bd13ab8",
+      "exit_code": 0,
+      "stderr_utf8": ""
+    },
+    {
+      "name": "duplicate-null-profile",
+      "input": {
+        "utf8": "{\"memory\":{\"profile\":null,\"profile\":null}}"
+      },
+      "input_sha256": "f78fd9326b15d24414c56c8a47546e4b7db27958200bab4eab6c4236a1be01e2",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"invalid-input\",\"runtime_activation\":\"unverified\",\"snapshot\":null}\n",
+      "stdout_sha256": "bd6de3092319e80027c3c5a7685b893d87d6c91e709ee97b2eb6fbeb6bd13ab8",
+      "exit_code": 0,
+      "stderr_utf8": ""
+    },
+    {
+      "name": "duplicate-null-collection",
+      "input": {
+        "utf8": "{\"sync\":{\"collection\":null,\"collection\":null}}"
+      },
+      "input_sha256": "dd0f18522cd2b27517b5c3a53f1e6ef6b2e6a514c7cdff77a23a8b2fe9d75f96",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"invalid-input\",\"runtime_activation\":\"unverified\",\"snapshot\":null}\n",
+      "stdout_sha256": "bd6de3092319e80027c3c5a7685b893d87d6c91e709ee97b2eb6fbeb6bd13ab8",
+      "exit_code": 0,
+      "stderr_utf8": ""
+    },
+    {
+      "name": "duplicate-nested-text",
+      "input": {
+        "utf8": "{\"personalization\":{\"text\":\"\",\"text\":\"\"}}"
+      },
+      "input_sha256": "4bb0c2ad2050e3882971d49141cfa32fc5e144f3c82a645f5249a292d7701078",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"invalid-input\",\"runtime_activation\":\"unverified\",\"snapshot\":null}\n",
+      "stdout_sha256": "bd6de3092319e80027c3c5a7685b893d87d6c91e709ee97b2eb6fbeb6bd13ab8",
+      "exit_code": 0,
+      "stderr_utf8": ""
+    },
+    {
+      "name": "duplicate-namespaces",
+      "input": {
+        "utf8": "{\"sync\":{\"namespaces\":[\"source\",\"source\"]}}"
+      },
+      "input_sha256": "39be3c6cdd91e24cd7479d7281148b90130a41b08cf32619c8c9c7c868f9ea79",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"invalid-input\",\"runtime_activation\":\"unverified\",\"snapshot\":null}\n",
+      "stdout_sha256": "bd6de3092319e80027c3c5a7685b893d87d6c91e709ee97b2eb6fbeb6bd13ab8",
+      "exit_code": 0,
+      "stderr_utf8": ""
+    },
+    {
+      "name": "unknown-root-field",
+      "input": {
+        "utf8": "{\"unknown-secret-sentinel\":\"hidden\"}"
+      },
+      "input_sha256": "316f376874d37b8bc80af80130276de26d3fbc4faf9336841dddad3b0ddf2ffe",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"invalid-input\",\"runtime_activation\":\"unverified\",\"snapshot\":null}\n",
+      "stdout_sha256": "bd6de3092319e80027c3c5a7685b893d87d6c91e709ee97b2eb6fbeb6bd13ab8",
+      "exit_code": 0,
+      "stderr_utf8": ""
+    },
+    {
+      "name": "unknown-nested-field",
+      "input": {
+        "utf8": "{\"personalization\":{\"unknown-secret-sentinel\":true}}"
+      },
+      "input_sha256": "5b63c182f89ad2be6c613e6ac3b5aaae4df5e2ae6fbf5a8c6aa74275a0c1568b",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"invalid-input\",\"runtime_activation\":\"unverified\",\"snapshot\":null}\n",
+      "stdout_sha256": "bd6de3092319e80027c3c5a7685b893d87d6c91e709ee97b2eb6fbeb6bd13ab8",
+      "exit_code": 0,
+      "stderr_utf8": ""
+    },
+    {
+      "name": "unknown-selection-field",
+      "input": {
+        "utf8": "{\"memory\":{\"selection\":{\"profile\":\"a138b641-a4aa-4ac3-b1d1-091ba27f1470\",\"group\":\"b2f1cc78-a8d8-4dc1-a3ce-a40cdff053ba\",\"binding_sha256\":\"a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5\",\"extra\":true}}}"
+      },
+      "input_sha256": "9a1f7654461754fc88237e7751dcddefbef0808bd973ce7b541fd83e114aef92",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"invalid-input\",\"runtime_activation\":\"unverified\",\"snapshot\":null}\n",
+      "stdout_sha256": "bd6de3092319e80027c3c5a7685b893d87d6c91e709ee97b2eb6fbeb6bd13ab8",
+      "exit_code": 0,
+      "stderr_utf8": ""
+    },
+    {
+      "name": "wrong-scalar-type",
+      "input": {
+        "utf8": "{\"debug_dump\":\"secret-sentinel\"}"
+      },
+      "input_sha256": "f6bdf5c29ae50502f318efd002c2280adb24b1bad91c577695de8e019ee5f542",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"invalid-input\",\"runtime_activation\":\"unverified\",\"snapshot\":null}\n",
+      "stdout_sha256": "bd6de3092319e80027c3c5a7685b893d87d6c91e709ee97b2eb6fbeb6bd13ab8",
+      "exit_code": 0,
+      "stderr_utf8": ""
+    },
+    {
+      "name": "partial-path-object",
+      "input": {
+        "utf8": "{\"paths\":{\"data\":\"/unopened\"}}"
+      },
+      "input_sha256": "1857ed15c2bc6bc1d924ca3c5728c8e9f70b887cc3d676c54adbe93e2afb38fb",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"invalid-input\",\"runtime_activation\":\"unverified\",\"snapshot\":null}\n",
+      "stdout_sha256": "bd6de3092319e80027c3c5a7685b893d87d6c91e709ee97b2eb6fbeb6bd13ab8",
+      "exit_code": 0,
+      "stderr_utf8": ""
+    },
+    {
+      "name": "null-object",
+      "input": {
+        "utf8": "{\"memory\":null}"
+      },
+      "input_sha256": "10328752727b49f9b533ec7338f86266b0730b606a8f1576b8f2a9e0aced7f44",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"invalid-input\",\"runtime_activation\":\"unverified\",\"snapshot\":null}\n",
+      "stdout_sha256": "bd6de3092319e80027c3c5a7685b893d87d6c91e709ee97b2eb6fbeb6bd13ab8",
+      "exit_code": 0,
+      "stderr_utf8": ""
+    },
+    {
+      "name": "media-over-bound",
+      "input": {
+        "utf8": "{\"sync\":{\"max_media_bytes\":268435457}}"
+      },
+      "input_sha256": "79797f338680b27d888a5f378e1b6e463596afe07bd7bd0e700a975ea5a0a009",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"invalid-input\",\"runtime_activation\":\"unverified\",\"snapshot\":null}\n",
+      "stdout_sha256": "bd6de3092319e80027c3c5a7685b893d87d6c91e709ee97b2eb6fbeb6bd13ab8",
+      "exit_code": 0,
+      "stderr_utf8": ""
+    },
+    {
+      "name": "unsafe-number",
+      "input": {
+        "utf8": "{\"sync\":{\"max_media_bytes\":9007199254740992}}"
+      },
+      "input_sha256": "ed364c65fffa06a088127e56b6ad1feb8d77644645b5ca9ad411664da40d219a",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"invalid-input\",\"runtime_activation\":\"unverified\",\"snapshot\":null}\n",
+      "stdout_sha256": "bd6de3092319e80027c3c5a7685b893d87d6c91e709ee97b2eb6fbeb6bd13ab8",
+      "exit_code": 0,
+      "stderr_utf8": ""
+    },
+    {
+      "name": "bad-sync-limits",
+      "input": {
+        "utf8": "{\"sync\":{\"poll_seconds\":4}}"
+      },
+      "input_sha256": "ebac232c4876a0ed84218ca42c3a345f229c2dda3befbec774e3b903296873f4",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"invalid-input\",\"runtime_activation\":\"unverified\",\"snapshot\":null}\n",
+      "stdout_sha256": "bd6de3092319e80027c3c5a7685b893d87d6c91e709ee97b2eb6fbeb6bd13ab8",
+      "exit_code": 0,
+      "stderr_utf8": ""
+    },
+    {
+      "name": "enabled-memory-without-profile",
+      "input": {
+        "utf8": "{\"memory\":{\"enabled\":true}}"
+      },
+      "input_sha256": "086e39af9460b21f155053255d913935ff8fb29883d3b467bc03639e6db8a7cf",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"invalid-input\",\"runtime_activation\":\"unverified\",\"snapshot\":null}\n",
+      "stdout_sha256": "bd6de3092319e80027c3c5a7685b893d87d6c91e709ee97b2eb6fbeb6bd13ab8",
+      "exit_code": 0,
+      "stderr_utf8": ""
+    },
+    {
+      "name": "selection-profile-mismatch",
+      "input": {
+        "utf8": "{\"memory\":{\"profile\":\"c173dd73-907b-44d6-a08b-402924459b2f\",\"selection\":{\"profile\":\"a138b641-a4aa-4ac3-b1d1-091ba27f1470\",\"group\":\"b2f1cc78-a8d8-4dc1-a3ce-a40cdff053ba\",\"binding_sha256\":\"a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5\"}}}"
+      },
+      "input_sha256": "c5ca5b155dba9bc6121e4c1511e40deef52d7f3907541bda581e156fffe13ba7",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"invalid-input\",\"runtime_activation\":\"unverified\",\"snapshot\":null}\n",
+      "stdout_sha256": "bd6de3092319e80027c3c5a7685b893d87d6c91e709ee97b2eb6fbeb6bd13ab8",
+      "exit_code": 0,
+      "stderr_utf8": ""
+    },
+    {
+      "name": "sync-memory-conflict",
+      "input": {
+        "utf8": "{\"memory\":{\"enabled\":true,\"profile\":\"a138b641-a4aa-4ac3-b1d1-091ba27f1470\"},\"sync\":{\"enabled\":true,\"namespaces\":[\"subject-memory\"]}}"
+      },
+      "input_sha256": "1ea72f078b8e3d7976483e2949b7ed8d7544ba2d016bb1856c2f98c818c46a2a",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"invalid-input\",\"runtime_activation\":\"unverified\",\"snapshot\":null}\n",
+      "stdout_sha256": "bd6de3092319e80027c3c5a7685b893d87d6c91e709ee97b2eb6fbeb6bd13ab8",
+      "exit_code": 0,
+      "stderr_utf8": ""
+    },
+    {
+      "name": "sync-selection-conflict",
+      "input": {
+        "utf8": "{\"memory\":{\"profile\":\"a138b641-a4aa-4ac3-b1d1-091ba27f1470\",\"selection\":{\"profile\":\"a138b641-a4aa-4ac3-b1d1-091ba27f1470\",\"group\":\"b2f1cc78-a8d8-4dc1-a3ce-a40cdff053ba\",\"binding_sha256\":\"a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5\"}},\"sync\":{\"enabled\":true}}"
+      },
+      "input_sha256": "585362f75273e8e2bf9602c9972e021c9496d21b2ea9a7dfd85bb13143745d37",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"invalid-input\",\"runtime_activation\":\"unverified\",\"snapshot\":null}\n",
+      "stdout_sha256": "bd6de3092319e80027c3c5a7685b893d87d6c91e709ee97b2eb6fbeb6bd13ab8",
+      "exit_code": 0,
+      "stderr_utf8": ""
+    },
+    {
+      "name": "create-without-collection",
+      "input": {
+        "utf8": "{\"sync\":{\"create_new\":true}}"
+      },
+      "input_sha256": "42792acdea7bb25b8c6ac3657db69e0e51fe9ce4adea6b5bf1b1a58afabcbcfc",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"invalid-input\",\"runtime_activation\":\"unverified\",\"snapshot\":null}\n",
+      "stdout_sha256": "bd6de3092319e80027c3c5a7685b893d87d6c91e709ee97b2eb6fbeb6bd13ab8",
+      "exit_code": 0,
+      "stderr_utf8": ""
+    },
+    {
+      "name": "nul-personalization",
+      "input": {
+        "utf8": "{\"personalization\":{\"text\":\"secret\\u0000sentinel\"}}"
+      },
+      "input_sha256": "6095784c2dd7802b23a095dcf46efef1152d5bdc07ad4c3050c2a9ba503fb6db",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"invalid-input\",\"runtime_activation\":\"unverified\",\"snapshot\":null}\n",
+      "stdout_sha256": "bd6de3092319e80027c3c5a7685b893d87d6c91e709ee97b2eb6fbeb6bd13ab8",
+      "exit_code": 0,
+      "stderr_utf8": ""
+    },
+    {
+      "name": "invalid-utf8",
+      "input": {
+        "base64": "/w=="
+      },
+      "input_sha256": "a8100ae6aa1940d0b663bb31cd466142ebbdbd5187131b92d93818987832eb89",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"invalid-input\",\"runtime_activation\":\"unverified\",\"snapshot\":null}\n",
+      "stdout_sha256": "bd6de3092319e80027c3c5a7685b893d87d6c91e709ee97b2eb6fbeb6bd13ab8",
+      "exit_code": 0,
+      "stderr_utf8": ""
+    },
+    {
+      "name": "trailing-json",
+      "input": {
+        "utf8": "{} {}"
+      },
+      "input_sha256": "2cec2bbf1a64ea5249e8a7ab9ecc782fa48be13f0b35ad5f52bdea741841a230",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"invalid-input\",\"runtime_activation\":\"unverified\",\"snapshot\":null}\n",
+      "stdout_sha256": "bd6de3092319e80027c3c5a7685b893d87d6c91e709ee97b2eb6fbeb6bd13ab8",
+      "exit_code": 0,
+      "stderr_utf8": ""
+    },
+    {
+      "name": "exact-input-cap",
+      "input": {
+        "prefix_utf8": "{}",
+        "padding_byte": 32,
+        "total_bytes": 1048576
+      },
+      "input_sha256": "f2eb6b7a8c36cfb7376f4c0b1ef4f2dd725566e4489d69ed3e85d889b3df16db",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"runtime_activation\":\"unverified\",\"snapshot\":{\"schema_version\":1,\"config_sha256\":\"f2eb6b7a8c36cfb7376f4c0b1ef4f2dd725566e4489d69ed3e85d889b3df16db\",\"byte_basis\":\"saved-file-bytes\",\"validation_basis\":\"typed-values-only\",\"declared_roots_validated\":false,\"fields\":{\"base_url\":{\"origin\":\"default\",\"value\":false},\"config_schema_version\":{\"origin\":\"default\",\"value\":1},\"debug_dump\":{\"origin\":\"default\",\"value\":null},\"log_level\":{\"origin\":\"default\",\"value\":null},\"memory.enabled\":{\"origin\":\"default\",\"value\":false},\"memory.profile\":{\"origin\":\"default\",\"value\":false},\"memory.selection\":{\"origin\":\"default\",\"value\":false},\"model\":{\"origin\":\"default\",\"value\":false},\"model_credential\":{\"origin\":\"default\",\"value\":false},\"paths.cache\":{\"origin\":\"default\",\"value\":true},\"paths.credentials\":{\"origin\":\"default\",\"value\":true},\"paths.data\":{\"origin\":\"default\",\"value\":true},\"personalization.enabled\":{\"origin\":\"default\",\"value\":false},\"personalization.schema_version\":{\"origin\":\"default\",\"value\":1},\"personalization.text\":{\"origin\":\"default\",\"value\":false},\"personalization.text_bytes\":{\"origin\":\"default\",\"value\":0},\"sync.batch_items\":{\"origin\":\"default\",\"value\":32},\"sync.collection\":{\"origin\":\"default\",\"value\":false},\"sync.create_new\":{\"origin\":\"default\",\"value\":false},\"sync.enabled\":{\"origin\":\"default\",\"value\":false},\"sync.max_media_bytes\":{\"origin\":\"default\",\"value\":33554432},\"sync.media\":{\"origin\":\"default\",\"value\":false},\"sync.namespaces\":{\"origin\":\"default\",\"value\":[]},\"sync.poll_seconds\":{\"origin\":\"default\",\"value\":60},\"trigger_corner\":{\"origin\":\"default\",\"value\":null}},\"unsupported\":[\"reader-enablement\",\"writer-enablement\",\"retrieval-policy\",\"research-policy\",\"mem-destination\",\"handwriting-settings\"]}}\n",
+      "stdout_sha256": "a8f4a2739a4c2033e9a68b9633cd8aa7ac08cd226fbc432bd6949ad7abf8b6fc",
+      "exit_code": 0,
+      "stderr_utf8": ""
+    },
+    {
+      "name": "over-input-cap",
+      "input": {
+        "prefix_utf8": "{}",
+        "padding_byte": 32,
+        "total_bytes": 1048577
+      },
+      "input_sha256": "c9045bb89626e0dca74ced4e7d4be1288135b0644072783146d05ca487456368",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"unavailable\",\"runtime_activation\":\"unverified\",\"snapshot\":null}\n",
+      "stdout_sha256": "78d768d11c65f7d015bbfdb886bcc4de39a7bd5e844e46efc357fec1017879ca",
+      "exit_code": 0,
+      "stderr_utf8": ""
+    }
+  ]
+}

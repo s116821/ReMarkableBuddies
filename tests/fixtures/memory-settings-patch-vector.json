@@ -1,0 +1,17 @@
+{
+  "source": "Independent Python reference; synthetic declaration strings, not producer execution",
+  "changes": {
+    "profile": {
+      "value": "123E4567-E89B-12D3-A456-426614174000",
+      "action": "set"
+    },
+    "enabled": {
+      "value": true,
+      "action": "set"
+    }
+  },
+  "canonical_patch_utf8": "{\"enabled\":{\"action\":\"set\",\"value\":true},\"profile\":{\"action\":\"set\",\"value\":\"123E4567-E89B-12D3-A456-426614174000\"}}",
+  "canonical_patch_bytes": 115,
+  "prefixed_bytes": 163,
+  "changes_sha256": "eb760e429bd11cdebf432a7dbb2f43588474e78112b042d244fd671d188dec0d"
+}

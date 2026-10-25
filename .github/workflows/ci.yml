@@ -21,12 +21,26 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       application: ${{ steps.paths.outputs.application }}
+      body_only: ${{ steps.metadata.outputs.body_only }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Classify only exact body edits as metadata
+        id: metadata
+        shell: bash
+        run: |
+          jq --version
+          body_only="$(jq -r '
+            if .action == "edited" and (.changes | type) == "object" then
+              .changes | if keys == ["body"] and (.body | type) == "object" then
+                .body | keys == ["from"] and (.from | type) == "string"
+              else false end
+            else false end
+          ' "$GITHUB_EVENT_PATH")"
+          printf 'body_only=%s\n' "$body_only" >> "$GITHUB_OUTPUT"
       - name: Refuse an incomplete PR file inventory
         if: github.event_name == 'pull_request' && (github.event.pull_request.changed_files <= 0 || github.event.pull_request.changed_files >= 3000)
         run: exit 1
@@ -61,7 +75,7 @@ jobs:
           requireScope: true
         if: github.event_name == 'pull_request' && steps.paths.outputs.application != 'true'
   checks:
-    name: Checks
+    name: ${{ needs.title.outputs.body_only == 'true' && 'PR metadata (no source checks)' || 'Checks' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -118,9 +132,10 @@ jobs:
     outputs:
       application: ${{ github.event_name == 'pull_request' && needs.title.outputs.application || steps.paths.outputs.application }}
     needs: title
-    if: "!cancelled() && (github.event_name == 'push' || needs.title.result == 'success')"
+    if: "!cancelled() && (github.event_name == 'push' || needs.title.result == 'success') && needs.title.outputs.body_only != 'true'"
   application:
-    needs: checks
+    name: ${{ needs.title.outputs.body_only == 'true' && 'PR metadata (no artifact jobs)' || 'application' }}
+    needs: [title, checks]
     if: "!cancelled() && needs.checks.result == 'success' && needs.checks.outputs.application == 'true'"
     uses: ./.github/workflows/pipeline.yml
     permissions:

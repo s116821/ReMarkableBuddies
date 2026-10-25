@@ -1,10 +1,16 @@
 pub mod analysis;
+pub mod archive_maintenance;
 pub mod config;
 pub mod conversation;
+pub mod conversation_feedback;
+pub mod conversation_layout;
 pub mod device;
 pub mod llm;
 mod measurement;
+pub mod memory;
+pub mod mode_maintenance;
 pub mod note_export;
+pub mod restore_maintenance;
 pub mod retrieval;
 pub mod simulator;
 pub mod storage;
@@ -23,3 +29,11 @@ pub use device::{
 };
 pub use llm::{openai::OpenAI, LLMEngine};
 pub use workflow::{orchestrator::Orchestrator, Workflow};
+
+pub mod ordinary_export_maintenance;
+
+pub mod source_cache_maintenance;
+
+pub mod source_cache_inventory;
+
+pub mod conversation_maintenance;

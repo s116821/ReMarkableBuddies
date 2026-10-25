@@ -42,6 +42,41 @@ impl Store {
     /// Retains one lease through caller maintenance. Does not create directories,
     /// repair markers, clean staging, publish capabilities or initialize a store.
     pub fn open_existing(paths: StorePaths) -> Result<Self, Refusal> {
+        Self::open_existing_inner(paths, false)
+    }
+    /// Opt-in mode maintenance only. Preserve legacy callers' format refusal.
+    pub(crate) fn open_existing_for_mode(paths: StorePaths) -> Result<Self, Refusal> {
+        Self::open_existing_inner(paths, true)
+    }
+    /// Selected archive custody only; no initialization or restore admission.
+    pub(crate) fn open_existing_for_archive(paths: StorePaths) -> Result<Self, Refusal> {
+        Self::open_existing_inner(paths, true)
+    }
+    /// Explicit configuration publication only; never initialize or activate a mode.
+    pub(crate) fn open_existing_for_config(paths: StorePaths) -> Result<Self, Refusal> {
+        Self::open_existing_inner(paths, true)
+    }
+    pub(super) fn open_existing_for_conversation(
+        paths: StorePaths,
+        admit: impl FnOnce(&StorePaths, &std::fs::File) -> anyhow::Result<()>,
+        recover: impl FnOnce(&Store, Uuid) -> anyhow::Result<super::Index>,
+    ) -> Result<Self, Refusal> {
+        Self::open_existing_using(paths, false, admit, recover)
+    }
+    fn open_existing_inner(paths: StorePaths, selected_aware: bool) -> Result<Self, Refusal> {
+        Self::open_existing_using(
+            paths,
+            selected_aware,
+            |_, _| Ok(()),
+            |store, generation| store.recover(generation),
+        )
+    }
+    fn open_existing_using(
+        paths: StorePaths,
+        selected_aware: bool,
+        admit: impl FnOnce(&StorePaths, &std::fs::File) -> anyhow::Result<()>,
+        recover: impl FnOnce(&Store, Uuid) -> anyhow::Result<super::Index>,
+    ) -> Result<Self, Refusal> {
         paths.validate().map_err(|_| Refusal::Unsupported)?;
         directory(&paths.data)?;
         let lock_path = paths.data.join("store.lock");
@@ -61,6 +96,7 @@ impl Store {
         })?;
         // Unlock even if validation fails before a Store can be constructed.
         let lease = Lease(lease);
+        admit(&paths, &lease.0).map_err(|_| Refusal::Unsupported)?;
         let identity: Identity = record(&paths.data.join("identity.json"), MAX_RECORD as u64)?;
         if identity.format != FORMAT || identity.actor.is_nil() {
             return Err(Refusal::Unsupported);
@@ -87,7 +123,10 @@ impl Store {
         ] {
             directory(path)?;
         }
-        if record::<u32>(&generation_root.join("format.json"), 64)? != FORMAT {
+        if selected_aware {
+            super::selection::validate_generation(&generation_root, identity.actor, generation)
+                .map_err(|_| Refusal::Unsupported)?;
+        } else if record::<u32>(&generation_root.join("format.json"), 64)? != FORMAT {
             return Err(Refusal::Unsupported);
         }
         let store = Self {
@@ -98,14 +137,15 @@ impl Store {
                 generation,
                 index: Default::default(),
                 fault: Fault::None,
+                legacy_sync_handles: 0,
+                mode_handles: 0,
+                legacy_publisher_handles: 0,
             }),
             wake: Mutex::new(None),
             export_active: std::sync::atomic::AtomicBool::new(false),
             writer_active: std::sync::atomic::AtomicBool::new(false),
         };
-        let index = store
-            .recover(generation)
-            .map_err(|_| Refusal::Unsupported)?;
+        let index = recover(&store, generation).map_err(|_| Refusal::Unsupported)?;
         if index.unavailable != 0 {
             return Err(Refusal::Unsupported);
         }
