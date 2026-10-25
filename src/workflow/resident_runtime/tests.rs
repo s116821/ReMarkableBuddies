@@ -1,0 +1,335 @@
+use super::*;
+use crate::storage::{StorePaths, Uuid as StoreUuid};
+use remarkable_open_sdk::native_adapter::{Rejection, Reply};
+
+struct Fixture(PathBuf);
+impl Fixture {
+    fn new() -> Self {
+        let path = std::env::temp_dir().join(format!("rsdk-{}", StoreUuid::new_v4().simple()));
+        DirBuilder::new().mode(0o700).create(&path).unwrap();
+        for name in ["profile", "adapter"] {
+            let mut file = create_private(&path.join(name)).unwrap();
+            file.write_all(name.as_bytes()).unwrap();
+        }
+        Self(path)
+    }
+    fn store(&self) -> Arc<Store> {
+        Arc::new(
+            Store::open(StorePaths {
+                data: self.0.join("data"),
+                cache: self.0.join("cache"),
+                credentials: self.0.join("credentials"),
+            })
+            .unwrap(),
+        )
+    }
+    fn launch(&self) -> Launch {
+        let artifact = |path: PathBuf| Artifact {
+            sha256: Sha256::digest(fs::read(&path).unwrap()).into(),
+            path,
+        };
+        Launch {
+            profile: artifact(self.0.join("profile")),
+            executable: artifact(
+                fs::canonicalize("/usr/bin/python3")
+                    .expect("Linux runtime fixtures require Python3"),
+            ),
+            adapter: artifact(self.0.join("adapter")),
+            directory: self.0.join("run"),
+            environment: BTreeMap::from([("LANG".into(), "C".into())]),
+            operation_budget_ms: 1000,
+        }
+    }
+    fn start(
+        &self,
+        mode: &str,
+        timeout: Duration,
+    ) -> std::result::Result<ResidentRuntime, StartupFailure> {
+        ResidentRuntime::launch_inner(
+            self.store(),
+            self.launch(),
+            Instant::now() + timeout,
+            |command| {
+                // Owned protocol fixture, explicitly no actual LD_PRELOAD/native code.
+                command
+                    .env_remove("LD_PRELOAD")
+                    .arg("-S")
+                    .arg("-c")
+                    .arg(include_str!(
+                        "../../../tests/fixtures/resident_runtime_child.py"
+                    ))
+                    .arg(mode);
+            },
+        )
+    }
+    fn preserved_and_reaped(&self, failure: StartupFailure) {
+        let report = failure.shutdown.expect("child was launched");
+        assert!(report.reaped, "{report:?}");
+        assert!(!Path::new(&format!("/proc/{}", report.pid)).exists());
+        for name in [
+            "admission.bin",
+            "stdout.log",
+            "stderr.log",
+            "shutdown.txt",
+            "reader",
+            "adapter.so",
+            "profile.json",
+        ] {
+            assert!(self.0.join("run").join(name).is_file(), "missing {name}");
+        }
+    }
+}
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn real_child_consumes_exact_admission_connects_once_and_is_reaped() {
+    let fixture = Fixture::new();
+    let mut runtime = fixture.start("ready", Duration::from_secs(5)).unwrap();
+    let identity = runtime.identity().clone();
+    assert_ne!(identity.pid, std::process::id());
+    assert_eq!(process_start(identity.pid).unwrap(), identity.start_ticks);
+    let reply = runtime
+        .connection()
+        .unwrap()
+        .observe(
+            OperationId(nonce()),
+            Instant::now() + Duration::from_secs(2),
+        )
+        .unwrap();
+    assert_eq!(reply, Reply::Rejected(Rejection::Unsupported));
+    let root = runtime.evidence_directory().to_owned();
+    assert_eq!(fs::metadata(&root).unwrap().mode() & 0o7777, 0o700);
+    assert_eq!(
+        fs::metadata(root.join("admission.bin")).unwrap().mode() & 0o7777,
+        0o600
+    );
+    assert_eq!(
+        fs::metadata(root.join("reader")).unwrap().mode() & 0o7777,
+        0o500
+    );
+    assert_eq!(
+        fs::metadata(root.join("adapter.so")).unwrap().mode() & 0o7777,
+        0o400
+    );
+    assert_eq!(fs::metadata(root.join("admission.bin")).unwrap().nlink(), 2);
+    assert_eq!(fs::read(root.join("handshakes")).unwrap(), b"1");
+    let report = runtime.shutdown(Instant::now() + Duration::from_secs(1));
+    assert!(report.reaped && report.error.is_none(), "{report:?}");
+    assert_eq!(report.lost, LostRequest::NoPendingMutation);
+    assert!(!Path::new(&format!("/proc/{}", identity.pid)).exists());
+    assert!(root.join("admission.consumed").exists());
+    assert!(
+        fixture.start("ready", Duration::from_secs(5)).is_err(),
+        "never reuse consumed directory"
+    );
+}
+
+#[test]
+fn startup_faults_keep_evidence_and_stop_only_the_owned_child() {
+    for mode in [
+        "exit",
+        "no-socket",
+        "late-ready",
+        "no-consume",
+        "replaced-admission",
+        "bad-ready",
+    ] {
+        let fixture = Fixture::new();
+        let started = Instant::now();
+        let result = fixture.start(mode, Duration::from_millis(800));
+        let failure = match result {
+            Err(error) => error,
+            Ok(_) => panic!("unexpected success: {mode}"),
+        };
+        fixture.preserved_and_reaped(failure);
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "startup/cleanup must not renew: {mode}"
+        );
+        assert!(Path::new(&format!("/proc/{}", std::process::id())).exists());
+    }
+}
+
+#[test]
+fn wrong_artifact_and_loader_environment_refuse_before_launch() {
+    let fixture = Fixture::new();
+    let mut input = fixture.launch();
+    input.adapter.sha256 = [1; 32];
+    let failure = ResidentRuntime::launch(
+        fixture.store(),
+        input,
+        Instant::now() + Duration::from_secs(5),
+    )
+    .err()
+    .unwrap();
+    assert!(failure.shutdown.is_none());
+    assert!(!fixture.0.join("run/admission.bin").exists());
+    for key in [
+        "LD_AUDIT",
+        "LD_LIBRARY_PATH",
+        "LD_PRELOAD",
+        "QML_IMPORT_PATH",
+        "QT_PLUGIN_PATH",
+    ] {
+        let fixture = Fixture::new();
+        let mut input = fixture.launch();
+        input.environment.insert(key.into(), "/unapproved".into());
+        assert!(ResidentRuntime::launch(
+            fixture.store(),
+            input,
+            Instant::now() + Duration::from_secs(5)
+        )
+        .is_err());
+        assert!(!fixture.0.join("run").exists());
+    }
+}
+
+#[test]
+fn source_replacement_after_copy_cannot_change_launched_bytes() {
+    let fixture = Fixture::new();
+    let input = fixture.launch();
+    let adapter_hash = input.adapter.sha256;
+    let mut prepared = Prepared::new(input, Instant::now() + Duration::from_secs(5)).unwrap();
+    fs::rename(fixture.0.join("adapter"), fixture.0.join("old-adapter")).unwrap();
+    fs::write(fixture.0.join("adapter"), b"replacement").unwrap();
+    prepared.current(false).unwrap();
+    assert_eq!(
+        <[u8; 32]>::from(Sha256::digest(
+            fs::read(&prepared.artifacts[2].path).unwrap()
+        )),
+        adapter_hash
+    );
+    assert_eq!(
+        prepared.command.get_program(),
+        prepared.artifacts[1].path.as_os_str()
+    );
+    assert!(prepared
+        .command
+        .get_envs()
+        .all(|(name, _)| name != "LD_AUDIT" && name != "LD_LIBRARY_PATH"));
+    // Replacement of a private launch copy, unlike source replacement, refuses.
+    fs::rename(
+        fixture.0.join("run/adapter.so"),
+        fixture.0.join("run/old-adapter.so"),
+    )
+    .unwrap();
+    fs::write(fixture.0.join("run/adapter.so"), b"replacement").unwrap();
+    assert!(prepared.current(false).is_err());
+}
+
+#[test]
+fn dropping_the_owner_closes_and_reaps_the_child() {
+    let fixture = Fixture::new();
+    let runtime = fixture.start("ready", Duration::from_secs(5)).unwrap();
+    let pid = runtime.identity().pid;
+    drop(runtime);
+    assert!(!Path::new(&format!("/proc/{pid}")).exists());
+    assert!(fixture.0.join("run/shutdown.txt").is_file());
+}
+
+#[test]
+fn effect_publication_loss_stays_original_through_close_and_runtime_shutdown() {
+    use remarkable_open_sdk::{
+        native_adapter::{ReaderFacts, SelectAdjacent},
+        PageKey,
+    };
+    for after in [false, true] {
+        let fixture = Fixture::new();
+        let mut runtime = fixture.start("selection", Duration::from_secs(5)).unwrap();
+        let page = PageKey {
+            document: nonce(),
+            page: nonce(),
+        };
+        let selection = SelectAdjacent {
+            expected: ReaderFacts::new(page, vec![page.page]).unwrap(),
+            target: page.page,
+        };
+        let original = OperationId(nonce());
+        resident_client::fail_next_outcome_publication(after);
+        let failure = runtime
+            .connection()
+            .unwrap()
+            .select_adjacent(
+                StoreUuid::new_v4(),
+                original,
+                selection.clone(),
+                Instant::now() + Duration::from_secs(2),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(failure.lost, LostRequest::Indeterminate { operation, .. } if operation == original)
+        );
+        assert_eq!(runtime.connection.as_mut().unwrap().close(), failure.lost);
+        let repeated = runtime
+            .connection
+            .as_mut()
+            .unwrap()
+            .select_adjacent(
+                StoreUuid::new_v4(),
+                OperationId(nonce()),
+                selection,
+                Instant::now() + Duration::from_secs(2),
+            )
+            .unwrap_err();
+        assert_eq!(repeated.lost, failure.lost);
+        let report = runtime.shutdown(Instant::now() + Duration::from_secs(1));
+        assert!(report.reaped, "{report:?}");
+        assert_eq!(report.lost, failure.lost);
+        let attempts = resident_client::attempts(&fixture.store()).unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].request.frame().operation, original);
+        assert_eq!(attempts[0].reply.is_some(), after);
+    }
+}
+
+#[test]
+fn preload_separators_and_excessive_deadline_refuse_before_directory_creation() {
+    for name in [
+        "space name",
+        "colon:name",
+        "tab\tname",
+        "trailing/",
+        "$ORIGIN",
+        "${LIB}",
+    ] {
+        let fixture = Fixture::new();
+        let mut input = fixture.launch();
+        input.directory = fixture.0.join(name);
+        assert!(ResidentRuntime::launch(
+            fixture.store(),
+            input,
+            Instant::now() + Duration::from_secs(5)
+        )
+        .is_err());
+        assert!(!fixture.0.join(name).exists());
+    }
+    let fixture = Fixture::new();
+    assert!(ResidentRuntime::launch(
+        fixture.store(),
+        fixture.launch(),
+        Instant::now() + Duration::from_secs(61)
+    )
+    .is_err());
+    assert!(!fixture.0.join("run").exists());
+}
+
+#[test]
+fn replaced_directory_refuses_connection_and_cleanup_stays_in_the_owned_inode() {
+    let fixture = Fixture::new();
+    let mut runtime = fixture.start("ready", Duration::from_secs(5)).unwrap();
+    let old = fixture.0.join("original-run");
+    fs::rename(fixture.0.join("run"), &old).unwrap();
+    DirBuilder::new()
+        .mode(0o700)
+        .create(fixture.0.join("run"))
+        .unwrap();
+    assert!(runtime.connection().is_err());
+    let report = runtime.shutdown(Instant::now() + Duration::from_secs(1));
+    assert!(report.reaped && report.error.is_none(), "{report:?}");
+    assert!(old.join("shutdown.txt").exists());
+    assert_eq!(fs::read_dir(fixture.0.join("run")).unwrap().count(), 0);
+}

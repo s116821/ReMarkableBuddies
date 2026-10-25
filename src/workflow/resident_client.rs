@@ -37,6 +37,17 @@ fn publication_fault(point: PublicationPoint) -> Result<()> {
     })
 }
 
+#[cfg(all(test, target_os = "linux"))]
+pub(super) fn fail_next_outcome_publication(after: bool) {
+    PUBLICATION_FAULT.with(|fault| {
+        fault.set(Some(if after {
+            PublicationPoint::AfterOutcome
+        } else {
+            PublicationPoint::Outcome
+        }))
+    });
+}
+
 #[derive(Clone, Debug)]
 pub struct HistoricalAttempt {
     pub conversation: Uuid,
@@ -367,6 +378,9 @@ mod linux {
     pub struct ResidentConnection {
         client: Client,
         store: Arc<Store>,
+        // A reply-retention failure happens after SDK response correlation has
+        // retired its pending request. Keep that original uncertainty here too.
+        retention_loss: Option<LostRequest>,
     }
     impl ResidentConnection {
         /// Supervisor must independently verify artifacts/runtime and supply a
@@ -383,7 +397,11 @@ mod linux {
             attempts(&store)?;
             let client = Client::connect(directory, uid, scope, handshake, deadline)
                 .map_err(|error| anyhow::anyhow!("resident connection refused: {error:?}"))?;
-            Ok(Self { client, store })
+            Ok(Self {
+                client,
+                store,
+                retention_loss: None,
+            })
         }
         pub fn observe(&mut self, operation: OperationId, deadline: Instant) -> Result<Reply> {
             self.client
@@ -453,12 +471,14 @@ mod linux {
                     });
                     if let Err(error) = recorded {
                         self.client.close();
+                        let lost = LostRequest::Indeterminate {
+                            operation,
+                            request_sha256: request.fingerprint().unwrap(),
+                        };
+                        self.retention_loss = Some(lost.clone());
                         return Err(EffectFailure {
                             operation,
-                            lost: LostRequest::Indeterminate {
-                                operation,
-                                request_sha256: request.fingerprint().unwrap(),
-                            },
+                            lost,
                             detail: format!("native reply retention failed: {error}"),
                         });
                     }
@@ -479,7 +499,7 @@ mod linux {
                     }
                     Err(EffectFailure {
                         operation,
-                        lost: error.lost,
+                        lost: self.retention_loss.clone().unwrap_or(error.lost),
                         detail,
                     })
                 }
@@ -540,7 +560,8 @@ mod linux {
                 .map_err(|error| anyhow::anyhow!("resident reconciliation failed: {error:?}"))
         }
         pub fn close(&mut self) -> LostRequest {
-            self.client.close()
+            let lost = self.client.close();
+            self.retention_loss.clone().unwrap_or(lost)
         }
     }
 }

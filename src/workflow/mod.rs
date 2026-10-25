@@ -5,6 +5,8 @@ mod navigation;
 pub mod orchestrator;
 mod reader_attempt;
 pub mod resident_client;
+#[cfg(target_os = "linux")]
+pub mod resident_runtime;
 pub mod sdk_acquisition;
 pub mod sdk_buddy_decision;
 pub mod selected_buddy;
