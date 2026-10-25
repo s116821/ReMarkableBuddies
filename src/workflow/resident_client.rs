@@ -1,13 +1,13 @@
-//! Durable resident insertion attempts, distinct from qualified page bindings.
+//! Durable resident insertion/selection attempts, distinct from qualified page bindings.
 //! Native replies remain historical. No runtime activation or Reader write path
 //! is installed by this module; Supervisor and acquisition qualification remain
 //! separate. Stored attempts never refresh synthetic Platform observations.
 use crate::storage::{files, Store, Uuid};
 use anyhow::{bail, ensure, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
-#[cfg(any(target_os = "linux", test))]
-use remarkable_open_sdk::native_adapter::Frame;
-use remarkable_open_sdk::native_adapter::{Command, HistoricalFrame, Message, Reply, MAX_FRAME};
+use remarkable_open_sdk::native_adapter::{
+    Command, Frame, HistoricalFrame, Message, Reply, MAX_FRAME,
+};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -133,15 +133,20 @@ fn validate_reply(original: &HistoricalFrame, response: &HistoricalFrame) -> Res
         original.fingerprint() == *request_sha256,
         "native reply digest mismatch"
     );
-    let Message::Request(Command::InsertAfter(insertion)) = &request.message else {
-        bail!("expected native insertion")
+    let Message::Request(command @ (Command::InsertAfter(_) | Command::SelectAdjacent(_))) =
+        &request.message
+    else {
+        bail!("expected native effect")
     };
-    match reply {
-        Reply::Rejected(_) | Reply::Indeterminate => {}
-        Reply::InsertionObserved {
-            target,
-            after_order,
-        } => {
+    match (command, reply) {
+        (_, Reply::Rejected(_) | Reply::Indeterminate) => {}
+        (
+            Command::InsertAfter(insertion),
+            Reply::InsertionObserved {
+                target,
+                after_order,
+            },
+        ) => {
             ensure!(
                 target.document == insertion.source.page().document
                     && target.page == insertion.target
@@ -149,7 +154,15 @@ fn validate_reply(original: &HistoricalFrame, response: &HistoricalFrame) -> Res
                 "native insertion reply mismatch"
             );
         }
-        _ => bail!("wrong native insertion response"),
+        (Command::SelectAdjacent(selection), Reply::TargetObserved(actual)) => {
+            ensure!(
+                actual.page().document == selection.expected.page().document
+                    && actual.page().page == selection.target
+                    && actual.order() == selection.expected.order(),
+                "native selection reply mismatch"
+            );
+        }
+        _ => bail!("wrong native effect response"),
     }
     Ok(reply.clone())
 }
@@ -160,9 +173,9 @@ impl Attempt {
         ensure!(
             matches!(
                 request.frame().message,
-                Message::Request(Command::InsertAfter(_))
+                Message::Request(Command::InsertAfter(_) | Command::SelectAdjacent(_))
             ),
-            "journal contains non-insertion"
+            "journal contains non-effect"
         );
         ensure!(
             crate::storage::digest(request.encoded()) == self.sha256,
@@ -184,11 +197,24 @@ impl HistoricalAttempt {
     fn known_no_effect(&self) -> bool {
         self.known_not_dispatched || matches!(self.reply, Some(Reply::Rejected(_)))
     }
+    fn permits_followup(&self, next: &Frame) -> bool {
+        if self.known_no_effect() {
+            return true;
+        }
+        let target = match &self.reply {
+            Some(Reply::InsertionObserved { target, .. }) => *target,
+            Some(Reply::TargetObserved(facts)) => facts.page(),
+            _ => return false,
+        };
+        matches!(&next.message,
+            Message::Request(Command::SelectAdjacent(selection))
+            if selection.expected.page().document == target.document && selection.target == target.page)
+    }
 }
 impl State {
     fn validate(&self, actor: Uuid) -> Result<Vec<HistoricalAttempt>> {
         ensure!(
-            self.format == 1 && self.actor == actor && !actor.is_nil(),
+            matches!(self.format, 1 | 2) && self.actor == actor && !actor.is_nil(),
             "native journal owner/schema mismatch"
         );
         ensure!(
@@ -196,20 +222,30 @@ impl State {
             "native journal capacity exceeded"
         );
         let mut operations = std::collections::HashSet::new();
-        let mut reserved = std::collections::HashSet::new();
-        let mut history = Vec::new();
+        let mut reserved = std::collections::HashMap::<Uuid, usize>::new();
+        let mut history: Vec<HistoricalAttempt> = Vec::new();
         for attempt in &self.attempts {
             let value = attempt.historical()?;
+            ensure!(
+                self.format == 2
+                    || matches!(
+                        value.request.frame().message,
+                        Message::Request(Command::InsertAfter(_))
+                    ),
+                "selection requires native journal format 2"
+            );
             ensure!(
                 operations.insert(value.request.frame().operation),
                 "duplicate native operation"
             );
-            ensure!(
-                !reserved.contains(&value.conversation),
-                "native attempt follows unresolved conversation"
-            );
+            if let Some(index) = reserved.get(&value.conversation) {
+                ensure!(
+                    history[*index].permits_followup(value.request.frame()),
+                    "native attempt violates prior conversation reservation"
+                );
+            }
             if !value.known_no_effect() {
-                reserved.insert(value.conversation);
+                reserved.insert(value.conversation, history.len());
             }
             history.push(value);
         }
@@ -221,7 +257,7 @@ fn load(path: &Path, actor: Uuid) -> Result<State> {
     let state = match std::fs::symlink_metadata(path) {
         Ok(_) => files::json(path, MAX_JOURNAL as u64)?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => State {
-            format: 1,
+            format: 2,
             actor,
             attempts: Vec::new(),
         },
@@ -273,10 +309,11 @@ fn reserve(store: &Store, conversation: Uuid, request: &Frame, expected: [u8; 32
                 "native operation already consumed"
             );
             ensure!(
-                prior.conversation != conversation || prior.known_no_effect(),
+                prior.conversation != conversation || prior.permits_followup(request),
                 "native conversation requires original-target reconciliation"
             );
         }
+        state.format = 2;
         state.attempts.push(attempt);
         #[cfg(test)]
         publication_fault(PublicationPoint::Reservation)?;
@@ -299,6 +336,7 @@ fn finish(store: &Store, request: &Frame, outcome: Outcome) -> Result<()> {
             "native outcome already recorded"
         );
         attempt.outcome = outcome;
+        state.format = 2;
         #[cfg(test)]
         publication_fault(PublicationPoint::Outcome)?;
         persist(&path, &state)?;
@@ -312,17 +350,20 @@ fn finish(store: &Store, request: &Frame, outcome: Outcome) -> Result<()> {
 mod linux {
     use super::*;
     use remarkable_open_sdk::{
-        native_adapter::{transport::Client, ConnectionIdentity, InsertAfter, LostRequest},
+        native_adapter::{
+            transport::Client, ConnectionIdentity, InsertAfter, LostRequest, SelectAdjacent,
+        },
         OperationId,
     };
     use std::{fs::File, sync::Arc, time::Instant};
 
     #[derive(Debug)]
-    pub struct InsertionFailure {
+    pub struct EffectFailure {
         pub operation: OperationId,
         pub lost: LostRequest,
         pub detail: String,
     }
+    pub type InsertionFailure = EffectFailure;
     pub struct ResidentConnection {
         client: Client,
         store: Arc<Store>,
@@ -358,18 +399,45 @@ mod linux {
             insertion: InsertAfter,
             deadline: Instant,
         ) -> std::result::Result<Reply, InsertionFailure> {
-            let mut original = None;
-            let result = self.client.execute(
+            self.execute_effect(
+                conversation,
                 operation,
                 Command::InsertAfter(insertion),
                 deadline,
-                |frame, hash| {
+            )
+        }
+        /// Selection needs a qualified current/adjacent reuse decision. A stored
+        /// success is historical evidence, never a fresh capture or write lease.
+        pub fn select_adjacent(
+            &mut self,
+            conversation: Uuid,
+            operation: OperationId,
+            selection: SelectAdjacent,
+            deadline: Instant,
+        ) -> std::result::Result<Reply, EffectFailure> {
+            self.execute_effect(
+                conversation,
+                operation,
+                Command::SelectAdjacent(selection),
+                deadline,
+            )
+        }
+        fn execute_effect(
+            &mut self,
+            conversation: Uuid,
+            operation: OperationId,
+            command: Command,
+            deadline: Instant,
+        ) -> std::result::Result<Reply, EffectFailure> {
+            let mut original = None;
+            let result = self
+                .client
+                .execute(operation, command, deadline, |frame, hash| {
                     reserve(&self.store, conversation, frame, hash)
                         .map_err(std::io::Error::other)?;
                     original = Some(frame.clone());
                     Ok(())
-                },
-            );
+                });
             match result {
                 Ok(reply) => {
                     let request = original.expect("SDK cannot reply before journal callback");
@@ -385,7 +453,7 @@ mod linux {
                     });
                     if let Err(error) = recorded {
                         self.client.close();
-                        return Err(InsertionFailure {
+                        return Err(EffectFailure {
                             operation,
                             lost: LostRequest::Indeterminate {
                                 operation,
@@ -397,7 +465,7 @@ mod linux {
                     Ok(reply)
                 }
                 Err(error) => {
-                    let mut detail = format!("resident insertion failed: {:?}", error.cause);
+                    let mut detail = format!("resident effect failed: {:?}", error.cause);
                     if error.lost == LostRequest::NoPendingMutation {
                         if let Some(request) = original {
                             if let Err(record_error) =
@@ -409,7 +477,7 @@ mod linux {
                             }
                         }
                     }
-                    Err(InsertionFailure {
+                    Err(EffectFailure {
                         operation,
                         lost: error.lost,
                         detail,
@@ -430,18 +498,45 @@ mod linux {
                 .rev()
                 .find(|a| a.conversation == conversation)
                 .context("native attempt missing")?;
-            let Message::Request(Command::InsertAfter(insertion)) =
-                original.request.frame().message.clone()
-            else {
-                unreachable!()
+            self.reconcile_original(original, operation, deadline)
+        }
+        /// Inspect one specific consumed operation, including an older attempt.
+        /// A mismatched conversation or unknown operation refuses before IO.
+        pub fn reconcile_attempt(
+            &mut self,
+            conversation: Uuid,
+            original_operation: OperationId,
+            operation: OperationId,
+            deadline: Instant,
+        ) -> Result<Reply> {
+            let original = attempts(&self.store)?
+                .into_iter()
+                .find(|a| {
+                    a.conversation == conversation
+                        && a.request.frame().operation == original_operation
+                })
+                .context("native original attempt missing")?;
+            self.reconcile_original(original, operation, deadline)
+        }
+        fn reconcile_original(
+            &mut self,
+            original: HistoricalAttempt,
+            operation: OperationId,
+            deadline: Instant,
+        ) -> Result<Reply> {
+            ensure!(
+                operation != original.request.frame().operation,
+                "reconciliation requires new operation"
+            );
+            let command = match original.request.frame().message.clone() {
+                Message::Request(Command::InsertAfter(insertion)) => Command::Reconcile(insertion),
+                Message::Request(Command::SelectAdjacent(selection)) => {
+                    Command::ReconcileSelection(selection)
+                }
+                _ => unreachable!("validated journal contains only effects"),
             };
             self.client
-                .execute(
-                    operation,
-                    Command::Reconcile(insertion),
-                    deadline,
-                    |_, _| Ok(()),
-                )
+                .execute(operation, command, deadline, |_, _| Ok(()))
                 .map_err(|error| anyhow::anyhow!("resident reconciliation failed: {error:?}"))
         }
         pub fn close(&mut self) -> LostRequest {
@@ -450,7 +545,7 @@ mod linux {
     }
 }
 #[cfg(target_os = "linux")]
-pub use linux::{InsertionFailure, ResidentConnection};
+pub use linux::{EffectFailure, InsertionFailure, ResidentConnection};
 
 #[cfg(test)]
 mod tests;

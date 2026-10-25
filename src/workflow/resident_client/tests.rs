@@ -3,6 +3,9 @@ use crate::storage::StorePaths;
 use remarkable_open_sdk::{native_adapter::*, OperationId, PageKey, Uuid as SdkUuid};
 use std::{fs, path::PathBuf, sync::Arc};
 
+#[path = "tests_selection.rs"]
+mod selection;
+
 fn id(n: u32) -> SdkUuid {
     SdkUuid::parse(&format!("00000000-0000-0000-0000-{n:012x}")).unwrap()
 }
@@ -347,6 +350,7 @@ fn v1_bytes_and_reservations_survive_upgrade_restart_and_append() {
         claim(&store, Uuid::new_v4(), &request(71, 15)).unwrap();
         let appended: serde_json::Value =
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(appended["format"], 2);
         assert_eq!(appended["attempts"][0], first["attempts"][0]);
         assert_eq!(
             attempts(&store)
@@ -479,6 +483,308 @@ mod sockets {
         ready.scope.server_nonce = Some(id(6));
         send(&mut stream, &ready);
         stream
+    }
+
+    #[test]
+    fn selection_is_durable_before_bytes_and_reconciles_specific_original_read_only() {
+        let f = Fixture::new();
+        let store = f.open();
+        let conversation = Uuid::new_v4();
+        let (listener, directory, uid) = endpoint(&f);
+        let path = store.paths.data.join(JOURNAL_FILE);
+        let peer_path = path.clone();
+        let peer = thread::spawn(move || {
+            let mut stream = accept(&listener);
+            for (operation, target) in [(51, 12), (52, 12)] {
+                let call = read(&mut stream);
+                let saved: State = serde_json::from_slice(&fs::read(&peer_path).unwrap()).unwrap();
+                let last = saved.attempts.last().unwrap();
+                assert_eq!(*decode(&last.frame).unwrap().frame(), call);
+                assert!(matches!(last.outcome, Outcome::Reserved {}));
+                assert_eq!(call.operation, OperationId(id(operation)));
+                let Message::Request(Command::SelectAdjacent(selection)) = &call.message else {
+                    panic!()
+                };
+                assert_eq!(selection.target, id(target));
+                let current = ReaderFacts::new(
+                    PageKey {
+                        document: id(10),
+                        page: id(target),
+                    },
+                    selection.expected.order().to_vec(),
+                )
+                .unwrap();
+                send(
+                    &mut stream,
+                    &response(&call, Reply::TargetObserved(current)),
+                );
+            }
+            // First reconcile an older adjacent request, then latest current request.
+            for expected_page in [11, 12] {
+                let call = read(&mut stream);
+                let Message::Request(Command::ReconcileSelection(selection)) = &call.message else {
+                    panic!()
+                };
+                assert_eq!(selection.expected.page().page, id(expected_page));
+                assert_eq!(selection.target, id(12));
+                send(
+                    &mut stream,
+                    &response(
+                        &call,
+                        Reply::SelectionReconciled {
+                            current: facts(),
+                            target_present: true,
+                        },
+                    ),
+                );
+            }
+            let mut eof = [0];
+            assert_eq!(stream.read(&mut eof).unwrap(), 0);
+        });
+        let mut connection = ResidentConnection::connect(
+            store.clone(),
+            directory,
+            uid,
+            runtime_scope(),
+            OperationId(id(50)),
+            end(),
+        )
+        .unwrap();
+        for (operation, expected) in [
+            (51, facts()),
+            (
+                52,
+                ReaderFacts::new(
+                    PageKey {
+                        document: id(10),
+                        page: id(12),
+                    },
+                    facts().order().to_vec(),
+                )
+                .unwrap(),
+            ),
+        ] {
+            assert!(matches!(
+                connection
+                    .select_adjacent(
+                        conversation,
+                        OperationId(id(operation)),
+                        SelectAdjacent {
+                            expected,
+                            target: id(12)
+                        },
+                        end()
+                    )
+                    .unwrap(),
+                Reply::TargetObserved(_)
+            ));
+        }
+        let before = fs::read(&path).unwrap();
+        // Each invalid lookup must refuse before any socket request.
+        for (conv, original, fresh) in [
+            (Uuid::new_v4(), 51, 60),
+            (conversation, 99, 60),
+            (conversation, 51, 51),
+        ] {
+            assert!(connection
+                .reconcile_attempt(
+                    conv,
+                    OperationId(id(original)),
+                    OperationId(id(fresh)),
+                    end()
+                )
+                .is_err());
+        }
+        assert!(matches!(
+            connection
+                .reconcile_attempt(
+                    conversation,
+                    OperationId(id(51)),
+                    OperationId(id(60)),
+                    end()
+                )
+                .unwrap(),
+            Reply::SelectionReconciled { .. }
+        ));
+        assert!(matches!(
+            connection
+                .reconcile(conversation, OperationId(id(61)), end())
+                .unwrap(),
+            Reply::SelectionReconciled { .. }
+        ));
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(store
+            .heads(crate::storage::Namespace::Conversation, conversation)
+            .unwrap()
+            .is_empty());
+        connection.close();
+        peer.join().unwrap();
+    }
+
+    #[test]
+    fn selection_loss_partial_wrong_kind_and_indeterminate_block_both_effects() {
+        for mode in 0..4 {
+            let f = Fixture::new();
+            let store = f.open();
+            let conversation = Uuid::new_v4();
+            let (listener, directory, uid) = endpoint(&f);
+            let peer = thread::spawn(move || {
+                let mut stream = accept(&listener);
+                let call = read(&mut stream);
+                match mode {
+                    0 => {} // Lost entire reply.
+                    1 => stream.write_all(&[0, 0]).unwrap(),
+                    2 => send(&mut stream, &response(&call, Reply::Observed(facts()))),
+                    _ => send(&mut stream, &response(&call, Reply::Indeterminate)),
+                }
+            });
+            let mut connection = ResidentConnection::connect(
+                store.clone(),
+                directory,
+                uid,
+                runtime_scope(),
+                OperationId(id(50)),
+                end(),
+            )
+            .unwrap();
+            let result = connection.select_adjacent(
+                conversation,
+                OperationId(id(51)),
+                SelectAdjacent {
+                    expected: facts(),
+                    target: id(12),
+                },
+                end(),
+            );
+            if mode == 3 {
+                assert_eq!(result.unwrap(), Reply::Indeterminate);
+            } else {
+                assert!(
+                    matches!(result.unwrap_err().lost, LostRequest::Indeterminate { operation, .. } if operation == OperationId(id(51)))
+                );
+            }
+            peer.join().unwrap();
+            drop(connection);
+            drop(store);
+            let store = f.open();
+            assert!(claim(&store, conversation, &request(52, 13)).is_err());
+            let selection = Frame {
+                message: Message::Request(Command::SelectAdjacent(SelectAdjacent {
+                    expected: facts(),
+                    target: id(12),
+                })),
+                ..request(53, 13)
+            };
+            assert!(claim(&store, conversation, &selection).is_err());
+            let saved = attempts(&store).unwrap();
+            assert_eq!(saved.len(), 1);
+            assert_eq!(
+                saved[0].reply,
+                if mode == 3 {
+                    Some(Reply::Indeterminate)
+                } else {
+                    None
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn selection_publication_failure_reopen_uses_actual_stored_outcome() {
+        for point in [
+            PublicationPoint::Reservation,
+            PublicationPoint::Outcome,
+            PublicationPoint::AfterOutcome,
+        ] {
+            for reply in [
+                Reply::TargetObserved(
+                    ReaderFacts::new(
+                        PageKey {
+                            document: id(10),
+                            page: id(12),
+                        },
+                        facts().order().to_vec(),
+                    )
+                    .unwrap(),
+                ),
+                Reply::Indeterminate,
+                Reply::Rejected(Rejection::BeforeDispatch),
+            ] {
+                let f = Fixture::new();
+                let store = f.open();
+                let conversation = Uuid::new_v4();
+                let (listener, directory, uid) = endpoint(&f);
+                let observed_reply = reply.clone();
+                let peer = thread::spawn(move || {
+                    let mut stream = accept(&listener);
+                    if point != PublicationPoint::Reservation {
+                        let call = read(&mut stream);
+                        send(&mut stream, &response(&call, observed_reply));
+                    }
+                    let mut eof = [0];
+                    assert_eq!(stream.read(&mut eof).unwrap(), 0);
+                });
+                let mut connection = ResidentConnection::connect(
+                    store.clone(),
+                    directory,
+                    uid,
+                    runtime_scope(),
+                    OperationId(id(50)),
+                    end(),
+                )
+                .unwrap();
+                PUBLICATION_FAULT.with(|fault| fault.set(Some(point)));
+                let failure = connection
+                    .select_adjacent(
+                        conversation,
+                        OperationId(id(51)),
+                        SelectAdjacent {
+                            expected: facts(),
+                            target: id(12),
+                        },
+                        end(),
+                    )
+                    .unwrap_err();
+                peer.join().unwrap();
+                drop(connection);
+                drop(store);
+                let store = f.open();
+                let saved = attempts(&store).unwrap();
+                if point == PublicationPoint::Reservation {
+                    assert_eq!(failure.lost, LostRequest::NoPendingMutation);
+                    assert!(saved.is_empty());
+                    claim(&store, conversation, &request(52, 13)).unwrap();
+                } else {
+                    assert_eq!(
+                        failure.lost,
+                        LostRequest::Indeterminate {
+                            operation: OperationId(id(51)),
+                            request_sha256: saved[0].request.fingerprint()
+                        }
+                    );
+                    assert!(claim(&store, Uuid::new_v4(), &request(51, 13)).is_err());
+                    let stored = point == PublicationPoint::AfterOutcome;
+                    assert_eq!(saved[0].reply, stored.then_some(reply.clone()));
+                    let selection = Frame {
+                        message: Message::Request(Command::SelectAdjacent(SelectAdjacent {
+                            expected: facts(),
+                            target: id(12),
+                        })),
+                        ..request(53, 13)
+                    };
+                    if stored && matches!(reply, Reply::Rejected(_)) {
+                        claim(&store, conversation, &request(52, 13)).unwrap();
+                    } else {
+                        assert!(claim(&store, conversation, &request(52, 13)).is_err());
+                        if stored && matches!(reply, Reply::TargetObserved(_)) {
+                            claim(&store, conversation, &selection).unwrap();
+                        } else {
+                            assert!(claim(&store, conversation, &selection).is_err());
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -748,6 +1054,31 @@ mod sockets {
                 assert!(claim(&store, conversation, &request(52, 14)).is_err());
             }
             peer.join().unwrap();
+            drop(connection);
+            drop(store);
+            let store = f.open();
+            if point != PublicationPoint::Reservation {
+                assert!(claim(&store, conversation, &request(53, 14)).is_err());
+                let selection = Frame {
+                    message: Message::Request(Command::SelectAdjacent(SelectAdjacent {
+                        expected: ReaderFacts::new(
+                            PageKey {
+                                document: id(10),
+                                page: id(11),
+                            },
+                            vec![id(11), id(13), id(12)],
+                        )
+                        .unwrap(),
+                        target: id(13),
+                    })),
+                    ..request(54, 13)
+                };
+                assert_eq!(
+                    claim(&store, conversation, &selection).is_ok(),
+                    point == PublicationPoint::AfterOutcome
+                );
+                assert!(claim(&store, Uuid::new_v4(), &request(51, 13)).is_err());
+            }
         }
     }
 
