@@ -44,3 +44,40 @@ user-manager attempts failed and their owned containers were removed. No host
 cgroups were modified. This fixture therefore does not qualify job cancellation,
 stop deadlines, failure-handler execution, service coupling, watchdog recovery,
 or any tablet activation. E1 remains unapproved.
+
+## Isolated live recovery lifecycle fixture
+
+`recovery_lifecycle.sh` is a separate, explicitly invoked development-host test.
+It creates three fresh runtime units: fake stock, an actor with an owned sleeping
+child, and an independent recovery helper. It never starts/stops real xochitl or
+reader-buddy. Run only on an authorized idle development tablet after announcing
+the temporary service changes. The present fixture requires the observed hybrid
+cgroup2 mount at `/sys/fs/cgroup/unified`; it refuses other layouts.
+
+```sh
+sh recovery_lifecycle.sh FRESH_32_LOWERCASE_HEX_NONCE clean
+```
+
+Replace the placeholder with a newly generated nonce for each run. Other cases
+are `crash`, `watchdog`, `stop`, and `recovery-retry`. Never reuse a run directory
+or unit name. All three units have independent runtime/start/stop bounds. The
+driver verifies distinct recovery invocations and exactly two fake-stock starts
+(initial plus restoration), including a helper failure before restoration and a
+second restoration request after success. Cleanup stops only its own units,
+verifies inactivity/jobs/group state, and removes their definitions only after
+that check. Failed cleanup returns failure and preserves definitions. Retain and
+archive `/run/buddy-recovery-NONCE` before removing that exact evidence directory.
+
+The script brackets the experiment with actual stock/Buddy process and invocation
+identities plus stock artifact hashes. Cgroup disappearance is recorded explicitly
+as an observation; it is not accepted as a production emptiness proof. This fixture
+also does not test real shutdown cancellation, native loading, UI readiness,
+document safety or the installed product's recovery implementation.
+
+On October 25, all five cases passed on the authorized RM2, firmware 3.28.0.172,
+kernel 5.4.70-v1.6.3-rm11x, systemd 255.21. The exact script SHA256 was
+`6be67aa2672c0760aba0d8dc4a7f0e774473c6b070a5fc65ec711acc73b055df`.
+All owned units were stopped and removed; real stock/Buddy identities and stock
+hashes remained identical. PID1 removed the actor's group before every helper
+invocation. Detailed evidence and remaining product gates live in the coordinated
+Docs change `qualify-open-pdf-capture/resident-supervisor-fixture-result.md`.
