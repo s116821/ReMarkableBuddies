@@ -29,6 +29,18 @@ key must equal the expected key before returning an Index. Do not read a cache's
 own key and use it to assert current source freshness. Query the returned Index
 using that same key and the existing passage/count/serialized-byte budgets.
 
+An already-open `DiskCache` also implements `retrieval::Provider`, so ordinary
+declared receiving can take `Some(&cache as &dyn Provider)` directly. Each query
+calls the existing `load` once and forwards the exact expected key, question,
+passage count, complete result-byte budget and neighbors flag to the rebuilt
+Index. A missing slot is an error here, not an empty result or no-document choice.
+Valid material with no matches still returns the source-bound empty result.
+No cache is opened implicitly and querying does not install, forget or memoize
+material. The load operation lock is released before searching the owned Index.
+A later replacement cannot rewrite that immutable observation; each later query
+reloads independently. This is not a cache-currentness lease, original-source
+freshness proof or new durable receiving publication admission.
+
 There are at most 16 document slots, with at most 32MiB complete encoded JSON per
 admitted slot. One additional bounded staging file may exist during replacement.
 Reads are capped before JSON decoding; ordinary Index text/location limits still
@@ -48,3 +60,11 @@ oversized/unknown-schema input, rejected replacement, capacity/forget, lock and
 Store lifetime, staging recovery and unknown-file preservation. Unix fixtures
 also exercise symlink refusal. These tests do not establish installed Reader,
 real-provider, cloud-sync or tablet behavior.
+
+Provider fixtures additionally use the real cache through declared receiving
+after reopening the Store, follow-up queries reaching other pages, replacement
+and stale keys, missing/corrupt versus unmatched material, no-document bypass,
+complete frame limits and unchanged slot bytes. Direct Index comparisons retain
+ranking, exact provenance, neighbors, result budgets and refusal behavior. These
+qualify the local integration seam; automatic runtime ingestion and model/native
+consumption remain unfinished.

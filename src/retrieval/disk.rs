@@ -1,5 +1,5 @@
 //! Disposable local normalized inputs, never durable evidence or source authority.
-use super::{Index, IndexKey, NormalizedDocument};
+use super::{Index, IndexKey, NormalizedDocument, Provider, Retrieved};
 use crate::storage::{files, Store, Uuid, FORMAT};
 use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -225,6 +225,21 @@ impl<'a> DiskCache<'a> {
         fs::remove_file(path)?;
         files::sync_dir(&self.root)?;
         Ok(true)
+    }
+}
+
+/// Each query observes one validated owned Index, not a cache-currentness lease.
+impl Provider for DiskCache<'_> {
+    fn query(
+        &self,
+        expected: &IndexKey,
+        question: &str,
+        max_passages: usize,
+        max_bytes: usize,
+        neighbors: bool,
+    ) -> Result<Retrieved> {
+        let index = self.load(expected)?.context("Cached source unavailable")?;
+        index.query(expected, question, max_passages, max_bytes, neighbors)
     }
 }
 

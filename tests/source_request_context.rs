@@ -1,4 +1,6 @@
 //! Real local Store/Index fixtures. Counters are declared synthetic byte counts.
+#[path = "source_request_context/disk_cache.rs"]
+mod disk_cache;
 #[path = "source_request_context/memory.rs"]
 mod memory;
 #[path = "source_request_context/ranking.rs"]
