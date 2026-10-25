@@ -673,7 +673,7 @@ pub fn run_any_file(path: &Path) -> Result<()> {
     #[derive(serde::Deserialize)]
     #[serde(untagged)]
     enum AnyScenario {
-        Reader(Scenario),
+        Reader(Box<Scenario>),
         Writer(writer::Scenario),
     }
     let bytes = std::fs::read(path)?;

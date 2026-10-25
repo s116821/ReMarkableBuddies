@@ -32,7 +32,7 @@ pub struct Scenario {
 #[serde(tag = "step", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum Step {
     Run {
-        request: writer_flow::Request,
+        request: Box<writer_flow::Request>,
         fault: Option<PhaseFault>,
     },
     Restart,
