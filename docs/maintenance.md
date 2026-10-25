@@ -55,3 +55,5 @@ how to reconcile incomplete output. Follow those rules before another deliberate
 action.
 
 Concrete research acquisition: [OpenAI web research](openai-web-research.md).
+
+Consume complete context with an explicit model: [Researched answers](researched-answer.md).
