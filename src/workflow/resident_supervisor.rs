@@ -500,9 +500,21 @@ impl Lease {
     /// Repeated reads permit recovery retries, including after helper failure.
     /// Reading this record can never authorize a new native activation.
     pub fn reopen(path: &Path) -> Result<Self> {
+        Self::reopen_if_present(path)?.context("activation record absent")
+    }
+    // Only the exact initial final-component ENOENT may become None. Once an
+    // occupied record was observed, every later failure remains an error.
+    fn reopen_if_present(path: &Path) -> Result<Option<Self>> {
         let directory = private_directory(path)?;
         let identity = Identity::of(&directory.metadata()?);
-        let file = open_at(&directory, LEASE_NAME, false, false)?;
+        let file = match open_at(&directory, LEASE_NAME, false, false) {
+            Ok(file) => file,
+            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {
+                absent_record(path, &directory, &identity)?;
+                return Ok(None);
+            }
+            Err(error) => return Err(error.into()),
+        };
         let file_metadata = file.metadata()?;
         let bytes = read_record(&directory)?;
         let record: LeaseRecord = serde_json::from_slice(&bytes)?;
@@ -522,7 +534,7 @@ impl Lease {
             bytes,
         };
         lease.current()?;
-        Ok(lease)
+        Ok(Some(lease))
     }
     pub fn record(&self) -> &LeaseRecord {
         &self.record
@@ -555,6 +567,24 @@ impl Lease {
         );
         Ok(())
     }
+}
+
+fn absent_record(path: &Path, directory: &File, identity: &Identity) -> Result<()> {
+    let current = || -> Result<()> {
+        ensure!(
+            Identity::of(&directory.metadata()?) == *identity
+                && Identity::of(&private_directory(path)?.metadata()?) == *identity,
+            "lease directory changed during absence check"
+        );
+        Ok(())
+    };
+    current()?;
+    match open_at(directory, LEASE_NAME, false, false) {
+        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {}
+        Err(error) => return Err(error.into()),
+        Ok(_) => bail!("activation record appeared during absence check"),
+    }
+    current()
 }
 
 fn read_record(directory: &File) -> Result<Vec<u8>> {

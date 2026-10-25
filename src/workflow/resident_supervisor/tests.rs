@@ -86,6 +86,55 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn optional_reopen_distinguishes_absence_from_occupied_or_broken_state() {
+    let f = Fixture::new();
+    let path = f.lease_dir();
+    assert!(Lease::reopen_if_present(&path).unwrap().is_none());
+    assert!(Lease::reopen_if_present(&path.join("missing")).is_err());
+    for bytes in [b"".as_slice(), b"{", b"{}"] {
+        fs::write(path.join(LEASE_NAME), bytes).unwrap();
+        fs::set_permissions(path.join(LEASE_NAME), fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(Lease::reopen_if_present(&path).is_err());
+        assert_eq!(fs::read(path.join(LEASE_NAME)).unwrap(), bytes);
+        fs::remove_file(path.join(LEASE_NAME)).unwrap();
+    }
+    symlink(path.join("missing"), path.join(LEASE_NAME)).unwrap();
+    assert!(Lease::reopen_if_present(&path).is_err());
+    fs::remove_file(path.join(LEASE_NAME)).unwrap();
+    fs::create_dir(path.join(LEASE_NAME)).unwrap();
+    assert!(Lease::reopen_if_present(&path).is_err());
+    fs::remove_dir(path.join(LEASE_NAME)).unwrap();
+    let lease = Lease::publish_inner(&path, f.record()).unwrap();
+    let bytes = fs::read(path.join(LEASE_NAME)).unwrap();
+    assert!(Lease::reopen_if_present(&path).unwrap().is_some());
+    assert!(recovery::require_unoccupied(&path).is_err());
+    lease.current().unwrap();
+    assert_eq!(fs::read(path.join(LEASE_NAME)).unwrap(), bytes);
+    let mut stale: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    stale["group"]["context"]["boot"] = serde_json::json!(Uuid::new_v4());
+    fs::write(path.join(LEASE_NAME), serde_json::to_vec(&stale).unwrap()).unwrap();
+    assert!(Lease::reopen_if_present(&path).is_err());
+}
+
+#[test]
+fn absence_recheck_refuses_appeared_record_and_replaced_directory() {
+    let f = Fixture::new();
+    let path = f.lease_dir();
+    let directory = private_directory(&path).unwrap();
+    let identity = Identity::of(&directory.metadata().unwrap());
+    absent_record(&path, &directory, &identity).unwrap();
+    fs::write(path.join(LEASE_NAME), b"partial").unwrap();
+    assert!(absent_record(&path, &directory, &identity).is_err());
+    fs::rename(&path, path.with_extension("old")).unwrap();
+    fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
+    assert!(absent_record(&path, &directory, &identity).is_err());
+    assert_eq!(
+        fs::read(path.with_extension("old").join(LEASE_NAME)).unwrap(),
+        b"partial"
+    );
+}
+
+#[test]
 fn original_population_and_deleted_final_component_are_distinct() {
     let f = Fixture::new();
     assert_eq!(f.observe().unwrap(), GroupObservation::Populated);

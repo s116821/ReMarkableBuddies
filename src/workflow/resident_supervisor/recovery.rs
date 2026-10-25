@@ -34,6 +34,61 @@ const MOUNT: &str = "/sys/fs/cgroup/unified";
 const MAX_BYTES: u64 = 128 * 1024 * 1024;
 const RECOVERY_SECONDS: u64 = 45;
 
+// The only permitted missing directory is the fixed final component below the
+// protected /run parent. Missing/replaced/untrusted ancestors never mean absent.
+fn installed_directory_identity() -> Result<Option<super::Identity>> {
+    let parent = trusted_file(Path::new("/run"))?;
+    let identity = super::Identity::of(&parent.metadata()?);
+    ensure!(
+        parent.metadata()?.is_dir() && identity.uid == 0 && identity.mode & 0o22 == 0,
+        "untrusted runtime directory"
+    );
+    let observe = || -> Result<Option<super::Identity>> {
+        match open_at(&parent, "reader-buddy-resident", true, false) {
+            Ok(directory) => {
+                let metadata = directory.metadata()?;
+                ensure!(
+                    metadata.uid() == 0 && metadata.mode() & 0o7777 == 0o700,
+                    "untrusted installed lease directory"
+                );
+                Ok(Some(super::Identity::of(&metadata)))
+            }
+            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    };
+    let present = observe()?;
+    ensure!(
+        super::Identity::of(&trusted_file(Path::new("/run"))?.metadata()?) == identity
+            && observe()? == present,
+        "runtime directory changed"
+    );
+    Ok(present)
+}
+
+/// Ordinary Linux startup must not bypass an occupied installed activation latch.
+/// Absence permits only ordinary startup, not stock stop or native activation.
+pub fn refuse_occupied_activation() -> Result<()> {
+    if let Some(identity) = installed_directory_identity()? {
+        require_unoccupied(Path::new(LEASE_DIRECTORY))?;
+        ensure!(
+            installed_directory_identity()? == Some(identity),
+            "installed lease directory changed"
+        );
+    }
+    Ok(())
+}
+
+pub(super) fn require_unoccupied(path: &Path) -> Result<()> {
+    ensure!(
+        Lease::reopen_if_present(path)
+            .context("installed activation latch refuses ordinary startup")?
+            .is_none(),
+        "resident activation already consumed this boot; ordinary startup refused"
+    );
+    Ok(())
+}
+
 /// The same fixed occupied path is used by installed activation and recovery.
 /// The installer creates it once per boot; service stop must never remove it.
 /// A failed publication leaves the directory occupied and cannot authorize stop.
@@ -556,17 +611,33 @@ pub struct RestoredStock {
     pub start_requested: bool,
 }
 
+#[derive(Debug)]
+pub enum RecoveryOutcome {
+    /// A no-op observation, not proof of stock readiness or past nonactivation.
+    NoRecordedActivation,
+    Restored(RestoredStock),
+}
+
 /// Fixed installed operation. No provider/config/Store startup and no arbitrary
 /// unit/path overrides. Errors retain the activation record and any queued job.
-pub fn run_installed() -> Result<RestoredStock> {
+pub fn run_installed() -> Result<RecoveryOutcome> {
     ensure!(
         unsafe { libc::geteuid() } == 0,
         "stock recovery requires root"
     );
     let deadline = Instant::now() + Duration::from_secs(RECOVERY_SECONDS);
-    let lease = Lease::reopen(Path::new(LEASE_DIRECTORY))?;
+    let identity = installed_directory_identity()?.context("installed lease directory absent")?;
+    let lease = Lease::reopen_if_present(Path::new(LEASE_DIRECTORY))?;
+    ensure!(
+        installed_directory_identity()? == Some(identity),
+        "installed lease directory changed"
+    );
+    let Some(lease) = lease else {
+        check_deadline(deadline)?;
+        return Ok(RecoveryOutcome::NoRecordedActivation);
+    };
     let installed = Installed::load(&lease, deadline)?;
-    restore(&mut Native { installed, lease }, deadline)
+    restore(&mut Native { installed, lease }, deadline).map(RecoveryOutcome::Restored)
 }
 
 // Private test seam runs the same sequencing; callers cannot inject a command,

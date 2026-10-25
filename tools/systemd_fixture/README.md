@@ -1,5 +1,24 @@
 # Exact upstream systemd 255.21 parser fixture
 
+## Recovery command entry fixture
+
+`recovery_entry.py /absolute/path/to/reader-buddy` exercises the built application
+in a disposable root Linux container with Python 3.11+, compatible binary libraries,
+no running systemd, and no preexisting `/run/reader-buddy-resident`. It refuses
+other contexts. Mount the binary and this script read-only; give the container
+private writable `/run` and `/tmp`, no device mounts and no network. This fixture
+must never run on the tablet or against an existing installation.
+
+The bounded subprocess cases verify the exact recovery command before poisoned
+configuration/Store/provider startup, no-record no-op output, missing directory,
+partial/malformed/symlink/directory/FIFO refusal, protected directory permissions,
+mixed-mode rejection and ordinary startup's occupied-latch refusal. It removes
+only its own known test leaves. It performs no PID1 recovery, stock activation,
+native operation or document check; service and native qualification remain
+separate from this command-dispatch coverage.
+
+## Offline unit parser
+
 This original tooling builds upstream systemd-stable tag v255.21, peeled commit
 70500d37992a01d3275b1c414c3ed161d6f91f9e, and exercises its offline test mode.
 It uses disposable fake units, an unprivileged parser, empty generator paths,

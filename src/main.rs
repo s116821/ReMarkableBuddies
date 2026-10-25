@@ -13,6 +13,9 @@ use std::time::Duration;
 #[command(author, version = env!("READER_BUDDY_VERSION"))]
 #[command(about = "ReMarkable Reader Buddy - AI-powered reading assistant for reMarkable tablets")]
 pub struct Args {
+    /// Fixed installed stock recovery; never starts ordinary application services
+    #[arg(long, exclusive = true)]
+    resident_stock_recovery: bool,
     /// Deliberate saved research policy; no runtime/provider activation
     #[arg(long, value_enum, conflicts_with_all = ["inspect_conversations","conversation_operation","conversation_input","inspect_source_cache","source_cache_operation","source_cache_input","credential_reference_operation","credential_reference_input","model_credential_operation","model_credential_input","memory_settings_operation","memory_settings_input","ordinary_export_operation","ordinary_export_input","model_settings_operation","model_settings_input","restore_operation","restore_input","basic_settings_operation","basic_settings_input","configuration_operation","simulate","inspect_owned_data","api_key","model","base_url","trigger_corner","log_level","debug_dump","memory_operation","memory_input","sync_mode_operation","sync_mode_input","archive_operation","archive_input","personalization_operation","export_note"])]
     research_settings_operation: Option<config::research_settings::Operation>,
@@ -158,6 +161,9 @@ fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_lo
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    if args.resident_stock_recovery {
+        return stock_recovery();
+    }
     if args.writer_note {
         let report = remarkable_reader_buddy::writer::command::run(
             std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
@@ -442,6 +448,8 @@ fn main() -> Result<()> {
         report.write_to(&mut std::io::stdout().lock())?;
         return Ok(());
     }
+    #[cfg(target_os = "linux")]
+    remarkable_reader_buddy::workflow::resident_supervisor::recovery::refuse_occupied_activation()?;
     dotenv().ok();
     if let Some(path) = args.simulate {
         logging(args.log_level, std::env::var("RUST_LOG").ok().as_deref()).init();
@@ -496,11 +504,84 @@ fn main() -> Result<()> {
     orchestrator.run_loop()
 }
 
+fn stock_recovery() -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        use remarkable_reader_buddy::workflow::resident_supervisor::recovery::{
+            self, RecoveryOutcome,
+        };
+        match recovery::run_installed()? {
+            RecoveryOutcome::NoRecordedActivation => {
+                println!("no-recorded-activation; stock was not inspected or changed");
+            }
+            RecoveryOutcome::Restored(stock) => {
+                println!(
+                    "stock-restored pid={} invocation={} start_requested={}",
+                    stock.process.pid, stock.invocation, stock.start_requested
+                );
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    anyhow::bail!("installed stock recovery is supported only on Linux")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use clap::CommandFactory;
     use log::{Level, LevelFilter, Log, Metadata};
+
+    #[test]
+    fn stock_recovery_is_exclusive_before_all_other_dispatch() {
+        assert!(
+            Args::try_parse_from(["reader-buddy", "--resident-stock-recovery"])
+                .unwrap()
+                .resident_stock_recovery
+        );
+        for extra in [
+            vec!["--writer-note"],
+            vec!["--simulate", "scenario.json"],
+            vec!["--inspect-owned-data"],
+            vec!["--configuration-operation", "inspect"],
+            vec!["--model-credential-operation", "inspect"],
+            vec!["--api-key", "fixture-key"],
+            vec!["--model", "fixture-model"],
+            vec!["--base-url", "http://127.0.0.1:1"],
+            vec!["--trigger-corner", "UR"],
+            vec!["--debug-dump"],
+            vec!["--log-level", "trace"],
+            vec!["--export-note"],
+        ] {
+            assert!(Args::try_parse_from(
+                ["reader-buddy"].into_iter().chain(extra.iter().copied())
+            )
+            .is_ok());
+            let error = Args::try_parse_from(
+                ["reader-buddy", "--resident-stock-recovery"]
+                    .into_iter()
+                    .chain(extra.iter().copied()),
+            )
+            .err()
+            .expect("exclusive recovery");
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+        }
+        assert!(Args::try_parse_from([
+            "reader-buddy",
+            "--resident-stock-recovery",
+            "--unit",
+            "other.service"
+        ])
+        .is_err());
+        assert!(Args::try_parse_from([
+            "reader-buddy",
+            "--resident-stock-recovery",
+            "--lease-directory",
+            "/tmp/other"
+        ])
+        .is_err());
+    }
 
     #[test]
     fn writer_rejects_valid_current_modes_before_any_runtime() {
@@ -670,6 +751,7 @@ mod tests {
                 "personalization-operation",
                 "research-settings-input",
                 "research-settings-operation",
+                "resident-stock-recovery",
                 "restore-input",
                 "restore-operation",
                 "simulate",
@@ -682,6 +764,7 @@ mod tests {
             ]
         );
         let args = Args::try_parse_from(["reader-buddy"]).unwrap();
+        assert!(!args.resident_stock_recovery);
         assert!(!args.inspect_conversations);
         assert!(args.conversation_operation.is_none());
         assert!(args.conversation_input.is_none());
