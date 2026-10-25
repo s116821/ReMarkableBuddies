@@ -135,6 +135,9 @@ pub struct Args {
     /// Export prepared Markdown or reconcile a prior export; bounded JSON stdin
     #[arg(long, conflicts_with_all=["simulate","api_key","model","base_url","trigger_corner","debug_dump","log_level","personalization_operation"])]
     export_note: bool,
+    /// Generate/refine an unrendered Writer draft or prepare export; bounded JSON stdin
+    #[arg(long, conflicts_with_all=["research_settings_operation","research_settings_input","inspect_conversations","conversation_operation","conversation_input","inspect_source_cache","source_cache_operation","source_cache_input","credential_reference_operation","credential_reference_input","model_credential_operation","model_credential_input","memory_settings_operation","memory_settings_input","ordinary_export_operation","ordinary_export_input","model_settings_operation","model_settings_input","restore_operation","restore_input","basic_settings_operation","basic_settings_input","configuration_operation","simulate","inspect_owned_data","api_key","model","base_url","trigger_corner","log_level","debug_dump","memory_operation","memory_input","sync_mode_operation","sync_mode_input","archive_operation","archive_input","personalization_operation","export_note"])]
+    writer_note: bool,
 }
 
 fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_logger::Builder {
@@ -155,6 +158,15 @@ fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_lo
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    if args.writer_note {
+        let report = remarkable_reader_buddy::writer::command::run(
+            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+            &mut std::io::stdin().lock(),
+        );
+        serde_json::to_writer(std::io::stdout().lock(), &report)?;
+        println!();
+        return Ok(());
+    }
     if let Some(operation) = args.research_settings_operation {
         let report = if operation == config::research_settings::Operation::Inspect {
             if args.research_settings_input.is_some() {
@@ -491,6 +503,62 @@ mod tests {
     use log::{Level, LevelFilter, Log, Metadata};
 
     #[test]
+    fn writer_rejects_valid_current_modes_before_any_runtime() {
+        for extra in [
+            vec!["--model-credential-operation", "inspect"],
+            vec!["--credential-reference-operation", "inspect"],
+            vec!["--model-settings-operation", "inspect"],
+            vec!["--memory-settings-operation", "inspect"],
+            vec!["--research-settings-operation", "inspect"],
+            vec!["--basic-settings-operation", "inspect"],
+            vec!["--configuration-operation", "inspect"],
+            vec![
+                "--conversation-operation",
+                "prepare",
+                "--conversation-input",
+                "PRIVATE_INPUT_SENTINEL",
+            ],
+            vec![
+                "--source-cache-operation",
+                "prepare",
+                "--source-cache-input",
+                "PRIVATE_INPUT_SENTINEL",
+            ],
+            vec![
+                "--memory-operation",
+                "query",
+                "--memory-input",
+                "PRIVATE_INPUT_SENTINEL",
+            ],
+            vec![
+                "--archive-operation",
+                "inspect",
+                "--archive-input",
+                "PRIVATE_INPUT_SENTINEL",
+            ],
+            vec!["--sync-mode-operation", "inspect"],
+            vec!["--inspect-source-cache"],
+            vec!["--inspect-conversations"],
+            vec!["--inspect-owned-data"],
+        ] {
+            assert!(
+                Args::try_parse_from(["reader-buddy"].into_iter().chain(extra.iter().copied()))
+                    .is_ok(),
+                "fixture must be a valid other mode"
+            );
+            let error = Args::try_parse_from(
+                ["reader-buddy", "--writer-note"]
+                    .into_iter()
+                    .chain(extra.iter().copied()),
+            )
+            .err()
+            .expect("execution modes conflict");
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+            assert!(!error.to_string().contains("PRIVATE_INPUT_SENTINEL"));
+        }
+    }
+
+    #[test]
     fn source_cache_requires_input_and_rejects_other_execution_modes() {
         for args in [
             vec!["reader-buddy", "--source-cache-operation", "inspect"],
@@ -504,6 +572,7 @@ mod tests {
             vec!["--simulate", "private-fixture-sentinel"],
             vec!["--inspect-owned-data"],
             vec!["--export-note"],
+            vec!["--writer-note"],
             vec!["--credential-reference-operation", "inspect"],
             vec!["--memory-settings-operation", "inspect"],
         ] {
@@ -608,7 +677,8 @@ mod tests {
                 "source-cache-operation",
                 "sync-mode-input",
                 "sync-mode-operation",
-                "trigger-corner"
+                "trigger-corner",
+                "writer-note"
             ]
         );
         let args = Args::try_parse_from(["reader-buddy"]).unwrap();
@@ -630,6 +700,12 @@ mod tests {
         assert!(!args.debug_dump);
         assert!(!args.inspect_owned_data);
         assert!(!args.export_note);
+        assert!(!args.writer_note);
+        assert!(
+            Args::try_parse_from(["reader-buddy", "--writer-note"])
+                .unwrap()
+                .writer_note
+        );
         assert!(
             Args::try_parse_from(["reader-buddy", "--export-note"])
                 .unwrap()
@@ -780,6 +856,7 @@ mod tests {
                 vec!["--log-level", "trace"],
                 vec!["--simulate", "scenario.json"],
                 vec!["--export-note"],
+                vec!["--writer-note"],
             ] {
                 assert!(Args::try_parse_from(
                     ["reader-buddy", "--personalization-operation", operation]

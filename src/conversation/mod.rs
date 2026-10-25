@@ -22,6 +22,7 @@ mod selected;
 mod selected_context_tests;
 mod settlement;
 mod types;
+mod writer;
 use crate::storage::{
     digest, Conflict, Envelope, Kind, Media, Namespace, ObjectRef, Store, Uuid, FORMAT, MAX_ITEMS,
 };
@@ -45,8 +46,10 @@ use std::{
     sync::Arc,
 };
 pub use types::*;
+pub use writer::*;
 
 type TurnCounter<'a> = dyn Fn(&[Turn]) -> Result<usize> + 'a;
+const TEXT_SOURCE_SCHEMA: u32 = 2;
 
 pub struct Ledger {
     store: Arc<Store>,
@@ -104,6 +107,7 @@ impl Ledger {
                 Record::Receipt(receipt) if receipt.admitted_intent.is_some() => INTENT_SCHEMA,
                 Record::OutcomeFact(fact) if fact.settlement.is_some() => INTENT_SCHEMA,
                 Record::Export(export) if export.attempt.is_some() => EXPORT_SCHEMA,
+                Record::NormalizedText(_) => TEXT_SOURCE_SCHEMA,
                 _ => SCHEMA,
             },
             record_id: id,
@@ -125,7 +129,13 @@ impl Ledger {
         );
         ensure!(envelope.kind == Kind::Value, "deleted conversation record");
         let record: Record = serde_json::from_value(envelope.payload.clone())?;
-        if matches!(&record, Record::Export(_)) {
+        if matches!(&record, Record::NormalizedText(_)) {
+            ensure!(
+                envelope.namespace == Namespace::Source
+                    && envelope.domain_schema_version == TEXT_SOURCE_SCHEMA,
+                "text source schema/shape mismatch"
+            );
+        } else if matches!(&record, Record::Export(_)) {
             ensure!(
                 (envelope.domain_schema_version == EXPORT_SCHEMA)
                     == matches!(&record, Record::Export(e) if e.attempt.is_some()),
@@ -159,6 +169,10 @@ impl Ledger {
                     "invalid historical capture identity"
                 );
                 (capture.id, Namespace::Source, capture.conversation)
+            }
+            Record::NormalizedText(source) => {
+                source.validate()?;
+                (source.id, Namespace::Source, source.conversation)
             }
             Record::DevelopmentCapture(capture) => {
                 capture.validate()?;
@@ -452,6 +466,7 @@ impl Ledger {
             let conversation = match Self::decode(&e)? {
                 Record::Source(source) => source.conversation,
                 Record::Capture(capture) => capture.conversation,
+                Record::NormalizedText(source) => source.conversation,
                 Record::LegacyCapture(capture) => capture.conversation,
                 Record::DevelopmentCapture(capture) => capture.conversation,
                 _ => bail!("invalid existing source reference"),
@@ -1545,6 +1560,7 @@ impl Ledger {
             .collect::<BTreeSet<_>>();
         let mut sources = Vec::new();
         let mut captures = Vec::new();
+        let mut normalized_text = Vec::new();
         let mut legacy_captures = Vec::new();
         let mut development_captures = Vec::new();
         for record in records {
@@ -1552,6 +1568,9 @@ impl Ledger {
                 Record::Source(source) if source_ids.contains(&source.id) => sources.push(source),
                 Record::Capture(capture) if source_ids.contains(&capture.id) => {
                     captures.push(*capture)
+                }
+                Record::NormalizedText(source) if source_ids.contains(&source.id) => {
+                    normalized_text.push(*source)
                 }
                 Record::DevelopmentCapture(capture) if source_ids.contains(&capture.id) => {
                     development_captures.push(*capture)
@@ -1563,7 +1582,11 @@ impl Ledger {
             }
         }
         ensure!(
-            sources.len() + captures.len() + legacy_captures.len() + development_captures.len()
+            sources.len()
+                + captures.len()
+                + legacy_captures.len()
+                + development_captures.len()
+                + normalized_text.len()
                 == source_ids.len(),
             "source reference absent"
         );
@@ -1594,6 +1617,7 @@ impl Ledger {
             turns,
             sources,
             captures,
+            normalized_text,
             legacy_captures,
             development_captures,
             missing_media,
