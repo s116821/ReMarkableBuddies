@@ -8,13 +8,13 @@ use remarkable_reader_buddy::{
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
-fn limits() -> cm::CombinedBudget {
+pub(super) fn limits() -> cm::CombinedBudget {
     cm::CombinedBudget {
         max_encoded_bytes: 524288,
         max_tokens: 1_000_000,
     }
 }
-fn frozen(f: &Fixture) -> (cm::FrozenSourceMemoryContext, StorePaths, Turn, Turn) {
+pub(super) fn frozen(f: &Fixture) -> (cm::FrozenSourceMemoryContext, StorePaths, Turn, Turn) {
     let ledger = f.ledger();
     let conversation = create(&ledger);
     let history = append(
@@ -92,7 +92,7 @@ fn report(report: saved::Report) -> Value {
     report.write_to(&mut bytes).unwrap();
     serde_json::from_slice(&bytes).unwrap()
 }
-fn save(file: &Path, policy: Option<&str>) {
+pub(super) fn save(file: &Path, policy: Option<&str>) {
     let current = report(saved::inspect(Some(file.into())));
     let changes = match policy {
         Some(policy) => json!({"research_policy":{"action":"set","value":policy}}),

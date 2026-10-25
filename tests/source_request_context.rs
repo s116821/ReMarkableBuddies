@@ -9,6 +9,8 @@ mod ranking;
 mod research;
 #[path = "source_request_context/saved_policy.rs"]
 mod saved_policy;
+#[path = "source_request_context/web_research.rs"]
+mod web_research;
 use anyhow::{bail, Result};
 use remarkable_reader_buddy::{
     conversation::{receiving::*, *},
