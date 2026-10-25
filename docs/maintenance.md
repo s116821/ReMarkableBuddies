@@ -19,6 +19,7 @@ native-page qualification. Individual guides identify remaining companion work.
 | Manage the declared protected model credential | [Model credential](model-credential.md) |
 | Change the saved private credential reference | [Credential reference](credential-reference.md) |
 | Edit saved memory enablement and profile declarations | [Memory settings](memory-settings.md) |
+| Edit saved research policy without activating a provider | [Research policy](saved-research-policy.md) |
 
 ## Subject memory
 

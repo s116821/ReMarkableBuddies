@@ -7,6 +7,8 @@ mod memory;
 mod ranking;
 #[path = "source_request_context/research.rs"]
 mod research;
+#[path = "source_request_context/saved_policy.rs"]
+mod saved_policy;
 use anyhow::{bail, Result};
 use remarkable_reader_buddy::{
     conversation::{receiving::*, *},
