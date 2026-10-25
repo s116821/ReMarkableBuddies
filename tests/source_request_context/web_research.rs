@@ -9,7 +9,10 @@ use serde_json::{json, Value};
 use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
-    sync::mpsc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -28,6 +31,8 @@ struct Capture {
 struct Server {
     endpoint: String,
     received: mpsc::Receiver<Capture>,
+    partial_written: mpsc::Receiver<Instant>,
+    hold_finished: Arc<AtomicBool>,
     stop: mpsc::Sender<()>,
     worker: Option<thread::JoinHandle<usize>>,
 }
@@ -37,7 +42,10 @@ impl Server {
         listener.set_nonblocking(true).unwrap();
         let endpoint = format!("http://{}/v1/responses", listener.local_addr().unwrap());
         let (tx, received) = mpsc::channel();
+        let (partial_tx, partial_written) = mpsc::channel();
         let (stop, rx) = mpsc::channel();
+        let hold_finished = Arc::new(AtomicBool::new(false));
+        let worker_hold_finished = hold_finished.clone();
         let worker = thread::spawn(move || {
             let deadline = Instant::now() + Duration::from_secs(8);
             let mut count = 0;
@@ -67,11 +75,18 @@ impl Server {
                             }
                             Reply::HoldHeaders => {
                                 let _ = rx.recv_timeout(Duration::from_secs(3));
+                                worker_hold_finished.store(true, Ordering::Release);
                                 break;
                             }
                             Reply::HoldBody => {
-                                let _=stream.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n1\r\n{\r\n");
+                                stream.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n1\r\n{\r\n").expect("owned partial headers/chunk write");
+                                partial_tx
+                                    .send(Instant::now())
+                                    .expect("owned partial-write witness");
                                 let _ = rx.recv_timeout(Duration::from_secs(3));
+                                worker_hold_finished.store(true, Ordering::Release);
+                                // Late release is cleanup after cancellation; only the earlier partial write is qualification.
+                                let _ = stream.write_all(b"0\r\n\r\n");
                                 break;
                             }
                         }
@@ -92,6 +107,8 @@ impl Server {
         Self {
             endpoint,
             received,
+            partial_written,
+            hold_finished,
             stop,
             worker: Some(worker),
         }
@@ -430,15 +447,31 @@ fn real_chunked_and_declared_caps_http_errors_and_redirects_never_retry() {
 }
 #[test]
 fn witnessed_request_cancel_during_withheld_headers_or_body_joins_owned_threads() {
-    for reply in [Reply::HoldHeaders, Reply::HoldBody] {
+    for body_case in [false, true] {
         let f = Fixture::new();
         let (prior, _, _, _) = saved_policy::frozen(&f);
-        let mut server = Server::new(reply);
-        let witnessed = Cell::new(None);
+        let exact = prior.encoded_json().to_owned();
+        let mut server = Server::new(if body_case {
+            Reply::HoldBody
+        } else {
+            Reply::HoldHeaders
+        });
+        let received = Cell::new(None);
+        let partial = Cell::new(None);
+        let canceled = Cell::new(None);
         let mut progress = |phase| {
             if phase == Progress::Waiting {
-                if let Ok(c) = server.received.try_recv() {
-                    witnessed.set(Some(c.at));
+                if let Ok(capture) = server.received.try_recv() {
+                    assert_eq!(capture.body["input"][0]["content"][0]["text"], exact);
+                    received.set(Some(capture.at));
+                }
+                if body_case {
+                    if let Ok(at) = server.partial_written.try_recv() {
+                        partial.set(Some(at));
+                    }
+                }
+                if received.get().is_some() && (!body_case || partial.get().is_some()) {
+                    canceled.set(Some(Instant::now()));
                     bail!("PRIVATE_CALLBACK");
                 }
             }
@@ -448,16 +481,27 @@ fn witnessed_request_cancel_during_withheld_headers_or_body_joins_owned_threads(
         let result = rr::Provider::research(&provider, &raw(&prior));
         let returned = Instant::now();
         drop(provider);
-        let received = witnessed.get().expect("actual invocation request witness");
+        let still_withheld = !server.hold_finished.load(Ordering::Acquire);
         let count = server.finish();
+        let request_at = received.get().expect("exact invocation request witness");
+        let cancel_at = canceled.get().expect("callback cancellation witness");
+        if body_case {
+            let written = partial.get().expect("successful partial-write witness");
+            assert!(written >= request_at && written <= cancel_at);
+        }
         assert!(result.is_err());
         assert_eq!(count, 1);
         assert!(
-            returned.duration_since(received) < Duration::from_millis(500),
+            still_withheld,
+            "remaining response was not withheld at local return"
+        );
+        assert!(
+            returned.duration_since(cancel_at) < Duration::from_millis(500),
             "local return depended on withheld response"
         );
     }
 }
+
 #[test]
 fn phase_witnesses_cancel_before_dispatch_after_join_and_before_return_and_panic_cleans_up() {
     for phase in [
@@ -751,6 +795,63 @@ fn current_and_legacy_query_witnesses_preserve_actual_text_and_deduplicate_only_
                 _ => "single witnessed query",
             }]
         );
+        assert_eq!(server.finish(), 1);
+    }
+}
+
+#[test]
+fn reasoning_status_refuses_incomplete_in_progress_and_malformed_without_stale_observation() {
+    for status in [
+        json!("incomplete"),
+        json!("in_progress"),
+        json!("failed"),
+        json!(42),
+        json!(true),
+        json!({}),
+        json!([]),
+    ] {
+        let mut invalid = answer(false);
+        invalid["output"]
+            .as_array_mut()
+            .unwrap()
+            .insert(0, json!({"type":"reasoning","status":status}));
+        let f = Fixture::new();
+        let (prior, _, _, _) = saved_policy::frozen(&f);
+        let mut server = Server::new(Reply::Sequence(vec![
+            Reply::Body(answer(false)),
+            Reply::Body(invalid),
+        ]));
+        let mut progress = |_| Ok(());
+        let provider = backend(&server.endpoint, Default::default(), &mut progress)
+            .with_exchange_observation();
+        rr::Provider::research(&provider, &raw(&prior)).unwrap();
+        let result = rr::Provider::research(&provider, &raw(&prior));
+        let admitted = result.is_ok();
+        let retained = provider.take_exchange_observation().is_some();
+        assert_eq!(server.finish(), 2);
+        assert!(
+            !admitted && !retained,
+            "reasoning status {status} admitted={admitted} retained={retained}"
+        );
+    }
+}
+#[test]
+fn reasoning_status_completed_absent_or_null_still_allows_witnessed_search() {
+    for item in [
+        json!({"type":"reasoning"}),
+        json!({"type":"reasoning","status":null}),
+        json!({"type":"reasoning","status":"completed"}),
+    ] {
+        let mut body = answer(false);
+        body["output"].as_array_mut().unwrap().insert(0, item);
+        let f = Fixture::new();
+        let (prior, _, _, _) = saved_policy::frozen(&f);
+        let mut server = Server::new(Reply::Body(body));
+        let mut progress = |_| Ok(());
+        let provider = backend(&server.endpoint, Default::default(), &mut progress)
+            .with_exchange_observation();
+        rr::Provider::research(&provider, &raw(&prior)).unwrap();
+        assert!(provider.take_exchange_observation().is_some());
         assert_eq!(server.finish(), 1);
     }
 }

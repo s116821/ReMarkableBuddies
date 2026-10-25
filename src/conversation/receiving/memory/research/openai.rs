@@ -362,7 +362,14 @@ fn parse_inner(bytes: &[u8], request: &ResearchRequest<'_>) -> Result<ResearchRe
     let mut text = None;
     for item in output {
         match item["type"].as_str() {
-            Some("reasoning") => {}
+            Some("reasoning") => {
+                ensure!(
+                    item.get("status").is_none_or(
+                        |status| status.is_null() || status.as_str() == Some("completed")
+                    ),
+                    "incomplete reasoning item"
+                );
+            }
             Some("web_search_call") => {
                 calls += 1;
                 ensure!(
