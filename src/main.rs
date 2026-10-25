@@ -16,7 +16,7 @@ pub struct Args {
     /// Deliberate saved research policy; no runtime/provider activation
     #[arg(long, value_enum, conflicts_with_all = ["inspect_conversations","conversation_operation","conversation_input","inspect_source_cache","source_cache_operation","source_cache_input","credential_reference_operation","credential_reference_input","model_credential_operation","model_credential_input","memory_settings_operation","memory_settings_input","ordinary_export_operation","ordinary_export_input","model_settings_operation","model_settings_input","restore_operation","restore_input","basic_settings_operation","basic_settings_input","configuration_operation","simulate","inspect_owned_data","api_key","model","base_url","trigger_corner","log_level","debug_dump","memory_operation","memory_input","sync_mode_operation","sync_mode_input","archive_operation","archive_input","personalization_operation","export_note"])]
     research_settings_operation: Option<config::research_settings::Operation>,
-    #[arg(long, requires = "research_settings_operation")]
+    #[arg(long, requires = "research_settings_operation", conflicts_with_all = ["inspect_conversations","conversation_operation","conversation_input","inspect_source_cache","source_cache_operation","source_cache_input","credential_reference_operation","credential_reference_input","model_credential_operation","model_credential_input","memory_settings_operation","memory_settings_input","ordinary_export_operation","ordinary_export_input","model_settings_operation","model_settings_input","restore_operation","restore_input","basic_settings_operation","basic_settings_input","configuration_operation","simulate","inspect_owned_data","api_key","model","base_url","trigger_corner","log_level","debug_dump","memory_operation","memory_input","sync_mode_operation","sync_mode_input","archive_operation","archive_input","personalization_operation","export_note"])]
     research_settings_input: Option<std::path::PathBuf>,
 
     /// Linux-only ordinary root candidates; requires a fresh separate cleanup preview
@@ -599,6 +599,8 @@ mod tests {
                 "ordinary-export-input",
                 "ordinary-export-operation",
                 "personalization-operation",
+                "research-settings-input",
+                "research-settings-operation",
                 "restore-input",
                 "restore-operation",
                 "simulate",
@@ -621,6 +623,8 @@ mod tests {
         assert!(args.basic_settings_operation.is_none());
         assert!(args.basic_settings_input.is_none());
         assert!(args.configuration_operation.is_none());
+        assert!(args.research_settings_operation.is_none());
+        assert!(args.research_settings_input.is_none());
         assert!(args.model.is_none());
         assert!(args.trigger_corner.is_none());
         assert!(!args.debug_dump);
@@ -680,6 +684,47 @@ mod tests {
             let error = Args::try_parse_from(argv)
                 .err()
                 .expect("inventory must reject ignored arguments");
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::ArgumentConflict,
+                "{long}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn research_input_rejects_every_unrelated_argument_before_startup() {
+        for argument in Args::command().get_arguments() {
+            let Some(long) = argument.get_long() else {
+                continue;
+            };
+            if long.starts_with("research-settings-") {
+                continue;
+            }
+            let mut argv = vec![
+                "reader-buddy".to_owned(),
+                "--research-settings-input".into(),
+                "-".into(),
+                format!("--{long}"),
+            ];
+            if argument.get_action().takes_values() {
+                let value = argument
+                    .get_value_parser()
+                    .possible_values()
+                    .and_then(|mut values| values.next())
+                    .map(|v| v.get_name().to_owned())
+                    .unwrap_or_else(|| {
+                        if long == "log-level" {
+                            "info".into()
+                        } else {
+                            "synthetic-conflict".into()
+                        }
+                    });
+                argv.push(value);
+            }
+            let error = Args::try_parse_from(argv)
+                .err()
+                .expect("research input must reject unrelated arguments");
             assert_eq!(
                 error.kind(),
                 clap::error::ErrorKind::ArgumentConflict,
