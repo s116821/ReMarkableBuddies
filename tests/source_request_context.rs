@@ -1,8 +1,18 @@
 //! Real local Store/Index fixtures. Counters are declared synthetic byte counts.
+#[path = "source_request_context/answer.rs"]
+mod answer;
+#[path = "source_request_context/disk_cache.rs"]
+mod disk_cache;
 #[path = "source_request_context/memory.rs"]
 mod memory;
 #[path = "source_request_context/ranking.rs"]
 mod ranking;
+#[path = "source_request_context/research.rs"]
+mod research;
+#[path = "source_request_context/saved_policy.rs"]
+mod saved_policy;
+#[path = "source_request_context/web_research.rs"]
+mod web_research;
 use anyhow::{bail, Result};
 use remarkable_reader_buddy::{
     conversation::{receiving::*, *},

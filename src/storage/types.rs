@@ -84,7 +84,7 @@ impl Envelope {
                 || (self.domain_schema_version == 2
                     && matches!(
                         self.namespace,
-                        Namespace::Conversation | Namespace::ExportAssociation
+                        Namespace::Conversation | Namespace::Source | Namespace::ExportAssociation
                     )),
             "unsupported domain schema version for namespace"
         );

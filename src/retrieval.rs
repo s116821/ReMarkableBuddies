@@ -1,6 +1,7 @@
 //! Derived normalized-source retrieval; no extraction or native identity authority.
 pub mod disk;
 pub mod epub;
+pub mod notebook;
 pub mod pdf;
 mod ranking;
 use crate::storage::{digest, Uuid};
@@ -27,7 +28,7 @@ pub struct SourceUnit {
     pub text: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct NormalizedDocument {
     pub document: Uuid,

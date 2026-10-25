@@ -19,6 +19,7 @@ native-page qualification. Individual guides identify remaining companion work.
 | Manage the declared protected model credential | [Model credential](model-credential.md) |
 | Change the saved private credential reference | [Credential reference](credential-reference.md) |
 | Edit saved memory enablement and profile declarations | [Memory settings](memory-settings.md) |
+| Edit saved research policy without activating a provider | [Research policy](saved-research-policy.md) |
 
 ## Subject memory
 
@@ -52,3 +53,9 @@ native-page qualification. Individual guides identify remaining companion work.
 Prepared-operation guides explain which original confirmation data to retain and
 how to reconcile incomplete output. Follow those rules before another deliberate
 action.
+
+Concrete research acquisition: [OpenAI web research](openai-web-research.md).
+
+Consume complete context with an explicit model: [Researched answers](researched-answer.md).
+
+Index explicitly supplied historical PNG pages: [Notebook image normalization](notebook-image-normalization.md).

@@ -6,6 +6,8 @@ pub mod memory_settings;
 pub mod model_credential;
 pub mod model_settings;
 pub mod personalization;
+pub mod research_settings;
+use crate::conversation::receiving::memory::research::ResearchPolicy;
 use crate::{
     llm::openai::DEFAULT_MODEL,
     storage::{files, Namespace, StorePaths, Uuid, MAX_MEDIA, MAX_RECORD},
@@ -78,6 +80,12 @@ pub struct Config {
     pub sync: SyncPolicy,
     pub memory: crate::memory::Configuration,
     pub personalization: Personalization,
+    #[serde(
+        default,
+        deserialize_with = "research_settings::present_policy",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub research_policy: Option<Option<ResearchPolicy>>,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -93,6 +101,7 @@ impl Default for Config {
             sync: SyncPolicy::default(),
             memory: crate::memory::Configuration::default(),
             personalization: Personalization::default(),
+            research_policy: None,
         }
     }
 }
@@ -166,6 +175,11 @@ impl Config {
     /// Snapshot a verified preference without changing request/history or authority.
     pub fn personalization_snapshot(&self) -> Result<PersonalizationSnapshot> {
         self.personalization.snapshot()
+    }
+
+    /// Pure saved declaration/default capture; no file or runtime lookup.
+    pub fn research_policy_snapshot(&self) -> Result<research_settings::ResearchPolicySnapshot> {
+        research_settings::ResearchPolicySnapshot::capture(self)
     }
 }
 

@@ -60,6 +60,14 @@ impl SelectedDomainProjection {
                                     s.id == *source
                                         && s.conversation == conversation
                                         && s.turn == turn.id,
+                                Record::NormalizedText(s) =>
+                                    s.id == *source
+                                        && s.conversation == conversation
+                                        && matches!(self.head(Namespace::Conversation, s.turn),
+                                            Some((_, Some(Record::Turn(origin))))
+                                            if origin.conversation == conversation
+                                                && origin.sequence <= turn.sequence
+                                                && origin.sources.contains(&s.id)),
                                 _ => false,
                             }),
                             "selected turn source closure missing or foreign"
@@ -87,6 +95,15 @@ impl SelectedDomainProjection {
                 }
                 Record::LegacyCapture(capture) => {
                     self.require_turn(capture.turn, conversation)?;
+                }
+                Record::NormalizedText(source) => {
+                    self.require_turn(source.turn, conversation)?;
+                    ensure!(
+                        matches!(self.head(Namespace::Conversation, source.turn),
+                            Some((_, Some(Record::Turn(origin))))
+                            if origin.sources.contains(&source.id)),
+                        "selected normalized source origin relationship missing"
+                    );
                 }
                 Record::Binding(binding) => {
                     ensure!(
@@ -433,6 +450,7 @@ pub(super) fn conversation_id(record: &Record) -> Uuid {
         Record::RequestEvidence(r) => r.conversation,
         Record::Turn(r) => r.conversation,
         Record::Source(r) => r.conversation,
+        Record::NormalizedText(r) => r.conversation,
         Record::Capture(r) => r.conversation,
         Record::LegacyCapture(r) => r.conversation,
         Record::DevelopmentCapture(r) => r.conversation,
@@ -477,6 +495,212 @@ mod tests {
         next.operation_id = Uuid::new_v4();
         next.parents = BTreeSet::from([prior.revision_id]);
         next
+    }
+    #[test]
+    fn supplied_writer_text_requires_its_turn_without_native_document_ownership() {
+        use crate::conversation::{Mode, NormalizedTextSource, Outcome, Role, TextScope, Turn};
+        use crate::retrieval::{NormalizedDocument, SourceFormat, SourceUnit};
+        let root = root();
+        let conversation = root.record_id;
+        let turn_id = Uuid::new_v4();
+        let source = NormalizedTextSource::new(
+            conversation,
+            turn_id,
+            NormalizedDocument {
+                document: Uuid::new_v4(),
+                format: SourceFormat::Notebook,
+                source_sha256: "a".repeat(64),
+                extractor_revision: "selected-writer-fixture-v1".into(),
+                units: vec![SourceUnit {
+                    page: Some(1),
+                    section: None,
+                    text: "Force = 6 N.".into(),
+                }],
+            },
+            TextScope::SuppliedNotebook,
+            None,
+        )
+        .unwrap();
+        let mut source_envelope = root.clone();
+        source_envelope.namespace = Namespace::Source;
+        source_envelope.domain_schema_version = 2;
+        source_envelope.record_id = source.id;
+        source_envelope.revision_id = Uuid::new_v4();
+        source_envelope.payload =
+            serde_json::to_value(Record::NormalizedText(Box::new(source))).unwrap();
+        let mut turn = root.clone();
+        turn.record_id = turn_id;
+        turn.revision_id = Uuid::new_v4();
+        turn.payload = serde_json::to_value(Record::Turn(Turn {
+            id: turn_id,
+            conversation,
+            exchange: Uuid::new_v4(),
+            sequence: 0,
+            role: Role::User,
+            mode: Mode::Writer,
+            outcome: Outcome::Interpreted,
+            text: Some("Make notes".into()),
+            sources: vec![source_envelope.record_id],
+            correction_of: None,
+            created_ms: 1,
+            updated_ms: 1,
+            completion: None,
+        }))
+        .unwrap();
+        let projection = SelectedDomainProjection::from_records(&[
+            root.clone(),
+            turn.clone(),
+            source_envelope.clone(),
+        ])
+        .unwrap();
+        assert_eq!(
+            projection.document_ownership().unwrap()[&conversation],
+            DocumentOwnership::DeferredMissing
+        );
+        let missing =
+            SelectedDomainProjection::from_records(&[root.clone(), source_envelope.clone()])
+                .unwrap();
+        assert!(missing.document_ownership().is_err());
+        for namespace in [
+            Namespace::Conversation,
+            Namespace::ExportAssociation,
+            Namespace::SubjectMemory,
+        ] {
+            let mut wrong_domain = source_envelope.clone();
+            wrong_domain.namespace = namespace;
+            assert!(SelectedDomainProjection::from_records(&[
+                root.clone(),
+                turn.clone(),
+                wrong_domain
+            ])
+            .is_err());
+        }
+        source_envelope.domain_schema_version = 1;
+        assert!(SelectedDomainProjection::from_records(&[root, turn, source_envelope]).is_err());
+    }
+    #[test]
+    fn generated_and_refined_writer_history_has_valid_selected_source_closure() {
+        use crate::conversation::TextScope;
+        use crate::retrieval::{NormalizedDocument, SourceFormat, SourceUnit};
+        use crate::storage::{Store, StorePaths};
+        use crate::writer::{self, Request, Status};
+        use std::sync::Arc;
+        struct Model;
+        impl crate::LLMEngine for Model {
+            fn add_text_content(&mut self, _: &str) {}
+            fn add_image_content(&mut self, _: &str) {
+                panic!("text-only fixture")
+            }
+            fn clear_content(&mut self) {}
+            fn execute(&mut self) -> Result<String> {
+                Ok("# Notes\n\nForce = 6 N (page 1).".into())
+            }
+        }
+        let path = std::env::temp_dir().join(format!("rmb-selected-writer-{}", Uuid::new_v4()));
+        let store = Arc::new(
+            Store::open(StorePaths {
+                data: path.join("data"),
+                cache: path.join("cache"),
+                credentials: path.join("credentials"),
+            })
+            .unwrap(),
+        );
+        let ledger = Ledger::new(store.clone());
+        let conversation = Uuid::new_v4();
+        ledger.create(conversation, Uuid::new_v4(), 1).unwrap();
+        let preference = crate::config::Personalization::default()
+            .snapshot()
+            .unwrap();
+        let generated = writer::run(
+            &ledger,
+            &mut Model,
+            &Request::Generate {
+                conversation,
+                operation: Uuid::new_v4(),
+                request: "Make study notes".into(),
+                document: NormalizedDocument {
+                    document: Uuid::new_v4(),
+                    format: SourceFormat::Notebook,
+                    source_sha256: "a".repeat(64),
+                    extractor_revision: "writer-selected-fixture-v1".into(),
+                    units: vec![SourceUnit {
+                        page: Some(1),
+                        section: None,
+                        text: "Force = 6 N.".into(),
+                    }],
+                },
+                selection: TextScope::SuppliedNotebook,
+                guidance: None,
+            },
+            &preference,
+            &mut || false,
+        );
+        assert_eq!(generated.status, Status::Generated);
+        let refined = writer::run(
+            &ledger,
+            &mut Model,
+            &Request::Refine {
+                conversation,
+                operation: Uuid::new_v4(),
+                request: "Keep the exact force".into(),
+                draft: generated.draft.unwrap(),
+            },
+            &preference,
+            &mut || false,
+        );
+        assert_eq!(refined.status, Status::Generated);
+        let records = store
+            .snapshot_revisions_matching(
+                &[Namespace::Conversation, Namespace::Source],
+                MAX_ITEMS,
+                |_| true,
+            )
+            .unwrap();
+        let projection = SelectedDomainProjection::from_records(&records).unwrap();
+        assert_eq!(
+            projection.document_ownership().unwrap()[&conversation],
+            DocumentOwnership::DeferredMissing
+        );
+        let source = records
+            .iter()
+            .find(|e| e.namespace == Namespace::Source)
+            .unwrap();
+        let Record::NormalizedText(source_record) = Ledger::decode(source).unwrap() else {
+            panic!("text source")
+        };
+        let missing_origin: Vec<_> = records
+            .iter()
+            .filter(|e| e.record_id != source_record.turn)
+            .cloned()
+            .collect();
+        assert!(SelectedDomainProjection::from_records(&missing_origin)
+            .unwrap()
+            .document_ownership()
+            .is_err());
+        let mut foreign = records.clone();
+        for envelope in &mut foreign {
+            if envelope.record_id == source_record.turn {
+                envelope.payload["record"]["conversation"] =
+                    serde_json::to_value(Uuid::new_v4()).unwrap();
+            }
+        }
+        assert!(SelectedDomainProjection::from_records(&foreign)
+            .unwrap()
+            .document_ownership()
+            .is_err());
+        drop(ledger);
+        drop(store);
+        let resolved = path.canonicalize().unwrap();
+        assert_eq!(
+            resolved.parent().unwrap(),
+            std::env::temp_dir().canonicalize().unwrap()
+        );
+        assert!(resolved
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("rmb-selected-writer-"));
+        std::fs::remove_dir_all(resolved).unwrap();
     }
     #[test]
     fn ordinary_chain_has_one_head_and_exact_ancestor_lookup() {

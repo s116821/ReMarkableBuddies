@@ -1,0 +1,26 @@
+{
+  "status": "reference facts selected before any hosted OCR call",
+  "inspection": "Main visually inspected the complete 1822x2324 scan; displayed view was resized to1405x1792. Facts below were independently readable in the handwritten body and corroborated by NPS reference transcription. These are semantic checks, not a complete exact transcription.",
+  "png_sha256": "a4a5b635299491db594d2a69f9dacb731060f757f1c69573fe3e320fe2085f32",
+  "expected_body_facts": [
+    "The letter addresses Miss Longfellow.",
+    "The reports concern Mattie Walden.",
+    "The teacher calls her a lovely girl and says she is doing well in her studies.",
+    "Her second year in the Junior class seems to be just what she needed.",
+    "She is described as deserving her place at Hampton.",
+    "The handwritten closing thanks the recipient for all that you have done for her.",
+    "The signature is M. J. Sherman."
+  ],
+  "reference_caveats": [
+    "NPS text says all that have done for her, while the visible manuscript includes you. Do not blindly use institutional transcription as exact ground truth.",
+    "Printed letterhead is visible and is not fully included in the NPS description transcription.",
+    "Punctuation, capitalization, printed versus handwritten date components and original line breaks require separate inspection if exact-character claims are made."
+  ],
+  "retrieval_checks_planned": [
+    "Query Mattie Walden and verify returned text is from the declared page, exact normalized UTF8 range, retained complete image-set/profile key and visible unverified origin.",
+    "Query Junior class after cache reopen using independently retained original key; verify the second-year statement is actually retrieved.",
+    "Change PNG content, page mapping, reading order or profile in local controls and require stale complete-key refusal rather than assuming cache freshness."
+  ],
+  "hosted_call": "not performed",
+  "limitations": "One historical correspondence image is not a general notebook/handwriting benchmark, exact transcription certification or proof against model memorization."
+}

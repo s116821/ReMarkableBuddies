@@ -823,7 +823,7 @@ async fn export_domain_upgrade_refuses_other_namespaces_and_cross_schema_payload
             .pop()
             .unwrap();
         let mut unsupported = original.clone();
-        unsupported.namespace = Namespace::Source;
+        unsupported.namespace = Namespace::SubjectMemory;
         unsupported.record_id = Uuid::new_v4();
         unsupported.revision_id = Uuid::new_v4();
         unsupported.operation_id = Uuid::new_v4();
