@@ -82,7 +82,7 @@ fn replicate(source: &Store, target: &Store) {
 }
 
 #[test]
-fn integrated_domain_versions_preserve_both_accepted_namespaces_on_reopen() {
+fn integrated_domain_versions_preserve_all_accepted_namespaces_on_reopen() {
     let fixture = Fixture::new();
     let store = fixture.open();
     let mut accepted = Vec::new();
@@ -100,7 +100,7 @@ fn integrated_domain_versions_preserve_both_accepted_namespaces_on_reopen() {
                 || (version == 2
                     && matches!(
                         namespace,
-                        Namespace::Conversation | Namespace::ExportAssociation
+                        Namespace::Conversation | Namespace::Source | Namespace::ExportAssociation
                     ));
             let before = store.manifests().unwrap().len();
             let result = store.commit(vec![value.clone()], BTreeMap::new());
@@ -114,7 +114,7 @@ fn integrated_domain_versions_preserve_both_accepted_namespaces_on_reopen() {
     }
     drop(store);
     let reopened = fixture.open();
-    assert_eq!(reopened.manifests().unwrap().len(), 7);
+    assert_eq!(reopened.manifests().unwrap().len(), 8);
     for value in accepted {
         assert_eq!(
             reopened
@@ -137,7 +137,7 @@ fn integrated_domain_versions_preserve_both_accepted_namespaces_on_reopen() {
     );
     assert_eq!(
         schema["allOf"][0]["then"]["properties"]["namespace"]["enum"],
-        json!(["conversation", "export-association"])
+        json!(["conversation", "source", "export-association"])
     );
 }
 
