@@ -346,6 +346,7 @@ fn bind_historical_target(ledger: &Ledger, conversation: Uuid) -> BindingReceipt
     let target = Uuid::new_v4();
     let document = Uuid::new_v4();
     let receipt = BindingReceipt {
+        acquisition: Default::default(),
         operation: Uuid::new_v4(),
         conversation,
         request_fingerprint: "synthetic request".into(),

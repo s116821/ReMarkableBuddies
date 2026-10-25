@@ -205,6 +205,21 @@ pub struct ImageUse {
     pub target: Option<[f64; 2]>,
     pub captured_ms: u64,
 }
+/// Historical acquisition shape, never current-device qualification.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum BindingAcquisition {
+    #[default]
+    Inserted,
+    ExistingCurrent,
+    ExistingAdjacent,
+}
+impl BindingAcquisition {
+    pub(crate) fn is_inserted(&self) -> bool {
+        *self == Self::Inserted
+    }
+}
+pub const EXISTING_BINDING_SCHEMA: u32 = 2;
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct BindingReceipt {
@@ -222,6 +237,10 @@ pub struct BindingReceipt {
     pub observed_ms: u64,
     /// Domain fixtures are synthetic; SDK native qualification is a separate gate.
     pub evidence_origin: String,
+    /// Omission preserves the exact schema-1 insertion serialization/fingerprint.
+    /// Nondefault forms require a schema-2 Binding envelope and unchanged order.
+    #[serde(default, skip_serializing_if = "BindingAcquisition::is_inserted")]
+    pub acquisition: BindingAcquisition,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]

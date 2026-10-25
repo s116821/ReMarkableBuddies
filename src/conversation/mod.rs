@@ -109,6 +109,9 @@ impl Ledger {
                 Record::Receipt(receipt) if receipt.admitted_intent.is_some() => INTENT_SCHEMA,
                 Record::OutcomeFact(fact) if fact.settlement.is_some() => INTENT_SCHEMA,
                 Record::Export(export) if export.attempt.is_some() => EXPORT_SCHEMA,
+                Record::Binding(binding) if !binding.receipt.acquisition.is_inserted() => {
+                    EXISTING_BINDING_SCHEMA
+                }
                 _ => SCHEMA,
             },
             record_id: id,
@@ -130,7 +133,18 @@ impl Ledger {
         );
         ensure!(envelope.kind == Kind::Value, "deleted conversation record");
         let record: Record = serde_json::from_value(envelope.payload.clone())?;
-        if matches!(&record, Record::Export(_)) {
+        if let Record::Binding(binding) = &record {
+            ensure!(
+                (envelope.domain_schema_version == EXISTING_BINDING_SCHEMA)
+                    == !binding.receipt.acquisition.is_inserted(),
+                "binding schema/acquisition mismatch"
+            );
+            if envelope.domain_schema_version == EXISTING_BINDING_SCHEMA {
+                // Selected projection also decodes here. New shapes cannot bypass
+                // full receipt semantics by avoiding the explicit binding query.
+                Self::validate_binding_receipt(&binding.receipt)?;
+            }
+        } else if matches!(&record, Record::Export(_)) {
             ensure!(
                 (envelope.domain_schema_version == EXPORT_SCHEMA)
                     == matches!(&record, Record::Export(e) if e.attempt.is_some()),
@@ -1128,7 +1142,6 @@ impl Ledger {
             !unique.is_empty()
                 && unique.len() == receipt.expected_order.len()
                 && unique.contains(&receipt.source.page)
-                && !unique.contains(&receipt.observed_page)
                 && !unique.contains(&Uuid::nil()),
             "ambiguous source order"
         );
@@ -1137,10 +1150,30 @@ impl Ledger {
             .iter()
             .position(|id| *id == receipt.source.page)
             .context("source outside order")?;
-        permitted.insert(position + 1, receipt.observed_page);
+        match receipt.acquisition {
+            BindingAcquisition::Inserted => {
+                ensure!(
+                    !unique.contains(&receipt.observed_page),
+                    "insertion target already exists"
+                );
+                permitted.insert(position + 1, receipt.observed_page);
+            }
+            BindingAcquisition::ExistingCurrent => {
+                ensure!(
+                    receipt.observed_page == receipt.source.page,
+                    "existing current target mismatch"
+                );
+            }
+            BindingAcquisition::ExistingAdjacent => {
+                ensure!(
+                    permitted.get(position + 1) == Some(&receipt.observed_page),
+                    "existing adjacent target mismatch"
+                );
+            }
+        }
         ensure!(
             permitted == receipt.observed_order,
-            "insertion receipt order mismatch"
+            "acquisition receipt order mismatch"
         );
         Ok(())
     }

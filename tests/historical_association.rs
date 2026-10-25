@@ -61,6 +61,7 @@ fn create(ledger: &Ledger) -> Uuid {
 }
 fn claim(conversation: Uuid, document: Uuid, source: Uuid, target: Uuid) -> BindingReceipt {
     BindingReceipt {
+        acquisition: Default::default(),
         operation: Uuid::new_v4(),
         conversation,
         request_fingerprint: "synthetic immutable request".into(),
