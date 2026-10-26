@@ -372,3 +372,310 @@ fn a_forged_empty_key_tombstone_never_looks_like_confirmed_history() {
     );
     drop(report);
 }
+
+fn envelope(store: &Store, value: &Correction, parents: BTreeSet<Uuid>) -> Envelope {
+    let operation = Uuid::new_v4();
+    let record = value.record_id().unwrap();
+    let action = if parents.is_empty() {
+        Action::Confirm
+    } else {
+        Action::Update
+    };
+    let (_, revision) = mutation_identity(
+        action,
+        operation,
+        record,
+        &parents,
+        Some(&value.value_digest().unwrap()),
+    )
+    .unwrap();
+    Envelope {
+        envelope_version: 1,
+        namespace: Namespace::Handwriting,
+        domain_schema_version: 1,
+        record_id: record,
+        revision_id: revision,
+        parents,
+        operation_id: operation,
+        actor_id: store.actor_id,
+        kind: Kind::Value,
+        payload: serde_json::to_value(value).unwrap(),
+        media_descriptors: vec![value.sample.clone()],
+    }
+}
+fn import(store: &Store, envelope: Envelope, sample: Option<&[u8]>) {
+    use crate::storage::{Coverage, Manifest, ObjectRef, Omission, Scope};
+    let bytes = serde_json::to_vec(&envelope).unwrap();
+    let hash = digest(&bytes);
+    let descriptor = &envelope.media_descriptors[0];
+    let mut objects = std::collections::BTreeMap::from([(hash.clone(), bytes.clone())]);
+    let (media, coverage) = if let Some(sample) = sample {
+        objects.insert(descriptor.sha256.clone(), sample.to_vec());
+        (
+            vec![ObjectRef {
+                sha256: descriptor.sha256.clone(),
+                bytes: descriptor.bytes,
+            }],
+            Coverage::Included {
+                sha256: descriptor.sha256.clone(),
+            },
+        )
+    } else {
+        (
+            vec![],
+            Coverage::Omitted {
+                sha256: descriptor.sha256.clone(),
+                reason: Omission::UnavailableAtSource,
+            },
+        )
+    };
+    let manifest = Manifest {
+        format: 1,
+        transaction_id: Uuid::new_v4(),
+        scope: Scope::LocalTransaction,
+        records: vec![ObjectRef {
+            sha256: hash.clone(),
+            bytes: bytes.len() as u64,
+        }],
+        record_namespaces: std::collections::BTreeMap::from([(hash, Namespace::Handwriting)]),
+        media,
+        media_coverage: vec![coverage],
+    };
+    store.import(manifest, objects).unwrap();
+}
+fn fields(value: &Value, expected: &[&str]) {
+    assert_eq!(
+        value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        expected.iter().copied().collect()
+    );
+}
+
+#[test]
+fn real_conflicted_imports_are_withheld_and_reports_keep_exact_shapes_and_nulls() {
+    let local = Local::new();
+    let store = local.open();
+    let initial = admitted(&request()).unwrap();
+    let value = initial.correction().unwrap().clone();
+    let sample = initial.sample().unwrap().to_vec();
+    let root = envelope(&store, &value, BTreeSet::new());
+    let parent = root.revision_id;
+    import(&store, root, Some(&sample));
+    for body in ["First confirmed branch", "Second confirmed branch"] {
+        let mut branch = value.clone();
+        branch.corrected_text = body.into();
+        branch.confirmed_ms = 2;
+        import(
+            &store,
+            envelope(&store, &branch, BTreeSet::from([parent])),
+            Some(&sample),
+        );
+    }
+    let query_report = local.execute(&store, &query());
+    assert_eq!(query_report.status, Status::Partial);
+    assert!(query_report.facts.is_empty());
+    assert_eq!(query_report.diagnostics.conflicted, 1);
+    drop(query_report);
+    let report = local.execute(&store, &key("inspect"));
+    assert_eq!(report.status, Status::Partial);
+    assert_eq!(report.facts.len(), 2);
+    let mut bytes = Vec::new();
+    report.write_to(&mut bytes).unwrap();
+    let wire: Value = serde_json::from_slice(&bytes).unwrap();
+    fields(
+        &wire,
+        &[
+            "handwriting_version",
+            "command",
+            "status",
+            "failure",
+            "operation",
+            "transaction",
+            "record",
+            "historical",
+            "facts",
+            "diagnostics",
+        ],
+    );
+    fields(
+        &wire["diagnostics"],
+        &[
+            "scanned",
+            "matched",
+            "omitted",
+            "conflicted",
+            "unsupported",
+            "missing_media",
+            "mutation_outcome",
+        ],
+    );
+    assert!(
+        wire["failure"].is_null() && wire["operation"].is_null() && wire["transaction"].is_null()
+    );
+    assert_eq!(wire["historical"], false);
+    for fact in wire["facts"].as_array().unwrap() {
+        fields(
+            fact,
+            &[
+                "record",
+                "revision",
+                "parents",
+                "head",
+                "conflicted",
+                "state",
+                "value",
+                "sample_availability",
+            ],
+        );
+        fields(
+            &fact["value"],
+            &[
+                "kind",
+                "profile",
+                "correction",
+                "original_text",
+                "corrected_text",
+                "confirmed_ms",
+                "provenance",
+                "sample",
+                "width",
+                "height",
+            ],
+        );
+        fields(
+            &fact["value"]["provenance"],
+            &["kind", "description", "source"],
+        );
+        fields(&fact["value"]["sample"], &["sha256", "bytes", "media_type"]);
+        assert_eq!(fact["head"], true);
+        assert_eq!(fact["conflicted"], true);
+        assert_eq!(fact["sample_availability"], "available");
+        assert!(fact["value"]["provenance"]["source"].is_null());
+    }
+    drop(report);
+}
+
+#[test]
+fn declared_media_omission_is_partial_metadata_not_a_usable_or_absent_correction() {
+    let local = Local::new();
+    let store = local.open();
+    let input = admitted(&request()).unwrap();
+    let value = input.correction().unwrap();
+    let envelope = envelope(&store, value, BTreeSet::new());
+    let operation = envelope.operation_id;
+    import(&store, envelope, None);
+    assert_eq!(store.unavailable_commits().unwrap(), 0);
+    let report = local.execute(&store, &query());
+    assert_eq!(report.status, Status::Partial);
+    assert!(report.facts.is_empty());
+    assert_eq!(report.diagnostics.missing_media, 1);
+    drop(report);
+    let report = local.execute(&store, &key("inspect"));
+    assert_eq!(report.status, Status::Partial);
+    assert_eq!(
+        report.facts[0].sample_availability,
+        Availability::Unavailable
+    );
+    assert!(report.facts[0].value.is_some());
+    drop(report);
+    let report = local.execute(&store, &status(&json!(operation)));
+    assert_eq!(report.status, Status::Partial);
+    assert!(report.historical);
+    assert!(report.transaction.is_none());
+    assert_eq!(report.facts[0].head, None);
+    assert_eq!(report.facts[0].conflicted, None);
+    assert_eq!(
+        report.diagnostics.mutation_outcome,
+        MutationOutcome::Observed
+    );
+    drop(report);
+}
+
+#[test]
+fn encoded_budget_omits_unexamined_corrupt_samples_and_foreign_profile_stays_separate() {
+    let local = Local::new();
+    let store = local.open();
+    let mut source = request();
+    source["corrected_text"] = json!("\"\\\n".repeat(1000));
+    let report = local.execute(&store, &source);
+    assert_eq!(report.status, Status::Complete);
+    let sha = report.facts[0]
+        .value
+        .as_ref()
+        .unwrap()
+        .sample
+        .sha256
+        .clone();
+    drop(report);
+    let generation: Uuid = files::json(&local.config.paths.data.join("CURRENT"), 128).unwrap();
+    std::fs::write(
+        local
+            .config
+            .paths
+            .data
+            .join("generations")
+            .join(generation.to_string())
+            .join("objects")
+            .join(sha),
+        b"synthetic corrupt data",
+    )
+    .unwrap();
+    let mut limited = query();
+    limited["max_encoded_bytes"] = json!(512);
+    let report = local.execute(&store, &limited);
+    assert_eq!(report.status, Status::Partial);
+    assert!(report.facts.is_empty());
+    assert_eq!(report.diagnostics.omitted, 1);
+    assert_eq!(report.diagnostics.missing_media, 0);
+    let mut bytes = Vec::new();
+    report.write_to(&mut bytes).unwrap();
+    assert!(bytes.len() <= 512);
+    drop(report);
+    let mut foreign = query();
+    foreign["profile"] = json!(Uuid::new_v4());
+    let report = local.execute(&store, &foreign);
+    assert_eq!(report.status, Status::CompleteEmpty);
+    assert!(report.facts.is_empty());
+    assert_eq!(report.diagnostics.missing_media, 0);
+    drop(report);
+    limited["max_encoded_bytes"] = json!(511);
+    assert!(matches!(admitted(&limited), Err(Failure::InvalidBudget)));
+}
+
+#[test]
+fn inspect_whole_report_limit_refuses_without_truncating_conflicting_text() {
+    let local = Local::new();
+    let store = local.open();
+    let mut input = request();
+    input["original_text"] = json!("\"".repeat(MAX_TEXT));
+    input["corrected_text"] = json!("\"".repeat(MAX_TEXT));
+    let prepared = admitted(&input).unwrap();
+    let value = prepared.correction().unwrap();
+    let sample = prepared.sample().unwrap();
+    let root = envelope(&store, value, BTreeSet::new());
+    let revision = root.revision_id;
+    import(&store, root, Some(sample));
+    for n in 0..16 {
+        let mut branch = value.clone();
+        branch.corrected_text = format!("{}{:02}", "\"".repeat(MAX_TEXT - 2), n);
+        branch.confirmed_ms = 2;
+        import(
+            &store,
+            envelope(&store, &branch, BTreeSet::from([revision])),
+            Some(sample),
+        );
+    }
+    let report = local.execute(&store, &key("inspect"));
+    assert_eq!(report.status, Status::Unavailable);
+    assert_eq!(report.failure, Some(Failure::OutputLimit));
+    assert!(report.facts.is_empty());
+    assert_eq!(report.diagnostics.conflicted, 1);
+    let mut bytes = Vec::new();
+    report.write_to(&mut bytes).unwrap();
+    assert!(bytes.len() <= 256 * 1024 + 1);
+    drop(report);
+}
