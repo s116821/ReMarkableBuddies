@@ -71,6 +71,16 @@ fn server_with_metadata(
     delay: Duration,
     response_fields: Value,
 ) -> (String, thread::JoinHandle<Vec<Value>>) {
+    server_with_witness(replies, stall, delay, response_fields, None)
+}
+
+fn server_with_witness(
+    replies: Vec<String>,
+    stall: bool,
+    delay: Duration,
+    response_fields: Value,
+    request_received: Option<std::sync::mpsc::SyncSender<()>>,
+) -> (String, thread::JoinHandle<Vec<Value>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -94,13 +104,19 @@ fn server_with_metadata(
                 .unwrap();
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
+            assert!(
+                reader.read_line(&mut line).unwrap() > 0,
+                "local fixture request-line EOF"
+            );
             assert!(line.starts_with("POST /v1/chat/completions "));
             let mut length = 0;
             let mut authorized = false;
             loop {
                 line.clear();
-                reader.read_line(&mut line).unwrap();
+                assert!(
+                    reader.read_line(&mut line).unwrap() > 0,
+                    "local fixture header EOF before terminator"
+                );
                 if line == "\r\n" {
                     break;
                 }
@@ -117,6 +133,9 @@ fn server_with_metadata(
             let mut body = vec![0; length];
             reader.read_exact(&mut body).unwrap();
             bodies.push(serde_json::from_slice(&body).unwrap());
+            if let Some(witness) = &request_received {
+                witness.send(()).unwrap();
+            }
             if stall {
                 thread::sleep(Duration::from_secs(3));
                 continue;
@@ -380,7 +399,14 @@ fn live_timeout_is_bounded_and_retains_failure_evidence() {
 #[test]
 fn pending_http_ticks_on_caller_thread_and_callback_failure_stops_ticks() {
     use remarkable_reader_buddy::{LLMEngine, OpenAI};
-    let (endpoint, handle) = server(vec!["NONE".into()], true);
+    let (sent, received) = std::sync::mpsc::sync_channel(1);
+    let (endpoint, handle) = server_with_witness(
+        vec!["NONE".into()],
+        true,
+        Duration::ZERO,
+        json!({"model":"local-fixture"}),
+        Some(sent),
+    );
     let mut model = OpenAI::new(
         "local-fixture".into(),
         "local-test-secret-not-real".into(),
@@ -390,12 +416,26 @@ fn pending_http_ticks_on_caller_thread_and_callback_failure_stops_ticks() {
     model.add_text_content("bounded progress test");
     let caller = thread::current().id();
     let mut ticks = 0;
+    let mut witnessed = false;
+    let mut pending_ticks = 0;
     let start = Instant::now();
     let result = model.execute_with_progress(&mut || {
         assert_eq!(thread::current().id(), caller);
         ticks += 1;
-        if ticks == 2 {
-            anyhow::bail!("progress fixture failed");
+        if !witnessed {
+            match received.try_recv() {
+                Ok(()) => witnessed = true,
+                Err(std::sync::mpsc::TryRecvError::Empty) => (),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    anyhow::bail!("local fixture request witness unavailable");
+                }
+            }
+        }
+        if witnessed {
+            pending_ticks += 1;
+            if pending_ticks == 2 {
+                anyhow::bail!("progress fixture failed");
+            }
         }
         Ok(())
     });
@@ -403,7 +443,9 @@ fn pending_http_ticks_on_caller_thread_and_callback_failure_stops_ticks() {
         .unwrap_err()
         .to_string()
         .contains("progress fixture failed"));
-    assert_eq!(ticks, 2);
+    assert!(witnessed);
+    assert_eq!(pending_ticks, 2);
+    assert!(ticks >= pending_ticks);
     assert!(start.elapsed() < Duration::from_secs(3));
     assert_eq!(handle.join().unwrap().len(), 1);
 }
