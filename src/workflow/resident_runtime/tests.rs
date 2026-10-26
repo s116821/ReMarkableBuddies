@@ -129,7 +129,8 @@ fn staged_socket_wait_services_admission_and_connects_only_after_listen() {
         "1"
     );
     assert!(!fixture.0.join("run/sdk.pending").exists());
-    assert!(runtime.shutdown(end()).reaped);
+    let report = runtime.shutdown(Instant::now() + Duration::from_secs(1));
+    assert!(report.reaped && report.error.is_none(), "{report:?}");
 }
 
 #[test]
