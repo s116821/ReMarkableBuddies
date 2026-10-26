@@ -1,7 +1,7 @@
 //! Explicit Linux child ownership for the resident SDK. Not installed activation.
 //! The caller still owns approved profile selection, stock-service takeover and
 //! independent stock recovery. Protocol Ready confers no Reader/write capability.
-use super::resident_client::{self, ResidentConnection};
+use super::resident_client::{self, ConnectionFailure, ResidentConnection};
 use crate::storage::Store;
 use anyhow::{ensure, Context, Result};
 use nix::libc;
@@ -101,6 +101,8 @@ pub struct ResidentRuntime {
     child: Option<Child>,
     connection: Option<ResidentConnection>,
     prepared: Prepared,
+    store: Arc<Store>,
+    retired_loss: LostRequest,
 }
 impl ResidentRuntime {
     pub fn launch(
@@ -165,6 +167,8 @@ impl ResidentRuntime {
             child: Some(child),
             connection: None,
             prepared,
+            store: store.clone(),
+            retired_loss: LostRequest::NoPendingMutation,
         };
         match runtime.connect(store, deadline, &mut admit) {
             Ok(()) => Ok(runtime),
@@ -252,6 +256,70 @@ impl ResidentRuntime {
     pub fn identity(&self) -> &RuntimeIdentity {
         &self.prepared.identity
     }
+    /// Close only the client socket, retaining original effect uncertainty and
+    /// child ownership. This is not native cancellation or permission to replay.
+    pub fn retire_connection(&mut self) -> LostRequest {
+        if let Some(mut connection) = self.connection.take() {
+            let lost = connection.close();
+            if self.retired_loss == LostRequest::NoPendingMutation {
+                self.retired_loss = lost;
+            }
+        }
+        self.retired_loss.clone()
+    }
+    /// Explicitly reconnect to this same verified child. The installed owner
+    /// must supply lease/group/health admission on each callback. No retry or
+    /// child restart follows failure, and unresolved effects stay read-only.
+    pub fn reconnect(
+        &mut self,
+        deadline: Instant,
+        progress: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        self.retire_connection();
+        before(deadline)?;
+        ensure!(
+            deadline.saturating_duration_since(Instant::now()) <= Duration::from_secs(30),
+            "resident reconnect bound exceeds 30 seconds"
+        );
+        self.prepared.current(true)?;
+        self.check_child()?;
+        let scope = ConnectionIdentity {
+            runtime: self.prepared.identity.clone(),
+            connection: nonce(),
+            server_nonce: None,
+        };
+        let result = ResidentConnection::connect_with_progress(
+            self.store.clone(),
+            self.prepared.directory.file.try_clone()?,
+            self.prepared.uid,
+            scope,
+            OperationId(nonce()),
+            deadline,
+            &mut || {
+                progress()?;
+                self.prepared.current(true)?;
+                self.check_child()?;
+                before(deadline)
+            },
+        );
+        let mut connection =
+            result.map_err(|error| match error.downcast::<ConnectionFailure>() {
+                Ok(mut failure) => {
+                    if self.retired_loss != LostRequest::NoPendingMutation {
+                        failure.lost = self.retired_loss.clone();
+                    }
+                    anyhow::Error::new(failure)
+                }
+                Err(error) => error,
+            })?;
+        progress()?;
+        self.prepared.current(true)?;
+        self.check_child()?;
+        before(deadline)?;
+        connection.retain_loss(self.retired_loss.clone());
+        self.connection = Some(connection);
+        Ok(())
+    }
     pub fn evidence_directory(&self) -> &Path {
         &self.prepared.directory.path
     }
@@ -260,12 +328,7 @@ impl ResidentRuntime {
     }
     fn stop(&mut self, deadline: Instant) -> Shutdown {
         let deadline = deadline.min(Instant::now() + CLEANUP);
-        let lost = self
-            .connection
-            .take()
-            .map_or(LostRequest::NoPendingMutation, |mut connection| {
-                connection.close()
-            });
+        let lost = self.retire_connection();
         let mut report = Shutdown {
             pid: self.prepared.identity.pid,
             start_ticks: (self.prepared.identity.start_ticks != 0)

@@ -34,10 +34,6 @@ listener = socket.socket(socket.AF_UNIX)
 listener.bind(str(root / "sdk.sock"))
 (root / "sdk.sock").chmod(0o600)
 listener.listen(1)
-peer, _ = listener.accept()
-peer.settimeout(3)
-credentials = peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
-assert struct.unpack("3i", credentials)[:2] == (os.getppid(), os.geteuid())
 
 def receive(count):
     result = b""
@@ -56,30 +52,57 @@ def frame():
 def send(payload):
     peer.sendall(struct.pack(">I", len(payload)) + payload)
 
-hello = bytearray(frame())
-assert len(hello) == 203 and hello[:6] == b"RSDK\x00\x02" and hello[202] == 0
-assert hello[6:118] == admission[8:120]
-assert struct.unpack(">I", hello[118:122])[0] == os.getpid()
-assert hello[130:146] == admission[120:136]
-(root / "handshakes").write_bytes(b"1")
-if mode == "late-ready":
-    time.sleep(10)
-hello[162:178] = uuid.uuid4().bytes
-hello[202] = 1
-if mode == "bad-ready":
-    hello[130:146] = uuid.uuid4().bytes
-send(hello)
-try:
-    while True:
-        request = frame()
-        digest = hashlib.sha256(struct.pack(">I", len(request)) + request).digest()
-        if mode == "selection":
-            assert request[202:204] == b"\x02\x03"
-            # Owned current-target selection fixture: unchanged original facts.
-            assert request[220:236] == request[-16:]
-            send(request[:202] + b"\x03" + digest + b"\x05" + request[204:-16])
-        else:
-            assert len(request) == 204 and request[202:] == b"\x02\x00"
-            send(request[:202] + b"\x03" + digest + b"\x03\x00")
-except EOFError:
-    pass
+connections = set()
+handshakes = set()
+count = 0
+while True:
+    peer, _ = listener.accept()
+    peer.settimeout(3)
+    credentials = peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+    assert struct.unpack("3i", credentials)[:2] == (os.getppid(), os.geteuid())
+    try:
+        hello = bytearray(frame())
+        assert len(hello) == 203 and hello[:6] == b"RSDK\x00\x02" and hello[202] == 0
+        assert hello[6:118] == admission[8:120]
+        assert struct.unpack(">I", hello[118:122])[0] == os.getpid()
+        assert hello[130:146] == admission[120:136]
+        connection = bytes(hello[146:162])
+        handshake = bytes(hello[186:202])
+        assert connection not in connections and handshake not in handshakes
+        connections.add(connection)
+        handshakes.add(handshake)
+        count += 1
+        (root / "handshakes").write_text(str(count))
+        if mode == "late-ready":
+            time.sleep(10)
+        hello[162:178] = uuid.uuid4().bytes
+        hello[202] = 1
+        if mode == "bad-ready":
+            hello[130:146] = uuid.uuid4().bytes
+        send(hello)
+        if mode == "reconnect-idle" and count == 1:
+            # Immediate owned EOF models expiry without a 30-second test sleep.
+            peer.close()
+            (root / "idle-retired").touch()
+            continue
+        while True:
+            request = frame()
+            digest = hashlib.sha256(struct.pack(">I", len(request)) + request).digest()
+            if mode == "reconnect-pending" and count == 1:
+                assert request[202:204] == b"\x02\x03"
+                (root / "effect-received").touch()
+                assert peer.recv(1) == b""  # no reply before caller cancellation
+                break
+            if mode in ("selection", "reconnect-selection") and request[202:204] == b"\x02\x03":
+                # Owned current-target selection fixture: unchanged original facts.
+                assert request[220:236] == request[-16:]
+                send(request[:202] + b"\x03" + digest + b"\x05" + request[204:-16])
+            else:
+                assert len(request) == 204 and request[202:] == b"\x02\x00"
+                send(request[:202] + b"\x03" + digest + b"\x03\x00")
+    except (EOFError, ConnectionResetError, BrokenPipeError):
+        pass
+    finally:
+        peer.close()
+    if not mode.startswith("reconnect"):
+        break

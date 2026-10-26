@@ -362,17 +362,50 @@ mod linux {
     use super::*;
     use remarkable_open_sdk::{
         native_adapter::{
-            transport::Client, ConnectionIdentity, InsertAfter, LostRequest, SelectAdjacent,
+            transport::{Client, Failure, TransportError},
+            ConnectionIdentity, InsertAfter, LostRequest, SelectAdjacent,
         },
         OperationId,
     };
     use std::{fs::File, sync::Arc, time::Instant};
 
+    /// Structured transport evidence survives anyhow context at the product boundary.
+    #[derive(Debug)]
+    pub struct ConnectionFailure {
+        pub cause: Failure,
+        pub lost: LostRequest,
+    }
+    impl From<TransportError> for ConnectionFailure {
+        fn from(error: TransportError) -> Self {
+            Self {
+                cause: error.cause,
+                lost: error.lost,
+            }
+        }
+    }
+    impl std::fmt::Display for ConnectionFailure {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                f,
+                "resident transport failed: {:?}; {:?}",
+                self.cause, self.lost
+            )
+        }
+    }
+    impl std::error::Error for ConnectionFailure {}
+
+    #[derive(Debug)]
+    pub enum EffectCause {
+        Transport(Failure),
+        Retention,
+        Unresolved,
+    }
     #[derive(Debug)]
     pub struct EffectFailure {
         pub operation: OperationId,
         pub lost: LostRequest,
         pub detail: String,
+        pub cause: EffectCause,
     }
     pub type InsertionFailure = EffectFailure;
     pub struct ResidentConnection {
@@ -422,7 +455,10 @@ mod linux {
                 deadline,
                 &mut || progress().map_err(std::io::Error::other),
             )
-            .map_err(|error| anyhow::anyhow!("resident connection refused: {error:?}"))?;
+            .map_err(|cause| ConnectionFailure {
+                cause,
+                lost: LostRequest::NoPendingMutation,
+            })?;
             Ok(Self {
                 client,
                 store,
@@ -447,7 +483,7 @@ mod linux {
                     |_, _| Ok(()),
                     &mut || progress().map_err(std::io::Error::other),
                 )
-                .map_err(|error| anyhow::anyhow!("resident observation failed: {error:?}"))
+                .map_err(|error| self.transport_failure(error).into())
         }
         /// Requires separately qualified product reuse/placement decisions. This
         /// primitive only journals and dispatches; it grants no rendering lease.
@@ -523,6 +559,14 @@ mod linux {
             deadline: Instant,
             progress: &mut dyn FnMut() -> Result<()>,
         ) -> std::result::Result<Reply, EffectFailure> {
+            if let Some(lost) = &self.retention_loss {
+                return Err(EffectFailure {
+                    operation,
+                    lost: lost.clone(),
+                    detail: "resident effect requires original uncertainty reconciliation".into(),
+                    cause: EffectCause::Unresolved,
+                });
+            }
             let mut original = None;
             let result = self.client.execute_with_progress(
                 operation,
@@ -560,6 +604,7 @@ mod linux {
                             operation,
                             lost,
                             detail: format!("native reply retention failed: {error}"),
+                            cause: EffectCause::Retention,
                         });
                     }
                     Ok(reply)
@@ -581,6 +626,7 @@ mod linux {
                         operation,
                         lost: self.retention_loss.clone().unwrap_or(error.lost),
                         detail,
+                        cause: EffectCause::Transport(error.cause),
                     })
                 }
             }
@@ -665,7 +711,19 @@ mod linux {
                 .execute_with_progress(operation, command, deadline, |_, _| Ok(()), &mut || {
                     progress().map_err(std::io::Error::other)
                 })
-                .map_err(|error| anyhow::anyhow!("resident reconciliation failed: {error:?}"))
+                .map_err(|error| self.transport_failure(error).into())
+        }
+        fn transport_failure(&self, error: TransportError) -> ConnectionFailure {
+            ConnectionFailure {
+                cause: error.cause,
+                lost: self.retention_loss.clone().unwrap_or(error.lost),
+            }
+        }
+        /// Runtime owner carries uncertainty across explicitly renewed sockets.
+        pub(in crate::workflow) fn retain_loss(&mut self, lost: LostRequest) {
+            if lost != LostRequest::NoPendingMutation {
+                self.retention_loss = Some(lost);
+            }
         }
         pub fn close(&mut self) -> LostRequest {
             let lost = self.client.close();
@@ -674,7 +732,9 @@ mod linux {
     }
 }
 #[cfg(target_os = "linux")]
-pub use linux::{EffectFailure, InsertionFailure, ResidentConnection};
+pub use linux::{
+    ConnectionFailure, EffectCause, EffectFailure, InsertionFailure, ResidentConnection,
+};
 
 #[cfg(test)]
 mod tests;

@@ -552,6 +552,12 @@ mod sockets {
                 }
                 .unwrap_err();
                 assert!(canceled && failure.detail.contains("owned request canceled"));
+                assert!(matches!(
+                    failure.cause,
+                    super::super::EffectCause::Transport(
+                        remarkable_open_sdk::native_adapter::transport::Failure::Progress(_)
+                    )
+                ));
                 let history = attempts(&store).unwrap();
                 assert_eq!(history.len(), 1);
                 let original = history[0].request.clone();

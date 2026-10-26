@@ -148,6 +148,251 @@ fn real_child_consumes_exact_admission_connects_once_and_is_reaped() {
 }
 
 #[test]
+fn reconnect_retains_child_and_admission_after_idle_eof_and_cancellation() {
+    use remarkable_open_sdk::native_adapter::transport::Failure;
+    use resident_client::ConnectionFailure;
+    let fixture = Fixture::new();
+    let mut runtime = fixture
+        .start("reconnect-idle", Duration::from_secs(5))
+        .unwrap();
+    let original = runtime.identity().clone();
+    let admission = fs::metadata(fixture.0.join("run/admission.consumed")).unwrap();
+    let end = || Instant::now() + Duration::from_secs(2);
+    let marker_deadline = end();
+    while !fixture.0.join("run/idle-retired").exists() {
+        before(marker_deadline).unwrap();
+        thread::sleep(POLL);
+    }
+    let error = runtime
+        .connection()
+        .unwrap()
+        .observe(OperationId(nonce()), end())
+        .unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<ConnectionFailure>().unwrap().cause,
+        Failure::Io(_)
+    ));
+    runtime.reconnect(end(), &mut || Ok(())).unwrap();
+    assert_eq!(runtime.identity(), &original);
+    assert_eq!(fs::read(fixture.0.join("run/handshakes")).unwrap(), b"2");
+    assert!(same_file(
+        &admission,
+        &fs::metadata(fixture.0.join("run/admission.consumed")).unwrap()
+    ));
+    // Cancellation retires the socket, never the process or consumed activation.
+    let refused = runtime
+        .reconnect(end(), &mut || anyhow::bail!("request canceled"))
+        .unwrap_err();
+    assert!(matches!(
+        refused.downcast_ref::<ConnectionFailure>().unwrap().cause,
+        Failure::Progress(_)
+    ));
+    assert!(runtime.connection.is_none());
+    runtime.check_child().unwrap();
+    runtime.reconnect(end(), &mut || Ok(())).unwrap();
+    assert_eq!(runtime.identity(), &original);
+    assert_eq!(fs::read(fixture.0.join("run/handshakes")).unwrap(), b"3");
+    assert_eq!(
+        runtime
+            .connection()
+            .unwrap()
+            .observe(OperationId(nonce()), end())
+            .unwrap(),
+        Reply::Rejected(Rejection::Unsupported)
+    );
+    let report = runtime.shutdown(end());
+    assert!(report.reaped && report.error.is_none(), "{report:?}");
+}
+
+#[test]
+fn reconnect_refuses_changed_artifacts_or_consumption_before_handshake() {
+    for name in ["adapter.so", "admission.consumed"] {
+        let fixture = Fixture::new();
+        let mut runtime = fixture.start("reconnect", Duration::from_secs(5)).unwrap();
+        let path = fixture.0.join("run").join(name);
+        fs::rename(&path, path.with_extension("original")).unwrap();
+        fs::write(&path, b"changed").unwrap();
+        assert!(runtime
+            .reconnect(Instant::now() + Duration::from_secs(2), &mut || Ok(()))
+            .is_err());
+        assert_eq!(fs::read(fixture.0.join("run/handshakes")).unwrap(), b"1");
+        assert!(runtime.connection.is_none());
+        runtime.check_child().unwrap();
+        assert!(
+            runtime
+                .shutdown(Instant::now() + Duration::from_secs(1))
+                .reaped
+        );
+    }
+}
+
+#[test]
+fn reconnect_preserves_dispatched_cancellation_through_later_observation_failure() {
+    use remarkable_open_sdk::{
+        native_adapter::{transport::Failure, ReaderFacts, SelectAdjacent},
+        PageKey,
+    };
+    let fixture = Fixture::new();
+    let mut runtime = fixture
+        .start("reconnect-pending", Duration::from_secs(5))
+        .unwrap();
+    let identity = runtime.identity().clone();
+    let end = || Instant::now() + Duration::from_secs(2);
+    let page = PageKey {
+        document: nonce(),
+        page: nonce(),
+    };
+    let selection = SelectAdjacent {
+        expected: ReaderFacts::new(page, vec![page.page]).unwrap(),
+        target: page.page,
+    };
+    let original = OperationId(nonce());
+    let failure = runtime
+        .connection()
+        .unwrap()
+        .select_adjacent_with_progress(
+            StoreUuid::new_v4(),
+            original,
+            selection.clone(),
+            end(),
+            &mut || {
+                ensure!(
+                    !fixture.0.join("run/effect-received").exists(),
+                    "request canceled after dispatch"
+                );
+                Ok(())
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(
+        failure.cause,
+        resident_client::EffectCause::Transport(Failure::Progress(_))
+    ));
+    assert!(
+        matches!(failure.lost, LostRequest::Indeterminate { operation, .. } if operation == original)
+    );
+    runtime.reconnect(end(), &mut || Ok(())).unwrap();
+    assert_eq!(runtime.identity(), &identity);
+    let error = runtime
+        .connection()
+        .unwrap()
+        .observe_with_progress(OperationId(nonce()), end(), &mut || {
+            anyhow::bail!("second request canceled")
+        })
+        .unwrap_err();
+    let typed = error
+        .downcast_ref::<resident_client::ConnectionFailure>()
+        .unwrap();
+    assert!(matches!(typed.cause, Failure::Progress(_)));
+    assert_eq!(typed.lost, failure.lost);
+    runtime.reconnect(end(), &mut || Ok(())).unwrap();
+    let refused = runtime
+        .connection()
+        .unwrap()
+        .select_adjacent(StoreUuid::new_v4(), OperationId(nonce()), selection, end())
+        .unwrap_err();
+    assert!(matches!(
+        refused.cause,
+        resident_client::EffectCause::Unresolved
+    ));
+    assert_eq!(refused.lost, failure.lost);
+    assert_eq!(
+        runtime
+            .connection()
+            .unwrap()
+            .observe(OperationId(nonce()), end())
+            .unwrap(),
+        Reply::Rejected(Rejection::Unsupported)
+    );
+    let history = resident_client::attempts(&fixture.store()).unwrap();
+    assert_eq!(history.len(), 1);
+    assert!(!history[0].known_not_dispatched && history[0].reply.is_none());
+    let report = runtime.shutdown(end());
+    assert!(report.reaped && report.error.is_none(), "{report:?}");
+    assert_eq!(report.lost, failure.lost);
+}
+
+#[test]
+fn reconnect_carries_reply_retention_uncertainty_into_new_conversations_and_shutdown() {
+    use remarkable_open_sdk::{
+        native_adapter::{ReaderFacts, SelectAdjacent},
+        PageKey,
+    };
+    for after in [false, true] {
+        let fixture = Fixture::new();
+        let mut runtime = fixture
+            .start("reconnect-selection", Duration::from_secs(5))
+            .unwrap();
+        let identity = runtime.identity().clone();
+        let end = || Instant::now() + Duration::from_secs(2);
+        let page = PageKey {
+            document: nonce(),
+            page: nonce(),
+        };
+        let selection = SelectAdjacent {
+            expected: ReaderFacts::new(page, vec![page.page]).unwrap(),
+            target: page.page,
+        };
+        resident_client::fail_next_outcome_publication(after);
+        let failure = runtime
+            .connection()
+            .unwrap()
+            .select_adjacent(
+                StoreUuid::new_v4(),
+                OperationId(nonce()),
+                selection.clone(),
+                end(),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            failure.cause,
+            resident_client::EffectCause::Retention
+        ));
+        let canceled = runtime
+            .reconnect(end(), &mut || anyhow::bail!("reconnect canceled"))
+            .unwrap_err();
+        let typed = canceled
+            .downcast_ref::<resident_client::ConnectionFailure>()
+            .unwrap();
+        assert!(matches!(
+            typed.cause,
+            remarkable_open_sdk::native_adapter::transport::Failure::Progress(_)
+        ));
+        assert_eq!(typed.lost, failure.lost);
+        assert!(runtime.connection.is_none());
+        runtime.check_child().unwrap();
+        runtime.reconnect(end(), &mut || Ok(())).unwrap();
+        assert_eq!(runtime.identity(), &identity);
+        let refused = runtime
+            .connection()
+            .unwrap()
+            .select_adjacent(StoreUuid::new_v4(), OperationId(nonce()), selection, end())
+            .unwrap_err();
+        assert!(matches!(
+            refused.cause,
+            resident_client::EffectCause::Unresolved
+        ));
+        assert_eq!(refused.lost, failure.lost);
+        // Observation still works and proves the refused effect sent no bytes.
+        assert_eq!(
+            runtime
+                .connection()
+                .unwrap()
+                .observe(OperationId(nonce()), end())
+                .unwrap(),
+            Reply::Rejected(Rejection::Unsupported)
+        );
+        assert_eq!(
+            resident_client::attempts(&fixture.store()).unwrap().len(),
+            1
+        );
+        let report = runtime.shutdown(end());
+        assert!(report.reaped && report.error.is_none(), "{report:?}");
+        assert_eq!(report.lost, failure.lost);
+    }
+}
+
+#[test]
 fn final_admission_after_preparation_refuses_before_any_child_is_spawned() {
     for mode in ["canceled", "expired", "replaced"] {
         let fixture = Fixture::new();
