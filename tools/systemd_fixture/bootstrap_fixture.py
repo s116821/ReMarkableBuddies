@@ -60,7 +60,44 @@ def terminal(state):
             and not state["Job"])
 
 
-def verify_states(case, unit, original, first, second):
+def cleared_success(state):
+    return (terminal(state) and state["ActiveState"] == "inactive"
+            and state["SubState"] == "dead" and state["Result"] == "success"
+            and state["ExecMainStartTimestampMonotonic"] == "0"
+            and state["InvocationID"] == "")
+
+
+def recovery_results(records):
+    results = {}
+    for name, value in records.items():
+        if name.startswith("recovery-result-"):
+            if not re.fullmatch(r"recovery-result-[0-9a-f]{32}", name):
+                raise ValueError("malformed recovery result name")
+            results[name] = digest(value)
+    return results
+
+
+def result_delta(previous, current):
+    if any(current.get(name) != value for name, value in previous.items()):
+        raise AssertionError("previous recovery results changed or disappeared")
+    added = {name: value for name, value in current.items() if name not in previous}
+    if len(added) > 1:
+        raise AssertionError("multiple new recovery results")
+    return added
+
+
+def successful_result_delta(previous, current):
+    added = result_delta(previous, current)
+    return len(added) == 1 and next(iter(added.values())) == digest(b"Ok(())\n")
+
+
+def successful_actor_result(records):
+    found = [(name, value) for name, value in records.items() if name.startswith("actor-result-")]
+    return (len(found) == 1 and re.fullmatch(r"actor-result-[0-9a-f]{32}", found[0][0])
+            and found[0][1] == b"Ok(())\n")
+
+
+def verify_states(case, unit, original, first, second, completion=None):
     expected_actor = {"actor_kill": "signal", "actor_hang": "timeout",
                       "after_buddy_stop": "exit-code", "source_mismatch": "exit-code"}.get(case, "success")
     if first[unit("actor")]["Result"] != expected_actor:
@@ -71,7 +108,9 @@ def verify_states(case, unit, original, first, second):
         raise AssertionError("first helper did not reach the selected completion/fault")
     if (first[unit("recovery")]["ExecMainStartTimestampMonotonic"]
             == second[unit("recovery")]["ExecMainStartTimestampMonotonic"]):
-        raise AssertionError("second helper invocation not observed")
+        if (completion is None or not cleared_success(second[unit("recovery")])
+                or not successful_result_delta(*completion)):
+            raise AssertionError("second helper invocation not observed")
     expected_helper = "exit-code" if case in ("recovery_after_intent", "source_mismatch") else "success"
     if second[unit("recovery")]["Result"] != expected_helper:
         raise AssertionError("unexpected second helper result")
@@ -101,7 +140,7 @@ def verify_states(case, unit, original, first, second):
             raise AssertionError("source mismatch delayed original stock restoration")
 
 
-def verify_archive(data, nonce, case):
+def read_control_archive(data, nonce):
     prefix = "rsdk-control-" + nonce + "/"
     records = {}
     total = 0
@@ -117,6 +156,11 @@ def verify_archive(data, nonce, case):
                     or len(records) >= 128):
                 raise ValueError("unexpected control archive entry")
             records[leaf] = archive.extractfile(member).read()
+    return records
+
+
+def verify_archive(data, nonce, case):
+    records = read_control_archive(data, nonce)
     if records.get("buddy.stop-intent") != nonce.encode() or "ownership.json" not in records:
         raise AssertionError("original ownership/first stop not exercised")
     ownership = strict_json(records["ownership.json"])
@@ -252,8 +296,13 @@ class Run:
                     + ("; chmod 700 " + shlex.quote(path) if executable else ""),
                     data, timeout=40)
 
-    def wait(self, initial=False, previous=None):
+    def archive(self, required=True, label="completion-archive"):
+        return self.remote(label, "tar -C /run -czf - " + "rsdk-control-" + self.nonce,
+                           required=required)
+
+    def wait(self, initial=False, previous=None, previous_results=None):
         deadline = time.monotonic() + (20 if initial else 145)
+        previous_results = {} if previous_results is None else previous_results
         while time.monotonic() < deadline:
             current = states(self.show(("actor", "recovery", "stock", "buddy")))
             if initial:
@@ -262,9 +311,32 @@ class Run:
                     return current
             else:
                 helper = current[self.unit("recovery")]
-                if (terminal(current[self.unit("actor")]) and terminal(helper)
-                        and helper["ExecMainStartTimestampMonotonic"] not in ("0", previous)):
-                    return current
+                if terminal(current[self.unit("actor")]) and terminal(helper):
+                    retained = helper["ExecMainStartTimestampMonotonic"] not in ("0", previous)
+                    if retained or cleared_success(helper):
+                        records = read_control_archive(self.archive(), self.nonce)
+                        results = recovery_results(records)
+                        result_delta(previous_results, results)
+                        # Success always needs a new durable result, including
+                        # when PID1 still retains the successful invocation.
+                        success = successful_result_delta(previous_results, results)
+                        if helper["Result"] == "success" and not success:
+                            time.sleep(0.5)
+                            continue
+                        closing = states(self.show(("actor", "recovery", "stock", "buddy")))
+                        closed_helper = closing[self.unit("recovery")]
+                        closed_actor = closing[self.unit("actor")]
+                        same = closed_helper == helper
+                        cleared = success and cleared_success(closed_helper)
+                        actor_complete = (terminal(closed_actor)
+                                          and (not cleared_success(closed_actor)
+                                               or successful_actor_result(records)))
+                        if (actor_complete and (same or cleared)
+                                and time.monotonic() < deadline):
+                            phase = "first" if previous is None else "second"
+                            self.receipt[phase + "_results"] = results
+                            self.save()  # Freeze evidence before any next selection.
+                            return closing
             time.sleep(0.5)  # State-driven polling, never elapsed-time success.
         raise TimeoutError("original fixture wait deadline expired; no replay")
 
@@ -330,11 +402,13 @@ class Run:
             # Exactly one explicitly selected second helper attempt tests durable
             # admission. It may verify active stand-ins, never replay a start claim.
             self.remote("second-helper", "systemctl --no-block --job-mode=fail start " + self.unit("recovery"))
-            second = self.wait(previous=first[self.unit("recovery")]["ExecMainStartTimestampMonotonic"])
+            second = self.wait(previous=first[self.unit("recovery")]["ExecMainStartTimestampMonotonic"],
+                               previous_results=self.receipt["first_results"])
             self.receipt["second"] = second
             self.receipt["original"] = original
             self.save()
-            verify_states(self.args.case, self.unit, original, first, second)
+            verify_states(self.args.case, self.unit, original, first, second,
+                          (self.receipt["first_results"], self.receipt["second_results"]))
             self.receipt["result"] = "state-assertions-passed"
         finally:
             # Read-only collection also runs after failures; it never retries actors.
@@ -346,11 +420,14 @@ class Run:
             self.remote("journal", "journalctl --no-pager -n 200 -o short-monotonic "
                         + " ".join("-u " + self.unit(r) for r in ("actor", "recovery", "stock", "buddy")),
                         required=False)
-            archive = self.remote("control-archive", "tar -C /run -czf - " + "rsdk-control-" + self.nonce,
-                                  required=False)
+            archive = self.archive(required=False, label="control-archive")
             self.save()
         if not self.receipt["real_services_unchanged"]:
             raise AssertionError("real service baseline changed")
+        if self.receipt["calls"][-1].get("returncode") != 0:
+            raise AssertionError("final control archive collection incomplete")
+        if recovery_results(read_control_archive(archive, self.nonce)) != self.receipt["second_results"]:
+            raise AssertionError("final recovery results changed")
         self.receipt["records"] = verify_archive(archive, self.nonce, self.args.case)
         self.receipt["result"] = "passed"
         self.save()
