@@ -64,6 +64,32 @@ impl PolicySnapshot {
     pub fn property(&self, key: &str) -> Option<&str> {
         self.0.get(key).map(String::as_str)
     }
+    pub(super) fn matches_observed(&self, expected: &Self, watchdog: WatchdogObservation) -> bool {
+        self.0.len() == expected.0.len()
+            && self.0.iter().all(|(key, got)| {
+                expected.property(key).is_some_and(|wanted| {
+                    if key == "WatchdogUSec" {
+                        watchdog.matches(got, wanted)
+                    } else {
+                        got == wanted
+                    }
+                })
+            })
+    }
+}
+
+/// A sampled runtime-property distinction, never configured-policy or mutation
+/// authority. ClearedUninitialized additionally requires observed group absence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum WatchdogObservation {
+    Runtime,
+    ClearedUninitialized,
+}
+impl WatchdogObservation {
+    pub(super) fn matches(self, got: &str, wanted: &str) -> bool {
+        got == wanted
+            || (self == Self::ClearedUninitialized && got == "infinity" && !wanted.is_empty())
+    }
 }
 
 impl Snapshot {
@@ -75,9 +101,13 @@ impl Snapshot {
     /// service's first start. This is a state predicate, not disabled-watchdog
     /// authority: callers must also pin a zero-watchdog unit and reject drop-ins.
     pub(super) fn unstarted_watchdog(&self) -> bool {
+        self.property("Type") == Some("oneshot") && self.uninitialized_watchdog()
+    }
+    pub(super) fn uninitialized_watchdog(&self) -> bool {
+        self.property("WatchdogUSec") == Some("infinity") && self.cleared_runtime()
+    }
+    fn cleared_runtime(&self) -> bool {
         [
-            ("WatchdogUSec", "infinity"),
-            ("Type", "oneshot"),
             ("ActiveState", "inactive"),
             ("SubState", "dead"),
             ("MainPID", "0"),
@@ -90,6 +120,13 @@ impl Snapshot {
         ]
         .iter()
         .all(|(key, value)| self.property(key) == Some(*value))
+    }
+    pub(super) fn watchdog_observation(&self, group: GroupObservation) -> WatchdogObservation {
+        if group == GroupObservation::OriginalAbsent && self.uninitialized_watchdog() {
+            WatchdogObservation::ClearedUninitialized
+        } else {
+            WatchdogObservation::Runtime
+        }
     }
     pub(super) fn parse(bytes: &[u8], unit: &str) -> Result<Self> {
         validate_unit(unit)?;
@@ -220,6 +257,7 @@ pub struct RecoveryObservation {
     pub group: GroupObservation,
     /// Compare these exact bracketed values with the verified installed profile.
     pub policy: PolicySnapshot,
+    pub(super) watchdog: WatchdogObservation,
 }
 
 /// Read only. Service sampling and the group lookup share the caller deadline.
@@ -243,6 +281,7 @@ pub fn observe_recovery(lease: &Lease, deadline: Instant) -> Result<RecoveryObse
         identity,
         group,
         policy: before.policy(),
+        watchdog: before.watchdog_observation(group),
     })
 }
 

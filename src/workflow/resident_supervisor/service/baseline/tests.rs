@@ -78,6 +78,74 @@ fn clear(s: &Snapshot) -> Snapshot {
 }
 
 #[test]
+fn cleared_watchdog_sentinel_requires_deleted_group_and_preserves_raw_policy() {
+    let f = Fixture::new();
+    for (kind, interval) in [("exec", "0"), ("notify", "2min")] {
+        let original = changed(
+            &baseline(&f).original,
+            &[("Type", kind), ("WatchdogUSec", interval)],
+        );
+        let cleared = changed(
+            &clear(&terminal(&original)),
+            &[("WatchdogUSec", "infinity")],
+        );
+        let result = stopped_bracket(
+            &original,
+            &cleared,
+            GroupObservation::OriginalAbsent,
+            &cleared,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(result.identity, TerminalIdentity::Cleared);
+        assert_eq!(result.watchdog, WatchdogObservation::ClearedUninitialized);
+        assert_eq!(result.policy.property("WatchdogUSec"), Some("infinity"));
+        assert_eq!(original.property("WatchdogUSec"), Some(interval));
+        for group in [GroupObservation::EmptyOriginal, GroupObservation::Populated] {
+            assert!(stopped_snapshot(&cleared, &original, group).is_err());
+        }
+        let retained = changed(&terminal(&original), &[("WatchdogUSec", "infinity")]);
+        assert!(stopped_snapshot(&retained, &original, GroupObservation::OriginalAbsent).is_err());
+        for (key, value) in [
+            ("WatchdogUSec", "1s"),
+            ("ActiveState", "deactivating"),
+            ("SubState", "stop-sigterm"),
+            ("MainPID", "42"),
+            ("ControlPID", "42"),
+            ("ExecMainPID", "42"),
+            ("ExecMainStartTimestampMonotonic", "1234"),
+            ("InvocationID", "34343434343434343434343434343434"),
+            ("ControlGroup", "/system.slice/fixture.service"),
+            ("Job", "42"),
+            ("Type", "oneshot"),
+            ("Restart", "always"),
+            ("NeedDaemonReload", "yes"),
+        ] {
+            assert!(
+                stopped_snapshot(
+                    &changed(&cleared, &[(key, value)]),
+                    &original,
+                    GroupObservation::OriginalAbsent
+                )
+                .is_err(),
+                "{kind}: {key}"
+            );
+        }
+        let changed_interval = changed(&cleared, &[("WatchdogUSec", interval)]);
+        assert!(stopped_bracket(
+            &original,
+            &cleared,
+            GroupObservation::OriginalAbsent,
+            &changed_interval,
+            Instant::now() + Duration::from_secs(1)
+        )
+        .unwrap()
+        .is_none());
+    }
+}
+
+#[test]
 fn records_round_trip_but_do_not_assert_live_kernel_ownership() {
     let f = Fixture::new();
     let baseline = baseline(&f);

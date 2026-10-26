@@ -908,10 +908,16 @@ fn restore(
         if !admitted {
             baseline.current(deadline)?;
         }
-        ensure!(
-            s.policy() == baseline.original().policy(),
-            "recovery target policy changed"
-        );
+        if s.policy() != baseline.original().policy() {
+            let terminal = baseline
+                .stopped(deadline)?
+                .context("recovery target policy changed before terminal state")?;
+            ensure!(
+                terminal.watchdog == WatchdogObservation::ClearedUninitialized
+                    && terminal.policy == s.policy(),
+                "recovery target policy changed"
+            );
+        }
         if s.property("ActiveState") == Some("active")
             && s.property("SubState") == Some("running")
             && s.property("Job") == Some("")

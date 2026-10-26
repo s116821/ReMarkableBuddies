@@ -150,6 +150,7 @@ fn stopped_bracket(
             identity: a,
             group,
             policy: first.policy(),
+            watchdog: first.watchdog_observation(group),
         }),
         _ => None,
     })
@@ -176,7 +177,8 @@ pub(in crate::workflow::resident_supervisor) fn stopped_snapshot(
         "unit changed during stop"
     );
     ensure!(
-        s.policy() == original.policy(),
+        s.policy()
+            .matches_observed(&original.policy(), s.watchdog_observation(group)),
         "service policy changed during stop"
     );
     let retained = s.invocation() == original.invocation()

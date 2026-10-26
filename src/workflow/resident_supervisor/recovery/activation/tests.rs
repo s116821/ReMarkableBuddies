@@ -189,6 +189,61 @@ fn first_activation_accepts_only_the_unstarted_helper_watchdog_sentinel() {
 }
 
 #[test]
+fn installed_cleared_watchdog_policy_requires_actual_group_absence() {
+    let f = crate::workflow::resident_supervisor::tests::Fixture::new();
+    let profile = super::super::tests::profile(&f.record());
+    for (unit, policy) in [
+        (BUDDY, &profile.buddy_policy),
+        (STOCK, &profile.stock_policy),
+    ] {
+        let mut expected = policy.clone();
+        // Both a disabled interval and the Buddy's finite watchdog are covered.
+        if unit == STOCK {
+            expected.insert("WatchdogUSec".into(), "0".into());
+        }
+        let original = snapshot(unit, &expected, "active", "running", 42);
+        let cleared = changed(
+            &original,
+            &[
+                ("ActiveState", "inactive"),
+                ("SubState", "dead"),
+                ("MainPID", "0"),
+                ("ExecMainPID", "0"),
+                ("ExecMainStartTimestampMonotonic", "0"),
+                ("InvocationID", ""),
+                ("ControlGroup", ""),
+                ("WatchdogUSec", "infinity"),
+            ],
+        );
+        assert!(match_policy(&cleared.policy(), &expected).is_err());
+        match_observed_policy(
+            &cleared.policy(),
+            &expected,
+            cleared.watchdog_observation(GroupObservation::OriginalAbsent),
+        )
+        .unwrap();
+        for group in [GroupObservation::Populated, GroupObservation::EmptyOriginal] {
+            assert!(match_observed_policy(
+                &cleared.policy(),
+                &expected,
+                cleared.watchdog_observation(group)
+            )
+            .is_err());
+        }
+        let wrong = changed(&cleared, &[("KillMode", "process")]);
+        assert!(match_observed_policy(
+            &wrong.policy(),
+            &expected,
+            wrong.watchdog_observation(GroupObservation::OriginalAbsent)
+        )
+        .is_err());
+        // Neither normal policy matching nor the expected profile is normalized.
+        assert_ne!(expected["WatchdogUSec"], "infinity");
+        assert_eq!(cleared.property("WatchdogUSec"), Some("infinity"));
+    }
+}
+
+#[test]
 fn stopped_original_requires_stable_identity_terminal_state_and_empty_group() {
     let f = crate::workflow::resident_supervisor::tests::Fixture::new();
     let profile = super::super::tests::profile(&f.record());

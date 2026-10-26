@@ -395,7 +395,11 @@ impl Installed {
     fn admit(&self, lease: &Lease, deadline: Instant) -> Result<()> {
         self.current(lease, deadline)?;
         let observation = service::observe_recovery(lease, deadline)?;
-        match_policy(&observation.policy, &self.profile.buddy_policy)?;
+        match_observed_policy(
+            &observation.policy,
+            &self.profile.buddy_policy,
+            observation.watchdog,
+        )?;
         check_deadline(deadline)
     }
 }
@@ -513,11 +517,20 @@ fn match_policy(
     actual: &service::PolicySnapshot,
     expected: &BTreeMap<String, String>,
 ) -> Result<()> {
+    match_observed_policy(actual, expected, service::WatchdogObservation::Runtime)
+}
+fn match_observed_policy(
+    actual: &service::PolicySnapshot,
+    expected: &BTreeMap<String, String>,
+    watchdog: service::WatchdogObservation,
+) -> Result<()> {
     for key in service::POLICY {
         let wanted = expected.get(*key).context("missing expected policy")?;
         let got = actual.property(key).context("missing actual policy")?;
         let same = if matches!(*key, "Conflicts" | "After" | "OnSuccess" | "OnFailure") {
             tokens(got)? == tokens(wanted)?
+        } else if *key == "WatchdogUSec" {
+            watchdog.matches(got, wanted)
         } else {
             got == wanted
         };
@@ -783,22 +796,8 @@ struct Native {
     installed: Installed,
     lease: Lease,
 }
-impl Backend for Native {
-    fn original_stock(&self) -> &super::StockBaseline {
-        &self.lease.record().stock
-    }
-    fn admit(&mut self, deadline: Instant) -> Result<()> {
-        self.installed.admit(&self.lease, deadline)
-    }
-    fn stock(&mut self, deadline: Instant) -> Result<service::Snapshot> {
-        let snapshot = service::observe(STOCK, deadline)?;
-        match_policy(&snapshot.policy(), &self.installed.profile.stock_policy)?;
-        Ok(snapshot)
-    }
-    fn start(&mut self, deadline: Instant) -> Result<()> {
-        service::start_stock(deadline)
-    }
-    fn empty_stock_group(&mut self, deadline: Instant) -> Result<()> {
+impl Native {
+    fn stock_group(&self, deadline: Instant) -> Result<Option<super::Identity>> {
         let original = &self.lease.record().group.context;
         let before = super::GroupContext::read(Path::new(MOUNT))?;
         ensure!(&before.identity == original, "stock group context changed");
@@ -808,7 +807,47 @@ impl Backend for Native {
             &after.identity == original && empty_group(&after.slice)? == identity,
             "stock group changed during emptiness check"
         );
-        check_deadline(deadline)
+        check_deadline(deadline)?;
+        Ok(identity)
+    }
+}
+impl Backend for Native {
+    fn original_stock(&self) -> &super::StockBaseline {
+        &self.lease.record().stock
+    }
+    fn admit(&mut self, deadline: Instant) -> Result<()> {
+        self.installed.admit(&self.lease, deadline)
+    }
+    fn stock(&mut self, deadline: Instant) -> Result<service::Snapshot> {
+        let snapshot = service::observe(STOCK, deadline)?;
+        // Only a completely cleared runtime can need this extra observation.
+        // Derive the typed observation only after actual group absence and an
+        // unchanged service bracket have both been established.
+        let watchdog = if snapshot.uninitialized_watchdog() {
+            ensure!(
+                self.stock_group(deadline)?.is_none(),
+                "cleared stock group still exists"
+            );
+            ensure!(
+                service::observe(STOCK, deadline)? == snapshot,
+                "stock changed across group check"
+            );
+            snapshot.watchdog_observation(super::GroupObservation::OriginalAbsent)
+        } else {
+            service::WatchdogObservation::Runtime
+        };
+        match_observed_policy(
+            &snapshot.policy(),
+            &self.installed.profile.stock_policy,
+            watchdog,
+        )?;
+        Ok(snapshot)
+    }
+    fn start(&mut self, deadline: Instant) -> Result<()> {
+        service::start_stock(deadline)
+    }
+    fn empty_stock_group(&mut self, deadline: Instant) -> Result<()> {
+        self.stock_group(deadline).map(|_| ())
     }
     fn verify(
         &mut self,

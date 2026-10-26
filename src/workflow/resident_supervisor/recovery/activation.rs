@@ -375,8 +375,16 @@ impl Pending {
         let before = service::observe(STOCK, deadline)?;
         let group = self.stock_group.observe()?;
         let after = service::observe(STOCK, deadline)?;
-        match_policy(&before.policy(), &self.installation.profile.stock_policy)?;
-        match_policy(&after.policy(), &self.installation.profile.stock_policy)?;
+        match_observed_policy(
+            &before.policy(),
+            &self.installation.profile.stock_policy,
+            before.watchdog_observation(group),
+        )?;
+        match_observed_policy(
+            &after.policy(),
+            &self.installation.profile.stock_policy,
+            after.watchdog_observation(group),
+        )?;
         let before_stopped = stopped_stock(&before, &self.stock, group)?;
         let after_stopped = stopped_stock(&after, &self.stock, group)?;
         check_deadline(deadline)?;
