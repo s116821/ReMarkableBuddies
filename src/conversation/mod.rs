@@ -9,6 +9,7 @@ mod legacy;
 pub use development::{DevelopmentCaptureHistory, PreparedDevelopmentCapture};
 pub mod evidence;
 mod export;
+pub mod feedback;
 mod pending;
 #[cfg(test)]
 mod reader_dispatch;
