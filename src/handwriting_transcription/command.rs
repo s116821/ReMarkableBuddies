@@ -1,18 +1,13 @@
 //! Early explicit CLI path; no device, model retry, or sync worker startup.
 use super::*;
 use crate::config::{self, Environment, Overrides};
-use std::{
-    path::PathBuf,
-    sync::atomic::{AtomicBool, Ordering},
-};
-fn configured(path: Option<PathBuf>, bytes: Vec<u8>, canceled: &AtomicBool) -> Report {
-    let mut progress = || {
-        if canceled.load(Ordering::Acquire) {
-            anyhow::bail!("canceled");
-        }
-        Ok(())
-    };
-    let mut prepared = Prepared::admit(&bytes, &mut progress);
+use std::path::PathBuf;
+fn configured(
+    path: Option<PathBuf>,
+    bytes: Vec<u8>,
+    progress: &mut dyn FnMut() -> anyhow::Result<()>,
+) -> Report {
+    let mut prepared = Prepared::admit(&bytes, progress);
     if prepared.report.failure.is_some() {
         return prepared.report;
     }
@@ -23,7 +18,7 @@ fn configured(path: Option<PathBuf>, bytes: Vec<u8>, canceled: &AtomicBool) -> R
             return prepared.report;
         }
     };
-    prepared.capture(&config, &mut progress);
+    prepared.capture(&config, progress);
     if prepared.report.failure.is_some() {
         return prepared.report;
     }
@@ -40,35 +35,42 @@ fn configured(path: Option<PathBuf>, bytes: Vec<u8>, canceled: &AtomicBool) -> R
         effective.key.into_string(),
         effective.base_url,
     );
-    prepared.execute(&model, &mut engine, &mut progress)
+    prepared.execute(&model, &mut engine, progress)
 }
-/// Signal handling follows the existing one-shot Writer command. It waits for
-/// cooperative configured transport completion; this is not engine preemption.
-pub fn dispatch(path: Option<PathBuf>, input: &mut impl Read) -> anyhow::Result<Report> {
+/// Poll the owned signal future on this CLI thread at existing progress points.
+/// No wrapper worker or arbitrary-engine preemption is introduced.
+pub fn dispatch(path: Option<PathBuf>, input: &mut impl Read) -> Report {
     let bytes = match bounded_input(input) {
         Ok(b) => b,
         Err(f) => {
-            let mut r = Report::new();
-            r.fail(f);
-            return Ok(r);
+            let mut report = Report::new();
+            report.fail(f);
+            return report;
         }
     };
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
     {
-        Ok(r) => r,
+        Ok(runtime) => runtime,
         Err(_) => {
-            let mut r = Report::new();
-            r.fail(Failure::ProviderFailed);
-            return Ok(r);
+            let mut report = Report::new();
+            report.fail(Failure::ProviderFailed);
+            return report;
         }
     };
-    let flag = Arc::new(AtomicBool::new(false));
-    let worker_flag = flag.clone();
-    runtime.block_on(async move {
-        let mut worker=tokio::task::spawn_blocking(move||configured(path,bytes,&worker_flag));
-        let result=tokio::select! {r=&mut worker=>r,_=tokio::signal::ctrl_c()=>{flag.store(true,Ordering::Release);worker.await}};
-        result.map_err(|_| anyhow::anyhow!("transcription-unavailable"))
-    })
+    let mut signal = Box::pin(tokio::signal::ctrl_c());
+    let mut canceled = false;
+    let mut progress = || {
+        if canceled {
+            anyhow::bail!("canceled");
+        }
+        runtime.block_on(async {
+            tokio::select! { biased;
+                _ = &mut signal => {canceled=true;Err(anyhow::anyhow!("canceled"))},
+                _ = tokio::task::yield_now() => Ok(()),
+            }
+        })
+    };
+    configured(path, bytes, &mut progress)
 }

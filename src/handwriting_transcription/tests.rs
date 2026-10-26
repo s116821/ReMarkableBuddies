@@ -3,6 +3,7 @@ use crate::handwriting::{mutation_identity, Action, Correction};
 use crate::handwriting::{ConfirmedExample, ContextIdentity, ExampleIdentity, Provider};
 use crate::storage::{digest, StorePaths};
 use crate::storage::{Envelope, Kind, Namespace};
+use base64::Engine as _;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::{io::Cursor, path::PathBuf};

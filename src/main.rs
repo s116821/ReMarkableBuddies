@@ -168,7 +168,7 @@ fn main() -> Result<()> {
         let report = remarkable_reader_buddy::handwriting_transcription::command::dispatch(
             std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
             &mut std::io::stdin().lock(),
-        )?;
+        );
         let succeeded = report
             .write_to(&mut std::io::stdout().lock())
             .map_err(|_| anyhow::anyhow!("output-failure"))?;
