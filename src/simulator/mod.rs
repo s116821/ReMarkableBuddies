@@ -483,25 +483,36 @@ fn save_reader(scenario: &Scenario, root: &Path) -> Result<Report> {
     Ok(run.report)
 }
 
-/// Strict union dispatch retains Reader schemas and its existing report renderer.
+/// Probe only the mode, then deserialize original bytes with the strict schema.
+/// Avoid untagged buffering: Reader's existing numeric/flattened fields require
+/// direct serde_json deserialization. Duplicate fields remain visible to it.
 pub fn run_any_file(path: &Path) -> Result<()> {
+    use std::io::Read;
     #[derive(serde::Deserialize)]
-    #[serde(untagged)]
-    enum AnyScenario {
-        Reader(Box<Scenario>),
-        Writer(Box<writer::Scenario>),
+    struct ModeProbe {
+        mode: Option<String>,
     }
-    let bytes = std::fs::read(path)?;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(1024 * 1024 + 1)
+        .read_to_end(&mut bytes)?;
     ensure!(bytes.len() <= 1024 * 1024, "scenario exceeds 1 MiB");
-    match serde_json::from_slice::<AnyScenario>(&bytes)? {
-        AnyScenario::Reader(scenario) => {
+    let mode: ModeProbe = serde_json::from_slice(&bytes)?;
+    let root = path.parent().unwrap_or_else(|| Path::new("."));
+    match mode.mode.as_deref().unwrap_or("reader") {
+        "reader" => {
+            let scenario: Scenario = serde_json::from_slice(&bytes)?;
             scenario.validate()?;
-            save_reader(&scenario, path.parent().unwrap_or_else(|| Path::new(".")))?;
+            save_reader(&scenario, root)?;
             Ok(())
         }
-        AnyScenario::Writer(scenario) => {
-            writer::save(&scenario, path.parent().unwrap_or_else(|| Path::new(".")))
+        "writer" => {
+            let scenario: writer::Scenario = serde_json::from_slice(&bytes)?;
+            writer::save(&scenario, root)
         }
+        _ => anyhow::bail!(
+            "unsupported simulator mode; combined/native Writer routing is unsupported"
+        ),
     }
 }
 
