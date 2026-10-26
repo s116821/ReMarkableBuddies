@@ -110,6 +110,112 @@ impl LocalCorrections {
             .snapshot_revisions_matching(&[Namespace::Handwriting], MAX_ITEMS, filter)
             .map_err(|_| Failure::StoreUnavailable)
     }
+    #[cfg(test)]
+    pub(crate) fn publisher_excluded_for_test(&self) -> bool {
+        self.store.legacy_publisher_lease().is_err()
+    }
+    /// Capture all selected current heads from one bounded retained snapshot.
+    /// Stricter PNG eligibility belongs to this consumer, not stored validity.
+    pub fn capture_context(
+        self,
+        profile: Uuid,
+        selected: &[ExampleSelection],
+        progress: &mut dyn FnMut() -> std::result::Result<(), ContextFailure>,
+    ) -> std::result::Result<ConfirmedContext, (ContextFailure, LocalCorrections)> {
+        let admitted = (|| -> std::result::Result<Vec<ConfirmedExample>, ContextFailure> {
+            progress()?;
+            if profile.is_nil()
+                || selected.is_empty()
+                || selected.len() > 3
+                || selected
+                    .iter()
+                    .any(|s| s.correction.is_nil() || s.revision.is_nil())
+                || selected
+                    .iter()
+                    .map(|s| s.correction)
+                    .collect::<BTreeSet<_>>()
+                    .len()
+                    != selected.len()
+            {
+                return Err(ContextFailure::Invalid);
+            }
+            self.available().map_err(|_| ContextFailure::Storage)?;
+            let keys = selected
+                .iter()
+                .map(|s| record_id(profile, s.correction))
+                .collect::<Result<BTreeSet<_>>>()
+                .map_err(|_| ContextFailure::Invalid)?;
+            let history = self
+                .retained(|e| keys.contains(&e.record_id))
+                .map_err(|_| ContextFailure::Storage)?;
+            let mut examples = Vec::new();
+            for selection in selected {
+                progress()?;
+                let record = record_id(profile, selection.correction)
+                    .map_err(|_| ContextFailure::Invalid)?;
+                let retained = history
+                    .iter()
+                    .filter(|e| e.record_id == record)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let heads = Self::heads(&retained);
+                if heads.len() > 1 {
+                    return Err(ContextFailure::Conflict);
+                }
+                let head = heads.first().ok_or(ContextFailure::Unavailable)?;
+                if head.revision_id != selection.revision {
+                    return Err(ContextFailure::Stale);
+                }
+                let value = Self::lineage(head, &retained)
+                    .map_err(|_| ContextFailure::Unavailable)?
+                    .ok_or(ContextFailure::Unavailable)?;
+                if value.profile != profile || value.correction != selection.correction {
+                    return Err(ContextFailure::Unavailable);
+                }
+                let png = self
+                    .store
+                    .read_object(&ObjectRef {
+                        sha256: value.sample.sha256.clone(),
+                        bytes: value.sample.bytes,
+                    })
+                    .map_err(|_| ContextFailure::Unavailable)?;
+                // Container framing/CRC/static checks do not decode another image.
+                crate::retrieval::notebook::static_png(&png)
+                    .map_err(|_| ContextFailure::Unavailable)?;
+                value
+                    .verify_sample(&png)
+                    .map_err(|_| ContextFailure::Unavailable)?;
+                examples.push(ConfirmedExample {
+                    identity: ExampleIdentity {
+                        correction: selection.correction,
+                        record,
+                        revision: selection.revision,
+                        sample_sha256: value.sample.sha256.clone(),
+                        original_text_sha256: digest(value.original_text.as_bytes()),
+                        corrected_text_sha256: digest(value.corrected_text.as_bytes()),
+                    },
+                    png,
+                    original_text: value.original_text,
+                    corrected_text: value.corrected_text,
+                });
+            }
+            progress()?;
+            Ok(examples)
+        })();
+        let examples = match admitted {
+            Ok(values) => values,
+            Err(failure) => return Err((failure, self)),
+        };
+        let identity = ContextIdentity {
+            profile,
+            examples: examples.iter().map(|e| e.identity.clone()).collect(),
+        };
+        Ok(ConfirmedContext {
+            identity,
+            examples,
+            _owner: self,
+        })
+    }
     fn operations(&self, operation: Uuid) -> Result<Vec<Envelope>> {
         self.store
             .snapshot_revisions_matching(

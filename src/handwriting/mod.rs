@@ -1,5 +1,10 @@
 //! Explicit confirmed sample data. No recognition, native authority or model training.
 pub mod command;
+mod context;
+pub(crate) use context::ConfirmedExample;
+pub use context::{
+    ConfirmedContext, ContextFailure, ContextIdentity, ExampleIdentity, ExampleSelection,
+};
 mod provider;
 mod report;
 use crate::storage::{digest, valid_digest, Envelope, Kind, Media, Namespace, Uuid};
@@ -53,7 +58,7 @@ fn parse_id(value: &str) -> std::result::Result<Uuid, &'static str> {
     }
     Ok(id)
 }
-fn id<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<Uuid, D::Error> {
+pub(crate) fn id<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<Uuid, D::Error> {
     parse_id(&String::deserialize(d)?).map_err(D::Error::custom)
 }
 fn heads<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<Vec<Uuid>, D::Error> {
