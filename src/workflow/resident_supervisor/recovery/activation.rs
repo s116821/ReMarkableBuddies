@@ -417,7 +417,15 @@ fn buddy_state(s: &service::Snapshot, group: &GroupBaseline, profile: &Profile) 
 }
 
 fn idle_helper(s: &service::Snapshot, profile: &Profile) -> Result<()> {
-    match_policy(&s.policy(), &profile.helper_policy)?;
+    require(&profile.helper_policy, "WatchdogUSec", "0")?;
+    let mut expected = profile.helper_policy.clone();
+    if s.unstarted_watchdog() {
+        // Only this idle observation can contain systemd's pre-start sentinel.
+        // Installation pins the approved zero-watchdog unit; active helper
+        // admission still matches the original profile (zero) without changes.
+        expected.insert("WatchdogUSec".into(), "infinity".into());
+    }
+    match_policy(&s.policy(), &expected)?;
     for (key, value) in [
         ("Id", HELPER),
         ("LoadState", "loaded"),

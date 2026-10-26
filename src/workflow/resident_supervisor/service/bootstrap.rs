@@ -202,23 +202,7 @@ fn unit_text(nonce: &str, kind: Kind, role: &str) -> Result<String> {
 // This exception requires exact unit bytes and no drop-ins (checked by units),
 // and is never accepted for the running actor or a recovery invocation.
 fn diagnostic_watchdog_disabled(s: &Snapshot, unstarted_helper: bool) -> bool {
-    s.property("WatchdogUSec") == Some("0")
-        || (unstarted_helper
-            && [
-                ("WatchdogUSec", "infinity"),
-                ("Type", "oneshot"),
-                ("ActiveState", "inactive"),
-                ("SubState", "dead"),
-                ("MainPID", "0"),
-                ("ControlPID", "0"),
-                ("ExecMainPID", "0"),
-                ("ExecMainStartTimestampMonotonic", "0"),
-                ("InvocationID", ""),
-                ("ControlGroup", ""),
-                ("Job", ""),
-            ]
-            .iter()
-            .all(|(key, value)| s.property(key) == Some(*value)))
+    s.property("WatchdogUSec") == Some("0") || (unstarted_helper && s.unstarted_watchdog())
 }
 
 fn unit_paths(kind: Kind, nonce: &str) -> Vec<String> {

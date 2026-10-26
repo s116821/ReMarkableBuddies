@@ -354,6 +354,7 @@ pub(super) fn profile(record: &LeaseRecord) -> Profile {
     buddy_policy.insert("WatchdogUSec".into(), "2min".into());
     let mut helper_policy = policy(HELPER_UNIT);
     helper_policy.insert("Type".into(), "oneshot".into());
+    helper_policy.insert("WatchdogUSec".into(), "0".into());
     helper_policy.insert("TimeoutStartUSec".into(), "2min 10s".into());
     helper_policy.insert("Conflicts".into(), format!("shutdown.target {BUDDY}"));
     helper_policy.insert("After".into(), BUDDY.into());
@@ -666,6 +667,11 @@ fn shutdown_wait_requires_known_substate_and_original_stock() {
 fn profile_requires_supported_watchdog_and_both_service_timeout_budgets() {
     let fixture = crate::workflow::resident_supervisor::tests::Fixture::new();
     let record = fixture.record();
+    for value in ["", "infinity", "1s", "2min"] {
+        let mut p = profile(&record);
+        p.helper_policy.insert("WatchdogUSec".into(), value.into());
+        assert!(p.validate(&record).is_err(), "helper watchdog {value}");
+    }
     for value in ["", "0", "infinity", "129s", "130s", "2min", "2min 11s"] {
         let mut p = profile(&record);
         p.helper_policy

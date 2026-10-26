@@ -143,6 +143,52 @@ fn installed_admission_requires_current_buddy_and_idle_helper() {
 }
 
 #[test]
+fn first_activation_accepts_only_the_unstarted_helper_watchdog_sentinel() {
+    let f = crate::workflow::resident_supervisor::tests::Fixture::new();
+    let profile = super::super::tests::profile(&f.record());
+    let used = snapshot(HELPER, &profile.helper_policy, "inactive", "dead", 0);
+    idle_helper(&used, &profile).unwrap();
+    let fresh = changed(
+        &used,
+        &[
+            ("WatchdogUSec", "infinity"),
+            ("InvocationID", ""),
+            ("ExecMainStartTimestampMonotonic", "0"),
+            ("ControlGroup", ""),
+        ],
+    );
+    idle_helper(&fresh, &profile).unwrap();
+    for (key, value) in [
+        ("WatchdogUSec", "1s"),
+        ("ActiveState", "activating"),
+        ("SubState", "start"),
+        ("MainPID", "42"),
+        ("ControlPID", "42"),
+        ("ExecMainPID", "42"),
+        ("ExecMainStartTimestampMonotonic", "1234"),
+        ("InvocationID", "12121212121212121212121212121212"),
+        (
+            "ControlGroup",
+            "/system.slice/reader-buddy-stock-recovery.service",
+        ),
+        ("Job", "42"),
+        ("Type", "simple"),
+        ("DropInPaths", "/tmp/override.conf"),
+        ("NeedDaemonReload", "yes"),
+        ("Restart", "always"),
+    ] {
+        assert!(
+            idle_helper(&changed(&fresh, &[(key, value)]), &profile).is_err(),
+            "{key}"
+        );
+    }
+    // The special case must not normalize ordinary or active recovery policy.
+    assert!(match_policy(&fresh.policy(), &profile.helper_policy).is_err());
+    assert!(idle_helper(&changed(&used, &[("WatchdogUSec", "infinity")]), &profile).is_err());
+    assert_eq!(profile.helper_policy["WatchdogUSec"], "0");
+}
+
+#[test]
 fn stopped_original_requires_stable_identity_terminal_state_and_empty_group() {
     let f = crate::workflow::resident_supervisor::tests::Fixture::new();
     let profile = super::super::tests::profile(&f.record());

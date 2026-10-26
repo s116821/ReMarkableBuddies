@@ -71,6 +71,26 @@ impl Snapshot {
     pub fn property(&self, key: &str) -> Option<&str> {
         self.fields.get(key).map(String::as_str)
     }
+    /// systemd 255 exposes an uninitialized runtime watchdog interval before a
+    /// service's first start. This is a state predicate, not disabled-watchdog
+    /// authority: callers must also pin a zero-watchdog unit and reject drop-ins.
+    pub(super) fn unstarted_watchdog(&self) -> bool {
+        [
+            ("WatchdogUSec", "infinity"),
+            ("Type", "oneshot"),
+            ("ActiveState", "inactive"),
+            ("SubState", "dead"),
+            ("MainPID", "0"),
+            ("ControlPID", "0"),
+            ("ExecMainPID", "0"),
+            ("ExecMainStartTimestampMonotonic", "0"),
+            ("InvocationID", ""),
+            ("ControlGroup", ""),
+            ("Job", ""),
+        ]
+        .iter()
+        .all(|(key, value)| self.property(key) == Some(*value))
+    }
     pub(super) fn parse(bytes: &[u8], unit: &str) -> Result<Self> {
         validate_unit(unit)?;
         ensure!(bytes.len() <= LIMIT, "service output exceeds bound");
