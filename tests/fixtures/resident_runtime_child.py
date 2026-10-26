@@ -1,4 +1,5 @@
 """Owned Linux protocol fixture; no tablet libraries or native operations."""
+import ctypes
 import hashlib
 import os
 import pathlib
@@ -31,9 +32,27 @@ if mode == "replaced-admission":
 if mode != "no-consume":
     os.link(root / "admission.bin", root / "admission.consumed")
 listener = socket.socket(socket.AF_UNIX)
-listener.bind(str(root / "sdk.sock"))
-(root / "sdk.sock").chmod(0o600)
+listener.bind(str(root / "sdk.pending"))
+(root / "sdk.pending").chmod(0o600)
+if mode == "delayed-listen":
+    # The parent proves it is servicing admission while only staging exists.
+    until = time.monotonic() + 3
+    while not (root / "permit-listen").exists():
+        assert time.monotonic() < until
+        time.sleep(0.005)
 listener.listen(1)
+# Linux fixture: preserve the client's nlink==1 invariant at publication too.
+# Missing renameat2 support is a fixture failure, never an overwrite fallback.
+libc = ctypes.CDLL(None, use_errno=True)
+rename = libc.renameat2
+rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+rename.restype = ctypes.c_int
+directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+try:
+    if rename(directory, b"sdk.pending", directory, b"sdk.sock", 1) != 0:
+        raise OSError(ctypes.get_errno(), "atomic fixture socket publication failed")
+finally:
+    os.close(directory)
 
 def receive(count):
     result = b""

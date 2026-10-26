@@ -51,7 +51,7 @@ mod native {
     // Reviewed read-only candidate only. A new native artifact requires a source
     // revision and review, not a command-line override of these identities.
     const PROFILE: &str = "0ab8a72e32d978cbb0be14a01c6b0145240f83f13c64cdee6fef5431c411bdff";
-    const ADAPTER: &str = "b012e6c68567d82aeb642a902dfba3ff1a70ddefe2e829f147795d79488117a4";
+    const ADAPTER: &str = "751098608084e342602c30a31807f5b578dbe4ad8ee4828dd82ad6c620b54eb2";
     const STOCK: &str = "071d85beef3ef2d4cc0e11002140b27b82a2cc04a2ed740a5669f591069b77df";
 
     fn artifact(path: impl Into<std::path::PathBuf>, hash: &str) -> Artifact {

@@ -107,6 +107,32 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn staged_socket_wait_services_admission_and_connects_only_after_listen() {
+    let fixture = Fixture::new();
+    let mut staged_checks = 0;
+    let mut runtime = fixture
+        .start_admitted("delayed-listen", Duration::from_secs(5), |_| {
+            if fixture.0.join("run/sdk.pending").exists() && staged_checks < 3 {
+                assert!(!fixture.0.join("run/sdk.sock").exists());
+                assert!(!fixture.0.join("run/handshakes").exists());
+                staged_checks += 1;
+                if staged_checks == 3 {
+                    fs::write(fixture.0.join("run/permit-listen"), b"go").unwrap();
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(staged_checks, 3);
+    assert_eq!(
+        fs::read_to_string(fixture.0.join("run/handshakes")).unwrap(),
+        "1"
+    );
+    assert!(!fixture.0.join("run/sdk.pending").exists());
+    assert!(runtime.shutdown(end()).reaped);
+}
+
+#[test]
 fn real_child_consumes_exact_admission_connects_once_and_is_reaped() {
     let fixture = Fixture::new();
     let mut runtime = fixture.start("ready", Duration::from_secs(5)).unwrap();
