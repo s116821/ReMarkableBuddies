@@ -325,11 +325,43 @@ fn root_deleted_during_discovery_has_zero_writes_but_no_durable_no_send() {
         ledger.delete(id, Uuid::new_v4(), heads, None).unwrap();
     }));
     let mut m = model();
-    let report = execute(&f, &mut m, &d, &f.request());
+    let request = f.request();
+    let report = execute(&f, &mut m, &d, &request);
     assert_eq!(report.status, Status::Refused);
     assert_eq!(d.counts().2, 0);
     assert!(report.observation.selection_changed);
     assert_eq!(report.observation.no_send_recorded, Some(false));
+    let (_, correlation, _) = request.identities();
+    let envelope = f
+        .ledger
+        .store()
+        .value(Namespace::ExportAssociation, correlation)
+        .unwrap()
+        .unwrap();
+    let record: crate::conversation::Record = serde_json::from_value(envelope.payload).unwrap();
+    let crate::conversation::Record::Export(attempt) = record else {
+        panic!("export attempt missing")
+    };
+    assert_eq!(attempt.outcome, Outcome::Prepared);
+    assert!(!attempt.attempt.unwrap().no_send);
+    let before = d.counts();
+    let replay = execute(&f, &mut m, &d, &request);
+    assert_ne!(replay.status, Status::Exported);
+    assert_eq!(d.counts(), before);
+    let Request::GenerateAndExport { generation, .. } = request else {
+        unreachable!()
+    };
+    let next = Request::ExportDraft {
+        outer_operation: Uuid::new_v4(),
+        conversation: f.conversation,
+        draft: writer::stage(generation.operation(), "draft"),
+        correlation,
+        effect_operation: Uuid::new_v4(),
+    };
+    let refusal = execute(&f, &mut m, &d, &next);
+    assert_ne!(refusal.status, Status::Exported);
+    assert_eq!(d.counts(), before);
+    assert_eq!(m.calls, 1);
 }
 #[test]
 fn uncertain_write_reconciles_known_id_read_only_with_truthful_observation() {

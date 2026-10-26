@@ -483,6 +483,28 @@ fn save_reader(scenario: &Scenario, root: &Path) -> Result<Report> {
     Ok(run.report)
 }
 
+/// Strict union dispatch retains Reader schemas and its existing report renderer.
+pub fn run_any_file(path: &Path) -> Result<()> {
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum AnyScenario {
+        Reader(Box<Scenario>),
+        Writer(Box<writer::Scenario>),
+    }
+    let bytes = std::fs::read(path)?;
+    ensure!(bytes.len() <= 1024 * 1024, "scenario exceeds 1 MiB");
+    match serde_json::from_slice::<AnyScenario>(&bytes)? {
+        AnyScenario::Reader(scenario) => {
+            scenario.validate()?;
+            save_reader(&scenario, path.parent().unwrap_or_else(|| Path::new(".")))?;
+            Ok(())
+        }
+        AnyScenario::Writer(scenario) => {
+            writer::save(&scenario, path.parent().unwrap_or_else(|| Path::new(".")))
+        }
+    }
+}
+
 #[cfg(test)]
 mod request_retirement_tests {
     use super::*;
@@ -664,28 +686,6 @@ mod request_retirement_tests {
             assert_eq!(state.borrow().request_pin, original);
             state.borrow_mut().visit += 1;
             assert!(device.capture().is_err());
-        }
-    }
-}
-
-/// Strict union dispatch retains Reader schemas and its existing report renderer.
-pub fn run_any_file(path: &Path) -> Result<()> {
-    #[derive(serde::Deserialize)]
-    #[serde(untagged)]
-    enum AnyScenario {
-        Reader(Box<Scenario>),
-        Writer(Box<writer::Scenario>),
-    }
-    let bytes = std::fs::read(path)?;
-    ensure!(bytes.len() <= 1024 * 1024, "scenario exceeds 1 MiB");
-    match serde_json::from_slice::<AnyScenario>(&bytes)? {
-        AnyScenario::Reader(scenario) => {
-            scenario.validate()?;
-            save_reader(&scenario, path.parent().unwrap_or_else(|| Path::new(".")))?;
-            Ok(())
-        }
-        AnyScenario::Writer(scenario) => {
-            writer::save(&scenario, path.parent().unwrap_or_else(|| Path::new(".")))
         }
     }
 }
