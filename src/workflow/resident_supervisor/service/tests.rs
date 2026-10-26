@@ -280,10 +280,39 @@ fn owned_command_faults_are_bounded_and_reaped() {
             .expect("spawned child diagnostic");
         assert!(failure.reaped, "{failure:?}");
         assert_eq!(failure.error.to_string(), cause, "{code}: {failure:?}");
+        assert_eq!(
+            failure
+                .error
+                .downcast_ref::<crate::workflow::resident_request::DeadlineExpired>()
+                .is_some(),
+            milliseconds == 400
+        );
         assert!(!std::path::Path::new(&format!("/proc/{}", failure.pid)).exists());
         assert!(start.elapsed() < Duration::from_millis(milliseconds) + Duration::from_secs(3));
     }
     assert!(run(python("raise Exception('must not run')"), Instant::now()).is_err());
+}
+
+#[test]
+fn internal_service_budget_is_not_a_caller_deadline() {
+    let start = Instant::now();
+    let error = run(
+        python("import time; time.sleep(10)"),
+        start + Duration::from_secs(5),
+    )
+    .unwrap_err();
+    let failure = error.downcast_ref::<CommandFailure>().unwrap();
+    assert!(failure.reaped);
+    assert_eq!(
+        failure.error.to_string(),
+        "service observation internal timeout"
+    );
+    assert!(failure
+        .error
+        .downcast_ref::<crate::workflow::resident_request::DeadlineExpired>()
+        .is_none());
+    assert!(!std::path::Path::new(&format!("/proc/{}", failure.pid)).exists());
+    assert!(start.elapsed() < Duration::from_secs(5));
 }
 
 #[test]

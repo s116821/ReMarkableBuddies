@@ -277,8 +277,7 @@ fn hash_reader(file: &mut impl Read, limit: u64, deadline: Instant) -> Result<[u
     Ok(hash.finalize().into())
 }
 fn check_deadline(deadline: Instant) -> Result<()> {
-    ensure!(Instant::now() < deadline, "stock recovery deadline expired");
-    Ok(())
+    crate::workflow::resident_request::before(deadline, "stock recovery deadline expired")
 }
 
 struct Installation {

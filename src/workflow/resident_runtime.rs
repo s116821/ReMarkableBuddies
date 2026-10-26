@@ -2,6 +2,7 @@
 //! The caller still owns approved profile selection, stock-service takeover and
 //! independent stock recovery. Protocol Ready confers no Reader/write capability.
 use super::resident_client::{self, ConnectionFailure, ResidentConnection};
+use super::resident_request::{self, integrity};
 use crate::storage::Store;
 use anyhow::{ensure, Context, Result};
 use nix::libc;
@@ -235,16 +236,7 @@ impl ResidentRuntime {
         before(deadline)
     }
     fn check_child(&mut self) -> Result<()> {
-        let child = self.child.as_mut().context("resident already shut down")?;
-        ensure!(child.try_wait()?.is_none(), "resident child exited");
-        let actual = fs::metadata(format!("/proc/{}/exe", child.id()))?;
-        let expected = &self.prepared.artifacts[1].metadata;
-        ensure!(
-            same_inode(expected, &actual)
-                && process_start(child.id())? == self.prepared.identity.start_ticks,
-            "resident child executable/incarnation changed"
-        );
-        Ok(())
+        check_child(&mut self.child, &self.prepared)
     }
     pub fn connection(&mut self) -> Result<&mut ResidentConnection> {
         self.check_child()?;
@@ -255,6 +247,36 @@ impl ResidentRuntime {
     }
     pub fn identity(&self) -> &RuntimeIdentity {
         &self.prepared.identity
+    }
+    /// Keep runtime integrity admission active through every SDK progress check.
+    pub(super) fn with_connection<T>(
+        &mut self,
+        deadline: Instant,
+        progress: &mut dyn FnMut() -> Result<()>,
+        action: impl FnOnce(&mut ResidentConnection, &mut dyn FnMut() -> Result<()>) -> Result<T>,
+    ) -> Result<T> {
+        let Self {
+            child,
+            connection,
+            prepared,
+            ..
+        } = self;
+        let mut checked = || {
+            before(deadline)?;
+            progress()?;
+            prepared.current(true).map_err(integrity)?;
+            check_child(child, prepared).map_err(integrity)?;
+            before(deadline)
+        };
+        checked()?;
+        let connection = connection
+            .as_mut()
+            .context("resident connection absent; reconnect explicitly")?;
+        let result = action(connection, &mut checked)?;
+        // A journal outcome can take time after SDK response completion. Reject
+        // stale caller delivery without changing that retained historical result.
+        checked()?;
+        Ok(result)
     }
     /// Close only the client socket, retaining original effect uncertainty and
     /// child ownership. This is not native cancellation or permission to replay.
@@ -281,8 +303,8 @@ impl ResidentRuntime {
             deadline.saturating_duration_since(Instant::now()) <= Duration::from_secs(30),
             "resident reconnect bound exceeds 30 seconds"
         );
-        self.prepared.current(true)?;
-        self.check_child()?;
+        self.prepared.current(true).map_err(integrity)?;
+        self.check_child().map_err(integrity)?;
         let scope = ConnectionIdentity {
             runtime: self.prepared.identity.clone(),
             connection: nonce(),
@@ -297,8 +319,8 @@ impl ResidentRuntime {
             deadline,
             &mut || {
                 progress()?;
-                self.prepared.current(true)?;
-                self.check_child()?;
+                self.prepared.current(true).map_err(integrity)?;
+                self.check_child().map_err(integrity)?;
                 before(deadline)
             },
         );
@@ -313,8 +335,8 @@ impl ResidentRuntime {
                 Err(error) => error,
             })?;
         progress()?;
-        self.prepared.current(true)?;
-        self.check_child()?;
+        self.prepared.current(true).map_err(integrity)?;
+        self.check_child().map_err(integrity)?;
         before(deadline)?;
         connection.retain_loss(self.retired_loss.clone());
         self.connection = Some(connection);
@@ -591,9 +613,17 @@ impl Prepared {
 }
 
 fn before(deadline: Instant) -> Result<()> {
+    resident_request::before(deadline, "resident startup deadline expired")
+}
+fn check_child(child: &mut Option<Child>, prepared: &Prepared) -> Result<()> {
+    let child = child.as_mut().context("resident already shut down")?;
+    ensure!(child.try_wait()?.is_none(), "resident child exited");
+    let actual = fs::metadata(format!("/proc/{}/exe", child.id()))?;
+    let expected = &prepared.artifacts[1].metadata;
     ensure!(
-        Instant::now() < deadline,
-        "resident startup deadline expired"
+        same_inode(expected, &actual)
+            && process_start(child.id())? == prepared.identity.start_ticks,
+        "resident child executable/incarnation changed"
     );
     Ok(())
 }

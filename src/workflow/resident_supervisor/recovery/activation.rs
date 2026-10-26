@@ -4,13 +4,17 @@ use super::*;
 use crate::{
     storage::Store,
     workflow::{
-        resident_client::ResidentConnection,
+        resident_request::{self, FailureKind, InputProgress, Request, RequestFailure},
         resident_runtime::{Artifact, Launch, ResidentRuntime},
         resident_supervisor::{
             health::{ExitOnDrop, ServiceHealth},
             GroupObservation, StockBaseline,
         },
     },
+};
+use remarkable_open_sdk::{
+    native_adapter::{Reply, RuntimeIdentity},
+    OperationId,
 };
 use std::sync::Arc;
 
@@ -199,23 +203,56 @@ impl Session {
         Ok(session)
     }
 
-    pub fn connection(
+    /// Execute one request in the installed session. The caller supplies fresh
+    /// post-activation input/source admission; historical replies grant no lease.
+    pub fn request(
         &mut self,
         health: &mut ServiceHealth,
-        progress: &mut dyn FnMut() -> Result<()>,
+        progress: &mut dyn FnMut() -> Result<InputProgress>,
+        operation: OperationId,
+        request: Request,
         deadline: Instant,
-    ) -> Result<&mut ResidentConnection> {
-        if let Err(error) = self.current(health, progress, deadline) {
-            self.pending.exit.fail();
-            return Err(error);
-        }
-        match self.runtime.connection() {
-            Ok(connection) => Ok(connection),
-            Err(error) => {
-                self.pending.exit.fail();
-                Err(error)
+    ) -> std::result::Result<Reply, RequestFailure> {
+        self.with_request(health, deadline, |runtime, authority| {
+            resident_request::execute(runtime, operation, request, deadline, progress, authority)
+        })
+    }
+
+    pub fn reconnect(
+        &mut self,
+        health: &mut ServiceHealth,
+        progress: &mut dyn FnMut() -> Result<InputProgress>,
+        deadline: Instant,
+    ) -> std::result::Result<(), RequestFailure> {
+        self.with_request(health, deadline, |runtime, authority| {
+            resident_request::reconnect(runtime, deadline, progress, authority)
+        })
+    }
+
+    fn with_request<T>(
+        &mut self,
+        health: &mut ServiceHealth,
+        deadline: Instant,
+        action: impl FnOnce(
+            &mut ResidentRuntime,
+            &mut dyn FnMut() -> Result<()>,
+        ) -> std::result::Result<T, RequestFailure>,
+    ) -> std::result::Result<T, RequestFailure> {
+        let Self { pending, runtime } = self;
+        let result = match pending.exit.check(health) {
+            Ok(()) => {
+                let identity = runtime.identity().clone();
+                action(runtime, &mut || {
+                    pending.session_current(&identity, health, &mut || Ok(()), deadline)
+                })
             }
-        }
+            Err(error) => Err(RequestFailure {
+                kind: FailureKind::Integrity,
+                lost: runtime.retire_connection(),
+                error,
+            }),
+        };
+        pending.exit.finish_request(result)
     }
 
     fn current(
@@ -224,21 +261,8 @@ impl Session {
         progress: &mut dyn FnMut() -> Result<()>,
         deadline: Instant,
     ) -> Result<()> {
-        self.pending.current(health, progress, deadline)?;
-        ensure!(
-            self.pending.stock_stopped(deadline)?,
-            "stock is competing with resident runtime"
-        );
-        let identity = self.runtime.identity();
-        let child = GroupBaseline::capture_process(Path::new(MOUNT), BUDDY, identity.pid)?;
-        let parent = self.pending.lease.record().group();
-        ensure!(
-            child.context == parent.context
-                && child.group == parent.group
-                && child.parent.start_ticks == identity.start_ticks,
-            "resident child left admitted Buddy group"
-        );
-        self.pending.current(health, progress, deadline)
+        self.pending
+            .session_current(self.runtime.identity(), health, progress, deadline)
     }
 }
 
@@ -256,6 +280,28 @@ fn checked_handoff<T>(
 }
 
 impl Pending {
+    fn session_current(
+        &self,
+        identity: &RuntimeIdentity,
+        health: &mut ServiceHealth,
+        progress: &mut dyn FnMut() -> Result<()>,
+        deadline: Instant,
+    ) -> Result<()> {
+        self.current(health, progress, deadline)?;
+        ensure!(
+            self.stock_stopped(deadline)?,
+            "stock is competing with resident runtime"
+        );
+        let child = GroupBaseline::capture_process(Path::new(MOUNT), BUDDY, identity.pid)?;
+        let parent = self.lease.record().group();
+        ensure!(
+            child.context == parent.context
+                && child.group == parent.group
+                && child.parent.start_ticks == identity.start_ticks,
+            "resident child left admitted Buddy group"
+        );
+        self.current(health, progress, deadline)
+    }
     fn current(
         &self,
         health: &mut ServiceHealth,

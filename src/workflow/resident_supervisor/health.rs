@@ -148,6 +148,17 @@ pub(super) struct ExitOnDrop {
     failed: Arc<AtomicBool>,
 }
 impl ExitOnDrop {
+    pub(super) fn finish_request<T>(
+        &self,
+        result: std::result::Result<T, crate::workflow::resident_request::RequestFailure>,
+    ) -> std::result::Result<T, crate::workflow::resident_request::RequestFailure> {
+        if result.as_ref().is_err_and(|error| {
+            error.kind == crate::workflow::resident_request::FailureKind::Integrity
+        }) {
+            self.fail();
+        }
+        result
+    }
     pub(super) fn fail(&self) {
         self.failed.store(true, Ordering::Release);
     }
@@ -227,6 +238,36 @@ mod tests {
             socket.recv(&mut [0u8; 64]).unwrap_err().kind(),
             std::io::ErrorKind::WouldBlock
         );
+    }
+
+    #[test]
+    fn request_retirement_preserves_health_but_integrity_failure_is_sticky() {
+        use crate::workflow::resident_request::{FailureKind, RequestFailure};
+        use remarkable_open_sdk::native_adapter::LostRequest;
+        for kind in [
+            FailureKind::Canceled,
+            FailureKind::Deadline,
+            FailureKind::Connection,
+            FailureKind::Unresolved,
+            FailureKind::Refused,
+            FailureKind::Integrity,
+        ] {
+            let (mut health, receiver) = pair();
+            health.ready().unwrap();
+            receive(&receiver, b"READY=1\nWATCHDOG=1");
+            let guard = health.exit_on_drop().unwrap();
+            let result = guard.finish_request::<()>(Err(RequestFailure {
+                kind,
+                lost: LostRequest::NoPendingMutation,
+                error: anyhow::anyhow!("owned request outcome"),
+            }));
+            assert_eq!(result.unwrap_err().kind, kind);
+            assert_eq!(health.failed(), kind == FailureKind::Integrity);
+            assert_eq!(health.progress().is_err(), kind == FailureKind::Integrity);
+            empty(&receiver);
+            drop(guard);
+            assert!(health.failed()); // Whole-session drop remains fatal.
+        }
     }
 
     #[test]

@@ -6,6 +6,8 @@ pub mod orchestrator;
 mod reader_attempt;
 pub mod resident_client;
 #[cfg(target_os = "linux")]
+pub mod resident_request;
+#[cfg(target_os = "linux")]
 pub mod resident_runtime;
 #[cfg(target_os = "linux")]
 pub mod resident_supervisor;

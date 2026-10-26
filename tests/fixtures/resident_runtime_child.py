@@ -88,8 +88,8 @@ while True:
         while True:
             request = frame()
             digest = hashlib.sha256(struct.pack(">I", len(request)) + request).digest()
-            if mode == "reconnect-pending" and count == 1:
-                assert request[202:204] == b"\x02\x03"
+            if mode in ("reconnect-pending", "reconnect-observe-timeout") and count == 1:
+                assert request[202:204] in (b"\x02\x01", b"\x02\x03") if mode == "reconnect-pending" else request[202:204] == b"\x02\x00"
                 (root / "effect-received").touch()
                 assert peer.recv(1) == b""  # no reply before caller cancellation
                 break
@@ -98,8 +98,11 @@ while True:
                 assert request[220:236] == request[-16:]
                 send(request[:202] + b"\x03" + digest + b"\x05" + request[204:-16])
             else:
-                assert len(request) == 204 and request[202:] == b"\x02\x00"
-                send(request[:202] + b"\x03" + digest + b"\x03\x00")
+                assert (len(request) == 204 and request[202:] == b"\x02\x00") or request[202:204] in (b"\x02\x02", b"\x02\x04")
+                response = bytearray(request[:202] + b"\x03" + digest + b"\x03\x00")
+                if mode == "reconnect-malformed":
+                    response[186:202] = uuid.uuid4().bytes
+                send(response)
     except (EOFError, ConnectionResetError, BrokenPipeError):
         pass
     finally:

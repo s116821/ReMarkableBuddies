@@ -2,6 +2,8 @@ use super::*;
 use crate::storage::{StorePaths, Uuid as StoreUuid};
 use remarkable_open_sdk::native_adapter::{Rejection, Reply};
 
+mod requests;
+
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {

@@ -315,7 +315,11 @@ impl std::fmt::Display for CommandFailure {
         )
     }
 }
-impl std::error::Error for CommandFailure {}
+impl std::error::Error for CommandFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.error.as_ref())
+    }
+}
 
 fn nonblocking(stream: &impl AsRawFd) -> Result<()> {
     let flags = unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_GETFL) };
@@ -357,11 +361,23 @@ fn reap(child: &mut Child) -> bool {
     }
 }
 fn run(mut command: Command, deadline: Instant) -> Result<Vec<u8>> {
+    let caller_deadline = deadline;
     let deadline = deadline.min(Instant::now() + Duration::from_secs(3));
-    ensure!(
-        Instant::now() < deadline,
-        "service observation deadline expired"
-    );
+    let check = || -> Result<()> {
+        if deadline == caller_deadline {
+            crate::workflow::resident_request::before(
+                deadline,
+                "service observation deadline expired",
+            )
+        } else {
+            ensure!(
+                Instant::now() < deadline,
+                "service observation internal timeout"
+            );
+            Ok(())
+        }
+    };
+    check()?;
     let mut child = command
         .env_clear()
         .env("LANG", "C")
@@ -378,20 +394,14 @@ fn run(mut command: Command, deadline: Instant) -> Result<Vec<u8>> {
         nonblocking(&err)?;
         let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
         loop {
-            ensure!(
-                Instant::now() < deadline,
-                "service observation deadline expired"
-            );
+            check()?;
             let out_eof = drain(&mut out, &mut stdout)?;
             let err_eof = drain(&mut err, &mut stderr)?;
             ensure!(stderr.is_empty(), "service command wrote stderr");
             if let Some(status) = child.try_wait()? {
                 ensure!(status.success(), "service command exited unsuccessfully");
                 if out_eof && err_eof {
-                    ensure!(
-                        Instant::now() < deadline,
-                        "service observation deadline expired"
-                    );
+                    check()?;
                     return Ok(stdout);
                 }
             }

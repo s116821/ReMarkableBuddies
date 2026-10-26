@@ -25,6 +25,14 @@ enum PublicationPoint {
 #[cfg(test)]
 thread_local! {
     static PUBLICATION_FAULT: std::cell::Cell<Option<PublicationPoint>> = const { std::cell::Cell::new(None) };
+    static AFTER_OUTCOME: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(all(test, target_os = "linux"))]
+pub(super) fn after_next_outcome(action: impl FnOnce() + 'static) {
+    AFTER_OUTCOME.with(|slot| {
+        assert!(slot.borrow().is_none());
+        *slot.borrow_mut() = Some(Box::new(action));
+    });
 }
 #[cfg(test)]
 fn publication_fault(point: PublicationPoint) -> Result<()> {
@@ -352,6 +360,10 @@ fn finish(store: &Store, request: &Frame, outcome: Outcome) -> Result<()> {
         publication_fault(PublicationPoint::Outcome)?;
         persist(&path, &state)?;
         #[cfg(test)]
+        if let Some(action) = AFTER_OUTCOME.with(|slot| slot.borrow_mut().take()) {
+            action();
+        }
+        #[cfg(test)]
         publication_fault(PublicationPoint::AfterOutcome)?;
         Ok(())
     })
@@ -368,6 +380,24 @@ mod linux {
         OperationId,
     };
     use std::{fs::File, sync::Arc, time::Instant};
+
+    #[derive(Debug)]
+    struct ProgressFailure(anyhow::Error);
+    impl std::fmt::Display for ProgressFailure {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{:#}", self.0)
+        }
+    }
+    impl std::error::Error for ProgressFailure {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(self.0.as_ref())
+        }
+    }
+    // Boxing anyhow directly can erase its root marker from standard Error
+    // traversal. Keep an explicit source link for the Session classifier.
+    pub(in crate::workflow) fn progress_error(error: anyhow::Error) -> std::io::Error {
+        std::io::Error::other(ProgressFailure(error))
+    }
 
     /// Structured transport evidence survives anyhow context at the product boundary.
     #[derive(Debug)]
@@ -392,7 +422,23 @@ mod linux {
             )
         }
     }
-    impl std::error::Error for ConnectionFailure {}
+    impl std::error::Error for ConnectionFailure {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            failure_source(&self.cause)
+        }
+    }
+    fn failure_source(cause: &Failure) -> Option<&(dyn std::error::Error + 'static)> {
+        match cause {
+            Failure::Io(error) | Failure::Journal(error) | Failure::Progress(error) => {
+                // Keep the callback's root marker even when it has no source.
+                Some(match error.get_ref() {
+                    Some(inner) => inner,
+                    None => error,
+                })
+            }
+            _ => None,
+        }
+    }
 
     #[derive(Debug)]
     pub enum EffectCause {
@@ -408,6 +454,19 @@ mod linux {
         pub cause: EffectCause,
     }
     pub type InsertionFailure = EffectFailure;
+    impl std::fmt::Display for EffectFailure {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(&self.detail)
+        }
+    }
+    impl std::error::Error for EffectFailure {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            match &self.cause {
+                EffectCause::Transport(cause) => failure_source(cause),
+                _ => None,
+            }
+        }
+    }
     pub struct ResidentConnection {
         client: Client,
         store: Arc<Store>,
@@ -453,7 +512,7 @@ mod linux {
                 scope,
                 handshake,
                 deadline,
-                &mut || progress().map_err(std::io::Error::other),
+                &mut || progress().map_err(progress_error),
             )
             .map_err(|cause| ConnectionFailure {
                 cause,
@@ -481,7 +540,7 @@ mod linux {
                     Command::Observe,
                     deadline,
                     |_, _| Ok(()),
-                    &mut || progress().map_err(std::io::Error::other),
+                    &mut || progress().map_err(progress_error),
                 )
                 .map_err(|error| self.transport_failure(error).into())
         }
@@ -578,7 +637,7 @@ mod linux {
                     original = Some(frame.clone());
                     Ok(())
                 },
-                &mut || progress().map_err(std::io::Error::other),
+                &mut || progress().map_err(progress_error),
             );
             match result {
                 Ok(reply) => {
@@ -709,7 +768,7 @@ mod linux {
             };
             self.client
                 .execute_with_progress(operation, command, deadline, |_, _| Ok(()), &mut || {
-                    progress().map_err(std::io::Error::other)
+                    progress().map_err(progress_error)
                 })
                 .map_err(|error| self.transport_failure(error).into())
         }
@@ -731,6 +790,8 @@ mod linux {
         }
     }
 }
+#[cfg(all(test, target_os = "linux"))]
+pub(super) use linux::progress_error;
 #[cfg(target_os = "linux")]
 pub use linux::{
     ConnectionFailure, EffectCause, EffectFailure, InsertionFailure, ResidentConnection,
