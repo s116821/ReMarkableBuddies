@@ -11,7 +11,7 @@ const workflow = name => parse(readFileSync(path.join(root, '.github/workflows',
 const expr = text => String.fromCharCode(36) + '{{ ' + text + ' }}';
 const manager = false;
 
-test('native observer is a PR diagnostic artifact, outside official release inventory', () => {
+test('native bootstrap diagnostics stay outside official release inventory', () => {
   const pipeline = workflow('pipeline');
   const build = pipeline.jobs.build;
   const compile = build.steps.find(s => /--example resident_bootstrap_observer/.test(s.run ?? ''));
@@ -20,7 +20,10 @@ test('native observer is a PR diagnostic artifact, outside official release inve
   assert.equal(archive.if, expr('!inputs.release'));
   assert.equal(compile.env.READER_BUDDY_CANDIDATE_SHA, expr('steps.freeze.outputs.sha'));
   assert.match(compile.run, /--locked --release --target armv7-unknown-linux-gnueabihf/);
-  assert.match(compile.run, /sha256sum resident_bootstrap_observer/);
+  assert.match(compile.run, /--example resident_bootstrap_control --features development-resident-bootstrap/);
+  assert.match(compile.run, /sha256sum resident_bootstrap_observer resident_bootstrap_control/);
+  const applicationBuild = build.steps.find(s => /release\/build.py build/.test(s.run ?? ''));
+  assert.ok(!JSON.stringify(applicationBuild).includes('development-resident-bootstrap'));
   assert.ok(!pipeline.jobs.release.steps.some(s => JSON.stringify(s).includes('resident-observer')));
   assert.ok(build.steps.indexOf(compile) > build.steps.findIndex(s => /release\/build.py build/.test(s.run ?? '')));
 });

@@ -46,6 +46,11 @@ path = "src/lib.rs"
 
 [features]
 development-input-diagnostics = []
+development-resident-bootstrap = []
+
+[[example]]
+name = "resident_bootstrap_control"
+required-features = ["development-resident-bootstrap"]
 
 [dev-dependencies]
 remarkable-open-sdk = { git = "https://github.com/s116821/ReMarkableOpenSDK", rev = "df4383e0af4bccd2e4e1a6b14615e8f281dc5cb3", default-features = false, features = ["mock", "development-capture"] }

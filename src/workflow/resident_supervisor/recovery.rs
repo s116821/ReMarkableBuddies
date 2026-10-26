@@ -164,13 +164,13 @@ fn policy_fields<'de, D: serde::Deserializer<'de>>(
     deserializer.deserialize_map(Fields)
 }
 
-struct Pinned {
+pub(super) struct Pinned {
     path: PathBuf,
     file: File,
     metadata: Metadata,
 }
 impl Pinned {
-    fn open(path: &Path) -> Result<Self> {
+    pub(super) fn open(path: &Path) -> Result<Self> {
         let file = trusted_file(path)?;
         let metadata = file.metadata()?;
         ensure!(
@@ -186,7 +186,7 @@ impl Pinned {
             metadata,
         })
     }
-    fn current(&self) -> Result<()> {
+    pub(super) fn current(&self) -> Result<()> {
         ensure!(
             metadata_equal(&self.metadata, &self.file.metadata()?)
                 && metadata_equal(&self.metadata, &trusted_file(&self.path)?.metadata()?),
@@ -194,7 +194,7 @@ impl Pinned {
         );
         Ok(())
     }
-    fn bytes(&mut self, limit: u64, deadline: Instant) -> Result<Vec<u8>> {
+    pub(super) fn bytes(&mut self, limit: u64, deadline: Instant) -> Result<Vec<u8>> {
         let bytes = bounded_bytes(&mut self.file, limit, deadline)?;
         ensure!(
             bytes.len() as u64 == self.metadata.len(),
@@ -204,7 +204,7 @@ impl Pinned {
         check_deadline(deadline)?;
         Ok(bytes)
     }
-    fn verified(path: &str, digest: [u8; 32], deadline: Instant) -> Result<Self> {
+    pub(super) fn verified(path: &str, digest: [u8; 32], deadline: Instant) -> Result<Self> {
         ensure!(digest != [0; 32], "missing recovery artifact digest");
         let mut pinned = Self::open(Path::new(path))?;
         ensure!(
@@ -216,7 +216,7 @@ impl Pinned {
     }
 }
 
-fn trusted_file(path: &Path) -> Result<File> {
+pub(super) fn trusted_file(path: &Path) -> Result<File> {
     validate_absolute(path)?;
     let mut directory = File::open("/")?;
     let components: Vec<_> = path.components().skip(1).collect();
@@ -553,7 +553,7 @@ fn helper_state(
     Ok(())
 }
 
-fn verify_process(
+pub(super) fn verify_process(
     process: &ProcessIdentity,
     executable: &str,
     digest: [u8; 32],

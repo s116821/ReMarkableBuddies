@@ -12,6 +12,8 @@ use std::{
 };
 
 pub mod baseline;
+#[cfg(feature = "development-resident-bootstrap")]
+pub mod bootstrap;
 
 const LIMIT: usize = 16 * 1024;
 const POLL: Duration = Duration::from_millis(5);
