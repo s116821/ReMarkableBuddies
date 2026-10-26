@@ -78,6 +78,90 @@ fn clear(s: &Snapshot) -> Snapshot {
 }
 
 #[test]
+fn cleared_stop_accepts_only_reordered_dependencies_with_original_group_absence() {
+    let f = Fixture::new();
+    let mut selected = baseline(&f);
+    selected.original = changed(
+        &selected.original,
+        &[
+            ("WatchdogUSec", "0"),
+            (
+                "After",
+                "system.slice sysinit.target systemd-journald.socket basic.target",
+            ),
+            ("Conflicts", "shutdown.target fixture.target"),
+        ],
+    );
+    let encoded = selected.encode().unwrap();
+    let original = &selected.original;
+    let cleared = changed(
+        &clear(&terminal(original)),
+        &[
+            ("WatchdogUSec", "infinity"),
+            (
+                "After",
+                "systemd-journald.socket basic.target sysinit.target system.slice",
+            ),
+            ("Conflicts", "fixture.target shutdown.target"),
+        ],
+    );
+    let result = stopped_bracket(
+        original,
+        &cleared,
+        GroupObservation::OriginalAbsent,
+        &cleared,
+        Instant::now() + Duration::from_secs(1),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(result.identity, TerminalIdentity::Cleared);
+    assert_eq!(result.watchdog, WatchdogObservation::ClearedUninitialized);
+    assert_eq!(result.policy.property("After"), cleared.property("After"));
+    assert_eq!(
+        ServiceBaseline::decode(&encoded).unwrap().encode().unwrap(),
+        encoded
+    );
+    assert_eq!(selected.encode().unwrap(), encoded);
+    for group in [GroupObservation::EmptyOriginal, GroupObservation::Populated] {
+        assert!(stopped_snapshot(&cleared, original, group).is_err());
+    }
+    for (key, value) in [
+        ("After", "system.slice sysinit.target basic.target"),
+        (
+            "After",
+            "system.slice system.slice sysinit.target systemd-journald.socket basic.target",
+        ),
+        ("Conflicts", "fixture.target shutdown.target extra.target"),
+        (
+            "Conflicts",
+            "fixture.target shutdown.target shutdown.target",
+        ),
+        ("KillMode", "process"),
+    ] {
+        assert!(
+            stopped_snapshot(
+                &changed(&cleared, &[(key, value)]),
+                original,
+                GroupObservation::OriginalAbsent
+            )
+            .is_err(),
+            "{key}"
+        );
+    }
+    let reordered_between_samples =
+        changed(&cleared, &[("After", original.property("After").unwrap())]);
+    assert!(stopped_bracket(
+        original,
+        &cleared,
+        GroupObservation::OriginalAbsent,
+        &reordered_between_samples,
+        Instant::now() + Duration::from_secs(1)
+    )
+    .unwrap()
+    .is_none());
+}
+
+#[test]
 fn cleared_watchdog_sentinel_requires_deleted_group_and_preserves_raw_policy() {
     let f = Fixture::new();
     for (kind, interval) in [("exec", "0"), ("notify", "2min")] {

@@ -505,13 +505,7 @@ fn firmware_version(input: &str) -> Result<&str> {
     Ok(value)
 }
 fn tokens(value: &str) -> Result<Vec<&str>> {
-    let mut result: Vec<_> = value.split_whitespace().collect();
-    result.sort_unstable();
-    ensure!(
-        !result.windows(2).any(|w| w[0] == w[1]),
-        "duplicate policy unit"
-    );
-    Ok(result)
+    service::policy_unit_tokens(value)
 }
 fn match_policy(
     actual: &service::PolicySnapshot,

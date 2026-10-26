@@ -64,18 +64,37 @@ impl PolicySnapshot {
     pub fn property(&self, key: &str) -> Option<&str> {
         self.0.get(key).map(String::as_str)
     }
+    /// Compare policy meaning without rewriting raw sampled/encoded values.
+    #[cfg(any(test, feature = "development-resident-bootstrap"))]
+    pub(super) fn matches(&self, expected: &Self) -> bool {
+        self.matches_observed(expected, WatchdogObservation::Runtime)
+    }
     pub(super) fn matches_observed(&self, expected: &Self, watchdog: WatchdogObservation) -> bool {
         self.0.len() == expected.0.len()
             && self.0.iter().all(|(key, got)| {
                 expected.property(key).is_some_and(|wanted| {
                     if key == "WatchdogUSec" {
                         watchdog.matches(got, wanted)
+                    } else if matches!(key.as_str(), "After" | "Conflicts") {
+                        policy_unit_tokens(got).is_ok_and(|actual| {
+                            policy_unit_tokens(wanted).is_ok_and(|expected| actual == expected)
+                        })
                     } else {
                         got == wanted
                     }
                 })
             })
     }
+}
+
+pub(super) fn policy_unit_tokens(value: &str) -> Result<Vec<&str>> {
+    let mut result: Vec<_> = value.split_whitespace().collect();
+    result.sort_unstable();
+    ensure!(
+        !result.windows(2).any(|w| w[0] == w[1]),
+        "duplicate policy unit"
+    );
+    Ok(result)
 }
 
 /// A sampled runtime-property distinction, never configured-policy or mutation

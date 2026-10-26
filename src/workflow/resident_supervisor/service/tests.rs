@@ -46,6 +46,51 @@ fn encode(fields: &BTreeMap<String, String>) -> Vec<u8> {
 }
 
 #[test]
+fn dependency_policy_matching_preserves_raw_values_and_rejects_changed_sets() {
+    let f = Fixture::new();
+    for key in ["After", "Conflicts"] {
+        let mut original = retained(&f.record());
+        original
+            .fields
+            .insert(key.into(), "a.target b.service".into());
+        let before = encode(&original.fields);
+        let mut reordered = original.clone();
+        reordered
+            .fields
+            .insert(key.into(), "b.service a.target".into());
+        assert_ne!(reordered, original);
+        assert_ne!(reordered.policy(), original.policy());
+        assert!(reordered.policy().matches(&original.policy()));
+        assert!(original.policy().matches(&reordered.policy()));
+        assert_eq!(reordered.policy().property(key), Some("b.service a.target"));
+        assert_eq!(encode(&original.fields), before);
+        for bad in [
+            "",
+            "a.target",
+            "a.target b.service c.target",
+            "a.target a.target b.service",
+        ] {
+            let mut altered = original.clone();
+            altered.fields.insert(key.into(), bad.into());
+            assert!(!altered.policy().matches(&original.policy()));
+            assert!(!original.policy().matches(&altered.policy()));
+        }
+        let mut duplicate = original.policy();
+        duplicate.0.insert(key.into(), "a.target a.target".into());
+        assert_eq!(duplicate, duplicate.clone()); // Raw equality remains reflexive.
+        assert!(!duplicate.matches(&duplicate)); // Malformed policy is never admitted.
+        for other in POLICY
+            .iter()
+            .filter(|k| !matches!(**k, "After" | "Conflicts"))
+        {
+            let mut altered = reordered.clone();
+            altered.fields.insert((*other).into(), "changed".into());
+            assert!(!altered.policy().matches(&original.policy()), "{other}");
+        }
+    }
+}
+
+#[test]
 fn stock_start_is_fixed_nonblocking_and_never_replaces_a_job() {
     let command = start_command();
     assert_eq!(command.get_program(), "/bin/systemctl");

@@ -248,7 +248,7 @@ fn cleared_actor_watchdog(
     Ok(terminal.identity == TerminalIdentity::Cleared
         && terminal.group == GroupObservation::OriginalAbsent
         && terminal.watchdog == WatchdogObservation::ClearedUninitialized
-        && terminal.policy == snapshot.policy()
+        && terminal.policy.matches(&snapshot.policy())
         && resample()? == *snapshot)
 }
 
@@ -689,7 +689,10 @@ impl Context {
         )?;
         let expected = ServiceBaseline::decode(self.expected(role).baseline.as_bytes())?;
         ensure!(
-            baseline.original().policy() == expected.original().policy(),
+            baseline
+                .original()
+                .policy()
+                .matches(&expected.original().policy()),
             "restored service policy changed"
         );
         baseline.current(deadline)?;
@@ -997,13 +1000,13 @@ fn restore(
         if !admitted {
             baseline.current(deadline)?;
         }
-        if s.policy() != baseline.original().policy() {
+        if !s.policy().matches(&baseline.original().policy()) {
             let terminal = baseline
                 .stopped(deadline)?
                 .context("recovery target policy changed before terminal state")?;
             ensure!(
                 terminal.watchdog == WatchdogObservation::ClearedUninitialized
-                    && terminal.policy == s.policy(),
+                    && terminal.policy.matches(&s.policy()),
                 "recovery target policy changed"
             );
         }
