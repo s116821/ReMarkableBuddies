@@ -1,5 +1,7 @@
 use super::*;
 use serde_json::{json, Value};
+#[path = "provider_tests.rs"]
+mod provider_tests;
 
 fn png(width: u32, height: u32) -> Vec<u8> {
     let image = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
@@ -171,14 +173,23 @@ fn status_is_a_distinct_strict_request_and_nullable_query_text_is_required() {
 fn typed_envelope_refuses_wrong_namespace_version_identity_and_media() {
     let admitted = admitted(&request()).unwrap();
     let value = admitted.correction().unwrap();
+    let operation = Uuid::new_v4();
+    let (_, revision) = mutation_identity(
+        Action::Confirm,
+        operation,
+        value.record_id().unwrap(),
+        &BTreeSet::new(),
+        Some(&value.value_digest().unwrap()),
+    )
+    .unwrap();
     let envelope = Envelope {
         envelope_version: 1,
         namespace: Namespace::Handwriting,
         domain_schema_version: 1,
         record_id: value.record_id().unwrap(),
-        revision_id: Uuid::new_v4(),
+        revision_id: revision,
         parents: BTreeSet::new(),
-        operation_id: Uuid::new_v4(),
+        operation_id: operation,
         actor_id: Uuid::new_v4(),
         kind: Kind::Value,
         payload: serde_json::to_value(value).unwrap(),

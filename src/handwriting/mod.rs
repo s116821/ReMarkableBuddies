@@ -1,6 +1,13 @@
 //! Explicit confirmed sample data. No recognition, native authority or model training.
+pub mod command;
+mod provider;
+mod report;
 use crate::storage::{digest, valid_digest, Envelope, Kind, Media, Namespace, Uuid};
 use base64::{engine::general_purpose::STANDARD, Engine};
+pub use provider::{LocalCorrections, Provider};
+pub use report::{
+    Availability, Command, Diagnostics, Fact, FactState, MutationOutcome, Report, Status,
+};
 use serde::{de::Error, Deserialize, Deserializer, Serialize};
 use std::{
     collections::BTreeSet,
@@ -246,6 +253,17 @@ pub fn decode(envelope: &Envelope) -> Result<Option<Correction>> {
         return Err(Failure::UnsupportedRecord);
     }
     if envelope.kind == Kind::Tombstone {
+        let (_, revision) = mutation_identity(
+            Action::Forget,
+            envelope.operation_id,
+            envelope.record_id,
+            &envelope.parents,
+            None,
+        )
+        .map_err(|_| Failure::UnsupportedRecord)?;
+        if envelope.parents.is_empty() || revision != envelope.revision_id {
+            return Err(Failure::UnsupportedRecord);
+        }
         return Ok(None);
     }
     let value: Correction =
@@ -254,6 +272,22 @@ pub fn decode(envelope: &Envelope) -> Result<Option<Correction>> {
     if value.record_id()? != envelope.record_id
         || envelope.media_descriptors != [value.sample.clone()]
     {
+        return Err(Failure::UnsupportedRecord);
+    }
+    let value_digest = value.value_digest()?;
+    let action = if envelope.parents.is_empty() {
+        Action::Confirm
+    } else {
+        Action::Update
+    };
+    let (_, revision) = mutation_identity(
+        action,
+        envelope.operation_id,
+        envelope.record_id,
+        &envelope.parents,
+        Some(&value_digest),
+    )?;
+    if revision != envelope.revision_id {
         return Err(Failure::UnsupportedRecord);
     }
     Ok(Some(value))
@@ -381,6 +415,9 @@ impl ValidatedInput {
     }
 }
 pub fn parse(input: &mut impl Read) -> Result<ValidatedInput> {
+    validate_request(read_request(input)?)
+}
+pub(crate) fn read_request(input: &mut impl Read) -> Result<Request> {
     let mut bytes = Vec::new();
     input
         .take(MAX_INPUT as u64 + 1)
@@ -389,13 +426,33 @@ pub fn parse(input: &mut impl Read) -> Result<ValidatedInput> {
     if bytes.len() > MAX_INPUT {
         return Err(Failure::InputLimit);
     }
-    let request: Request = serde_json::from_slice(&bytes).map_err(|error| {
+    serde_json::from_slice(&bytes).map_err(|error| {
         if error.to_string().starts_with("invalid identity") {
             Failure::InvalidIdentity
         } else {
             Failure::InvalidJson
         }
-    })?;
+    })
+}
+pub fn validate_request(request: Request) -> Result<ValidatedInput> {
+    if request.profile().is_nil()
+        || request.operation().is_some_and(|id| id.is_nil())
+        || (!matches!(&request, Request::Query(_)) && request.record().is_none())
+    {
+        return Err(Failure::InvalidIdentity);
+    }
+    let expected = match &request {
+        Request::Confirm(v) | Request::Update(v) => Some(&v.expected_heads),
+        Request::Forget(v) => Some(&v.expected_heads),
+        _ => None,
+    };
+    if expected.is_some_and(|heads| {
+        heads.len() > crate::storage::MAX_ITEMS
+            || heads.iter().any(Uuid::is_nil)
+            || heads.iter().collect::<BTreeSet<_>>().len() != heads.len()
+    }) {
+        return Err(Failure::InvalidIdentity);
+    }
     let version = match &request {
         Request::Confirm(v) | Request::Update(v) => v.handwriting_version,
         Request::Inspect(v) => v.handwriting_version,
