@@ -393,7 +393,7 @@ fn composed_receiving_preserves_snapshot_refusal_privacy_and_mode_release() {
                 e.payload = Value::Null;
             }),
             2 => edit(&store, &head(&store, fact.id), |e| {
-                e.domain_schema_version = 999
+                e.domain_schema_version = 2
             }),
             3 => {
                 let current = store.sync_mode_snapshot().unwrap();
@@ -414,6 +414,13 @@ fn composed_receiving_preserves_snapshot_refusal_privacy_and_mode_release() {
         let before = fixture.files();
         let error =
             plan_stored(&ledger, id, &ctx, "draft", Geometry::default(), fact.id).unwrap_err();
+        let expected = match case {
+            0 => "invalid stored feedback record",
+            1 | 2 => "unsupported stored feedback history",
+            3 => "stored feedback ordinary custody unavailable",
+            _ => "foreign stored feedback record",
+        };
+        assert_eq!(error.to_string(), expected);
         assert!(!format!("{error:?}").contains("SECRET-CANARY"));
         assert!(describe_stored(&ledger, turn.conversation, fact.id).is_err());
         assert_eq!(fixture.files(), before);
