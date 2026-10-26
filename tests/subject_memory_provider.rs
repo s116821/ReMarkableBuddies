@@ -336,3 +336,151 @@ fn actual_cli_runs_maintained_scripted_preference_scenario() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn interpreted_reader_terminal_facts_are_exact_atomic_and_narrow() {
+    use remarkable_reader_buddy::conversation::{
+        AttemptReason, Ledger, Mode, Outcome, Record, Role, Turn,
+    };
+    use remarkable_reader_buddy::storage::Namespace;
+    for case in 0..9 {
+        let root = std::env::temp_dir().join(format!("buddy-reader-terminal-{}", Uuid::new_v4()));
+        let store = Arc::new(
+            Store::open(StorePaths {
+                data: root.join("data"),
+                cache: root.join("cache"),
+                credentials: root.join("credentials"),
+            })
+            .unwrap(),
+        );
+        let ledger = Ledger::new(store.clone());
+        let conversation = Uuid::new_v4();
+        ledger.create(conversation, Uuid::new_v4(), 1).unwrap();
+        let original = Turn {
+            id: Uuid::new_v4(),
+            conversation,
+            exchange: Uuid::new_v4(),
+            sequence: 0,
+            role: Role::User,
+            mode: if case == 6 {
+                Mode::Writer
+            } else {
+                Mode::Reader
+            },
+            outcome: Outcome::Interpreted,
+            text: Some("Exact\r\nquestion: α µ?".into()),
+            sources: vec![],
+            correction_of: None,
+            created_ms: 2,
+            updated_ms: 2,
+            completion: None,
+        };
+        ledger
+            .append(
+                Uuid::new_v4(),
+                ledger
+                    .expected(Namespace::Conversation, conversation)
+                    .unwrap(),
+                original.clone(),
+                vec![],
+            )
+            .unwrap();
+        let before = ledger.inspect(conversation, false).unwrap();
+        let manifests = store.manifests().unwrap().len();
+        let mut terminal = original.clone();
+        terminal.updated_ms = 3;
+        terminal.outcome = if case == 1 || case == 3 {
+            Outcome::Canceled
+        } else if case == 4 {
+            Outcome::ReconcileRequired
+        } else {
+            Outcome::Failed
+        };
+        if case == 5 {
+            terminal.text = Some("Exact\nquestion: α µ?".into());
+        }
+        let reason = if case == 1 {
+            AttemptReason::Canceled
+        } else if case == 2 {
+            AttemptReason::RequestFailed
+        } else {
+            AttemptReason::ProviderFailure
+        };
+        let expected_root = ledger
+            .expected(Namespace::Conversation, conversation)
+            .unwrap();
+        let expected_turn = if case == 8 {
+            Default::default()
+        } else {
+            ledger
+                .expected(Namespace::Conversation, original.id)
+                .unwrap()
+        };
+        let operation = Uuid::new_v4();
+        let applied = if case == 7 {
+            ledger.advance(
+                operation,
+                expected_root.clone(),
+                expected_turn.clone(),
+                terminal.clone(),
+            )
+        } else {
+            ledger.record_attempt_outcome(
+                operation,
+                expected_root.clone(),
+                expected_turn.clone(),
+                terminal.clone(),
+                reason.clone(),
+            )
+        };
+        if case < 2 {
+            let applied = applied.unwrap();
+            let repeated = ledger
+                .record_attempt_outcome(
+                    operation,
+                    expected_root,
+                    expected_turn,
+                    terminal.clone(),
+                    reason.clone(),
+                )
+                .unwrap();
+            assert_eq!(applied.historical, repeated.historical);
+            let records = ledger.inspect(conversation, false).unwrap();
+            assert_eq!(
+                records
+                    .iter()
+                    .filter(|r| matches!(r, Record::Turn(_)))
+                    .count(),
+                1
+            );
+            assert!(records.iter().any(|r|matches!(r,Record::Turn(t) if t.text==original.text && t.outcome==terminal.outcome)));
+            assert!(records.iter().any(|r|matches!(r,Record::OutcomeFact(f) if f.turn==original.id && f.outcome==terminal.outcome && f.reason==reason)));
+            drop(ledger);
+            drop(store);
+            let reopened = Arc::new(
+                Store::open(StorePaths {
+                    data: root.join("data"),
+                    cache: root.join("cache"),
+                    credentials: root.join("credentials"),
+                })
+                .unwrap(),
+            );
+            let reopened = Ledger::new(reopened);
+            assert!(reopened.inspect(conversation,false).unwrap().iter().any(|r|matches!(r,Record::Turn(t) if t.text==original.text && t.outcome==terminal.outcome)));
+            drop(reopened);
+        } else {
+            assert!(
+                applied.is_err(),
+                "negative case {case} unexpectedly accepted"
+            );
+            assert_eq!(
+                serde_json::to_value(ledger.inspect(conversation, false).unwrap()).unwrap(),
+                serde_json::to_value(before).unwrap()
+            );
+            assert_eq!(store.manifests().unwrap().len(), manifests);
+            drop(ledger);
+            drop(store);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}

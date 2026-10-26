@@ -336,7 +336,7 @@ fn reader_withheld_only_abstention_provider_failure_and_cancel_never_publish_pro
         } else {
             crate::conversation::Outcome::Failed
         };
-        assert!(envelopes.iter().any(|e| matches!(serde_json::from_value::<Record>(e.payload.clone()), Ok(Record::Turn(t)) if t.role == Role::User && t.text.as_deref() == Some("G unc.?") && t.outcome == expected_outcome)));
+        assert!(envelopes.iter().any(|e| matches!(serde_json::from_value::<Record>(e.payload.clone()), Ok(Record::Turn(t)) if t.role == Role::User && t.text.as_deref() == Some("G unc.?") && t.outcome == expected_outcome)), "failure/cancellation case {mode} retained the wrong terminal turn");
         drop(inspect);
     }
 }
