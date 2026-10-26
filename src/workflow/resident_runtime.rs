@@ -119,12 +119,13 @@ impl ResidentRuntime {
         Self::launch_checked(store, input, deadline, decorate, |_| Ok(()))
     }
     /// Installed admission is repeated after potentially lengthy artifact
-    /// preparation, before any child exists. It cannot replace the fixed deadline.
+    /// preparation, before any child exists, then through socket/Ready waits.
+    /// It cannot replace the fixed deadline or disable owned-child cleanup.
     pub(super) fn launch_admitted(
         store: Arc<Store>,
         input: Launch,
         deadline: Instant,
-        admit: impl FnOnce(Instant) -> Result<()>,
+        admit: impl FnMut(Instant) -> Result<()>,
     ) -> std::result::Result<Self, StartupFailure> {
         Self::launch_checked(store, input, deadline, |_| {}, admit)
     }
@@ -133,7 +134,7 @@ impl ResidentRuntime {
         input: Launch,
         deadline: Instant,
         decorate: impl FnOnce(&mut Command),
-        admit: impl FnOnce(Instant) -> Result<()>,
+        mut admit: impl FnMut(Instant) -> Result<()>,
     ) -> std::result::Result<Self, StartupFailure> {
         let path = input.directory.clone();
         let prepare = || -> Result<Prepared> {
@@ -165,7 +166,7 @@ impl ResidentRuntime {
             connection: None,
             prepared,
         };
-        match runtime.connect(store, deadline) {
+        match runtime.connect(store, deadline, &mut admit) {
             Ok(()) => Ok(runtime),
             Err(error) => {
                 let shutdown = runtime.stop(Instant::now() + CLEANUP);
@@ -177,11 +178,18 @@ impl ResidentRuntime {
             }
         }
     }
-    fn connect(&mut self, store: Arc<Store>, deadline: Instant) -> Result<()> {
+    fn connect(
+        &mut self,
+        store: Arc<Store>,
+        deadline: Instant,
+        admit: &mut dyn FnMut(Instant) -> Result<()>,
+    ) -> Result<()> {
         let pid = self.child.as_ref().expect("owned child").id();
         self.prepared.identity.pid = pid;
         self.prepared.identity.start_ticks = process_start(pid)?;
         loop {
+            before(deadline)?;
+            admit(deadline)?;
             before(deadline)?;
             ensure!(
                 self.child.as_mut().unwrap().try_wait()?.is_none(),
@@ -202,14 +210,22 @@ impl ResidentRuntime {
             connection: nonce(),
             server_nonce: None,
         };
-        self.connection = Some(ResidentConnection::connect(
+        let connection = ResidentConnection::connect_with_progress(
             store,
             self.prepared.directory.file.try_clone()?,
             self.prepared.uid,
             scope,
             OperationId(nonce()),
             deadline,
-        )?);
+            &mut || {
+                admit(deadline)?;
+                self.prepared.current(false)?;
+                self.check_child()?;
+                before(deadline)
+            },
+        )?;
+        self.connection = Some(connection);
+        admit(deadline)?;
         self.prepared.current(true)?;
         self.check_child()?;
         before(deadline)

@@ -486,6 +486,104 @@ mod sockets {
     }
 
     #[test]
+    fn caller_progress_preserves_predispatch_proof_or_original_pending_across_restart() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        for select in [false, true] {
+            for dispatched in [false, true] {
+                let f = Fixture::new();
+                let store = f.open();
+                let conversation = Uuid::new_v4();
+                let (listener, directory, uid) = endpoint(&f);
+                let seen = Arc::new(AtomicBool::new(false));
+                let peer_seen = seen.clone();
+                let peer = thread::spawn(move || {
+                    let mut stream = accept(&listener);
+                    if dispatched {
+                        let request = read(&mut stream);
+                        assert_eq!(request.operation, OperationId(id(1400)));
+                        assert!(matches!(
+                            request.message,
+                            Message::Request(Command::InsertAfter(_) | Command::SelectAdjacent(_))
+                        ));
+                        peer_seen.store(true, Ordering::Release);
+                    }
+                    assert_eq!(stream.read(&mut [0; 1]).unwrap(), 0);
+                });
+                let mut connection = ResidentConnection::connect(
+                    store.clone(),
+                    directory,
+                    uid,
+                    runtime_scope(),
+                    OperationId(id(1399)),
+                    end(),
+                )
+                .unwrap();
+                let mut canceled = false;
+                let mut progress = || {
+                    let reserved = !attempts(&store)?.is_empty();
+                    if reserved && (!dispatched || seen.load(Ordering::Acquire)) {
+                        canceled = true;
+                        anyhow::bail!("owned request canceled");
+                    }
+                    Ok(())
+                };
+                let failure = if select {
+                    connection.select_adjacent_with_progress(
+                        conversation,
+                        OperationId(id(1400)),
+                        SelectAdjacent {
+                            expected: facts(),
+                            target: id(12),
+                        },
+                        end(),
+                        &mut progress,
+                    )
+                } else {
+                    connection.insert_after_with_progress(
+                        conversation,
+                        OperationId(id(1400)),
+                        InsertAfter {
+                            source: facts(),
+                            target: id(13),
+                        },
+                        end(),
+                        &mut progress,
+                    )
+                }
+                .unwrap_err();
+                assert!(canceled && failure.detail.contains("owned request canceled"));
+                let history = attempts(&store).unwrap();
+                assert_eq!(history.len(), 1);
+                let original = history[0].request.clone();
+                let expected = if dispatched {
+                    LostRequest::Indeterminate {
+                        operation: OperationId(id(1400)),
+                        request_sha256: original.fingerprint(),
+                    }
+                } else {
+                    LostRequest::NoPendingMutation
+                };
+                assert_eq!(failure.lost, expected);
+                assert_eq!(connection.close(), expected);
+                peer.join().unwrap();
+                drop(connection);
+                drop(store);
+                let reopened = f.open();
+                let after = attempts(&reopened).unwrap();
+                assert_eq!(after[0].request.encoded(), original.encoded());
+                assert_eq!(after[0].known_not_dispatched, !dispatched);
+                assert!(after[0].reply.is_none());
+                // A new caller request is possible only from explicit no-dispatch
+                // proof; a lost effect blocks insertion/selection after restart.
+                assert_eq!(
+                    claim(&reopened, conversation, &request(1401, 14)).is_ok(),
+                    !dispatched
+                );
+            }
+        }
+    }
+
+    #[test]
     fn selection_is_durable_before_bytes_and_reconciles_specific_original_read_only() {
         let f = Fixture::new();
         let store = f.open();

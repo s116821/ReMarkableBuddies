@@ -393,10 +393,36 @@ mod linux {
             handshake: OperationId,
             deadline: Instant,
         ) -> Result<Self> {
+            Self::connect_with_progress(
+                store,
+                directory,
+                uid,
+                scope,
+                handshake,
+                deadline,
+                &mut || Ok(()),
+            )
+        }
+        pub fn connect_with_progress(
+            store: Arc<Store>,
+            directory: File,
+            uid: u32,
+            scope: ConnectionIdentity,
+            handshake: OperationId,
+            deadline: Instant,
+            progress: &mut dyn FnMut() -> Result<()>,
+        ) -> Result<Self> {
             // Refuse malformed prior evidence before contacting the endpoint.
             attempts(&store)?;
-            let client = Client::connect(directory, uid, scope, handshake, deadline)
-                .map_err(|error| anyhow::anyhow!("resident connection refused: {error:?}"))?;
+            let client = Client::connect_with_progress(
+                directory,
+                uid,
+                scope,
+                handshake,
+                deadline,
+                &mut || progress().map_err(std::io::Error::other),
+            )
+            .map_err(|error| anyhow::anyhow!("resident connection refused: {error:?}"))?;
             Ok(Self {
                 client,
                 store,
@@ -404,8 +430,23 @@ mod linux {
             })
         }
         pub fn observe(&mut self, operation: OperationId, deadline: Instant) -> Result<Reply> {
+            self.observe_with_progress(operation, deadline, &mut || Ok(()))
+        }
+        /// Caller-thread input/health checks; returned facts remain historical.
+        pub fn observe_with_progress(
+            &mut self,
+            operation: OperationId,
+            deadline: Instant,
+            progress: &mut dyn FnMut() -> Result<()>,
+        ) -> Result<Reply> {
             self.client
-                .execute(operation, Command::Observe, deadline, |_, _| Ok(()))
+                .execute_with_progress(
+                    operation,
+                    Command::Observe,
+                    deadline,
+                    |_, _| Ok(()),
+                    &mut || progress().map_err(std::io::Error::other),
+                )
                 .map_err(|error| anyhow::anyhow!("resident observation failed: {error:?}"))
         }
         /// Requires separately qualified product reuse/placement decisions. This
@@ -417,11 +458,28 @@ mod linux {
             insertion: InsertAfter,
             deadline: Instant,
         ) -> std::result::Result<Reply, InsertionFailure> {
+            self.insert_after_with_progress(
+                conversation,
+                operation,
+                insertion,
+                deadline,
+                &mut || Ok(()),
+            )
+        }
+        pub fn insert_after_with_progress(
+            &mut self,
+            conversation: Uuid,
+            operation: OperationId,
+            insertion: InsertAfter,
+            deadline: Instant,
+            progress: &mut dyn FnMut() -> Result<()>,
+        ) -> std::result::Result<Reply, InsertionFailure> {
             self.execute_effect(
                 conversation,
                 operation,
                 Command::InsertAfter(insertion),
                 deadline,
+                progress,
             )
         }
         /// Selection needs a qualified current/adjacent reuse decision. A stored
@@ -433,11 +491,28 @@ mod linux {
             selection: SelectAdjacent,
             deadline: Instant,
         ) -> std::result::Result<Reply, EffectFailure> {
+            self.select_adjacent_with_progress(
+                conversation,
+                operation,
+                selection,
+                deadline,
+                &mut || Ok(()),
+            )
+        }
+        pub fn select_adjacent_with_progress(
+            &mut self,
+            conversation: Uuid,
+            operation: OperationId,
+            selection: SelectAdjacent,
+            deadline: Instant,
+            progress: &mut dyn FnMut() -> Result<()>,
+        ) -> std::result::Result<Reply, EffectFailure> {
             self.execute_effect(
                 conversation,
                 operation,
                 Command::SelectAdjacent(selection),
                 deadline,
+                progress,
             )
         }
         fn execute_effect(
@@ -446,16 +521,21 @@ mod linux {
             operation: OperationId,
             command: Command,
             deadline: Instant,
+            progress: &mut dyn FnMut() -> Result<()>,
         ) -> std::result::Result<Reply, EffectFailure> {
             let mut original = None;
-            let result = self
-                .client
-                .execute(operation, command, deadline, |frame, hash| {
+            let result = self.client.execute_with_progress(
+                operation,
+                command,
+                deadline,
+                |frame, hash| {
                     reserve(&self.store, conversation, frame, hash)
                         .map_err(std::io::Error::other)?;
                     original = Some(frame.clone());
                     Ok(())
-                });
+                },
+                &mut || progress().map_err(std::io::Error::other),
+            );
             match result {
                 Ok(reply) => {
                     let request = original.expect("SDK cannot reply before journal callback");
@@ -513,12 +593,21 @@ mod linux {
             operation: OperationId,
             deadline: Instant,
         ) -> Result<Reply> {
+            self.reconcile_with_progress(conversation, operation, deadline, &mut || Ok(()))
+        }
+        pub fn reconcile_with_progress(
+            &mut self,
+            conversation: Uuid,
+            operation: OperationId,
+            deadline: Instant,
+            progress: &mut dyn FnMut() -> Result<()>,
+        ) -> Result<Reply> {
             let original = attempts(&self.store)?
                 .into_iter()
                 .rev()
                 .find(|a| a.conversation == conversation)
                 .context("native attempt missing")?;
-            self.reconcile_original(original, operation, deadline)
+            self.reconcile_original(original, operation, deadline, progress)
         }
         /// Inspect one specific consumed operation, including an older attempt.
         /// A mismatched conversation or unknown operation refuses before IO.
@@ -529,6 +618,22 @@ mod linux {
             operation: OperationId,
             deadline: Instant,
         ) -> Result<Reply> {
+            self.reconcile_attempt_with_progress(
+                conversation,
+                original_operation,
+                operation,
+                deadline,
+                &mut || Ok(()),
+            )
+        }
+        pub fn reconcile_attempt_with_progress(
+            &mut self,
+            conversation: Uuid,
+            original_operation: OperationId,
+            operation: OperationId,
+            deadline: Instant,
+            progress: &mut dyn FnMut() -> Result<()>,
+        ) -> Result<Reply> {
             let original = attempts(&self.store)?
                 .into_iter()
                 .find(|a| {
@@ -536,13 +641,14 @@ mod linux {
                         && a.request.frame().operation == original_operation
                 })
                 .context("native original attempt missing")?;
-            self.reconcile_original(original, operation, deadline)
+            self.reconcile_original(original, operation, deadline, progress)
         }
         fn reconcile_original(
             &mut self,
             original: HistoricalAttempt,
             operation: OperationId,
             deadline: Instant,
+            progress: &mut dyn FnMut() -> Result<()>,
         ) -> Result<Reply> {
             ensure!(
                 operation != original.request.frame().operation,
@@ -556,7 +662,9 @@ mod linux {
                 _ => unreachable!("validated journal contains only effects"),
             };
             self.client
-                .execute(operation, command, deadline, |_, _| Ok(()))
+                .execute_with_progress(operation, command, deadline, |_, _| Ok(()), &mut || {
+                    progress().map_err(std::io::Error::other)
+                })
                 .map_err(|error| anyhow::anyhow!("resident reconciliation failed: {error:?}"))
         }
         pub fn close(&mut self) -> LostRequest {

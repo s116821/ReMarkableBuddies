@@ -52,7 +52,7 @@ impl Fixture {
         &self,
         mode: &str,
         timeout: Duration,
-        admit: impl FnOnce(Instant) -> Result<()>,
+        admit: impl FnMut(Instant) -> Result<()>,
     ) -> std::result::Result<ResidentRuntime, StartupFailure> {
         let mut input = self.launch();
         input.arguments = [
@@ -207,13 +207,46 @@ fn admitted_prepared_child_still_uses_normal_handshake_and_owned_cleanup() {
         .start_admitted("ready", Duration::from_secs(5), |_| {
             admissions += 1;
             assert!(fixture.0.join("run/admission.bin").is_file());
-            assert!(!fixture.0.join("run/sdk.sock").exists());
+            if admissions == 1 {
+                assert!(!fixture.0.join("run/sdk.sock").exists());
+            }
             Ok(())
         })
         .unwrap();
-    assert_eq!(admissions, 1);
+    assert!(admissions > 1);
     let stopped = runtime.shutdown(Instant::now() + Duration::from_secs(2));
     assert!(stopped.reaped && stopped.error.is_none());
+}
+
+#[test]
+fn startup_progress_cancellation_reaps_before_socket_or_during_handshake() {
+    for mode in ["no-socket", "late-ready"] {
+        let fixture = Fixture::new();
+        let mut calls = 0;
+        let mut original_deadline = None;
+        let failure = fixture
+            .start_admitted(mode, Duration::from_secs(5), |deadline| {
+                assert_eq!(*original_deadline.get_or_insert(deadline), deadline);
+                calls += 1;
+                if (mode == "no-socket" && calls > 1) || fixture.0.join("run/handshakes").exists() {
+                    anyhow::bail!("owned input cancellation during startup");
+                }
+                Ok(())
+            })
+            .err()
+            .expect("startup cancellation must refuse");
+        assert!(calls > 1);
+        assert!(failure
+            .error
+            .to_string()
+            .contains("owned input cancellation"));
+        if mode == "late-ready" {
+            assert!(fixture.0.join("run/handshakes").exists());
+        } else {
+            assert!(!fixture.0.join("run/sdk.sock").exists());
+        }
+        fixture.preserved_and_reaped(mode, failure);
+    }
 }
 
 #[test]
