@@ -124,7 +124,7 @@ impl ResidentRuntime {
     /// Installed admission is repeated after potentially lengthy artifact
     /// preparation, before any child exists, then through socket/Ready waits.
     /// It cannot replace the fixed deadline or disable owned-child cleanup.
-    pub(super) fn launch_admitted(
+    pub fn launch_admitted(
         store: Arc<Store>,
         input: Launch,
         deadline: Instant,
@@ -249,7 +249,7 @@ impl ResidentRuntime {
         &self.prepared.identity
     }
     /// Keep runtime integrity admission active through every SDK progress check.
-    pub(super) fn with_connection<T>(
+    pub fn with_connection<T>(
         &mut self,
         deadline: Instant,
         progress: &mut dyn FnMut() -> Result<()>,

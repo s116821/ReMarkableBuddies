@@ -63,7 +63,8 @@ impl PolicySnapshot {
 }
 
 impl Snapshot {
-    pub(super) fn property(&self, key: &str) -> Option<&str> {
+    /// Read-only sampled state, never independent process/group ownership proof.
+    pub fn property(&self, key: &str) -> Option<&str> {
         self.fields.get(key).map(String::as_str)
     }
     pub(super) fn parse(bytes: &[u8], unit: &str) -> Result<Self> {
