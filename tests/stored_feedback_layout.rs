@@ -432,7 +432,7 @@ fn feedback_remains_with_its_original_exchange_in_newest_first_history() {
     let mut later = turn.clone();
     later.id = Uuid::new_v4();
     later.exchange = Uuid::new_v4();
-    later.sequence = 1;
+    later.sequence = 0;
     later.outcome = Outcome::Prepared;
     later.text = Some("later unchanged request".into());
     later.created_ms = 4;
@@ -446,6 +446,15 @@ fn feedback_remains_with_its_original_exchange_in_newest_first_history() {
             later.clone(),
             vec![],
         )
+        .unwrap();
+    let later = ledger
+        .inspect(turn.conversation, false)
+        .unwrap()
+        .into_iter()
+        .find_map(|record| match record {
+            Record::Turn(stored) if stored.id == later.id => Some(stored),
+            _ => None,
+        })
         .unwrap();
     let ctx = context(vec![turn.clone(), later.clone()]);
     let before = fixture.files();
