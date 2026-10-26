@@ -25,6 +25,7 @@ fn units_supply_separate_pid1_recovery_and_control_group_bounds() {
         let actor = unit_text(NONCE, kind, "actor").unwrap();
         let recovery = unit_text(NONCE, kind, "recovery").unwrap();
         assert!(actor.contains("Type=exec\n"));
+        assert!(actor.contains("OnSuccessJobMode=fail\nOnFailureJobMode=fail\n"));
         assert!(actor.contains(&format!(
             "OnSuccess={}\nOnFailure={}\n",
             owned(NONCE, "recovery"),
@@ -48,6 +49,31 @@ fn units_supply_separate_pid1_recovery_and_control_group_bounds() {
         } else {
             "RuntimeMaxSec=12s\n"
         }));
+    }
+}
+
+#[test]
+fn diagnostic_triggers_cannot_replace_conflicting_jobs() {
+    let fields = BTreeMap::from([
+        ("OnSuccessJobMode".into(), "fail".into()),
+        ("OnFailureJobMode".into(), "fail".into()),
+    ]);
+    diagnostic_trigger_modes(&fields).unwrap();
+    for key in ["OnSuccessJobMode", "OnFailureJobMode"] {
+        for value in [
+            "replace",
+            "replace-irreversibly",
+            "ignore-dependencies",
+            "",
+            "fail replace",
+        ] {
+            let mut changed = fields.clone();
+            changed.insert(key.into(), value.into());
+            assert!(diagnostic_trigger_modes(&changed).is_err());
+        }
+        let mut missing = fields.clone();
+        missing.remove(key);
+        assert!(diagnostic_trigger_modes(&missing).is_err());
     }
 }
 

@@ -310,7 +310,7 @@ class Run:
                         + " -p Id -p Type -p ActiveState -p SubState -p MainPID -p ControlPID"
                         + " -p ExecMainPID -p ExecMainStartTimestampMonotonic -p InvocationID"
                         + " -p ControlGroup -p Job -p WatchdogUSec -p FragmentPath"
-                        + " -p DropInPaths -p NeedDaemonReload")
+                        + " -p DropInPaths -p NeedDaemonReload -p OnSuccessJobMode -p OnFailureJobMode")
             sample = json.loads(self.remote("inspect", f"{self.binary} inspect {self.nonce} fixture"))
             candidate = {"version": 1, "nonce": self.nonce, "kind": "fixture",
                          "fault": self.args.case, "boot": sample["boot"],

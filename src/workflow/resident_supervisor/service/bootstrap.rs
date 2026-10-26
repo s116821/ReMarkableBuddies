@@ -173,7 +173,7 @@ fn unit_text(nonce: &str, kind: Kind, role: &str) -> Result<String> {
     let binary = stage(nonce).join("resident_bootstrap_control");
     let (unit, service) = match role {
         "actor" => (
-            format!("OnSuccess={recovery}\nOnFailure={recovery}\n"),
+            format!("OnSuccess={recovery}\nOnFailure={recovery}\nOnSuccessJobMode=fail\nOnFailureJobMode=fail\n"),
             format!(
                 "Type=exec\nRuntimeMaxSec={}s\nTimeoutStartSec=5s\n",
                 if kind == Kind::Native { 310 } else { 12 }
@@ -616,6 +616,9 @@ impl Context {
                 }
             }
             let extra = extra(&unit, deadline)?;
+            if name == "actor" {
+                diagnostic_trigger_modes(&extra)?;
+            }
             let runtime = if name == "actor" {
                 if self.candidate.kind == Kind::Native {
                     "5min 10s"
@@ -697,6 +700,16 @@ impl Context {
     }
 }
 
+fn diagnostic_trigger_modes(fields: &BTreeMap<String, String>) -> Result<()> {
+    for key in ["OnSuccessJobMode", "OnFailureJobMode"] {
+        ensure!(
+            fields.get(key).map(String::as_str) == Some("fail"),
+            "diagnostic trigger may replace conflicting jobs: {key}"
+        );
+    }
+    Ok(())
+}
+
 fn extra(unit: &str, deadline: Instant) -> Result<BTreeMap<String, String>> {
     let mut command = Command::new("/bin/systemctl");
     command.args([
@@ -708,6 +721,8 @@ fn extra(unit: &str, deadline: Instant) -> Result<BTreeMap<String, String>> {
         "--property=RuntimeMaxUSec",
         "--property=ExecStart",
         "--property=Before",
+        "--property=OnSuccessJobMode",
+        "--property=OnFailureJobMode",
         "--",
         unit,
     ]);
@@ -717,12 +732,19 @@ fn extra(unit: &str, deadline: Instant) -> Result<BTreeMap<String, String>> {
     for line in input.lines() {
         let (k, v) = line.split_once('=').context("malformed extra policy")?;
         ensure!(
-            ["RuntimeMaxUSec", "ExecStart", "Before"].contains(&k)
+            [
+                "RuntimeMaxUSec",
+                "ExecStart",
+                "Before",
+                "OnSuccessJobMode",
+                "OnFailureJobMode"
+            ]
+            .contains(&k)
                 && fields.insert(k.into(), v.into()).is_none(),
             "unexpected extra policy"
         );
     }
-    ensure!(fields.len() == 3, "incomplete extra policy");
+    ensure!(fields.len() == 5, "incomplete extra policy");
     Ok(fields)
 }
 fn request(action: &str, unit: &str, deadline: Instant) -> Result<()> {
