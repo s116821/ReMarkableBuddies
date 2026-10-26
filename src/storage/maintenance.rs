@@ -140,6 +140,7 @@ impl Store {
                 legacy_sync_handles: 0,
                 mode_handles: 0,
                 legacy_publisher_handles: 0,
+                local_domain_handles: 0,
             }),
             wake: Mutex::new(None),
             export_active: std::sync::atomic::AtomicBool::new(false),
