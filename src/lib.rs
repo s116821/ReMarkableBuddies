@@ -5,6 +5,7 @@ pub mod conversation;
 pub mod conversation_feedback;
 pub mod conversation_layout;
 pub mod device;
+pub mod handwriting;
 pub mod llm;
 mod measurement;
 pub mod memory;
