@@ -450,6 +450,12 @@ fn main() -> Result<()> {
     }
     #[cfg(target_os = "linux")]
     remarkable_reader_buddy::workflow::resident_supervisor::recovery::refuse_occupied_activation()?;
+    #[cfg(target_os = "linux")]
+    let service_health = if args.simulate.is_none() {
+        remarkable_reader_buddy::workflow::resident_supervisor::health::ServiceHealth::from_environment()?
+    } else {
+        None
+    };
     dotenv().ok();
     if let Some(path) = args.simulate {
         logging(args.log_level, std::env::var("RUST_LOG").ok().as_deref()).init();
@@ -494,12 +500,20 @@ fn main() -> Result<()> {
     );
     let workflow = Workflow::new(false, effective.trigger_corner, effective.debug_dump)?;
     sleep(Duration::from_millis(1000));
+    let _sync_worker = Worker::google(store.clone(), config.sync)?;
+    #[cfg(target_os = "linux")]
+    let workflow = {
+        let mut workflow = workflow;
+        if let Some(health) = service_health {
+            workflow.enable_service_health(health)?;
+        }
+        workflow
+    };
     let mut orchestrator = Orchestrator::new(
         workflow,
         llm,
         remarkable_reader_buddy::conversation::Ledger::new(store.clone()),
     );
-    let _sync_worker = Worker::google(store.clone(), config.sync)?;
     info!("Initialization complete; starting main loop");
     orchestrator.run_loop()
 }

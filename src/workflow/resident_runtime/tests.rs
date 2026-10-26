@@ -191,6 +191,9 @@ fn wrong_artifact_and_loader_environment_refuse_before_launch() {
         "LD_PRELOAD",
         "QML_IMPORT_PATH",
         "QT_PLUGIN_PATH",
+        "NOTIFY_SOCKET",
+        "WATCHDOG_USEC",
+        "WATCHDOG_PID",
     ] {
         let fixture = Fixture::new();
         let mut input = fixture.launch();

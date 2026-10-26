@@ -327,6 +327,13 @@ impl Touch {
     }
 
     pub fn wait_for_trigger(&mut self) -> Result<()> {
+        self.wait_for_trigger_with_progress(&mut || Ok(()))
+    }
+
+    pub fn wait_for_trigger_with_progress(
+        &mut self,
+        progress: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
         use std::time::Instant;
         let device = self
             .device
@@ -372,6 +379,7 @@ impl Touch {
                     }
                 }
             }
+            progress()?;
             if hold.triggered(clock.elapsed()) {
                 info!("Trigger activated after 2s hold!");
                 return Ok(());

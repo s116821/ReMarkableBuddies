@@ -17,6 +17,7 @@ use uuid::Uuid;
 const RECORD_LIMIT: u64 = 32 * 1024;
 const LEASE_NAME: &str = "activation.json";
 
+pub mod health;
 pub mod recovery;
 pub mod service;
 

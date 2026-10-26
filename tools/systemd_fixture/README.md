@@ -17,6 +17,14 @@ only its own known test leaves. It performs no PID1 recovery, stock activation,
 native operation or document check; service and native qualification remain
 separate from this command-dispatch coverage.
 
+`health_entry.py /absolute/path/to/reader-buddy` uses the same disposable-container
+boundary. A real local Unix socket checks that failed ordinary initialization
+cannot emit readiness. Malformed/wrong-owner notification settings refuse before
+configuration; Writer, maintenance, recovery and simulator dispatch skip the
+notifier. Dotenv cannot introduce notification settings after startup capture.
+All subprocess calls are bounded and use poisoned configuration, with no device
+or model access. This does not exercise installed PID1 watchdog/recovery behavior.
+
 ## Offline unit parser
 
 This original tooling builds upstream systemd-stable tag v255.21, peeled commit
