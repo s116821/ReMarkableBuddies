@@ -119,6 +119,8 @@ jobs:
         if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
       - run: python -m unittest discover -s release -v
         if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
+      - run: python -m unittest discover -s tools/systemd_fixture -p test_bootstrap_fixture.py -v
+        if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
       - run: npm ci --prefix release/fixtures --ignore-scripts --no-audit --no-fund
         if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
       - run: npm audit --prefix release/fixtures

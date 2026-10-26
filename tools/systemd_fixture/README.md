@@ -121,3 +121,55 @@ and fully cleared on the second. Recovery cannot assume PID1 retains the origina
 incarnation indefinitely. The coordinated design defines the additional original
 lease, deleted-group and activation-latch checks required for that case; this
 fixture does not implement or authorize production recovery.
+
+## Bootstrap controller fixture
+
+`bootstrap_fixture.py` exercises the built development-only
+`resident_bootstrap_control` in fixture mode, using four nonce-owned runtime
+units and disposable source data. It requires Python on the coordinating host,
+SSH/root access to an already authorized idle development target, and the
+observed hybrid cgroup mount. It does not require Python on the tablet. Announce
+the temporary service changes before executing it. Source review and a matching
+compiled artifact are prerequisites; this script grants no execution permission.
+
+Create a protected local JSON file containing the authorized SSH executable,
+options and target as an argument array, without a remote command or password.
+Use the actual build-source SHA from the diagnostic artifact's `source.sha`.
+
+```sh
+python tools/systemd_fixture/bootstrap_fixture.py \
+  --ssh-prefix-file /local/ssh-prefix.json \
+  --binary /local/resident_bootstrap_control \
+  --source-sha EXACT_40_CHARACTER_BUILD_SHA \
+  --case none --output /local/evidence
+```
+
+Other cases are `actor_kill`, `actor_hang`, `after_buddy_stop`, `recovery_exit`,
+`recovery_after_intent` and `recovery_after_start`. Each invocation selects a
+fresh nonce, captures real stock/Buddy identities and artifact hashes, transfers
+the controller exclusively, checks its checksum, freezes the fixture candidate,
+and runs one actor followed by exactly one explicitly selected second helper.
+An uncertain stock-start intent must prevent another start even across helper
+invocations. Actor crash/timeout cases require an observed live child in the
+actor's actual group before the injected fault. Assertions distinguish successful
+restoration, unchanged unadmitted stock and intentional uncertain-start refusal.
+
+The runner preserves every command selection, output, candidate and control
+archive, including failures. Never replay a failed or timed-out actor. First
+inspect its live PID1 state and retained evidence; a host observation timeout is
+not proof that the remote unit stopped. All fixture services have independent
+PID1 limits. They address no real stock/Buddy unit and load no native adapter.
+Source-mismatch and shutdown cases remain outside this driver's coverage.
+
+Cleanup is deliberately separate: after collecting and verifying the exact
+nonce's evidence, confirm actor and helper terminal with no job, stop only the
+two owned fake services, verify all four units have no process/job/population,
+then remove only their exact runtime definitions and reload PID1. Preserve
+payloads and evidence until separately verified collection. Do not recursively
+remove an assumed or computed parent directory.
+
+Offline verifier tests run without SSH or PID1:
+
+```sh
+python -m unittest discover -s tools/systemd_fixture -p test_bootstrap_fixture.py -v
+```

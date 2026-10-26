@@ -791,6 +791,40 @@ fn actor(mut context: Context, deadline: Instant) -> Result<()> {
     quiet(&mut input)?;
     check(deadline)?;
     let mut child = command.spawn()?;
+    if matches!(context.candidate.fault, Fault::ActorKill | Fault::ActorHang) {
+        let ready = context.root.join("fixture-child-ready");
+        let complete = context.root.join("fixture-child-ready-complete");
+        loop {
+            context.current(deadline)?;
+            ensure!(
+                child.try_wait()?.is_none(),
+                "fixture child exited before fault"
+            );
+            if present(&complete)? {
+                let (_, completion) = read_pin(&complete, deadline)?;
+                ensure!(completion.is_empty(), "invalid child completion marker");
+                let (_, bytes) = read_pin(&ready, deadline)?;
+                let identity: ProcessIdentity = serde_json::from_slice(&bytes)?;
+                ensure!(
+                    identity.pid == child.id(),
+                    "fixture child identity mismatch"
+                );
+                let group = GroupBaseline::capture_process(
+                    Path::new(MOUNT),
+                    &owned(&context.nonce, "actor"),
+                    child.id(),
+                )?;
+                ensure!(group.parent() == &identity, "fixture child changed");
+                write_new(
+                    &context.root,
+                    "fixture-child-observed",
+                    &serde_json::to_vec(&group)?,
+                )?;
+                break;
+            }
+            pace(deadline);
+        }
+    }
     if context.candidate.fault == Fault::ActorKill {
         unsafe { libc::raise(libc::SIGKILL) };
         anyhow::bail!("SIGKILL did not terminate fixture");
@@ -907,6 +941,7 @@ fn restore(
             context.intent(&format!("{role}.start-intent"))?;
             prior = Some(read_pin(&durable_intent, deadline)?.0);
             if role == "stock" && context.candidate.fault == Fault::RecoveryAfterIntent {
+                context.intent("fixture-recovery-after-intent")?;
                 unsafe { libc::raise(libc::SIGKILL) };
                 anyhow::bail!("fixture recovery intent interruption");
             }
@@ -918,6 +953,7 @@ fn restore(
             requested = true;
             request("start", baseline.group().unit(), deadline)?;
             if role == "stock" && context.candidate.fault == Fault::RecoveryAfterStart {
+                context.intent("fixture-recovery-after-start")?;
                 unsafe { libc::raise(libc::SIGKILL) };
                 anyhow::bail!("fixture recovery queued-start interruption");
             }
@@ -1097,6 +1133,16 @@ pub fn entry(arguments: Vec<String>) -> Result<()> {
             "stand-in child forbidden for native candidate"
         );
         if matches!(context.candidate.fault, Fault::ActorKill | Fault::ActorHang) {
+            let group = GroupBaseline::capture(Path::new(MOUNT), &owned(name, "actor"))?;
+            write_new(
+                &context.root,
+                "fixture-child-ready",
+                &serde_json::to_vec(group.parent())?,
+            )?;
+            // Create the empty completion marker only after readiness bytes and
+            // their directory entry have been synced. Existence cannot expose a
+            // partially written readiness record to the parent.
+            write_new(&context.root, "fixture-child-ready-complete", b"")?;
             loop {
                 thread::sleep(Duration::from_secs(1));
             }
