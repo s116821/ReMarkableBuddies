@@ -1,7 +1,8 @@
 //! Explicit historical metadata receiving; no pending queue or rendering authority.
-use super::{Ledger, Record};
+use super::{ContextView, Ledger, Record, Turn};
 use crate::{
     conversation_feedback::{describe, FeedbackDescription},
+    conversation_layout::{plan, Geometry, HistoricalFeedbackPlan, PresentationIdentity},
     storage::{Kind, Namespace, Uuid, MAX_ITEMS},
 };
 use anyhow::{anyhow, bail, ensure, Context, Result};
@@ -18,6 +19,60 @@ pub fn describe_stored(
     conversation: Uuid,
     fact: Uuid,
 ) -> Result<FeedbackDescription> {
+    with_stored_feedback(ledger, conversation, fact, |description, _| Ok(description))
+}
+
+/// Compose one explicit historical fact with the exact stored turn snapshot.
+/// Other context and binding validation remain the caller's responsibility.
+/// The result neither inserts a turn nor grants current presentation authority.
+pub fn plan_stored<'a>(
+    ledger: &Ledger,
+    identity: PresentationIdentity,
+    context: &'a ContextView,
+    draft: &'a str,
+    geometry: Geometry,
+    fact: Uuid,
+) -> Result<HistoricalFeedbackPlan<'a>> {
+    let PresentationIdentity::Persisted {
+        conversation,
+        document,
+        page,
+    } = identity
+    else {
+        bail!("stored feedback presentation identity unavailable");
+    };
+    ensure!(
+        !conversation.is_nil() && !document.is_nil() && !page.is_nil(),
+        "stored feedback presentation identity unavailable"
+    );
+    ensure!(
+        context.turns.len() <= MAX_ITEMS,
+        "presentation turn bound exceeded"
+    );
+    with_stored_feedback(ledger, conversation, fact, |description, stored_turn| {
+        let mut matching = context
+            .turns
+            .iter()
+            .filter(|turn| turn.id == stored_turn.id);
+        ensure!(
+            matching.next() == Some(stored_turn) && matching.next().is_none(),
+            "stored feedback layout turn mismatch"
+        );
+        let page = plan(identity, context, draft, geometry)?;
+        Ok(HistoricalFeedbackPlan {
+            page,
+            exchange: stored_turn.exchange,
+            description,
+        })
+    })
+}
+
+fn with_stored_feedback<R>(
+    ledger: &Ledger,
+    conversation: Uuid,
+    fact: Uuid,
+    receive: impl FnOnce(FeedbackDescription, &Turn) -> Result<R>,
+) -> Result<R> {
     ensure!(
         !conversation.is_nil() && !fact.is_nil(),
         "stored feedback identity unavailable"
@@ -78,15 +133,19 @@ pub fn describe_stored(
             _ => None,
         })
         .context("stored feedback fact unavailable")?;
-    ensure!(
-        records.iter().any(|record| matches!(record,
-            Record::Turn(turn) if turn.id == selected.turn && turn.conversation == conversation)),
-        "stored feedback turn unavailable"
-    );
+    let turn = records
+        .iter()
+        .find_map(|record| match record {
+            Record::Turn(turn) if turn.id == selected.turn && turn.conversation == conversation => {
+                Some(turn)
+            }
+            _ => None,
+        })
+        .context("stored feedback turn unavailable")?;
     let description = describe(selected)?.context("unsupported stored feedback outcome")?;
     ensure!(
         serde_json::to_vec(&description)?.len() <= MAX_DESCRIPTION_BYTES,
         "stored feedback description exceeds bound"
     );
-    Ok(description)
+    receive(description, turn)
 }
