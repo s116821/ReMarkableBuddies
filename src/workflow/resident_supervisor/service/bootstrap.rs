@@ -205,6 +205,52 @@ fn diagnostic_watchdog_disabled(s: &Snapshot, unstarted_helper: bool) -> bool {
     s.property("WatchdogUSec") == Some("0") || (unstarted_helper && s.unstarted_watchdog())
 }
 
+// Only the recovery helper may use the original actor's independently proven
+// stopped/absent observation. The unit's raw snapshot must still be unchanged
+// after that proof; no running helper or ownership-free path gets this exception.
+fn diagnostic_actor_watchdog(
+    snapshot: &Snapshot,
+    role: &str,
+    name: &str,
+    original_actor: Option<&ServiceBaseline>,
+    deadline: Instant,
+) -> Result<bool> {
+    if role != "recovery" || name != "actor" || !snapshot.uninitialized_watchdog() {
+        return Ok(false);
+    }
+    let Some(actor) = original_actor else {
+        return Ok(false);
+    };
+    ensure!(
+        actor.original().property("WatchdogUSec") == Some("0")
+            && snapshot.property("Id") == Some(actor.group().unit()),
+        "diagnostic original actor watchdog identity changed"
+    );
+    cleared_actor_watchdog(
+        snapshot,
+        || actor.stopped(deadline),
+        || observe(actor.group().unit(), deadline),
+    )
+}
+
+fn cleared_actor_watchdog(
+    snapshot: &Snapshot,
+    stopped: impl FnOnce() -> Result<Option<RecoveryObservation>>,
+    resample: impl FnOnce() -> Result<Snapshot>,
+) -> Result<bool> {
+    if !snapshot.uninitialized_watchdog() {
+        return Ok(false);
+    }
+    let Some(terminal) = stopped()? else {
+        return Ok(false);
+    };
+    Ok(terminal.identity == TerminalIdentity::Cleared
+        && terminal.group == GroupObservation::OriginalAbsent
+        && terminal.watchdog == WatchdogObservation::ClearedUninitialized
+        && terminal.policy == snapshot.policy()
+        && resample()? == *snapshot)
+}
+
 fn unit_paths(kind: Kind, nonce: &str) -> Vec<String> {
     if kind == Kind::Native {
         vec![
@@ -476,7 +522,12 @@ impl Context {
         );
         Ok(())
     }
-    fn units(&mut self, role: &str, deadline: Instant) -> Result<()> {
+    fn units(
+        &mut self,
+        role: &str,
+        original_actor: Option<&ServiceBaseline>,
+        deadline: Instant,
+    ) -> Result<()> {
         for name in ["actor", "recovery"] {
             let unit = owned(&self.nonce, name);
             let path = PathBuf::from(format!("/run/systemd/system/{unit}"));
@@ -506,7 +557,8 @@ impl Context {
                 );
             }
             ensure!(
-                diagnostic_watchdog_disabled(&s, name == "recovery" && role == "actor"),
+                diagnostic_watchdog_disabled(&s, name == "recovery" && role == "actor")
+                    || diagnostic_actor_watchdog(&s, role, name, original_actor, deadline)?,
                 "unsafe diagnostic unit {name}: WatchdogUSec={:?}",
                 s.property("WatchdogUSec")
             );
@@ -717,7 +769,7 @@ fn stopped(baseline: &ServiceBaseline, deadline: Instant) -> Result<()> {
 fn actor(mut context: Context, deadline: Instant) -> Result<()> {
     fs::DirBuilder::new().mode(0o700).create(&context.root)?;
     context.bind_root()?;
-    context.units("actor", deadline)?;
+    context.units("actor", None, deadline)?;
     let mut input = if context.candidate.kind == Kind::Native {
         Some(RequestInput::new(TriggerCorner::LowerLeft, None)?)
     } else {
@@ -982,13 +1034,14 @@ fn restore(
 }
 
 fn recover(mut context: Context, deadline: Instant) -> Result<()> {
-    context.units("recovery", deadline)?;
     if !present(&context.root)? {
+        context.units("recovery", None, deadline)?;
         return Ok(());
     } // Actor creates root before any stop intent.
     context.bind_root()?;
     let record = context.root.join("ownership.json");
     if !present(&record)? {
+        context.units("recovery", None, deadline)?;
         for leaf in [
             "stock.stop-intent",
             "buddy.stop-intent",
@@ -1016,6 +1069,7 @@ fn recover(mut context: Context, deadline: Instant) -> Result<()> {
         actor.group().unit() == owned(&context.nonce, "actor"),
         "wrong original actor"
     );
+    context.units("recovery", Some(&actor), deadline)?;
     stopped(&actor, deadline)?;
     let stock = ServiceBaseline::decode(record.stock.as_bytes())?;
     let buddy = ServiceBaseline::decode(record.buddy.as_bytes())?;

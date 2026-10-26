@@ -100,6 +100,118 @@ fn watchdog_infinity_is_only_an_unstarted_helper_sentinel() {
 }
 
 #[test]
+fn completed_actor_watchdog_requires_original_absence_then_stable_resampling() {
+    use std::cell::Cell;
+    let mut snapshot = Snapshot {
+        fields: STATE
+            .iter()
+            .chain(POLICY)
+            .map(|key| ((*key).into(), String::new()))
+            .collect(),
+    };
+    snapshot.fields.extend(
+        [
+            ("WatchdogUSec", "infinity"),
+            ("Type", "exec"),
+            ("ActiveState", "inactive"),
+            ("SubState", "dead"),
+            ("MainPID", "0"),
+            ("ControlPID", "0"),
+            ("ExecMainPID", "0"),
+            ("ExecMainStartTimestampMonotonic", "0"),
+            ("InvocationID", ""),
+            ("ControlGroup", ""),
+            ("Job", ""),
+            ("KillMode", "control-group"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.into(), value.into())),
+    );
+    let terminal = || RecoveryObservation {
+        identity: TerminalIdentity::Cleared,
+        group: GroupObservation::OriginalAbsent,
+        policy: snapshot.policy(),
+        watchdog: WatchdogObservation::ClearedUninitialized,
+    };
+    let proven = Cell::new(false);
+    assert!(cleared_actor_watchdog(
+        &snapshot,
+        || {
+            proven.set(true);
+            Ok(Some(terminal()))
+        },
+        || {
+            assert!(proven.get(), "resampling must follow original-group proof");
+            Ok(snapshot.clone())
+        }
+    )
+    .unwrap());
+    assert!(!cleared_actor_watchdog(&snapshot, || Ok(None), || panic!("not stopped")).unwrap());
+    assert!(cleared_actor_watchdog(
+        &snapshot,
+        || anyhow::bail!("original group replaced"),
+        || panic!("failed proof")
+    )
+    .is_err());
+    for change in 0..5 {
+        let mut observed = terminal();
+        match change {
+            0 => observed.identity = TerminalIdentity::Retained,
+            1 => observed.group = GroupObservation::EmptyOriginal,
+            2 => observed.group = GroupObservation::Populated,
+            3 => observed.watchdog = WatchdogObservation::Runtime,
+            _ => {
+                let mut changed = snapshot.clone();
+                changed.fields.insert("KillMode".into(), "process".into());
+                observed.policy = changed.policy();
+            }
+        }
+        assert!(!cleared_actor_watchdog(
+            &snapshot,
+            || Ok(Some(observed)),
+            || panic!("invalid stopped observation")
+        )
+        .unwrap());
+    }
+    for (key, value) in [
+        ("WatchdogUSec", "0"),
+        ("ActiveState", "activating"),
+        ("MainPID", "42"),
+        ("InvocationID", "12"),
+        ("Job", "42"),
+        ("KillMode", "process"),
+    ] {
+        let mut changed = snapshot.clone();
+        changed.fields.insert(key.into(), value.into());
+        assert!(
+            !cleared_actor_watchdog(&snapshot, || Ok(Some(terminal())), || Ok(changed)).unwrap(),
+            "changed resample {key}"
+        );
+    }
+    assert!(cleared_actor_watchdog(
+        &snapshot,
+        || Ok(Some(terminal())),
+        || anyhow::bail!("resample unavailable")
+    )
+    .is_err());
+    for (role, name) in [
+        ("actor", "actor"),
+        ("recovery", "recovery"),
+        ("recovery", "actor"),
+    ] {
+        assert!(!diagnostic_actor_watchdog(&snapshot, role, name, None, Instant::now()).unwrap());
+    }
+    let mut partial = snapshot.clone();
+    partial.fields.remove("ExecMainPID");
+    assert!(!cleared_actor_watchdog(
+        &partial,
+        || panic!("incomplete clearing"),
+        || panic!("incomplete clearing")
+    )
+    .unwrap());
+}
+
+#[test]
 fn nonce_digest_and_candidate_schema_refuse_ambiguous_inputs() {
     nonce(NONCE).unwrap();
     for value in ["", "../escape", "0123456789abcdef0123456789abcdeF"] {
