@@ -510,7 +510,8 @@ fn cumulative_metadata_limit_refuses_without_truncating_feedback_context() {
                 || e.payload["record"]["conversation"].as_str() == Some(&identity)
                 || e.payload["record"]["acknowledgment"]["conversation"].as_str() == Some(&identity)
         })
-        .unwrap_err();
+        .err()
+        .expect("oversized metadata snapshot must refuse");
     assert!(underlying
         .to_string()
         .contains("inspection exceeds metadata byte bound"));
