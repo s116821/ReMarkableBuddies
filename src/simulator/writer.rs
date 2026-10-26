@@ -199,7 +199,7 @@ impl NoteDestination for Destination {
     }
 }
 impl Scenario {
-    fn validate(&self) -> Result<()> {
+    pub(super) fn validate(&self) -> Result<()> {
         ensure!(
             self.mode == "writer",
             "only supplied-text Writer host simulation is supported"
