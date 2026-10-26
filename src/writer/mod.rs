@@ -181,9 +181,9 @@ impl Report {
         r
     }
 }
-struct Owner<'a>(&'a Store);
+pub(crate) struct Owner<'a>(&'a Store);
 impl<'a> Owner<'a> {
-    fn acquire(store: &'a Store) -> Option<Self> {
+    pub(crate) fn acquire(store: &'a Store) -> Option<Self> {
         store
             .writer_active
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -314,9 +314,42 @@ pub fn run<E: LLMEngine>(
     if let Err(failure) = request.preflight() {
         return Report::refused(request, failure);
     }
-    let Some(_owner) = Owner::acquire(ledger.store()) else {
+    let Some(owner) = Owner::acquire(ledger.store()) else {
         return Report::new(request, Status::Busy);
     };
+    let mut produced = None;
+    run_owned(
+        ledger,
+        engine,
+        request,
+        personalization,
+        canceled,
+        OwnedRun {
+            owner: &owner,
+            expected_root: None,
+            produced: &mut produced,
+        },
+    )
+}
+pub(crate) struct OwnedRun<'a, 'store> {
+    pub(crate) owner: &'a Owner<'store>,
+    pub(crate) expected_root: Option<crate::conversation::ExpectedHeads>,
+    pub(crate) produced: &'a mut Option<crate::conversation::WriterSelection>,
+}
+pub(crate) fn run_owned<E: LLMEngine>(
+    ledger: &Ledger,
+    engine: &mut E,
+    request: &Request,
+    personalization: &PersonalizationSnapshot,
+    canceled: &mut dyn FnMut() -> bool,
+    control: OwnedRun<'_, '_>,
+) -> Report {
+    if !std::ptr::eq(control.owner.0, ledger.store().as_ref()) {
+        return Report::refused(request, Failure::Storage);
+    }
+    if let Err(failure) = request.preflight() {
+        return Report::refused(request, failure);
+    }
     if let Request::PrepareExport {
         conversation,
         draft,
@@ -326,29 +359,7 @@ pub fn run<E: LLMEngine>(
     {
         let prepared = (|| -> Result<PreparedNote> {
             let (draft, source) = selected(ledger, *conversation, *draft)?;
-            let (title, markdown) = parse_draft(draft.text.as_deref().context("no draft")?)?;
-            let note = PreparedNote {
-                conversation: *conversation,
-                correlation: *correlation,
-                effect_operation: *effect_operation,
-                source_scope: format!(
-                    "normalized-document:{}:{}",
-                    source.document.document,
-                    match source.selection {
-                        TextScope::Page { page } => format!("page:{page}"),
-                        TextScope::SuppliedNotebook => "supplied-notebook".into(),
-                    }
-                ),
-                source_revision: digest(&serde_json::to_vec(&(
-                    &source,
-                    draft.id,
-                    draft.text.as_deref(),
-                ))?),
-                title: title.into(),
-                markdown: markdown.into(),
-            };
-            note.render(CorrelationLocation::Title)?;
-            Ok(note)
+            note_from_draft(&draft, &source, *correlation, *effect_operation)
         })();
         return match prepared {
             Ok(note) => {
@@ -365,7 +376,10 @@ pub fn run<E: LLMEngine>(
     let assembled = (|| -> Result<_> {
         // Capture before every related read. Any append during assembly must
         // make preparation stale instead of silently admitting unseen history.
-        let expected = ledger.expected(Namespace::Conversation, conversation)?;
+        let expected = match &control.expected_root {
+            Some(expected) => expected.clone(),
+            None => ledger.expected(Namespace::Conversation, conversation)?,
+        };
         let (text, source, prior) = match request {
             Request::Generate {
                 request,
@@ -514,11 +528,45 @@ pub fn run<E: LLMEngine>(
     let mut report = Report::new(request, status);
     report.failure = failure;
     match ledger.finish_writer(stage(operation, "finish"), prepared, draft) {
-        Ok(_) => report.draft = Some(stage(operation, "draft")),
+        Ok((_, selection)) => {
+            report.draft = Some(stage(operation, "draft"));
+            *control.produced = selection;
+        }
         Err(_) => {
             report.status = Status::Stale;
             report.failure = Some(Failure::Storage)
         }
     }
     report
+}
+
+pub(crate) fn note_from_draft(
+    draft: &Turn,
+    source: &NormalizedTextSource,
+    correlation: Uuid,
+    effect_operation: Uuid,
+) -> Result<PreparedNote> {
+    let (title, markdown) = parse_draft(draft.text.as_deref().context("no draft")?)?;
+    let note = PreparedNote {
+        conversation: draft.conversation,
+        correlation,
+        effect_operation,
+        source_scope: format!(
+            "normalized-document:{}:{}",
+            source.document.document,
+            match source.selection {
+                TextScope::Page { page } => format!("page:{page}"),
+                TextScope::SuppliedNotebook => "supplied-notebook".into(),
+            }
+        ),
+        source_revision: digest(&serde_json::to_vec(&(
+            source,
+            draft.id,
+            draft.text.as_deref(),
+        ))?),
+        title: title.into(),
+        markdown: markdown.into(),
+    };
+    note.render(CorrelationLocation::Title)?;
+    Ok(note)
 }

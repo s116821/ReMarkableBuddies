@@ -23,6 +23,7 @@ mod selected_context_tests;
 mod settlement;
 mod types;
 mod writer;
+mod writer_flow;
 use crate::storage::{
     digest, Conflict, Envelope, Kind, Media, Namespace, ObjectRef, Store, Uuid, FORMAT, MAX_ITEMS,
 };
@@ -47,6 +48,9 @@ use std::{
 };
 pub use types::*;
 pub use writer::*;
+pub(crate) use writer_flow::{
+    WriterExportGuard, WriterExportInput, WriterFlowAdmission, WriterSelection,
+};
 
 type TurnCounter<'a> = dyn Fn(&[Turn]) -> Result<usize> + 'a;
 const TEXT_SOURCE_SCHEMA: u32 = 2;
@@ -1279,10 +1283,34 @@ impl Ledger {
         expected_export: ExpectedHeads,
         association: ExportAssociation,
     ) -> Result<(WriteResult, bool)> {
+        self.associate_export_inner(operation, expected_root, expected_export, association, None)
+            .map(|(result, fresh, _)| (result, fresh))
+    }
+    pub(crate) fn associate_writer_export_observed(
+        &self,
+        operation: Uuid,
+        expected_export: ExpectedHeads,
+        association: ExportAssociation,
+        input: WriterExportInput,
+    ) -> Result<(WriteResult, bool, Option<WriterExportGuard>)> {
+        let root = input.selection.root.clone();
+        self.associate_export_inner(operation, root, expected_export, association, Some(input))
+    }
+    fn associate_export_inner(
+        &self,
+        operation: Uuid,
+        expected_root: ExpectedHeads,
+        expected_export: ExpectedHeads,
+        association: ExportAssociation,
+        selection: Option<WriterExportInput>,
+    ) -> Result<(WriteResult, bool, Option<WriterExportGuard>)> {
         association.validate_attempt()?;
-        let fingerprint = Self::fingerprint(&("export", &association))?;
+        let fingerprint = match &selection {
+            Some(input) => input.fingerprint(self, &association)?,
+            None => Self::fingerprint(&("export", &association))?,
+        };
         if let Some(prior) = self.replay(operation, &fingerprint)? {
-            return Ok((prior, false));
+            return Ok((prior, false, None));
         }
         ensure!(
             association.operation == operation
@@ -1351,7 +1379,17 @@ impl Ledger {
             Record::Root(root),
             vec![],
         )?;
-        self.publish_observed(operation, fingerprint, root, vec![exported], binding)
+        let mut records = match &selection {
+            Some(input) => input.guard_records(self)?,
+            None => vec![],
+        };
+        records.push(exported);
+        let post = selection
+            .as_ref()
+            .map(|_| WriterExportGuard::published(&root, &records));
+        let (result, fresh) =
+            self.publish_observed(operation, fingerprint, root, records, binding)?;
+        Ok((result, fresh, if fresh { post } else { None }))
     }
     pub fn image(&self, source: Uuid) -> Result<Vec<u8>> {
         self.complete_store()?;

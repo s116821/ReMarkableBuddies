@@ -6,6 +6,7 @@ mod reader_persistence_tests;
 pub mod scenario;
 #[cfg(test)]
 mod smart_erase_tests;
+pub mod writer;
 
 use crate::{LLMEngine, OpenAI, Orchestrator, Workflow};
 use anyhow::{ensure, Context, Result};
@@ -460,8 +461,10 @@ pub fn run_file(path: &Path) -> Result<Report> {
     let scenario: Scenario = serde_json::from_slice(
         &std::fs::read(path).with_context(|| format!("Read scenario {}", path.display()))?,
     )?;
-    let root = path.parent().unwrap_or_else(|| Path::new("."));
-    let run = execute(&scenario, root)?;
+    save_reader(&scenario, path.parent().unwrap_or_else(|| Path::new(".")))
+}
+fn save_reader(scenario: &Scenario, root: &Path) -> Result<Report> {
+    let run = execute(scenario, root)?;
     let output = root.join(&scenario.output);
     std::fs::create_dir_all(&output)?;
     for (index, image) in run.images.iter().enumerate() {
@@ -478,6 +481,47 @@ pub fn run_file(path: &Path) -> Result<Report> {
         run.report.assertion_failures.join("; ")
     );
     Ok(run.report)
+}
+
+enum ParsedScenario {
+    Reader(Box<Scenario>),
+    Writer(Box<writer::Scenario>),
+}
+/// Probe the mode, then parse original bytes directly without untagged buffering.
+/// Reader retains its original admissibility; only the new Writer schema is capped.
+fn parse_scenario(bytes: &[u8]) -> Result<ParsedScenario> {
+    #[derive(serde::Deserialize)]
+    struct ModeProbe {
+        mode: Option<String>,
+    }
+    let mode: ModeProbe = serde_json::from_slice(bytes)?;
+    match mode.mode.as_deref().unwrap_or("reader") {
+        "reader" => {
+            let scenario: Scenario = serde_json::from_slice(bytes)?;
+            scenario.validate()?;
+            Ok(ParsedScenario::Reader(Box::new(scenario)))
+        }
+        "writer" => {
+            ensure!(bytes.len() <= 1024 * 1024, "Writer scenario exceeds 1 MiB");
+            let scenario: writer::Scenario = serde_json::from_slice(bytes)?;
+            scenario.validate()?;
+            Ok(ParsedScenario::Writer(Box::new(scenario)))
+        }
+        _ => anyhow::bail!(
+            "unsupported simulator mode; combined/native Writer routing is unsupported"
+        ),
+    }
+}
+pub fn run_any_file(path: &Path) -> Result<()> {
+    let bytes = std::fs::read(path)?;
+    let root = path.parent().unwrap_or_else(|| Path::new("."));
+    match parse_scenario(&bytes)? {
+        ParsedScenario::Reader(scenario) => {
+            save_reader(&scenario, root)?;
+            Ok(())
+        }
+        ParsedScenario::Writer(scenario) => writer::save(&scenario, root),
+    }
 }
 
 #[cfg(test)]
@@ -662,5 +706,40 @@ mod request_retirement_tests {
             state.borrow_mut().visit += 1;
             assert!(device.capture().is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod dispatch_admission_tests {
+    use super::*;
+    #[test]
+    fn valid_large_reader_history_preserves_admissibility_without_execution() {
+        let mut value: serde_json::Value = serde_json::from_str(include_str!(
+            "../../docs/simulator/scenarios/blank-answer.json"
+        ))
+        .unwrap();
+        value["iterations"][0]["actions"] = serde_json::json!((0..100)
+            .map(|_| serde_json::json!({"action":"edit","text":"x".repeat(16000)}))
+            .collect::<Vec<_>>());
+        let bytes = serde_json::to_vec(&value).unwrap();
+        assert!(bytes.len() > 1600000);
+        let ParsedScenario::Reader(scenario) = parse_scenario(&bytes).unwrap() else {
+            panic!("Reader expected")
+        };
+        assert_eq!(scenario.iterations[0].actions.len(), 100);
+        // Admission only: no Store, engine, device or execute call exists here.
+    }
+    #[test]
+    fn writer_size_cap_and_duplicate_mode_are_scoped_before_execution() {
+        let mut bytes =
+            include_bytes!("../../docs/simulator/scenarios/writer-create-replay.json").to_vec();
+        bytes.extend(vec![b' '; 1024 * 1024]);
+        assert!(parse_scenario(&bytes)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("Writer scenario exceeds"));
+        let duplicate = br#"{"mode":"reader","mode":"writer"}"#;
+        assert!(parse_scenario(duplicate).is_err());
     }
 }

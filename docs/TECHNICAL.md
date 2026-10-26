@@ -227,7 +227,8 @@ separate from emulator/package integration. Canonical requirements live in Docs.
   either, dependency logging stays at info. Image dumps remain opt-in.
 
 ### Simulator extensions
-- REM-23 must add production Writer and combined-mode simulator regressions.
+- Writer host scenarios run the production supplied-text joined export flow;
+  combined/native routing remains unsupported. See [the simulator guide](simulator.md).
 - REM-25 must extend the backend/scenarios for native insertion and preservation.
 - REM-17 must cover final gesture arbitration and combined workflows before 1.0.
 
