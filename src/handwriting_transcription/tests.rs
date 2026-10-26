@@ -709,3 +709,189 @@ fn actual_revision_only_update_changes_extractor_but_not_transmitted_prompt() {
     assert_ne!(result.document.extractor_revision, first.1);
     assert_eq!(engine.calls, 2);
 }
+
+#[test]
+fn entered_engine_method_is_called_even_when_its_preflight_prevents_execute() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct Cooperative {
+        entered: Arc<AtomicBool>,
+    }
+    impl LLMEngine for Cooperative {
+        fn add_text_content(&mut self, _: &str) {}
+        fn add_image_content(&mut self, _: &str) {}
+        fn clear_content(&mut self) {}
+        fn execute(&mut self) -> anyhow::Result<String> {
+            panic!("execute must not be reached");
+        }
+        fn execute_with_progress(
+            &mut self,
+            progress: &mut dyn FnMut() -> anyhow::Result<()>,
+        ) -> anyhow::Result<String> {
+            self.entered.store(true, Ordering::Release);
+            progress()?;
+            self.execute()
+        }
+    }
+    let local = Local::new();
+    let entered = Arc::new(AtomicBool::new(false));
+    let mut engine = Cooperative {
+        entered: entered.clone(),
+    };
+    let report = run_with_engine(
+        &local.config,
+        &serde_json::to_vec(&request(Value::Null)).unwrap(),
+        "m",
+        &mut engine,
+        &mut || {
+            if entered.load(Ordering::Acquire) {
+                anyhow::bail!("canceled");
+            }
+            Ok(())
+        },
+    );
+    assert!(entered.load(Ordering::Acquire));
+    assert_eq!(report.provider_attempt, Attempt::Called);
+    assert_eq!(report.failure, Some(Failure::Canceled));
+    assert!(report.result.is_none());
+}
+#[test]
+fn repeating_an_explicit_invocation_is_a_new_call_without_a_store_receipt() {
+    let local = Local::new();
+    let input = request(Value::Null);
+    let mut engine = Engine::new();
+    let first = run(&local, &input, &mut engine);
+    let second = run(&local, &input, &mut engine);
+    assert_eq!(first.invocation, second.invocation);
+    assert_eq!(engine.calls, 2);
+    assert_eq!(first.status, Status::Normalized);
+    assert_eq!(second.status, Status::Normalized);
+    assert!(output(&first).get("transaction").is_none());
+    assert!(!local.config.paths.data.exists());
+}
+
+fn tree_bytes(root: &std::path::Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+    fn walk(
+        root: &std::path::Path,
+        path: &std::path::Path,
+        out: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>,
+    ) {
+        for item in std::fs::read_dir(path).unwrap() {
+            let item = item.unwrap();
+            let path = item.path();
+            let rel = path.strip_prefix(root).unwrap().to_path_buf();
+            if item.file_type().unwrap().is_dir() {
+                out.insert(rel, vec![]);
+                walk(root, &path, out);
+            } else {
+                out.insert(rel, std::fs::read(path).unwrap());
+            }
+        }
+    }
+    let mut result = std::collections::BTreeMap::new();
+    walk(root, root, &mut result);
+    result
+}
+#[test]
+fn missing_empty_and_incomplete_existing_roots_are_refused_without_any_initialization_or_repair() {
+    for missing in [
+        "all",
+        "empty",
+        "identity",
+        "lock",
+        "current",
+        "format",
+        "cache-owner",
+        "credential-owner",
+    ] {
+        let local = Local::new();
+        if missing == "empty" {
+            for path in [
+                &local.config.paths.data,
+                &local.config.paths.cache,
+                &local.config.paths.credentials,
+            ] {
+                std::fs::create_dir(path).unwrap();
+            }
+        } else if missing != "all" {
+            drop(Store::open(local.config.paths.clone()).unwrap());
+            let path = match missing {
+                "identity" => local.config.paths.data.join("identity.json"),
+                "lock" => local.config.paths.data.join("store.lock"),
+                "current" => local.config.paths.data.join("CURRENT"),
+                "format" => {
+                    let current: Uuid = serde_json::from_slice(
+                        &std::fs::read(local.config.paths.data.join("CURRENT")).unwrap(),
+                    )
+                    .unwrap();
+                    local
+                        .config
+                        .paths
+                        .data
+                        .join("generations")
+                        .join(current.to_string())
+                        .join("format.json")
+                }
+                "cache-owner" => local.config.paths.cache.join("owner.json"),
+                "credential-owner" => local.config.paths.credentials.join("owner.json"),
+                _ => unreachable!(),
+            };
+            assert!(path
+                .canonicalize()
+                .unwrap()
+                .starts_with(local.root.canonicalize().unwrap()));
+            std::fs::remove_file(path).unwrap();
+        }
+        let before = tree_bytes(&local.root);
+        let mut engine = Engine::new();
+        let report = run(
+            &local,
+            &request(context(Uuid::new_v4(), Uuid::new_v4())),
+            &mut engine,
+        );
+        assert_eq!(
+            report.failure,
+            Some(Failure::StorageUnavailable),
+            "{missing}"
+        );
+        assert_eq!(report.provider_attempt, Attempt::NotCalled);
+        assert!(report.context.is_none());
+        assert_eq!(engine.calls, 0);
+        assert_eq!(
+            before,
+            tree_bytes(&local.root),
+            "consumer changed {missing} storage"
+        );
+    }
+}
+#[test]
+fn actual_os_contention_is_typed_busy_and_existing_unknown_context_does_not_publish_or_clean() {
+    let local = Local::new();
+    let store = Arc::new(Store::open(local.config.paths.clone()).unwrap());
+    let before = tree_bytes(&local.root);
+    let mut engine = Engine::new();
+    let input = request(context(Uuid::new_v4(), Uuid::new_v4()));
+    let report = run(&local, &input, &mut engine);
+    assert_eq!(report.failure, Some(Failure::OwnershipBusy));
+    assert_eq!(report.provider_attempt, Attempt::NotCalled);
+    assert!(report.context.is_none());
+    assert_eq!(engine.calls, 0);
+    assert_eq!(before, tree_bytes(&local.root));
+    drop(report);
+    drop(store);
+    std::fs::write(
+        local.config.paths.data.join(".stage-preserve"),
+        b"synthetic retained stage",
+    )
+    .unwrap();
+    std::fs::write(
+        local.config.paths.data.join("capabilities.json"),
+        b"preserve exact old capability bytes",
+    )
+    .unwrap();
+    let before = tree_bytes(&local.root);
+    let report = run(&local, &input, &mut engine);
+    assert_eq!(report.failure, Some(Failure::ContextUnavailable));
+    assert_eq!(engine.calls, 0);
+    assert!(report.context.is_none());
+    assert_eq!(before, tree_bytes(&local.root));
+}

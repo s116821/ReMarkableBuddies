@@ -44,6 +44,12 @@ impl Store {
     pub fn open_existing(paths: StorePaths) -> Result<Self, Refusal> {
         Self::open_existing_inner(paths, false)
     }
+    /// Read-only handwriting context custody. Validate existing formats so the
+    /// ordinary/local-domain leases can refuse selected state, never initialize,
+    /// repair, clean staging, publish capabilities or acquire mutation authority.
+    pub(crate) fn open_existing_for_handwriting(paths: StorePaths) -> Result<Self, Refusal> {
+        Self::open_existing_inner(paths, true)
+    }
     /// Opt-in mode maintenance only. Preserve legacy callers' format refusal.
     pub(crate) fn open_existing_for_mode(paths: StorePaths) -> Result<Self, Refusal> {
         Self::open_existing_inner(paths, true)

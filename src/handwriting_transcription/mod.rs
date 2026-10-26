@@ -243,15 +243,16 @@ impl Prepared {
             if config.sync.enabled {
                 return Err(Failure::UnsupportedMode);
             }
-            let store = Store::open(config.paths.clone()).map_err(|e| {
-                if e.downcast_ref::<std::io::Error>()
-                    .is_some_and(|x| x.kind() == std::io::ErrorKind::WouldBlock)
-                {
-                    Failure::OwnershipBusy
-                } else {
-                    Failure::StorageUnavailable
-                }
-            })?;
+            let store =
+                Store::open_existing_for_handwriting(config.paths.clone()).map_err(|error| {
+                    match error {
+                        crate::storage::maintenance::Refusal::Busy => Failure::OwnershipBusy,
+                        crate::storage::maintenance::Refusal::Unavailable
+                        | crate::storage::maintenance::Refusal::Unsupported => {
+                            Failure::StorageUnavailable
+                        }
+                    }
+                })?;
             let owner = LocalCorrections::new(Arc::new(store), config).map_err(|f| match f {
                 handwriting::Failure::UnsupportedMode => Failure::UnsupportedMode,
                 _ => Failure::StorageUnavailable,
