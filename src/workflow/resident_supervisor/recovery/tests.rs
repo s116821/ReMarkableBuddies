@@ -138,6 +138,43 @@ fn restoration_starts_once_then_observes_and_verifies() {
     assert!(b.snapshots.is_empty());
 }
 #[test]
+fn startable_recheck_tolerates_only_dependency_order_after_group_admission() {
+    let first = changed(
+        &stopped(),
+        &[
+            ("After", "a.target b.service"),
+            ("Conflicts", "c.target d.service"),
+        ],
+    );
+    let last = changed(
+        &first,
+        &[
+            ("After", "b.service a.target"),
+            ("Conflicts", "d.service c.target"),
+        ],
+    );
+    assert_ne!(first, last);
+    let mut b = Fake::new(vec![first.clone(), last.clone(), ready(), ready()]);
+    assert!(restore(&mut b, deadline()).unwrap().start_requested);
+    assert_eq!((b.starts, b.empty_checks), (1, 1));
+    for (key, value) in [
+        ("Job", "42"),
+        ("WatchdogUSec", "infinity"),
+        ("InvocationID", "34343434343434343434343434343434"),
+        ("After", "a.target"),
+        ("Conflicts", "c.target c.target d.service"),
+    ] {
+        let mut b = Fake::new(vec![first.clone(), changed(&last, &[(key, value)])]);
+        assert!(restore(&mut b, deadline()).is_err(), "{key}");
+        assert_eq!((b.starts, b.empty_checks), (0, 1));
+    }
+    let mut b = Fake::new(vec![first, last]);
+    b.populated = true;
+    assert!(restore(&mut b, deadline()).is_err());
+    assert_eq!(b.starts, 0);
+}
+
+#[test]
 fn active_or_already_starting_stock_is_never_restarted() {
     for samples in [vec![ready(), ready()], vec![pending(), ready(), ready()]] {
         let mut b = Fake::new(samples);

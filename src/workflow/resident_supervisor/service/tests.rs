@@ -105,6 +105,57 @@ fn dependency_policy_matching_preserves_raw_values_and_rejects_changed_sets() {
 }
 
 #[test]
+fn stable_observation_only_ignores_dependency_order_and_preserves_raw_evidence() {
+    let f = Fixture::new();
+    let mut first = cleared(retained(&f.record()));
+    first
+        .fields
+        .insert("After".into(), "a.target b.service".into());
+    first
+        .fields
+        .insert("Conflicts".into(), "c.target d.service".into());
+    let bytes = encode(&first.fields);
+    let mut last = first.clone();
+    last.fields
+        .insert("After".into(), "b.service a.target".into());
+    last.fields
+        .insert("Conflicts".into(), "d.service c.target".into());
+    assert_ne!(first, last);
+    assert!(first.same_observation(&last));
+    assert!(last.same_observation(&first));
+    assert_eq!(encode(&first.fields), bytes);
+    assert_eq!(
+        bracket(&f.record(), &first, GroupObservation::OriginalAbsent, &last).unwrap(),
+        TerminalIdentity::Cleared
+    );
+    assert!(bracket(&f.record(), &first, GroupObservation::EmptyOriginal, &last).is_err());
+    for key in STATE.iter().chain(POLICY) {
+        let mut altered = last.clone();
+        altered.fields.get_mut(*key).unwrap().push('x');
+        assert!(!first.same_observation(&altered), "changed {key}");
+        let mut missing = last.clone();
+        missing.fields.remove(*key);
+        assert!(!first.same_observation(&missing), "missing {key}");
+        assert!(!missing.same_observation(&first), "extra {key}");
+    }
+    for key in ["After", "Conflicts"] {
+        let mut duplicate = first.clone();
+        duplicate
+            .fields
+            .insert(key.into(), "a.target a.target".into());
+        assert_eq!(duplicate, duplicate.clone());
+        assert!(!duplicate.same_observation(&duplicate));
+        assert!(bracket(
+            &f.record(),
+            &duplicate,
+            GroupObservation::OriginalAbsent,
+            &duplicate
+        )
+        .is_err());
+    }
+}
+
+#[test]
 fn stock_start_is_fixed_nonblocking_and_never_replaces_a_job() {
     let command = start_command();
     assert_eq!(command.get_program(), "/bin/systemctl");

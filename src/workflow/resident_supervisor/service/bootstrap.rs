@@ -249,7 +249,7 @@ fn cleared_actor_watchdog(
         && terminal.group == GroupObservation::OriginalAbsent
         && terminal.watchdog == WatchdogObservation::ClearedUninitialized
         && terminal.policy.matches(&snapshot.policy())
-        && resample()? == *snapshot)
+        && resample()?.same_observation(snapshot))
 }
 
 fn unit_paths(kind: Kind, nonce: &str) -> Vec<String> {

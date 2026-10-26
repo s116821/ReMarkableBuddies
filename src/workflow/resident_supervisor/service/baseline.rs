@@ -146,7 +146,7 @@ fn stopped_bracket(
     let b = stopped_snapshot(last, original, group)?;
     before(deadline)?;
     Ok(match (a, b) {
-        (Some(a), Some(b)) if a == b && first == last => Some(RecoveryObservation {
+        (Some(a), Some(b)) if a == b && first.same_observation(last) => Some(RecoveryObservation {
             identity: a,
             group,
             policy: first.policy(),

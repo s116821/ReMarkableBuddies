@@ -77,15 +77,20 @@ impl PolicySnapshot {
                 expected.property(key).is_some_and(|wanted| {
                     if key == "WatchdogUSec" {
                         watchdog.matches(got, wanted)
-                    } else if matches!(key.as_str(), "After" | "Conflicts") {
-                        policy_unit_tokens(got).is_ok_and(|actual| {
-                            policy_unit_tokens(wanted).is_ok_and(|expected| actual == expected)
-                        })
                     } else {
-                        got == wanted
+                        same_property(key, got, wanted)
                     }
                 })
             })
+    }
+}
+
+fn same_property(key: &str, got: &str, wanted: &str) -> bool {
+    if matches!(key, "After" | "Conflicts") {
+        policy_unit_tokens(got)
+            .is_ok_and(|actual| policy_unit_tokens(wanted).is_ok_and(|expected| actual == expected))
+    } else {
+        got == wanted
     }
 }
 
@@ -114,6 +119,18 @@ impl WatchdogObservation {
 }
 
 impl Snapshot {
+    /// Compare already-qualified observations without rewriting raw evidence.
+    /// Reloaded units may enumerate dependencies in a different order. This
+    /// supplies no state/group proof and permits no other property difference.
+    pub(super) fn same_observation(&self, other: &Self) -> bool {
+        self.fields.len() == other.fields.len()
+            && self.fields.iter().all(|(key, value)| {
+                other
+                    .property(key)
+                    .is_some_and(|got| same_property(key, value, got))
+            })
+    }
+
     /// Read-only sampled state, never independent process/group ownership proof.
     pub fn property(&self, key: &str) -> Option<&str> {
         self.fields.get(key).map(String::as_str)
@@ -315,7 +332,7 @@ fn bracket(
     let first = before.terminal(record, group)?;
     let last = after.terminal(record, group)?;
     ensure!(
-        before == after && first == last,
+        before.same_observation(after) && first == last,
         "service changed across group observation"
     );
     Ok(first)

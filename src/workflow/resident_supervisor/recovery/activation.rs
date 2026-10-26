@@ -348,7 +348,7 @@ impl Pending {
         let helper = service::observe(HELPER, deadline)?;
         idle_helper(&helper, &self.installation.profile)?;
         ensure!(
-            helper == self.helper,
+            helper.same_observation(&self.helper),
             "recovery helper changed during activation"
         );
         ensure!(
@@ -390,7 +390,7 @@ impl Pending {
         check_deadline(deadline)?;
         // A legitimate shutdown can advance across a read. Wait for a stable
         // terminal bracket; both samples must still satisfy original identity.
-        Ok(before == after && before_stopped && after_stopped)
+        Ok(before.same_observation(&after) && before_stopped && after_stopped)
     }
 }
 

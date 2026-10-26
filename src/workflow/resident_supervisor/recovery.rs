@@ -825,7 +825,7 @@ impl Backend for Native {
                 "cleared stock group still exists"
             );
             ensure!(
-                service::observe(STOCK, deadline)? == snapshot,
+                service::observe(STOCK, deadline)?.same_observation(&snapshot),
                 "stock changed across group check"
             );
             snapshot.watchdog_observation(super::GroupObservation::OriginalAbsent)
@@ -906,7 +906,7 @@ fn restore(backend: &mut impl Backend, deadline: Instant) -> Result<RestoredStoc
                 backend.admit(deadline)?;
                 backend.empty_stock_group(deadline)?;
                 ensure!(
-                    backend.stock(deadline)? == snapshot,
+                    backend.stock(deadline)?.same_observation(&snapshot),
                     "stock changed before start request"
                 );
                 check_deadline(deadline)?;

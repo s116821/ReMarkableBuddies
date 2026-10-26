@@ -150,6 +150,7 @@ fn cleared_stop_accepts_only_reordered_dependencies_with_original_group_absence(
     }
     let reordered_between_samples =
         changed(&cleared, &[("After", original.property("After").unwrap())]);
+    assert_ne!(cleared, reordered_between_samples);
     assert!(stopped_bracket(
         original,
         &cleared,
@@ -158,7 +159,7 @@ fn cleared_stop_accepts_only_reordered_dependencies_with_original_group_absence(
         Instant::now() + Duration::from_secs(1)
     )
     .unwrap()
-    .is_none());
+    .is_some());
 }
 
 #[test]

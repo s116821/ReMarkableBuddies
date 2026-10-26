@@ -149,6 +149,8 @@ fn completed_actor_watchdog_requires_original_absence_then_stable_resampling() {
             ("ControlGroup", ""),
             ("Job", ""),
             ("KillMode", "control-group"),
+            ("After", "a.target b.service"),
+            ("Conflicts", "c.target d.service"),
         ]
         .into_iter()
         .map(|(key, value)| (key.into(), value.into())),
@@ -160,6 +162,15 @@ fn completed_actor_watchdog_requires_original_absence_then_stable_resampling() {
         watchdog: WatchdogObservation::ClearedUninitialized,
     };
     let proven = Cell::new(false);
+    let mut reordered = snapshot.clone();
+    reordered
+        .fields
+        .insert("After".into(), "b.service a.target".into());
+    reordered
+        .fields
+        .insert("Conflicts".into(), "d.service c.target".into());
+    assert_ne!(snapshot, reordered);
+    assert!(cleared_actor_watchdog(&snapshot, || Ok(Some(terminal())), || Ok(reordered)).unwrap());
     assert!(cleared_actor_watchdog(
         &snapshot,
         || {
