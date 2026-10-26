@@ -73,6 +73,73 @@ class EvidenceTests(unittest.TestCase):
         self.first["recovery"]["Result"] = "signal"
         self.check("recovery_after_start")
 
+    def test_source_mismatch_withholds_buddy_after_both_helpers(self):
+        self.first["actor"]["Result"] = "exit-code"
+        for sample in (self.first, self.second):
+            sample["recovery"]["Result"] = "exit-code"
+            sample["buddy"].update(ActiveState="inactive", SubState="dead", MainPID="0")
+        self.check("source_mismatch")
+        first, second = copy.deepcopy(self.first), copy.deepcopy(self.second)
+        for which, role, change in (
+            ("first", "buddy", {"ActiveState": "active", "MainPID": "12"}),
+            ("second", "buddy", {"ActiveState": "active", "MainPID": "12"}),
+            ("first", "stock", {"InvocationID": "original-stock"}),
+            ("first", "stock", {"ActiveState": "inactive", "MainPID": "0"}),
+            ("second", "stock", {"InvocationID": "third-stock"}),
+            ("first", "recovery", {"Result": "success"}),
+            ("second", "recovery", {"Result": "success"}),
+        ):
+            with self.subTest(which=which, role=role, change=change):
+                self.first, self.second = copy.deepcopy(first), copy.deepcopy(second)
+                getattr(self, which)[role].update(change)
+                with self.assertRaises(AssertionError):
+                    self.check("source_mismatch")
+
+    def test_source_mismatch_requires_injection_and_exact_failed_preservation(self):
+        nonce = "12" * 16
+        stock_unit = f"rsdk-bootstrap-{nonce}-stock.service"
+        stock = {"version": 1, "group": {"unit": stock_unit},
+                 "snapshot": f"Id={stock_unit}\nActiveState=active\nSubState=running\nMainPID=12\n"
+                             "ControlPID=0\nJob=\nInvocationID=new-stock\n"}
+        entries = {"ownership.json": b'{"version":1}', "buddy.stop-intent": nonce.encode(),
+                   "stock.stop-intent": nonce.encode(), "observer.launch-intent": nonce.encode(),
+                   "stock.start-intent": nonce.encode(), "fixture-source-mismatch": nonce.encode(),
+                   "observer.exit": b"exit status: 0", "actor-result-one": b"Err(source manifest changed)\n"}
+        for attempt in ("one", "two"):
+            entries[f"recovery-result-{attempt}"] = b"Err(source manifest changed)\n"
+            entries[f"recovery-{attempt}.source-after"] = b"Err(source manifest changed)"
+            entries[f"recovery-{attempt}.stock.restored"] = json.dumps(stock).encode()
+
+        def check(values):
+            output = io.BytesIO()
+            with tarfile.open(fileobj=output, mode="w:gz") as archive:
+                for name, data in values.items():
+                    entry = tarfile.TarInfo("rsdk-control-" + nonce + "/" + name)
+                    entry.size = len(data)
+                    archive.addfile(entry, io.BytesIO(data))
+            return verify_archive(output.getvalue(), nonce, "source_mismatch")
+
+        check(entries)
+        for leaf in ("fixture-source-mismatch", "observer.exit", "actor-result-one",
+                     "recovery-result-two", "recovery-two.source-after", "recovery-two.stock.restored"):
+            with self.subTest(missing=leaf):
+                altered = dict(entries)
+                del altered[leaf]
+                with self.assertRaises(AssertionError):
+                    check(altered)
+        for leaf, value in (
+            ("buddy.start-intent", nonce.encode()),
+            ("recovery-one.buddy.start-intent", nonce.encode()),
+            ("recovery-one.buddy.restored", b"{}"),
+            ("recovery-two.source-after", b"Ok(())"),
+            ("recovery-result-two", b"Err(unrelated failure)\n"),
+            ("recovery-two.stock.restored", b"{}"),
+            ("observer.exit", b"exit status: 1"),
+        ):
+            with self.subTest(changed=leaf):
+                with self.assertRaises(AssertionError):
+                    check({**entries, leaf: value})
+
     def test_duplicate_or_missing_snapshot_properties_are_rejected(self):
         data = "\n".join(k + "=" + v for k, v in self.original["stock"].items())
         self.assertEqual(states(data.encode())["stock"], self.original["stock"])

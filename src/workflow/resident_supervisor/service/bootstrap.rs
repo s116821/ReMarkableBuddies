@@ -41,6 +41,7 @@ enum Fault {
     RecoveryExit,
     RecoveryAfterIntent,
     RecoveryAfterStart,
+    SourceMismatch,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -914,6 +915,20 @@ fn actor(mut context: Context, deadline: Instant) -> Result<()> {
                 "observer.exit",
                 status.to_string().as_bytes(),
             )?;
+            if context.candidate.fault == Fault::SourceMismatch {
+                ensure!(
+                    context.candidate.kind == Kind::Fixture && status.success(),
+                    "source mismatch fault requires a successful fixture observer"
+                );
+                // Add only a new leaf in this candidate's disposable source.
+                // The native document root can never be selected by this fault.
+                write_new(
+                    &context.stage.join("fixture-data"),
+                    "fixture-added.txt",
+                    context.nonce.as_bytes(),
+                )?;
+                context.intent("fixture-source-mismatch")?;
+            }
             context.preserve(deadline)?;
             ensure!(status.success(), "observer refused/failed: {status}");
             return Ok(());

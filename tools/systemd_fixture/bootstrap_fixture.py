@@ -19,7 +19,7 @@ import uuid
 
 
 CASES = ("none", "actor_kill", "actor_hang", "after_buddy_stop",
-         "recovery_exit", "recovery_after_intent", "recovery_after_start")
+         "recovery_exit", "recovery_after_intent", "recovery_after_start", "source_mismatch")
 PROPERTIES = ("Id", "ActiveState", "SubState", "MainPID", "ControlPID", "Job",
               "InvocationID", "ExecMainStartTimestampMonotonic", "Result")
 
@@ -62,22 +62,25 @@ def terminal(state):
 
 def verify_states(case, unit, original, first, second):
     expected_actor = {"actor_kill": "signal", "actor_hang": "timeout",
-                      "after_buddy_stop": "exit-code"}.get(case, "success")
+                      "after_buddy_stop": "exit-code", "source_mismatch": "exit-code"}.get(case, "success")
     if first[unit("actor")]["Result"] != expected_actor:
         raise AssertionError("actor did not reach the selected completion/fault")
     expected_first = {"recovery_after_intent": "signal", "recovery_after_start": "signal",
-                      "recovery_exit": "exit-code"}.get(case, "success")
+                      "recovery_exit": "exit-code", "source_mismatch": "exit-code"}.get(case, "success")
     if first[unit("recovery")]["Result"] != expected_first:
         raise AssertionError("first helper did not reach the selected completion/fault")
     if (first[unit("recovery")]["ExecMainStartTimestampMonotonic"]
             == second[unit("recovery")]["ExecMainStartTimestampMonotonic"]):
         raise AssertionError("second helper invocation not observed")
-    expected_helper = "exit-code" if case == "recovery_after_intent" else "success"
+    expected_helper = "exit-code" if case in ("recovery_after_intent", "source_mismatch") else "success"
     if second[unit("recovery")]["Result"] != expected_helper:
         raise AssertionError("unexpected second helper result")
     for role in ("stock", "buddy"):
         final = second[unit(role)]
-        if case == "recovery_after_intent":
+        if case == "source_mismatch" and role == "buddy":
+            if not all(terminal(sample[unit(role)]) for sample in (first, second)):
+                raise AssertionError("source mismatch admitted Buddy")
+        elif case == "recovery_after_intent":
             if not terminal(final):
                 raise AssertionError("uncertain start was replayed")
         elif final["ActiveState"] != "active" or final["Job"]:
@@ -90,6 +93,12 @@ def verify_states(case, unit, original, first, second):
         if first[unit(role)]["ActiveState"] == "active":
             if final["InvocationID"] != first[unit(role)]["InvocationID"]:
                 raise AssertionError("second helper restarted an active stand-in")
+    if case == "source_mismatch":
+        stock = first[unit("stock")]
+        if (stock["ActiveState"] != "active" or stock["SubState"] != "running"
+                or stock["MainPID"] == "0" or stock["ControlPID"] != "0" or stock["Job"]
+                or stock["InvocationID"] == original[unit("stock")]["InvocationID"]):
+            raise AssertionError("source mismatch delayed original stock restoration")
 
 
 def verify_archive(data, nonce, case):
@@ -139,6 +148,40 @@ def verify_archive(data, nonce, case):
         leaf = "fixture-" + case.replace("_", "-")
         if records.get(leaf) != nonce.encode():
             raise AssertionError("selected recovery fault phase was not recorded")
+    if case == "source_mismatch":
+        if records.get("fixture-source-mismatch") != nonce.encode():
+            raise AssertionError("source mismatch injection was not recorded")
+        if records.get("observer.exit") != b"exit status: 0":
+            raise AssertionError("source mismatch observer did not complete successfully")
+        if any(name == "buddy.start-intent" or name.endswith((".buddy.start-intent", ".buddy.restored"))
+               for name in records):
+            raise AssertionError("source mismatch admitted Buddy")
+        for prefix, suffix, count, expected in (
+            ("actor-result-", "", 1, b"Err(source manifest changed)\n"),
+            ("recovery-result-", "", 2, b"Err(source manifest changed)\n"),
+            ("recovery-", ".source-after", 2, b"Err(source manifest changed)"),
+        ):
+            found = [value for name, value in records.items() if name.startswith(prefix) and name.endswith(suffix)]
+            if len(found) != count or any(value != expected for value in found):
+                raise AssertionError("source mismatch lacks exact preservation refusals")
+        restored = [value for name, value in records.items()
+                    if name.startswith("recovery-") and name.endswith(".stock.restored")]
+        if len(restored) != 2 or restored[0] != restored[1]:
+            raise AssertionError("source mismatch lacks both stock restoration receipts")
+        stock = strict_json(restored[0])
+        if stock.get("version") != 1 or stock.get("group", {}).get("unit") != f"rsdk-bootstrap-{nonce}-stock.service":
+            raise AssertionError("source mismatch stock receipt identity differs")
+        fields = {}
+        for line in stock["snapshot"].splitlines():
+            key, value = line.split("=", 1)
+            if key in fields:
+                raise ValueError("duplicate restored stock property")
+            fields[key] = value
+        if (fields.get("Id") != stock["group"]["unit"] or fields.get("ActiveState") != "active"
+                or fields.get("SubState") != "running" or int(fields.get("MainPID", "0")) <= 1
+                or fields.get("ControlPID") != "0" or fields.get("Job") != ""
+                or not fields.get("InvocationID")):
+            raise AssertionError("source mismatch stock receipt is not running")
     return {name: digest(value) for name, value in records.items()}
 
 

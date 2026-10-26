@@ -145,7 +145,7 @@ python tools/systemd_fixture/bootstrap_fixture.py \
 ```
 
 Other cases are `actor_kill`, `actor_hang`, `after_buddy_stop`, `recovery_exit`,
-`recovery_after_intent` and `recovery_after_start`. Each invocation selects a
+`recovery_after_intent`, `recovery_after_start` and `source_mismatch`. Each invocation selects a
 fresh nonce, captures real stock/Buddy identities and artifact hashes, transfers
 the controller exclusively, checks its checksum, freezes the fixture candidate,
 and runs one actor followed by exactly one explicitly selected second helper.
@@ -153,6 +153,13 @@ An uncertain stock-start intent must prevent another start even across helper
 invocations. Actor crash/timeout cases require an observed live child in the
 actor's actual group before the injected fault. Assertions distinguish successful
 restoration, unchanged unadmitted stock and intentional uncertain-start refusal.
+
+`source_mismatch` adds one new leaf only in the nonce-owned disposable fixture
+source after the stand-in observer succeeds. Both helpers must report source
+preservation refusal while stock is restored once and Buddy stays stopped.
+The verifier requires the injection/completion records, both refusal receipts,
+the same stock restoration receipt twice, and no Buddy start/restoration record.
+This does not modify native documents or qualify real source preservation.
 
 The runner preserves every command selection, output, candidate and control
 archive, including failures. Never replay a failed or timed-out actor. First
