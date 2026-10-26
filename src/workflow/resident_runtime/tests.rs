@@ -110,7 +110,7 @@ impl Drop for Fixture {
 fn staged_socket_wait_services_admission_and_connects_only_after_listen() {
     let fixture = Fixture::new();
     let mut staged_checks = 0;
-    let mut runtime = fixture
+    let runtime = fixture
         .start_admitted("delayed-listen", Duration::from_secs(5), |_| {
             if fixture.0.join("run/sdk.pending").exists() && staged_checks < 3 {
                 assert!(!fixture.0.join("run/sdk.sock").exists());
