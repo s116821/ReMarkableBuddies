@@ -1,6 +1,7 @@
 //! Explicit associative facts over the existing Store. No automatic extraction or sync engine.
 mod aggregate;
 pub mod catalog;
+pub mod context;
 pub mod maintenance;
 pub(crate) mod prepared;
 pub mod selected;

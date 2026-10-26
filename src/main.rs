@@ -462,6 +462,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
     let config = Config::load(std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into))?;
+    remarkable_reader_buddy::memory::context::admit_ordinary(&config.memory)?;
     let effective = config::resolve(
         &config,
         Overrides {
@@ -497,6 +498,19 @@ fn main() -> Result<()> {
         effective.key.into_string(),
         effective.base_url,
     );
+    let reader_memory = if config.memory.enabled {
+        Some(Arc::new(
+            remarkable_reader_buddy::memory::LocalMemory::new_local(
+                store.clone(),
+                config
+                    .memory
+                    .profile
+                    .ok_or_else(|| anyhow::anyhow!("memory profile absent"))?,
+            )?,
+        ))
+    } else {
+        None
+    };
     let workflow = Workflow::new(false, effective.trigger_corner, effective.debug_dump)?;
     sleep(Duration::from_millis(1000));
     let mut orchestrator = Orchestrator::new(
@@ -504,6 +518,8 @@ fn main() -> Result<()> {
         llm,
         remarkable_reader_buddy::conversation::Ledger::new(store.clone()),
     );
+    orchestrator.set_personalization(config.personalization_snapshot()?);
+    orchestrator.set_subject_memory(reader_memory);
     let _sync_worker = Worker::google(store.clone(), config.sync)?;
     info!("Initialization complete; starting main loop");
     orchestrator.run_loop()

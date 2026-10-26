@@ -1046,6 +1046,18 @@ impl Ledger {
                     | Outcome::ReconcileRequired,
             )
         );
+        let interpreted_reader_terminal = original.role == Role::User
+            && original.mode == Mode::Reader
+            && original.outcome == Outcome::Interpreted
+            && original.text.is_some()
+            && original.text == turn.text
+            && original.completion.is_none()
+            && turn.completion.is_none()
+            && matches!(
+                (&turn.outcome, &reason),
+                (Outcome::Failed, Some(AttemptReason::ProviderFailure))
+                    | (Outcome::Canceled, Some(AttemptReason::Canceled))
+            );
         let explicit_reconciliation = original.outcome == Outcome::ReconcileRequired
             && matches!(
                 (&turn.outcome, &reason),
@@ -1058,7 +1070,7 @@ impl Ledger {
                 )
             );
         ensure!(
-            permitted || explicit_reconciliation,
+            permitted || explicit_reconciliation || interpreted_reader_terminal,
             "invalid outcome transition; reconciliation is explicit"
         );
         if matches!(

@@ -7,6 +7,7 @@ use crate::analysis::{BoundingBox, SelectionCenter};
 use crate::conversation::{AttemptReason, Ledger, Outcome};
 use crate::device::screenshot::{SCREENSHOT_VIRTUAL_HEIGHT, SCREENSHOT_VIRTUAL_WIDTH};
 use crate::llm::{openai::OpenAI, LLMEngine};
+use crate::memory::Provider;
 use base64::{engine::general_purpose::STANDARD, Engine};
 
 /// Shared by the live workflow and bounded vision-comparison helper.
@@ -67,6 +68,8 @@ pub struct Orchestrator<M: LLMEngine = OpenAI> {
     llm: M,
     trigger_enabled: bool,
     ledger: Ledger,
+    memory: Option<std::sync::Arc<crate::memory::LocalMemory>>,
+    personalization: crate::config::PersonalizationSnapshot,
 }
 enum RenderOutcome {
     NoOutput(AttemptReason),
@@ -80,11 +83,28 @@ impl<M: LLMEngine> Orchestrator<M> {
             llm,
             trigger_enabled: true,
             ledger,
+            memory: None,
+            personalization: crate::config::Personalization::default()
+                .snapshot()
+                .expect("valid default preference"),
         }
     }
 
     pub fn set_trigger_enabled(&mut self, enabled: bool) {
         self.trigger_enabled = enabled;
+    }
+
+    /// Startup configuration only; the prepared request owns an immutable clone.
+    pub fn set_personalization(&mut self, snapshot: crate::config::PersonalizationSnapshot) {
+        self.personalization = snapshot;
+    }
+
+    /// Ordinary local context only. This cannot accept a selected provider.
+    pub fn set_subject_memory(
+        &mut self,
+        memory: Option<std::sync::Arc<crate::memory::LocalMemory>>,
+    ) {
+        self.memory = memory;
     }
 
     pub fn invalidate_history(&mut self) {
@@ -174,6 +194,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         result
     }
     fn run_prepared(&mut self, attempt: &mut Attempt) -> Result<()> {
+        let personalization = self.personalization.clone();
         let images = attempt.images(&self.ledger)?;
         let screenshot_png_data = images
             .first()
@@ -205,7 +226,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                 )?;
                 return Ok(());
             }
-            Some(result) => {
+            Some(mut result) => {
                 // Re-read the acknowledged stored batch; never query the device again.
                 let verification: Vec<String> = attempt
                     .images(&self.ledger)?
@@ -230,6 +251,30 @@ impl<M: LLMEngine> Orchestrator<M> {
                 info!("Got verified Q&A");
 
                 attempt.interpret(&self.ledger, &result.question)?;
+                if self.memory.is_some() || personalization.effective_text().is_some() {
+                    if let Err(error) =
+                        self.enrich_answer(&mut result, &verification, &personalization)
+                    {
+                        log::warn!("Contextual answer was not completed");
+                        self.workflow.report_failure(Failure::Provider)?;
+                        let canceled = self.workflow.input_failed();
+                        attempt.outcome(
+                            &self.ledger,
+                            false,
+                            if canceled {
+                                Outcome::Canceled
+                            } else {
+                                Outcome::Failed
+                            },
+                            if canceled {
+                                AttemptReason::Canceled
+                            } else {
+                                AttemptReason::ProviderFailure
+                            },
+                        )?;
+                        return Err(error);
+                    }
+                }
                 attempt.generated(
                     &self.ledger,
                     Workflow::compose_qa(&result.question, &result.answer, result.selection_center),
@@ -388,6 +433,60 @@ impl<M: LLMEngine> Orchestrator<M> {
             selection_center,
             _screenshot_data: screenshot_png_data,
         })
+    }
+
+    fn enrich_answer(
+        &mut self,
+        result: &mut AnalysisResult,
+        images: &[String],
+        preference: &crate::config::PersonalizationSnapshot,
+    ) -> Result<()> {
+        self.workflow.check_request_progress()?;
+        let retrieved = self
+            .memory
+            .as_ref()
+            .map(|memory| -> Result<_> {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_millis()
+                    .try_into()?;
+                // Ordinary historical capture has no verified document association.
+                memory
+                    .query(&crate::memory::Query::new(result.question.clone(), now))
+                    .map_err(|_| anyhow::anyhow!("subject memory retrieval failed"))
+            })
+            .transpose()?;
+        self.workflow.check_request_progress()?;
+        use crate::memory::Status;
+        if let Some(view) = &retrieved {
+            match view.status {
+                Status::Disabled | Status::CompleteEmpty
+                    if preference.effective_text().is_none() =>
+                {
+                    return Ok(())
+                }
+                Status::Unavailable => anyhow::bail!("subject memory retrieval unavailable"),
+                Status::Partial if view.context.facts.is_empty() => {
+                    anyhow::bail!("subject memory retrieval incomplete without usable facts")
+                }
+                _ => {}
+            }
+        }
+        let usable = retrieved.as_ref().filter(|view| {
+            matches!(view.status, Status::Complete | Status::Partial)
+                && !view.context.facts.is_empty()
+        });
+        let workflow = &mut self.workflow;
+        result.answer = crate::memory::context::answer_with_preference(
+            &mut self.llm,
+            &result.question,
+            images,
+            usable,
+            Some(preference),
+            &mut || workflow.check_request_progress(),
+        )?;
+        self.workflow.check_request_progress()?;
+        Ok(())
     }
 
     fn verify_question(
