@@ -441,7 +441,7 @@ fn feedback_remains_with_its_original_exchange_in_newest_first_history() {
     later.exchange = Uuid::new_v4();
     later.sequence = 0;
     later.outcome = Outcome::Prepared;
-    later.text = Some("later unchanged request".into());
+    later.text = None;
     later.created_ms = 4;
     later.updated_ms = 4;
     ledger
@@ -452,6 +452,29 @@ fn feedback_remains_with_its_original_exchange_in_newest_first_history() {
                 .unwrap(),
             later.clone(),
             vec![],
+        )
+        .unwrap();
+    let mut later = ledger
+        .inspect(turn.conversation, false)
+        .unwrap()
+        .into_iter()
+        .find_map(|record| match record {
+            Record::Turn(stored) if stored.id == later.id => Some(stored),
+            _ => None,
+        })
+        .unwrap();
+    later.outcome = Outcome::Failed;
+    later.text = Some("later unchanged request".into());
+    later.updated_ms = 5;
+    ledger
+        .record_attempt_outcome(
+            Uuid::new_v4(),
+            ledger
+                .expected(Namespace::Conversation, turn.conversation)
+                .unwrap(),
+            ledger.expected(Namespace::Conversation, later.id).unwrap(),
+            later.clone(),
+            AttemptReason::NoSelection,
         )
         .unwrap();
     let later = ledger
@@ -485,6 +508,8 @@ fn feedback_remains_with_its_original_exchange_in_newest_first_history() {
     );
     assert_eq!(result.exchange, turn.exchange);
     assert_eq!(result.description.turn, turn.id);
+    assert_eq!(result.description.fact, fact.id);
+    assert_eq!(result.description.code, "RMB-RESPONSE-UNAVAILABLE");
     assert!(std::ptr::eq(
         result.page.exchanges[1].turns[0],
         &ctx.turns[0]
