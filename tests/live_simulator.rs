@@ -407,3 +407,96 @@ fn pending_http_ticks_on_caller_thread_and_callback_failure_stops_ticks() {
     assert!(start.elapsed() < Duration::from_secs(3));
     assert_eq!(handle.join().unwrap().len(), 1);
 }
+
+// A separate process bounds regressions in the fixture itself: an old EOF loop
+// must not leak an unjoinable thread into the main test harness.
+#[test]
+fn fixture_eof_refuses_in_owned_bounded_children() {
+    for case in ["headers", "partial-header", "request-line"] {
+        let nonce = format!(
+            "{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "fixture_eof_child", "--nocapture"])
+            .env("RMB_FIXTURE_EOF_NONCE", &nonce)
+            .env("RMB_FIXTURE_EOF_CASE", case)
+            .env("RUST_BACKTRACE", "0")
+            .env_remove("OPENAI_API_KEY")
+            .env_remove("OPENAI_BASE_URL")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let timed_out = loop {
+            if child.try_wait().unwrap().is_some() {
+                break false;
+            }
+            if Instant::now() >= deadline {
+                break true;
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        if timed_out {
+            let _ = child.kill();
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            !timed_out,
+            "owned EOF fixture child exceeded deadline: {case}; stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.status.success(),
+            "EOF fixture child failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let marker = format!("fixture-eof-verified:{nonce}:{case}");
+        assert!(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|line| line == marker));
+    }
+}
+
+#[test]
+fn fixture_eof_child() {
+    let Ok(nonce) = std::env::var("RMB_FIXTURE_EOF_NONCE") else {
+        return;
+    };
+    assert!(!nonce.is_empty());
+    let case = std::env::var("RMB_FIXTURE_EOF_CASE").unwrap();
+    let (endpoint, handle) = server(vec!["NONE".into()], false);
+    let mut client =
+        std::net::TcpStream::connect(endpoint.strip_prefix("http://").unwrap()).unwrap();
+    let request: &[u8] = match case.as_str() {
+        "request-line" => b"",
+        "headers" => b"POST /v1/chat/completions HTTP/1.1\r\n",
+        "partial-header" => b"POST /v1/chat/completions HTTP/1.1\r\nAuthorization: Bearer local-test-secret-not-real",
+        _ => panic!("unsupported owned EOF case"),
+    };
+    client.write_all(request).unwrap();
+    client.shutdown(std::net::Shutdown::Write).unwrap();
+    println!("fixture-eof-sent:{nonce}:{case}");
+    std::io::stdout().flush().unwrap();
+    let failure = handle
+        .join()
+        .expect_err("incomplete request must not become an accepted body");
+    let message = failure
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| failure.downcast_ref::<String>().map(String::as_str))
+        .unwrap();
+    assert!(message.contains(if case == "request-line" {
+        "local fixture request-line EOF"
+    } else {
+        "local fixture header EOF before terminator"
+    }));
+    drop(client);
+    println!("fixture-eof-verified:{nonce}:{case}");
+}
