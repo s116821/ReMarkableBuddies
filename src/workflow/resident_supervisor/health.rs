@@ -10,6 +10,10 @@ use std::{
         },
     },
     path::Path,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     thread::{self, ThreadId},
     time::{Duration, Instant},
 };
@@ -24,7 +28,7 @@ pub struct ServiceHealth {
     thread: ThreadId,
     last_sent: Option<Instant>,
     last_seen: Option<Instant>,
-    failed: bool,
+    failed: Arc<AtomicBool>,
 }
 
 impl ServiceHealth {
@@ -55,7 +59,7 @@ impl ServiceHealth {
             thread: thread::current().id(),
             last_sent: None,
             last_seen: None,
-            failed: false,
+            failed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -70,19 +74,28 @@ impl ServiceHealth {
     }
 
     pub fn failed(&self) -> bool {
-        self.failed
+        self.failed.load(Ordering::Acquire)
+    }
+
+    /// Arm before attempting lease publication, which can leave partial state.
+    /// The successful session retains this guard for its entire lifetime.
+    pub(super) fn exit_on_drop(&mut self) -> Result<ExitOnDrop> {
+        self.progress()?;
+        Ok(ExitOnDrop {
+            failed: self.failed.clone(),
+        })
     }
 
     fn notify(&mut self, now: Instant, ready: bool) -> Result<()> {
         let result = self.notify_inner(now, ready);
         if result.is_err() {
-            self.failed = true;
+            self.failed.store(true, Ordering::Release);
         }
         result
     }
 
     fn notify_inner(&mut self, now: Instant, ready: bool) -> Result<()> {
-        ensure!(!self.failed, "Service health failed; runtime must exit");
+        ensure!(!self.failed(), "Service health failed; runtime must exit");
         ensure!(
             self.pid == std::process::id() && self.thread == thread::current().id(),
             "Service health owner changed"
@@ -126,6 +139,29 @@ impl ServiceHealth {
         self.last_sent = Some(now);
         self.last_seen = Some(now);
         Ok(())
+    }
+}
+
+/// A consumed activation cannot leave the ordinary loop alive without its session.
+/// No reset/disarm exists and no stock-service command runs in this destructor.
+pub(super) struct ExitOnDrop {
+    failed: Arc<AtomicBool>,
+}
+impl ExitOnDrop {
+    pub(super) fn fail(&self) {
+        self.failed.store(true, Ordering::Release);
+    }
+    pub(super) fn check(&self, health: &mut ServiceHealth) -> Result<()> {
+        if !Arc::ptr_eq(&self.failed, &health.failed) {
+            self.fail();
+            anyhow::bail!("Activation health owner changed");
+        }
+        health.progress()
+    }
+}
+impl Drop for ExitOnDrop {
+    fn drop(&mut self) {
+        self.fail();
     }
 }
 
@@ -191,6 +227,33 @@ mod tests {
             socket.recv(&mut [0u8; 64]).unwrap_err().kind(),
             std::io::ErrorKind::WouldBlock
         );
+    }
+
+    #[test]
+    fn activation_lifetime_guard_cannot_leave_an_ordinary_loop_healthy() {
+        let (mut health, receiver) = pair();
+        assert!(health.exit_on_drop().is_err()); // READY is mandatory.
+        empty(&receiver);
+        for failure in 0..3 {
+            let (mut health, receiver) = pair();
+            health.ready().unwrap();
+            receive(&receiver, b"READY=1\nWATCHDOG=1");
+            let guard = health.exit_on_drop().unwrap();
+            guard.check(&mut health).unwrap();
+            assert!(!health.failed());
+            if failure == 1 {
+                guard.fail();
+            }
+            if failure == 2 {
+                let (mut other, _) = pair();
+                assert!(guard.check(&mut other).is_err());
+                assert!(health.failed());
+            }
+            drop(guard); // Also models failure before publish returned a Lease.
+            assert!(health.failed());
+            assert!(health.progress().is_err());
+            empty(&receiver);
+        }
     }
 
     #[test]

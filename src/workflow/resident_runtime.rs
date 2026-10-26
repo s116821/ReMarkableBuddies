@@ -116,6 +116,25 @@ impl ResidentRuntime {
         deadline: Instant,
         decorate: impl FnOnce(&mut Command),
     ) -> std::result::Result<Self, StartupFailure> {
+        Self::launch_checked(store, input, deadline, decorate, |_| Ok(()))
+    }
+    /// Installed admission is repeated after potentially lengthy artifact
+    /// preparation, before any child exists. It cannot replace the fixed deadline.
+    pub(super) fn launch_admitted(
+        store: Arc<Store>,
+        input: Launch,
+        deadline: Instant,
+        admit: impl FnOnce(Instant) -> Result<()>,
+    ) -> std::result::Result<Self, StartupFailure> {
+        Self::launch_checked(store, input, deadline, |_| {}, admit)
+    }
+    fn launch_checked(
+        store: Arc<Store>,
+        input: Launch,
+        deadline: Instant,
+        decorate: impl FnOnce(&mut Command),
+        admit: impl FnOnce(Instant) -> Result<()>,
+    ) -> std::result::Result<Self, StartupFailure> {
         let path = input.directory.clone();
         let prepare = || -> Result<Prepared> {
             // Invalid retained effects must refuse before starting another process.
@@ -129,6 +148,9 @@ impl ResidentRuntime {
         })?;
         decorate(&mut prepared.command); // Only tests customize the private fixture launch.
         let spawned = (|| -> Result<Child> {
+            prepared.current(false)?;
+            before(deadline)?;
+            admit(deadline)?;
             prepared.current(false)?;
             before(deadline)?;
             prepared.command.spawn().context("spawn resident child")

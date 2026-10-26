@@ -46,6 +46,14 @@ impl Fixture {
         mode: &str,
         timeout: Duration,
     ) -> std::result::Result<ResidentRuntime, StartupFailure> {
+        self.start_admitted(mode, timeout, |_| Ok(()))
+    }
+    fn start_admitted(
+        &self,
+        mode: &str,
+        timeout: Duration,
+        admit: impl FnOnce(Instant) -> Result<()>,
+    ) -> std::result::Result<ResidentRuntime, StartupFailure> {
         let mut input = self.launch();
         input.arguments = [
             "-S",
@@ -60,10 +68,16 @@ impl Fixture {
         ]
         .map(str::to_owned)
         .to_vec();
-        ResidentRuntime::launch_inner(self.store(), input, Instant::now() + timeout, |command| {
-            // Owned protocol fixture, explicitly no actual LD_PRELOAD/native code.
-            command.env_remove("LD_PRELOAD");
-        })
+        ResidentRuntime::launch_checked(
+            self.store(),
+            input,
+            Instant::now() + timeout,
+            |command| {
+                // Owned protocol fixture, explicitly no actual LD_PRELOAD/native code.
+                command.env_remove("LD_PRELOAD");
+            },
+            admit,
+        )
     }
     fn preserved_and_reaped(&self, mode: &str, failure: StartupFailure) {
         let report = failure.shutdown.as_ref().unwrap_or_else(|| {
@@ -131,6 +145,75 @@ fn real_child_consumes_exact_admission_connects_once_and_is_reaped() {
         fixture.start("ready", Duration::from_secs(5)).is_err(),
         "never reuse consumed directory"
     );
+}
+
+#[test]
+fn final_admission_after_preparation_refuses_before_any_child_is_spawned() {
+    for mode in ["canceled", "expired", "replaced"] {
+        let fixture = Fixture::new();
+        let mut called = 0;
+        let failure = fixture
+            .start_admitted("ready", Duration::from_secs(2), |deadline| {
+                called += 1;
+                // Admission is after all copied files and the synchronized record.
+                for name in ["admission.bin", "reader", "adapter.so", "profile.json"] {
+                    assert!(fixture.0.join("run").join(name).is_file(), "{name}");
+                }
+                match mode {
+                    "canceled" => anyhow::bail!("source canceled during preparation"),
+                    "expired" => thread::sleep(
+                        deadline.saturating_duration_since(Instant::now())
+                            + Duration::from_millis(1),
+                    ),
+                    _ => {
+                        let file = fixture.0.join("run/profile.json");
+                        fs::rename(&file, fixture.0.join("original-profile")).unwrap();
+                        fs::write(file, b"replacement").unwrap();
+                    }
+                }
+                Ok(())
+            })
+            .err()
+            .expect("final admission must refuse");
+        assert_eq!(called, 1);
+        assert!(failure.shutdown.is_none(), "{failure:?}");
+        assert!(!fixture.0.join("run/sdk.sock").exists());
+        assert_eq!(
+            fs::metadata(fixture.0.join("run/stdout.log"))
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            fs::metadata(fixture.0.join("run/stderr.log"))
+                .unwrap()
+                .len(),
+            0
+        );
+        if mode == "canceled" {
+            assert!(failure.error.to_string().contains("source canceled"));
+        }
+        if mode == "expired" {
+            assert!(failure.error.to_string().contains("deadline"));
+        }
+    }
+}
+
+#[test]
+fn admitted_prepared_child_still_uses_normal_handshake_and_owned_cleanup() {
+    let fixture = Fixture::new();
+    let mut admissions = 0;
+    let runtime = fixture
+        .start_admitted("ready", Duration::from_secs(5), |_| {
+            admissions += 1;
+            assert!(fixture.0.join("run/admission.bin").is_file());
+            assert!(!fixture.0.join("run/sdk.sock").exists());
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(admissions, 1);
+    let stopped = runtime.shutdown(Instant::now() + Duration::from_secs(2));
+    assert!(stopped.reaped && stopped.error.is_none());
 }
 
 #[test]

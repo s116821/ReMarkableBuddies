@@ -18,6 +18,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub mod activation;
+
 pub const LEASE_DIRECTORY: &str = "/run/reader-buddy-resident";
 const PROFILE: &str = "/home/root/.local/lib/reader-buddy/resident-recovery.json";
 const APP: &str = "/home/root/.local/lib/reader-buddy/reader-buddy";
@@ -32,7 +34,7 @@ const STOCK_DROPIN: &str =
     "/usr/lib/systemd/system/xochitl.service.d/xochitl-service-override.conf";
 const MOUNT: &str = "/sys/fs/cgroup/unified";
 const MAX_BYTES: u64 = 128 * 1024 * 1024;
-const RECOVERY_SECONDS: u64 = 45;
+const RECOVERY_SECONDS: u64 = 120;
 
 // The only permitted missing directory is the fixed final component below the
 // protected /run parent. Missing/replaced/untrusted ancestors never mean absent.
@@ -279,28 +281,18 @@ fn check_deadline(deadline: Instant) -> Result<()> {
     Ok(())
 }
 
-struct Installed {
+struct Installation {
     profile: Profile,
     artifacts: Vec<Pinned>,
-    helper_group: GroupBaseline,
-    helper_invocation: String,
-    helper_start: u64,
+    digest: [u8; 32],
 }
-impl Installed {
-    fn load(lease: &Lease, deadline: Instant) -> Result<Self> {
-        let record = lease.record();
-        ensure!(
-            record.group.unit == BUDDY && record.group.mount_path == Path::new(MOUNT),
-            "lease is not installed Buddy activation"
-        );
+impl Installation {
+    fn load(deadline: Instant) -> Result<Self> {
         let mut file = Pinned::open(Path::new(PROFILE))?;
         let bytes = file.bytes(32 * 1024, deadline)?;
-        ensure!(
-            sha256(&bytes) == record.recovery_profile_sha256,
-            "original recovery profile mismatch"
-        );
+        let digest = sha256(&bytes);
         let profile: Profile = serde_json::from_slice(&bytes)?;
-        profile.validate(record)?;
+        profile.validate_definition()?;
         ensure!(
             firmware_version(&text(Path::new("/etc/os-release"), 16 * 1024)?)? == profile.firmware
                 && text(Path::new("/proc/sys/kernel/osrelease"), 256)?.trim() == profile.kernel,
@@ -317,6 +309,46 @@ impl Installed {
         ] {
             artifacts.push(Pinned::verified(path, hash, deadline)?);
         }
+        let installation = Self {
+            profile,
+            artifacts,
+            digest,
+        };
+        installation.current(deadline)?;
+        Ok(installation)
+    }
+    fn current(&self, deadline: Instant) -> Result<()> {
+        check_deadline(deadline)?;
+        for artifact in &self.artifacts {
+            artifact.current()?;
+        }
+        check_deadline(deadline)
+    }
+}
+
+struct Installed {
+    profile: Profile,
+    artifacts: Vec<Pinned>,
+    helper_group: GroupBaseline,
+    helper_invocation: String,
+    helper_start: u64,
+}
+impl Installed {
+    fn load(lease: &Lease, deadline: Instant) -> Result<Self> {
+        let record = lease.record();
+        ensure!(
+            record.group.unit == BUDDY && record.group.mount_path == Path::new(MOUNT),
+            "lease is not installed Buddy activation"
+        );
+        let installation = Installation::load(deadline)?;
+        ensure!(
+            installation.digest == record.recovery_profile_sha256,
+            "original recovery profile mismatch"
+        );
+        installation.profile.validate(record)?;
+        let Installation {
+            profile, artifacts, ..
+        } = installation;
         let before = service::observe(HELPER, deadline)?;
         let helper_group = GroupBaseline::capture(Path::new(MOUNT), HELPER)?;
         let after = service::observe(HELPER, deadline)?;
@@ -371,12 +403,7 @@ impl Installed {
 
 impl Profile {
     fn validate(&self, record: &LeaseRecord) -> Result<()> {
-        ensure!(
-            self.version == 1
-                && self.firmware == "3.28.0.172"
-                && self.kernel == "5.4.70-v1.6.3-rm11x",
-            "unsupported recovery profile"
-        );
+        self.validate_definition()?;
         ensure!(
             self.native_profile_sha256 == record.profile_sha256
                 && self.adapter_sha256 == record.adapter_sha256
@@ -384,6 +411,27 @@ impl Profile {
                 && self.stock_unit_sha256 == record.stock.unit_sha256
                 && self.stock_dropin_sha256 == record.stock.dropin_sha256,
             "recovery profile differs from admitted activation"
+        );
+        Ok(())
+    }
+    fn validate_definition(&self) -> Result<()> {
+        for digest in [
+            self.native_profile_sha256,
+            self.adapter_sha256,
+            self.app_sha256,
+            self.buddy_unit_sha256,
+            self.helper_unit_sha256,
+            self.stock_executable_sha256,
+            self.stock_unit_sha256,
+            self.stock_dropin_sha256,
+        ] {
+            ensure!(digest != [0; 32], "missing installed artifact digest");
+        }
+        ensure!(
+            self.version == 1
+                && self.firmware == "3.28.0.172"
+                && self.kernel == "5.4.70-v1.6.3-rm11x",
+            "unsupported recovery profile"
         );
         for (policy, fragment, dropins) in [
             (&self.buddy_policy, BUDDY_UNIT, ""),
@@ -414,10 +462,9 @@ impl Profile {
         require(&self.buddy_policy, "Type", "notify")?;
         require(&self.buddy_policy, "OnSuccess", HELPER)?;
         require(&self.buddy_policy, "OnFailure", HELPER)?;
-        ensure!(
-            self.buddy_policy["WatchdogUSec"] != "0",
-            "Buddy watchdog absent"
-        );
+        require(&self.buddy_policy, "WatchdogUSec", "2min")?;
+        require(&self.helper_policy, "TimeoutStartUSec", "2min 10s")?;
+        require(&self.stock_policy, "TimeoutStopUSec", "1min 30s")?;
         require(&self.helper_policy, "Type", "oneshot")?;
         require(&self.helper_policy, "OnSuccess", "")?;
         require(&self.helper_policy, "OnFailure", "")?;
@@ -563,6 +610,7 @@ enum StockState {
     Ready,
     Startable,
     Pending,
+    Stopping,
 }
 fn stock_state(s: &service::Snapshot) -> Result<StockState> {
     ensure!(
@@ -572,6 +620,29 @@ fn stock_state(s: &service::Snapshot) -> Result<StockState> {
     let active = s.property("ActiveState").context("missing stock state")?;
     let sub = s.property("SubState").context("missing stock substate")?;
     let job = s.property("Job").context("missing stock job")?;
+    // systemd 255.21's service state table. This permits waiting only: the
+    // backend must bind it to the original stock before it can lead to a start.
+    if active == "deactivating" {
+        ensure!(
+            matches!(
+                sub,
+                "stop"
+                    | "stop-watchdog"
+                    | "stop-sigterm"
+                    | "stop-sigkill"
+                    | "stop-post"
+                    | "final-watchdog"
+                    | "final-sigterm"
+                    | "final-sigkill"
+            ),
+            "unknown stock shutdown substate"
+        );
+        ensure!(
+            s.property("ControlPID") != Some("1"),
+            "invalid stock control PID"
+        );
+        return Ok(StockState::Stopping);
+    }
     ensure!(
         s.property("ControlPID") == Some("0"),
         "stock control process active"
@@ -601,6 +672,55 @@ fn stock_state(s: &service::Snapshot) -> Result<StockState> {
         return Ok(StockState::Pending);
     }
     bail!("stock state does not permit restoration")
+}
+
+/// A verified original shutdown may settle before this helper's FIRST start.
+/// The systemd timestamp is sampled here, never converted from proc start ticks.
+#[derive(Debug, Eq, PartialEq)]
+struct StoppingIdentity {
+    invocation: String,
+    pid: u32,
+    start_micros: u64,
+}
+impl StoppingIdentity {
+    fn capture(s: &service::Snapshot, original: &super::StockBaseline) -> Result<Self> {
+        ensure!(
+            stock_state(s)? == StockState::Stopping,
+            "stock is not stopping"
+        );
+        ensure!(
+            s.invocation() == original.invocation
+                && s.property("ExecMainPID") == Some(original.process.pid.to_string().as_str())
+                && (s.main_pid() == 0 || s.main_pid() == original.process.pid)
+                && s.start_micros() != 0
+                && s.control_group() == format!("/system.slice/{STOCK}"),
+            "shutdown is not the original stock incarnation"
+        );
+        Ok(Self {
+            invocation: s.invocation().to_owned(),
+            pid: original.process.pid,
+            start_micros: s.start_micros(),
+        })
+    }
+    fn terminal(&self, s: &service::Snapshot) -> Result<()> {
+        ensure!(
+            stock_state(s)? == StockState::Startable,
+            "stock shutdown is not terminal"
+        );
+        let retained = s.invocation() == self.invocation
+            && s.property("ExecMainPID") == Some(self.pid.to_string().as_str())
+            && s.start_micros() == self.start_micros;
+        let cleared = s.invocation().is_empty()
+            && s.property("ExecMainPID") == Some("0")
+            && s.start_micros() == 0
+            && s.property("ActiveState") == Some("inactive")
+            && s.property("SubState") == Some("dead");
+        ensure!(
+            retained || cleared,
+            "stock identity changed or partially cleared after shutdown"
+        );
+        Ok(())
+    }
 }
 
 /// Service-level result only, never UI readiness or document-persistence proof.
@@ -643,6 +763,7 @@ pub fn run_installed() -> Result<RecoveryOutcome> {
 // Private test seam runs the same sequencing; callers cannot inject a command,
 // substitute a filesystem or manufacture an admitted installed profile.
 trait Backend {
+    fn original_stock(&self) -> &super::StockBaseline;
     fn admit(&mut self, deadline: Instant) -> Result<()>;
     fn stock(&mut self, deadline: Instant) -> Result<service::Snapshot>;
     fn start(&mut self, deadline: Instant) -> Result<()>;
@@ -663,6 +784,9 @@ struct Native {
     lease: Lease,
 }
 impl Backend for Native {
+    fn original_stock(&self) -> &super::StockBaseline {
+        &self.lease.record().stock
+    }
     fn admit(&mut self, deadline: Instant) -> Result<()> {
         self.installed.admit(&self.lease, deadline)
     }
@@ -715,6 +839,7 @@ impl Backend for Native {
 fn restore(backend: &mut impl Backend, deadline: Instant) -> Result<RestoredStock> {
     let mut requested = false;
     let mut observed_pending = false;
+    let mut stopping: Option<StoppingIdentity> = None;
     loop {
         check_deadline(deadline)?;
         backend.admit(deadline)?;
@@ -740,6 +865,9 @@ fn restore(backend: &mut impl Backend, deadline: Instant) -> Result<RestoredStoc
                     !requested && !observed_pending,
                     "stock start did not reach running; no retry"
                 );
+                if let Some(identity) = &stopping {
+                    identity.terminal(&snapshot)?;
+                }
                 backend.admit(deadline)?;
                 backend.empty_stock_group(deadline)?;
                 ensure!(
@@ -752,6 +880,15 @@ fn restore(backend: &mut impl Backend, deadline: Instant) -> Result<RestoredStoc
             }
             StockState::Pending => {
                 observed_pending = true;
+            }
+            StockState::Stopping => {
+                let identity = StoppingIdentity::capture(&snapshot, backend.original_stock())?;
+                if let Some(original) = &stopping {
+                    ensure!(original == &identity, "stock shutdown identity changed");
+                } else {
+                    stopping = Some(identity);
+                }
+                // Neither requested nor observed_pending is ever reset here.
             }
         }
         backend.pace(deadline);

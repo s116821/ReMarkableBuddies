@@ -49,6 +49,8 @@ fn pending() -> service::Snapshot {
 }
 
 struct Fake {
+    original: super::super::StockBaseline,
+    expire_on_pace: bool,
     snapshots: VecDeque<service::Snapshot>,
     starts: usize,
     admissions: usize,
@@ -61,6 +63,17 @@ struct Fake {
 impl Fake {
     fn new(snapshots: Vec<service::Snapshot>) -> Self {
         Self {
+            original: super::super::StockBaseline {
+                process: ProcessIdentity {
+                    pid: 42,
+                    start_ticks: 100,
+                },
+                invocation: "12121212121212121212121212121212".into(),
+                executable_sha256: [1; 32],
+                unit_sha256: [2; 32],
+                dropin_sha256: [3; 32],
+            },
+            expire_on_pace: false,
             snapshots: snapshots.into(),
             starts: 0,
             admissions: 0,
@@ -73,6 +86,9 @@ impl Fake {
     }
 }
 impl Backend for Fake {
+    fn original_stock(&self) -> &super::super::StockBaseline {
+        &self.original
+    }
     fn admit(&mut self, _: Instant) -> Result<()> {
         self.admissions += 1;
         ensure!(
@@ -103,7 +119,13 @@ impl Backend for Fake {
             start_ticks: 100,
         })
     }
-    fn pace(&mut self, _: Instant) {}
+    fn pace(&mut self, deadline: Instant) {
+        if self.expire_on_pace {
+            thread::sleep(
+                deadline.saturating_duration_since(Instant::now()) + Duration::from_millis(1),
+            );
+        }
+    }
 }
 
 #[test]
@@ -175,7 +197,7 @@ fn completion_requires_process_and_closing_admission_and_stock() {
 #[test]
 fn unknown_or_incomplete_stock_state_is_not_ready_or_startable() {
     for s in [
-        snapshot("deactivating", "stop", 42, ""),
+        snapshot("deactivating", "unknown", 42, ""),
         snapshot("active", "exited", 0, ""),
         snapshot("inactive", "dead", 42, ""),
         snapshot("active", "running", 0, ""),
@@ -305,7 +327,7 @@ fn nested_policy_json_rejects_duplicate_missing_and_unknown_fields() {
     }
 }
 
-fn profile(record: &LeaseRecord) -> Profile {
+pub(super) fn profile(record: &LeaseRecord) -> Profile {
     fn policy(fragment: &str) -> BTreeMap<String, String> {
         let mut p: BTreeMap<_, _> = service::POLICY
             .iter()
@@ -332,10 +354,12 @@ fn profile(record: &LeaseRecord) -> Profile {
     buddy_policy.insert("WatchdogUSec".into(), "2min".into());
     let mut helper_policy = policy(HELPER_UNIT);
     helper_policy.insert("Type".into(), "oneshot".into());
+    helper_policy.insert("TimeoutStartUSec".into(), "2min 10s".into());
     helper_policy.insert("Conflicts".into(), format!("shutdown.target {BUDDY}"));
     helper_policy.insert("After".into(), BUDDY.into());
     let mut stock_policy = policy(STOCK_UNIT);
     stock_policy.insert("DropInPaths".into(), STOCK_DROPIN.into());
+    stock_policy.insert("TimeoutStopUSec".into(), "1min 30s".into());
     Profile {
         version: 1,
         firmware: "3.28.0.172".into(),
@@ -467,4 +491,192 @@ fn firmware_uses_observed_image_version_without_shell_evaluation() {
     ] {
         assert!(firmware_version(input).is_err());
     }
+}
+
+fn changed(s: &service::Snapshot, changes: &[(&str, &str)]) -> service::Snapshot {
+    let mut fields: BTreeMap<_, _> = service::STATE
+        .iter()
+        .chain(service::POLICY)
+        .map(|key| ((*key).to_owned(), s.property(key).unwrap().to_owned()))
+        .collect();
+    for (key, value) in changes {
+        fields.insert((*key).into(), (*value).into());
+    }
+    parse(fields)
+}
+fn stopping() -> service::Snapshot {
+    changed(
+        &snapshot("deactivating", "stop-sigterm", 42, "5678"),
+        &[("ControlPID", "43")],
+    )
+}
+fn stopped_original() -> service::Snapshot {
+    changed(
+        &stopping(),
+        &[
+            ("ActiveState", "inactive"),
+            ("SubState", "dead"),
+            ("MainPID", "0"),
+            ("ControlPID", "0"),
+            ("Job", ""),
+        ],
+    )
+}
+fn stopped_cleared() -> service::Snapshot {
+    changed(
+        &stopped_original(),
+        &[
+            ("InvocationID", ""),
+            ("ExecMainPID", "0"),
+            ("ExecMainStartTimestampMonotonic", "0"),
+            ("ControlGroup", ""),
+        ],
+    )
+}
+
+#[test]
+fn original_shutdown_with_control_process_allows_first_start_after_terminal() {
+    for terminal in [
+        stopped_original(),
+        stopped_cleared(),
+        changed(
+            &stopped_original(),
+            &[("ActiveState", "failed"), ("SubState", "failed")],
+        ),
+    ] {
+        let mut b = Fake::new(vec![
+            stopping(),
+            terminal.clone(),
+            terminal,
+            pending(),
+            ready(),
+            ready(),
+        ]);
+        assert!(restore(&mut b, deadline()).unwrap().start_requested);
+        assert_eq!((b.starts, b.empty_checks), (1, 1));
+        assert!(b.snapshots.is_empty());
+    }
+}
+
+#[test]
+fn shutdown_identity_refuses_partial_clearing_replacement_and_changed_timestamp() {
+    for changes in [
+        vec![("InvocationID", "")],
+        vec![("ExecMainPID", "0")],
+        vec![("ExecMainStartTimestampMonotonic", "0")],
+        vec![("InvocationID", "34343434343434343434343434343434")],
+        vec![("ExecMainStartTimestampMonotonic", "1235")],
+        vec![("ControlPID", "43")],
+        vec![("MainPID", "42")],
+    ] {
+        let terminal = changed(&stopped_original(), &changes);
+        let mut b = Fake::new(vec![stopping(), terminal]);
+        assert!(restore(&mut b, deadline()).is_err(), "{changes:?}");
+        assert_eq!(b.starts, 0);
+    }
+    let failed_cleared = changed(
+        &stopped_cleared(),
+        &[("ActiveState", "failed"), ("SubState", "failed")],
+    );
+    let mut b = Fake::new(vec![stopping(), failed_cleared]);
+    assert!(restore(&mut b, deadline()).is_err());
+    assert_eq!(b.starts, 0);
+    let mut b = Fake::new(vec![
+        stopping(),
+        changed(&stopping(), &[("ExecMainStartTimestampMonotonic", "1235")]),
+    ]);
+    assert!(restore(&mut b, deadline())
+        .unwrap_err()
+        .to_string()
+        .contains("identity changed"));
+    assert_eq!(b.starts, 0);
+}
+
+#[test]
+fn waiting_shutdown_never_clears_prior_start_uncertainty() {
+    for first in [pending(), snapshot("active", "running", 42, "7890")] {
+        let mut b = Fake::new(vec![first, stopping(), stopped_original()]);
+        assert!(restore(&mut b, deadline())
+            .unwrap_err()
+            .to_string()
+            .contains("no retry"));
+        assert_eq!(b.starts, 0);
+    }
+    let mut b = Fake::new(vec![stopped(), stopped(), stopping(), stopped_original()]);
+    assert!(restore(&mut b, deadline())
+        .unwrap_err()
+        .to_string()
+        .contains("no retry"));
+    assert_eq!(b.starts, 1);
+    let mut b = Fake::new(vec![stopping(), pending(), stopped_original()]);
+    assert!(restore(&mut b, deadline())
+        .unwrap_err()
+        .to_string()
+        .contains("no retry"));
+    assert_eq!(b.starts, 0);
+}
+
+#[test]
+fn original_shutdown_expiry_and_populated_group_never_start_stock() {
+    let mut b = Fake::new(vec![stopping()]);
+    b.expire_on_pace = true;
+    assert!(restore(&mut b, Instant::now() + Duration::from_millis(20))
+        .unwrap_err()
+        .to_string()
+        .contains("deadline expired"));
+    assert_eq!(b.starts, 0);
+    let mut b = Fake::new(vec![stopping(), stopped_original()]);
+    b.populated = true;
+    assert!(restore(&mut b, deadline()).is_err());
+    assert_eq!(b.starts, 0);
+}
+
+#[test]
+fn shutdown_wait_requires_known_substate_and_original_stock() {
+    let b = Fake::new(vec![]);
+    for sub in [
+        "stop",
+        "stop-watchdog",
+        "stop-sigterm",
+        "stop-sigkill",
+        "stop-post",
+        "final-watchdog",
+        "final-sigterm",
+        "final-sigkill",
+    ] {
+        StoppingIdentity::capture(&changed(&stopping(), &[("SubState", sub)]), &b.original)
+            .unwrap();
+    }
+    for changes in [
+        vec![("SubState", "future-stop")],
+        vec![("ExecMainPID", "44")],
+        vec![("InvocationID", "34343434343434343434343434343434")],
+        vec![("MainPID", "44")],
+        vec![("ControlGroup", "/wrong")],
+        vec![("ExecMainStartTimestampMonotonic", "0")],
+        vec![("ControlPID", "1")],
+    ] {
+        assert!(StoppingIdentity::capture(&changed(&stopping(), &changes), &b.original).is_err());
+    }
+    StoppingIdentity::capture(&changed(&stopping(), &[("MainPID", "0")]), &b.original).unwrap();
+    assert!(stock_state(&changed(&pending(), &[("ControlPID", "43")])).is_err());
+}
+
+#[test]
+fn profile_requires_supported_watchdog_and_both_service_timeout_budgets() {
+    let fixture = crate::workflow::resident_supervisor::tests::Fixture::new();
+    let record = fixture.record();
+    for value in ["", "0", "infinity", "129s", "130s", "2min", "2min 11s"] {
+        let mut p = profile(&record);
+        p.helper_policy
+            .insert("TimeoutStartUSec".into(), value.into());
+        assert!(p.validate(&record).is_err(), "{value}");
+    }
+    let mut p = profile(&record);
+    p.stock_policy
+        .insert("TimeoutStopUSec".into(), "2min".into());
+    assert!(p.validate(&record).is_err());
+    let mut p = profile(&record);
+    p.buddy_policy.insert("WatchdogUSec".into(), "1min".into());
+    assert!(p.validate(&record).is_err());
 }

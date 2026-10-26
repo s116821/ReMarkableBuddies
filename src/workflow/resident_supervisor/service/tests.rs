@@ -304,3 +304,22 @@ fn both_pipe_eofs_do_not_replace_process_exit() {
     assert!(!std::path::Path::new(&format!("/proc/{}", failure.pid)).exists());
     assert!(start.elapsed() < Duration::from_secs(5));
 }
+
+#[test]
+fn stock_stop_is_fixed_nonblocking_and_never_replaces_a_job() {
+    let command = stop_command();
+    assert_eq!(command.get_program(), "/bin/systemctl");
+    assert_eq!(
+        command.get_args().collect::<Vec<_>>(),
+        [
+            "--system",
+            "--no-pager",
+            "--no-ask-password",
+            "--no-block",
+            "--job-mode=fail",
+            "stop",
+            "--",
+            "xochitl.service"
+        ]
+    );
+}

@@ -44,6 +44,7 @@ pub(super) const POLICY: &[&str] = &[
     "SendSIGKILL",
     "WatchdogUSec",
     "TimeoutStopUSec",
+    "TimeoutStartUSec",
 ];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -262,6 +263,27 @@ pub(super) fn start_stock(deadline: Instant) -> Result<()> {
     let output = run(start_command(), deadline)?;
     ensure!(output.is_empty(), "unexpected stock-start command output");
     Ok(())
+}
+/// Only the installed activation admission path may stop stock. Failure may
+/// leave a queued stop; its caller must exit so independent recovery can observe it.
+pub(super) fn stop_stock(deadline: Instant) -> Result<()> {
+    let output = run(stop_command(), deadline)?;
+    ensure!(output.is_empty(), "unexpected stock-stop command output");
+    Ok(())
+}
+fn stop_command() -> Command {
+    let mut command = Command::new("/bin/systemctl");
+    command.args([
+        "--system",
+        "--no-pager",
+        "--no-ask-password",
+        "--no-block",
+        "--job-mode=fail",
+        "stop",
+        "--",
+        "xochitl.service",
+    ]);
+    command
 }
 fn start_command() -> Command {
     let mut command = Command::new("/bin/systemctl");
