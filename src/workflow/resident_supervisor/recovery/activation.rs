@@ -441,52 +441,10 @@ fn stopped_stock(
     group: GroupObservation,
 ) -> Result<bool> {
     ensure!(
-        s.property("Id") == Some(STOCK) && s.property("LoadState") == Some("loaded"),
-        "stock unit changed during stop"
+        original.property("Id") == Some(STOCK),
+        "original stock unit mismatch"
     );
-    let retained = s.invocation() == original.invocation()
-        && s.property("ExecMainPID") == Some(original.main_pid().to_string().as_str())
-        && s.start_micros() == original.start_micros();
-    let cleared = s.invocation().is_empty()
-        && s.property("ExecMainPID") == Some("0")
-        && s.start_micros() == 0;
-    ensure!(retained || cleared, "stock incarnation changed during stop");
-    let active = s.property("ActiveState");
-    let sub = s.property("SubState");
-    if retained && (active == Some("active") || active == Some("deactivating")) {
-        ensure!(
-            s.main_pid() == 0 || s.main_pid() == original.main_pid(),
-            "stock main PID changed"
-        );
-        ensure!(
-            s.control_group() == original.control_group(),
-            "stock control group changed"
-        );
-        return Ok(false);
-    }
-    ensure!(
-        s.main_pid() == 0 && s.property("ControlPID") == Some("0") && s.property("Job") == Some(""),
-        "stock is not terminal"
-    );
-    ensure!(
-        (active == Some("inactive") && sub == Some("dead"))
-            || (retained && active == Some("failed") && sub == Some("failed")),
-        "unexpected stock terminal state"
-    );
-    ensure!(
-        group != GroupObservation::Populated,
-        "original stock group remains populated"
-    );
-    ensure!(
-        s.control_group() == original.control_group()
-            || (s.control_group().is_empty() && group == GroupObservation::OriginalAbsent),
-        "stock group changed"
-    );
-    ensure!(
-        retained || group == GroupObservation::OriginalAbsent,
-        "cleared stock needs original group deletion"
-    );
-    Ok(true)
+    Ok(service::baseline::stopped_snapshot(s, original, group)?.is_some())
 }
 
 #[cfg(test)]

@@ -1,0 +1,259 @@
+use super::*;
+use crate::workflow::resident_supervisor::tests::Fixture;
+
+fn baseline(f: &Fixture) -> ServiceBaseline {
+    let record = f.record();
+    let mut fields: BTreeMap<String, String> = STATE
+        .iter()
+        .chain(POLICY)
+        .map(|key| ((*key).into(), String::new()))
+        .collect();
+    for (key, value) in [
+        ("Id", "fixture.service"),
+        ("LoadState", "loaded"),
+        ("ActiveState", "active"),
+        ("SubState", "running"),
+        ("ControlPID", "0"),
+        ("Job", ""),
+        ("ControlGroup", "/system.slice/fixture.service"),
+        ("KillMode", "control-group"),
+        ("Delegate", "no"),
+        ("Restart", "no"),
+        ("NeedDaemonReload", "no"),
+        ("SendSIGKILL", "yes"),
+    ] {
+        fields.insert(key.into(), value.into());
+    }
+    fields.insert("MainPID".into(), record.group().parent().pid.to_string());
+    fields.insert(
+        "ExecMainPID".into(),
+        record.group().parent().pid.to_string(),
+    );
+    fields.insert("InvocationID".into(), "23".repeat(16));
+    fields.insert("ExecMainStartTimestampMonotonic".into(), "1234".into());
+    let original = Snapshot::parse(&encode_fields(&fields), "fixture.service").unwrap();
+    ServiceBaseline {
+        original,
+        group: record.group().clone(),
+    }
+}
+
+fn encode_fields(fields: &BTreeMap<String, String>) -> Vec<u8> {
+    fields
+        .iter()
+        .map(|(k, v)| format!("{k}={v}\n"))
+        .collect::<String>()
+        .into_bytes()
+}
+
+fn changed(s: &Snapshot, fields: &[(&str, &str)]) -> Snapshot {
+    let mut s = s.clone();
+    for (key, value) in fields {
+        s.fields.insert((*key).into(), (*value).into());
+    }
+    Snapshot::parse(&encode_fields(&s.fields), s.property("Id").unwrap()).unwrap()
+}
+
+fn terminal(s: &Snapshot) -> Snapshot {
+    changed(
+        s,
+        &[
+            ("ActiveState", "inactive"),
+            ("SubState", "dead"),
+            ("MainPID", "0"),
+        ],
+    )
+}
+
+fn clear(s: &Snapshot) -> Snapshot {
+    changed(
+        s,
+        &[
+            ("InvocationID", ""),
+            ("ExecMainPID", "0"),
+            ("ExecMainStartTimestampMonotonic", "0"),
+            ("ControlGroup", ""),
+        ],
+    )
+}
+
+#[test]
+fn records_round_trip_but_do_not_assert_live_kernel_ownership() {
+    let f = Fixture::new();
+    let baseline = baseline(&f);
+    let bytes = baseline.encode().unwrap();
+    let decoded = ServiceBaseline::decode(&bytes).unwrap();
+    assert_eq!(decoded.encode().unwrap(), bytes);
+    // Fixture files are deliberately not cgroups: current/stopped must NOT
+    // convert deserialization into a live ownership result.
+    assert!(decoded.group().observe().is_err());
+    assert!(decoded.current(Instant::now()).is_err());
+    assert!(decoded.stopped(Instant::now()).is_err());
+}
+
+#[test]
+fn malformed_or_fabricated_record_relationships_refuse() {
+    let f = Fixture::new();
+    let baseline = baseline(&f);
+    let bytes = baseline.encode().unwrap();
+    assert!(ServiceBaseline::decode(&vec![b' '; RECORD_LIMIT + 1]).is_err());
+    assert!(ServiceBaseline::decode(&bytes[..bytes.len() - 1]).is_err());
+    let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    for key in ["version", "snapshot", "group"] {
+        let mut missing = value.clone();
+        missing.as_object_mut().unwrap().remove(key);
+        assert!(ServiceBaseline::decode(&serde_json::to_vec(&missing).unwrap()).is_err());
+    }
+    value["unexpected"] = true.into();
+    assert!(ServiceBaseline::decode(&serde_json::to_vec(&value).unwrap()).is_err());
+    let duplicate = format!(
+        "{{\"version\":1,{}",
+        std::str::from_utf8(&bytes).unwrap().trim_start_matches('{')
+    );
+    assert!(ServiceBaseline::decode(duplicate.as_bytes()).is_err());
+    for (key, value) in [
+        ("Id", "other.service"),
+        ("MainPID", "0"),
+        ("ExecMainPID", "0"),
+        ("InvocationID", ""),
+        ("ExecMainStartTimestampMonotonic", "0"),
+        ("ActiveState", "inactive"),
+        ("SubState", "dead"),
+        ("LoadState", "not-found"),
+        ("Job", "42"),
+        ("ControlPID", "42"),
+        ("ControlGroup", "/wrong"),
+    ] {
+        let mut record: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let s = changed(&baseline.original, &[(key, value)]);
+        record["snapshot"] = String::from_utf8(encode_fields(&s.fields)).unwrap().into();
+        assert!(
+            ServiceBaseline::decode(&serde_json::to_vec(&record).unwrap()).is_err(),
+            "{key}"
+        );
+    }
+    for snapshot in [
+        "Id=fixture.service\n".to_string(),
+        format!(
+            "{}MainPID=0\n",
+            std::str::from_utf8(&encode_fields(&baseline.original.fields)).unwrap()
+        ),
+    ] {
+        let mut record: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        record["snapshot"] = snapshot.into();
+        assert!(ServiceBaseline::decode(&serde_json::to_vec(&record).unwrap()).is_err());
+    }
+}
+
+#[test]
+fn typed_terminal_bracket_requires_original_identity_group_and_policy() {
+    let f = Fixture::new();
+    let baseline = baseline(&f);
+    let original = baseline.original();
+    let stopped = terminal(original);
+    let cleared = clear(&stopped);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    for (s, group, identity) in [
+        (
+            &stopped,
+            GroupObservation::EmptyOriginal,
+            TerminalIdentity::Retained,
+        ),
+        (
+            &stopped,
+            GroupObservation::OriginalAbsent,
+            TerminalIdentity::Retained,
+        ),
+        (
+            &cleared,
+            GroupObservation::OriginalAbsent,
+            TerminalIdentity::Cleared,
+        ),
+    ] {
+        let observed = stopped_bracket(original, s, group, s, deadline)
+            .unwrap()
+            .unwrap();
+        assert_eq!(observed.identity, identity);
+        assert_eq!(observed.group, group);
+        assert_eq!(observed.policy, original.policy());
+    }
+    assert!(stopped_bracket(
+        original,
+        &stopped,
+        GroupObservation::Populated,
+        &stopped,
+        deadline
+    )
+    .is_err());
+    assert!(stopped_bracket(
+        original,
+        &cleared,
+        GroupObservation::EmptyOriginal,
+        &cleared,
+        deadline
+    )
+    .is_err());
+    for (key, value) in [
+        ("InvocationID", ""),
+        ("ExecMainPID", "0"),
+        ("ExecMainStartTimestampMonotonic", "0"),
+        ("Job", "42"),
+        ("ControlPID", "42"),
+        ("MainPID", "42"),
+        ("KillMode", "process"),
+        ("NeedDaemonReload", "yes"),
+        ("ControlGroup", "/wrong"),
+    ] {
+        let bad = changed(&stopped, &[(key, value)]);
+        for (a, b) in [(&bad, &stopped), (&stopped, &bad)] {
+            assert!(
+                stopped_bracket(original, a, GroupObservation::OriginalAbsent, b, deadline)
+                    .is_err(),
+                "{key}"
+            );
+        }
+    }
+    assert!(stopped_bracket(
+        original,
+        &stopped,
+        GroupObservation::OriginalAbsent,
+        &stopped,
+        Instant::now()
+    )
+    .is_err());
+}
+
+#[test]
+fn transitions_remain_pending_and_never_renew_the_deadline() {
+    let f = Fixture::new();
+    let baseline = baseline(&f);
+    let original = baseline.original();
+    let stopping = changed(
+        original,
+        &[
+            ("ActiveState", "deactivating"),
+            ("SubState", "stop-sigterm"),
+            ("Job", "42"),
+        ],
+    );
+    let stopped = terminal(original);
+    let cleared = clear(&stopped);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    for (a, b, group) in [
+        (original, &stopping, GroupObservation::Populated),
+        (&stopping, &stopped, GroupObservation::EmptyOriginal),
+        (&stopped, &cleared, GroupObservation::OriginalAbsent),
+    ] {
+        assert!(stopped_bracket(original, a, group, b, deadline)
+            .unwrap()
+            .is_none());
+    }
+    assert!(stopped_bracket(
+        original,
+        &stopping,
+        GroupObservation::Populated,
+        &stopping,
+        Instant::now()
+    )
+    .is_err());
+}

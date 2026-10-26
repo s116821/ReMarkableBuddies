@@ -11,6 +11,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub mod baseline;
+
 const LIMIT: usize = 16 * 1024;
 const POLL: Duration = Duration::from_millis(5);
 pub(super) const STATE: &[&str] = &[
