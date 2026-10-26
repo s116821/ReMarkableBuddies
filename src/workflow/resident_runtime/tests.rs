@@ -304,7 +304,7 @@ fn reconnect_preserves_dispatched_cancellation_through_later_observation_failure
             .unwrap(),
         Reply::Rejected(Rejection::Unsupported)
     );
-    let history = resident_client::attempts(&fixture.store()).unwrap();
+    let history = resident_client::attempts(&runtime.store).unwrap();
     assert_eq!(history.len(), 1);
     assert!(!history[0].known_not_dispatched && history[0].reply.is_none());
     let report = runtime.shutdown(end());
@@ -382,10 +382,7 @@ fn reconnect_carries_reply_retention_uncertainty_into_new_conversations_and_shut
                 .unwrap(),
             Reply::Rejected(Rejection::Unsupported)
         );
-        assert_eq!(
-            resident_client::attempts(&fixture.store()).unwrap().len(),
-            1
-        );
+        assert_eq!(resident_client::attempts(&runtime.store).unwrap().len(), 1);
         let report = runtime.shutdown(end());
         assert!(report.reaped && report.error.is_none(), "{report:?}");
         assert_eq!(report.lost, failure.lost);
