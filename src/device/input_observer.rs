@@ -609,6 +609,19 @@ impl InputObserver {
     }
 
     #[cfg(test)]
+    pub(super) fn replay_request(
+        batches: Vec<(bool, Vec<super::owned_pen_window::Event>)>,
+    ) -> Self {
+        let mut observer = Self::scripted(vec![]);
+        observer.scripted_polls = None;
+        observer.replay = Some(Replay {
+            batches,
+            ..Replay::default()
+        });
+        observer
+    }
+
+    #[cfg(test)]
     pub(super) fn scripted(polls: Vec<Result<Vec<Interaction>>>) -> Self {
         Self {
             sources: Vec::new(),

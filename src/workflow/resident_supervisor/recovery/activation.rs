@@ -2,6 +2,7 @@
 //! admission/reacquisition. No native page or mutation capability is fabricated.
 use super::*;
 use crate::{
+    device::request_input::RequestInput,
     storage::Store,
     workflow::{
         resident_request::{self, FailureKind, InputProgress, Request, RequestFailure},
@@ -42,13 +43,29 @@ struct Pending {
 
 impl Session {
     /// Only the installed first-gesture caller may compose this with live source
-    /// admission. The callback checks input/cancellation, not a fabricated page ID.
+    /// admission. The input guard supplies no page identity or output authority.
     pub fn activate(
         store: Arc<Store>,
         health: &mut ServiceHealth,
-        progress: &mut dyn FnMut() -> Result<()>,
+        input: &mut RequestInput,
     ) -> Result<Self> {
         let deadline = Instant::now() + ACTIVATION;
+        let mut session =
+            Self::activate_with_progress(store, health, &mut || input.require_quiet(), deadline)?;
+        ensure!(
+            input.reacquire()? == InputProgress::Quiet,
+            "Input canceled resident activation handoff"
+        );
+        session.current(health, &mut || input.require_quiet(), deadline)?;
+        Ok(session)
+    }
+
+    fn activate_with_progress(
+        store: Arc<Store>,
+        health: &mut ServiceHealth,
+        progress: &mut dyn FnMut() -> Result<()>,
+        deadline: Instant,
+    ) -> Result<Self> {
         ensure!(
             unsafe { libc::geteuid() } == 0,
             "installed activation requires root"
@@ -208,24 +225,31 @@ impl Session {
     pub fn request(
         &mut self,
         health: &mut ServiceHealth,
-        progress: &mut dyn FnMut() -> Result<InputProgress>,
+        input: &mut RequestInput,
         operation: OperationId,
         request: Request,
         deadline: Instant,
     ) -> std::result::Result<Reply, RequestFailure> {
         self.with_request(health, deadline, |runtime, authority| {
-            resident_request::execute(runtime, operation, request, deadline, progress, authority)
+            resident_request::execute(
+                runtime,
+                operation,
+                request,
+                deadline,
+                &mut || input.poll(),
+                authority,
+            )
         })
     }
 
     pub fn reconnect(
         &mut self,
         health: &mut ServiceHealth,
-        progress: &mut dyn FnMut() -> Result<InputProgress>,
+        input: &mut RequestInput,
         deadline: Instant,
     ) -> std::result::Result<(), RequestFailure> {
         self.with_request(health, deadline, |runtime, authority| {
-            resident_request::reconnect(runtime, deadline, progress, authority)
+            resident_request::reconnect(runtime, deadline, &mut || input.poll(), authority)
         })
     }
 

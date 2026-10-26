@@ -14,11 +14,7 @@ use remarkable_open_sdk::{
 };
 use std::time::Instant;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum InputProgress {
-    Quiet,
-    Canceled,
-}
+pub use crate::device::request_input::InputProgress;
 
 pub enum Request {
     Observe,

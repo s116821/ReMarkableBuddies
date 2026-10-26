@@ -13,6 +13,39 @@ fn quiet() -> Result<InputProgress> {
 }
 
 #[test]
+fn owned_input_guard_reaches_request_and_reconnect_failure_classification() {
+    use crate::device::{interaction::Interaction, request_input::RequestInput};
+    let fixture = Fixture::new();
+    let mut runtime = fixture.start("reconnect", Duration::from_secs(5)).unwrap();
+    let identity = runtime.identity().clone();
+    let mut input = RequestInput::scripted(vec![
+        Ok(vec![Interaction::Invalidated]),
+        Ok(vec![]),
+        Err(anyhow!("lost real input observer")),
+    ]);
+    let canceled = request::execute(
+        &mut runtime,
+        OperationId(nonce()),
+        Request::Observe,
+        end(),
+        &mut || input.poll(),
+        &mut || Ok(()),
+    )
+    .unwrap_err();
+    assert_eq!(canceled.kind, FailureKind::Canceled);
+    assert_eq!(canceled.lost, LostRequest::NoPendingMutation);
+    let still_canceled =
+        request::reconnect(&mut runtime, end(), &mut || input.poll(), &mut || Ok(())).unwrap_err();
+    assert_eq!(still_canceled.kind, FailureKind::Canceled);
+    let lost =
+        request::reconnect(&mut runtime, end(), &mut || input.poll(), &mut || Ok(())).unwrap_err();
+    assert_eq!(lost.kind, FailureKind::Integrity);
+    assert_eq!(runtime.identity(), &identity);
+    runtime.check_child().unwrap();
+    assert!(runtime.shutdown(end()).reaped);
+}
+
+#[test]
 fn input_changed_during_authority_check_refuses_before_effect_reservation() {
     let fixture = Fixture::new();
     let mut runtime = fixture.start("reconnect", Duration::from_secs(5)).unwrap();
