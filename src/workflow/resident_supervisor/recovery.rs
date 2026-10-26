@@ -465,6 +465,8 @@ impl Profile {
         require(&self.buddy_policy, "Type", "notify")?;
         require(&self.buddy_policy, "OnSuccess", HELPER)?;
         require(&self.buddy_policy, "OnFailure", HELPER)?;
+        require(&self.buddy_policy, "OnSuccessJobMode", "fail")?;
+        require(&self.buddy_policy, "OnFailureJobMode", "fail")?;
         require(&self.buddy_policy, "WatchdogUSec", "2min")?;
         require(&self.helper_policy, "WatchdogUSec", "0")?;
         require(&self.helper_policy, "TimeoutStartUSec", "2min 10s")?;

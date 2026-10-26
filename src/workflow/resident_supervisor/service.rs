@@ -42,6 +42,8 @@ pub(super) const POLICY: &[&str] = &[
     "DropInPaths",
     "OnSuccess",
     "OnFailure",
+    "OnSuccessJobMode",
+    "OnFailureJobMode",
     "Conflicts",
     "After",
     "DefaultDependencies",

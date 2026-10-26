@@ -46,6 +46,20 @@ fn encode(fields: &BTreeMap<String, String>) -> Vec<u8> {
 }
 
 #[test]
+fn service_snapshot_requires_unique_recovery_trigger_modes() {
+    let f = Fixture::new();
+    let original = retained(&f.record());
+    for key in ["OnSuccessJobMode", "OnFailureJobMode"] {
+        let mut missing = original.fields.clone();
+        missing.remove(key);
+        assert!(Snapshot::parse(&encode(&missing), "fixture.service").is_err());
+        let mut duplicate = encode(&original.fields);
+        duplicate.extend_from_slice(format!("{key}=fail\n").as_bytes());
+        assert!(Snapshot::parse(&duplicate, "fixture.service").is_err());
+    }
+}
+
+#[test]
 fn dependency_policy_matching_preserves_raw_values_and_rejects_changed_sets() {
     let f = Fixture::new();
     for key in ["After", "Conflicts"] {

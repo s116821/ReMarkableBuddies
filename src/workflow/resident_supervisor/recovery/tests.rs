@@ -320,10 +320,23 @@ fn nested_policy_json_rejects_duplicate_missing_and_unknown_fields() {
     );
     for bad in [
         format!("{{\"fields\":{{{properties},\"Type\":\"oneshot\"}}}}"),
+        format!("{{\"fields\":{{{properties},\"OnSuccessJobMode\":\"fail\"}}}}"),
+        format!("{{\"fields\":{{{properties},\"OnFailureJobMode\":\"fail\"}}}}"),
         format!("{{\"fields\":{{{properties},\"Unknown\":\"x\"}}}}"),
         "{\"fields\":{\"Type\":\"oneshot\"}}".to_owned(),
     ] {
         assert!(serde_json::from_str::<Policy>(&bad).is_err());
+    }
+    for missing in ["OnSuccessJobMode", "OnFailureJobMode"] {
+        let properties = service::POLICY
+            .iter()
+            .filter(|key| **key != missing)
+            .map(|key| format!("\"{key}\":\"\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(
+            serde_json::from_str::<Policy>(&format!("{{\"fields\":{{{properties}}}}}")).is_err()
+        );
     }
 }
 
@@ -342,6 +355,8 @@ pub(super) fn profile(record: &LeaseRecord) -> Profile {
             ("Restart", "no"),
             ("DefaultDependencies", "yes"),
             ("Conflicts", "shutdown.target"),
+            ("OnSuccessJobMode", "fail"),
+            ("OnFailureJobMode", "replace"),
         ] {
             p.insert(key.into(), value.into());
         }
@@ -351,6 +366,7 @@ pub(super) fn profile(record: &LeaseRecord) -> Profile {
     buddy_policy.insert("Type".into(), "notify".into());
     buddy_policy.insert("OnSuccess".into(), HELPER.into());
     buddy_policy.insert("OnFailure".into(), HELPER.into());
+    buddy_policy.insert("OnFailureJobMode".into(), "fail".into());
     buddy_policy.insert("WatchdogUSec".into(), "2min".into());
     let mut helper_policy = policy(HELPER_UNIT);
     helper_policy.insert("Type".into(), "oneshot".into());
@@ -376,6 +392,38 @@ pub(super) fn profile(record: &LeaseRecord) -> Profile {
         buddy_policy,
         helper_policy,
         stock_policy,
+    }
+}
+
+#[test]
+fn installed_buddy_requires_non_replacing_trigger_modes_without_rewriting_stock() {
+    let fixture = crate::workflow::resident_supervisor::tests::Fixture::new();
+    let record = fixture.record();
+    let p = profile(&record);
+    let stock = p.stock_policy.clone();
+    let helper = p.helper_policy.clone();
+    p.validate(&record).unwrap();
+    assert_eq!(p.stock_policy["OnFailureJobMode"], "replace");
+    assert_eq!(p.helper_policy["OnFailureJobMode"], "replace");
+    assert_eq!(p.stock_policy, stock);
+    assert_eq!(p.helper_policy, helper);
+    for key in ["OnSuccessJobMode", "OnFailureJobMode"] {
+        for value in [
+            None,
+            Some(""),
+            Some("replace"),
+            Some("replace-irreversibly"),
+            Some("ignore-dependencies"),
+            Some("fail replace"),
+        ] {
+            let mut p = profile(&record);
+            if let Some(value) = value {
+                p.buddy_policy.insert(key.into(), value.into());
+            } else {
+                p.buddy_policy.remove(key);
+            }
+            assert!(p.validate(&record).is_err(), "{key}={value:?}");
+        }
     }
 }
 

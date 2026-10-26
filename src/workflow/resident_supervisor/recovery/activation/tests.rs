@@ -91,6 +91,56 @@ fn changed(s: &service::Snapshot, changes: &[(&str, &str)]) -> service::Snapshot
 }
 
 #[test]
+fn loaded_trigger_mode_mismatch_refuses_the_final_handoff_before_stock_stop() {
+    let f = crate::workflow::resident_supervisor::tests::Fixture::new();
+    let record = f.record();
+    let mut group = record.group().clone();
+    group.unit = BUDDY.into();
+    group.mount_path = MOUNT.into();
+    let profile = super::super::tests::profile(&record);
+    let buddy = snapshot(
+        BUDDY,
+        &profile.buddy_policy,
+        "active",
+        "running",
+        std::process::id(),
+    );
+    for key in ["OnSuccessJobMode", "OnFailureJobMode"] {
+        for value in [
+            "",
+            "replace",
+            "replace-irreversibly",
+            "ignore-dependencies",
+            "fail replace",
+        ] {
+            let altered = changed(&buddy, &[(key, value)]);
+            let mut stops = 0;
+            let result = checked_handoff(
+                Instant::now() + Duration::from_secs(1),
+                || buddy_state(&altered, &group, &profile),
+                || {
+                    stops += 1;
+                    Ok(())
+                },
+            );
+            assert!(result.is_err(), "{key}={value}");
+            assert_eq!(stops, 0);
+        }
+    }
+    let mut stops = 0;
+    checked_handoff(
+        Instant::now() + Duration::from_secs(1),
+        || buddy_state(&buddy, &group, &profile),
+        || {
+            stops += 1;
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(stops, 1);
+}
+
+#[test]
 fn installed_admission_requires_current_buddy_and_idle_helper() {
     let f = crate::workflow::resident_supervisor::tests::Fixture::new();
     let record = f.record();
