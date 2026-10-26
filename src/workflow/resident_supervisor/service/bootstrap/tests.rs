@@ -37,6 +37,7 @@ fn units_supply_separate_pid1_recovery_and_control_group_bounds() {
         )));
         assert!(recovery.contains("Type=oneshot\nTimeoutStartSec=130s\n"));
         for unit in [&actor, &recovery] {
+            assert!(unit.contains("WatchdogSec=0\n"));
             assert!(unit.contains("KillMode=control-group\nSendSIGKILL=yes\nTimeoutStopSec=5s\n"));
             assert!(!unit.contains("DefaultDependencies=no"));
             assert!(!unit.contains("ExecStopPost="));
@@ -48,6 +49,54 @@ fn units_supply_separate_pid1_recovery_and_control_group_bounds() {
             "RuntimeMaxSec=12s\n"
         }));
     }
+}
+
+#[test]
+fn watchdog_infinity_is_only_an_unstarted_helper_sentinel() {
+    let mut s = Snapshot {
+        fields: [
+            ("WatchdogUSec", "infinity"),
+            ("Type", "oneshot"),
+            ("ActiveState", "inactive"),
+            ("SubState", "dead"),
+            ("MainPID", "0"),
+            ("ControlPID", "0"),
+            ("ExecMainPID", "0"),
+            ("ExecMainStartTimestampMonotonic", "0"),
+            ("InvocationID", ""),
+            ("ControlGroup", ""),
+            ("Job", ""),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.into(), value.into()))
+        .collect(),
+    };
+    assert!(diagnostic_watchdog_disabled(&s, true));
+    assert!(!diagnostic_watchdog_disabled(&s, false));
+    for (key, value) in [
+        ("WatchdogUSec", "1s"),
+        ("Type", "exec"),
+        ("ActiveState", "activating"),
+        ("SubState", "start"),
+        ("MainPID", "42"),
+        ("ControlPID", "42"),
+        ("ExecMainPID", "42"),
+        ("ExecMainStartTimestampMonotonic", "123"),
+        ("InvocationID", "0123456789abcdef0123456789abcdef"),
+        ("ControlGroup", "/system.slice/fixture.service"),
+        ("Job", "42"),
+    ] {
+        let mut changed = s.clone();
+        changed.fields.insert(key.into(), value.into());
+        assert!(!diagnostic_watchdog_disabled(&changed, true), "{key}");
+        changed.fields.remove(key);
+        assert!(
+            !diagnostic_watchdog_disabled(&changed, true),
+            "missing {key}"
+        );
+    }
+    s.fields.insert("WatchdogUSec".into(), "0".into());
+    assert!(diagnostic_watchdog_disabled(&s, false));
 }
 
 #[test]

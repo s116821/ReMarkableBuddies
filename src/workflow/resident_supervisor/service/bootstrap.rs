@@ -193,7 +193,32 @@ fn unit_text(nonce: &str, kind: Kind, role: &str) -> Result<String> {
     } else {
         role.into()
     };
-    Ok(format!("[Unit]\nDescription=Bounded resident bootstrap {role} {nonce}\n{unit}[Service]\n{service}ExecStart={} {command} {nonce}\nRestart=no\nKillMode=control-group\nSendSIGKILL=yes\nTimeoutStopSec=5s\nUMask=0077\nLimitCORE=0\nLimitFSIZE=67108864\n", binary.display()))
+    Ok(format!("[Unit]\nDescription=Bounded resident bootstrap {role} {nonce}\n{unit}[Service]\n{service}ExecStart={} {command} {nonce}\nRestart=no\nWatchdogSec=0\nKillMode=control-group\nSendSIGKILL=yes\nTimeoutStopSec=5s\nUMask=0077\nLimitCORE=0\nLimitFSIZE=67108864\n", binary.display()))
+}
+
+// systemd 255 initializes watchdog_original_usec to USEC_INFINITY and copies
+// the configured watchdog_usec only when starting the service. Thus an idle,
+// never-started helper reports infinity even with the pinned WatchdogSec=0.
+// This exception requires exact unit bytes and no drop-ins (checked by units),
+// and is never accepted for the running actor or a recovery invocation.
+fn diagnostic_watchdog_disabled(s: &Snapshot, unstarted_helper: bool) -> bool {
+    s.property("WatchdogUSec") == Some("0")
+        || (unstarted_helper
+            && [
+                ("WatchdogUSec", "infinity"),
+                ("Type", "oneshot"),
+                ("ActiveState", "inactive"),
+                ("SubState", "dead"),
+                ("MainPID", "0"),
+                ("ControlPID", "0"),
+                ("ExecMainPID", "0"),
+                ("ExecMainStartTimestampMonotonic", "0"),
+                ("InvocationID", ""),
+                ("ControlGroup", ""),
+                ("Job", ""),
+            ]
+            .iter()
+            .all(|(key, value)| s.property(key) == Some(*value)))
 }
 
 fn unit_paths(kind: Kind, nonce: &str) -> Vec<String> {
@@ -490,13 +515,17 @@ impl Context {
                 ("SendSIGKILL", "yes"),
                 ("DefaultDependencies", "yes"),
                 ("TimeoutStopUSec", "5s"),
-                ("WatchdogUSec", "0"),
             ] {
                 ensure!(
                     s.property(key) == Some(value),
                     "unsafe diagnostic unit {name}: {key}"
                 );
             }
+            ensure!(
+                diagnostic_watchdog_disabled(&s, name == "recovery" && role == "actor"),
+                "unsafe diagnostic unit {name}: WatchdogUSec={:?}",
+                s.property("WatchdogUSec")
+            );
             ensure!(
                 s.property("Conflicts")
                     .unwrap()

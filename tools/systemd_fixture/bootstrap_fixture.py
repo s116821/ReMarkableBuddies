@@ -260,6 +260,14 @@ class Run:
             self.remote("start-standins", "systemctl --no-block --job-mode=fail start "
                         + self.unit("stock") + " " + self.unit("buddy"))
             original = self.wait(initial=True)
+            # Retain the never-started helper's effective policy, including the
+            # systemd 255 WatchdogUSec=infinity sentinel before its first start.
+            self.remote("diagnostic-policy", "LC_ALL=C systemctl show "
+                        + self.unit("actor") + " " + self.unit("recovery")
+                        + " -p Id -p Type -p ActiveState -p SubState -p MainPID -p ControlPID"
+                        + " -p ExecMainPID -p ExecMainStartTimestampMonotonic -p InvocationID"
+                        + " -p ControlGroup -p Job -p WatchdogUSec -p FragmentPath"
+                        + " -p DropInPaths -p NeedDaemonReload")
             sample = json.loads(self.remote("inspect", f"{self.binary} inspect {self.nonce} fixture"))
             candidate = {"version": 1, "nonce": self.nonce, "kind": "fixture",
                          "fault": self.args.case, "boot": sample["boot"],
