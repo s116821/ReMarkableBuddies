@@ -4,7 +4,7 @@ use crate::{
     conversation_feedback::{describe, FeedbackDescription},
     storage::{Kind, Namespace, Uuid, MAX_ITEMS},
 };
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use std::collections::BTreeSet;
 
 pub const MAX_DESCRIPTION_BYTES: usize = 1024;
@@ -23,17 +23,25 @@ pub fn describe_stored(
         "stored feedback identity unavailable"
     );
     let store = ledger.store();
-    let current = store.sync_mode_snapshot()?;
-    let _ordinary = store.ordinary_mode_lease(&current.token)?;
-    ledger.complete_store()?;
+    let current = store
+        .sync_mode_snapshot()
+        .map_err(|_| anyhow!("stored feedback mode unavailable"))?;
+    let _ordinary = store
+        .ordinary_mode_lease(&current.token)
+        .map_err(|_| anyhow!("stored feedback ordinary custody unavailable"))?;
+    ledger
+        .complete_store()
+        .map_err(|_| anyhow!("stored feedback store incomplete"))?;
     let identity = conversation.to_string();
-    let snapshot = store.snapshot_heads_matching(&[Namespace::Conversation], MAX_ITEMS, |e| {
-        let payload = &e.payload["record"];
-        e.record_id == conversation
-            || e.record_id == fact
-            || payload["conversation"].as_str() == Some(&identity)
-            || payload["acknowledgment"]["conversation"].as_str() == Some(&identity)
-    })?;
+    let snapshot = store
+        .snapshot_heads_matching(&[Namespace::Conversation], MAX_ITEMS, |e| {
+            let payload = &e.payload["record"];
+            e.record_id == conversation
+                || e.record_id == fact
+                || payload["conversation"].as_str() == Some(&identity)
+                || payload["acknowledgment"]["conversation"].as_str() == Some(&identity)
+        })
+        .map_err(|_| anyhow!("stored feedback snapshot unavailable"))?;
 
     // inspect_snapshot skips tombstones and trusts the snapshot selection. Check
     // every selected head first, including malformed/foreign explicit IDs and
@@ -48,7 +56,9 @@ pub fn describe_stored(
             seen.insert((envelope.namespace, envelope.record_id)),
             "conflicted stored feedback history"
         );
-        let owner = match Ledger::decode(envelope)? {
+        let owner = match Ledger::decode(envelope)
+            .map_err(|_| anyhow!("invalid stored feedback record"))?
+        {
             Record::Root(root) => root.id,
             Record::Turn(turn) => turn.conversation,
             Record::OutcomeFact(fact) => fact.conversation,
@@ -59,7 +69,8 @@ pub fn describe_stored(
         };
         ensure!(owner == conversation, "foreign stored feedback record");
     }
-    let records = Ledger::inspect_snapshot(conversation, false, &snapshot)?;
+    let records = Ledger::inspect_snapshot(conversation, false, &snapshot)
+        .map_err(|_| anyhow!("invalid stored feedback chronology"))?;
     let selected = records
         .iter()
         .find_map(|record| match record {

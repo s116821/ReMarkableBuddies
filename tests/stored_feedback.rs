@@ -262,6 +262,21 @@ fn explicit_fact_id_retains_a_valid_but_foreign_payload_for_refusal() {
 }
 
 #[test]
+fn malformed_stored_values_do_not_leak_through_refusal_diagnostics() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    let (ledger, turn, fact) = seed(&store, Outcome::Failed, AttemptReason::ProviderFailure);
+    edit(&store, &head(&store, fact.id), |e| {
+        e.payload["record_kind"] = json!(SECRET);
+    });
+    let before = fixture.files();
+    let error = describe_stored(&ledger, turn.conversation, fact.id).unwrap_err();
+    assert_eq!(error.to_string(), "invalid stored feedback record");
+    assert!(!format!("{error:?}").contains("SECRET-CANARY"));
+    assert_eq!(fixture.files(), before);
+}
+
+#[test]
 fn all_heads_of_matching_records_include_foreign_and_null_tombstone_siblings() {
     for sibling in 0..3 {
         let fixture = Fixture::new();
@@ -306,7 +321,11 @@ fn all_heads_of_matching_records_include_foreign_and_null_tombstone_siblings() {
 
 #[test]
 fn completed_and_selected_schema_records_are_never_ordinary_successes() {
-    for (schema, outcome) in [(1, "Completed"), (2, "Completed"), (2, "Failed")] {
+    for (schema, outcome) in [
+        (1, Outcome::Completed),
+        (2, Outcome::Completed),
+        (2, Outcome::Failed),
+    ] {
         let fixture = Fixture::new();
         let store = fixture.open();
         let (ledger, turn, fact) = seed(&store, Outcome::Failed, AttemptReason::ProviderFailure);
@@ -315,7 +334,22 @@ fn completed_and_selected_schema_records_are_never_ordinary_successes() {
             e.payload["record"]["outcome"] = json!(outcome);
         });
         let before = fixture.files();
-        assert!(describe_stored(&ledger, turn.conversation, fact.id).is_err());
+        if schema == 1 {
+            // Typed serde serialization above uses canonical kebab-case. The
+            // actual public inspector must reach the domain completion guard,
+            // rather than fail parsing an invented enum spelling.
+            let domain = ledger.inspect(turn.conversation, false).unwrap_err();
+            assert!(domain.to_string().contains("invalid attempt outcome fact"));
+        }
+        let error = describe_stored(&ledger, turn.conversation, fact.id).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            if schema == 1 {
+                "invalid stored feedback record"
+            } else {
+                "unsupported stored feedback history"
+            }
+        );
         assert_eq!(fixture.files(), before);
     }
 }
@@ -469,9 +503,18 @@ fn cumulative_metadata_limit_refuses_without_truncating_feedback_context() {
         store.commit(vec![extra], BTreeMap::new()).unwrap();
     }
     let before = fixture.files();
-    let error = describe_stored(&ledger, turn.conversation, fact.id).unwrap_err();
-    assert!(error
+    let identity = turn.conversation.to_string();
+    let underlying = store
+        .snapshot_heads_matching(&[Namespace::Conversation], MAX_ITEMS, |e| {
+            e.record_id == turn.conversation
+                || e.payload["record"]["conversation"].as_str() == Some(&identity)
+                || e.payload["record"]["acknowledgment"]["conversation"].as_str() == Some(&identity)
+        })
+        .unwrap_err();
+    assert!(underlying
         .to_string()
         .contains("inspection exceeds metadata byte bound"));
+    let error = describe_stored(&ledger, turn.conversation, fact.id).unwrap_err();
+    assert_eq!(error.to_string(), "stored feedback snapshot unavailable");
     assert_eq!(fixture.files(), before);
 }
