@@ -21,7 +21,7 @@ fn owned_input_guard_reaches_request_and_reconnect_failure_classification() {
     let mut input = RequestInput::scripted(vec![
         Ok(vec![Interaction::Invalidated]),
         Ok(vec![]),
-        Err(anyhow!("lost real input observer")),
+        Err(anyhow::anyhow!("lost real input observer")),
     ]);
     let canceled = request::execute(
         &mut runtime,
