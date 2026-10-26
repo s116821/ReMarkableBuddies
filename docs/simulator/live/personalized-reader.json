@@ -1,0 +1,20 @@
+{
+  "name": "live-personalized-reader",
+  "llm": {"mode": "live", "max_calls": 3, "timeout_seconds": 90},
+  "personalization": {
+    "schema_version": 1,
+    "enabled": true,
+    "text": "Use exactly two short explanatory sentences.\r\nPrefer Markdown and Greek symbols: α and µ, only where permitted by the fixed output contract."
+  },
+  "pages": [{"image": "../../validation/images/rem22/live-input-2.png"}, {}],
+  "iterations": [{}],
+  "output": "../../../target/simulator/live-personalized-reader",
+  "expect": {
+    "model_calls": 3,
+    "active_page": 1,
+    "unchanged_pages": [0],
+    "text": {"0": ""},
+    "text_contains": {"1": ["flat plate", "A:"]},
+    "operations": {"next": 1, "previous": 0, "text": 2, "body": 1}
+  }
+}

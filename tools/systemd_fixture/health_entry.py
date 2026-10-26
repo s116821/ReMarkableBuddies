@@ -61,7 +61,8 @@ def main():
             wrong_owner = run(settings={**valid, "WATCHDOG_PID": "0"})
             assert wrong_owner.returncode != 0 and "Service watchdog owner mismatch" in wrong_owner.stderr
             for arguments in [
-                ("--writer-note",), ("--configuration-operation", "inspect"),
+                ("--writer-note",), ("--handwriting",),
+                ("--configuration-operation", "inspect"),
                 ("--simulate", str(root / "absent-scenario.json")),
             ]:
                 separate = run(arguments, invalid)

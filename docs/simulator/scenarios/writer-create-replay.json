@@ -1,0 +1,89 @@
+{
+  "name": "writer-create-replay",
+  "mode": "writer",
+  "conversation": "10000000-0000-4000-8000-000000000001",
+  "replies": [
+    "# Study\n\nx = 7 (page 1)."
+  ],
+  "steps": [
+    {
+      "step": "run",
+      "request": {
+        "command": "generate-and-export",
+        "outer_operation": "10000000-0000-4000-8000-000000000004",
+        "generation": {
+          "command": "generate",
+          "conversation": "10000000-0000-4000-8000-000000000001",
+          "operation": "10000000-0000-4000-8000-000000000002",
+          "request": "Preserve x = 7 and cite page 1.",
+          "document": {
+            "document": "10000000-0000-4000-8000-000000000003",
+            "format": "notebook",
+            "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "extractor_revision": "fixture-v1",
+            "units": [
+              {
+                "page": 1,
+                "section": null,
+                "text": "x = 7"
+              }
+            ]
+          },
+          "selection": {"scope":"supplied-notebook"},
+          "guidance": null
+        },
+        "correlation": "10000000-0000-4000-8000-000000000005",
+        "effect_operation": "10000000-0000-4000-8000-000000000006"
+      },
+      "fault": null
+    },
+    {
+      "step": "restart"
+    },
+    {
+      "step": "run",
+      "request": {
+        "command": "generate-and-export",
+        "outer_operation": "10000000-0000-4000-8000-000000000004",
+        "generation": {
+          "command": "generate",
+          "conversation": "10000000-0000-4000-8000-000000000001",
+          "operation": "10000000-0000-4000-8000-000000000002",
+          "request": "Preserve x = 7 and cite page 1.",
+          "document": {
+            "document": "10000000-0000-4000-8000-000000000003",
+            "format": "notebook",
+            "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "extractor_revision": "fixture-v1",
+            "units": [
+              {
+                "page": 1,
+                "section": null,
+                "text": "x = 7"
+              }
+            ]
+          },
+          "selection": {"scope":"supplied-notebook"},
+          "guidance": null
+        },
+        "correlation": "10000000-0000-4000-8000-000000000005",
+        "effect_operation": "10000000-0000-4000-8000-000000000006"
+      },
+      "fault": null
+    }
+  ],
+  "output": "../output/writer-create-replay",
+  "expect": {
+    "statuses": [
+      "exported",
+      "historical"
+    ],
+    "model_calls": 1,
+    "destination_calls": 3,
+    "writes": 1,
+    "note_contains": [
+      "x = 7",
+      "page 1"
+    ]
+  }
+}

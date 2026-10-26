@@ -126,5 +126,43 @@ cancellation; every returned reply is checked again before publication.
 Source basis: implementation and actual local loopback HTTP/Store tests. These
 tests use invented content/credentials and establish transport/persistence
 behavior, not live-model quality, original extraction or native qualification.
-The central `generate-writer-drafts` change remains active until its required
-verification and paired delivery are complete.
+The supplied-text generation/refinement increment is delivered. Joined export
+is described below; full native Writer acceptance remains separate.
+
+## Joined export commands
+
+The same `--writer-note` stdin entrypoint also accepts:
+
+- `generate-and-export`: `outer_operation`, nested `generation` (the complete
+  existing `generate` request), stable `correlation`, new `effect_operation`.
+- `refine-and-export`: the same outer identities and nested `refinement`
+  (the complete existing `refine` request).
+- `export-draft`: `outer_operation`, `conversation`, selected `draft`,
+  `correlation`, `effect_operation`; no model call.
+- `reconcile-export`: `conversation`, `correlation`; reads only the previously
+  known destination note ID and never creates or updates it.
+
+Configure existing model settings when generation/refinement is required and set
+`MEM_API_KEY`. The production Mem destination is fixed; no origin override is
+accepted. Required credentials resolve before opening the Store. Legacy commands
+retain their report shape and behavior, including local-only `prepare-export`.
+
+Use distinct nonnil UUIDs. Deliberate re-export keeps the correlation and uses new
+outer/model/effect identities as applicable. Joined reports include optional
+generation/export reports and actual `destination_polled`, `write_polled`,
+`no_send_recorded` and `selection_changed` observations.
+
+Fresh outer admission permits only this invocation to continue. Replay returns
+history or reconciliation-required without model/destination polling. An
+interruption after generation requires a new explicit `export-draft`; a saved
+`generated` report alone cannot grant automatic send authority. Exact selected
+root/draft/source revisions are guarded into export admission. Later checks use
+the revisions that admission actually published.
+
+Cancellation before the first write poll suppresses the write. Zero observed
+write polls and successful durable no-send recording are separate facts: deletion
+or conflict can prevent recording. After a write was polled, a lost response
+requires explicit known-ID reconciliation, never automatic resend. Writer/export
+owners span the joined invocation and contend with standalone calls. Existing
+model/export cooperative budgets remain 95/45 seconds with transport bounds;
+these are not a hard outer deadline on synchronous Store work.

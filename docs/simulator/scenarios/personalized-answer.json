@@ -1,0 +1,24 @@
+{
+  "name": "personalized-answer",
+  "personalization": {
+    "schema_version": 1,
+    "enabled": true,
+    "text": "Explain briefly.\r\nKeep units clear: µ and α."
+  },
+  "pages": [{"image": "../../validation/images/rem13/final-input.png"}, {}],
+  "iterations": [{}],
+  "replies": [
+    {"text": "QUESTION: G unc.?\nQUESTION_BOX: 130,35,200,50\nSELECTION_CENTER: 385,230\n---\nANSWER: Original proposal."},
+    {"text": "TRANSCRIPTION: G unc.?"},
+    {"text": "ANSWER: The uncertainty describes the precision of the gravity measurement."}
+  ],
+  "output": "../../../target/simulator/personalized-answer",
+  "expect": {
+    "model_calls": 3,
+    "active_page": 1,
+    "unchanged_pages": [0],
+    "text": {"0": ""},
+    "text_contains": {"1": ["Q: G unc.?", "The uncertainty describes the precision of the gravity measurement."]},
+    "operations": {"next": 1, "previous": 0, "text": 2, "body": 1}
+  }
+}

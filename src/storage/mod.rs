@@ -112,6 +112,7 @@ struct Inner {
     legacy_sync_handles: usize,
     mode_handles: usize,
     legacy_publisher_handles: usize,
+    local_domain_handles: usize,
 }
 pub struct Store {
     pub paths: StorePaths,
@@ -148,6 +149,18 @@ pub(crate) struct LegacyPublisherLease {
     store: Arc<Store>,
     _legacy: LegacySyncLease,
 }
+/// Pins a local-only domain against existing and future legacy publishers.
+pub(crate) struct LocalDomainLease {
+    store: Arc<Store>,
+    _legacy: LegacySyncLease,
+}
+impl Drop for LocalDomainLease {
+    fn drop(&mut self) {
+        if let Ok(mut inner) = self.store.inner.lock() {
+            inner.local_domain_handles -= 1;
+        }
+    }
+}
 impl Drop for LegacyPublisherLease {
     fn drop(&mut self) {
         if let Ok(mut inner) = self.store.inner.lock() {
@@ -169,6 +182,25 @@ impl Store {
         action(&self.paths.data, self.actor_id)
     }
 
+    pub(crate) fn local_domain_lease(self: &Arc<Self>) -> Result<LocalDomainLease> {
+        let legacy = self.legacy_sync_lease()?;
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        ensure!(
+            inner.legacy_publisher_handles == 0,
+            "legacy publisher is active"
+        );
+        inner.local_domain_handles = inner
+            .local_domain_handles
+            .checked_add(1)
+            .context("local domain lease overflow")?;
+        Ok(LocalDomainLease {
+            store: self.clone(),
+            _legacy: legacy,
+        })
+    }
     pub(crate) fn legacy_publisher_lease(self: &Arc<Self>) -> Result<LegacyPublisherLease> {
         // Preserve the domain lease while adding publisher-only lifetime accounting.
         let legacy = self.legacy_sync_lease()?;
@@ -179,6 +211,10 @@ impl Store {
         ensure!(
             sync::mode::load(self)?.is_none(),
             "explicit sync mode requires its matched worker"
+        );
+        ensure!(
+            inner.local_domain_handles == 0,
+            "local-only domain is active"
         );
         inner.legacy_publisher_handles = inner
             .legacy_publisher_handles
@@ -288,6 +324,7 @@ impl Store {
                 legacy_sync_handles: 0,
                 mode_handles: 0,
                 legacy_publisher_handles: 0,
+                local_domain_handles: 0,
             }),
             wake: Mutex::new(None),
             export_active: std::sync::atomic::AtomicBool::new(false),
@@ -701,6 +738,15 @@ impl Store {
         let (manifest, objects) = Self::ordinary_transaction(records, media)?;
         self.publish(manifest, objects, true)
     }
+    /// Existing atomic publication disposition; no new persisted format or grant.
+    pub(crate) fn commit_with_disposition(
+        &self,
+        records: Vec<Envelope>,
+        media: BTreeMap<String, Vec<u8>>,
+    ) -> Result<(Uuid, bool)> {
+        let (manifest, objects) = Self::ordinary_transaction(records, media)?;
+        self.publish_with_disposition(manifest, objects, true)
+    }
     fn ordinary_transaction(
         records: Vec<Envelope>,
         media: BTreeMap<String, Vec<u8>>,
@@ -752,6 +798,15 @@ impl Store {
         objects: BTreeMap<String, Vec<u8>>,
         local: bool,
     ) -> Result<Uuid> {
+        self.publish_with_disposition(manifest, objects, local)
+            .map(|(receipt, _)| receipt)
+    }
+    fn publish_with_disposition(
+        &self,
+        manifest: Manifest,
+        objects: BTreeMap<String, Vec<u8>>,
+        local: bool,
+    ) -> Result<(Uuid, bool)> {
         manifest.validate()?;
         let mut inner = self
             .inner
@@ -762,7 +817,7 @@ impl Store {
         if changed {
             self.notify_commit();
         }
-        Ok(receipt)
+        Ok((receipt, changed))
     }
     // Callers hold exactly one inner mutex guard. Legacy publish keeps its old
     // admission/order; conditional publication validates its extra evidence first.

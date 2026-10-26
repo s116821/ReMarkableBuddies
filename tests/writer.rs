@@ -935,3 +935,64 @@ fn changed_selected_draft_before_preparation_cannot_guard_new_text_and_send_old_
         "stale cached draft must not dispatch a second provider request"
     );
 }
+
+#[test]
+fn joined_command_requires_destination_credentials_before_store_or_model() {
+    use remarkable_reader_buddy::writer_flow;
+    use std::process::{Command, Stdio};
+    let local = Local::new();
+    let id = Uuid::new_v4();
+    let api = Api::new(vec![]);
+    let config = remarkable_reader_buddy::config::Config {
+        model: Some("fixture-model".into()),
+        paths: StorePaths {
+            data: local.0.join("data"),
+            cache: local.0.join("cache"),
+            credentials: local.0.join("credentials"),
+        },
+        ..Default::default()
+    };
+    let path = local.0.join("config.json");
+    std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+    for request in [
+        writer_flow::Request::GenerateAndExport {
+            outer_operation: Uuid::new_v4(),
+            generation: request(id),
+            correlation: Uuid::new_v4(),
+            effect_operation: Uuid::new_v4(),
+        },
+        writer_flow::Request::ExportDraft {
+            outer_operation: Uuid::new_v4(),
+            conversation: id,
+            draft: Uuid::new_v4(),
+            correlation: Uuid::new_v4(),
+            effect_operation: Uuid::new_v4(),
+        },
+    ] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_reader-buddy"))
+            .arg("--writer-note")
+            .env("REMARKABLE_BUDDIES_CONFIG", &path)
+            .env("OPENAI_API_KEY", "fixture-key")
+            .env("OPENAI_BASE_URL", &api.origin)
+            .env_remove("MEM_API_KEY")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(&serde_json::to_vec(&request).unwrap())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["failure"], "missing-credentials");
+        assert_eq!(report["status"], "refused");
+        assert!(!local.0.join("data").exists());
+        assert_eq!(api.count(), 0);
+    }
+}

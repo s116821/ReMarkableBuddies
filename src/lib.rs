@@ -5,6 +5,7 @@ pub mod conversation;
 pub mod conversation_feedback;
 pub mod conversation_layout;
 pub mod device;
+pub mod handwriting;
 pub mod llm;
 mod measurement;
 pub mod memory;
@@ -17,6 +18,7 @@ pub mod storage;
 pub mod util;
 pub mod workflow;
 pub mod writer;
+pub mod writer_flow;
 
 // Re-export commonly used types
 pub use analysis::BoundingBox;

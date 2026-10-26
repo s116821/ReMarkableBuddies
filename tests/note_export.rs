@@ -1050,3 +1050,119 @@ async fn cancellation_before_first_write_poll_is_no_send_and_can_be_deliberately
     );
     assert_eq!(destination.0.lock().unwrap().len(), 1);
 }
+
+/// Both actual HTTP adapters participate in one production Writer flow.
+#[test]
+fn joined_writer_actual_model_and_mem_http_create_restart_refine_update() {
+    use remarkable_reader_buddy::{
+        config::Personalization,
+        conversation::TextScope,
+        retrieval::{NormalizedDocument, SourceFormat, SourceUnit},
+        writer, writer_flow, OpenAI,
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let model_worker = thread::spawn(move || {
+        for body in [
+            "# Study\n\nx = 7 (page 1).",
+            "# Study\n\nx = 7 (page 1). Refined without a deadline.",
+        ] {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let (method, path, payload) = request(&mut socket);
+            assert_eq!(method, "POST");
+            assert_eq!(path, "/v1/chat/completions");
+            assert!(payload["messages"].is_array());
+            let reply = json!({"choices":[{"message":{"content":body}}]}).to_string();
+            write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",reply.len(),reply).unwrap();
+        }
+    });
+    let api = Api::new();
+    let local = LocalStore::new();
+    let (ledger, id) = local.ledger();
+    let correlation = Uuid::new_v4();
+    let generation = writer_flow::Request::GenerateAndExport {
+        outer_operation: Uuid::new_v4(),
+        correlation,
+        effect_operation: Uuid::new_v4(),
+        generation: writer::Request::Generate {
+            conversation: id,
+            operation: Uuid::new_v4(),
+            request: "Preserve the equation and cite page 1.".into(),
+            document: NormalizedDocument {
+                document: Uuid::new_v4(),
+                format: SourceFormat::Notebook,
+                source_sha256: "a".repeat(64),
+                extractor_revision: "loopback-v1".into(),
+                units: vec![SourceUnit {
+                    page: Some(1),
+                    section: None,
+                    text: "x = 7".into(),
+                }],
+            },
+            selection: TextScope::SuppliedNotebook,
+            guidance: None,
+        },
+    };
+    let mut engine = OpenAI::new("fixture-model".into(), "fixture-token".into(), Some(origin))
+        .with_timeout(Duration::from_secs(5));
+    let preference = Personalization::default().snapshot().unwrap();
+    let (_tx, rx) = watch::channel(false);
+    let first = writer_flow::run(
+        &ledger,
+        &mut engine,
+        &api.client(),
+        &generation,
+        &preference,
+        rx,
+    );
+    assert_eq!(first.status, writer_flow::Status::Exported);
+    let first_id = first.export.unwrap().native_note.unwrap();
+    let draft = first.draft.unwrap();
+    drop(ledger);
+    let reopened = Ledger::new(local.open());
+    let refinement = writer_flow::Request::RefineAndExport {
+        outer_operation: Uuid::new_v4(),
+        correlation,
+        effect_operation: Uuid::new_v4(),
+        refinement: writer::Request::Refine {
+            conversation: id,
+            operation: Uuid::new_v4(),
+            request: "Explicitly say no deadline.".into(),
+            draft,
+        },
+    };
+    let (_tx, rx) = watch::channel(false);
+    let second = writer_flow::run(
+        &reopened,
+        &mut engine,
+        &api.client(),
+        &refinement,
+        &preference,
+        rx,
+    );
+    assert_eq!(second.status, writer_flow::Status::Exported);
+    assert_eq!(
+        second.export.unwrap().native_note.as_deref(),
+        Some(first_id.as_str())
+    );
+    assert!(second.observation.write_polled);
+    assert_eq!(api.count("POST"), 1);
+    assert_eq!(api.count("PATCH"), 1);
+    assert_eq!(api.lists(), 1);
+    let before = api.state.lock().unwrap().requests.len();
+    let (_tx, rx) = watch::channel(false);
+    let replay = writer_flow::run(
+        &reopened,
+        &mut engine,
+        &api.client(),
+        &refinement,
+        &preference,
+        rx,
+    );
+    assert_eq!(replay.status, writer_flow::Status::Historical);
+    assert_eq!(api.state.lock().unwrap().requests.len(), before);
+    model_worker.join().unwrap();
+}

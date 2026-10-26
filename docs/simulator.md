@@ -46,6 +46,7 @@ based; operation call numbers are one based and span the whole scenario.
 | Field | Meaning |
 |---|---|
 | `llm` | Defaults to scripted/offline. Explicit live configuration is documented in local development setup. |
+| `personalization` | Optional version1 configured preference, default disabled/empty. Only verified ordinary Reader answer generation receives it; recognition and historical evidence remain separate. No running reload or native qualification is modeled. |
 | `name`, `mode` | Nonempty name; currently only `reader` executes. |
 | `pages` | Ordered pages. `{}` is blank. `image` loads a 768x1024 PNG; optional `text` and `strokes` add deterministic text or existing JSON pen paths. |
 | `active_page` | Starting page, default zero. |
@@ -147,13 +148,23 @@ limitation; it does not pretend page identity became native or reliable.
 
 ## Later product coverage
 
-`writer` and `combined` modes fail explicitly today. Production Writer and shared
-gesture arbitration do not exist yet, and native insertion is also deferred. Do
-not treat this Reader suite as full-platform acceptance. REM-23 must add real Writer
-and combined scenarios through these interfaces; REM-25 must add insertion and
-native-document preservation cases; REM-17 must validate final gesture routing,
-combined workflows and remaining 1.0 acceptance on simulator and real hardware.
-REM-28 provisions local credentials for later explicitly selected live-model work.
+`--simulate` accepts a separate strict `mode: "writer"` supplied-text host schema.
+It calls the production joined Writer/export flow and Store with scripted model
+replies and destination behavior, without credentials or network. Start with
+[`writer-create-replay.json`](simulator/scenarios/writer-create-replay.json).
+Steps declare `run` (a full joined request and optional phase fault), `restart`,
+or `lose-write-acknowledgment`. Phase faults support cancellation, root deletion
+and commit acknowledgment loss. Assertions check ordered statuses, model,
+destination and write counts, and note substrings. Reports retain draft/source
+records, export content and ordered phase/destination traces. Assertion failures
+are saved before returning failure. Writer reports contain no invented tablet
+PNGs, navigation, drawing or native-completion claims.
+
+Reader scenarios retain their existing schema and artifacts. Combined/native
+Writer routing, physical-notebook/OCR coverage, gestures, insertion and on-tablet
+proposal rendering remain unsupported by this host schema. Full integrated
+acceptance requires its own production paths and evidence. REM-28 credentials
+remain only for explicitly selected live-model work.
 
 
 ## Highlight recognition checks

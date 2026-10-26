@@ -16,6 +16,9 @@ pub struct Args {
     /// Fixed installed stock recovery; never starts ordinary application services
     #[arg(long, exclusive = true)]
     resident_stock_recovery: bool,
+    /// Explicit offline confirmed handwriting records; strict bounded JSON stdin
+    #[arg(long, exclusive = true)]
+    handwriting: bool,
     /// Deliberate saved research policy; no runtime/provider activation
     #[arg(long, value_enum, conflicts_with_all = ["inspect_conversations","conversation_operation","conversation_input","inspect_source_cache","source_cache_operation","source_cache_input","credential_reference_operation","credential_reference_input","model_credential_operation","model_credential_input","memory_settings_operation","memory_settings_input","ordinary_export_operation","ordinary_export_input","model_settings_operation","model_settings_input","restore_operation","restore_input","basic_settings_operation","basic_settings_input","configuration_operation","simulate","inspect_owned_data","api_key","model","base_url","trigger_corner","log_level","debug_dump","memory_operation","memory_input","sync_mode_operation","sync_mode_input","archive_operation","archive_input","personalization_operation","export_note"])]
     research_settings_operation: Option<config::research_settings::Operation>,
@@ -164,8 +167,18 @@ fn main() -> Result<()> {
     if args.resident_stock_recovery {
         return stock_recovery();
     }
+    if args.handwriting {
+        let report = remarkable_reader_buddy::handwriting::command::run(
+            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+            &mut std::io::stdin().lock(),
+        );
+        report
+            .write_to(&mut std::io::stdout().lock())
+            .map_err(|_| anyhow::anyhow!("output-failure"))?;
+        return Ok(());
+    }
     if args.writer_note {
-        let report = remarkable_reader_buddy::writer::command::run(
+        let report = remarkable_reader_buddy::writer::command::dispatch(
             std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
             &mut std::io::stdin().lock(),
         );
@@ -459,10 +472,11 @@ fn main() -> Result<()> {
     dotenv().ok();
     if let Some(path) = args.simulate {
         logging(args.log_level, std::env::var("RUST_LOG").ok().as_deref()).init();
-        remarkable_reader_buddy::simulator::run_file(&path)?;
+        remarkable_reader_buddy::simulator::run_any_file(&path)?;
         return Ok(());
     }
     let config = Config::load(std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into))?;
+    remarkable_reader_buddy::memory::context::admit_ordinary(&config.memory)?;
     let effective = config::resolve(
         &config,
         Overrides {
@@ -498,6 +512,20 @@ fn main() -> Result<()> {
         effective.key.into_string(),
         effective.base_url,
     );
+    let reader_memory = if config.memory.enabled {
+        Some(Arc::new(
+            remarkable_reader_buddy::memory::LocalMemory::new_local(
+                store.clone(),
+                config
+                    .memory
+                    .profile
+                    .ok_or_else(|| anyhow::anyhow!("memory profile absent"))?,
+            )?,
+        ))
+    } else {
+        None
+    };
+    let personalization = config.personalization_snapshot()?;
     let workflow = Workflow::new(false, effective.trigger_corner, effective.debug_dump)?;
     sleep(Duration::from_millis(1000));
     let _sync_worker = Worker::google(store.clone(), config.sync)?;
@@ -514,6 +542,8 @@ fn main() -> Result<()> {
         llm,
         remarkable_reader_buddy::conversation::Ledger::new(store.clone()),
     );
+    orchestrator.set_personalization(personalization);
+    orchestrator.set_subject_memory(reader_memory);
     info!("Initialization complete; starting main loop");
     orchestrator.run_loop()
 }
@@ -546,6 +576,21 @@ mod tests {
     use super::*;
     use clap::CommandFactory;
     use log::{Level, LevelFilter, Log, Metadata};
+    #[test]
+    fn handwriting_is_exclusive_before_any_runtime() {
+        assert!(Args::try_parse_from(["reader-buddy", "--handwriting"]).is_ok());
+        for extra in [
+            vec!["--resident-stock-recovery"],
+            vec!["--writer-note"],
+            vec!["--model", "unused"],
+            vec!["--inspect-owned-data"],
+            vec!["--research-settings-operation", "inspect"],
+        ] {
+            let mut argv = vec!["reader-buddy", "--handwriting"];
+            argv.extend(extra);
+            assert!(Args::try_parse_from(argv).is_err());
+        }
+    }
 
     #[test]
     fn stock_recovery_is_exclusive_before_all_other_dispatch() {
@@ -555,6 +600,7 @@ mod tests {
                 .resident_stock_recovery
         );
         for extra in [
+            vec!["--handwriting"],
             vec!["--writer-note"],
             vec!["--simulate", "scenario.json"],
             vec!["--inspect-owned-data"],
@@ -747,6 +793,7 @@ mod tests {
                 "credential-reference-operation",
                 "debug-dump",
                 "export-note",
+                "handwriting",
                 "inspect-conversations",
                 "inspect-owned-data",
                 "inspect-source-cache",
@@ -779,6 +826,7 @@ mod tests {
         );
         let args = Args::try_parse_from(["reader-buddy"]).unwrap();
         assert!(!args.resident_stock_recovery);
+        assert!(!args.handwriting);
         assert!(!args.inspect_conversations);
         assert!(args.conversation_operation.is_none());
         assert!(args.conversation_input.is_none());
