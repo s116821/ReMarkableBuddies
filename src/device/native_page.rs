@@ -220,8 +220,6 @@ pub(crate) struct NavigationMetadata {
     // The independently persisted index can lag cPages during a transition.
     // Such a sample is pending, never a stable current/destination owner.
     pub index_matches: bool,
-    // Persisted gesture configuration only, never active-page authority.
-    pub orientation: remarkable_open_sdk::navigation::gesture::Orientation,
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -312,11 +310,6 @@ fn navigation_metadata(
         },
         order,
         index_matches: index == current_index,
-        orientation: match content["customZoomOrientation"].as_str() {
-            Some("portrait") => remarkable_open_sdk::navigation::gesture::Orientation::Portrait,
-            // Do not guess handedness from the generic persisted landscape label.
-            _ => remarkable_open_sdk::navigation::gesture::Orientation::Unknown,
-        },
     })
 }
 
@@ -498,33 +491,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             [PAGE, note, third]
         );
-        assert_eq!(
-            parsed.orientation,
-            remarkable_open_sdk::navigation::gesture::Orientation::Unknown
-        );
-        for (label, expected) in [
-            (
-                json!("portrait"),
-                remarkable_open_sdk::navigation::gesture::Orientation::Portrait,
-            ),
-            (
-                json!("landscape"),
-                remarkable_open_sdk::navigation::gesture::Orientation::Unknown,
-            ),
-            (
-                json!(null),
-                remarkable_open_sdk::navigation::gesture::Orientation::Unknown,
-            ),
-        ] {
-            let mut oriented = content.clone();
-            oriented["customZoomOrientation"] = label;
-            assert_eq!(
-                navigation_metadata(DOC.into(), "5:6".into(), &meta, &oriented)
-                    .unwrap()
-                    .orientation,
-                expected
-            );
-        }
         assert_eq!(parsed.order[1].redirect, None);
         assert!(parsed.index_matches);
         assert!(

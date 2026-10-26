@@ -11,7 +11,7 @@
       "properties": {
         "envelope_version": {"const": 1},
         "namespace": {"enum": ["conversation", "source", "export-association", "subject-memory", "handwriting"]},
-        "domain_schema_version": {"const": 1},
+        "domain_schema_version": {"enum": [1, 2]},
         "record_id": {"type": "string", "format": "uuid"},
         "revision_id": {"type": "string", "format": "uuid"},
         "operation_id": {"type": "string", "format": "uuid"},
@@ -20,7 +20,8 @@
         "kind": {"enum": ["value", "tombstone"]},
         "payload": {},
         "media_descriptors": {"type": "array", "maxItems": 4096, "items": {"type": "object", "additionalProperties": false, "required": ["sha256", "bytes", "media_type"], "properties": {"sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "bytes": {"type": "integer", "minimum": 0, "maximum": 268435456}, "media_type": {"type": "string", "minLength": 1, "maxLength": 128}}}}
-      }
+      },
+      "allOf": [{"if": {"properties": {"domain_schema_version": {"const": 2}}}, "then": {"properties": {"namespace": {"enum": ["conversation", "source", "export-association"]}}}}]
     },
     "config": {
       "$id": "urn:remarkable-buddies:config:v1",

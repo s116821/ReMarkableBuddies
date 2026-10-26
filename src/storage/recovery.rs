@@ -1,5 +1,32 @@
 use super::*;
 
+#[path = "ordinary_export.rs"]
+pub(crate) mod ordinary_export;
+#[path = "ordinary_restore.rs"]
+pub(crate) mod ordinary_restore;
+
+/// Distinguish a proved prepublication conflict from a possible atomic publication.
+pub(crate) enum ConfigPublication {
+    Verified(String),
+    Conflict,
+    Refused,
+    Unknown,
+}
+#[cfg(test)]
+pub(crate) enum ConfigFault {
+    AtomicCall,
+    AfterPublication,
+    ChangedReadback,
+}
+#[derive(Debug)]
+struct ConfigRevisionChanged;
+impl std::fmt::Display for ConfigRevisionChanged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("configuration revision changed")
+    }
+}
+impl std::error::Error for ConfigRevisionChanged {}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Backup {
@@ -24,6 +51,23 @@ pub struct BackupInspection {
     pub selection_receipts: usize,
     pub complete_media: bool,
     pub configuration_included: bool,
+}
+
+/// Verified historical archive membership for domain-owned validation.
+/// No live token or current group/device/native authority is carried here.
+pub struct ArchivedSelectedSnapshot {
+    pub origin_actor: Uuid,
+    pub origin_generation: Uuid,
+    /// Original raw metadata identity, including noncanonical JSON bytes.
+    pub head_reference: ObjectRef,
+    pub transaction: selection::SelectionTransaction,
+    /// Order matches transaction.selected.records; retain those exact ObjectRefs.
+    pub selected_records: Vec<Envelope>,
+    /// Manifest order, then each retained manifest's record reference order.
+    pub retained_records: Vec<Envelope>,
+    pub media: BTreeMap<String, files::Source>,
+    /// Completeness of the entire archive, not only this requested scope.
+    pub complete_media: bool,
 }
 
 impl Backup {
@@ -171,8 +215,26 @@ impl Store {
             inner.index.unavailable == 0,
             "unavailable commits prevent complete export"
         );
-        let root = self.generation(inner.generation);
         files::directory(&destination.join("objects"))?;
+        let backup = self.export_backup_locked(&inner)?;
+        let backup_bytes = serde_json::to_vec(&backup)?;
+        ensure!(
+            backup_bytes.len() <= MAX_METADATA,
+            "backup metadata exceeds supported restore bound"
+        );
+        self.export_write_locked(
+            &inner,
+            destination,
+            &backup,
+            &backup_bytes,
+            &mut false,
+            files::atomic,
+        )?;
+        Ok(backup.complete_media)
+    }
+    // Shared collection/serialization and publication path; old caller order stays intact.
+    fn export_backup_locked(&self, inner: &Inner) -> Result<Backup> {
+        let root = self.generation(inner.generation);
         selection::refuse_selected_maintenance(&root)?;
         let manifests: Vec<_> = inner.index.manifests.values().cloned().collect();
         let mut inventory = BTreeMap::new();
@@ -197,20 +259,26 @@ impl Store {
         } else {
             None
         };
-        let backup = Backup {
+        Ok(Backup {
             format: FORMAT,
             manifests,
             objects: inventory.values().cloned().collect(),
             complete_media,
             config_snapshot,
             selected_history: None,
-        };
-        let backup_bytes = serde_json::to_vec(&backup)?;
-        ensure!(
-            backup_bytes.len() <= MAX_METADATA,
-            "backup metadata exceeds supported restore bound"
-        );
-        for item in inventory.values() {
+        })
+    }
+    fn export_write_locked(
+        &self,
+        inner: &Inner,
+        destination: &Path,
+        backup: &Backup,
+        backup_bytes: &[u8],
+        attempted: &mut bool,
+        publish: impl FnOnce(&Path, &[u8]) -> Result<()>,
+    ) -> Result<()> {
+        let root = self.generation(inner.generation);
+        for item in &backup.objects {
             let path = root.join("objects").join(&item.sha256);
             files::safe_path(&path)?;
             files::copy_verified(
@@ -219,8 +287,9 @@ impl Store {
                 item,
             )?;
         }
-        files::atomic(&destination.join("backup.json"), &backup_bytes)?;
-        Ok(complete_media)
+        *attempted = true;
+        publish(&destination.join("backup.json"), backup_bytes)?;
+        Ok(())
     }
 
     /// Verify a complete format-1 or selected format-2 archive without opening a
@@ -233,6 +302,83 @@ impl Store {
         files::safe_path(source)?;
         let backup = Backup::read(source)?;
         backup.inspect(source)
+    }
+
+    /// Inspect one archived selection for strict domain-owned payload validation.
+    /// Validates the whole format-2 archive, including unrelated scopes, before
+    /// returning historical references. Absence is not an empty winning closure.
+    /// No Store is opened, no live token is minted, and restore remains disabled.
+    pub fn inspect_selected_backup(
+        source: &Path,
+        scope: &selection::SelectionScope,
+        limit: usize,
+    ) -> Result<Option<ArchivedSelectedSnapshot>> {
+        scope.validate()?;
+        ensure!(
+            (1..=MAX_ITEMS).contains(&limit),
+            "invalid archived snapshot bound"
+        );
+        files::safe_path(source)?;
+        let backup = Backup::read(source)?;
+        let report = backup.inspect(source)?;
+        let archive = backup
+            .selected_history
+            .as_ref()
+            .context("selected inspection requires a format-2 archive")?;
+        // Preserve verified raw metadata bytes; never derive head identity from
+        // reserializing a transaction, or treat its historical pins as live ones.
+        let validated = archive.validate(source)?;
+        for reference in &archive.heads {
+            let bytes = validated
+                .metadata
+                .get(&reference.sha256)
+                .context("verified archived head is absent")?;
+            let transaction: selection::SelectionTransaction = serde_json::from_slice(bytes)?;
+            if &transaction.scope != scope {
+                continue;
+            }
+            transaction.validate(limit)?;
+            let selected_records = Self::validate_objects(source, &transaction.selected)?
+                .into_iter()
+                .map(|(record, _)| record)
+                .collect();
+            let mut retained_records = Vec::new();
+            let mut media = BTreeMap::new();
+            for manifest in &transaction.retained {
+                retained_records.extend(
+                    Self::validate_objects(source, manifest)?
+                        .into_iter()
+                        .map(|(record, _)| record),
+                );
+            }
+            for manifest in std::iter::once(&transaction.selected).chain(&transaction.retained) {
+                for item in &manifest.media {
+                    if let Some(existing) = media.get(&item.sha256) {
+                        let existing: &files::Source = existing;
+                        ensure!(
+                            existing.reference() == *item,
+                            "conflicting archived media reference"
+                        );
+                    } else {
+                        media.insert(
+                            item.sha256.clone(),
+                            files::Source::open(&source.join("objects").join(&item.sha256), item)?,
+                        );
+                    }
+                }
+            }
+            return Ok(Some(ArchivedSelectedSnapshot {
+                origin_actor: archive.origin_actor,
+                origin_generation: archive.origin_generation,
+                head_reference: reference.clone(),
+                transaction,
+                selected_records,
+                retained_records,
+                media,
+                complete_media: report.complete_media,
+            }));
+        }
+        Ok(None)
     }
 
     /// Preserve selected history as non-authoritative evidence in format 2.
@@ -378,6 +524,25 @@ impl Store {
         );
         selection::refuse_selected_maintenance(&self.generation(inner.generation))?;
         let next = Uuid::new_v4();
+        self.restore_locked(&mut inner, source, backup, next, false, &mut false)
+    }
+    /// The existing staging/rebuild/CURRENT writer shared by both entrypoints.
+    fn restore_locked(
+        &self,
+        inner: &mut Inner,
+        source: &Path,
+        backup: Backup,
+        next: Uuid,
+        exclusive: bool,
+        activation_attempted: &mut bool,
+    ) -> Result<()> {
+        if exclusive {
+            let root = self.generation(next);
+            files::safe_path(&root)?;
+            // The old helper intentionally permits existing directories. This
+            // new admission reserves its own empty root atomically first.
+            fs::create_dir(&root)?;
+        }
         Self::create_generation(&self.paths.data, next)?;
         let next_root = self.generation(next);
         if let Some(config) = &backup.config_snapshot {
@@ -419,11 +584,12 @@ impl Store {
             rebuilt.unavailable == 0,
             "restore contains unresolved lineage or identities"
         );
-        Self::trip(&mut inner, Fault::BeforeActivation)?;
+        Self::trip(inner, Fault::BeforeActivation)?;
+        *activation_attempted = true;
         files::atomic_json(&self.paths.data.join("CURRENT"), &next)?;
         inner.generation = next;
         inner.index = rebuilt;
-        Self::trip(&mut inner, Fault::AfterActivation)?;
+        Self::trip(inner, Fault::AfterActivation)?;
         Ok(())
     }
     pub fn snapshot_config(&self, config: &crate::config::Config) -> Result<()> {
@@ -442,6 +608,91 @@ impl Store {
         config: &crate::config::Config,
     ) -> Result<String> {
         config.validate()?;
+        self.publish_config(
+            path,
+            expected,
+            || Ok(serde_json::to_vec(config)?),
+            &mut false,
+            files::atomic,
+            false,
+        )
+    }
+
+    /// Declaration-preserving sibling of the typed writer; same CAS and atomic path.
+    pub(crate) fn replace_config_document(
+        &self,
+        path: &Path,
+        expected: &str,
+        bytes: &[u8],
+    ) -> ConfigPublication {
+        self.replace_config_document_with(path, expected, bytes, files::atomic)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_config_document_fault(
+        &self,
+        path: &Path,
+        expected: &str,
+        bytes: &[u8],
+        fault: ConfigFault,
+    ) -> ConfigPublication {
+        self.replace_config_document_with(path, expected, bytes, |path, bytes| {
+            if matches!(fault, ConfigFault::AtomicCall) {
+                anyhow::bail!("injected atomic call failure");
+            }
+            files::atomic(path, bytes)?;
+            match fault {
+                ConfigFault::AfterPublication => anyhow::bail!("injected post-publication failure"),
+                ConfigFault::ChangedReadback => files::atomic(path, b"{}"),
+                ConfigFault::AtomicCall => unreachable!(),
+            }
+        })
+    }
+
+    fn replace_config_document_with(
+        &self,
+        path: &Path,
+        expected: &str,
+        bytes: &[u8],
+        publish: impl FnOnce(&Path, &[u8]) -> Result<()>,
+    ) -> ConfigPublication {
+        let Ok((config, _)) = crate::config::inspection::document(bytes) else {
+            return ConfigPublication::Refused;
+        };
+        if config.validate().is_err()
+            || config.paths.data != self.paths.data
+            || config.paths.cache != self.paths.cache
+            || config.paths.credentials != self.paths.credentials
+            || !valid_digest(expected)
+        {
+            return ConfigPublication::Refused;
+        }
+        let mut attempted = false;
+        let result = self.publish_config(
+            path,
+            Some(expected),
+            || Ok(bytes.to_vec()),
+            &mut attempted,
+            publish,
+            true,
+        );
+        match result {
+            Ok(hash) => ConfigPublication::Verified(hash),
+            Err(_) if attempted => ConfigPublication::Unknown,
+            Err(error) if error.is::<ConfigRevisionChanged>() => ConfigPublication::Conflict,
+            Err(_) => ConfigPublication::Refused,
+        }
+    }
+
+    fn publish_config(
+        &self,
+        path: &Path,
+        expected: Option<&str>,
+        encode: impl FnOnce() -> Result<Vec<u8>>,
+        attempted: &mut bool,
+        publish: impl FnOnce(&Path, &[u8]) -> Result<()>,
+        verify: bool,
+    ) -> Result<String> {
         files::safe_path(path)?;
         ensure!(
             !path.starts_with(&self.paths.data)
@@ -458,13 +709,71 @@ impl Store {
         } else {
             None
         };
-        ensure!(
-            current.as_deref() == expected,
-            "configuration revision changed"
-        );
-        let bytes = serde_json::to_vec(config)?;
+        if current.as_deref() != expected {
+            return Err(ConfigRevisionChanged.into());
+        }
+        let bytes = encode()?;
         ensure!(bytes.len() <= MAX_RECORD, "configuration exceeds bound");
-        files::atomic(path, &bytes)?;
+        *attempted = true;
+        publish(path, &bytes)?;
+        if verify {
+            ensure!(
+                files::read(path, MAX_RECORD as u64)? == bytes,
+                "configuration readback changed"
+            );
+        }
         Ok(digest(&bytes))
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Store {
+    /// Same Store mutex as configuration/data publication; no credential-specific owner.
+    pub(crate) fn publish_declared_model_credential(
+        &self,
+        path: &std::path::Path,
+        intent: &crate::config::model_credential::linux::Intent,
+        change: &crate::config::model_credential::linux::Change,
+    ) -> crate::config::model_credential::Report {
+        self.with_credential_mutex(|| {
+            crate::config::model_credential::linux::publish_locked(
+                path,
+                &self.paths,
+                intent,
+                change,
+            )
+        })
+    }
+    fn with_credential_mutex(
+        &self,
+        publish: impl FnOnce() -> crate::config::model_credential::Report,
+    ) -> crate::config::model_credential::Report {
+        let Ok(_inner) = self.inner.lock() else {
+            return crate::config::model_credential::Report::refusal(
+                crate::config::model_credential::Operation::Apply,
+                crate::config::basic::Status::Unavailable,
+            );
+        };
+        publish()
+    }
+    #[cfg(test)]
+    pub(crate) fn credential_publication_test_hook(
+        &self,
+        path: &std::path::Path,
+        intent: &crate::config::model_credential::linux::Intent,
+        change: &crate::config::model_credential::linux::Change,
+        hook: impl FnMut(
+            crate::config::model_credential::linux::Phase,
+        ) -> std::result::Result<(), crate::config::basic::Status>,
+    ) -> crate::config::model_credential::Report {
+        self.with_credential_mutex(|| {
+            crate::config::model_credential::linux::publish_with(
+                path,
+                &self.paths,
+                intent,
+                change,
+                hook,
+            )
+        })
     }
 }

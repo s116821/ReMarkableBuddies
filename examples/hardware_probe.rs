@@ -406,23 +406,10 @@ fn main() -> Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("gap milliseconds required"))?
                 .parse()?;
             anyhow::ensure!(millis <= 2000, "round-trip gap exceeds 2000ms");
-            anyhow::ensure!(
-                args.get(3).map(String::as_str) == Some("portrait"),
-                "Explicit portrait orientation required as fourth argument"
-            );
-            let orientation = remarkable_open_sdk::navigation::gesture::Orientation::Portrait;
             let mut touch = Touch::new(false, TriggerCorner::LowerLeft);
-            XochitlIntegration::navigate_to_page(
-                &mut touch,
-                NavigationDirection::Previous,
-                orientation,
-            )?;
+            XochitlIntegration::navigate_to_page(&mut touch, NavigationDirection::Previous)?;
             sleep(Duration::from_millis(millis));
-            XochitlIntegration::navigate_to_page(
-                &mut touch,
-                NavigationDirection::Next,
-                orientation,
-            )?;
+            XochitlIntegration::navigate_to_page(&mut touch, NavigationDirection::Next)?;
         }
         Some("next") | Some("previous") => {
             use remarkable_reader_buddy::workflow::xochitl_integration::{
@@ -434,15 +421,7 @@ fn main() -> Result<()> {
             } else {
                 NavigationDirection::Previous
             };
-            anyhow::ensure!(
-                args.get(2).map(String::as_str) == Some("portrait"),
-                "Explicit portrait orientation required as third argument"
-            );
-            XochitlIntegration::navigate_to_page(
-                &mut touch,
-                direction,
-                remarkable_open_sdk::navigation::gesture::Orientation::Portrait,
-            )?;
+            XochitlIntegration::navigate_to_page(&mut touch, direction)?;
         }
         Some("key-layout") => {
             use evdev::KeyCode as K;

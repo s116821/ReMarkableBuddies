@@ -232,7 +232,7 @@ impl Scenario {
         }
         ensure!(
             self.mode == "reader",
-            "Unsupported simulator mode {:?}; Writer/combined require REM-23",
+            "Unsupported Reader scenario mode {:?}; use the Writer host schema for supplied-text Writer; combined/native routing is unsupported",
             self.mode
         );
         ensure!(!self.name.trim().is_empty(), "Scenario name is empty");

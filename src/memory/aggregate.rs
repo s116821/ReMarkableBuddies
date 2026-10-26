@@ -75,7 +75,7 @@ impl Aggregate {
                 remember(
                     &mut immutable,
                     envelope.record_id,
-                    owned_fact(envelope, &registration.owner)?,
+                    owned_fact(envelope, registration)?,
                 )?;
             } else {
                 ensure!(
@@ -115,7 +115,7 @@ impl Aggregate {
                     remember(
                         &mut custody,
                         envelope.record_id,
-                        owned_fact(envelope, &registration.owner)?,
+                        owned_fact(envelope, registration)?,
                     )?;
                 } else {
                     ensure!(
@@ -180,7 +180,7 @@ impl Aggregate {
     }
 }
 
-fn owned_fact(envelope: &Envelope, owner: &Owner) -> Result<Fact> {
+fn owned_fact(envelope: &Envelope, registration: &Registration) -> Result<Fact> {
     let fact: Fact =
         serde_json::from_value(envelope.payload.clone()).context("unsupported memory fact")?;
     fact.validate()?;
@@ -188,7 +188,7 @@ fn owned_fact(envelope: &Envelope, owner: &Owner) -> Result<Fact> {
         fact.key.record_id()? == envelope.record_id,
         "memory fact identity mismatch"
     );
-    match owner {
+    match &registration.owner {
         Owner::GlobalFact { key } => ensure!(fact.key == *key, "foreign global fact"),
         Owner::Document { document } => ensure!(
             fact.key.scope
@@ -199,40 +199,6 @@ fn owned_fact(envelope: &Envelope, owner: &Owner) -> Result<Fact> {
         ),
     }
     Ok(fact)
-}
-/// Reader partition validation reuses the owned fact and immutable-key rules.
-/// The caller validates the complete mixed causal graph before partitioning.
-pub(crate) fn validate_document_partition(records: &[Envelope], document: Uuid) -> Result<()> {
-    let owner = Owner::Document { document };
-    let mut immutable = BTreeMap::new();
-    for envelope in records {
-        envelope.validate()?;
-        ensure!(
-            envelope.namespace == Namespace::SubjectMemory
-                && envelope.domain_schema_version == 1
-                && envelope.media_descriptors.is_empty(),
-            "unsupported document memory partition"
-        );
-        if envelope.kind == Kind::Value {
-            remember(
-                &mut immutable,
-                envelope.record_id,
-                owned_fact(envelope, &owner)?,
-            )?;
-        } else {
-            ensure!(
-                envelope.payload.is_null() && !envelope.parents.is_empty(),
-                "invalid document forgetting"
-            );
-        }
-    }
-    for envelope in records {
-        ensure!(
-            immutable.contains_key(&envelope.record_id),
-            "memory tombstone has no owned ancestor"
-        );
-    }
-    Ok(())
 }
 fn remember(immutable: &mut BTreeMap<Uuid, (Key, String)>, record: Uuid, fact: Fact) -> Result<()> {
     if let Some((key, claim)) = immutable.get(&record) {

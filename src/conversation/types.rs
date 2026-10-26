@@ -241,6 +241,9 @@ pub struct ExportAssociation {
     pub source_revision: String,
     pub operation: Uuid,
     pub outcome: Outcome,
+    /// Schema-two export attempt; absent in unchanged schema-one history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<super::ExportAttempt>,
 }
 impl ExportAssociation {
     pub fn title_marker(&self) -> String {
@@ -275,9 +278,11 @@ pub struct Receipt {
 )]
 pub enum Record {
     Root(Root),
+    RequestEvidence(Box<super::evidence::RequestEvidence>),
     Turn(Turn),
     Source(ImageUse),
     Capture(Box<CaptureEvidence>),
+    NormalizedText(Box<super::NormalizedTextSource>),
     LegacyCapture(LegacyCapture),
     DevelopmentCapture(Box<super::development::DevelopmentCaptureHistory>),
     OutcomeFact(OutcomeFact),
@@ -309,7 +314,8 @@ pub struct WriteResult {
     pub current_root: Vec<crate::storage::Envelope>,
     pub current_binding: Vec<crate::storage::Envelope>,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContextBudget {
     pub max_text_bytes: usize,
     pub max_turns: usize,
@@ -321,12 +327,14 @@ pub struct ContextView {
     pub turns: Vec<Turn>,
     pub sources: Vec<ImageUse>,
     pub captures: Vec<CaptureEvidence>,
+    pub normalized_text: Vec<super::NormalizedTextSource>,
     pub legacy_captures: Vec<LegacyCapture>,
     pub development_captures: Vec<super::development::DevelopmentCaptureHistory>,
     pub missing_media: Vec<Media>,
     pub selection: Option<TurnRange>,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct TurnRange {
     pub start: u64,
     pub end_exclusive: u64,

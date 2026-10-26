@@ -100,14 +100,8 @@ pub struct Touch {
 
 #[cfg(not(target_os = "linux"))]
 pub struct Touch {
-    device_model: DeviceModel,
+    _device_model: DeviceModel,
     _trigger_corner: TriggerCorner,
-}
-
-impl Touch {
-    pub(crate) fn model(&self) -> DeviceModel {
-        self.device_model
-    }
 }
 
 #[cfg(target_os = "linux")]
@@ -315,7 +309,7 @@ impl Touch {
         info!("Touch using device model: {}", device_model.name());
 
         Self {
-            device_model,
+            _device_model: device_model,
             _trigger_corner: trigger_corner,
         }
     }

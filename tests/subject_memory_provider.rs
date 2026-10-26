@@ -177,3 +177,162 @@ fn actual_provider_receives_labeled_memory_exact_question_and_original_image_par
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+
+#[test]
+fn selected_configuration_refuses_before_credentials_device_or_store_startup() {
+    use remarkable_reader_buddy::config::Config;
+    use std::process::Command;
+    let root = std::env::temp_dir().join(format!("buddy-reader-admission-{}", Uuid::new_v4()));
+    std::fs::create_dir(&root).unwrap();
+    let identity = memory::catalog::Identity {
+        group: Uuid::new_v4(),
+        profile: Uuid::new_v4(),
+        binding_sha256: remarkable_reader_buddy::storage::digest(b"historical fixture only"),
+    };
+    let config = Config {
+        paths: StorePaths {
+            data: root.join("data"),
+            cache: root.join("cache"),
+            credentials: root.join("credentials"),
+        },
+        model_credential: Some("must-not-read".into()),
+        memory: memory::Configuration {
+            enabled: true,
+            profile: Some(identity.profile),
+            selection: Some(identity.clone()),
+        },
+        ..Default::default()
+    };
+    let path = root.join("config.json");
+    let original = serde_json::to_vec(&config).unwrap();
+    std::fs::write(&path, &original).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_reader-buddy"))
+        .current_dir(&root)
+        .env("REMARKABLE_BUDDIES_CONFIG", &path)
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("OPENAI_BASE_URL")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(error.contains("selected memory requires separately admitted Reader context"));
+    assert!(!error.contains("must-not-read") && !error.contains(&identity.profile.to_string()));
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert!(
+        !config.paths.data.exists()
+            && !config.paths.cache.exists()
+            && !config.paths.credentials.exists()
+    );
+    let mut disabled = config.memory.clone();
+    disabled.enabled = false;
+    assert!(memory::context::admit_ordinary(&disabled).is_ok());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+struct Untouched;
+impl remarkable_reader_buddy::llm::LLMEngine for Untouched {
+    fn add_text_content(&mut self, _: &str) {
+        panic!("selected context touched engine")
+    }
+    fn add_image_content(&mut self, _: &str) {
+        panic!("selected context touched engine")
+    }
+    fn clear_content(&mut self) {
+        panic!("selected context touched engine")
+    }
+    fn execute(&mut self) -> anyhow::Result<String> {
+        panic!("selected context invoked engine")
+    }
+}
+#[test]
+fn actual_selected_query_result_refuses_before_any_engine_touch() {
+    let root = std::env::temp_dir().join(format!("buddy-context-selected-{}", Uuid::new_v4()));
+    let store = Arc::new(
+        Store::open(StorePaths {
+            data: root.join("data"),
+            cache: root.join("cache"),
+            credentials: root.join("credentials"),
+        })
+        .unwrap(),
+    );
+    let identity = memory::catalog::Identity {
+        group: Uuid::new_v4(),
+        profile: Uuid::new_v4(),
+        binding_sha256: remarkable_reader_buddy::storage::digest(b"local selected fixture"),
+    };
+    let selected = memory::selected::SelectedMemory::new(store.clone(), identity.clone()).unwrap();
+    let fact = memory::Fact {
+        key: memory::Key {
+            profile: identity.profile,
+            scope: memory::Scope::Global,
+            fact: Uuid::new_v4(),
+        },
+        claim: "gravity convention".into(),
+        value: "SI gravity units".into(),
+        subject: "gravity".into(),
+        tags: vec![],
+        provenance: memory::Provenance {
+            basis: memory::Basis::UserConfirmed,
+            description: "Explicit historical fixture".into(),
+            conversation: None,
+            turn: None,
+            source: None,
+        },
+        confidence_basis_points: 9000,
+        observed_ms: 1,
+        expires_ms: None,
+    };
+    let registration = selected
+        .initialize_aggregate(memory::selected::InitializeAggregate {
+            operation: Uuid::new_v4(),
+            accepted_base_sha256: remarkable_reader_buddy::storage::digest(b"aggregate fixture"),
+            fact,
+        })
+        .unwrap()
+        .registration
+        .unwrap();
+    selected
+        .initialize_selection(memory::selected::InitializeSelection {
+            operation: Uuid::new_v4(),
+            accepted_base_sha256: remarkable_reader_buddy::storage::digest(b"catalog fixture"),
+            registrations: vec![registration],
+        })
+        .unwrap();
+    let view = selected
+        .query(&memory::Query::new("gravity".into(), 2))
+        .unwrap();
+    assert_eq!(view.status, memory::Status::Complete);
+    assert!(!view.context.facts.is_empty());
+    assert!(memory::context::answer_with_preference(
+        &mut Untouched,
+        "gravity?",
+        &["fixture".into()],
+        Some(&view),
+        None,
+        &mut || Ok(())
+    )
+    .is_err());
+    drop(view);
+    drop(selected);
+    drop(store);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn actual_cli_runs_maintained_scripted_preference_scenario() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("docs/simulator/scenarios/personalized-answer.json");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_reader-buddy"))
+        .arg("--simulate")
+        .arg(path)
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("OPENAI_BASE_URL")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "scripted CLI failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

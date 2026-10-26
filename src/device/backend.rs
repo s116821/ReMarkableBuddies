@@ -10,9 +10,7 @@ use super::{
     screenshot::Screenshot,
     touch::{Touch, TriggerCorner},
 };
-use crate::workflow::xochitl_integration::NavigationDirection;
-#[cfg(target_os = "linux")]
-use crate::workflow::xochitl_integration::XochitlIntegration;
+use crate::workflow::xochitl_integration::{NavigationDirection, XochitlIntegration};
 
 #[derive(Clone, Default)]
 pub struct Frame {
@@ -165,15 +163,11 @@ impl super::navigation_completion::NavigationIo for NativeNavigation<'_> {
             image,
         })
     }
-    fn swipe(
-        &mut self,
-        direction: NavigationDirection,
-        orientation: remarkable_open_sdk::navigation::gesture::Orientation,
-    ) -> Result<()> {
+    fn swipe(&mut self, direction: NavigationDirection) -> Result<()> {
         // The successor observer and source capture have already overlapped
         // the retained request. Only the deliberate physical gesture is unobserved.
         self.device.finish_request_guard()?;
-        XochitlIntegration::swipe_with_orientation(&mut self.device.touch, direction, orientation)
+        XochitlIntegration::swipe(&mut self.device.touch, direction)
     }
     fn now(&self) -> Duration {
         self.device.clock.elapsed()
@@ -749,8 +743,6 @@ impl DeviceBackend for RealDevice {
         self.status_wait_cancellation.record(result)
     }
     fn navigate(&mut self, direction: NavigationDirection) -> Result<NavigationCompletion> {
-        #[cfg(not(target_os = "linux"))]
-        let _ = direction;
         self.check_request_guard()?;
         let _timing = crate::measurement::Span::new("device.navigation");
         #[cfg(target_os = "linux")]
@@ -769,9 +761,9 @@ impl DeviceBackend for RealDevice {
             }
             return result;
         }
-        Err(anyhow::anyhow!(
-            "Navigation requires a supported current document orientation and source layout"
-        ))
+        self.finish_request_guard()?;
+        XochitlIntegration::navigate_to_page(&mut self.touch, direction)?;
+        Ok(NavigationCompletion::Legacy)
     }
     fn render_text(&mut self, text: &str) -> Result<()> {
         self.check_request_guard()?;

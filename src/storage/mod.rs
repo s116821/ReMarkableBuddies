@@ -1,6 +1,13 @@
 //! Versioned local persistence, independent of Reader/Writer domain semantics.
+pub(crate) mod captured;
+pub(crate) mod conditional;
+pub(crate) mod conversation_cleanup;
 pub mod drive;
 pub mod files;
+pub mod inspection;
+#[cfg(all(test, unix))]
+mod lease_tests;
+pub mod maintenance;
 pub mod migration;
 mod recovery;
 #[cfg(test)]
@@ -9,7 +16,11 @@ pub mod selection;
 pub mod sync;
 pub mod types;
 use anyhow::{ensure, Context, Result};
-pub use recovery::BackupInspection;
+pub(crate) use recovery::ordinary_restore;
+#[cfg(test)]
+pub(crate) use recovery::ConfigFault;
+pub(crate) use recovery::ConfigPublication;
+pub use recovery::{ArchivedSelectedSnapshot, BackupInspection};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -87,6 +98,9 @@ struct Index {
     operations: BTreeMap<Uuid, String>,
     heads: BTreeMap<(Namespace, Uuid), BTreeSet<Uuid>>,
     manifests: BTreeMap<Uuid, Manifest>,
+    // Derived from accepted manifests, rebuilt on recovery; no on-disk format.
+    record_refs: BTreeMap<String, ObjectRef>,
+    record_transactions: BTreeMap<String, BTreeSet<Uuid>>,
     unavailable: usize,
 }
 struct Inner {
@@ -96,13 +110,28 @@ struct Inner {
     legacy_sync_handles: usize,
     mode_handles: usize,
     legacy_publisher_handles: usize,
+    local_domain_handles: usize,
 }
 pub struct Store {
     pub paths: StorePaths,
     pub actor_id: Uuid,
-    _lease: File,
+    _lease: Lease,
     inner: Mutex<Inner>,
     wake: Mutex<Option<SyncSender<()>>>,
+    // Process-local export invocation exclusion, shared by every Ledger over
+    // this Store. Independent of the index mutex; no index lock spans HTTP.
+    pub(crate) export_active: std::sync::atomic::AtomicBool,
+    pub(crate) writer_active: std::sync::atomic::AtomicBool,
+}
+
+struct Lease(File);
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        // A concurrent subprocess fork can temporarily inherit this descriptor.
+        // Closing our copy alone would retain flock until that child execs.
+        let _ = self.0.unlock();
+    }
 }
 
 pub(crate) struct LegacySyncLease(Arc<Store>);
@@ -118,6 +147,18 @@ pub(crate) struct LegacyPublisherLease {
     store: Arc<Store>,
     _legacy: LegacySyncLease,
 }
+/// Pins a local-only domain against existing and future legacy publishers.
+pub(crate) struct LocalDomainLease {
+    store: Arc<Store>,
+    _legacy: LegacySyncLease,
+}
+impl Drop for LocalDomainLease {
+    fn drop(&mut self) {
+        if let Ok(mut inner) = self.store.inner.lock() {
+            inner.local_domain_handles -= 1;
+        }
+    }
+}
 impl Drop for LegacyPublisherLease {
     fn drop(&mut self) {
         if let Ok(mut inner) = self.store.inner.lock() {
@@ -125,15 +166,26 @@ impl Drop for LegacyPublisherLease {
         }
     }
 }
-impl Drop for Store {
-    fn drop(&mut self) {
-        // A concurrent subprocess fork can temporarily inherit this descriptor.
-        // Closing our copy alone would retain flock until that child execs.
-        let _ = self._lease.unlock();
-    }
-}
-
 impl Store {
+    pub(crate) fn local_domain_lease(self: &Arc<Self>) -> Result<LocalDomainLease> {
+        let legacy = self.legacy_sync_lease()?;
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        ensure!(
+            inner.legacy_publisher_handles == 0,
+            "legacy publisher is active"
+        );
+        inner.local_domain_handles = inner
+            .local_domain_handles
+            .checked_add(1)
+            .context("local domain lease overflow")?;
+        Ok(LocalDomainLease {
+            store: self.clone(),
+            _legacy: legacy,
+        })
+    }
     pub(crate) fn legacy_publisher_lease(self: &Arc<Self>) -> Result<LegacyPublisherLease> {
         // Preserve the domain lease while adding publisher-only lifetime accounting.
         let legacy = self.legacy_sync_lease()?;
@@ -144,6 +196,10 @@ impl Store {
         ensure!(
             sync::mode::load(self)?.is_none(),
             "explicit sync mode requires its matched worker"
+        );
+        ensure!(
+            inner.local_domain_handles == 0,
+            "local-only domain is active"
         );
         inner.legacy_publisher_handles = inner
             .legacy_publisher_handles
@@ -204,6 +260,7 @@ impl Store {
         lease
             .try_lock()
             .map_err(|_| anyhow::anyhow!("store is owned by another process"))?;
+        let lease = Lease(lease);
         for root in [&paths.cache, &paths.credentials] {
             if root.exists() && !root.join("owner.json").exists() {
                 ensure!(
@@ -252,8 +309,11 @@ impl Store {
                 legacy_sync_handles: 0,
                 mode_handles: 0,
                 legacy_publisher_handles: 0,
+                local_domain_handles: 0,
             }),
             wake: Mutex::new(None),
+            export_active: std::sync::atomic::AtomicBool::new(false),
+            writer_active: std::sync::atomic::AtomicBool::new(false),
         };
         selection::validate_generation(&store.generation(generation), store.actor_id, generation)?;
         for directory in [
@@ -261,6 +321,7 @@ impl Store {
             store.paths.credentials.clone(),
             store.paths.data.join("sync"),
             store.paths.data.join("sync/incoming"),
+            store.paths.data.join("sync/selected-outbox"),
             store.generation(generation),
             store.generation(generation).join("objects"),
             store.generation(generation).join("commits"),
@@ -460,6 +521,16 @@ impl Store {
         Ok(())
     }
     fn apply_index(index: &mut Index, manifest: Manifest, records: Vec<(Envelope, String)>) {
+        for reference in &manifest.records {
+            index
+                .record_refs
+                .insert(reference.sha256.clone(), reference.clone());
+            index
+                .record_transactions
+                .entry(reference.sha256.clone())
+                .or_default()
+                .insert(manifest.transaction_id);
+        }
         for (e, hash) in records {
             index.operations.insert(e.operation_id, hash.clone());
             index.records.insert(e.revision_id, (e, hash));
@@ -492,7 +563,13 @@ impl Store {
             .get(&(namespace, record))
             .into_iter()
             .flatten()
-            .filter_map(|id| inner.index.records.get(id).map(|p| p.0.clone()))
+            .filter_map(|id| {
+                inner.index.records.get(id).map(|p| {
+                    #[cfg(test)]
+                    captured::head_cloned();
+                    p.0.clone()
+                })
+            })
             .collect())
     }
     pub fn value(&self, namespace: Namespace, record: Uuid) -> Result<Option<Envelope>> {
@@ -631,6 +708,22 @@ impl Store {
         Ok(())
     }
     pub fn commit(&self, records: Vec<Envelope>, media: BTreeMap<String, Vec<u8>>) -> Result<Uuid> {
+        let (manifest, objects) = Self::ordinary_transaction(records, media)?;
+        self.publish(manifest, objects, true)
+    }
+    /// Existing atomic publication disposition; no new persisted format or grant.
+    pub(crate) fn commit_with_disposition(
+        &self,
+        records: Vec<Envelope>,
+        media: BTreeMap<String, Vec<u8>>,
+    ) -> Result<(Uuid, bool)> {
+        let (manifest, objects) = Self::ordinary_transaction(records, media)?;
+        self.publish_with_disposition(manifest, objects, true)
+    }
+    fn ordinary_transaction(
+        records: Vec<Envelope>,
+        media: BTreeMap<String, Vec<u8>>,
+    ) -> Result<(Manifest, BTreeMap<String, Vec<u8>>)> {
         let mut objects = media;
         let mut refs = Vec::new();
         let mut record_namespaces = BTreeMap::new();
@@ -667,7 +760,7 @@ impl Store {
                 .map(|h| Coverage::Included { sha256: h.clone() })
                 .collect(),
         };
-        self.publish(manifest, objects, true)
+        Ok((manifest, objects))
     }
     pub fn import(&self, manifest: Manifest, objects: BTreeMap<String, Vec<u8>>) -> Result<Uuid> {
         self.publish(manifest, objects, false)
@@ -678,17 +771,42 @@ impl Store {
         objects: BTreeMap<String, Vec<u8>>,
         local: bool,
     ) -> Result<Uuid> {
+        self.publish_with_disposition(manifest, objects, local)
+            .map(|(receipt, _)| receipt)
+    }
+    fn publish_with_disposition(
+        &self,
+        manifest: Manifest,
+        objects: BTreeMap<String, Vec<u8>>,
+        local: bool,
+    ) -> Result<(Uuid, bool)> {
         manifest.validate()?;
         let mut inner = self
             .inner
             .lock()
             .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        let (receipt, changed) = self.publish_locked(&mut inner, manifest, objects, local)?;
+        drop(inner);
+        if changed {
+            self.notify_commit();
+        }
+        Ok((receipt, changed))
+    }
+    // Callers hold exactly one inner mutex guard. Legacy publish keeps its old
+    // admission/order; conditional publication validates its extra evidence first.
+    fn publish_locked(
+        &self,
+        inner: &mut Inner,
+        manifest: Manifest,
+        objects: BTreeMap<String, Vec<u8>>,
+        local: bool,
+    ) -> Result<(Uuid, bool)> {
         let root = self.generation(inner.generation);
         if let Some(previous) = inner.index.manifests.get(&manifest.transaction_id) {
             ensure!(previous == &manifest, "transaction identity collision");
-            return Ok(manifest.transaction_id);
+            return Ok((manifest.transaction_id, false));
         }
-        Self::trip(&mut inner, Fault::BeforeObjects)?;
+        Self::trip(inner, Fault::BeforeObjects)?;
         for item in manifest.records.iter().chain(&manifest.media) {
             if let Some(bytes) = objects.get(&item.sha256) {
                 ensure!(bytes.len() as u64 == item.bytes, "object size mismatch");
@@ -699,7 +817,7 @@ impl Store {
                 )?;
             }
         }
-        Self::trip(&mut inner, Fault::AfterObjects)?;
+        Self::trip(inner, Fault::AfterObjects)?;
         let records = Self::validate_objects(&root, &manifest)?;
         Self::can_apply(&inner.index, &records)?;
         if local {
@@ -736,11 +854,11 @@ impl Store {
                     })
                     .map(|m| m.transaction_id)
                 {
-                    return Ok(prior);
+                    return Ok((prior, false));
                 }
             }
         }
-        Self::trip(&mut inner, Fault::BeforeCommit)?;
+        Self::trip(inner, Fault::BeforeCommit)?;
         files::atomic_json(
             &root
                 .join("commits")
@@ -750,15 +868,16 @@ impl Store {
         let after_commit = inner.fault == Fault::AfterCommit;
         Self::apply_index(&mut inner.index, manifest.clone(), records);
         if after_commit {
-            Self::trip(&mut inner, Fault::AfterCommit)?;
+            Self::trip(inner, Fault::AfterCommit)?;
         }
-        drop(inner);
+        Ok((manifest.transaction_id, true))
+    }
+    fn notify_commit(&self) {
         if let Ok(wake) = self.wake.lock() {
             if let Some(wake) = wake.as_ref() {
                 let _ = wake.try_send(());
             }
         }
-        Ok(manifest.transaction_id)
     }
     pub fn set_wake(&self, wake: Option<SyncSender<()>>) {
         if let Ok(mut target) = self.wake.lock() {
@@ -832,3 +951,5 @@ impl Store {
         self.import(manifest, BTreeMap::new())
     }
 }
+
+pub(crate) use recovery::ordinary_export;

@@ -466,6 +466,7 @@ mod tests {
                 source_revision: "synthetic source revision".into(),
                 operation: envelope.operation_id,
                 outcome: Outcome::ReconcileRequired,
+                attempt: None,
             }))
             .unwrap();
             let pin = pending::pin(&envelope).unwrap();
