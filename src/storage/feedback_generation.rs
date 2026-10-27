@@ -181,6 +181,7 @@ impl Store {
             .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
         self.check_feedback(&inner)?;
         let result = self.publish_locked(&mut inner, manifest.clone(), objects, true);
+        let changed = result.as_ref().map_or(true, |(_, changed)| *changed);
         if let Err(error) = result {
             // AfterCommit can return an error after the literal commit was applied.
             let root = self.generation(inner.generation);
@@ -199,7 +200,9 @@ impl Store {
             }
         }
         drop(inner);
-        self.notify_commit();
+        if changed {
+            self.notify_commit();
+        }
         observation.description()
     }
     pub(crate) fn feedback_snapshot(&self) -> Result<Vec<Description>> {

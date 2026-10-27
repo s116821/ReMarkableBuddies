@@ -37,16 +37,20 @@ fn explicit_preparation_reopen_and_exact_literal_identity() {
     let before = fs::read(f.paths().data.join("contract-v1.json")).unwrap();
     drop(store);
     let feedback = Feedback::prepare(f.paths()).unwrap();
+    let (wake, events) = std::sync::mpsc::sync_channel(2);
+    feedback.store().set_wake(Some(wake));
     let op = Uuid::new_v4();
     let first = feedback
         .retain(op, 123, AttemptReason::ProviderFailure, false)
         .unwrap();
+    events.try_recv().unwrap();
     assert_eq!(
         first,
         feedback
             .retain(op, 123, AttemptReason::ProviderFailure, false)
             .unwrap()
     );
+    assert!(events.try_recv().is_err());
     assert!(feedback
         .retain(op, 124, AttemptReason::ProviderFailure, false)
         .is_err());
