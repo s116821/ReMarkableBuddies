@@ -111,6 +111,13 @@ impl SelectionTransaction {
         let mut bytes = 0u64;
         for manifest in std::iter::once(&self.selected).chain(&self.retained) {
             manifest.validate()?;
+            ensure!(
+                !manifest
+                    .record_namespaces
+                    .values()
+                    .any(|n| *n == Namespace::UnassociatedFeedback),
+                "unassociated feedback is not selected/group data"
+            );
             count = count
                 .checked_add(manifest.records.len() + manifest.media.len())
                 .context("selected item overflow")?;
@@ -374,15 +381,34 @@ struct SelectionFeature {
     generation: Uuid,
 }
 pub(crate) fn validate_generation(root: &Path, actor: Uuid, generation: Uuid) -> Result<()> {
+    validate_generation_policy(root, actor, generation, false)
+}
+pub(crate) fn validate_generation_preparing(
+    root: &Path,
+    actor: Uuid,
+    generation: Uuid,
+) -> Result<()> {
+    validate_generation_policy(root, actor, generation, true)
+}
+fn validate_generation_policy(
+    root: &Path,
+    actor: Uuid,
+    generation: Uuid,
+    preparing: bool,
+) -> Result<()> {
     ensure!(
         !actor.is_nil() && !generation.is_nil(),
         "nil selected store identity"
     );
     let version: u32 = files::json(&root.join("format.json"), 64)?;
     ensure!(
-        matches!(version, FORMAT | SELECTED_STORE_FORMAT),
+        matches!(
+            version,
+            FORMAT | SELECTED_STORE_FORMAT | feedback_generation::VERSION
+        ),
         "unsupported generation format"
     );
+    feedback_generation::validate_version(root, actor, generation, version, preparing)?;
     if version == FORMAT {
         ensure!(
             !has_selected(root)?,
@@ -406,7 +432,11 @@ pub(crate) fn validate_generation(root: &Path, actor: Uuid, generation: Uuid) ->
 }
 pub(crate) fn prepare_generation(root: &Path, actor: Uuid, generation: Uuid) -> Result<()> {
     validate_generation(root, actor, generation)?;
-    if files::json::<u32>(&root.join("format.json"), 64)? == FORMAT {
+    let version = files::json::<u32>(&root.join("format.json"), 64)?;
+    if version == FORMAT
+        || (version == feedback_generation::VERSION
+            && !root.join("selection-feature.json").exists())
+    {
         files::atomic_json(
             &root.join("selection-feature.json"),
             &SelectionFeature {
@@ -415,7 +445,9 @@ pub(crate) fn prepare_generation(root: &Path, actor: Uuid, generation: Uuid) -> 
                 generation,
             },
         )?;
-        files::atomic_json(&root.join("format.json"), &SELECTED_STORE_FORMAT)?;
+        if version == FORMAT {
+            files::atomic_json(&root.join("format.json"), &SELECTED_STORE_FORMAT)?;
+        }
     }
     Ok(())
 }

@@ -3,6 +3,7 @@ pub(crate) mod captured;
 pub(crate) mod conditional;
 pub(crate) mod conversation_cleanup;
 pub mod drive;
+pub(crate) mod feedback_generation;
 pub mod files;
 pub mod inspection;
 #[cfg(all(test, unix))]
@@ -226,6 +227,12 @@ impl Store {
         Ok(LegacySyncLease(self.clone()))
     }
     pub fn open(paths: StorePaths) -> Result<Self> {
+        Self::open_policy(paths, false)
+    }
+    pub(crate) fn open_for_feedback(paths: StorePaths) -> Result<Self> {
+        Self::open_policy(paths, true)
+    }
+    fn open_policy(paths: StorePaths, preparing_feedback: bool) -> Result<Self> {
         paths.validate()?;
         let identity_path = paths.data.join("identity.json");
         if !identity_path.exists() {
@@ -315,7 +322,19 @@ impl Store {
             export_active: std::sync::atomic::AtomicBool::new(false),
             writer_active: std::sync::atomic::AtomicBool::new(false),
         };
-        selection::validate_generation(&store.generation(generation), store.actor_id, generation)?;
+        if preparing_feedback {
+            selection::validate_generation_preparing(
+                &store.generation(generation),
+                store.actor_id,
+                generation,
+            )?;
+        } else {
+            selection::validate_generation(
+                &store.generation(generation),
+                store.actor_id,
+                generation,
+            )?;
+        }
         for directory in [
             store.paths.data.clone(),
             store.paths.credentials.clone(),
@@ -337,19 +356,45 @@ impl Store {
                 .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
             inner.index = store.recover(generation)?;
         }
+        store.publish_capabilities(&store.generation(generation))?;
+        Ok(store)
+    }
+    fn publish_capabilities(&self, root: &Path) -> Result<()> {
         files::atomic(
-            &store.paths.data.join("contract-v1.json"),
+            &self.paths.data.join("contract-v1.json"),
             CONTRACT_V1.as_bytes(),
         )?;
-        files::atomic_json(
-            &store.paths.data.join("capabilities.json"),
-            &serde_json::json!({
-            "contract_version": 1, "schema_file":"contract-v1.json", "store_versions": [1, 2], "selected_store_feature": "actor-generation-bound-v1", "envelope_versions": [1], "config_versions": [1],
-                "paths": store.paths, "lock": "stable-inode-exclusive-os-lease", "linux_lock": "flock",
-                "maintenance": "stop-confirm-lock-stage-commit-release-restart", "namespaces": ["conversation","source","export-association","subject-memory","handwriting"], "sync": "optional-immutable-drive-v1"
-            }),
-        )?;
-        Ok(store)
+        let store = self;
+        let mut capabilities = serde_json::json!({
+        "contract_version": 1, "schema_file":"contract-v1.json", "store_versions": [1, 2], "selected_store_feature": "actor-generation-bound-v1", "envelope_versions": [1], "config_versions": [1],
+            "paths": store.paths, "lock": "stable-inode-exclusive-os-lease", "linux_lock": "flock",
+            "maintenance": "stop-confirm-lock-stage-commit-release-restart", "namespaces": ["conversation","source","export-association","subject-memory","handwriting"], "sync": "optional-immutable-drive-v1"
+        });
+        if feedback_generation::version(root)? == feedback_generation::VERSION {
+            let contract = include_str!("contract-v2.json");
+            files::atomic(
+                &self.paths.data.join("contract-v2.json"),
+                contract.as_bytes(),
+            )?;
+            capabilities["contract_version"] = serde_json::json!(2);
+            capabilities["schema_file"] = serde_json::json!("contract-v2.json");
+            capabilities["store_versions"] = serde_json::json!([1, 2, 3]);
+            capabilities["unassociated_feedback_feature"] =
+                serde_json::json!("actor-generation-bound-v1");
+            capabilities["namespaces"]
+                .as_array_mut()
+                .context("invalid capabilities")?
+                .push(serde_json::json!("unassociated-feedback"));
+        }
+        files::atomic_json(&self.paths.data.join("capabilities.json"), &capabilities)?;
+        ensure!(
+            files::json::<serde_json::Value>(
+                &self.paths.data.join("capabilities.json"),
+                MAX_RECORD as u64
+            )? == capabilities,
+            "capability publication unverified"
+        );
+        Ok(())
     }
     fn create_generation(root: &Path, id: Uuid) -> Result<()> {
         for child in ["objects", "commits"] {
@@ -392,7 +437,10 @@ impl Store {
         while !pending.is_empty() {
             let before = pending.len();
             pending.retain(|(manifest, records)| {
-                if Self::can_apply(&index, records).is_ok() {
+                if feedback_generation::admit(&root, self.actor_id, generation, &index, records)
+                    .is_ok()
+                    && Self::can_apply(&index, records).is_ok()
+                {
                     Self::apply_index(&mut index, manifest.clone(), records.clone());
                     false
                 } else {
@@ -819,6 +867,22 @@ impl Store {
         }
         Self::trip(inner, Fault::AfterObjects)?;
         let records = Self::validate_objects(&root, &manifest)?;
+        if records
+            .iter()
+            .any(|(e, _)| e.namespace == Namespace::UnassociatedFeedback)
+        {
+            ensure!(
+                inner.mode_handles == 0 && sync::mode::load(self)?.is_none(),
+                "feedback publication requires ordinary local mode"
+            );
+        }
+        feedback_generation::admit(
+            &root,
+            self.actor_id,
+            inner.generation,
+            &inner.index,
+            &records,
+        )?;
         Self::can_apply(&inner.index, &records)?;
         if local {
             for (e, hash) in &records {
