@@ -53,6 +53,10 @@ impl SyncPolicy {
             (5..=3600).contains(&self.poll_seconds) && (1..=128).contains(&self.batch_items),
             "invalid sync work limits"
         );
+        ensure!(
+            !self.namespaces.contains(&Namespace::UnassociatedFeedback),
+            "unassociated feedback live sync unsupported"
+        );
         ensure!(self.max_media_bytes <= MAX_MEDIA, "invalid media limit");
         ensure!(
             self.collection.is_none_or(|c| !c.is_nil()),

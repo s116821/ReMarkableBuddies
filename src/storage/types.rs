@@ -30,6 +30,7 @@ pub enum Namespace {
     ExportAssociation,
     SubjectMemory,
     Handwriting,
+    UnassociatedFeedback,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
