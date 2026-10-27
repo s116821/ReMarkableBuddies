@@ -16,7 +16,11 @@ fn fixture_targets_and_native_units_cannot_be_substituted() {
         stage(NONCE).join("fixture-data")
     );
     assert_eq!(argv(Kind::Native, NONCE, "stock"), [STOCK, "--system"]);
-    assert_eq!(argv(Kind::Native, NONCE, "buddy"), [BUDDY]);
+    assert_eq!(
+        argv(Kind::Native, NONCE, "buddy"),
+        ["/opt/bin/reader-buddy"]
+    );
+    assert_eq!(executable(Kind::Native, NONCE, "buddy"), Path::new(BUDDY));
 }
 
 #[test]

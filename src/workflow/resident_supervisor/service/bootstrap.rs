@@ -23,6 +23,9 @@ const MOUNT: &str = "/sys/fs/cgroup/unified";
 const DATA: &str = "/home/root/.local/share/remarkable/xochitl";
 const STOCK: &str = "/usr/bin/xochitl";
 const BUDDY: &str = "/home/root/.local/lib/reader-buddy/reader-buddy";
+// The reviewed legacy service invokes this alias; /proc/PID/exe still resolves
+// to BUDDY. Exact argv and canonical executable identity are separate checks.
+const BUDDY_ARGV0: &str = "/opt/bin/reader-buddy";
 const MAX_RECORD: u64 = 256 * 1024;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -162,9 +165,29 @@ fn argv(kind: Kind, nonce: &str, role: &str) -> Vec<String> {
     let executable = executable(kind, nonce, role).to_string_lossy().into_owned();
     match (kind, role) {
         (Kind::Native, "stock") => vec![executable, "--system".into()],
-        (Kind::Native, "buddy") => vec![executable],
+        (Kind::Native, "buddy") => vec![BUDDY_ARGV0.into()],
         _ => vec![executable, format!("standin-{role}"), nonce.into()],
     }
+}
+
+fn verify_service_process(
+    kind: Kind,
+    nonce: &str,
+    role: &str,
+    baseline: &ServiceBaseline,
+    hash: [u8; 32],
+    deadline: Instant,
+) -> Result<()> {
+    let path = executable(kind, nonce, role);
+    let args = argv(kind, nonce, role);
+    verify_process(
+        baseline.group().parent(),
+        path.to_str().context("invalid service executable path")?,
+        hash,
+        &args.iter().map(String::as_str).collect::<Vec<_>>(),
+        deadline,
+    )
+    .with_context(|| format!("{role} process verification failed"))
 }
 
 fn unit_text(nonce: &str, kind: Kind, role: &str) -> Result<String> {
@@ -678,13 +701,12 @@ impl Context {
     fn verified_running(&self, role: &str, deadline: Instant) -> Result<ServiceBaseline> {
         let unit = target(self.candidate.kind, &self.nonce, role);
         let baseline = ServiceBaseline::capture(Path::new(MOUNT), &unit, deadline)?;
-        let path = executable(self.candidate.kind, &self.nonce, role);
-        let args = argv(self.candidate.kind, &self.nonce, role);
-        verify_process(
-            baseline.group().parent(),
-            path.to_str().unwrap(),
+        verify_service_process(
+            self.candidate.kind,
+            &self.nonce,
+            role,
+            &baseline,
             digest(&self.expected(role).executable_sha256)?,
-            &args.iter().map(String::as_str).collect::<Vec<_>>(),
             deadline,
         )?;
         let expected = ServiceBaseline::decode(self.expected(role).baseline.as_bytes())?;
@@ -1198,6 +1220,7 @@ pub fn entry(arguments: Vec<String>) -> Result<()> {
             let path = executable(kind, name, role);
             let mut pin = Pinned::open(&path)?;
             let hash = sha(&pin.bytes(128 * 1024 * 1024, deadline)?);
+            verify_service_process(kind, name, role, &baseline, digest(&hash)?, deadline)?;
             baseline.current(deadline)?;
             services.insert(
                 role,

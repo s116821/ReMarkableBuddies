@@ -273,13 +273,20 @@ impl Drop for OwnedChild {
 }
 #[test]
 fn actual_running_executable_argv_incarnation_and_loader_environment() {
+    use std::os::unix::process::CommandExt;
     let executable = fs::canonicalize("/usr/bin/python3").unwrap();
     let executable = executable.to_str().unwrap();
     let script = "import time; time.sleep(30)";
     let digest = sha256(&fs::read(executable).unwrap());
-    for bad_environment in [false, true] {
+    for (bad_environment, argv0) in [
+        (false, executable),
+        (true, executable),
+        (false, "/reviewed/service-alias"),
+        (true, "/reviewed/service-alias"),
+    ] {
         let mut command = Command::new(executable);
         command
+            .arg0(argv0)
             .args(["-c", script])
             .env_clear()
             .stdin(Stdio::null())
@@ -303,12 +310,23 @@ fn actual_running_executable_argv_incarnation_and_loader_environment() {
             assert!(Instant::now() < limit, "fixture did not exec");
             thread::sleep(Duration::from_millis(5));
         };
-        let argv = [executable, "-c", script];
+        let argv = [argv0, "-c", script];
         let result = verify_process(&process, executable, digest, &argv, limit);
         if bad_environment {
             assert!(result.unwrap_err().to_string().contains("loader override"));
         } else {
             result.unwrap();
+            if argv0 != executable {
+                let error = verify_process(
+                    &process,
+                    executable,
+                    digest,
+                    &[executable, "-c", script],
+                    deadline(),
+                )
+                .unwrap_err();
+                assert!(error.to_string().contains("argv mismatch"));
+            }
             assert!(verify_process(&process, executable, [1; 32], &argv, deadline()).is_err());
             assert!(
                 verify_process(&process, executable, digest, &[executable], deadline()).is_err()
