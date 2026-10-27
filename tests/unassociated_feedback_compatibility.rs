@@ -297,3 +297,104 @@ fn foreign_feature_cannot_be_rebound_by_preparation() {
     assert!(Feedback::prepare(f.paths()).is_err());
     assert_eq!(fs::read(marker).unwrap(), bytes);
 }
+
+#[test]
+fn actual_cli_feedback_reports_preserve_bytes_and_emit_consumer_evidence() {
+    use remarkable_reader_buddy::config::Config;
+    use std::{io::Write, process::Command};
+    fn snapshot(path: &std::path::Path) -> BTreeMap<PathBuf, String> {
+        let mut result = BTreeMap::new();
+        if path.is_dir() {
+            for entry in fs::read_dir(path).unwrap() {
+                result.extend(snapshot(&entry.unwrap().path()));
+            }
+        } else {
+            result.insert(path.to_owned(), digest(&fs::read(path).unwrap()));
+        }
+        result
+    }
+    let f = Fixture::new();
+    drop(Store::open(f.paths()).unwrap());
+    let config = f.0.join("config.json");
+    fs::write(
+        &config,
+        serde_json::to_vec(&Config {
+            paths: f.paths(),
+            ..Default::default()
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let executable = env!("CARGO_BIN_EXE_reader-buddy");
+    let binary_sha = digest(&fs::read(executable).unwrap());
+    let source = std::env::var("GITHUB_SHA").unwrap_or_else(|_| "local-unattributed".to_owned());
+    let inspect = |case: &str| {
+        let before = snapshot(&f.0);
+        let output = Command::new(executable)
+            .current_dir(&f.0)
+            .env_remove("OPENAI_API_KEY")
+            .env("REMARKABLE_BUDDIES_CONFIG", &config)
+            .arg("--inspect-owned-data")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "inspection CLI failed for {case}");
+        assert!(output.stderr.is_empty());
+        assert_eq!(snapshot(&f.0), before);
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("SECRET-CANARY"));
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let evidence = serde_json::json!({"case":case,"source_checkout":source,"binary_sha256":binary_sha,"host_os":std::env::consts::OS,"report":report});
+        let line = format!(
+            "RMB_UNASSOCIATED_CLI_EVIDENCE {}\n",
+            serde_json::to_string(&evidence).unwrap()
+        );
+        std::io::stdout().write_all(line.as_bytes()).unwrap();
+        report
+    };
+    let legacy = inspect("legacy1-complete");
+    assert_eq!(legacy["report_version"], 1);
+    assert_eq!(legacy["status"], "complete");
+    assert!(legacy.get("current_generation_format").is_none());
+    let feedback = Feedback::prepare(f.paths()).unwrap();
+    feedback
+        .retain(Uuid::new_v4(), 42, AttemptReason::ProviderFailure, false)
+        .unwrap();
+    drop(feedback);
+    let complete = inspect("feedback3-complete");
+    assert_eq!(complete["report_version"], 2);
+    assert_eq!(complete["status"], "complete");
+    assert_eq!(complete["current_generation_format"], 3);
+    assert_eq!(
+        complete["observed_domains"]["unassociated-feedback"]["observed_record_files"],
+        1
+    );
+    let scratch = f.paths().data.join("unexpected-scratch");
+    fs::write(&scratch, b"SECRET-CANARY").unwrap();
+    let partial = inspect("feedback3-partial");
+    assert_eq!(partial["report_version"], 2);
+    assert_ne!(partial["status"], "complete");
+    assert!(partial["complete_apparent_bytes"].is_null());
+    fs::remove_file(scratch).unwrap();
+    let marker = f.root().join("feedback-feature.json");
+    let mut invalid: serde_json::Value =
+        serde_json::from_slice(&fs::read(&marker).unwrap()).unwrap();
+    invalid["actor"] = serde_json::json!(Uuid::new_v4());
+    fs::write(&marker, serde_json::to_vec(&invalid).unwrap()).unwrap();
+    let refused = inspect("feedback3-invalid-feature");
+    assert_eq!(refused["report_version"], 2);
+    assert_ne!(refused["status"], "complete");
+    assert_eq!(refused["domain_accounting_complete"], false);
+    let before = snapshot(&f.0);
+    let refusal = Command::new(executable)
+        .current_dir(&f.0)
+        .env_remove("OPENAI_API_KEY")
+        .env("REMARKABLE_BUDDIES_CONFIG", &config)
+        .args(["--inspect-owned-data", "--simulate", "never-read.json"])
+        .output()
+        .unwrap();
+    assert!(!refusal.status.success());
+    assert_eq!(snapshot(&f.0), before);
+    let evidence = serde_json::json!({"case":"conflicting-cli-flags-refusal","source_checkout":source,"binary_sha256":binary_sha,"host_os":std::env::consts::OS,"success":false,"stdout_bytes":refusal.stdout.len(),"stderr_sha256":digest(&refusal.stderr)});
+    std::io::stdout()
+        .write_all(format!("RMB_UNASSOCIATED_CLI_EVIDENCE {}\n", evidence).as_bytes())
+        .unwrap();
+}
