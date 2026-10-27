@@ -114,6 +114,7 @@ pub(super) fn admit(
     generation: Uuid,
     index: &Index,
     records: &[(Envelope, String)],
+    scope: &Scope,
 ) -> Result<()> {
     let feedback: Vec<_> = records
         .iter()
@@ -122,6 +123,10 @@ pub(super) fn admit(
     if feedback.is_empty() {
         return Ok(());
     }
+    ensure!(
+        *scope == Scope::LocalTransaction,
+        "feedback is not selected/group data"
+    );
     ensure!(
         version(root)? == VERSION && index.unavailable == 0,
         "feedback requires prepared complete generation"

@@ -437,8 +437,15 @@ impl Store {
         while !pending.is_empty() {
             let before = pending.len();
             pending.retain(|(manifest, records)| {
-                if feedback_generation::admit(&root, self.actor_id, generation, &index, records)
-                    .is_ok()
+                if feedback_generation::admit(
+                    &root,
+                    self.actor_id,
+                    generation,
+                    &index,
+                    records,
+                    &manifest.scope,
+                )
+                .is_ok()
                     && Self::can_apply(&index, records).is_ok()
                 {
                     Self::apply_index(&mut index, manifest.clone(), records.clone());
@@ -882,6 +889,7 @@ impl Store {
             inner.generation,
             &inner.index,
             &records,
+            &manifest.scope,
         )?;
         Self::can_apply(&inner.index, &records)?;
         if local {
