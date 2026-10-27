@@ -309,3 +309,137 @@ fn uncertain_stock_restoration_withholds_diagnostics_and_buddy() {
     );
     assert!(result.unwrap_err().to_string().contains("uncertain"));
 }
+
+#[test]
+fn handoff_cancellation_or_integrity_loss_never_submits_stop() {
+    use crate::device::interaction::Interaction;
+    for poll in [
+        Ok(vec![Interaction::Invalidated]),
+        Err(anyhow::anyhow!("lost old input")),
+    ] {
+        let mut input = Some(RequestInput::scripted(vec![poll]));
+        assert!(stop_with_input(
+            &mut input,
+            || panic!("no stop after canceled or lost admission"),
+            || panic!("not submitted"),
+            true,
+            || panic!("no replacement of invalid admission"),
+            Instant::now() + Duration::from_secs(1),
+        )
+        .is_err());
+    }
+}
+
+#[test]
+fn handoff_ends_old_admission_and_requires_terminal_proof_before_fresh_input() {
+    use std::cell::Cell;
+    let submitted = Cell::new(0);
+    let samples = Cell::new(0);
+    let created = Cell::new(0);
+    // The old admission has no further polls: it ends after successful submission.
+    let mut input = Some(RequestInput::scripted(vec![Ok(vec![])]));
+    stop_with_input(
+        &mut input,
+        || {
+            submitted.set(submitted.get() + 1);
+            Ok(())
+        },
+        || {
+            assert_eq!(submitted.get(), 1);
+            assert_eq!(created.get(), 0);
+            samples.set(samples.get() + 1);
+            Ok(samples.get() == 2)
+        },
+        true,
+        || {
+            assert_eq!(samples.get(), 2);
+            created.set(created.get() + 1);
+            Ok(RequestInput::scripted(vec![
+                Ok(vec![]),
+                Err(anyhow::anyhow!("later inventory loss")),
+            ]))
+        },
+        Instant::now() + Duration::from_secs(2),
+    )
+    .unwrap();
+    assert_eq!((submitted.get(), created.get()), (1, 1));
+    // The fresh guard must remain in force before the subsequent stock stop.
+    assert!(stop_with_input(
+        &mut input,
+        || panic!("lost fresh guard cannot stop stock"),
+        || panic!("not submitted"),
+        false,
+        || panic!("cannot replace fresh guard"),
+        Instant::now() + Duration::from_secs(1),
+    )
+    .is_err());
+}
+
+#[test]
+fn handoff_failure_or_population_expiry_never_creates_new_admission_or_retries() {
+    use std::cell::Cell;
+    for fault in ["submit", "terminal", "populated", "deadline"] {
+        let submitted = Cell::new(0);
+        let mut input = Some(RequestInput::scripted(vec![Ok(vec![])]));
+        let deadline = if fault == "deadline" {
+            Instant::now()
+        } else {
+            Instant::now() + Duration::from_millis(10)
+        };
+        assert!(stop_with_input(
+            &mut input,
+            || {
+                submitted.set(submitted.get() + 1);
+                ensure!(fault != "submit", "submission failed");
+                Ok(())
+            },
+            || {
+                ensure!(fault != "terminal", "identity changed");
+                Ok(false)
+            },
+            true,
+            || panic!("no new admission without terminal proof within deadline"),
+            deadline,
+        )
+        .is_err());
+        assert_eq!(submitted.get(), usize::from(fault != "deadline"));
+    }
+}
+
+#[test]
+fn fresh_contact_or_integrity_failure_refuses_after_handoff_without_reset() {
+    use crate::device::interaction::Interaction;
+    for poll in [
+        Ok(vec![Interaction::Invalidated]),
+        Err(anyhow::anyhow!("fresh inventory changed")),
+    ] {
+        let mut input = Some(RequestInput::scripted(vec![Ok(vec![])]));
+        assert!(stop_with_input(
+            &mut input,
+            || Ok(()),
+            || Ok(true),
+            true,
+            || Ok(RequestInput::scripted(vec![poll])),
+            Instant::now() + Duration::from_secs(1),
+        )
+        .is_err());
+        assert!(input.is_some(), "failed fresh admission is not cleared");
+    }
+}
+
+#[test]
+fn stock_shutdown_keeps_the_existing_observation_guard() {
+    let mut input = Some(RequestInput::scripted(vec![
+        Ok(vec![]),
+        Err(anyhow::anyhow!("inventory changed during stock stop")),
+    ]));
+    assert!(stop_with_input(
+        &mut input,
+        || Ok(()),
+        || panic!("lost input cannot advance to terminal proof"),
+        false,
+        || panic!("stock stop cannot create a new admission"),
+        Instant::now() + Duration::from_secs(1),
+    )
+    .is_err());
+}

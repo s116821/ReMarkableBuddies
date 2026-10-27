@@ -435,7 +435,8 @@ fn typed_terminal_bracket_requires_original_identity_group_and_policy() {
         &stopped,
         deadline
     )
-    .is_err());
+    .unwrap()
+    .is_none());
     assert!(stopped_bracket(
         original,
         &cleared,
@@ -492,6 +493,8 @@ fn transitions_remain_pending_and_never_renew_the_deadline() {
     let deadline = Instant::now() + Duration::from_secs(5);
     for (a, b, group) in [
         (original, &stopping, GroupObservation::Populated),
+        (&stopping, &stopped, GroupObservation::Populated),
+        (&stopped, &stopped, GroupObservation::Populated),
         (&stopping, &stopped, GroupObservation::EmptyOriginal),
         (&stopped, &cleared, GroupObservation::OriginalAbsent),
     ] {
@@ -507,4 +510,28 @@ fn transitions_remain_pending_and_never_renew_the_deadline() {
         Instant::now()
     )
     .is_err());
+    assert!(stopped_bracket(
+        original,
+        &stopped,
+        GroupObservation::Populated,
+        &stopped,
+        Instant::now()
+    )
+    .is_err());
+    for (key, value) in [
+        ("InvocationID", "34343434343434343434343434343434"),
+        ("KillMode", "process"),
+        ("ControlGroup", "/wrong"),
+        ("ControlPID", "42"),
+        ("Job", "42"),
+    ] {
+        let bad = changed(&stopped, &[(key, value)]);
+        for (first, last) in [(&bad, &stopped), (&stopping, &bad)] {
+            assert!(
+                stopped_bracket(original, first, GroupObservation::Populated, last, deadline)
+                    .is_err(),
+                "{key} must not become pending"
+            );
+        }
+    }
 }

@@ -69,7 +69,7 @@ impl ServiceBaseline {
         before(deadline)
     }
 
-    /// None means the original incarnation is still active/stopping. A returned
+    /// None means the original incarnation or its group is still stopping. A returned
     /// observation requires the caller's independent policy/ownership admission.
     pub fn stopped(&self, deadline: Instant) -> Result<Option<RecoveryObservation>> {
         self.validate()?;
@@ -228,10 +228,6 @@ pub(in crate::workflow::resident_supervisor) fn stopped_snapshot(
         "unexpected service terminal state"
     );
     ensure!(
-        group != GroupObservation::Populated,
-        "original service group remains populated"
-    );
-    ensure!(
         s.control_group() == original.control_group()
             || (s.control_group().is_empty() && group == GroupObservation::OriginalAbsent),
         "service group changed"
@@ -240,6 +236,12 @@ pub(in crate::workflow::resident_supervisor) fn stopped_snapshot(
         retained || group == GroupObservation::OriginalAbsent,
         "cleared service needs original group deletion"
     );
+    // PID1's terminal snapshot and the intervening cgroup sample need not
+    // become terminal together. This is still pending, never empty evidence.
+    // Validate identity/policy/group above before allowing another bounded poll.
+    if group == GroupObservation::Populated {
+        return Ok(None);
+    }
     Ok(Some(if retained {
         TerminalIdentity::Retained
     } else {

@@ -317,7 +317,7 @@ fn stopped_original_requires_stable_identity_terminal_state_and_empty_group() {
             ("MainPID", "0"),
         ],
     );
-    assert!(stopped_stock(&stopped, &original, GroupObservation::Populated).is_err());
+    assert!(!stopped_stock(&stopped, &original, GroupObservation::Populated).unwrap());
     for group in [
         GroupObservation::EmptyOriginal,
         GroupObservation::OriginalAbsent,

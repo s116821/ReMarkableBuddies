@@ -806,6 +806,41 @@ fn pace(deadline: Instant) {
         Duration::from_millis(100).min(deadline.saturating_duration_since(Instant::now())),
     );
 }
+
+/// Development diagnostic only: a fresh observation admission after Buddy's
+/// proved stop is distinct from the ended handoff admission. Input during that
+/// interval is not covered; this must never implement installed request renewal.
+fn stop_with_input(
+    input: &mut Option<RequestInput>,
+    submit: impl FnOnce() -> Result<()>,
+    mut terminal: impl FnMut() -> Result<bool>,
+    new_admission: bool,
+    create: impl FnOnce() -> Result<RequestInput>,
+    deadline: Instant,
+) -> Result<()> {
+    quiet(input)?;
+    check(deadline)?;
+    submit()?;
+    if new_admission {
+        *input = None;
+    }
+    loop {
+        check(deadline)?;
+        quiet(input)?;
+        if terminal()? {
+            break;
+        }
+        pace(deadline);
+    }
+    check(deadline)?;
+    if new_admission {
+        *input = Some(create()?);
+        quiet(input)?;
+        check(deadline)?;
+    }
+    Ok(())
+}
+
 fn stopped(baseline: &ServiceBaseline, deadline: Instant) -> Result<()> {
     ensure!(
         baseline.stopped(deadline)?.is_some(),
@@ -855,16 +890,27 @@ fn actor(mut context: Context, deadline: Instant) -> Result<()> {
         context.intent(&format!("{role}.stop-intent"))?;
         context.current(deadline)?;
         baselines[index].current(deadline)?;
-        quiet(&mut input)?;
-        check(deadline)?;
-        request("stop", baselines[index].group().unit(), deadline)?;
-        loop {
-            context.current(deadline)?;
-            quiet(&mut input)?;
-            if baselines[index].stopped(deadline)?.is_some() {
-                break;
-            }
-            pace(deadline);
+        let new_admission = role == "buddy" && context.candidate.kind == Kind::Native;
+        stop_with_input(
+            &mut input,
+            || {
+                request("stop", baselines[index].group().unit(), deadline)?;
+                if new_admission {
+                    context.intent("buddy.input-admission-ended")?;
+                }
+                Ok(())
+            },
+            || {
+                context.current(deadline)?;
+                Ok(baselines[index].stopped(deadline)?.is_some())
+            },
+            new_admission,
+            || RequestInput::new(TriggerCorner::LowerLeft, None),
+            deadline,
+        )?;
+        if new_admission {
+            context.intent("observation.input-admission-started")?;
+            context.preserve(deadline)?;
         }
         if role == "buddy" && context.candidate.fault == Fault::AfterBuddyStop {
             anyhow::bail!("fixture partial-stop fault");
@@ -990,11 +1036,6 @@ fn restore(
     attempt: &str,
     deadline: Instant,
 ) -> Result<()> {
-    let mut input = if role == "buddy" && context.candidate.kind == Kind::Native {
-        Some(RequestInput::new(TriggerCorner::LowerLeft, None)?)
-    } else {
-        None
-    };
     let durable_intent = context.root.join(format!("{role}.start-intent"));
     let mut prior = if present(&durable_intent)? {
         let (pin, bytes) = read_pin(&durable_intent, deadline)?;
@@ -1043,7 +1084,8 @@ fn restore(
             context.current(deadline)?;
             stopped(actor, deadline)?;
             running.current(deadline)?;
-            quiet(&mut input)?;
+            // Historical restoration is independently verified service evidence.
+            // It grants no input authority across Buddy's own uinput creation.
             write_new(
                 &context.root,
                 &format!("{attempt}.{role}.restored"),
@@ -1064,6 +1106,11 @@ fn restore(
                 admitted && !requested && !pending,
                 "unadmitted or uncertain start; no retry"
             );
+            let mut input = if role == "buddy" && context.candidate.kind == Kind::Native {
+                Some(RequestInput::new(TriggerCorner::LowerLeft, None)?)
+            } else {
+                None
+            };
             context.current(deadline)?;
             stopped(actor, deadline)?;
             context.intent(&format!("{attempt}.{role}.start-intent"))?;
