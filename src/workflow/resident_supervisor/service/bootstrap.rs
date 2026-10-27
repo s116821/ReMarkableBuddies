@@ -804,12 +804,10 @@ fn actor(mut context: Context, deadline: Instant) -> Result<()> {
     quiet(&mut input)?;
     context.preserve(deadline)?;
     let mut baselines = Vec::new();
+    let mut selected_records = Vec::new();
     for role in ["stock", "buddy"] {
         let baseline = context.verified_running(role, deadline)?;
-        ensure!(
-            baseline.encode()? == context.expected(role).baseline.as_bytes(),
-            "selected service incarnation changed"
-        );
+        selected_records.push(baseline.selected_record(&context.expected(role).baseline)?);
         baselines.push(baseline);
     }
     let actor =
@@ -818,8 +816,8 @@ fn actor(mut context: Context, deadline: Instant) -> Result<()> {
         version: 1,
         candidate_sha256: context.digest.clone(),
         actor: String::from_utf8(actor.encode()?)?,
-        stock: String::from_utf8(baselines[0].encode()?)?,
-        buddy: String::from_utf8(baselines[1].encode()?)?,
+        stock: selected_records[0].clone(),
+        buddy: selected_records[1].clone(),
     };
     write_new(
         &context.root,
@@ -1017,7 +1015,7 @@ fn restore(
         {
             let running = context.verified_running(role, deadline)?;
             ensure!(
-                running.original() == &s,
+                running.original().same_observation(&s),
                 "service changed at restored verification"
             );
             context.current(deadline)?;

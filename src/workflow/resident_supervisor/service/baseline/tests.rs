@@ -78,6 +78,104 @@ fn clear(s: &Snapshot) -> Snapshot {
 }
 
 #[test]
+fn selected_record_preserves_bytes_and_rejects_every_other_property_difference() {
+    let f = Fixture::new();
+    let mut selected = baseline(&f);
+    selected.original = changed(
+        &selected.original,
+        &[
+            ("After", "a.target b.target"),
+            ("Conflicts", "c.target d.target"),
+        ],
+    );
+    let bytes = selected.encode().unwrap();
+    let text = String::from_utf8(bytes.clone()).unwrap();
+    let mut fresh = ServiceBaseline::decode(&bytes).unwrap();
+    fresh.original = changed(
+        &fresh.original,
+        &[
+            ("After", "b.target a.target"),
+            ("Conflicts", "d.target c.target"),
+        ],
+    );
+    assert_ne!(fresh.encode().unwrap(), bytes);
+    assert_eq!(fresh.selected_record(&text).unwrap(), text);
+    assert_eq!(selected.encode().unwrap(), bytes);
+    for key in STATE.iter().chain(POLICY) {
+        let mut altered = ServiceBaseline::decode(&fresh.encode().unwrap()).unwrap();
+        let value = format!("{} changed", altered.original.property(key).unwrap());
+        let mut fields = altered.original.fields.clone();
+        fields.insert((*key).into(), value);
+        if let Ok(parsed) = Snapshot::parse(&encode_fields(&fields), "fixture.service") {
+            altered.original = parsed;
+            assert!(altered.selected_record(&text).is_err(), "changed {key}");
+        }
+        let mut missing = ServiceBaseline::decode(&bytes).unwrap();
+        let mut fields = missing.original.fields.clone();
+        fields.remove(*key);
+        if let Ok(parsed) = Snapshot::parse(&encode_fields(&fields), "fixture.service") {
+            missing.original = parsed;
+            assert!(missing.selected_record(&text).is_err(), "missing {key}");
+        }
+    }
+    for key in ["After", "Conflicts"] {
+        let mut duplicate = ServiceBaseline::decode(&bytes).unwrap();
+        duplicate
+            .original
+            .fields
+            .insert(key.into(), "a.target a.target".into());
+        let duplicate_text = String::from_utf8(duplicate.encode().unwrap()).unwrap();
+        assert!(duplicate.selected_record(&duplicate_text).is_err());
+        assert!(fresh.selected_record(&duplicate_text).is_err());
+    }
+}
+
+#[test]
+fn selected_record_requires_exact_group_process_and_context_identity() {
+    let f = Fixture::new();
+    let selected = baseline(&f);
+    let bytes = selected.encode().unwrap();
+    let text = String::from_utf8(bytes.clone()).unwrap();
+    let record: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    for pointer in [
+        "/group/mount_path",
+        "/group/unit",
+        "/group/parent/pid",
+        "/group/parent/start_ticks",
+        "/group/context/boot",
+        "/group/context/mount_record",
+    ]
+    .into_iter()
+    .map(String::from)
+    .chain(
+        [
+            "/group/group",
+            "/group/context/mount_namespace",
+            "/group/context/cgroup_namespace",
+            "/group/context/mount",
+            "/group/context/slice",
+        ]
+        .into_iter()
+        .flat_map(|base| {
+            ["device", "inode", "uid", "mode"]
+                .into_iter()
+                .map(move |field| format!("{base}/{field}"))
+        }),
+    ) {
+        let mut altered = record.clone();
+        let value = altered.pointer_mut(&pointer).unwrap();
+        *value = if let Some(n) = value.as_u64() {
+            serde_json::json!(n + 1)
+        } else {
+            serde_json::json!(format!("{}changed", value.as_str().unwrap()))
+        };
+        if let Ok(altered) = ServiceBaseline::decode(&serde_json::to_vec(&altered).unwrap()) {
+            assert!(altered.selected_record(&text).is_err(), "changed {pointer}");
+        }
+    }
+}
+
+#[test]
 fn cleared_stop_accepts_only_reordered_dependencies_with_original_group_absence() {
     let f = Fixture::new();
     let mut selected = baseline(&f);

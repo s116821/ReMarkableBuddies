@@ -40,16 +40,30 @@ impl ServiceBaseline {
         &self.group
     }
 
+    /// Preserve the selected bytes after verifying the same service/process and
+    /// group context. Only duplicate-free dependency permutations are ignored.
+    /// This is comparison, never freshness or independent restoration authority.
+    #[cfg(any(test, feature = "development-resident-bootstrap"))]
+    pub(super) fn selected_record(&self, selected: &str) -> Result<String> {
+        self.validate()?;
+        let expected = Self::decode(selected.as_bytes())?;
+        ensure!(
+            self.original.same_observation(&expected.original) && self.group == expected.group,
+            "selected service incarnation changed"
+        );
+        Ok(selected.to_owned())
+    }
+
     pub fn current(&self, deadline: Instant) -> Result<()> {
         self.validate()?;
         before(deadline)?;
         ensure!(
-            observe(self.group.unit(), deadline)? == self.original,
+            observe(self.group.unit(), deadline)?.same_observation(&self.original),
             "original service changed"
         );
         self.group.current_process()?;
         ensure!(
-            observe(self.group.unit(), deadline)? == self.original,
+            observe(self.group.unit(), deadline)?.same_observation(&self.original),
             "service changed across process observation"
         );
         before(deadline)
