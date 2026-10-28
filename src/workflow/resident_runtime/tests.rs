@@ -111,6 +111,50 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn identity_refusal_retains_inode_and_start_observations_without_relaxing_checks() {
+    let fixture = Fixture::new();
+    let mut runtime = fixture.start("ready", Duration::from_secs(5)).unwrap();
+    let original = runtime.prepared.artifacts[1].metadata.clone();
+    let start = runtime.prepared.identity.start_ticks;
+    let observed_inode = format!(
+        "observed_inode=Ok(({}, {}))",
+        original.dev(),
+        original.ino()
+    );
+    for mismatch in ["inode", "start"] {
+        if mismatch == "inode" {
+            runtime.prepared.artifacts[1].metadata =
+                fs::metadata(fixture.0.join("profile")).unwrap();
+        } else {
+            runtime.prepared.identity.start_ticks = start + 1;
+        }
+        let error = check_child(&mut runtime.child, &runtime.prepared)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&observed_inode), "{error}");
+        assert!(
+            error.contains(&format!("observed_start=Ok({start})")),
+            "{error}"
+        );
+        assert!(error.contains("executable=Ok("), "{error}");
+        assert!(error.contains("/run/reader"), "{error}");
+        assert_eq!(
+            runtime.prepared.identity.start_ticks,
+            if mismatch == "start" {
+                start + 1
+            } else {
+                start
+            }
+        );
+        runtime.prepared.artifacts[1].metadata = original.clone();
+        runtime.prepared.identity.start_ticks = start;
+    }
+    check_child(&mut runtime.child, &runtime.prepared).unwrap();
+    let report = runtime.shutdown(Instant::now() + Duration::from_secs(1));
+    assert!(report.reaped && report.error.is_none(), "{report:?}");
+}
+
+#[test]
 fn staged_socket_wait_services_admission_and_connects_only_after_listen() {
     let fixture = Fixture::new();
     let mut staged_checks = 0;

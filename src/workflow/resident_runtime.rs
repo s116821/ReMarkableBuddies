@@ -728,12 +728,26 @@ fn before(deadline: Instant) -> Result<()> {
 fn check_child(child: &mut Option<Child>, prepared: &Prepared) -> Result<()> {
     let child = child.as_mut().context("resident already shut down")?;
     ensure!(child.try_wait()?.is_none(), "resident child exited");
-    let actual = fs::metadata(format!("/proc/{}/exe", child.id()))?;
+    let executable = format!("/proc/{}/exe", child.id());
+    let actual = fs::metadata(&executable).map(|value| (value.dev(), value.ino()));
     let expected = &prepared.artifacts[1].metadata;
+    // Retain both observations even when the inode check fails. A combined,
+    // short-circuiting comparison concealed which identity gate refused native
+    // startup. Sampling errors remain failures, never permission to wait/retry.
+    let start = process_start(child.id());
     ensure!(
-        same_inode(expected, &actual)
-            && process_start(child.id())? == prepared.identity.start_ticks,
-        "resident child executable/incarnation changed"
+        actual
+            .as_ref()
+            .is_ok_and(|identity| *identity == (expected.dev(), expected.ino()))
+            && start
+                .as_ref()
+                .is_ok_and(|value| *value == prepared.identity.start_ticks),
+        "resident child executable/incarnation changed: pid={} expected_inode=({}, {}) observed_inode={actual:?} expected_start={} observed_start={start:?} executable={:?}",
+        child.id(),
+        expected.dev(),
+        expected.ino(),
+        prepared.identity.start_ticks,
+        fs::read_link(&executable)
     );
     Ok(())
 }
