@@ -267,6 +267,12 @@ impl Companion {
         checked()?;
         let Some(observed) = observed else {
             ensure!(self.owner.is_none(), "companion lost broker ownership");
+            #[cfg(test)]
+            if let Some(path) = &self.broker_file {
+                // Private fixture witness: startup actually reached a successful
+                // missing-owner observation, rather than expiring in handshake.
+                fs::write(path.with_extension("missing-observed"), b"missing-owner")?;
+            }
             return Ok(false);
         };
         ensure!(

@@ -77,7 +77,9 @@ handshakes = set()
 count = 0
 while True:
     peer, _ = listener.accept()
-    peer.settimeout(3)
+    # The companion-startup fixture must outlive its five-second readiness
+    # deadline; an idle fixture exit must not masquerade as absent-broker refusal.
+    peer.settimeout(10 if mode == "reconnect-companion-startup" else 3)
     credentials = peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
     assert struct.unpack("3i", credentials)[:2] == (os.getppid(), os.geteuid())
     try:

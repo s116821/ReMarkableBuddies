@@ -25,7 +25,11 @@ impl Fixture {
         mode: &str,
         timeout: Duration,
     ) -> std::result::Result<ResidentRuntime, StartupFailure> {
-        self.launch_companion(self.companion_profile(mode), "reconnect", timeout)
+        self.launch_companion(
+            self.companion_profile(mode),
+            "reconnect-companion-startup",
+            timeout,
+        )
     }
     fn launch_companion(
         &self,
@@ -112,16 +116,33 @@ fn two_owned_children_handshake_then_broker_ready_and_both_reap() {
 fn companion_exit_and_missing_broker_fail_startup_and_reap_both() {
     for mode in ["exit", "missing"] {
         let f = Fixture::new();
-        let error = match f.start_companion(mode, Duration::from_secs(2)) {
+        let error = match f.start_companion(mode, Duration::from_secs(5)) {
             Ok(_) => panic!("unexpected startup: {mode}"),
             Err(error) => error,
         };
+        if mode == "missing" {
+            assert!(f.0.join("run/handshakes").is_file(), "{error:?}");
+            assert_eq!(
+                fs::read(f.0.join("broker.missing-observed")).unwrap(),
+                b"missing-owner"
+            );
+            assert!(
+                error
+                    .error
+                    .chain()
+                    .any(|cause| cause.is::<request::DeadlineExpired>()),
+                "missing broker must exhaust readiness after the SDK handshake: {error:?}"
+            );
+        }
         let report = error
             .shutdown
             .as_ref()
             .expect("both processes were launched");
         assert!(report.reaped && report.reader_reaped, "{error:?}");
-        assert!(report.companion.as_ref().unwrap().reaped, "{report:?}");
+        assert!(
+            report.companion.as_ref().is_some_and(|child| child.reaped),
+            "{error:?}"
+        );
         assert!(!Path::new(&format!("/proc/{}", report.pid)).exists());
     }
 }
