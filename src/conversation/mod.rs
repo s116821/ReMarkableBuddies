@@ -540,8 +540,6 @@ impl Ledger {
                 Record::Capture(capture) => capture.conversation,
                 Record::NormalizedText(source) => source.conversation,
                 Record::ArchivedNormalizedSource(source) => source.conversation,
-                Record::NotebookPlan(plan) => plan.conversation,
-                Record::NotebookStage(stage) => stage.conversation,
                 Record::LegacyCapture(capture) => capture.conversation,
                 Record::DevelopmentCapture(capture) => capture.conversation,
                 _ => bail!("invalid existing source reference"),
@@ -1736,6 +1734,7 @@ impl Ledger {
                 + legacy_captures.len()
                 + development_captures.len()
                 + normalized_text.len()
+                + archived_sources.len()
                 == source_ids.len(),
             "source reference absent"
         );

@@ -121,10 +121,11 @@ impl NotebookPlan {
             (2..=9).contains(&self.caller_max_model_calls)
                 && !self.chunks.is_empty()
                 && self.chunks.len() <= 8
-                && self.chunks.len() + 1 <= self.caller_max_model_calls
+                && self.chunks.len() < self.caller_max_model_calls
                 && self.map_input_digests.len() == self.chunks.len()
                 && self.map_input_digests.iter().all(|s| valid_digest(s))
-                && self.reducer_reserved_bytes <= MAX_INPUT,
+                && self.reducer_reserved_bytes <= MAX_INPUT
+                && self.reducer_reserved_bytes >= self.chunks.len() * MAX_MAP_REPLY,
             "invalid notebook work reservation"
         );
         for (ordinal, chunk) in self.chunks.iter().enumerate() {

@@ -212,7 +212,7 @@ impl Store {
     }
     pub(crate) fn legacy_publisher_lease(self: &Arc<Self>) -> Result<LegacyPublisherLease> {
         // Preserve the domain lease while adding publisher-only lifetime accounting.
-        let legacy = self.local_compatibility_lease(true)?;
+        let legacy = self.local_compatibility_lease(false)?;
         let mut inner = self
             .inner
             .lock()
@@ -997,8 +997,7 @@ impl Store {
             notebook_generation::validate_ready(&self.paths, self.actor_id, inner.generation)?;
             ensure!(
                 inner.index.unavailable == 0
-                    && inner.mode_handles == 0
-                    && sync::mode::load(self)?.is_none()
+                    && sync::mode::ordinary_local(self)?
                     && manifest.scope == Scope::LocalTransaction,
                 "notebook publication requires complete ordinary local custody"
             );

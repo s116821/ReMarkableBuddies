@@ -56,7 +56,7 @@ impl NotebookBackup {
         let mut record_hashes = BTreeSet::new();
         for manifest in &self.manifests {
             ensure!(
-                matches!(manifest.scope, Scope::Local),
+                matches!(manifest.scope, Scope::LocalTransaction),
                 "selected notebook backup unsupported"
             );
             ensure!(
@@ -153,7 +153,7 @@ impl Store {
         let mut inventory = BTreeMap::new();
         for manifest in inner.index.manifests.values() {
             ensure!(
-                matches!(manifest.scope, Scope::Local),
+                matches!(manifest.scope, Scope::LocalTransaction),
                 "selected notebook backup unsupported"
             );
             Self::validate_objects(&root, manifest)?;
@@ -216,7 +216,7 @@ impl Store {
             "notebook archive requires complete idle custody"
         );
         ensure!(
-            sync::mode::load(self)?.is_none(),
+            sync::mode::ordinary_local(self)?,
             "notebook archive requires local mode"
         );
         let root = self.generation(inner.generation);

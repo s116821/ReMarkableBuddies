@@ -207,6 +207,15 @@ pub(crate) fn load(store: &Store) -> Result<Option<ModeState>> {
     }
     Ok(Some(state))
 }
+
+/// Read-only distinction for ordinary successor consumers. Mode-handle counts
+/// also include valid ordinary leases and cannot identify a sync publisher.
+pub(crate) fn ordinary_local(store: &Store) -> Result<bool> {
+    Ok(matches!(
+        snapshot(store, &load(store)?)?.mode,
+        None | Some(SyncMode::LocalOnly)
+    ))
+}
 fn snapshot(store: &Store, state: &Option<ModeState>) -> Result<SyncModeSnapshot> {
     let current = state.as_ref().and_then(|s| s.transitions.last());
     Ok(SyncModeSnapshot {

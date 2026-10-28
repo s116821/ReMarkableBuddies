@@ -156,7 +156,7 @@ pub(crate) fn prepare(
         "notebook preparation requires unique complete custody"
     );
     ensure!(
-        sync::mode::load(store)?.is_none(),
+        sync::mode::ordinary_local(store)?,
         "notebook requires ordinary local mode"
     );
     let generation = inner.generation;
@@ -166,6 +166,13 @@ pub(crate) fn prepare(
     );
     let root = store.generation(generation);
     selection::validate_generation_preparing_notebook(&root, store.actor_id, generation)?;
+    selection::refuse_selected_maintenance(&root)?;
+    let retained = root.join("selection-history");
+    files::safe_path(&retained)?;
+    ensure!(
+        !retained.exists() || fs::read_dir(&retained)?.next().is_none(),
+        "retained selected history prevents notebook preparation"
+    );
     for ((namespace, _), heads) in &inner.index.heads {
         if *namespace != Namespace::ExportAssociation {
             continue;

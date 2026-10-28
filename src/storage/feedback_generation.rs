@@ -89,7 +89,11 @@ pub(crate) fn prepare(
         "feedback preparation requires unique complete custody"
     );
     ensure!(
-        sync::mode::load(store)?.is_none(),
+        if version(&store.generation(inner.generation))? == notebook_generation::VERSION {
+            sync::mode::ordinary_local(store)?
+        } else {
+            sync::mode::load(store)?.is_none()
+        },
         "feedback requires ordinary local mode"
     );
     let generation = inner.generation;
@@ -174,10 +178,14 @@ pub(super) fn admit(
 }
 impl Store {
     pub(super) fn check_feedback(&self, inner: &Inner) -> Result<()> {
+        let notebook = version(&self.generation(inner.generation))? == notebook_generation::VERSION;
         ensure!(
             inner.index.unavailable == 0
-                && inner.mode_handles == 0
-                && sync::mode::load(self)?.is_none(),
+                && if notebook {
+                    sync::mode::ordinary_local(self)?
+                } else {
+                    inner.mode_handles == 0 && sync::mode::load(self)?.is_none()
+                },
             "feedback unavailable in current mode/history"
         );
         let root = self.generation(inner.generation);

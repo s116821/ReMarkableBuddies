@@ -228,3 +228,123 @@ fn legacy_maintenance_and_generic_inspection_refuse_notebook_generation() {
             || report.current_generation_format == Some(None)
     );
 }
+
+#[test]
+fn explicit_local_only_adoption_and_real_ordinary_leases_allow_legacy_publication() {
+    for explicit in [false, true] {
+        let f = Fixture::new();
+        let store = Store::open(f.paths()).unwrap();
+        if explicit {
+            store
+                .set_sync_mode(
+                    &store.sync_mode_snapshot().unwrap().token,
+                    Uuid::new_v4(),
+                    sync::mode::SyncModeChoice::LocalOnly,
+                )
+                .unwrap();
+        }
+        drop(store);
+        let store = Arc::new(Store::prepare_notebook(f.paths()).unwrap());
+        let ordinary = store
+            .ordinary_mode_lease(&store.sync_mode_snapshot().unwrap().token)
+            .unwrap();
+        let local = store.local_domain_lease().unwrap();
+        let record = retained(&store, b"ordinary retained bytes");
+        store
+            .commit(
+                vec![record.clone()],
+                BTreeMap::from([(
+                    digest(b"ordinary retained bytes"),
+                    b"ordinary retained bytes".to_vec(),
+                )]),
+            )
+            .unwrap();
+        let ledger = crate::conversation::Ledger::new(store.clone());
+        ledger.create(Uuid::new_v4(), Uuid::new_v4(), 1).unwrap();
+        assert!(store.legacy_publisher_lease().is_err());
+        assert!(store.legacy_sync_lease().is_err());
+        assert!(store
+            .sync_mode_lease(&store.sync_mode_snapshot().unwrap().token)
+            .is_err());
+        drop(local);
+        drop(ordinary);
+        drop(ledger);
+        let backup = f.0.join("archive");
+        store.export_notebook_backup(&backup).unwrap();
+        store.restore_notebook_backup(&backup).unwrap();
+        assert_eq!(
+            store
+                .media_references(&record.media_descriptors[0])
+                .unwrap(),
+            1
+        );
+    }
+}
+
+#[test]
+fn nonlocal_mode_refuses_before_notebook_marker_or_format_mutation() {
+    let f = Fixture::new();
+    let store = Store::open(f.paths()).unwrap();
+    store
+        .set_sync_mode(
+            &store.sync_mode_snapshot().unwrap().token,
+            Uuid::new_v4(),
+            sync::mode::SyncModeChoice::IsolatedBackup {
+                binding_sha256: digest(b"nonlocal"),
+            },
+        )
+        .unwrap();
+    let format = fs::read(f.root().join("format.json")).unwrap();
+    drop(store);
+    assert!(Store::prepare_notebook(f.paths()).is_err());
+    assert_eq!(fs::read(f.root().join("format.json")).unwrap(), format);
+    assert!(!f.root().join(MARKER).exists());
+}
+
+#[test]
+fn actual_selected_history_refuses_but_empty_bound_feature_marker_is_preserved() {
+    for nonempty in [false, true] {
+        let f = Fixture::new();
+        let store = Store::open(f.paths()).unwrap();
+        let generation = store.inner.lock().unwrap().generation;
+        selection::prepare_generation(&f.root(), store.actor_id, generation).unwrap();
+        if nonempty {
+            let (mut selected, objects) = Store::ordinary_transaction(
+                vec![retained(&store, b"selected")],
+                BTreeMap::from([(digest(b"selected"), b"selected".to_vec())]),
+            )
+            .unwrap();
+            selected.scope = Scope::SelectedRecords;
+            store
+                .initialize_selected(
+                    &selection::SelectionScope {
+                        group: Uuid::new_v4(),
+                        key_sha256: digest(b"scope"),
+                        binding_sha256: digest(b"binding"),
+                    },
+                    selection::SelectionChange {
+                        operation: Uuid::new_v4(),
+                        accepted_base_sha256: digest(b"base"),
+                        selected,
+                        retained: vec![],
+                    },
+                    objects,
+                )
+                .unwrap();
+        }
+        let marker = fs::read(f.root().join("selection-feature.json")).unwrap();
+        let format = fs::read(f.root().join("format.json")).unwrap();
+        drop(store);
+        if nonempty {
+            assert!(Store::prepare_notebook(f.paths()).is_err());
+            assert!(!f.root().join(MARKER).exists());
+            assert_eq!(fs::read(f.root().join("format.json")).unwrap(), format);
+        } else {
+            drop(Store::prepare_notebook(f.paths()).unwrap());
+        }
+        assert_eq!(
+            fs::read(f.root().join("selection-feature.json")).unwrap(),
+            marker
+        );
+    }
+}
