@@ -300,6 +300,8 @@ impl Ledger {
                 && user.outcome == Outcome::Interpreted
                 && user.text.as_ref() == Some(&plan.request)
                 && user.sequence == 0
+                && user.created_ms == 0
+                && user.updated_ms == 0
                 && user.sources == vec![archive.id],
             "invalid notebook user admission"
         );
@@ -322,6 +324,12 @@ impl Ledger {
             return Ok(None);
         }
         let (_, mut root) = self.live_root(plan.conversation, Some(&expected))?;
+        user.created_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .min(u64::MAX as u128) as u64;
+        user.updated_ms = user.created_ms;
         ensure!(
             (archive.turn == user.id) == plan.prior.is_none()
                 && user.correction_of == plan.prior.as_ref().map(|prior| prior.0),
@@ -333,10 +341,11 @@ impl Ledger {
                 .find(|e| e.record_id == *id && e.namespace == Namespace::Conversation)
                 .context("notebook prior draft guard absent")?;
             ensure!(
-                encoded_revision(selected)? == *revision
+                self.store.notebook_revision_reference(selected)?.sha256 == *revision
                     && matches!(Self::decode(selected)?,Record::Turn(ref draft)
                     if draft.role == Role::Assistant && draft.mode == Mode::Writer
                     && draft.outcome == Outcome::Generated && draft.sources == vec![archive.id]
+                    && draft.sequence < root.next_sequence
                     && draft.text.as_ref().is_some_and(|body| digest(body.as_bytes()) == *text)),
                 "notebook prior draft mismatch"
             );
@@ -360,7 +369,11 @@ impl Ledger {
             );
             prior
         };
-        plan.source_revision = encoded_revision(&original)?;
+        plan.source_revision = if archive.turn == user.id {
+            encoded_revision(&original)?
+        } else {
+            self.store.notebook_revision_reference(&original)?.sha256
+        };
         let plan_envelope = self.envelope(
             Namespace::Conversation,
             plan.id,

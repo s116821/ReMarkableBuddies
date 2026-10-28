@@ -257,6 +257,33 @@ pub(crate) fn prepare(
 }
 
 impl Store {
+    /// Actual retained object identity, not a hash of reserialized JSON.
+    /// This read-only reference grants no execution or current-head authority.
+    pub fn notebook_revision_reference(&self, envelope: &Envelope) -> Result<ObjectRef> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        let (stored, hash) = inner
+            .index
+            .records
+            .get(&envelope.revision_id)
+            .context("notebook revision absent")?;
+        ensure!(stored == envelope, "notebook revision changed");
+        let reference = inner
+            .index
+            .manifests
+            .values()
+            .flat_map(|m| &m.records)
+            .find(|reference| &reference.sha256 == hash)
+            .context("notebook committed reference absent")?
+            .clone();
+        files::Source::open(
+            &self.generation(inner.generation).join("objects").join(hash),
+            &reference,
+        )?;
+        Ok(reference)
+    }
     /// Freeze read-only command context/payloads under the fresh OS lease before
     /// notebook metadata publication. Existing conversations must already exist.
     /// All temporary readers must be dropped; no Arc or live domain owner may

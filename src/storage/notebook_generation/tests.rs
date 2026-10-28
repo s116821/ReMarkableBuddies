@@ -338,6 +338,44 @@ fn command_preflight_refusal_and_escaped_reader_cannot_publish_notebook_adoption
         expected.0
     );
 }
+#[test]
+fn retained_revision_reference_preserves_noncanonical_record_bytes_and_checks_actual_object() {
+    let f = Fixture::new();
+    let store = Store::prepare_notebook(f.paths()).unwrap();
+    let record = retained(&store, b"retained object");
+    let transaction = store
+        .commit(
+            vec![record.clone()],
+            BTreeMap::from([(digest(b"retained object"), b"retained object".to_vec())]),
+        )
+        .unwrap();
+    let root = f.root();
+    drop(store);
+    let path = root.join("commits").join(format!("{transaction}.json"));
+    let mut manifest: Manifest = files::json(&path, MAX_METADATA as u64).unwrap();
+    let original = manifest.records[0].sha256.clone();
+    let mut bytes = serde_json::to_vec_pretty(&record).unwrap();
+    bytes.push(b'\n');
+    let actual = digest(&bytes);
+    fs::write(root.join("objects").join(&actual), &bytes).unwrap();
+    manifest.records[0] = ObjectRef {
+        sha256: actual.clone(),
+        bytes: bytes.len() as u64,
+    };
+    let namespace = manifest.record_namespaces.remove(&original).unwrap();
+    manifest.record_namespaces.insert(actual.clone(), namespace);
+    files::atomic_json(&path, &manifest).unwrap();
+    let store = Store::open(f.paths()).unwrap();
+    let reference = store.notebook_revision_reference(&record).unwrap();
+    assert_eq!(reference.sha256, actual);
+    assert_ne!(
+        reference.sha256,
+        digest(&serde_json::to_vec(&record).unwrap())
+    );
+    assert_eq!(reference.bytes, bytes.len() as u64);
+    fs::write(root.join("objects").join(&actual), b"corrupt").unwrap();
+    assert!(store.notebook_revision_reference(&record).is_err());
+}
 
 #[test]
 fn actual_selected_history_refuses_but_empty_bound_feature_marker_is_preserved() {

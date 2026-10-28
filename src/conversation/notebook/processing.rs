@@ -413,6 +413,13 @@ impl NotebookStage {
                         );
                     }
                 }
+                ensure!(
+                    self.invoked != Some(false)
+                        || (self.output.is_none()
+                            && self.observed_output_digest.is_none()
+                            && self.observed_output_bytes.is_none()),
+                    "no-call notebook result cannot contain an observed response"
+                );
             }
         }
         Ok(())
