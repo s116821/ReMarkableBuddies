@@ -68,7 +68,7 @@
       "exported"
     ],
     "model_calls": 6,
-    "destination_calls": 6,
+    "destination_calls": 5,
     "writes": 2,
     "note_contains": [
       "Force = 10 N",
