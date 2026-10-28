@@ -5,6 +5,7 @@ use remarkable_open_sdk::native_adapter::{Rejection, Reply};
 mod capture;
 mod companion;
 mod requests;
+mod shutdown;
 
 struct Fixture(PathBuf);
 impl Fixture {

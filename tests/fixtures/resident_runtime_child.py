@@ -1,9 +1,11 @@
 """Owned Linux protocol fixture; no tablet libraries or native operations."""
 import ctypes
 import hashlib
+import json
 import os
 import pathlib
 import socket
+import signal
 import struct
 import sys
 import time
@@ -14,6 +16,16 @@ root = pathlib.Path(os.environ["RSDK_ACTIVATION_DIRECTORY"])
 mode = sys.argv[1]
 assert sys.argv[2:] == ["--system", "two words", "", "$(not-a-command); *", "λ"]
 assert "LD_PRELOAD" not in os.environ  # fixture-only launch, explicitly removed
+if mode == "reconnect-companion-term":
+    def terminate(_signal, _frame):
+        companion = json.loads((root.parent / "companion-evidence").read_text())
+        result = {"companion_absent": not pathlib.Path(f"/proc/{companion['pid']}").exists(),
+                  "companion_term": (root.parent / "companion-evidence.term").read_text() == "TERM"}
+        (root / "reader-term").write_text(json.dumps(result))
+        sys.exit(0)
+    signal.signal(signal.SIGTERM, terminate)
+elif mode == "reconnect-companion-ignore-term":
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
 assert not any(key in os.environ for key in ("LD_AUDIT", "LD_LIBRARY_PATH", "QT_PLUGIN_PATH", "QML_IMPORT_PATH", "HOSTNAME"))
 admission = (root / "admission.bin").read_bytes()
 assert len(admission) == 168 and admission[:8] == b"RSDKACT1"
@@ -79,7 +91,7 @@ while True:
     peer, _ = listener.accept()
     # The companion-startup fixture must outlive its five-second readiness
     # deadline; an idle fixture exit must not masquerade as absent-broker refusal.
-    peer.settimeout(10 if mode == "reconnect-companion-startup" else 3)
+    peer.settimeout(10 if mode.startswith("reconnect-companion-") else 3)
     credentials = peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
     assert struct.unpack("3i", credentials)[:2] == (os.getppid(), os.geteuid())
     try:

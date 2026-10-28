@@ -2,7 +2,7 @@ use super::*;
 use crate::workflow::resident_request::{self as request, FailureKind, InputProgress, Request};
 
 impl Fixture {
-    fn companion_profile(&self, mode: &str) -> CompanionProfile {
+    pub(super) fn companion_profile(&self, mode: &str) -> CompanionProfile {
         let path = self.0.join("vendor-companion");
         fs::copy(fs::canonicalize("/usr/bin/python3").unwrap(), &path).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
@@ -31,7 +31,7 @@ impl Fixture {
             timeout,
         )
     }
-    fn launch_companion(
+    pub(super) fn launch_companion(
         &self,
         companion: CompanionProfile,
         reader_mode: &str,
