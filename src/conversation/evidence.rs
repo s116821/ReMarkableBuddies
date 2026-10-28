@@ -518,6 +518,38 @@ impl Ledger {
         }
         Ok(())
     }
+    /// Validate evidence against the caller's one captured head set. Only the
+    /// immutable referenced objects and original transaction are read afterward;
+    /// evidence/receipt heads must not be refreshed independently of that set.
+    pub(super) fn validate_snapshot_evidence(
+        &self,
+        records: &[Record],
+        snapshot: &[Envelope],
+    ) -> Result<()> {
+        let mut budget = ReadBudget::default();
+        let head = |id| -> Result<&Envelope> {
+            let mut matches = snapshot.iter().filter(|envelope| {
+                envelope.namespace == Namespace::Conversation && envelope.record_id == id
+            });
+            let envelope = matches.next().context("evidence snapshot head absent")?;
+            ensure!(
+                matches.next().is_none(),
+                "evidence snapshot head conflicted"
+            );
+            Ok(envelope)
+        };
+        for record in records {
+            if let Record::RequestEvidence(fact) = record {
+                self.validate_evidence_pair(
+                    fact,
+                    head(RequestEvidence::identity(fact.operation))?,
+                    head(Self::receipt_id(fact.operation))?,
+                    &mut budget,
+                )?;
+            }
+        }
+        Ok(())
+    }
     fn validate_evidence(
         &self,
         fact: &RequestEvidence,

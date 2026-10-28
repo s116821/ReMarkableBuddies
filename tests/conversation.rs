@@ -272,6 +272,7 @@ fn receipt(
     target: Uuid,
 ) -> BindingReceipt {
     BindingReceipt {
+        acquisition: Default::default(),
         operation,
         conversation,
         request_fingerprint: "immutable synthetic request".into(),

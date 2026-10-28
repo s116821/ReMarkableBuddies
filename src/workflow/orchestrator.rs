@@ -128,10 +128,10 @@ impl<M: LLMEngine> Orchestrator<M> {
         let _timing = crate::measurement::Span::new("reader.iteration");
         self.workflow.begin_iteration()?;
         let result = self.run_iteration_inner(wait_for_trigger);
-        // A failed request guard must not be cleared by cleanup or another turn.
-        if self.workflow.input_failed() {
+        // A failed input guard or service health cannot be cleared by cleanup.
+        if self.workflow.runtime_failed() {
             return result.and(Err(anyhow::anyhow!(
-                "Request input lost; further input stopped"
+                "Runtime health or input lost; further activity stopped"
             )));
         }
         if let Err(error) = self.workflow.finish_request() {
@@ -321,7 +321,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                 }
                 if let Err(e) = rendered {
                     error!("Error rendering answer: {}", e);
-                    if self.workflow.input_failed() {
+                    if self.workflow.runtime_failed() {
                         return Err(e);
                     }
                     // On error, retain the typed diagnostic without source feedback
@@ -724,7 +724,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                 Ok(_) => info!("Iteration completed successfully"),
                 Err(e) => {
                     error!("Error in iteration: {}", e);
-                    if self.workflow.input_failed() {
+                    if self.workflow.runtime_failed() {
                         return Err(e);
                     }
                     // The iteration already attempted the non-ink failure diagnostic.

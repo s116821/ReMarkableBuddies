@@ -1,5 +1,8 @@
 # ReMarkableBuddies
 
+See [application documentation](docs/README.md) for development, technical, release
+and fixture guides.
+
 The [public ecosystem hub](https://github.com/s116821/RemarkableBuddiesDocs) owns
 all OpenSpec specs, active changes, archives, config and workflow skills.
 Start with its [contributor guide](https://github.com/s116821/RemarkableBuddiesDocs/blob/main/CONTRIBUTING.md)

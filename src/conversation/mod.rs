@@ -10,6 +10,7 @@ pub use development::{DevelopmentCaptureHistory, PreparedDevelopmentCapture};
 pub mod evidence;
 mod export;
 pub mod feedback;
+mod historical_association;
 mod pending;
 #[cfg(test)]
 mod reader_dispatch;
@@ -34,6 +35,10 @@ pub use binding_projection::{
     SelectedBindingCandidate, SelectedBindingInspection, SelectedBindingUnresolved,
 };
 pub use export::*;
+pub use historical_association::{
+    HistoricalPageAssociation, HistoricalPageAssociationInspection,
+    HistoricalPageAssociationUnresolved,
+};
 pub use intent::*;
 pub use pending::{PendingIntentPublication, PendingIntentRequest, SourceAdmission};
 #[cfg(test)]
@@ -112,6 +117,9 @@ impl Ledger {
                 Record::Receipt(receipt) if receipt.admitted_intent.is_some() => INTENT_SCHEMA,
                 Record::OutcomeFact(fact) if fact.settlement.is_some() => INTENT_SCHEMA,
                 Record::Export(export) if export.attempt.is_some() => EXPORT_SCHEMA,
+                Record::Binding(binding) if !binding.receipt.acquisition.is_inserted() => {
+                    EXISTING_BINDING_SCHEMA
+                }
                 Record::NormalizedText(_) => TEXT_SOURCE_SCHEMA,
                 _ => SCHEMA,
             },
@@ -134,7 +142,18 @@ impl Ledger {
         );
         ensure!(envelope.kind == Kind::Value, "deleted conversation record");
         let record: Record = serde_json::from_value(envelope.payload.clone())?;
-        if matches!(&record, Record::NormalizedText(_)) {
+        if let Record::Binding(binding) = &record {
+            ensure!(
+                (envelope.domain_schema_version == EXISTING_BINDING_SCHEMA)
+                    == !binding.receipt.acquisition.is_inserted(),
+                "binding schema/acquisition mismatch"
+            );
+            if envelope.domain_schema_version == EXISTING_BINDING_SCHEMA {
+                // Selected projection also decodes here. New shapes cannot bypass
+                // full receipt semantics by avoiding the explicit binding query.
+                Self::validate_binding_receipt(&binding.receipt)?;
+            }
+        } else if matches!(&record, Record::NormalizedText(_)) {
             ensure!(
                 envelope.namespace == Namespace::Source
                     && envelope.domain_schema_version == TEXT_SOURCE_SCHEMA,
@@ -1124,6 +1143,10 @@ impl Ledger {
     /// Historical receipt semantics shared by writes and selected inspection.
     /// Successful validation never reconstructs native qualification.
     fn validate_binding_receipt(receipt: &BindingReceipt) -> Result<()> {
+        ensure!(
+            !receipt.operation.is_nil() && !receipt.conversation.is_nil(),
+            "nil binding identity"
+        );
         Self::validate_observation(&receipt.source)?;
         ensure!(
             receipt.intended_target == Some(receipt.observed_page),
@@ -1151,7 +1174,6 @@ impl Ledger {
             !unique.is_empty()
                 && unique.len() == receipt.expected_order.len()
                 && unique.contains(&receipt.source.page)
-                && !unique.contains(&receipt.observed_page)
                 && !unique.contains(&Uuid::nil()),
             "ambiguous source order"
         );
@@ -1160,10 +1182,30 @@ impl Ledger {
             .iter()
             .position(|id| *id == receipt.source.page)
             .context("source outside order")?;
-        permitted.insert(position + 1, receipt.observed_page);
+        match receipt.acquisition {
+            BindingAcquisition::Inserted => {
+                ensure!(
+                    !unique.contains(&receipt.observed_page),
+                    "insertion target already exists"
+                );
+                permitted.insert(position + 1, receipt.observed_page);
+            }
+            BindingAcquisition::ExistingCurrent => {
+                ensure!(
+                    receipt.observed_page == receipt.source.page,
+                    "existing current target mismatch"
+                );
+            }
+            BindingAcquisition::ExistingAdjacent => {
+                ensure!(
+                    permitted.get(position + 1) == Some(&receipt.observed_page),
+                    "existing adjacent target mismatch"
+                );
+            }
+        }
         ensure!(
             permitted == receipt.observed_order,
-            "insertion receipt order mismatch"
+            "acquisition receipt order mismatch"
         );
         Ok(())
     }
@@ -1443,6 +1485,7 @@ impl Ledger {
         self.validate_evidence_records(&records)?;
         Ok(records)
     }
+    /// Validate a single already-cloned snapshot without another Store read.
     fn inspect_snapshot(
         conversation: Uuid,
         retained: bool,

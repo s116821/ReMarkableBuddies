@@ -14,6 +14,8 @@ mod recovery;
 #[cfg(test)]
 mod selected_projection_tests;
 pub mod selection;
+#[cfg(test)]
+mod snapshot_status_tests;
 pub mod sync;
 pub mod types;
 use anyhow::{ensure, Context, Result};
@@ -168,6 +170,19 @@ impl Drop for LegacyPublisherLease {
     }
 }
 impl Store {
+    /// Serialize domain-owned local journal IO under the existing Store lease.
+    /// The callback may perform bounded owned-file IO, never network/native work.
+    pub(crate) fn with_owned_local_io<T>(
+        &self,
+        action: impl FnOnce(&std::path::Path, Uuid) -> Result<T>,
+    ) -> Result<T> {
+        let _guard = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex poisoned"))?;
+        action(&self.paths.data, self.actor_id)
+    }
+
     pub(crate) fn local_domain_lease(self: &Arc<Self>) -> Result<LocalDomainLease> {
         let legacy = self.legacy_sync_lease()?;
         let mut inner = self
@@ -645,6 +660,18 @@ impl Store {
         limit: usize,
         matches: impl Fn(&Envelope) -> bool,
     ) -> Result<Vec<Envelope>> {
+        self.snapshot_heads_matching_with_status(namespaces, limit, matches)
+            .map(|(_, records)| records)
+    }
+
+    /// Availability and cloned heads describe the same locked index snapshot.
+    /// Domain callers decide whether incomplete history permits their query.
+    pub(crate) fn snapshot_heads_matching_with_status(
+        &self,
+        namespaces: &[Namespace],
+        limit: usize,
+        matches: impl Fn(&Envelope) -> bool,
+    ) -> Result<(usize, Vec<Envelope>)> {
         ensure!((1..=MAX_ITEMS).contains(&limit), "invalid inspection bound");
         let inner = self
             .inner
@@ -687,7 +714,7 @@ impl Store {
                 result.push(record.clone());
             }
         }
-        Ok(result)
+        Ok((inner.index.unavailable, result))
     }
     /// Bounded retained revisions, including superseded facts; never a live lookup.
     pub fn snapshot_revisions_matching(
