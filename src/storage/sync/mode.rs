@@ -311,6 +311,12 @@ impl Store {
             .inner
             .lock()
             .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        let root = self.generation(inner.generation);
+        ensure!(
+            feedback_generation::version(&root)? != notebook_generation::VERSION
+                && !root.join(notebook_generation::MARKER).exists(),
+            "notebook storage does not support sync mode transitions"
+        );
         let original = load(self)?;
         let fingerprint = digest(&serde_json::to_vec(&(
             self.actor_id,

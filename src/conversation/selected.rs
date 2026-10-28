@@ -68,6 +68,14 @@ impl SelectedDomainProjection {
                                             if origin.conversation == conversation
                                                 && origin.sequence <= turn.sequence
                                                 && origin.sources.contains(&s.id)),
+                                Record::ArchivedNormalizedSource(s) =>
+                                    s.id == *source
+                                        && s.conversation == conversation
+                                        && matches!(self.head(Namespace::Conversation, s.turn),
+                                            Some((_, Some(Record::Turn(origin))))
+                                            if origin.conversation == conversation
+                                                && origin.sequence <= turn.sequence
+                                                && origin.sources.contains(&s.id)),
                                 _ => false,
                             }),
                             "selected turn source closure missing or foreign"
@@ -104,6 +112,15 @@ impl SelectedDomainProjection {
                             if origin.sources.contains(&source.id)),
                         "selected normalized source origin relationship missing"
                     );
+                }
+                Record::ArchivedNormalizedSource(source) => {
+                    self.require_turn(source.turn, conversation)?;
+                    ensure!(
+                        matches!(self.head(Namespace::Conversation, source.turn),
+                        Some((_, Some(Record::Turn(origin)))) if origin.sources.contains(&source.id)),
+                        "selected notebook archive origin relationship missing"
+                    );
+                    // Historical document metadata never grants native ownership.
                 }
                 Record::Binding(binding) => {
                     ensure!(
@@ -451,6 +468,7 @@ pub(super) fn conversation_id(record: &Record) -> Uuid {
         Record::Turn(r) => r.conversation,
         Record::Source(r) => r.conversation,
         Record::NormalizedText(r) => r.conversation,
+        Record::ArchivedNormalizedSource(r) => r.conversation,
         Record::Capture(r) => r.conversation,
         Record::LegacyCapture(r) => r.conversation,
         Record::DevelopmentCapture(r) => r.conversation,

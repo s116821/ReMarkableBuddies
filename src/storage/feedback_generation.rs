@@ -42,7 +42,13 @@ pub(crate) fn validate_version(
             "unsupported feedback feature"
         );
         ensure!(
-            version == VERSION || allow_pending,
+            version == VERSION
+                || allow_pending
+                || (version == notebook_generation::VERSION
+                    && notebook_generation::validate_version(
+                        root, actor, generation, version, false
+                    )
+                    .is_ok()),
             "interrupted feedback preparation"
         );
     }
@@ -89,6 +95,13 @@ pub(crate) fn prepare(
     let generation = inner.generation;
     let root = store.generation(generation);
     selection::validate_generation_preparing(&root, store.actor_id, generation)?;
+    if version(&root)? == notebook_generation::VERSION {
+        ensure!(
+            root.join(MARKER).exists(),
+            "feedback enablement on notebook storage unsupported"
+        );
+        return notebook_generation::validate_ready(&store.paths, store.actor_id, generation);
+    }
     if version(&root)? != VERSION {
         hook(PreparationStage::BeforeMarker)?;
         files::atomic_json(
@@ -128,7 +141,7 @@ pub(super) fn admit(
         "feedback is not selected/group data"
     );
     ensure!(
-        version(root)? == VERSION && index.unavailable == 0,
+        matches!(version(root)?, VERSION | notebook_generation::VERSION) && index.unavailable == 0,
         "feedback requires prepared complete generation"
     );
     validate(root, actor, generation, false)?;
@@ -168,7 +181,14 @@ impl Store {
             "feedback unavailable in current mode/history"
         );
         let root = self.generation(inner.generation);
-        ensure!(version(&root)? == VERSION, "feedback feature not prepared");
+        ensure!(
+            matches!(version(&root)?, VERSION | notebook_generation::VERSION),
+            "feedback feature not prepared"
+        );
+        if version(&root)? == notebook_generation::VERSION {
+            ensure!(root.join(MARKER).exists(), "feedback feature absent");
+            notebook_generation::validate_ready(&self.paths, self.actor_id, inner.generation)?;
+        }
         validate(&root, self.actor_id, inner.generation, false)
     }
     pub(crate) fn retain_feedback(&self, observation: Observation) -> Result<Description> {

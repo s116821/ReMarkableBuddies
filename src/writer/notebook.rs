@@ -108,6 +108,30 @@ impl Coverage {
 }
 
 impl ValidatedNotebook {
+    /// Canonical bytes already reached through a committed archive. Retain the
+    /// archive's original raw-input facts rather than inventing new provenance
+    /// from the reserialized document during refinement.
+    pub(crate) fn from_archived_bytes(
+        canonical: &[u8],
+        canonical_sha256: &str,
+        raw_sha256: &str,
+        raw_bytes: u64,
+    ) -> Result<Self> {
+        ensure!(
+            raw_bytes > 0
+                && raw_bytes <= MAX_CANONICAL_BYTES as u64
+                && crate::storage::valid_digest(raw_sha256),
+            "invalid archived raw provenance"
+        );
+        let mut source = Self::from_bytes(canonical, canonical_sha256)?;
+        ensure!(
+            source.canonical_bytes() == canonical,
+            "noncanonical notebook archive"
+        );
+        source.raw_sha256 = raw_sha256.to_owned();
+        source.raw_bytes = raw_bytes as usize;
+        Ok(source)
+    }
     /// The file-admission layer must supply the exact bounded observed bytes.
     /// This function performs no I/O, Store mutation or credential/provider work.
     pub fn from_bytes(raw: &[u8], expected_sha256: &str) -> Result<Self> {
