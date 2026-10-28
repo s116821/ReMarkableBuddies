@@ -39,6 +39,7 @@ fn root() -> PathBuf {
 #[test]
 fn capture_plan_validates_full_order_and_canonical_ids() {
     let mut plan = CapturePlan {
+        opening_metadata: None,
         document: binding().boot,
         page: binding().activation,
         order: vec![binding().activation],
@@ -305,4 +306,67 @@ fn actor_refuses_new_guard_failure_contact_and_missing_peer_without_release() {
             assert!(Instant::now() >= deadline);
         }
     }
+}
+
+#[test]
+#[ignore = "protected root filesystem; run in the owned Linux root container"]
+fn opening_allowance_requires_durable_matching_history_without_live_old_processes() {
+    let b = binding();
+    let context = |root: PathBuf| Context {
+        nonce: b.nonce.clone(),
+        stage: root.clone(),
+        root,
+        digest: b.candidate_sha256.clone(),
+        pins: Vec::new(),
+        own: None,
+        own_snapshot: None,
+        root_identity: None,
+        candidate: Candidate {
+            version: 2,
+            nonce: b.nonce.clone(),
+            kind: Kind::Native,
+            fault: Fault::None,
+            boot: b.boot.clone(),
+            controller_sha256: "55".repeat(32),
+            observer_sha256: "66".repeat(32),
+            backup_sha256: "77".repeat(32),
+            stock: ExpectedService {
+                baseline: String::new(),
+                executable_sha256: "88".repeat(32),
+            },
+            buddy: ExpectedService {
+                baseline: String::new(),
+                executable_sha256: "99".repeat(32),
+            },
+            source: Vec::new(),
+            unit_files: Vec::new(),
+            capture: None,
+        },
+    };
+    let c = context(root());
+    assert!(historical_ready(&c, end()).unwrap().is_none());
+    let mut peer = Mailbox::open(&c.root).unwrap();
+    peer.publish("ready", &b, end()).unwrap();
+    assert!(historical_ready(&c, end()).is_err());
+    peer.publish("observer-ended", &b, end()).unwrap();
+    assert!(historical_ready(&c, end()).is_err());
+    let mut stale = b.clone();
+    stale.runtime.start_ticks += 1;
+    peer.publish("actor-ended", &stale, end()).unwrap();
+    assert!(historical_ready(&c, end()).is_err());
+
+    let c = context(root());
+    let mut peer = Mailbox::open(&c.root).unwrap();
+    for phase in ["observer-ended", "actor-ended", "ready"] {
+        peer.publish(phase, &b, end()).unwrap();
+    }
+    let history = historical_ready(&c, end()).unwrap().unwrap();
+    history.current().unwrap(); // Fake old PIDs do not need to be alive for recovery.
+    let mut changed = context(c.root.clone());
+    changed.digest = "aa".repeat(32);
+    assert!(historical_ready(&changed, end()).is_err());
+    let leaf = Mailbox::leaf("ready").unwrap();
+    fs::rename(c.root.join(&leaf), c.root.join("retained-ready.json")).unwrap();
+    write_new(&c.root, &leaf, &serde_json::to_vec(&b).unwrap()).unwrap();
+    assert!(history.current().is_err());
 }

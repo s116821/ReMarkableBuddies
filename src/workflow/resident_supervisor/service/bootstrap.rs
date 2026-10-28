@@ -28,6 +28,7 @@ const BUDDY: &str = "/home/root/.local/lib/reader-buddy/reader-buddy";
 const BUDDY_ARGV0: &str = "/opt/bin/reader-buddy";
 const MAX_RECORD: u64 = 256 * 1024;
 
+pub mod opening;
 pub mod setup;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -414,6 +415,9 @@ impl Context {
         );
         if let Some(plan) = &candidate.capture {
             plan.facts()?;
+            if let Some(policy) = &plan.opening_metadata {
+                policy.validate(plan, &candidate.source)?;
+            }
         }
         ensure!(
             candidate.kind == Kind::Fixture || candidate.fault == Fault::None,
@@ -556,6 +560,25 @@ impl Context {
             "source manifest changed"
         );
         Ok(())
+    }
+    fn preserve_after_setup(&self, deadline: Instant, label: &str) -> Result<()> {
+        let Some(plan) = &self.candidate.capture else {
+            return self.preserve(deadline);
+        };
+        let Some(policy) = &plan.opening_metadata else {
+            return self.preserve(deadline);
+        };
+        let Some(mailbox) = setup::historical_ready(self, deadline)? else {
+            return self.preserve(deadline);
+        };
+        policy.validate(plan, &self.candidate.source)?;
+        let base = source_root(self.candidate.kind, &self.nonce);
+        let current = inventory(&base, deadline)?;
+        let samples = opening::Samples::read(plan, &base, &self.root, label, &current, deadline)?;
+        opening::verify_inventory(plan, &self.candidate.source, &current)?;
+        samples.verify(policy, plan)?;
+        mailbox.current()?;
+        self.current(deadline)
     }
     fn units(
         &mut self,
@@ -1072,7 +1095,7 @@ fn actor(mut context: Context, deadline: Instant) -> Result<()> {
                 )?;
                 context.intent("fixture-source-mismatch")?;
             }
-            context.preserve(deadline)?;
+            context.preserve_after_setup(deadline, "actor")?;
             ensure!(status.success(), "observer refused/failed: {status}");
             return Ok(());
         }
@@ -1257,7 +1280,7 @@ fn recover(mut context: Context, deadline: Instant) -> Result<()> {
         || {
             // Stock restoration owns the remaining budget first. A slow or
             // failed inventory can withhold Buddy, never delay stock recovery.
-            let after = context.preserve(deadline);
+            let after = context.preserve_after_setup(deadline, &attempt);
             let record = write_new(
                 &context.root,
                 &format!("{attempt}.source-after"),

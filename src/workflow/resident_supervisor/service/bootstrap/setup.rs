@@ -19,6 +19,8 @@ pub struct CapturePlan {
     pub document: String,
     pub page: String,
     pub order: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opening_metadata: Option<super::opening::OpeningMetadata>,
 }
 impl CapturePlan {
     pub fn facts(&self) -> Result<remarkable_open_sdk::native_adapter::ReaderFacts> {
@@ -99,15 +101,19 @@ impl Binding {
         ensure!(self.observer != self.runtime, "setup processes must differ");
         Ok(())
     }
-    pub(super) fn current(&self, context: &Context, observer: u32) -> Result<()> {
+    fn candidate(&self, context: &Context) -> Result<()> {
         self.validate()?;
         ensure!(
             self.nonce == context.nonce
                 && self.candidate_sha256 == context.digest
-                && self.boot == context.candidate.boot
-                && self.observer.pid == observer,
-            "setup candidate/process mismatch"
+                && self.boot == context.candidate.boot,
+            "setup candidate mismatch"
         );
+        Ok(())
+    }
+    pub(super) fn current(&self, context: &Context, observer: u32) -> Result<()> {
+        self.candidate(context)?;
+        ensure!(self.observer.pid == observer, "setup observer mismatch");
         ensure!(
             ProcessIdentity::read(observer)? == self.observer
                 && ProcessIdentity::read(self.runtime.pid)? == self.runtime,
@@ -124,6 +130,24 @@ impl Binding {
         }
         Ok(())
     }
+}
+
+/// Recovery reads historical bindings after the original processes have exited;
+/// liveness belongs to admission, not proof that both guards ended before setup.
+pub(super) fn historical_ready(context: &Context, deadline: Instant) -> Result<Option<Mailbox>> {
+    let mut mailbox = Mailbox::open(&context.root)?;
+    let Some(binding) = mailbox.receive("ready", deadline)? else {
+        return Ok(None);
+    };
+    binding.candidate(context)?;
+    for name in ["observer-ended", "actor-ended"] {
+        ensure!(
+            mailbox.receive(name, deadline)?.as_ref() == Some(&binding),
+            "opening policy lacks matching ended-admission proof"
+        );
+    }
+    mailbox.current()?;
+    Ok(Some(mailbox))
 }
 
 pub struct ObserverSetup {
