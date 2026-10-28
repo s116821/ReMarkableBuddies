@@ -177,6 +177,8 @@ mod native {
             credentials: root.join("credentials"),
         })?);
         let launch = Launch {
+            // Existing candidates retain their original one-process contract.
+            companion: None,
             profile: artifact(stage.join("profile.json"), PROFILE),
             executable: artifact("/usr/bin/xochitl", STOCK),
             adapter: artifact(stage.join("libremarkable-resident.so"), ADAPTER),

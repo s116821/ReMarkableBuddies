@@ -180,6 +180,8 @@ impl Session {
             .join(format!("session-{}", pending.lease.record().activation()));
         let profile = &pending.installation.profile;
         let launch = Launch {
+            // Two-service profile and independent recovery admission pending.
+            companion: None,
             profile: Artifact {
                 path: NATIVE_PROFILE.into(),
                 sha256: profile.native_profile_sha256,

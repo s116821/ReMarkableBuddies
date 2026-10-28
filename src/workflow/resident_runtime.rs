@@ -27,6 +27,9 @@ use std::{
 const POLL: Duration = Duration::from_millis(10);
 const CLEANUP: Duration = Duration::from_secs(2);
 
+mod companion;
+pub use companion::Profile as CompanionProfile;
+
 /// Expected bytes from independently reviewed delivery, never peer assertions.
 pub struct Artifact {
     pub path: PathBuf,
@@ -36,6 +39,8 @@ pub struct Launch {
     pub profile: Artifact,
     pub executable: Artifact,
     pub adapter: Artifact,
+    /// Explicit two-process selection. Never inferred from an old profile.
+    pub companion: Option<CompanionProfile>,
     /// Fresh absolute path below an existing caller-owned mode0700 directory.
     pub directory: PathBuf,
     /// Explicit approved ordinary values; all ambient environment is discarded.
@@ -50,6 +55,15 @@ pub struct Shutdown {
     pub pid: u32,
     pub start_ticks: Option<u64>,
     pub lost: LostRequest,
+    pub reaped: bool,
+    pub reader_reaped: bool,
+    pub companion: Option<ChildShutdown>,
+    pub error: Option<String>,
+}
+#[derive(Debug)]
+pub struct ChildShutdown {
+    pub pid: u32,
+    pub start_ticks: Option<u64>,
     pub reaped: bool,
     pub error: Option<String>,
 }
@@ -94,6 +108,7 @@ struct Prepared {
     identity: RuntimeIdentity,
     uid: u32,
     command: Command,
+    companion: Option<companion::Companion>,
 }
 
 /// Retain for the entire session, not one conversation. Dropping stops only this
@@ -171,7 +186,20 @@ impl ResidentRuntime {
             store: store.clone(),
             retired_loss: LostRequest::NoPendingMutation,
         };
-        match runtime.connect(store, deadline, &mut admit) {
+        let connected = (|| {
+            let pid = runtime.child.as_ref().unwrap().id();
+            runtime.prepared.identity.pid = pid;
+            runtime.prepared.identity.start_ticks = process_start(pid)?;
+            check_child(&mut runtime.child, &runtime.prepared)?;
+            if let Some(companion) = &mut runtime.prepared.companion {
+                before(deadline)?;
+                admit(deadline)?;
+                before(deadline)?;
+                companion.spawn(deadline)?;
+            }
+            runtime.connect(store, deadline, &mut admit)
+        })();
+        match connected {
             Ok(()) => Ok(runtime),
             Err(error) => {
                 let shutdown = runtime.stop(Instant::now() + CLEANUP);
@@ -201,6 +229,7 @@ impl ResidentRuntime {
                 "resident exited before Ready"
             );
             self.prepared.current(false)?;
+            self.check_child()?;
             match fs::symlink_metadata(self.prepared.directory.path.join("sdk.sock")) {
                 Ok(_) => break,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -233,12 +262,63 @@ impl ResidentRuntime {
         admit(deadline)?;
         self.prepared.current(true)?;
         self.check_child()?;
+        // Both processes already exist. Complete SDK handshake before waiting on
+        // companion readiness, avoiding a dependency cycle through reader main.
+        self.wait_companion(deadline, admit)?;
         before(deadline)
     }
     fn check_child(&mut self) -> Result<()> {
-        check_child(&mut self.child, &self.prepared)
+        check_children(&mut self.child, &mut self.prepared)
+    }
+    fn sample_companion(
+        &mut self,
+        deadline: Instant,
+        progress: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<bool> {
+        let Some(mut companion) = self.prepared.companion.take() else {
+            return Ok(true);
+        };
+        let result = companion.observe(deadline, &mut || {
+            progress()?;
+            self.prepared.current(false).map_err(integrity)?;
+            self.check_child().map_err(integrity)?;
+            before(deadline)
+        });
+        self.prepared.companion = Some(companion);
+        result
+    }
+    fn observe_companion(
+        &mut self,
+        deadline: Instant,
+        progress: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        let result = self.sample_companion(deadline, progress).and_then(|ready| {
+            ensure!(ready, "owned companion is not broker ready");
+            Ok(())
+        });
+        if result.is_err() {
+            self.retire_connection();
+        }
+        result
+    }
+    fn wait_companion(
+        &mut self,
+        deadline: Instant,
+        admit: &mut dyn FnMut(Instant) -> Result<()>,
+    ) -> Result<()> {
+        loop {
+            before(deadline)?;
+            if self.sample_companion(deadline, &mut || admit(deadline))? {
+                return Ok(());
+            }
+            thread::sleep(POLL.min(deadline.saturating_duration_since(Instant::now())));
+        }
     }
     pub fn connection(&mut self) -> Result<&mut ResidentConnection> {
+        ensure!(
+            self.prepared.companion.is_none(),
+            "two-process requests require with_connection admission and delivery checks"
+        );
         self.check_child()?;
         self.prepared.current(true)?;
         self.connection
@@ -255,6 +335,7 @@ impl ResidentRuntime {
         progress: &mut dyn FnMut() -> Result<()>,
         action: impl FnOnce(&mut ResidentConnection, &mut dyn FnMut() -> Result<()>) -> Result<T>,
     ) -> Result<T> {
+        self.observe_companion(deadline, progress)?;
         let Self {
             child,
             connection,
@@ -265,7 +346,7 @@ impl ResidentRuntime {
             before(deadline)?;
             progress()?;
             prepared.current(true).map_err(integrity)?;
-            check_child(child, prepared).map_err(integrity)?;
+            check_children(child, prepared).map_err(integrity)?;
             before(deadline)
         };
         checked()?;
@@ -276,6 +357,7 @@ impl ResidentRuntime {
         // A journal outcome can take time after SDK response completion. Reject
         // stale caller delivery without changing that retained historical result.
         checked()?;
+        self.observe_companion(deadline, progress)?;
         Ok(result)
     }
     /// Close only the client socket, retaining original effect uncertainty and
@@ -305,6 +387,7 @@ impl ResidentRuntime {
         );
         self.prepared.current(true).map_err(integrity)?;
         self.check_child().map_err(integrity)?;
+        self.observe_companion(deadline, progress)?;
         let scope = ConnectionIdentity {
             runtime: self.prepared.identity.clone(),
             connection: nonce(),
@@ -337,6 +420,7 @@ impl ResidentRuntime {
         progress()?;
         self.prepared.current(true).map_err(integrity)?;
         self.check_child().map_err(integrity)?;
+        self.observe_companion(deadline, progress)?;
         before(deadline)?;
         connection.retain_loss(self.retired_loss.clone());
         self.connection = Some(connection);
@@ -357,30 +441,39 @@ impl ResidentRuntime {
                 .then_some(self.prepared.identity.start_ticks),
             lost,
             reaped: false,
+            reader_reaped: false,
+            companion: None,
             error: None,
         };
-        if let Some(mut child) = self.child.take() {
-            report.pid = child.id();
-            let stopped = (|| -> Result<bool> {
-                if child.try_wait()?.is_some() {
-                    return Ok(true);
-                }
-                child.kill().context("stop owned resident child")?;
-                loop {
-                    if child.try_wait()?.is_some() {
-                        return Ok(true);
-                    }
-                    if Instant::now() >= deadline {
-                        return Ok(false);
-                    }
-                    thread::sleep(POLL.min(deadline.saturating_duration_since(Instant::now())));
-                }
-            })();
-            match stopped {
-                Ok(reaped) => report.reaped = reaped,
-                Err(error) => report.error = Some(format!("{error:#}")),
+        // Dispatch both terminations before waiting. An exhausted companion wait
+        // cannot suppress reader termination; never signal a recycled saved PID.
+        let companion = self
+            .prepared
+            .companion
+            .as_mut()
+            .and_then(companion::Companion::take_child)
+            .map(|(child, start)| begin_stop(child, start));
+        let reader = self
+            .child
+            .take()
+            .map(|child| begin_stop(child, report.start_ticks));
+        report.companion = companion.map(|pending| finish_stop(pending, deadline));
+        if let Some(reader) = reader {
+            let reader = finish_stop(reader, deadline);
+            report.pid = reader.pid;
+            report.reader_reaped = reader.reaped;
+            report.error = reader.error;
+        }
+        if let Some(companion) = &report.companion {
+            if let Some(error) = &companion.error {
+                report.error = Some(match report.error.take() {
+                    Some(prior) => format!("{prior}; companion: {error}"),
+                    None => format!("companion: {error}"),
+                });
             }
         }
+        report.reaped =
+            report.reader_reaped && report.companion.as_ref().is_none_or(|child| child.reaped);
         if !report.reaped && report.error.is_none() {
             report.error = Some("owned child was not reaped before deadline".into());
         }
@@ -565,6 +658,10 @@ impl Prepared {
             start_ticks: 0,
             activation,
         };
+        let companion = input
+            .companion
+            .map(|profile| companion::Companion::prepare(profile, &input.directory, deadline))
+            .transpose()?;
         Ok(Self {
             directory,
             artifacts,
@@ -573,6 +670,7 @@ impl Prepared {
             identity,
             uid,
             command,
+            companion,
         })
     }
     fn current(&mut self, consumed: bool) -> Result<()> {
@@ -626,6 +724,61 @@ fn check_child(child: &mut Option<Child>, prepared: &Prepared) -> Result<()> {
         "resident child executable/incarnation changed"
     );
     Ok(())
+}
+fn check_children(child: &mut Option<Child>, prepared: &mut Prepared) -> Result<()> {
+    check_child(child, prepared)?;
+    if let Some(companion) = &mut prepared.companion {
+        companion.current()?;
+    }
+    Ok(())
+}
+struct Stopping {
+    child: Child,
+    report: ChildShutdown,
+}
+fn begin_stop(mut child: Child, start_ticks: Option<u64>) -> Stopping {
+    let mut report = ChildShutdown {
+        pid: child.id(),
+        start_ticks,
+        reaped: false,
+        error: None,
+    };
+    match child.try_wait() {
+        Ok(Some(_)) => report.reaped = true,
+        Ok(None) => {
+            if let Err(error) = child.kill() {
+                report.error = Some(format!("stop owned child: {error}"));
+            }
+        }
+        Err(error) => report.error = Some(format!("observe owned child before stop: {error}")),
+    }
+    Stopping { child, report }
+}
+fn finish_stop(mut pending: Stopping, deadline: Instant) -> ChildShutdown {
+    while !pending.report.reaped {
+        match pending.child.try_wait() {
+            Ok(Some(_)) => {
+                pending.report.reaped = true;
+                break;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                pending.report.error = Some(format!(
+                    "{:?}; reap owned child: {error}",
+                    pending.report.error
+                ));
+                break;
+            }
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        thread::sleep(POLL.min(deadline.saturating_duration_since(Instant::now())));
+    }
+    if !pending.report.reaped && pending.report.error.is_none() {
+        pending.report.error = Some("owned child was not reaped before deadline".into());
+    }
+    pending.report
 }
 fn nonce() -> Uuid {
     Uuid::parse(&crate::storage::Uuid::new_v4().to_string()).expect("OS UUID")

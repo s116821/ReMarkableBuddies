@@ -3,6 +3,7 @@ use crate::storage::{StorePaths, Uuid as StoreUuid};
 use remarkable_open_sdk::native_adapter::{Rejection, Reply};
 
 mod capture;
+mod companion;
 mod requests;
 
 struct Fixture(PathBuf);
@@ -32,6 +33,7 @@ impl Fixture {
             path,
         };
         Launch {
+            companion: None,
             profile: artifact(self.0.join("profile")),
             executable: artifact(
                 fs::canonicalize("/usr/bin/python3")
