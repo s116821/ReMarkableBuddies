@@ -109,6 +109,8 @@ impl LLMEngine for Model {
         assert!(self.parts.len() >= 2);
         Ok(if self.calls % 2 == 1 {
             "Force = 10 N. (page 1)."
+        } else if self.calls >= 4 {
+            "# Force\n\nForce = 10 N. (page 1). Refined."
         } else {
             "# Force\n\nForce = 10 N. (page 1)."
         }

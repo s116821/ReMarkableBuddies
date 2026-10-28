@@ -97,6 +97,8 @@ fn notebook_joined_flow_uses_real_mem_http_for_create_reopen_refinement_update_a
             self.0 += 1;
             Ok(if self.0 % 2 == 1 {
                 "x = 7 (page 1)."
+            } else if self.0 >= 4 {
+                "# Study\n\nx = 7 (page 1). Refined."
             } else {
                 "# Study\n\nx = 7 (page 1)."
             }
