@@ -52,6 +52,10 @@ development-resident-bootstrap = []
 name = "resident_bootstrap_control"
 required-features = ["development-resident-bootstrap"]
 
+[[example]]
+name = "resident_bootstrap_observer"
+required-features = ["development-resident-bootstrap"]
+
 [dev-dependencies]
 remarkable-open-sdk = { git = "https://github.com/s116821/ReMarkableOpenSDK", rev = "80b29ebec3a46b6976e5288d2e8d65fbeccca816", default-features = false, features = ["mock", "development-capture"] }
 # Explicit native-evidence example only; not linked into the installed runtime.

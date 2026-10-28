@@ -80,7 +80,7 @@ jobs:
           READER_BUDDY_CANDIDATE_SHA: ${{ steps.freeze.outputs.sha }}
           CROSS_CONFIG: release/Cross.release.toml
         run: |
-          cross build --locked --release --target armv7-unknown-linux-gnueabihf --example resident_bootstrap_observer
+          cross build --locked --release --target armv7-unknown-linux-gnueabihf --example resident_bootstrap_observer --features development-resident-bootstrap
           cross build --locked --release --target armv7-unknown-linux-gnueabihf --example resident_bootstrap_control --features development-resident-bootstrap
           mkdir "$RUNNER_TEMP/resident-observer"
           cp target/armv7-unknown-linux-gnueabihf/release/examples/resident_bootstrap_observer "$RUNNER_TEMP/resident-observer/"

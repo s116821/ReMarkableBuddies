@@ -21,6 +21,7 @@ test('native bootstrap diagnostics stay outside official release inventory', () 
   assert.equal(compile.env.READER_BUDDY_CANDIDATE_SHA, expr('steps.freeze.outputs.sha'));
   assert.match(compile.run, /--locked --release --target armv7-unknown-linux-gnueabihf/);
   assert.match(compile.run, /--example resident_bootstrap_control --features development-resident-bootstrap/);
+  assert.match(compile.run, /--example resident_bootstrap_observer --features development-resident-bootstrap/);
   assert.match(compile.run, /sha256sum resident_bootstrap_observer resident_bootstrap_control/);
   const applicationBuild = build.steps.find(s => /release\/build.py build/.test(s.run ?? ''));
   assert.ok(!JSON.stringify(applicationBuild).includes('development-resident-bootstrap'));

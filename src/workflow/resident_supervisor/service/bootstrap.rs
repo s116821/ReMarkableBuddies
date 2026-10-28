@@ -28,6 +28,8 @@ const BUDDY: &str = "/home/root/.local/lib/reader-buddy/reader-buddy";
 const BUDDY_ARGV0: &str = "/opt/bin/reader-buddy";
 const MAX_RECORD: u64 = 256 * 1024;
 
+pub mod setup;
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum Kind {
@@ -80,6 +82,8 @@ struct Candidate {
     buddy: ExpectedService,
     source: Vec<SourceEntry>,
     unit_files: Vec<UnitFile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    capture: Option<setup::CapturePlan>,
 }
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -401,9 +405,16 @@ impl Context {
         let (pin, bytes) = read_pin(&stage.join("candidate.json"), deadline)?;
         let candidate: Candidate = serde_json::from_slice(&bytes)?;
         ensure!(
-            candidate.version == 1 && candidate.nonce == nonce,
+            ((candidate.version == 1 && candidate.capture.is_none())
+                || (candidate.version == 2
+                    && candidate.kind == Kind::Native
+                    && candidate.capture.is_some()))
+                && candidate.nonce == nonce,
             "candidate identity mismatch"
         );
+        if let Some(plan) = &candidate.capture {
+            plan.facts()?;
+        }
         ensure!(
             candidate.kind == Kind::Fixture || candidate.fault == Fault::None,
             "native fault injection forbidden"
@@ -947,7 +958,45 @@ fn actor(mut context: Context, deadline: Instant) -> Result<()> {
     }
     quiet(&mut input)?;
     check(deadline)?;
+    let mut capture_mailbox = if context.candidate.capture.is_some() {
+        let mailbox = setup::Mailbox::open(&context.root)?;
+        mailbox.empty()?;
+        Some(mailbox)
+    } else {
+        None
+    };
     let mut child = command.spawn()?;
+    if let Some(mailbox) = &mut capture_mailbox {
+        let setup_deadline = deadline.min(Instant::now() + Duration::from_secs(120));
+        let binding = loop {
+            context.current(setup_deadline)?;
+            quiet(&mut input)?;
+            for baseline in &baselines {
+                stopped(baseline, setup_deadline)?;
+            }
+            ensure!(child.try_wait()?.is_none(), "observer exited before setup");
+            if let Some(binding) = mailbox.receive("observer-ended", setup_deadline)? {
+                binding.current(&context, child.id())?;
+                break binding;
+            }
+            pace(setup_deadline);
+        };
+        setup::actor(
+            mailbox,
+            &binding,
+            &mut input,
+            || RequestInput::new(TriggerCorner::LowerLeft, None),
+            setup_deadline,
+            &mut || {
+                context.current(setup_deadline)?;
+                binding.current(&context, child.id())?;
+                for baseline in &baselines {
+                    stopped(baseline, setup_deadline)?;
+                }
+                Ok(())
+            },
+        )?;
+    }
     if matches!(context.candidate.fault, Fault::ActorKill | Fault::ActorHang) {
         let ready = context.root.join("fixture-child-ready");
         let complete = context.root.join("fixture-child-ready-complete");
@@ -997,6 +1046,9 @@ fn actor(mut context: Context, deadline: Instant) -> Result<()> {
     loop {
         context.current(deadline)?;
         quiet(&mut input)?;
+        if let Some(mailbox) = &capture_mailbox {
+            mailbox.current()?;
+        }
         for baseline in &baselines {
             stopped(baseline, deadline)?;
         }
@@ -1241,6 +1293,47 @@ pub fn entry(arguments: Vec<String>) -> Result<()> {
     nonce(&arguments[1])?;
     let name = &arguments[1];
     let role = arguments[0].as_str();
+    if role == "setup-complete" {
+        ensure!(arguments.len() == 2, "unexpected setup arguments");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut context = Context::load(name, deadline)?;
+        ensure!(
+            context.candidate.capture.is_some(),
+            "candidate has no capture setup"
+        );
+        context.bind_root()?;
+        let (ownership_pin, bytes) = read_pin(&context.root.join("ownership.json"), deadline)?;
+        let ownership: Ownership = serde_json::from_slice(&bytes)?;
+        ensure!(
+            ownership.version == 1 && ownership.candidate_sha256 == context.digest,
+            "setup ownership mismatch"
+        );
+        let actor = ServiceBaseline::decode(ownership.actor.as_bytes())?;
+        actor.current(deadline)?;
+        let mut mailbox = setup::Mailbox::open(&context.root)?;
+        let binding = mailbox
+            .receive("ready", deadline)?
+            .context("setup is not ready")?;
+        for phase in ["observer-ended", "actor-ended"] {
+            ensure!(
+                mailbox.receive(phase, deadline)?.as_ref() == Some(&binding),
+                "setup admissions did not end for this binding"
+            );
+        }
+        binding.current(&context, binding.observer_pid())?;
+        for role in ["stock", "buddy"] {
+            stopped(
+                &ServiceBaseline::decode(context.expected(role).baseline.as_bytes())?,
+                deadline,
+            )?;
+        }
+        context.current(deadline)?;
+        ownership_pin.current()?;
+        actor.current(deadline)?;
+        mailbox.publish("complete", &binding, deadline)?;
+        println!("setup_complete=true reader_identity=false");
+        return Ok(());
+    }
     if matches!(role, "units" | "inspect") {
         ensure!(arguments.len() == 3, "selection kind required");
         let kind = match arguments[2].as_str() {

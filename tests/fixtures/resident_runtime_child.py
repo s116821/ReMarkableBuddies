@@ -107,6 +107,9 @@ while True:
             continue
         while True:
             request = frame()
+            if mode == "reconnect-idle":
+                with (root / "commands").open("ab") as commands:
+                    commands.write(request[202:204])
             digest = hashlib.sha256(struct.pack(">I", len(request)) + request).digest()
             if request[202:204] == b"\x02\x05":
                 # Independent owned PNG encoder, not a native Reader model.

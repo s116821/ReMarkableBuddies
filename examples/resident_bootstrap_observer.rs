@@ -26,7 +26,10 @@ fn nonce(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Stri
 #[cfg(target_os = "linux")]
 mod native {
     use super::*;
-    use remarkable_open_sdk::OperationId;
+    use remarkable_open_sdk::{native_adapter::HistoricalCapture, OperationId};
+    use remarkable_reader_buddy::workflow::resident_supervisor::service::bootstrap::setup::{
+        capture_after_setup, Binding, ObserverSetup,
+    };
     use remarkable_reader_buddy::{
         device::{
             request_input::{InputProgress, RequestInput},
@@ -122,12 +125,42 @@ mod native {
         Ok(())
     }
 
+    fn capture(
+        runtime: &mut ResidentRuntime,
+        mut input: Option<RequestInput>,
+        setup: &mut ObserverSetup,
+        nonce: &str,
+        operation: OperationId,
+        overall: Instant,
+    ) -> Result<HistoricalCapture> {
+        let binding = Binding::new(nonce, &setup.candidate_sha256, runtime.identity())?;
+        let setup_deadline = overall.min(Instant::now() + Duration::from_secs(120));
+        runtime.with_connection(
+            setup_deadline,
+            &mut || inactive_services(setup_deadline),
+            |_, progress| setup.admit(&binding, &mut input, setup_deadline, progress),
+        )?;
+        let deadline = overall.min(Instant::now() + Duration::from_secs(10));
+        let facts = setup.plan.facts()?;
+        capture_after_setup(runtime, facts, operation, deadline, &mut || {
+            setup.current()?;
+            admit(
+                input
+                    .as_mut()
+                    .ok_or_else(|| anyhow::anyhow!("missing capture guard"))?,
+                deadline,
+            )
+        })
+    }
+
     pub fn run(nonce: &str) -> Result<()> {
         ensure!(
             unsafe { nix::libc::geteuid() } == 0,
             "Native observation requires root"
         );
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let start = Instant::now();
+        let deadline = start + Duration::from_secs(60);
+        let mut capture_setup = ObserverSetup::load(nonce, deadline)?;
         inactive_services(deadline)?;
         let mut input = RequestInput::new(TriggerCorner::LowerLeft, None)?;
         admit(&mut input, deadline)?;
@@ -172,11 +205,53 @@ mod native {
             }
         };
         let identity = runtime.identity().clone();
-        let observe_deadline = Instant::now() + Duration::from_secs(10);
         let operation = OperationId(
             remarkable_open_sdk::Uuid::parse(&uuid::Uuid::new_v4().to_string())
                 .expect("fresh UUID"),
         );
+        if let Some(setup) = &mut capture_setup {
+            let captured = capture(
+                &mut runtime,
+                Some(input),
+                setup,
+                nonce,
+                operation,
+                start + Duration::from_secs(180),
+            );
+            // Setup and capture failures take the same owned-child cleanup path.
+            let shutdown = runtime.shutdown(Instant::now() + Duration::from_secs(3));
+            let result = match &captured {
+                Ok(image) => serde_json::json!({"captured": true,
+                    "before": format!("{:?}", image.before()), "after": format!("{:?}", image.after()),
+                    "dimensions": image.dimensions(), "dpr": image.device_pixel_ratio(),
+                    "sha256": image.sha256(), "png_bytes": image.png().len()}),
+                Err(error) => serde_json::json!({"captured": false, "error": format!("{error:#}")}),
+            };
+            record(
+                &root,
+                serde_json::json!({"nonce": nonce, "stage": "capture",
+                "candidate_sha256": setup.candidate_sha256, "runtime": format!("{identity:?}"),
+                "operation": operation.0.to_string(), "result": result,
+                "shutdown": format!("{shutdown:?}"), "native_authority": false}),
+            )?;
+            if let Ok(image) = &captured {
+                let mut file = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(root.join("capture.png"))?;
+                file.write_all(image.png())?;
+                file.sync_all()?;
+                fs::File::open(&root)?.sync_all()?;
+            }
+            ensure!(
+                shutdown.reaped && shutdown.error.is_none(),
+                "Owned native cleanup incomplete: {shutdown:?}"
+            );
+            captured?;
+            return Ok(());
+        }
+        let observe_deadline = Instant::now() + Duration::from_secs(10);
         let observed = runtime.with_connection(
             observe_deadline,
             &mut || admit(&mut input, observe_deadline),

@@ -11,6 +11,66 @@ fn end() -> Instant {
 fn quiet() -> Result<InputProgress> {
     Ok(InputProgress::Quiet)
 }
+
+#[cfg(feature = "development-resident-bootstrap")]
+#[test]
+fn diagnostic_capture_reconnects_after_setup_idle_retirement_without_observe_or_replay() {
+    use crate::workflow::resident_supervisor::service::bootstrap::setup::capture_after_setup;
+    for refusal in ["none", "input", "expired", "after-handshake"] {
+        let fixture = Fixture::new();
+        let mut runtime = fixture
+            .start("reconnect-idle", Duration::from_secs(5))
+            .unwrap();
+        let identity = runtime.identity().clone();
+        let deadline = end();
+        while !fixture.0.join("run/idle-retired").exists() {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        }
+        let expected = facts();
+        let result = capture_after_setup(
+            &mut runtime,
+            expected.clone(),
+            OperationId(nonce()),
+            if refusal == "expired" {
+                Instant::now()
+            } else {
+                deadline
+            },
+            &mut || {
+                ensure!(refusal != "input", "fresh input canceled");
+                ensure!(
+                    refusal != "after-handshake"
+                        || fs::read_to_string(fixture.0.join("run/handshakes"))? != "2",
+                    "guard canceled after reconnect"
+                );
+                Ok(())
+            },
+        );
+        assert_eq!(runtime.identity(), &identity);
+        if refusal == "none" {
+            let image = result.unwrap();
+            assert_eq!(image.before(), &expected);
+            assert_eq!(fs::read(fixture.0.join("run/commands")).unwrap(), [2, 5]);
+        } else {
+            assert!(result.is_err(), "{refusal}");
+            assert!(!fixture.0.join("run/capture-received").exists());
+            assert!(!fixture.0.join("run/commands").exists());
+        }
+        assert_eq!(
+            fs::read_to_string(fixture.0.join("run/handshakes")).unwrap(),
+            if matches!(refusal, "none" | "after-handshake") {
+                "2"
+            } else {
+                "1"
+            }
+        );
+        assert!(resident_client::attempts(&runtime.store)
+            .unwrap()
+            .is_empty());
+        assert!(runtime.shutdown(end()).reaped);
+    }
+}
 fn facts() -> ReaderFacts {
     let page = PageKey {
         document: nonce(),
