@@ -19,6 +19,8 @@ pub const MAX_CONTEXT_BYTES: usize = 512;
 pub const MEDIA_TYPE: &str =
     "application/vnd.remarkable-buddies.normalized-document+json;version=1";
 pub const CHUNKER_REVISION: &str = "notebook-chunker-v1";
+mod input;
+pub use input::{read_document_file, InputRefusal};
 
 /// Validated observed buffer, not an atomic concurrent-filesystem snapshot.
 /// Includes unselected units; raw presentation is represented by hash and size.
