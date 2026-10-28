@@ -155,12 +155,14 @@ pub struct ObserverSetup {
     pub candidate_sha256: String,
     pub mailbox: Mailbox,
     candidate: Pinned,
+    vendor: Option<std::sync::Arc<vendor::OriginalCompanion>>,
 }
 impl ObserverSetup {
     pub fn load(name: &str, deadline: Instant) -> Result<Option<Self>> {
         nonce(name)?;
         let (pin, bytes) = read_pin(&stage(name).join("candidate.json"), deadline)?;
         let candidate: Candidate = serde_json::from_slice(&bytes)?;
+        candidate.validate_version()?;
         ensure!(
             candidate.nonce == name
                 && candidate.kind == Kind::Native
@@ -170,7 +172,17 @@ impl ObserverSetup {
         if candidate.version == 1 && candidate.capture.is_none() {
             return Ok(None);
         }
-        ensure!(candidate.version == 2, "unsupported capture candidate");
+        ensure!(
+            matches!(candidate.version, 2 | 3),
+            "unsupported capture candidate"
+        );
+        let vendor = candidate
+            .companion
+            .as_deref()
+            .map(|record| {
+                vendor::OriginalCompanion::load(record, deadline).map(std::sync::Arc::new)
+            })
+            .transpose()?;
         let plan = candidate.capture.context("missing capture plan")?;
         plan.facts()?;
         verify_process(
@@ -194,7 +206,11 @@ impl ObserverSetup {
             candidate_sha256: sha(&bytes),
             mailbox,
             candidate: pin,
+            vendor,
         }))
+    }
+    pub fn vendor(&self) -> Option<std::sync::Arc<vendor::OriginalCompanion>> {
+        self.vendor.clone()
     }
     pub fn current(&self) -> Result<()> {
         self.candidate.current()?;

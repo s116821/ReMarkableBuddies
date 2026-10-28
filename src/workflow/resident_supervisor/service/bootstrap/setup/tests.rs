@@ -321,6 +321,7 @@ fn opening_allowance_requires_durable_matching_history_without_live_old_processe
         own: None,
         own_snapshot: None,
         root_identity: None,
+        vendor: None,
         candidate: Candidate {
             version: 2,
             nonce: b.nonce.clone(),
@@ -341,6 +342,7 @@ fn opening_allowance_requires_durable_matching_history_without_live_old_processe
             source: Vec::new(),
             unit_files: Vec::new(),
             capture: None,
+            companion: None,
         },
     };
     let c = context(root());

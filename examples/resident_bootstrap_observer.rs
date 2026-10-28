@@ -37,7 +37,7 @@ mod native {
         },
         storage::{Store, StorePaths},
         workflow::{
-            resident_runtime::{Artifact, Launch, ResidentRuntime},
+            resident_runtime::{Artifact, CompanionProfile, Launch, ResidentRuntime},
             resident_supervisor::service,
         },
     };
@@ -70,7 +70,10 @@ mod native {
         }
     }
 
-    fn inactive_services(deadline: Instant) -> Result<()> {
+    fn inactive_services(
+        deadline: Instant,
+        vendor: Option<&service::vendor::OriginalCompanion>,
+    ) -> Result<()> {
         // This prevents accidental invocation against the running legacy stack.
         // It does NOT replace the controller's original-cgroup and recovery proof.
         for unit in ["xochitl.service", "reader-buddy.service"] {
@@ -93,16 +96,26 @@ mod native {
                 "{unit} changed during admission"
             );
         }
+        if let Some(vendor) = vendor {
+            ensure!(
+                vendor.stopped(deadline)?,
+                "original companion is not stopped"
+            );
+        }
         Ok(())
     }
 
-    fn admit(input: &mut RequestInput, deadline: Instant) -> Result<()> {
+    fn admit(
+        input: &mut RequestInput,
+        deadline: Instant,
+        vendor: Option<&service::vendor::OriginalCompanion>,
+    ) -> Result<()> {
         ensure!(Instant::now() < deadline, "Observation deadline expired");
         ensure!(
             input.poll()? == InputProgress::Quiet,
             "Observation canceled by input"
         );
-        inactive_services(deadline)?;
+        inactive_services(deadline, vendor)?;
         ensure!(
             input.poll()? == InputProgress::Quiet,
             "Observation canceled during service check"
@@ -135,9 +148,10 @@ mod native {
     ) -> Result<HistoricalCapture> {
         let binding = Binding::new(nonce, &setup.candidate_sha256, runtime.identity())?;
         let setup_deadline = overall.min(Instant::now() + Duration::from_secs(120));
+        let vendor = setup.vendor();
         runtime.with_connection(
             setup_deadline,
-            &mut || inactive_services(setup_deadline),
+            &mut || inactive_services(setup_deadline, vendor.as_deref()),
             |_, progress| setup.admit(&binding, &mut input, setup_deadline, progress),
         )?;
         let deadline = overall.min(Instant::now() + Duration::from_secs(10));
@@ -149,6 +163,7 @@ mod native {
                     .as_mut()
                     .ok_or_else(|| anyhow::anyhow!("missing capture guard"))?,
                 deadline,
+                vendor.as_deref(),
             )
         })
     }
@@ -161,9 +176,10 @@ mod native {
         let start = Instant::now();
         let deadline = start + Duration::from_secs(60);
         let mut capture_setup = ObserverSetup::load(nonce, deadline)?;
-        inactive_services(deadline)?;
+        let vendor = capture_setup.as_ref().and_then(ObserverSetup::vendor);
+        inactive_services(deadline, vendor.as_deref())?;
         let mut input = RequestInput::new(TriggerCorner::LowerLeft, None)?;
-        admit(&mut input, deadline)?;
+        admit(&mut input, deadline, vendor.as_deref())?;
         let root = std::path::PathBuf::from(format!("/run/rsdk-bootstrap-{nonce}"));
         let stage = std::path::PathBuf::from(format!("/home/root/rsdk-bootstrap-{nonce}"));
         ensure!(
@@ -177,8 +193,8 @@ mod native {
             credentials: root.join("credentials"),
         })?);
         let launch = Launch {
-            // Existing candidates retain their original one-process contract.
-            companion: None,
+            // Only the pinned, versioned candidate selects this contract.
+            companion: vendor.as_ref().map(|_| CompanionProfile::rm2_3_28_0_172()),
             profile: artifact(stage.join("profile.json"), PROFILE),
             executable: artifact("/usr/bin/xochitl", STOCK),
             adapter: artifact(stage.join("libremarkable-resident.so"), ADAPTER),
@@ -194,7 +210,7 @@ mod native {
             operation_budget_ms: 10_000,
         };
         let mut runtime = match ResidentRuntime::launch_admitted(store, launch, deadline, |end| {
-            admit(&mut input, end)
+            admit(&mut input, end, vendor.as_deref())
         }) {
             Ok(runtime) => runtime,
             Err(error) => {
@@ -256,7 +272,7 @@ mod native {
         let observe_deadline = Instant::now() + Duration::from_secs(10);
         let observed = runtime.with_connection(
             observe_deadline,
-            &mut || admit(&mut input, observe_deadline),
+            &mut || admit(&mut input, observe_deadline, vendor.as_deref()),
             |connection, progress| {
                 connection.observe_with_progress(operation, observe_deadline, progress)
             },

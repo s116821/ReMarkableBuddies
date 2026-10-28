@@ -85,6 +85,24 @@ struct Candidate {
     unit_files: Vec<UnitFile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     capture: Option<setup::CapturePlan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    companion: Option<String>,
+}
+impl Candidate {
+    fn validate_version(&self) -> Result<()> {
+        ensure!(
+            match self.version {
+                1 => self.capture.is_none() && self.companion.is_none(),
+                2 =>
+                    self.kind == Kind::Native && self.capture.is_some() && self.companion.is_none(),
+                3 =>
+                    self.kind == Kind::Native && self.capture.is_some() && self.companion.is_some(),
+                _ => false,
+            },
+            "unsupported candidate version/companion selection"
+        );
+        Ok(())
+    }
 }
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -94,6 +112,22 @@ struct Ownership {
     actor: String,
     stock: String,
     buddy: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    companion: Option<String>,
+}
+impl Ownership {
+    fn validate(&self, candidate: &Candidate, digest: &str) -> Result<()> {
+        candidate.validate_version()?;
+        ensure!(
+            self.version == if candidate.companion.is_some() { 2 } else { 1 }
+                && self.candidate_sha256 == digest
+                && self.stock == candidate.stock.baseline
+                && self.buddy == candidate.buddy.baseline
+                && self.companion == candidate.companion,
+            "ownership record mismatch"
+        );
+        Ok(())
+    }
 }
 
 struct Context {
@@ -106,6 +140,7 @@ struct Context {
     own: Option<GroupBaseline>,
     own_snapshot: Option<Snapshot>,
     root_identity: Option<(u64, u64)>,
+    vendor: Option<vendor::OriginalCompanion>,
 }
 
 fn check(deadline: Instant) -> Result<()> {
@@ -405,14 +440,8 @@ impl Context {
         );
         let (pin, bytes) = read_pin(&stage.join("candidate.json"), deadline)?;
         let candidate: Candidate = serde_json::from_slice(&bytes)?;
-        ensure!(
-            ((candidate.version == 1 && candidate.capture.is_none())
-                || (candidate.version == 2
-                    && candidate.kind == Kind::Native
-                    && candidate.capture.is_some()))
-                && candidate.nonce == nonce,
-            "candidate identity mismatch"
-        );
+        candidate.validate_version()?;
+        ensure!(candidate.nonce == nonce, "candidate identity mismatch");
         if let Some(plan) = &candidate.capture {
             plan.facts()?;
             if let Some(policy) = &plan.opening_metadata {
@@ -455,6 +484,11 @@ impl Context {
                 .collect::<Vec<_>>(),
             deadline,
         )?;
+        let vendor = candidate
+            .companion
+            .as_deref()
+            .map(|record| vendor::OriginalCompanion::load(record, deadline))
+            .transpose()?;
         let mut result = Self {
             nonce: nonce.into(),
             stage,
@@ -465,6 +499,7 @@ impl Context {
             own: None,
             own_snapshot: None,
             root_identity: None,
+            vendor,
         };
         let paths = unit_paths(result.candidate.kind, nonce);
         ensure!(
@@ -532,6 +567,9 @@ impl Context {
         }
         for pin in &self.pins {
             pin.current()?;
+        }
+        if let Some(vendor) = &self.vendor {
+            vendor.policy(deadline)?;
         }
         ensure!(
             self.candidate.boot == fs::read_to_string("/proc/sys/kernel/random/boot_id")?.trim(),
@@ -757,6 +795,11 @@ impl Context {
     fn intent(&self, name: &str) -> Result<()> {
         write_new(&self.root, name, self.nonce.as_bytes())
     }
+    fn companion_stopped(&self, deadline: Instant) -> Result<bool> {
+        self.vendor
+            .as_ref()
+            .map_or(Ok(true), |vendor| vendor.stopped(deadline))
+    }
 }
 
 fn diagnostic_trigger_modes(fields: &BTreeMap<String, String>) -> Result<()> {
@@ -901,14 +944,21 @@ fn actor(mut context: Context, deadline: Instant) -> Result<()> {
         selected_records.push(baseline.selected_record(&context.expected(role).baseline)?);
         baselines.push(baseline);
     }
+    if let Some(vendor) = &context.vendor {
+        vendor.current(deadline)?;
+        baselines.push(ServiceBaseline::decode(
+            context.candidate.companion.as_ref().unwrap().as_bytes(),
+        )?);
+    }
     let actor =
         ServiceBaseline::capture(Path::new(MOUNT), &owned(&context.nonce, "actor"), deadline)?;
     let ownership = Ownership {
-        version: 1,
+        version: if context.vendor.is_some() { 2 } else { 1 },
         candidate_sha256: context.digest.clone(),
         actor: String::from_utf8(actor.encode()?)?,
         stock: selected_records[0].clone(),
         buddy: selected_records[1].clone(),
+        companion: context.candidate.companion.clone(),
     };
     write_new(
         &context.root,
@@ -924,6 +974,11 @@ fn actor(mut context: Context, deadline: Instant) -> Result<()> {
         context.intent(&format!("{role}.stop-intent"))?;
         context.current(deadline)?;
         baselines[index].current(deadline)?;
+        if role == "stock" {
+            if let Some(vendor) = &context.vendor {
+                vendor.current(deadline)?;
+            }
+        }
         let new_admission = role == "buddy" && context.candidate.kind == Kind::Native;
         stop_with_input(
             &mut input,
@@ -936,7 +991,16 @@ fn actor(mut context: Context, deadline: Instant) -> Result<()> {
             },
             || {
                 context.current(deadline)?;
-                Ok(baselines[index].stopped(deadline)?.is_some())
+                let target_stopped = baselines[index].stopped(deadline)?.is_some();
+                let companion_stopped = if role == "stock" {
+                    match &context.vendor {
+                        Some(vendor) => vendor.stopped(deadline)?,
+                        None => true,
+                    }
+                } else {
+                    true
+                };
+                Ok(target_stopped && companion_stopped)
             },
             new_admission,
             || RequestInput::new(TriggerCorner::LowerLeft, None),
@@ -1110,7 +1174,8 @@ fn restore(
     role: &str,
     attempt: &str,
     deadline: Instant,
-) -> Result<()> {
+    admit: &mut dyn FnMut() -> Result<()>,
+) -> Result<ServiceBaseline> {
     let durable_intent = context.root.join(format!("{role}.start-intent"));
     let mut prior = if present(&durable_intent)? {
         let (pin, bytes) = read_pin(&durable_intent, deadline)?;
@@ -1128,6 +1193,7 @@ fn restore(
     let admitted = present(&stop_intent)?;
     loop {
         context.current(deadline)?;
+        admit()?;
         if let Some(pin) = &prior {
             pin.current()?;
         }
@@ -1159,6 +1225,8 @@ fn restore(
             context.current(deadline)?;
             stopped(actor, deadline)?;
             running.current(deadline)?;
+            admit()?;
+            running.current(deadline)?;
             // Historical restoration is independently verified service evidence.
             // It grants no input authority across Buddy's own uinput creation.
             write_new(
@@ -1166,7 +1234,7 @@ fn restore(
                 &format!("{attempt}.{role}.restored"),
                 &running.encode()?,
             )?;
-            return Ok(());
+            return Ok(running);
         }
         if s.property("ActiveState") == Some("activating")
             || (s.property("Job") != Some("") && s.property("ActiveState") != Some("deactivating"))
@@ -1181,6 +1249,12 @@ fn restore(
                 admitted && !requested && !pending,
                 "unadmitted or uncertain start; no retry"
             );
+            // An interrupted actor may have reached stock terminal before the
+            // bound companion drained. Wait, never restart over that old group.
+            if role == "stock" && !context.companion_stopped(deadline)? {
+                pace(deadline);
+                continue;
+            }
             let mut input = if role == "buddy" && context.candidate.kind == Kind::Native {
                 Some(RequestInput::new(TriggerCorner::LowerLeft, None)?)
             } else {
@@ -1202,6 +1276,13 @@ fn restore(
             stopped(actor, deadline)?;
             stopped(baseline, deadline)?;
             quiet(&mut input)?;
+            admit()?;
+            if role == "stock" {
+                ensure!(
+                    context.companion_stopped(deadline)?,
+                    "original companion no longer stopped"
+                );
+            }
             check(deadline)?;
             requested = true;
             request("start", baseline.group().unit(), deadline)?;
@@ -1239,13 +1320,7 @@ fn recover(mut context: Context, deadline: Instant) -> Result<()> {
     let (pin, bytes) = read_pin(&record, deadline)?;
     context.pins.push(pin);
     let record: Ownership = serde_json::from_slice(&bytes)?;
-    ensure!(
-        record.version == 1
-            && record.candidate_sha256 == context.digest
-            && record.stock == context.candidate.stock.baseline
-            && record.buddy == context.candidate.buddy.baseline,
-        "ownership record mismatch"
-    );
+    record.validate(&context.candidate, &context.digest)?;
     let actor = ServiceBaseline::decode(record.actor.as_bytes())?;
     ensure!(
         actor.group().unit() == owned(&context.nonce, "actor"),
@@ -1267,6 +1342,11 @@ fn recover(mut context: Context, deadline: Instant) -> Result<()> {
             baseline.current(deadline)?;
         }
     }
+    if !present(&context.root.join("stock.stop-intent"))? {
+        if let Some(vendor) = &context.vendor {
+            vendor.current(deadline)?;
+        }
+    }
     let attempt = format!("recovery-{}", uuid::Uuid::new_v4().simple());
     context.intent(&attempt)?;
     if context.candidate.fault == Fault::RecoveryExit
@@ -1276,8 +1356,37 @@ fn recover(mut context: Context, deadline: Instant) -> Result<()> {
         anyhow::bail!("fixture first recovery interruption");
     }
     recovery_sequence(
-        || restore(&context, &stock, &actor, "stock", &attempt, deadline),
         || {
+            let stock = restore(
+                &context,
+                &stock,
+                &actor,
+                "stock",
+                &attempt,
+                deadline,
+                &mut || Ok(()),
+            )?;
+            let companion = context
+                .vendor
+                .as_ref()
+                .map(|vendor| {
+                    vendor.restored(deadline, &mut || {
+                        context.current(deadline)?;
+                        stopped(&actor, deadline)?;
+                        stock.current(deadline)
+                    })
+                })
+                .transpose()?;
+            if let Some(companion) = &companion {
+                write_new(
+                    &context.root,
+                    &format!("{attempt}.companion.restored"),
+                    &companion.encode()?,
+                )?;
+            }
+            Ok((stock, companion))
+        },
+        |_| {
             // Stock restoration owns the remaining budget first. A slow or
             // failed inventory can withhold Buddy, never delay stock recovery.
             let after = context.preserve_after_setup(deadline, &attempt);
@@ -1289,18 +1398,32 @@ fn recover(mut context: Context, deadline: Instant) -> Result<()> {
             after?;
             record
         },
-        || restore(&context, &buddy, &actor, "buddy", &attempt, deadline),
+        |(stock, companion)| {
+            let mut admit = || {
+                stock.current(deadline)?;
+                if let (Some(vendor), Some(companion)) = (&context.vendor, companion) {
+                    vendor.verify_running(companion, deadline)?;
+                }
+                stock.current(deadline)
+            };
+            admit()?;
+            let buddy = restore(
+                &context, &buddy, &actor, "buddy", &attempt, deadline, &mut admit,
+            )?;
+            admit()?;
+            buddy.current(deadline)
+        },
     )
 }
 
-fn recovery_sequence(
-    restore_stock: impl FnOnce() -> Result<()>,
-    preserve: impl FnOnce() -> Result<()>,
-    restore_buddy: impl FnOnce() -> Result<()>,
+fn recovery_sequence<T>(
+    restore_stock: impl FnOnce() -> Result<T>,
+    preserve: impl FnOnce(&T) -> Result<()>,
+    restore_buddy: impl FnOnce(&T) -> Result<()>,
 ) -> Result<()> {
-    restore_stock()?;
-    preserve()?;
-    restore_buddy()
+    let restored = restore_stock()?;
+    preserve(&restored)?;
+    restore_buddy(&restored)
 }
 
 /// Explicit example entry only; the feature is absent from installed builds.
@@ -1327,10 +1450,7 @@ pub fn entry(arguments: Vec<String>) -> Result<()> {
         context.bind_root()?;
         let (ownership_pin, bytes) = read_pin(&context.root.join("ownership.json"), deadline)?;
         let ownership: Ownership = serde_json::from_slice(&bytes)?;
-        ensure!(
-            ownership.version == 1 && ownership.candidate_sha256 == context.digest,
-            "setup ownership mismatch"
-        );
+        ownership.validate(&context.candidate, &context.digest)?;
         let actor = ServiceBaseline::decode(ownership.actor.as_bytes())?;
         actor.current(deadline)?;
         let mut mailbox = setup::Mailbox::open(&context.root)?;
@@ -1350,11 +1470,30 @@ pub fn entry(arguments: Vec<String>) -> Result<()> {
                 deadline,
             )?;
         }
+        if let Some(vendor) = &context.vendor {
+            ensure!(
+                vendor.stopped(deadline)?,
+                "original companion is not stopped"
+            );
+        }
         context.current(deadline)?;
         ownership_pin.current()?;
         actor.current(deadline)?;
         mailbox.publish("complete", &binding, deadline)?;
         println!("setup_complete=true reader_identity=false");
+        return Ok(());
+    }
+    if role == "inspect-companion" {
+        ensure!(
+            arguments.len() == 2,
+            "unexpected companion inspection arguments"
+        );
+        println!(
+            "{}",
+            serde_json::to_string(&vendor::OriginalCompanion::inspect(
+                Instant::now() + Duration::from_secs(30)
+            )?)?
+        );
         return Ok(());
     }
     if matches!(role, "units" | "inspect") {

@@ -490,7 +490,7 @@ fn require(policy: &BTreeMap<String, String>, key: &str, value: &str) -> Result<
     );
     Ok(())
 }
-fn firmware_version(input: &str) -> Result<&str> {
+pub(super) fn firmware_version(input: &str) -> Result<&str> {
     let mut values = input
         .lines()
         .filter_map(|line| line.strip_prefix("IMG_VERSION="));
