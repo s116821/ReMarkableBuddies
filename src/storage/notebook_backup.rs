@@ -102,10 +102,9 @@ impl NotebookBackup {
             required.len() == inventory.len(),
             "unreachable notebook backup inventory"
         );
-        Store::can_apply(
-            &Index::default(),
-            &records.into_values().collect::<Vec<_>>(),
-        )?;
+        let records = records.into_values().collect::<Vec<_>>();
+        Store::can_apply(&Index::default(), &records)?;
+        notebook_generation::validate_records(source, &Index::default(), &records)?;
         let complete = self
             .manifests
             .iter()
@@ -164,6 +163,15 @@ impl Store {
                 }
             }
         }
+        ensure!(
+            inner
+                .index
+                .manifests
+                .values()
+                .flat_map(|m| &m.media_coverage)
+                .all(|coverage| inventory.contains_key(coverage.hash())),
+            "incomplete notebook backup"
+        );
         let backup = NotebookBackup {
             format: 4,
             origin_actor: self.actor_id,

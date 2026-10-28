@@ -78,6 +78,9 @@ mod linux {
             && a.ctime_nsec() == b.ctime_nsec()
             && a.file_type() == b.file_type()
     }
+    fn same_binding(a: &Metadata, b: &Metadata) -> bool {
+        a.dev() == b.dev() && a.ino() == b.ino() && a.file_type() == b.file_type()
+    }
     fn local(file: &File) -> std::result::Result<(), InputRefusal> {
         let mut stat = std::mem::MaybeUninit::<libc::statfs>::uninit();
         // SAFETY: stat points to writable storage of the platform's statfs type.
@@ -168,8 +171,8 @@ mod linux {
                 .metadata()
                 .map_err(invalid)?;
             if !named.is_dir()
-                || !same(&bindings[index], &named)
-                || !same(
+                || !same_binding(&bindings[index], &named)
+                || !same_binding(
                     &bindings[index],
                     &dirs[index + 1].metadata().map_err(invalid)?,
                 )
@@ -221,6 +224,12 @@ mod linux {
                 return;
             } // Filesystem support is explicit.
             assert_eq!(result.unwrap().raw_sha256(), expected);
+            let sibling = read(&f.file(), &expected, |stage| {
+                if stage == "after-open" {
+                    fs::write(f.0.join("unrelated-sibling"), b"unrelated").unwrap();
+                }
+            });
+            assert_eq!(sibling.unwrap().raw_sha256(), expected);
             assert!(read(&f.file(), &"a".repeat(64), |_| {}).is_err());
             let link = f.0.join("link");
             symlink(f.file(), &link).unwrap();

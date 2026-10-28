@@ -5,6 +5,8 @@ use std::sync::atomic::Ordering;
 pub const VERSION: u32 = 4;
 pub const MARKER: &str = "notebook-feature.json";
 const CONTRACT: &str = include_str!("contract-v3.json");
+mod records;
+pub(super) use records::validate_records;
 
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

@@ -506,6 +506,7 @@ impl Store {
                 )
                 .is_ok()
                     && Self::can_apply(&index, records).is_ok()
+                    && notebook_generation::validate_records(&root, &index, records).is_ok()
                 {
                     Self::apply_index(&mut index, manifest.clone(), records.clone());
                     false
@@ -1024,7 +1025,11 @@ impl Store {
             .any(|(e, _)| e.namespace == Namespace::UnassociatedFeedback)
         {
             ensure!(
-                inner.mode_handles == 0 && sync::mode::load(self)?.is_none(),
+                if feedback_generation::version(&root)? == notebook_generation::VERSION {
+                    sync::mode::ordinary_local(self)?
+                } else {
+                    inner.mode_handles == 0 && sync::mode::load(self)?.is_none()
+                },
                 "feedback publication requires ordinary local mode"
             );
         }
@@ -1037,6 +1042,7 @@ impl Store {
             &manifest.scope,
         )?;
         Self::can_apply(&inner.index, &records)?;
+        notebook_generation::validate_records(&root, &inner.index, &records)?;
         if local {
             for (e, hash) in &records {
                 if inner.index.operations.get(&e.operation_id) == Some(hash) {

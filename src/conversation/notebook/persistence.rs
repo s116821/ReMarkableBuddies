@@ -727,4 +727,56 @@ mod tests {
             .iter()
             .any(|r| matches!(r, Record::NotebookStage(_))));
     }
+    #[test]
+    fn direct_store_cannot_publish_omitted_coverage_or_result_with_absent_preparation() {
+        let f = Fixture::new();
+        let store = Arc::new(Store::prepare_notebook(f.paths()).unwrap());
+        let ledger = Ledger::new(store.clone());
+        let input = admission(&ledger);
+        let plan_id = input.plan.id;
+        let operation = input.plan.operation;
+        let map = input.plan.map_input_digests[0].clone();
+        let cursor = ledger.admit_notebook(input).unwrap().unwrap();
+        let original = store
+            .value(Namespace::Conversation, plan_id)
+            .unwrap()
+            .unwrap();
+        let Record::NotebookPlan(mut plan) = Ledger::decode(&original).unwrap() else {
+            panic!("plan absent")
+        };
+        plan.chunks=vec![serde_json::from_value(serde_json::json!({"ordinal":0,"authoritative":[[0,0,5]],"before_context":[],"after_context":[]})).unwrap()];
+        plan.core_digest = plan.core_identity().unwrap();
+        plan.validate().unwrap();
+        let mut wrong = guarded(&original);
+        wrong.payload = serde_json::to_value(Record::NotebookPlan(plan)).unwrap();
+        assert!(store.commit(vec![wrong], BTreeMap::new()).is_err());
+        assert_eq!(
+            store
+                .value(Namespace::Conversation, plan_id)
+                .unwrap()
+                .unwrap(),
+            original
+        );
+        let prepared = ledger
+            .prepare_notebook_stage(cursor, NotebookStageKind::Map, 0, map)
+            .unwrap()
+            .unwrap();
+        assert!(ledger.notebook_stage_current(&prepared).unwrap());
+        let id = NotebookStage::identity(operation, NotebookStageKind::Map, 0);
+        let original = store.value(Namespace::Conversation, id).unwrap().unwrap();
+        let Record::NotebookStage(mut stage) = Ledger::decode(&original).unwrap() else {
+            panic!("stage absent")
+        };
+        stage.prepared_revision = Some("f".repeat(64));
+        stage.outcome = Some(NotebookStageOutcome::Generated);
+        stage.invoked = Some(true);
+        stage.output = Some("output".into());
+        stage.observed_output_digest = Some(digest(b"output"));
+        stage.observed_output_bytes = Some(6);
+        stage.validate().unwrap();
+        let mut wrong = guarded(&original);
+        wrong.payload = serde_json::to_value(Record::NotebookStage(stage)).unwrap();
+        assert!(store.commit(vec![wrong], BTreeMap::new()).is_err());
+        assert!(ledger.notebook_stage_current(&prepared).unwrap());
+    }
 }
