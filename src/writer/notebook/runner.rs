@@ -488,6 +488,7 @@ mod tests {
         parts: Vec<String>,
         lost_result: Option<usize>,
         bad_output: bool,
+        bad_reduce: bool,
         cancel: Option<Arc<AtomicBool>>,
     }
     impl LLMEngine for Model {
@@ -512,6 +513,8 @@ mod tests {
             }
             Ok(if self.bad_output {
                 "x".repeat(MAX_MAP_REPLY + 1)
+            } else if self.bad_reduce && self.calls == 2 {
+                "Bounded but invalid reduction: Force = 10 N.".into()
             } else if self.calls % 2 == 1 {
                 "Force = 10 N. (page 1).".into()
             } else {
@@ -526,6 +529,7 @@ mod tests {
             parts: vec![],
             lost_result: None,
             bad_output: false,
+            bad_reduce: false,
             cancel: None,
         }
     }
@@ -699,5 +703,65 @@ mod tests {
             assert!(!result.report.unobserved_publication);
             assert!(result.finalized.is_none());
         }
+    }
+    #[test]
+    fn final_publication_lost_ack_or_post_commit_cancel_never_grants_automatic_export() {
+        for lose_ack in [false, true] {
+            let f = Fixture::new();
+            let store = Arc::new(Store::prepare_notebook(f.paths()).unwrap());
+            let ledger = Ledger::new(store.clone());
+            let input = input(&ledger);
+            let conversation = input.admission.plan.conversation;
+            let replay = input.clone();
+            let mut model = model(store.clone());
+            let mut injected = false;
+            let result = run(&ledger, &mut model, input, &mut || {
+                let records = ledger.inspect(conversation, false).unwrap();
+                if lose_ack && !injected && records.iter().any(|r|matches!(r,crate::conversation::Record::NotebookStage(stage)
+                    if stage.kind==NotebookStageKind::Reduce && stage.outcome==Some(NotebookStageOutcome::Generated))) {
+                    store.set_fault(Fault::AfterCommit).unwrap();injected=true;
+                }
+                !lose_ack && records.iter().any(|r|matches!(r,crate::conversation::Record::Turn(turn) if turn.outcome==Outcome::Generated))
+            });
+            assert_eq!(
+                result.report.status,
+                if lose_ack {
+                    Status::Uncertain
+                } else {
+                    Status::Canceled
+                }
+            );
+            assert!(result.finalized.is_none());
+            assert_eq!(model.calls, 2);
+            assert_eq!(result.report.confirmed_stage_results, 2);
+            assert_eq!(result.report.unobserved_publication, lose_ack);
+            assert_eq!(ledger.inspect(conversation,false).unwrap().iter().filter(|r|matches!(r,crate::conversation::Record::Turn(t) if t.outcome==Outcome::Generated)).count(),1);
+            let again = run(&ledger, &mut model, replay, &mut || false);
+            assert_eq!(again.report.status, Status::Historical);
+            assert_eq!(again.report.local_invocations, 0);
+            assert_eq!(model.calls, 2);
+            assert!(again.finalized.is_none());
+        }
+    }
+    #[test]
+    fn invalid_bounded_reducer_body_is_retained_as_failed_without_visible_proposal() {
+        let f = Fixture::new();
+        let store = Arc::new(Store::prepare_notebook(f.paths()).unwrap());
+        let ledger = Ledger::new(store.clone());
+        let input = input(&ledger);
+        let conversation = input.admission.plan.conversation;
+        let mut model = model(store);
+        model.bad_reduce = true;
+        let result = run(&ledger, &mut model, input, &mut || false);
+        assert_eq!(result.report.status, Status::Failed);
+        assert_eq!(result.report.failure, Some(Failure::Output));
+        assert_eq!(model.calls, 2);
+        assert!(result.finalized.is_none());
+        let records = ledger.inspect(conversation, false).unwrap();
+        assert!(records.iter().any(|r|matches!(r,crate::conversation::Record::NotebookStage(stage) if stage.kind==NotebookStageKind::Reduce
+            && stage.outcome==Some(NotebookStageOutcome::Failed) && stage.output.as_deref()==Some("Bounded but invalid reduction: Force = 10 N."))));
+        assert!(!records.iter().any(
+            |r| matches!(r,crate::conversation::Record::Turn(t) if t.outcome==Outcome::Generated)
+        ));
     }
 }
