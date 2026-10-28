@@ -9,6 +9,7 @@ struct NotebookBackup {
     origin_generation: Uuid,
     notebook_feature: u32,
     feedback_feature: bool,
+    selected_feature: bool,
     manifests: Vec<Manifest>,
     objects: Vec<ObjectRef>,
     complete_media: bool,
@@ -169,6 +170,7 @@ impl Store {
             origin_generation: inner.generation,
             notebook_feature: 1,
             feedback_feature: root.join(feedback_generation::MARKER).exists(),
+            selected_feature: root.join("selection-feature.json").exists(),
             manifests: inner.index.manifests.values().cloned().collect(),
             objects: inventory.into_values().collect(),
             complete_media: true,
@@ -220,9 +222,12 @@ impl Store {
             "notebook archive requires local mode"
         );
         let root = self.generation(inner.generation);
+        selection::refuse_selected_maintenance(&root)?;
+        let retained = root.join("selection-history");
+        files::safe_path(&retained)?;
         ensure!(
-            !root.join("selection-feature.json").exists(),
-            "selected notebook archive unsupported"
+            !retained.exists() || fs::read_dir(&retained)?.next().is_none(),
+            "retained selected notebook archive unsupported"
         );
         Ok(())
     }
@@ -248,13 +253,17 @@ impl Store {
             .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
         self.notebook_archive_custody(&inner)?;
         let root = self.generation(inner.generation);
-        let feedback = root.join(feedback_generation::MARKER).exists();
-        ensure!(
-            feedback == backup.feedback_feature,
-            "notebook restore feature mismatch"
-        );
+        let feedback = root.join(feedback_generation::MARKER).exists() || backup.feedback_feature;
+        let selected_feature =
+            root.join("selection-feature.json").exists() || backup.selected_feature;
         let next = Uuid::new_v4();
-        notebook_generation::create(&self.paths.data, self.actor_id, next, feedback)?;
+        notebook_generation::create(
+            &self.paths.data,
+            self.actor_id,
+            next,
+            feedback,
+            selected_feature,
+        )?;
         let next_root = self.generation(next);
         if let Some(config) = &backup.config_snapshot {
             files::atomic_json(&next_root.join("restored-config.json"), config)?;

@@ -14,9 +14,18 @@ struct Feature {
     generation: Uuid,
 }
 
-pub(super) fn create(data: &Path, actor: Uuid, generation: Uuid, feedback: bool) -> Result<()> {
+pub(super) fn create(
+    data: &Path,
+    actor: Uuid,
+    generation: Uuid,
+    feedback: bool,
+    selected_feature: bool,
+) -> Result<()> {
     Store::create_generation(data, generation)?;
     let root = data.join("generations").join(generation.to_string());
+    if selected_feature {
+        selection::prepare_generation(&root, actor, generation)?;
+    }
     if feedback {
         feedback_generation::create(data, generation, actor)?;
     }

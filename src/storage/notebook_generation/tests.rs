@@ -340,11 +340,29 @@ fn actual_selected_history_refuses_but_empty_bound_feature_marker_is_preserved()
             assert!(!f.root().join(MARKER).exists());
             assert_eq!(fs::read(f.root().join("format.json")).unwrap(), format);
         } else {
-            drop(Store::prepare_notebook(f.paths()).unwrap());
+            let store = Store::prepare_notebook(f.paths()).unwrap();
+            assert_eq!(
+                fs::read(f.root().join("selection-feature.json")).unwrap(),
+                marker
+            );
+            let archive = f.0.join("empty-feature-backup");
+            store.export_notebook_backup(&archive).unwrap();
+            store.restore_notebook_backup(&archive).unwrap();
+            let feature: serde_json::Value =
+                files::json(&f.root().join("selection-feature.json"), 4096).unwrap();
+            let generation = store.inner.lock().unwrap().generation;
+            assert_eq!(
+                feature,
+                serde_json::json!({"format":1,"actor":store.actor_id,"generation":generation})
+            );
+            drop(store);
+            drop(Store::open(f.paths()).unwrap());
         }
-        assert_eq!(
-            fs::read(f.root().join("selection-feature.json")).unwrap(),
-            marker
-        );
+        if nonempty {
+            assert_eq!(
+                fs::read(f.root().join("selection-feature.json")).unwrap(),
+                marker
+            );
+        }
     }
 }

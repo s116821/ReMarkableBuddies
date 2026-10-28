@@ -8,6 +8,20 @@ pub const MAX_INPUT: usize = 96 * 1024;
 pub const MAX_MAP_REPLY: usize = 4096;
 pub const MAX_FINAL_TEXT: usize = 24 * 1024;
 
+/// Exact text parts; digest equality alone grants no model invocation.
+pub fn notebook_input_digest(prompt_revision: &str, parts: &[String]) -> Result<String> {
+    ensure!(
+        matches!(prompt_revision, MAP_PROMPT | REDUCE_PROMPT)
+            && serde_json::to_vec(parts)?.len() <= MAX_INPUT,
+        "notebook input reservation exceeded"
+    );
+    Ok(digest(&serde_json::to_vec(&(
+        "writer-notebook-input-v1",
+        prompt_revision,
+        parts,
+    ))?))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NotebookPlan {
@@ -32,6 +46,29 @@ pub struct NotebookPlan {
     pub reducer_reserved_bytes: usize,
 }
 impl NotebookPlan {
+    /// Content recipe only; export still requires the final exact Store guards.
+    pub fn export_revision(&self, draft: Uuid, text: &str) -> Result<String> {
+        self.validate()?;
+        ensure!(
+            draft
+                == Uuid::new_v5(
+                    &Uuid::NAMESPACE_URL,
+                    format!("urn:rmb:writer:v1:{}:draft", self.operation).as_bytes()
+                )
+                && !text.trim().is_empty()
+                && text.len() <= MAX_FINAL_TEXT
+                && !text.contains('\0'),
+            "invalid notebook export content"
+        );
+        Ok(digest(&serde_json::to_vec(&(
+            "writer-notebook-export-v1",
+            self.archive_id,
+            &self.source_identity_digest,
+            &self.core_digest,
+            draft,
+            text,
+        ))?))
+    }
     pub fn identity(operation: Uuid) -> Uuid {
         Uuid::new_v5(
             &Uuid::NAMESPACE_URL,
@@ -476,6 +513,17 @@ mod tests {
         assert!(changed.validate().is_err());
         s.observed_output_bytes = Some(10);
         assert!(s.validate().is_err());
+        let parts = vec!["Recipe vector only.".into(), "Explain the force.".into()];
+        assert_eq!(
+            notebook_input_digest(MAP_PROMPT, &parts).unwrap(),
+            v["model_input"]["sha256"]
+        );
+        assert!(notebook_input_digest(MAP_PROMPT, &["\\".repeat(MAX_INPUT)]).is_err());
+        let draft = v["stage_ids"]["draft"].as_str().unwrap().parse().unwrap();
+        assert_eq!(
+            p.export_revision(draft, "Force\n\nF = ma = 10 N.").unwrap(),
+            v["notebook_export"]["sha256"]
+        );
     }
     #[test]
     fn parsed_ranges_and_failed_or_oversize_results_never_become_valid_generated_facts() {
