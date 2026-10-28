@@ -2,6 +2,7 @@ use super::*;
 use crate::storage::{StorePaths, Uuid as StoreUuid};
 use remarkable_open_sdk::native_adapter::{Rejection, Reply};
 
+mod capture;
 mod requests;
 
 struct Fixture(PathBuf);

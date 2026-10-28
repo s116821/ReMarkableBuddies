@@ -375,7 +375,7 @@ mod linux {
     use remarkable_open_sdk::{
         native_adapter::{
             transport::{Client, Failure, TransportError},
-            ConnectionIdentity, InsertAfter, LostRequest, SelectAdjacent,
+            ConnectionIdentity, InsertAfter, LostRequest, ReaderFacts, SelectAdjacent,
         },
         OperationId,
     };
@@ -538,6 +538,26 @@ mod linux {
                 .execute_with_progress(
                     operation,
                     Command::Observe,
+                    deadline,
+                    |_, _| Ok(()),
+                    &mut || progress().map_err(progress_error),
+                )
+                .map_err(|error| self.transport_failure(error).into())
+        }
+        /// Capture preserves expected source and the caller's original admission.
+        /// The SDK validates the bounded image and both source samples. This
+        /// read-only request neither journals nor reconciles an earlier effect.
+        pub fn capture_source_with_progress(
+            &mut self,
+            operation: OperationId,
+            expected: ReaderFacts,
+            deadline: Instant,
+            progress: &mut dyn FnMut() -> Result<()>,
+        ) -> Result<Reply> {
+            self.client
+                .execute_with_progress(
+                    operation,
+                    Command::CaptureSource(expected),
                     deadline,
                     |_, _| Ok(()),
                     &mut || progress().map_err(progress_error),

@@ -50,8 +50,10 @@ mod native {
 
     // Reviewed read-only candidate only. A new native artifact requires a source
     // revision and review, not a command-line override of these identities.
-    const PROFILE: &str = "0ab8a72e32d978cbb0be14a01c6b0145240f83f13c64cdee6fef5431c411bdff";
-    const ADAPTER: &str = "751098608084e342602c30a31807f5b578dbe4ad8ee4828dd82ad6c620b54eb2";
+    // Revision-3 SDK80b29eb capture-native-library-r2 build. Historical revision-2
+    // observers remain frozen with their original candidates and are not replayed.
+    const PROFILE: &str = "cd1d38507aedadc7df1406b5a74843ba7ab307fb51c8213311d71cab6bb0d8ae";
+    const ADAPTER: &str = "3e5dee321c68384bfd042e3697dc405f6f5d0de3891bfadb541bb55efac2b21d";
     const STOCK: &str = "071d85beef3ef2d4cc0e11002140b27b82a2cc04a2ed740a5669f591069b77df";
 
     fn artifact(path: impl Into<std::path::PathBuf>, hash: &str) -> Artifact {

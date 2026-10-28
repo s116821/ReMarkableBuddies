@@ -8,7 +8,8 @@ use super::{
 use anyhow::Result;
 use remarkable_open_sdk::{
     native_adapter::{
-        transport::Failure, InsertAfter, LostRequest, ProtocolError, Reply, SelectAdjacent,
+        transport::Failure, InsertAfter, LostRequest, ProtocolError, ReaderFacts, Reply,
+        SelectAdjacent,
     },
     OperationId,
 };
@@ -18,6 +19,8 @@ pub use crate::device::request_input::InputProgress;
 
 pub enum Request {
     Observe,
+    /// Source-correlated historical pixels, never a current-page or writing lease.
+    CaptureSource(ReaderFacts),
     Insert {
         conversation: crate::storage::Uuid,
         insertion: InsertAfter,
@@ -41,6 +44,9 @@ impl Request {
     ) -> Result<Reply> {
         match self {
             Self::Observe => connection.observe_with_progress(operation, deadline, progress),
+            Self::CaptureSource(expected) => {
+                connection.capture_source_with_progress(operation, expected, deadline, progress)
+            }
             Self::Insert {
                 conversation,
                 insertion,

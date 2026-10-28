@@ -8,6 +8,7 @@ import struct
 import sys
 import time
 import uuid
+import zlib
 
 root = pathlib.Path(os.environ["RSDK_ACTIVATION_DIRECTORY"])
 mode = sys.argv[1]
@@ -81,7 +82,7 @@ while True:
     assert struct.unpack("3i", credentials)[:2] == (os.getppid(), os.geteuid())
     try:
         hello = bytearray(frame())
-        assert len(hello) == 203 and hello[:6] == b"RSDK\x00\x02" and hello[202] == 0
+        assert len(hello) == 203 and hello[:6] == b"RSDK\x00\x03" and hello[202] == 0
         assert hello[6:118] == admission[8:120]
         assert struct.unpack(">I", hello[118:122])[0] == os.getpid()
         assert hello[130:146] == admission[120:136]
@@ -107,6 +108,35 @@ while True:
         while True:
             request = frame()
             digest = hashlib.sha256(struct.pack(">I", len(request)) + request).digest()
+            if request[202:204] == b"\x02\x05":
+                # Independent owned PNG encoder, not a native Reader model.
+                facts = request[204:]
+                (root / "capture-received").touch()
+                if mode in ("reconnect-capture-cancel", "reconnect-capture-timeout") and count == 1:
+                    assert peer.recv(1) == b""
+                    break
+                width, height = 192, 128
+                pixels = b"".join(hashlib.sha256(struct.pack(">I", i)).digest() for i in range(width * height * 3 // 32))
+                def chunk(tag, data):
+                    return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data))
+                rows = b"".join(b"\x00" + pixels[y * width * 3:(y + 1) * width * 3] for y in range(height))
+                png = (b"\x89PNG\r\n\x1a\n"
+                       + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+                       + chunk(b"IDAT", zlib.compress(rows))
+                       + chunk(b"IEND", b""))
+                assert len(png) > 65536
+                image_hash = hashlib.sha256(png).digest()
+                if mode == "reconnect-capture-corrupt":
+                    png = png[:-1] + bytes([png[-1] ^ 1])
+                if mode == "reconnect-capture-source":
+                    facts = bytes([facts[0] ^ 1]) + facts[1:]
+                capture = facts + facts + struct.pack(">IIdB", width, height, 1.0, 1) + image_hash + struct.pack(">I", len(png)) + png
+                response = request[:202] + b"\x03" + digest + b"\x07" + capture
+                if mode == "reconnect-capture-eof":
+                    peer.sendall(struct.pack(">I", len(response)) + response[:500])
+                    break
+                send(response)
+                continue
             if mode in ("reconnect-pending", "reconnect-observe-timeout") and count == 1:
                 assert request[202:204] in (b"\x02\x01", b"\x02\x03") if mode == "reconnect-pending" else request[202:204] == b"\x02\x00"
                 (root / "effect-received").touch()

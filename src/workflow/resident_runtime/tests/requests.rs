@@ -329,6 +329,26 @@ fn dispatched_cancellation_remains_original_through_dispatcher_reconnect_and_rec
         assert!(runtime.connection.is_none());
         request::reconnect(&mut runtime, end(), &mut quiet, &mut || Ok(())).unwrap();
         assert_eq!(runtime.identity(), &identity);
+        // Read-only pixels do not reconcile the uncertain insertion/selection.
+        let journal = runtime
+            .store
+            .paths
+            .data
+            .join("native-insertion-attempts-v1.json");
+        let before_capture = fs::read(&journal).unwrap();
+        assert!(matches!(
+            request::execute(
+                &mut runtime,
+                OperationId(nonce()),
+                Request::CaptureSource(facts.clone()),
+                end(),
+                &mut quiet,
+                &mut || Ok(())
+            )
+            .unwrap(),
+            Reply::Captured(_)
+        ));
+        assert_eq!(fs::read(&journal).unwrap(), before_capture);
         let refused = request::execute(
             &mut runtime,
             OperationId(nonce()),
