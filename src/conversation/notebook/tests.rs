@@ -156,6 +156,37 @@ fn archive_reopen_context_and_retained_media_keep_original_raw_provenance() {
     assert_eq!(media[0].media, archive.media);
     assert!(media[0].available);
     assert_eq!(media[0].retained_revision_references, 1);
+    let backup = fixture.0.join("notebook-backup");
+    let report = store.export_notebook_backup(&backup).unwrap();
+    assert_eq!(report.format, 4);
+    assert!(report.complete_media && report.manifests > 0 && report.objects > 0);
+    assert_eq!(Store::inspect_notebook_backup(&backup).unwrap(), report);
+    assert!(
+        Store::inspect_backup(&backup).is_err(),
+        "legacy backup reader must refuse"
+    );
+    let before = fs::read(fixture.paths().data.join("CURRENT")).unwrap();
+    store.restore_notebook_backup(&backup).unwrap();
+    assert_ne!(
+        fs::read(fixture.paths().data.join("CURRENT")).unwrap(),
+        before
+    );
+    assert_eq!(
+        archive.load(&store).unwrap().raw_sha256(),
+        source.raw_sha256()
+    );
+    assert_eq!(
+        ledger.retained_media(conversation).unwrap()[0].retained_revision_references,
+        1
+    );
+    let foreign = Fixture::new();
+    let foreign_store = Store::prepare_notebook(foreign.paths()).unwrap();
+    let foreign_current = fs::read(foreign.paths().data.join("CURRENT")).unwrap();
+    assert!(foreign_store.restore_notebook_backup(&backup).is_err());
+    assert_eq!(
+        fs::read(foreign.paths().data.join("CURRENT")).unwrap(),
+        foreign_current
+    );
 }
 
 #[test]

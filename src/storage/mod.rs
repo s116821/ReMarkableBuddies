@@ -526,7 +526,15 @@ impl Store {
     fn validate_objects_with_budget(
         root: &Path,
         manifest: &Manifest,
+        budget: Option<&mut selection::SelectedReadBudget>,
+    ) -> Result<Vec<(Envelope, String)>> {
+        Self::validate_objects_policy(root, manifest, budget, None)
+    }
+    fn validate_objects_policy(
+        root: &Path,
+        manifest: &Manifest,
         mut budget: Option<&mut selection::SelectedReadBudget>,
+        notebook_archive_actor: Option<Uuid>,
     ) -> Result<Vec<(Envelope, String)>> {
         manifest.validate()?;
         for (item, media) in manifest
@@ -562,22 +570,29 @@ impl Store {
                 .map_err(|_| anyhow::anyhow!("invalid or unsupported stored JSON"))?;
             envelope.validate()?;
             if envelope.domain_schema_version == 3 {
-                ensure!(
-                    feedback_generation::version(root)? == notebook_generation::VERSION,
-                    "notebook records require adopted generation4"
-                );
-                let generation = Uuid::parse_str(
-                    root.file_name()
-                        .and_then(|s| s.to_str())
-                        .context("invalid notebook generation path")?,
-                )?;
-                notebook_generation::validate_version(
-                    root,
-                    envelope.actor_id,
-                    generation,
-                    notebook_generation::VERSION,
-                    false,
-                )?;
+                if let Some(actor) = notebook_archive_actor {
+                    ensure!(
+                        envelope.actor_id == actor,
+                        "notebook archive actor mismatch"
+                    );
+                } else {
+                    ensure!(
+                        feedback_generation::version(root)? == notebook_generation::VERSION,
+                        "notebook records require adopted generation4"
+                    );
+                    let generation = Uuid::parse_str(
+                        root.file_name()
+                            .and_then(|s| s.to_str())
+                            .context("invalid notebook generation path")?,
+                    )?;
+                    notebook_generation::validate_version(
+                        root,
+                        envelope.actor_id,
+                        generation,
+                        notebook_generation::VERSION,
+                        false,
+                    )?;
+                }
                 if let crate::conversation::Record::ArchivedNormalizedSource(source) =
                     crate::conversation::Ledger::decode(&envelope)?
                 {

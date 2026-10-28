@@ -14,6 +14,23 @@ struct Feature {
     generation: Uuid,
 }
 
+pub(super) fn create(data: &Path, actor: Uuid, generation: Uuid, feedback: bool) -> Result<()> {
+    Store::create_generation(data, generation)?;
+    let root = data.join("generations").join(generation.to_string());
+    if feedback {
+        feedback_generation::create(data, generation, actor)?;
+    }
+    files::atomic_json(
+        &root.join(MARKER),
+        &Feature {
+            format: 1,
+            actor,
+            generation,
+        },
+    )?;
+    files::atomic_json(&root.join("format.json"), &VERSION)
+}
+
 pub(crate) fn validate_version(
     root: &Path,
     actor: Uuid,
