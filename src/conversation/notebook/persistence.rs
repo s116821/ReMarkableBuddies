@@ -195,7 +195,7 @@ mod tests {
             .unwrap();
         let (_, draft) = ledger.finalize_notebook(cursor).unwrap().unwrap();
         assert_eq!(draft.sequence, 1);
-        let records = ledger.inspect(conversation).unwrap();
+        let records = ledger.inspect(conversation, false).unwrap();
         assert_eq!(
             records
                 .iter()
@@ -244,7 +244,7 @@ mod tests {
             assert!(ledger.admit_notebook(replay).unwrap().is_none());
             assert_eq!(
                 ledger
-                    .inspect(conversation)
+                    .inspect(conversation, false)
                     .unwrap()
                     .iter()
                     .filter(|r| matches!(r, Record::Turn(_)))
@@ -271,7 +271,7 @@ mod tests {
             .prepare_notebook_stage(cursor, NotebookStageKind::Map, 0, map)
             .is_err());
         assert!(!ledger
-            .inspect(conversation)
+            .inspect(conversation, false)
             .unwrap()
             .iter()
             .any(|r| matches!(r, Record::NotebookStage(_))));
