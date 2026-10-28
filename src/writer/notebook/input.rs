@@ -247,6 +247,8 @@ mod linux {
         }
         #[test]
         fn fifo_swap_and_parent_replacement_are_refused_before_any_probe_read() {
+            let f = Fixture::new();
+            let receipt = f.0.join("fifo-refusal-receipt");
             let mut child = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
@@ -254,6 +256,7 @@ mod linux {
                     "--nocapture",
                 ])
                 .env("RMB_NOTEBOOK_FIFO_CHILD", "1")
+                .env("RMB_NOTEBOOK_FIFO_RECEIPT", &receipt)
                 .spawn()
                 .unwrap();
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -270,7 +273,7 @@ mod linux {
                 // Bounded process-status polling; this wait never implies success.
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
-            let f = Fixture::new();
+            assert_eq!(fs::read(receipt).unwrap(), b"refused-before-read");
             let raw = f.write();
             let expected = digest(&raw);
             let child = f.0.join("parent");
@@ -303,6 +306,11 @@ mod linux {
                 }
             });
             assert_eq!(result.err(), Some(InputRefusal::InvalidInput));
+            fs::write(
+                std::env::var_os("RMB_NOTEBOOK_FIFO_RECEIPT").unwrap(),
+                b"refused-before-read",
+            )
+            .unwrap();
         }
         #[test]
         fn aliases_replacement_invalid_encoding_and_one_over_bound_refuse() {

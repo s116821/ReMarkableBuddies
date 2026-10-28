@@ -300,6 +300,44 @@ fn nonlocal_mode_refuses_before_notebook_marker_or_format_mutation() {
     assert_eq!(fs::read(f.root().join("format.json")).unwrap(), format);
     assert!(!f.root().join(MARKER).exists());
 }
+#[test]
+fn command_preflight_refusal_and_escaped_reader_cannot_publish_notebook_adoption() {
+    let f = Fixture::new();
+    let conversation = Uuid::new_v4();
+    {
+        let ledger = crate::conversation::Ledger::new(Arc::new(Store::open(f.paths()).unwrap()));
+        ledger.create(conversation, Uuid::new_v4(), 0).unwrap();
+    }
+    let current = fs::read(f.paths().data.join("CURRENT")).unwrap();
+    let failed = Store::prepare_notebook_validated(f.paths(), |ledger| -> Result<()> {
+        ledger.expected(Namespace::Conversation, conversation)?;
+        anyhow::bail!("bounded preflight refusal")
+    });
+    assert!(failed.is_err());
+    assert!(!f.root().join(MARKER).exists());
+    let mut escaped = None;
+    assert!(Store::prepare_notebook_validated(f.paths(), |ledger| {
+        escaped = Some(ledger.store().clone());
+        Ok(())
+    })
+    .is_err());
+    assert!(!f.root().join(MARKER).exists());
+    drop(escaped);
+    let (store, expected) = Store::prepare_notebook_validated(f.paths(), |ledger| {
+        ledger.expected(Namespace::Conversation, conversation)
+    })
+    .unwrap();
+    assert_eq!(fs::read(f.paths().data.join("CURRENT")).unwrap(), current);
+    assert_eq!(
+        store
+            .heads(Namespace::Conversation, conversation)
+            .unwrap()
+            .iter()
+            .map(|e| e.revision_id)
+            .collect::<BTreeSet<_>>(),
+        expected.0
+    );
+}
 
 #[test]
 fn actual_selected_history_refuses_but_empty_bound_feature_marker_is_preserved() {

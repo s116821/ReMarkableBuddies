@@ -257,6 +257,32 @@ pub(crate) fn prepare(
 }
 
 impl Store {
+    /// Freeze read-only command context/payloads under the fresh OS lease before
+    /// notebook metadata publication. Existing conversations must already exist.
+    /// All temporary readers must be dropped; no Arc or live domain owner may
+    /// escape the preflight. The command resolves files/credentials before this.
+    pub fn prepare_notebook_validated<T>(
+        paths: StorePaths,
+        validate: impl FnOnce(&crate::conversation::Ledger) -> Result<T>,
+    ) -> Result<(Self, T)> {
+        for name in ["identity.json", "CURRENT"] {
+            let path = paths.data.join(name);
+            files::safe_path(&path)?;
+            ensure!(
+                path.is_file(),
+                "notebook requires an existing owned conversation store"
+            );
+        }
+        let store = Arc::new(Self::open_policy(paths, OpenPreparation::Notebook)?);
+        let validated = {
+            let ledger = crate::conversation::Ledger::new(store.clone());
+            validate(&ledger)?
+        };
+        let mut store = Arc::try_unwrap(store)
+            .map_err(|_| anyhow::anyhow!("notebook preflight readers still active"))?;
+        prepare(&mut store, |_| Ok(()))?;
+        Ok((store, validated))
+    }
     /// Explicit preparation owns a fresh Store before any Arc/client escapes.
     /// Ordinary open never repairs or adopts an incomplete notebook feature.
     pub fn prepare_notebook(paths: StorePaths) -> Result<Self> {

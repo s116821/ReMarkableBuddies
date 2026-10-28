@@ -22,6 +22,69 @@ pub struct NotebookPreparedStage {
     cursor: NotebookRunCursor,
     prepared: Envelope,
 }
+/// Fresh final-publication witness, never reconstructed from retained history.
+pub struct NotebookFinalized {
+    root: Envelope,
+    draft: Envelope,
+    source: Envelope,
+    plan: Envelope,
+    store: usize,
+}
+impl NotebookFinalized {
+    pub fn is_for_store(&self, store: &Store) -> bool {
+        self.store == store as *const Store as usize
+    }
+    pub fn root(&self) -> &Envelope {
+        &self.root
+    }
+    pub fn draft(&self) -> &Envelope {
+        &self.draft
+    }
+    pub fn source(&self) -> &Envelope {
+        &self.source
+    }
+    pub fn plan(&self) -> &Envelope {
+        &self.plan
+    }
+}
+pub enum NotebookStagePublication {
+    Generated(NotebookRunCursor),
+    /// Freshly observed durable non-generated result, with no continuation grant.
+    Stopped,
+    /// Historical/lost acknowledgment: publication may exist, freshness was not observed.
+    Unobserved,
+}
+impl NotebookRunCursor {
+    pub fn map_outputs(&self) -> Result<Vec<crate::writer::notebook::NotebookMapOutput>> {
+        ensure!(
+            self.results.len() == self.plan.chunks.len(),
+            "notebook map coverage incomplete"
+        );
+        self.results
+            .iter()
+            .enumerate()
+            .map(|(ordinal, envelope)| {
+                let Record::NotebookStage(stage) = Ledger::decode(envelope)? else {
+                    bail!("notebook map result absent")
+                };
+                ensure!(
+                    stage.ordinal == ordinal
+                        && stage.kind == NotebookStageKind::Map
+                        && stage.outcome == Some(NotebookStageOutcome::Generated),
+                    "notebook map result unavailable"
+                );
+                Ok(crate::writer::notebook::NotebookMapOutput {
+                    stage_id: stage.id,
+                    result_revision: encoded_revision(envelope)?,
+                    output_digest: stage
+                        .observed_output_digest
+                        .context("notebook map digest absent")?,
+                    text: stage.output.context("notebook map text absent")?,
+                })
+            })
+            .collect()
+    }
+}
 impl NotebookPreparedStage {
     pub fn input_digest(&self) -> Result<String> {
         let Record::NotebookStage(stage) = Ledger::decode(&self.prepared)? else {
@@ -85,6 +148,19 @@ impl Ledger {
         &self,
         cursor: NotebookRunCursor,
     ) -> Result<Option<(WriteResult, Turn)>> {
+        self.finalize_notebook_granted(cursor)?
+            .map(|(result, finalized)| {
+                let Record::Turn(draft) = Self::decode(finalized.draft())? else {
+                    bail!("notebook draft absent")
+                };
+                Ok((result, draft))
+            })
+            .transpose()
+    }
+    pub fn finalize_notebook_granted(
+        &self,
+        cursor: NotebookRunCursor,
+    ) -> Result<Option<(WriteResult, NotebookFinalized)>> {
         let result = cursor.results.last().context("notebook reducer absent")?;
         let Record::NotebookStage(reducer) = Self::decode(result)? else {
             bail!("notebook reducer absent")
@@ -154,16 +230,32 @@ impl Ledger {
             vec![],
         )?;
         let mut records = cursor.guards.iter().map(guarded).collect::<Vec<_>>();
-        records.push(self.envelope(
+        let draft = self.envelope(
             Namespace::Conversation,
             turn.id,
             ExpectedHeads::default(),
             Record::Turn(turn.clone()),
             vec![],
-        )?);
+        )?;
+        let finalized = NotebookFinalized {
+            root: root.clone(),
+            draft: draft.clone(),
+            source: records
+                .iter()
+                .find(|e| e.namespace == Namespace::Source && e.record_id == cursor.plan.archive_id)
+                .context("notebook final source guard absent")?
+                .clone(),
+            plan: records
+                .iter()
+                .find(|e| e.namespace == Namespace::Conversation && e.record_id == cursor.plan.id)
+                .context("notebook final plan guard absent")?
+                .clone(),
+            store: self.store.as_ref() as *const Store as usize,
+        };
+        records.push(draft);
         let (result, fresh) =
             self.publish_observed(operation, fingerprint, root, records, binding)?;
-        Ok(fresh.then_some((result, turn)))
+        Ok(fresh.then_some((result, finalized)))
     }
     /// Atomic user/source/plan admission through the existing Ledger receipt path.
     /// Historical replay returns no cursor, including a committed lost acknowledgment.
@@ -429,6 +521,18 @@ impl Ledger {
         prepared: NotebookPreparedStage,
         result: NotebookResult,
     ) -> Result<Option<NotebookRunCursor>> {
+        Ok(
+            match self.finish_notebook_stage_observed(prepared, result)? {
+                NotebookStagePublication::Generated(cursor) => Some(cursor),
+                NotebookStagePublication::Stopped | NotebookStagePublication::Unobserved => None,
+            },
+        )
+    }
+    pub fn finish_notebook_stage_observed(
+        &self,
+        prepared: NotebookPreparedStage,
+        result: NotebookResult,
+    ) -> Result<NotebookStagePublication> {
         let NotebookPreparedStage {
             mut cursor,
             prepared,
@@ -447,7 +551,7 @@ impl Ledger {
         let operation = stage.transition(true);
         let fingerprint = stage.finish_fingerprint()?;
         if self.replay(operation, &fingerprint)?.is_some() {
-            return Ok(None);
+            return Ok(NotebookStagePublication::Unobserved);
         }
         let generated = stage.outcome == Some(NotebookStageOutcome::Generated);
         let envelope = self.envelope(
@@ -462,13 +566,13 @@ impl Ledger {
         let Some(mut cursor) =
             self.publish_notebook_cursor(cursor, operation, fingerprint, envelope.clone())?
         else {
-            return Ok(None);
+            return Ok(NotebookStagePublication::Unobserved);
         };
         if !generated {
-            return Ok(None);
+            return Ok(NotebookStagePublication::Stopped);
         }
         cursor.results.push(envelope);
-        Ok(Some(cursor))
+        Ok(NotebookStagePublication::Generated(cursor))
     }
     fn publish_notebook_cursor(
         &self,
@@ -668,40 +772,54 @@ mod tests {
     }
     #[test]
     fn lost_prepare_or_finish_ack_retains_facts_without_automatic_continuation() {
-        for finish in [false, true] {
-            let f = Fixture::new();
-            let store = Arc::new(Store::prepare_notebook(f.paths()).unwrap());
-            let ledger = Ledger::new(store.clone());
-            let input = admission(&ledger);
-            let replay = input.clone();
-            let conversation = input.plan.conversation;
-            let map_digest = input.plan.map_input_digests[0].clone();
-            let cursor = ledger.admit_notebook(input).unwrap().unwrap();
-            if !finish {
-                store.set_fault(Fault::AfterCommit).unwrap();
+        for kind in [NotebookStageKind::Map, NotebookStageKind::Reduce] {
+            for finish in [false, true] {
+                let f = Fixture::new();
+                let store = Arc::new(Store::prepare_notebook(f.paths()).unwrap());
+                let ledger = Ledger::new(store.clone());
+                let input = admission(&ledger);
+                let replay = input.clone();
+                let conversation = input.plan.conversation;
+                let map_digest = input.plan.map_input_digests[0].clone();
+                let mut cursor = ledger.admit_notebook(input).unwrap().unwrap();
+                let mut input_digest = map_digest.clone();
+                if kind == NotebookStageKind::Reduce {
+                    let prepared = ledger
+                        .prepare_notebook_stage(cursor, NotebookStageKind::Map, 0, map_digest)
+                        .unwrap()
+                        .unwrap();
+                    cursor = ledger
+                        .finish_notebook_stage(prepared, generated("map output"))
+                        .unwrap()
+                        .unwrap();
+                    input_digest = digest(b"reducer payload");
+                }
+                if !finish {
+                    store.set_fault(Fault::AfterCommit).unwrap();
+                }
+                let prepared = ledger
+                    .prepare_notebook_stage(cursor, kind, 0, input_digest)
+                    .unwrap();
+                if finish {
+                    store.set_fault(Fault::AfterCommit).unwrap();
+                    assert!(ledger
+                        .finish_notebook_stage(prepared.unwrap(), generated("map output"))
+                        .unwrap()
+                        .is_none());
+                } else {
+                    assert!(prepared.is_none());
+                }
+                assert!(ledger.admit_notebook(replay).unwrap().is_none());
+                assert_eq!(
+                    ledger
+                        .inspect(conversation, false)
+                        .unwrap()
+                        .iter()
+                        .filter(|r| matches!(r, Record::Turn(_)))
+                        .count(),
+                    1
+                );
             }
-            let prepared = ledger
-                .prepare_notebook_stage(cursor, NotebookStageKind::Map, 0, map_digest)
-                .unwrap();
-            if finish {
-                store.set_fault(Fault::AfterCommit).unwrap();
-                assert!(ledger
-                    .finish_notebook_stage(prepared.unwrap(), generated("map output"))
-                    .unwrap()
-                    .is_none());
-            } else {
-                assert!(prepared.is_none());
-            }
-            assert!(ledger.admit_notebook(replay).unwrap().is_none());
-            assert_eq!(
-                ledger
-                    .inspect(conversation, false)
-                    .unwrap()
-                    .iter()
-                    .filter(|r| matches!(r, Record::Turn(_)))
-                    .count(),
-                1
-            );
         }
     }
     #[test]

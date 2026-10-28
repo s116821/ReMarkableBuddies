@@ -21,6 +21,9 @@ pub const MEDIA_TYPE: &str =
 pub const CHUNKER_REVISION: &str = "notebook-chunker-v1";
 mod input;
 pub use input::{read_document_file, InputRefusal};
+mod payload;
+pub use payload::{FrozenNotebookPayloads, NotebookMapOutput, PayloadContext};
+pub mod runner;
 
 /// Validated observed buffer, not an atomic concurrent-filesystem snapshot.
 /// Includes unselected units; raw presentation is represented by hash and size.

@@ -248,6 +248,7 @@ pub enum NotebookFailure {
     Deadline,
     OutputLimit,
     EmptyOutput,
+    InvalidOutput,
     PublicationUnknown,
 }
 
