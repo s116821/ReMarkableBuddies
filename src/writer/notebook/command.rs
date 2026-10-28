@@ -279,6 +279,14 @@ pub(crate) fn prepare(
     request: &Request,
     preference: &PersonalizationSnapshot,
 ) -> Result<Prepared> {
+    prepare_frozen(ledger, request, preference, None)
+}
+pub(crate) fn prepare_frozen(
+    ledger: &Ledger,
+    request: &Request,
+    preference: &PersonalizationSnapshot,
+    frozen: Option<ValidatedNotebook>,
+) -> Result<Prepared> {
     request.preflight()?;
     ensure!(
         ledger.store().unavailable_commits()? == 0,
@@ -374,7 +382,16 @@ pub(crate) fn prepare(
     );
     let (source, archive, prior) = match request.model() {
         Request::GenerateNotebook(input) => {
-            let source = read_document_file(&input.document_file, &input.document_sha256)?;
+            let source = match frozen {
+                Some(source) => {
+                    ensure!(
+                        source.raw_sha256 == input.document_sha256,
+                        "frozen notebook asset identity changed"
+                    );
+                    source
+                }
+                None => read_document_file(&input.document_file, &input.document_sha256)?,
+            };
             let archive = ArchivedNormalizedSource::from_notebook(
                 input.conversation,
                 user_id,

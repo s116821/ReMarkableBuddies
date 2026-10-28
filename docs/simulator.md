@@ -5,7 +5,8 @@ They use the separate strict Writer schema: scripted string `replies`, `steps`,
 `conversation`, `expect` and `output`. `run` steps use existing inline/export
 commands; `notebook` steps use the explicit joined notebook commands documented
 in [Writer drafts](reference/writer-drafts.md). Notebook source fixture paths
-are relative to the component checkout. All are offline even when credentials
+are relative to the scenario file. Validated complete asset buffers freeze before
+fixture creation, with an 8 MiB total raw-asset bound. All are offline even when credentials
 exist. Notebook file admission currently requires supported Linux filesystems.
 
 Maintained `writer-notebook-create-replay`, `writer-notebook-create-refine`,
@@ -16,6 +17,14 @@ journal. Reports retain common status/transport summaries and detailed typed
 `notebook_reports` with stage counts and provenance. Scripted replies establish
 workflow behavior, not model quality or device qualification. No tablet actions
 or live destination account writes occur.
+
+Optional `retain_store_fixture: true` saves the closed test-owned data directory
+under `output/store-fixture/data`, plus a relative-path/byte/hash manifest. It
+defaults off, excludes cache/credential roots and refuses existing/symlink
+destinations, more than 8192 files or 64 MiB. This is a diagnostic fixture rather
+than a backup/restore or fresh execution grant. A restart-only scenario with no
+replies can retain a fresh ordinary conversation with zero model/destination
+calls. Unused replies and unreached declared faults fail report assertions.
 
 For fixture selection and evidence gates, use the [local testing checklist](https://github.com/s116821/RemarkableBuddiesDocs/blob/main/.agents/skills/reader-simulator-testing/SKILL.md). It also works without an agent integration.
 

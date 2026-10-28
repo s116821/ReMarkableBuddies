@@ -14,6 +14,7 @@ use std::{
     sync::Mutex,
 };
 use tokio::sync::watch;
+mod fixture;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -26,6 +27,8 @@ pub struct Scenario {
     pub reader_history: Vec<String>,
     pub steps: Vec<Step>,
     pub output: PathBuf,
+    #[serde(default)]
+    pub retain_store_fixture: bool,
     pub expect: Expected,
 }
 #[derive(Deserialize)]
@@ -96,6 +99,8 @@ pub struct Report {
     pub reports: Vec<writer_flow::Report>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub notebook_reports: Vec<crate::writer::notebook::flow::Report>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub store_fixture_saved: Option<bool>,
     pub reader_history_provenance: &'static str,
     pub records: Vec<crate::conversation::Record>,
     pub notes: Vec<RemoteNote>,
@@ -251,7 +256,42 @@ impl Scenario {
     }
 }
 pub fn execute(scenario: &Scenario) -> Result<Report> {
+    execute_at(scenario, &std::env::current_dir()?)
+}
+fn execute_at(scenario: &Scenario, root: &Path) -> Result<Report> {
     scenario.validate()?;
+    let fixture_destination = if scenario.retain_store_fixture {
+        Some(fixture::destination(root, &scenario.output)?)
+    } else {
+        None
+    };
+    let mut total_asset_bytes = 0usize;
+    let mut assets = Vec::new();
+    for step in &scenario.steps {
+        let asset = if let Step::Notebook { request, .. } = step {
+            if let crate::writer::notebook::command::Request::GenerateNotebook(input) =
+                request.model()
+            {
+                let path = root.join(&input.document_file);
+                let source =
+                    crate::writer::notebook::read_document_file(&path, &input.document_sha256)?;
+                source.coverage(&input.selection, input.max_model_calls)?;
+                total_asset_bytes = total_asset_bytes
+                    .checked_add(source.raw_bytes())
+                    .ok_or_else(|| anyhow::anyhow!("Writer asset byte overflow"))?;
+                ensure!(
+                    total_asset_bytes <= 8 * 1024 * 1024,
+                    "Writer assets exceed 8 MiB"
+                );
+                Some(source)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        assets.push(asset);
+    }
     let owned = super::SimulatorLedger::new();
     let mut ledger = owned.open()?;
     ledger.create(scenario.conversation, Uuid::new_v4(), 1)?;
@@ -287,29 +327,20 @@ pub fn execute(scenario: &Scenario) -> Result<Report> {
     let preference = Personalization::default().snapshot()?;
     let mut reports = vec![];
     let mut notebook_reports = vec![];
-    for step in &scenario.steps {
+    let mut unreached_faults = 0;
+    for (step, asset) in scenario.steps.iter().zip(assets) {
         match step {
             Step::Notebook { request, fault } => {
-                let mut request = (**request).clone();
-                if let crate::writer::notebook::command::Request::GenerateNotebookAndExport {
-                    generation,
-                    ..
-                } = &mut request
-                {
-                    if let crate::writer::notebook::command::Request::GenerateNotebook(input) =
-                        generation.as_mut()
-                    {
-                        if input.document_file.is_relative() {
-                            input.document_file =
-                                Path::new(env!("CARGO_MANIFEST_DIR")).join(&input.document_file);
-                        }
-                    }
-                }
                 let paths = ledger.store().paths.clone();
                 drop(ledger);
                 let (store, prepared) =
                     crate::storage::Store::prepare_notebook_validated(paths, |l| {
-                        crate::writer::notebook::command::prepare(l, &request, &preference)
+                        crate::writer::notebook::command::prepare_frozen(
+                            l,
+                            request,
+                            &preference,
+                            asset,
+                        )
                     })?;
                 ledger = crate::conversation::Ledger::new(std::sync::Arc::new(store));
                 let (tx, rx) = watch::channel(false);
@@ -387,6 +418,9 @@ pub fn execute(scenario: &Scenario) -> Result<Report> {
                     }),
                 });
                 notebook_reports.push(report);
+                if fault.is_some() && !fired {
+                    unreached_faults += 1;
+                }
             }
             Step::Restart => {
                 drop(ledger);
@@ -436,12 +470,26 @@ pub fn execute(scenario: &Scenario) -> Result<Report> {
                     },
                 );
                 reports.push(report);
+                if fault.is_some() && !fired {
+                    unreached_faults += 1;
+                }
             }
         }
     }
     let records = ledger.inspect(scenario.conversation, true)?;
+    let data = ledger.store().paths.data.clone();
+    drop(ledger);
+    if let Some(destination) = &fixture_destination {
+        fixture::save(&data, destination)?;
+    }
     let state = destination.0.into_inner().unwrap();
     let mut failures = vec![];
+    if !model.replies.is_empty() {
+        failures.push(format!("unused model replies: {}", model.replies.len()));
+    }
+    if unreached_faults > 0 {
+        failures.push(format!("unreached phase faults: {unreached_faults}"));
+    }
     let statuses: Vec<_> = reports.iter().map(|r| r.status).collect();
     if statuses != scenario.expect.statuses {
         failures.push(format!("statuses: {statuses:?}"));
@@ -476,6 +524,7 @@ pub fn execute(scenario: &Scenario) -> Result<Report> {
         evidence: "scripted supplied-text host flow; no native output",
         reports,
         notebook_reports,
+        store_fixture_saved: fixture_destination.map(|_| true),
         reader_history_provenance: "seeded fixture history; no native Reader-to-Writer transition",
         records,
         notes: state.notes.into_values().collect(),
@@ -487,7 +536,7 @@ pub fn execute(scenario: &Scenario) -> Result<Report> {
     })
 }
 pub fn save(scenario: &Scenario, root: &Path) -> Result<()> {
-    let report = execute(scenario)?;
+    let report = execute_at(scenario, root)?;
     let output = root.join(&scenario.output);
     std::fs::create_dir_all(&output)?;
     std::fs::write(
@@ -510,6 +559,57 @@ pub fn save(scenario: &Scenario, root: &Path) -> Result<()> {
 mod tests {
     use super::*;
     #[test]
+    fn explicit_empty_store_fixture_is_closed_inspectable_and_contains_no_scripted_result() {
+        let root = std::env::temp_dir().join(format!("writer-retained-fixture-{}", Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let conversation = Uuid::new_v4();
+        let scenario:Scenario=serde_json::from_value(serde_json::json!({"name":"fresh-empty-host-fixture","mode":"writer","conversation":conversation,"replies":[],"steps":[{"step":"restart"}],"output":"output","retain_store_fixture":true,
+            "expect":{"statuses":[],"model_calls":0,"destination_calls":0,"writes":0,"note_contains":[]}})).unwrap();
+        let report = execute_at(&scenario, &root).unwrap();
+        assert!(report.assertion_failures.is_empty());
+        assert_eq!(report.store_fixture_saved, Some(true));
+        let ledger = crate::conversation::Ledger::new(std::sync::Arc::new(
+            crate::storage::Store::open(crate::storage::StorePaths {
+                data: root.join("output/store-fixture/data"),
+                cache: root.join("cache"),
+                credentials: root.join("credentials"),
+            })
+            .unwrap(),
+        ));
+        let records = ledger.inspect(conversation, false).unwrap();
+        assert!(records.iter().any(|record|matches!(record,crate::conversation::Record::Root(root) if root.binding.is_none())));
+        assert!(records.iter().all(|record| matches!(
+            record,
+            crate::conversation::Record::Root(_) | crate::conversation::Record::Receipt(_)
+        )));
+        drop(ledger);
+        assert!(execute_at(&scenario, &root).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn unused_replies_and_unreachable_declared_faults_fail_saved_assertions() {
+        let mut scenario: Scenario = serde_json::from_str(include_str!(
+            "../../docs/simulator/scenarios/writer-create-replay.json"
+        ))
+        .unwrap();
+        scenario.replies.push("unused response".into());
+        if let Step::Run { fault, .. } = &mut scenario.steps[2] {
+            *fault = Some(PhaseFault {
+                phase: FaultPhase::AfterModel,
+                action: Action::Cancel,
+            });
+        }
+        let report = execute(&scenario).unwrap();
+        assert!(report
+            .assertion_failures
+            .iter()
+            .any(|s| s == "unused model replies: 1"));
+        assert!(report
+            .assertion_failures
+            .iter()
+            .any(|s| s == "unreached phase faults: 1"));
+    }
+    #[test]
     #[cfg(target_os = "linux")]
     fn maintained_notebook_scenarios_use_real_store_map_reduce_and_fresh_export_path() {
         for name in [
@@ -523,7 +623,11 @@ mod tests {
                 .join("docs/simulator/scenarios")
                 .join(format!("{name}.json"));
             let scenario: Scenario = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-            let report = execute(&scenario).unwrap();
+            let report = execute_at(
+                &scenario,
+                &Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/simulator/scenarios"),
+            )
+            .unwrap();
             assert!(
                 report.assertion_failures.is_empty(),
                 "{name}: {:?}",

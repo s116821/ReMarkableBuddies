@@ -21,7 +21,7 @@
           "conversation": "20000000-0000-4000-8000-000000000001",
           "operation": "20000000-0000-4000-8000-000000000002",
           "request": "Preserve Force = 10 N and cite page 1.",
-          "document_file": "docs/simulator/scenarios/writer-notebook-source.json",
+          "document_file": "writer-notebook-source.json",
           "document_sha256": "debb857e44ea06ddb46af489beed2146cfad8743f8ec08ab0f03771a7c3d93bd",
           "selection": {
             "scope": "supplied-notebook"
@@ -48,7 +48,7 @@
           "conversation": "20000000-0000-4000-8000-000000000001",
           "operation": "20000000-0000-4000-8000-000000000002",
           "request": "Preserve Force = 10 N and cite page 1.",
-          "document_file": "docs/simulator/scenarios/writer-notebook-source.json",
+          "document_file": "writer-notebook-source.json",
           "document_sha256": "debb857e44ea06ddb46af489beed2146cfad8743f8ec08ab0f03771a7c3d93bd",
           "selection": {
             "scope": "supplied-notebook"

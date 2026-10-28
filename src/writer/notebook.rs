@@ -29,6 +29,7 @@ pub mod runner;
 
 /// Validated observed buffer, not an atomic concurrent-filesystem snapshot.
 /// Includes unselected units; raw presentation is represented by hash and size.
+#[derive(Clone)]
 pub struct ValidatedNotebook {
     document: NormalizedDocument,
     canonical: Vec<u8>,

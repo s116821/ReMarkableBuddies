@@ -1123,3 +1123,79 @@ fn notebook_binary_commands_use_actual_provider_http_archive_replay_and_restart_
         2
     );
 }
+
+#[test]
+#[cfg(target_os = "linux")]
+fn relocated_notebook_scenario_binary_freezes_local_asset_and_retains_a_closed_real_store() {
+    use std::process::Command;
+    let local = Local::new();
+    let maintained = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/simulator/scenarios");
+    let mut scenario: Value = serde_json::from_slice(
+        &std::fs::read(maintained.join("writer-notebook-create-replay.json")).unwrap(),
+    )
+    .unwrap();
+    scenario["output"] = json!("output");
+    scenario["retain_store_fixture"] = json!(true);
+    std::fs::copy(
+        maintained.join("writer-notebook-source.json"),
+        local.0.join("writer-notebook-source.json"),
+    )
+    .unwrap();
+    let path = local.0.join("scenario.json");
+    std::fs::write(&path, serde_json::to_vec(&scenario).unwrap()).unwrap();
+    let execute = || {
+        Command::new(env!("CARGO_BIN_EXE_reader-buddy"))
+            .arg("--simulate")
+            .arg(&path)
+            .current_dir(&local.0)
+            .env_remove("OPENAI_API_KEY")
+            .env_remove("MEM_API_KEY")
+            .output()
+            .unwrap()
+    };
+    let output = execute();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report_path = local.0.join("output/report.json");
+    let report_bytes = std::fs::read(&report_path).unwrap();
+    let report: Value = serde_json::from_slice(&report_bytes).unwrap();
+    assert_eq!(report["store_fixture_saved"], true);
+    assert_eq!(report["model_calls"], 3);
+    assert_eq!(report["writes"], 1);
+    let fixture = local.0.join("output/store-fixture");
+    let manifest: Value =
+        serde_json::from_slice(&std::fs::read(fixture.join("manifest.json")).unwrap()).unwrap();
+    for entry in manifest["files"].as_array().unwrap() {
+        let bytes =
+            std::fs::read(fixture.join("data").join(entry["path"].as_str().unwrap())).unwrap();
+        assert_eq!(
+            remarkable_reader_buddy::storage::digest(&bytes),
+            entry["sha256"].as_str().unwrap()
+        );
+    }
+    assert!(!fixture.join("credentials").exists());
+    assert!(!fixture.join("cache").exists());
+    let store = Store::open(StorePaths {
+        data: fixture.join("data"),
+        cache: local.0.join("cache"),
+        credentials: local.0.join("credentials"),
+    })
+    .unwrap();
+    let ledger = Ledger::new(Arc::new(store));
+    let conversation = serde_json::from_value(scenario["conversation"].clone()).unwrap();
+    assert!(ledger
+        .inspect(conversation, false)
+        .unwrap()
+        .iter()
+        .any(|r| matches!(r,Record::Turn(t) if t.outcome==Outcome::Generated)));
+    drop(ledger);
+    let repeat = execute();
+    assert!(
+        !repeat.status.success(),
+        "an existing fixture destination must never be overwritten"
+    );
+    assert_eq!(std::fs::read(report_path).unwrap(), report_bytes);
+}
