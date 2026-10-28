@@ -36,6 +36,7 @@ pub(crate) struct ExportControl<'a> {
     pub guard: Option<crate::conversation::WriterExportGuard>,
     pub observation: &'a mut ExportObservation,
     pub event: &'a mut (dyn FnMut(ExportPhase, &Ledger) + Send),
+    pub deadline: Option<std::time::Instant>,
 }
 fn event(control: &mut Option<&mut ExportControl<'_>>, phase: ExportPhase, ledger: &Ledger) {
     if let Some(control) = control.as_deref_mut() {
@@ -358,6 +359,12 @@ pub(crate) async fn export_with_owner(
         }
     }
     let budget = Budget::default();
+    let budget = match control.as_deref().and_then(|control| control.deadline) {
+        Some(end) => Budget {
+            end: budget.end.min(end),
+        },
+        None => budget,
+    };
     let body = match note.render(destination.correlation_location()) {
         Ok(body) => body,
         Err(failure) => {

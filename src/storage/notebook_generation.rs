@@ -307,7 +307,14 @@ impl Store {
         };
         let mut store = Arc::try_unwrap(store)
             .map_err(|_| anyhow::anyhow!("notebook preflight readers still active"))?;
-        prepare(&mut store, |_| Ok(()))?;
+        let generation = store
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?
+            .generation;
+        if validate_ready(&store.paths, store.actor_id, generation).is_err() {
+            prepare(&mut store, |_| Ok(()))?;
+        }
         Ok((store, validated))
     }
     /// Explicit preparation owns a fresh Store before any Arc/client escapes.

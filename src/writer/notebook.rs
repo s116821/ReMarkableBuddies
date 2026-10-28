@@ -23,6 +23,8 @@ mod input;
 pub use input::{read_document_file, InputRefusal};
 mod payload;
 pub use payload::{FrozenNotebookPayloads, NotebookMapOutput, PayloadContext};
+pub mod command;
+pub mod flow;
 pub mod runner;
 
 /// Validated observed buffer, not an atomic concurrent-filesystem snapshot.

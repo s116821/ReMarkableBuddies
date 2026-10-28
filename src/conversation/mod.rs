@@ -1490,7 +1490,8 @@ impl Ledger {
         records.push(exported);
         let post = selection
             .as_ref()
-            .map(|_| WriterExportGuard::published(&root, &records));
+            .map(|_| WriterExportGuard::published(&root, &records, self.store.clone()))
+            .transpose()?;
         let (result, fresh) =
             self.publish_observed(operation, fingerprint, root, records, binding)?;
         Ok((result, fresh, if fresh { post } else { None }))

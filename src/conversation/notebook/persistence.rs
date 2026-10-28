@@ -28,6 +28,7 @@ pub struct NotebookFinalized {
     draft: Envelope,
     source: Envelope,
     plan: Envelope,
+    guards: Vec<Envelope>,
     store: Arc<Store>,
 }
 impl NotebookFinalized {
@@ -45,6 +46,9 @@ impl NotebookFinalized {
     }
     pub fn plan(&self) -> &Envelope {
         &self.plan
+    }
+    pub fn guards(&self) -> &[Envelope] {
+        &self.guards
     }
 }
 pub enum NotebookStagePublication {
@@ -250,6 +254,7 @@ impl Ledger {
                 .find(|e| e.namespace == Namespace::Conversation && e.record_id == cursor.plan.id)
                 .context("notebook final plan guard absent")?
                 .clone(),
+            guards: records.clone(),
             store: self.store.clone(),
         };
         records.push(draft);

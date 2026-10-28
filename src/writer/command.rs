@@ -104,12 +104,14 @@ pub fn run(config_path: Option<PathBuf>, input: &mut impl Read) -> Report {
 pub enum CommandReport {
     Legacy(Report),
     Flow(crate::writer_flow::Report),
+    Notebook(Box<notebook::command::Report>),
 }
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum CommandRequest {
     Legacy(Request),
     Flow(crate::writer_flow::Request),
+    Notebook(Box<notebook::command::Request>),
 }
 /// Parse bounded stdin once; each strict variant rejects duplicates and unknown fields.
 pub fn dispatch(config_path: Option<PathBuf>, input: &mut impl Read) -> CommandReport {
@@ -138,6 +140,9 @@ pub fn dispatch(config_path: Option<PathBuf>, input: &mut impl Read) -> CommandR
             CommandReport::Legacy(run(config_path, &mut &bytes[..]))
         }
         Ok(CommandRequest::Flow(request)) => CommandReport::Flow(run_flow(config_path, request)),
+        Ok(CommandRequest::Notebook(request)) => {
+            CommandReport::Notebook(Box::new(notebook::command::run(config_path, *request)))
+        }
         Err(_) => CommandReport::Legacy(run(config_path, &mut &bytes[..])),
     }
 }

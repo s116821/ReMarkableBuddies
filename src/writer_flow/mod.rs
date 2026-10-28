@@ -429,6 +429,7 @@ pub(crate) fn run_with_events<E: LLMEngine>(
         guard: None,
         observation: &mut result.observation,
         event: &mut export_event,
+        deadline: None,
     };
     let export = runtime.block_on(note_export::export_with_owner(
         ledger,

@@ -29,6 +29,8 @@ pub enum Status {
 pub enum Failure {
     InvalidInput,
     InvalidOwner,
+    MissingCredentials,
+    Unsupported,
     Busy,
     Storage,
     Provider,
