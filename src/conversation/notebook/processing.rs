@@ -399,10 +399,19 @@ impl NotebookStage {
                         "notebook result bound"
                     );
                 } else {
-                    ensure!(
-                        self.output.is_none() && self.failure.is_some(),
-                        "invalid notebook failed result"
-                    );
+                    ensure!(self.failure.is_some(), "invalid notebook failed result");
+                    if let Some(text) = &self.output {
+                        ensure!(
+                            self.observed_output_digest == Some(digest(text.as_bytes()))
+                                && self.observed_output_bytes == Some(text.len() as u64)
+                                && match self.kind {
+                                    NotebookStageKind::Map =>
+                                        serde_json::to_vec(text)?.len() <= MAX_MAP_REPLY,
+                                    NotebookStageKind::Reduce => text.len() <= MAX_FINAL_TEXT,
+                                },
+                            "invalid retained notebook failed output"
+                        );
+                    }
                 }
             }
         }

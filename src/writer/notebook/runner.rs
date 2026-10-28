@@ -28,6 +28,7 @@ pub enum Status {
 #[serde(rename_all = "kebab-case")]
 pub enum Failure {
     InvalidInput,
+    InvalidOwner,
     Busy,
     Storage,
     Provider,
@@ -93,6 +94,15 @@ impl Report {
         }
     }
 }
+fn final_stop(canceled: bool, elapsed: Duration) -> Option<Failure> {
+    if canceled {
+        Some(Failure::Canceled)
+    } else if elapsed >= Duration::from_secs(600) {
+        Some(Failure::Deadline)
+    } else {
+        None
+    }
+}
 pub(crate) fn run_owned<E: LLMEngine>(
     ledger: &Ledger,
     engine: &mut E,
@@ -102,15 +112,21 @@ pub(crate) fn run_owned<E: LLMEngine>(
     started: Instant,
 ) -> Completed {
     let mut report = Report::new(&input);
+    if !std::ptr::eq(owner.0, ledger.store().as_ref()) {
+        report.failure = Some(Failure::InvalidOwner);
+        return Completed {
+            report,
+            finalized: None,
+        };
+    }
+    if input.admission.plan != input.payloads.plan {
+        report.failure = Some(Failure::InvalidInput);
+        return Completed {
+            report,
+            finalized: None,
+        };
+    }
     let result = (|| -> Result<Option<NotebookFinalized>> {
-        ensure!(
-            std::ptr::eq(owner.0, ledger.store().as_ref()),
-            "foreign notebook writer owner"
-        );
-        ensure!(
-            input.admission.plan == input.payloads.plan,
-            "notebook frozen plan mismatch"
-        );
         if canceled() {
             report.status = Status::Canceled;
             report.failure = Some(Failure::Canceled);
@@ -152,9 +168,9 @@ pub(crate) fn run_owned<E: LLMEngine>(
             };
             cursor = next;
         }
-        if canceled() || started.elapsed() >= Duration::from_secs(600) {
+        if let Some(failure) = final_stop(canceled(), started.elapsed()) {
             report.status = Status::Canceled;
-            report.failure = Some(Failure::Canceled);
+            report.failure = Some(failure);
             return Ok(None);
         }
         let Some((_, finalized)) = ledger.finalize_notebook_granted(cursor)? else {
@@ -162,6 +178,12 @@ pub(crate) fn run_owned<E: LLMEngine>(
             report.unobserved_publication = true;
             return Ok(None);
         };
+        if let Some(failure) = final_stop(canceled(), started.elapsed()) {
+            report.status = Status::Canceled;
+            report.failure = Some(failure);
+            report.draft = Some(finalized.draft().record_id);
+            return Ok(None);
+        }
         report.status = Status::Generated;
         report.draft = Some(finalized.draft().record_id);
         Ok(Some(finalized))
@@ -252,6 +274,14 @@ impl<E: LLMEngine> Runner<'_, E> {
             }
         };
         let body = response.as_ref().and_then(|result| result.as_ref().ok());
+        let retained = body
+            .filter(|text| match kind {
+                NotebookStageKind::Map => {
+                    serde_json::to_vec(text).is_ok_and(|bytes| bytes.len() <= MAX_MAP_REPLY)
+                }
+                NotebookStageKind::Reduce => text.len() <= super::super::MAX_DRAFT,
+            })
+            .cloned();
         let observed_output_digest = body.map(|body| digest(body.as_bytes()));
         let observed_output_bytes = body.map(|body| body.len() as u64);
         let (outcome, output, failure, status, reported) = if let Some(stop) = stop {
@@ -273,7 +303,7 @@ impl<E: LLMEngine> Runner<'_, E> {
                     Status::Stale,
                 ),
             };
-            (outcome, None, Some(failure), status, Some(stop))
+            (outcome, retained, Some(failure), status, Some(stop))
         } else if let Some(body) = body {
             let valid = match kind {
                 NotebookStageKind::Map => {
@@ -286,7 +316,7 @@ impl<E: LLMEngine> Runner<'_, E> {
             if valid {
                 (
                     NotebookStageOutcome::Generated,
-                    Some(body.clone()),
+                    retained,
                     None,
                     Status::Generated,
                     None,
@@ -294,7 +324,7 @@ impl<E: LLMEngine> Runner<'_, E> {
             } else {
                 (
                     NotebookStageOutcome::Failed,
-                    None,
+                    retained,
                     Some(NotebookFailure::InvalidOutput),
                     Status::Failed,
                     Some(Failure::Output),
@@ -324,7 +354,7 @@ impl<E: LLMEngine> Runner<'_, E> {
         match publication {
             NotebookStagePublication::Generated(cursor) => {
                 self.report.confirmed_stage_results += 1;
-                Ok(Some(cursor))
+                Ok(Some(*cursor))
             }
             NotebookStagePublication::Stopped => {
                 self.report.confirmed_stage_results += 1;
@@ -527,6 +557,19 @@ mod tests {
         assert_eq!(result.report.local_invocations, 0);
         assert_eq!(model.calls, 2);
         assert!(result.finalized.is_none());
+        let foreign = Fixture::new();
+        let foreign_store = Store::prepare_notebook(foreign.paths()).unwrap();
+        assert!(!finalized.is_for_store(&foreign_store));
+        drop(foreign_store);
+        drop(model);
+        drop(ledger);
+        drop(store);
+        assert!(
+            Store::open(f.paths()).is_err(),
+            "fresh witness must retain its originating live lease"
+        );
+        drop(finalized);
+        drop(Store::open(f.paths()).unwrap());
     }
     #[test]
     fn lost_map_or_reducer_result_ack_stops_before_next_call_or_final_grant() {
@@ -578,6 +621,81 @@ mod tests {
             );
             assert!(result.finalized.is_none());
             assert!(model.parts.is_empty());
+        }
+    }
+    #[test]
+    fn deterministic_pre_admission_mismatch_refuses_without_publication_or_engine_uncertainty() {
+        let f = Fixture::new();
+        let store = Arc::new(Store::prepare_notebook(f.paths()).unwrap());
+        let ledger = Ledger::new(store.clone());
+        let mut input = input(&ledger);
+        let original = input.clone();
+        let before = store.manifests().unwrap().len();
+        input.admission.plan.request.push('!');
+        let mut model = model(store.clone());
+        let result = run(&ledger, &mut model, input, &mut || false);
+        assert_eq!(result.report.status, Status::Refused);
+        assert_eq!(result.report.failure, Some(Failure::InvalidInput));
+        assert!(
+            !result.report.unobserved_publication
+                && !result.report.admitted
+                && !result.report.remote_cost_unknown
+        );
+        assert_eq!(result.report.local_invocations, 0);
+        assert_eq!(model.calls, 0);
+        assert_eq!(store.manifests().unwrap().len(), before);
+        let foreign = Fixture::new();
+        let foreign_store = Store::prepare_notebook(foreign.paths()).unwrap();
+        let owner = super::super::super::Owner::acquire(&foreign_store).unwrap();
+        let result = run_owned(
+            &ledger,
+            &mut model,
+            original,
+            &mut || false,
+            &owner,
+            Instant::now(),
+        );
+        assert_eq!(result.report.status, Status::Refused);
+        assert_eq!(result.report.failure, Some(Failure::InvalidOwner));
+        assert!(!result.report.unobserved_publication);
+        assert_eq!(model.calls, 0);
+        assert_eq!(store.manifests().unwrap().len(), before);
+    }
+    #[test]
+    fn final_guard_distinguishes_user_cancellation_and_inclusive_deadline_boundary() {
+        assert_eq!(final_stop(false, Duration::from_secs(599)), None);
+        assert_eq!(
+            final_stop(false, Duration::from_secs(600)),
+            Some(Failure::Deadline)
+        );
+        assert_eq!(
+            final_stop(true, Duration::from_secs(599)),
+            Some(Failure::Canceled)
+        );
+    }
+    #[test]
+    fn zero_engine_entries_and_confirmed_durable_no_call_are_separate_observations() {
+        for after_admission in [false, true] {
+            let f = Fixture::new();
+            let store = Arc::new(Store::prepare_notebook(f.paths()).unwrap());
+            let ledger = Ledger::new(store.clone());
+            let input = input(&ledger);
+            let mut model = model(store);
+            let mut checks = 0;
+            let result = run(&ledger, &mut model, input, &mut || {
+                checks += 1;
+                !after_admission || checks > 1
+            });
+            assert_eq!(result.report.status, Status::Canceled);
+            assert_eq!(model.calls, 0);
+            assert_eq!(result.report.local_invocations, 0);
+            assert_eq!(result.report.admitted, after_admission);
+            assert_eq!(
+                result.report.confirmed_stage_results,
+                usize::from(after_admission)
+            );
+            assert!(!result.report.unobserved_publication);
+            assert!(result.finalized.is_none());
         }
     }
 }

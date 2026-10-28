@@ -28,11 +28,11 @@ pub struct NotebookFinalized {
     draft: Envelope,
     source: Envelope,
     plan: Envelope,
-    store: usize,
+    store: Arc<Store>,
 }
 impl NotebookFinalized {
     pub fn is_for_store(&self, store: &Store) -> bool {
-        self.store == store as *const Store as usize
+        std::ptr::eq(self.store.as_ref(), store)
     }
     pub fn root(&self) -> &Envelope {
         &self.root
@@ -48,7 +48,7 @@ impl NotebookFinalized {
     }
 }
 pub enum NotebookStagePublication {
-    Generated(NotebookRunCursor),
+    Generated(Box<NotebookRunCursor>),
     /// Freshly observed durable non-generated result, with no continuation grant.
     Stopped,
     /// Historical/lost acknowledgment: publication may exist, freshness was not observed.
@@ -250,7 +250,7 @@ impl Ledger {
                 .find(|e| e.namespace == Namespace::Conversation && e.record_id == cursor.plan.id)
                 .context("notebook final plan guard absent")?
                 .clone(),
-            store: self.store.as_ref() as *const Store as usize,
+            store: self.store.clone(),
         };
         records.push(draft);
         let (result, fresh) =
@@ -523,7 +523,7 @@ impl Ledger {
     ) -> Result<Option<NotebookRunCursor>> {
         Ok(
             match self.finish_notebook_stage_observed(prepared, result)? {
-                NotebookStagePublication::Generated(cursor) => Some(cursor),
+                NotebookStagePublication::Generated(cursor) => Some(*cursor),
                 NotebookStagePublication::Stopped | NotebookStagePublication::Unobserved => None,
             },
         )
@@ -572,7 +572,7 @@ impl Ledger {
             return Ok(NotebookStagePublication::Stopped);
         }
         cursor.results.push(envelope);
-        Ok(NotebookStagePublication::Generated(cursor))
+        Ok(NotebookStagePublication::Generated(Box::new(cursor)))
     }
     fn publish_notebook_cursor(
         &self,
