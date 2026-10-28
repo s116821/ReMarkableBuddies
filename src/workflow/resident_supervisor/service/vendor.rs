@@ -10,6 +10,7 @@ use std::path::Path;
 const UNIT: &str = "rm-sync.service";
 const EXE: &str = "/usr/bin/rm-sync";
 const MOUNT: &str = "/sys/fs/cgroup/unified";
+pub const PROFILE_ID: &str = "rm2-3.28.0.172-v1";
 const EXE_SHA: &str = "1caf6493cce2132af89a9377679c19005bef1c5b0e658f704f95b4fdbd07138c";
 const UNIT_PATH: &str = "/usr/lib/systemd/system/rm-sync.service";
 const DROPIN: &str = "/usr/lib/systemd/system/rm-sync.service.d/rm-sync-service-override.conf";

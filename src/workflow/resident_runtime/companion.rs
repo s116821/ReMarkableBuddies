@@ -2,6 +2,7 @@
 use super::*;
 use crate::workflow::resident_supervisor::service::companion::{self as broker, BrokerOwner};
 use std::os::unix::process::CommandExt;
+mod group;
 
 /// An explicit launch selection, not a firmware capability claim. Installed
 /// admission must independently pin both original services before using this.
@@ -53,6 +54,7 @@ pub(super) struct Companion {
     start_ticks: Option<u64>,
     owner: Option<BrokerOwner>,
     failed: bool,
+    group: group::Binding,
     #[cfg(test)]
     broker_file: Option<PathBuf>,
 }
@@ -60,6 +62,13 @@ impl Companion {
     #[cfg(test)]
     pub(super) fn pid(&self) -> u32 {
         self.child.as_ref().unwrap().id()
+    }
+    #[cfg(test)]
+    pub(super) fn fixture_group(&mut self, mismatch: Option<bool>) {
+        self.group = group::Binding::capture().unwrap();
+        if let Some(namespace) = mismatch {
+            self.group.inject_mismatch(namespace);
+        }
     }
     pub(super) fn prepare(profile: Profile, directory: &Path, deadline: Instant) -> Result<Self> {
         before(deadline)?;
@@ -124,6 +133,7 @@ impl Companion {
             start_ticks: None,
             owner: None,
             failed: false,
+            group: group::Binding::capture()?,
             #[cfg(test)]
             broker_file: profile.broker_file,
         };
@@ -174,6 +184,7 @@ impl Companion {
     pub(super) fn spawn(&mut self, deadline: Instant) -> Result<()> {
         ensure!(self.child.is_none(), "companion already spawned");
         self.hash_current(deadline)?;
+        self.group.parent_current()?;
         // Bind exec to the retained inode, not a mutable path. Root-owned file
         // changes remain integrity failures; this is not an atomic byte snapshot.
         self.child = Some(
@@ -214,6 +225,11 @@ impl Companion {
             .take(4097)
             .read_to_end(&mut cmdline)?;
         ensure!(cmdline == self.cmdline, "companion command line changed");
+        self.group.child_current(pid)?;
+        ensure!(
+            Some(process_start(pid)?) == self.start_ticks && child.try_wait()?.is_none(),
+            "companion changed across group observation"
+        );
         Ok(())
     }
     pub(super) fn observe(

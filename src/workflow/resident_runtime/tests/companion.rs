@@ -64,6 +64,42 @@ impl Fixture {
 
 #[test]
 #[ignore = "requires root for the fixed vendor process contract"]
+fn observed_group_or_namespace_mismatch_permanently_retires_the_session() {
+    for namespace in [false, true] {
+        let f = Fixture::new();
+        let mut runtime = f.start_companion("ready", Duration::from_secs(5)).unwrap();
+        runtime
+            .prepared
+            .companion
+            .as_mut()
+            .unwrap()
+            .fixture_group(Some(namespace));
+        assert!(runtime
+            .with_connection(
+                Instant::now() + Duration::from_secs(2),
+                &mut || Ok(()),
+                |_, _| -> Result<()> {
+                    panic!("observed membership loss must prevent request exposure")
+                }
+            )
+            .is_err());
+        // Restoring the modeled expectation cannot clear the integrity latch.
+        runtime
+            .prepared
+            .companion
+            .as_mut()
+            .unwrap()
+            .fixture_group(None);
+        assert!(runtime
+            .reconnect(Instant::now() + Duration::from_secs(2), &mut || Ok(()))
+            .is_err());
+        let report = runtime.shutdown(Instant::now() + Duration::from_secs(2));
+        assert!(report.reaped, "{report:?}");
+    }
+}
+
+#[test]
+#[ignore = "requires root for the fixed vendor process contract"]
 fn two_owned_children_handshake_then_broker_ready_and_both_reap() {
     let f = Fixture::new();
     let mut runtime = f
