@@ -25,6 +25,10 @@ destinations, more than 8192 files or 64 MiB. This is a diagnostic fixture rathe
 than a backup/restore or fresh execution grant. A restart-only scenario with no
 replies can retain a fresh ordinary conversation with zero model/destination
 calls. Unused replies and unreached declared faults fail report assertions.
+Copied generation4 capabilities retain their original paths: ordinary open at a
+new location refuses until explicit notebook preparation revalidates the closed
+copy and publishes its new path binding. Snapshot retention does not perform
+that preparation or mint a model/export witness.
 
 For fixture selection and evidence gates, use the [local testing checklist](https://github.com/s116821/RemarkableBuddiesDocs/blob/main/.agents/skills/reader-simulator-testing/SKILL.md). It also works without an agent integration.
 

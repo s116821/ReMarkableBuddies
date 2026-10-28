@@ -1178,12 +1178,16 @@ fn relocated_notebook_scenario_binary_freezes_local_asset_and_retains_a_closed_r
     }
     assert!(!fixture.join("credentials").exists());
     assert!(!fixture.join("cache").exists());
-    let store = Store::open(StorePaths {
+    let paths = StorePaths {
         data: fixture.join("data"),
         cache: local.0.join("cache"),
         credentials: local.0.join("credentials"),
-    })
-    .unwrap();
+    };
+    assert!(
+        Store::open(paths.clone()).is_err(),
+        "diagnostic relocation must not silently rebind path-bound capabilities"
+    );
+    let store = Store::prepare_notebook(paths).unwrap();
     let ledger = Ledger::new(Arc::new(store));
     let conversation = serde_json::from_value(scenario["conversation"].clone()).unwrap();
     assert!(ledger
