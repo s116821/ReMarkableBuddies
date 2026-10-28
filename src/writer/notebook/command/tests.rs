@@ -116,7 +116,7 @@ impl LLMEngine for Model {
     }
 }
 #[derive(Default)]
-struct Destination(Mutex<(BTreeMap<String, note_export::RemoteNote>, usize)>);
+struct Destination(Mutex<(BTreeMap<String, note_export::RemoteNote>, usize, usize)>);
 impl NoteDestination for Destination {
     fn backend(&self) -> &str {
         "fixture"
@@ -129,6 +129,7 @@ impl NoteDestination for Destination {
         _: Uuid,
         _: note_export::Budget,
     ) -> note_export::Result<note_export::Discovery> {
+        self.0.lock().unwrap().2 += 1;
         Ok(note_export::Discovery::Missing)
     }
     async fn read(
@@ -136,7 +137,9 @@ impl NoteDestination for Destination {
         id: &str,
         _: note_export::Budget,
     ) -> note_export::Result<Option<note_export::RemoteNote>> {
-        Ok(self.0.lock().unwrap().0.get(id).cloned())
+        let mut state = self.0.lock().unwrap();
+        state.2 += 1;
+        Ok(state.0.get(id).cloned())
     }
     async fn create(
         &self,
@@ -181,6 +184,7 @@ impl Destination {
         let mut state = self.0.lock().unwrap();
         state.0.insert(id.into(), note.clone());
         state.1 += 1;
+        state.2 += 1;
         Ok(note)
     }
 }
@@ -369,4 +373,188 @@ fn joined_root_change_before_model_stops_without_provider_or_destination_write()
     assert_ne!(result.status, crate::writer_flow::Status::Exported);
     assert_eq!(model.calls, 0);
     assert_eq!(destination.0.lock().unwrap().1, 0);
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn replay_reconstructs_original_subrange_despite_foreign_conversation_domain_and_later_history() {
+    let mut f = Fixture::new();
+    let conversation = f.request.conversation();
+    let append = |ledger: &Ledger, conversation: Uuid, text: &str| {
+        ledger
+            .append(
+                Uuid::new_v4(),
+                ledger
+                    .expected(Namespace::Conversation, conversation)
+                    .unwrap(),
+                Turn {
+                    id: Uuid::new_v4(),
+                    conversation,
+                    exchange: Uuid::new_v4(),
+                    sequence: 0,
+                    role: Role::User,
+                    mode: Mode::Reader,
+                    outcome: Outcome::Interpreted,
+                    text: Some(text.into()),
+                    sources: vec![],
+                    correction_of: None,
+                    created_ms: 1,
+                    updated_ms: 1,
+                    completion: None,
+                },
+                vec![],
+            )
+            .unwrap();
+    };
+    append(&f.ledger, conversation, "Excluded earlier context");
+    append(&f.ledger, conversation, "Selected equation context");
+    let foreign = Uuid::new_v4();
+    f.ledger.create(foreign, Uuid::new_v4(), 1).unwrap();
+    append(&f.ledger, foreign, "Foreign context");
+    let store = f.ledger.store();
+    store
+        .commit(
+            vec![crate::storage::Envelope {
+                envelope_version: 1,
+                namespace: Namespace::SubjectMemory,
+                domain_schema_version: 1,
+                record_id: Uuid::new_v4(),
+                revision_id: Uuid::new_v4(),
+                parents: Default::default(),
+                operation_id: Uuid::new_v4(),
+                actor_id: store.actor_id,
+                kind: crate::storage::Kind::Value,
+                payload: serde_json::json!({"fixture":"unrelated domain"}),
+                media_descriptors: vec![],
+            }],
+            BTreeMap::new(),
+        )
+        .unwrap();
+    let Request::GenerateNotebook(input) = &mut f.request else {
+        unreachable!()
+    };
+    input.history_range = Some(TurnRange {
+        start: 1,
+        end_exclusive: 2,
+    });
+    let mut model = Model::default();
+    let generated = runner::run(&f.ledger, &mut model, f.input(&f.request), &mut || false);
+    assert_eq!(generated.report.status, runner::Status::Generated);
+    drop(generated);
+    append(
+        &f.ledger,
+        conversation,
+        "Later mutable history must not replace frozen context",
+    );
+    f.reopen();
+    let preference = Personalization::default().snapshot().unwrap();
+    let Prepared::Replay(replay) = prepare(&f.ledger, &f.request, &preference).unwrap() else {
+        panic!("unchanged retry must be historical")
+    };
+    let history = initial_history(
+        &f.ledger,
+        &replay.plan,
+        Some(TurnRange {
+            start: 1,
+            end_exclusive: 2,
+        }),
+    )
+    .unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(
+        history[0].text.as_deref(),
+        Some("Selected equation context")
+    );
+    assert_eq!(model.calls, 2);
+    let identity = identity();
+    let joined = Request::GenerateNotebookAndExport {
+        outer_operation: identity.outer_operation,
+        generation: Box::new(f.request.clone()),
+        correlation: identity.correlation,
+        effect_operation: identity.effect_operation,
+    };
+    let destination = Destination::default();
+    let (_sender, receiver) = tokio::sync::watch::channel(false);
+    let historical = joined
+        .run_joined_prepared(
+            Prepared::Replay(replay),
+            &f.ledger,
+            &mut model,
+            &destination,
+            receiver,
+            &mut |_, _| {},
+        )
+        .unwrap();
+    assert_eq!(historical.status, crate::writer_flow::Status::Historical);
+    assert_eq!(historical.generation.unwrap().local_invocations, 0);
+    assert_eq!(model.calls, 2);
+    assert_eq!(destination.0.lock().unwrap().2, 0);
+    let Request::GenerateNotebook(input) = &mut f.request else {
+        unreachable!()
+    };
+    input.history_range = Some(TurnRange {
+        start: 0,
+        end_exclusive: 1,
+    });
+    assert!(prepare(&f.ledger, &f.request, &preference).is_err());
+    assert_eq!(model.calls, 2);
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn joined_export_rechecks_archive_bytes_at_both_destination_poll_boundaries() {
+    for boundary in [
+        crate::writer_flow::Phase::BeforeDestinationPoll,
+        crate::writer_flow::Phase::BeforeWritePoll,
+    ] {
+        let f = Fixture::new();
+        let mut model = Model::default();
+        let destination = Destination::default();
+        let input = f.input(&f.request);
+        let hash = input.admission.archive.media.sha256.clone();
+        let (_sender, receiver) = tokio::sync::watch::channel(false);
+        let mut fired = false;
+        let result = flow::run_with_events(
+            &f.ledger,
+            &mut model,
+            &destination,
+            input,
+            identity(),
+            receiver,
+            &mut |phase, ledger| {
+                if phase == boundary && !fired {
+                    fired = true;
+                    assert!(
+                        crate::writer::Owner::acquire(ledger.store()).is_none(),
+                        "Writer owner must span destination transport"
+                    );
+                    assert!(
+                        note_export::ExportOwner::acquire(ledger).is_none(),
+                        "export owner must span destination transport"
+                    );
+                    let generation: Uuid = serde_json::from_slice(
+                        &std::fs::read(ledger.store().paths.data.join("CURRENT")).unwrap(),
+                    )
+                    .unwrap();
+                    std::fs::write(
+                        ledger
+                            .store()
+                            .paths
+                            .data
+                            .join("generations")
+                            .join(generation.to_string())
+                            .join("objects")
+                            .join(&hash),
+                        b"corrupt archive",
+                    )
+                    .unwrap();
+                }
+            },
+        );
+        assert!(fired);
+        assert_eq!(model.calls, 2);
+        assert_eq!(destination.0.lock().unwrap().1, 0);
+        assert!(!result.observation.write_polled);
+        assert_ne!(result.status, crate::writer_flow::Status::Exported);
+    }
 }

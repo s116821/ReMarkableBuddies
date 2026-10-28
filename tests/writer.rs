@@ -996,3 +996,130 @@ fn joined_command_requires_destination_credentials_before_store_or_model() {
         assert_eq!(api.count(), 0);
     }
 }
+
+#[test]
+#[cfg(target_os = "linux")]
+fn notebook_binary_commands_use_actual_provider_http_archive_replay_and_restart_refinement() {
+    use remarkable_reader_buddy::writer::notebook::command::{
+        Generate, Refine, Request as NotebookRequest,
+    };
+    use std::process::{Command, Stdio};
+    let local = Local::new();
+    let (ledger, conversation) = local.ledger();
+    let paths = ledger.store().paths.clone();
+    drop(ledger);
+    let api = Api::new(vec![
+        reply("x = 7 (page 1)."),
+        reply("# Study\n\nx = 7 (page 1)."),
+        reply("x = 7 (page 1)."),
+        reply("# Study\n\nx = 7 (page 1). Refined."),
+    ]);
+    let config = remarkable_reader_buddy::config::Config {
+        model: Some("fixture-model".into()),
+        paths: paths.clone(),
+        ..Default::default()
+    };
+    let config_path = local.0.join("notebook-config.json");
+    std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    let document = NormalizedDocument {
+        document: Uuid::new_v4(),
+        format: SourceFormat::Notebook,
+        source_sha256: "a".repeat(64),
+        extractor_revision: "binary-notebook-fixture-v1".into(),
+        units: vec![SourceUnit {
+            page: Some(1),
+            section: None,
+            text: "Equation: x = 7.".into(),
+        }],
+    };
+    let raw = serde_json::to_vec_pretty(&document).unwrap();
+    let document_file = local.0.join("source.json");
+    std::fs::write(&document_file, &raw).unwrap();
+    let request = NotebookRequest::GenerateNotebook(Box::new(Generate {
+        conversation,
+        operation: Uuid::new_v4(),
+        request: "Keep x = 7 and page 1.".into(),
+        document_file: document_file.clone(),
+        document_sha256: remarkable_reader_buddy::storage::digest(&raw),
+        selection: TextScope::SuppliedNotebook,
+        guidance: None,
+        max_model_calls: 2,
+        history_range: None,
+    }));
+    let execute = |request: &NotebookRequest| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_reader-buddy"))
+            .arg("--writer-note")
+            .env("REMARKABLE_BUDDIES_CONFIG", &config_path)
+            .env("OPENAI_API_KEY", "fixture-key")
+            .env("OPENAI_BASE_URL", &api.origin)
+            .env_remove("MEM_API_KEY")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(&serde_json::to_vec(request).unwrap())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert!(
+            output.stderr.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    // Bad transport identity cannot adopt metadata or dispatch a provider call.
+    let mut bad = request.clone();
+    if let NotebookRequest::GenerateNotebook(input) = &mut bad {
+        input.document_sha256 = "b".repeat(64);
+    }
+    assert_eq!(execute(&bad)["status"], "refused");
+    assert_eq!(api.count(), 0);
+    let generation: Uuid =
+        serde_json::from_slice(&std::fs::read(paths.data.join("CURRENT")).unwrap()).unwrap();
+    assert!(!paths
+        .data
+        .join("generations")
+        .join(generation.to_string())
+        .join("notebook-feature.json")
+        .exists());
+    let result = execute(&request);
+    assert_eq!(result["status"], "generated");
+    assert_eq!(result["local_invocations"], 2);
+    assert_eq!(api.count(), 2);
+    let draft = serde_json::from_value(result["draft"].clone()).unwrap();
+    std::fs::remove_file(document_file).unwrap();
+    let replay = execute(&request);
+    assert_eq!(replay["status"], "historical");
+    assert_eq!(replay["local_invocations"], 0);
+    assert_eq!(api.count(), 2);
+    let refinement = NotebookRequest::RefineNotebook(Box::new(Refine {
+        conversation,
+        operation: Uuid::new_v4(),
+        request: "Refine while keeping x = 7.".into(),
+        draft,
+        max_model_calls: 2,
+        history_range: None,
+    }));
+    let result = execute(&refinement);
+    assert_eq!(result["status"], "generated");
+    assert_eq!(result["local_invocations"], 2);
+    assert_eq!(api.count(), 4);
+    let ledger = Ledger::new(local.open());
+    let records = ledger.inspect(conversation, true).unwrap();
+    assert!(records
+        .iter()
+        .any(|r| matches!(r, Record::ArchivedNormalizedSource(_))));
+    assert_eq!(
+        records
+            .iter()
+            .filter(|r| matches!(r,Record::Turn(t) if t.outcome==Outcome::Generated))
+            .count(),
+        2
+    );
+}

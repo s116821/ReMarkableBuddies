@@ -35,6 +35,10 @@ pub enum Step {
         request: Box<writer_flow::Request>,
         fault: Option<PhaseFault>,
     },
+    Notebook {
+        request: Box<crate::writer::notebook::command::Request>,
+        fault: Option<PhaseFault>,
+    },
     Restart,
     LoseWriteAcknowledgment,
 }
@@ -90,6 +94,8 @@ pub struct Report {
     pub mode: &'static str,
     pub evidence: &'static str,
     pub reports: Vec<writer_flow::Report>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notebook_reports: Vec<crate::writer::notebook::flow::Report>,
     pub reader_history_provenance: &'static str,
     pub records: Vec<crate::conversation::Record>,
     pub notes: Vec<RemoteNote>,
@@ -233,6 +239,13 @@ impl Scenario {
                     "foreign conversation"
                 );
             }
+            if let Step::Notebook { request, .. } = step {
+                request.preflight()?;
+                ensure!(
+                    request.joined().is_some() && request.conversation() == self.conversation,
+                    "joined same-conversation notebook fixture required"
+                );
+            }
         }
         Ok(())
     }
@@ -273,8 +286,108 @@ pub fn execute(scenario: &Scenario) -> Result<Report> {
     let destination = Destination::default();
     let preference = Personalization::default().snapshot()?;
     let mut reports = vec![];
+    let mut notebook_reports = vec![];
     for step in &scenario.steps {
         match step {
+            Step::Notebook { request, fault } => {
+                let mut request = (**request).clone();
+                if let crate::writer::notebook::command::Request::GenerateNotebookAndExport {
+                    generation,
+                    ..
+                } = &mut request
+                {
+                    if let crate::writer::notebook::command::Request::GenerateNotebook(input) =
+                        generation.as_mut()
+                    {
+                        if input.document_file.is_relative() {
+                            input.document_file =
+                                Path::new(env!("CARGO_MANIFEST_DIR")).join(&input.document_file);
+                        }
+                    }
+                }
+                let paths = ledger.store().paths.clone();
+                drop(ledger);
+                let (store, prepared) =
+                    crate::storage::Store::prepare_notebook_validated(paths, |l| {
+                        crate::writer::notebook::command::prepare(l, &request, &preference)
+                    })?;
+                ledger = crate::conversation::Ledger::new(std::sync::Arc::new(store));
+                let (tx, rx) = watch::channel(false);
+                let mut fired = false;
+                let report = request.run_joined_prepared(
+                    prepared,
+                    &ledger,
+                    &mut model,
+                    &destination,
+                    rx,
+                    &mut |phase, ledger| {
+                        if let Some(fault) = fault {
+                            if !fired && phase == fault.phase.phase() {
+                                fired = true;
+                                match fault.action {
+                                    Action::Cancel => {
+                                        let _ = tx.send(true);
+                                    }
+                                    Action::LoseCommitAcknowledgment => {
+                                        ledger.store().set_fault(Fault::AfterCommit).unwrap()
+                                    }
+                                    Action::DeleteRoot => {
+                                        let expected = ledger
+                                            .expected(
+                                                Namespace::Conversation,
+                                                scenario.conversation,
+                                            )
+                                            .unwrap();
+                                        ledger
+                                            .delete(
+                                                scenario.conversation,
+                                                Uuid::new_v4(),
+                                                expected,
+                                                None,
+                                            )
+                                            .unwrap();
+                                    }
+                                }
+                            }
+                        }
+                    },
+                )?;
+                // Keep the existing common status/transport report shape; retain all
+                // notebook stage/call/provenance facts in the adjacent typed report.
+                reports.push(writer_flow::Report {
+                    status: report.status,
+                    conversation: report.conversation,
+                    outer_operation: report.outer_operation,
+                    correlation: report.correlation,
+                    effect_operation: report.effect_operation,
+                    draft: report.draft,
+                    generation: None,
+                    export: None,
+                    observation: report.observation,
+                    trace: report.trace.clone(),
+                    failure: report.failure.and_then(|failure| {
+                        Some(match failure {
+                            crate::writer::notebook::flow::Failure::InvalidInput => {
+                                writer_flow::Failure::InvalidInput
+                            }
+                            crate::writer::notebook::flow::Failure::MissingCredentials => {
+                                writer_flow::Failure::MissingCredentials
+                            }
+                            crate::writer::notebook::flow::Failure::Unsupported => {
+                                writer_flow::Failure::Unsupported
+                            }
+                            crate::writer::notebook::flow::Failure::NoFreshSelection => {
+                                writer_flow::Failure::NoFreshSelection
+                            }
+                            crate::writer::notebook::flow::Failure::Storage => {
+                                writer_flow::Failure::Storage
+                            }
+                            crate::writer::notebook::flow::Failure::Deadline => return None,
+                        })
+                    }),
+                });
+                notebook_reports.push(report);
+            }
             Step::Restart => {
                 drop(ledger);
                 ledger = owned.open()?;
@@ -362,6 +475,7 @@ pub fn execute(scenario: &Scenario) -> Result<Report> {
         mode: "writer",
         evidence: "scripted supplied-text host flow; no native output",
         reports,
+        notebook_reports,
         reader_history_provenance: "seeded fixture history; no native Reader-to-Writer transition",
         records,
         notes: state.notes.into_values().collect(),
@@ -395,6 +509,41 @@ pub fn save(scenario: &Scenario, root: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn maintained_notebook_scenarios_use_real_store_map_reduce_and_fresh_export_path() {
+        for name in [
+            "writer-notebook-create-replay",
+            "writer-notebook-final-cancel",
+            "writer-notebook-create-refine",
+            "writer-notebook-reconcile",
+            "writer-inline-to-notebook",
+        ] {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("docs/simulator/scenarios")
+                .join(format!("{name}.json"));
+            let scenario: Scenario = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            let report = execute(&scenario).unwrap();
+            assert!(
+                report.assertion_failures.is_empty(),
+                "{name}: {:?}",
+                report.assertion_failures
+            );
+            let generated = report.notebook_reports[0].generation.as_ref().unwrap();
+            assert_eq!(generated.local_invocations, 3);
+            assert_eq!(generated.confirmed_stage_results, 3);
+            if name == "writer-notebook-create-replay" {
+                assert_eq!(
+                    report.notebook_reports[1]
+                        .generation
+                        .as_ref()
+                        .unwrap()
+                        .local_invocations,
+                    0
+                );
+            }
+        }
+    }
     #[test]
     fn maintained_writer_host_scenarios_use_production_flow() {
         for name in [

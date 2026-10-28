@@ -175,16 +175,61 @@ pub enum Report {
     Generation(runner::Report),
     Joined(Box<flow::Report>),
 }
-struct Replay {
+pub(crate) struct Replay {
     plan: NotebookPlan,
     draft: Option<Uuid>,
 }
-enum Prepared {
+pub(crate) enum Prepared {
     Fresh(Box<runner::Input>),
     Replay(Box<Replay>),
 }
 
-fn initial_history(ledger: &Ledger, plan: &NotebookPlan) -> Result<Vec<Turn>> {
+impl Request {
+    pub(crate) fn run_joined_prepared<E: crate::LLMEngine>(
+        &self,
+        prepared: Prepared,
+        ledger: &Ledger,
+        engine: &mut E,
+        destination: &impl crate::note_export::NoteDestination,
+        canceled: tokio::sync::watch::Receiver<bool>,
+        events: &mut crate::writer_flow::Events<'_>,
+    ) -> Result<flow::Report> {
+        let identity = self.joined().context("joined notebook request required")?;
+        Ok(match prepared {
+            Prepared::Fresh(input) => flow::run_with_events(
+                ledger,
+                engine,
+                destination,
+                *input,
+                identity,
+                canceled,
+                events,
+            ),
+            Prepared::Replay(replay) => {
+                let mut report = flow::Report::refused(
+                    self.conversation(),
+                    identity,
+                    replay.plan.id,
+                    replay.plan.archive_id,
+                    flow::Failure::NoFreshSelection,
+                );
+                report.status = crate::writer_flow::Status::Historical;
+                report.failure = None;
+                report.draft = replay.draft;
+                let mut generation = generation_report(self, runner::Status::Historical, None);
+                generation.draft = replay.draft;
+                report.generation = Some(generation);
+                report
+            }
+        })
+    }
+}
+
+fn initial_history(
+    ledger: &Ledger,
+    plan: &NotebookPlan,
+    range: Option<TurnRange>,
+) -> Result<Vec<Turn>> {
     let candidates = ledger.store().snapshot_revisions_matching(
         &[Namespace::Conversation],
         crate::storage::MAX_ITEMS,
@@ -213,8 +258,14 @@ fn initial_history(ledger: &Ledger, plan: &NotebookPlan) -> Result<Vec<Turn>> {
         );
         let envelope: crate::storage::Envelope =
             serde_json::from_slice(&ledger.store().read_object(reference)?)?;
+        if envelope.namespace != Namespace::Conversation {
+            continue;
+        }
         if let Record::Turn(turn) = Ledger::decode(&envelope)? {
-            if turn.id != user && matches!(turn.outcome, Outcome::Completed | Outcome::Interpreted)
+            if turn.id != user
+                && turn.conversation == plan.conversation
+                && range.is_none_or(|r| turn.sequence >= r.start && turn.sequence < r.end_exclusive)
+                && matches!(turn.outcome, Outcome::Completed | Outcome::Interpreted)
             {
                 history.push(turn);
             }
@@ -223,7 +274,7 @@ fn initial_history(ledger: &Ledger, plan: &NotebookPlan) -> Result<Vec<Turn>> {
     history.sort_by_key(|turn| turn.sequence);
     Ok(history)
 }
-fn prepare(
+pub(crate) fn prepare(
     ledger: &Ledger,
     request: &Request,
     preference: &PersonalizationSnapshot,
@@ -270,7 +321,7 @@ fn prepare(
             ),
             _ => unreachable!(),
         }
-        let history = initial_history(ledger, &plan)?;
+        let history = initial_history(ledger, &plan, range)?;
         let history_digest = digest(&serde_json::to_vec(&(
             "writer-notebook-history-v1",
             range.map(|r| [r.start, r.end_exclusive]),

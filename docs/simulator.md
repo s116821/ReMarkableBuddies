@@ -1,5 +1,22 @@
 # Local Reader simulator
 
+Writer host scenarios also execute through `--simulate` with `mode: "writer"`.
+They use the separate strict Writer schema: scripted string `replies`, `steps`,
+`conversation`, `expect` and `output`. `run` steps use existing inline/export
+commands; `notebook` steps use the explicit joined notebook commands documented
+in [Writer drafts](reference/writer-drafts.md). Notebook source fixture paths
+are relative to the component checkout. All are offline even when credentials
+exist. Notebook file admission currently requires supported Linux filesystems.
+
+Maintained `writer-notebook-create-replay`, `writer-notebook-create-refine`,
+`writer-notebook-final-cancel`, `writer-notebook-reconcile` and
+`writer-inline-to-notebook` scenarios exercise actual Store adoption, complete
+ordered map/reduction, restart, fresh final selection and the existing export
+journal. Reports retain common status/transport summaries and detailed typed
+`notebook_reports` with stage counts and provenance. Scripted replies establish
+workflow behavior, not model quality or device qualification. No tablet actions
+or live destination account writes occur.
+
 For fixture selection and evidence gates, use the [local testing checklist](https://github.com/s116821/RemarkableBuddiesDocs/blob/main/.agents/skills/reader-simulator-testing/SKILL.md). It also works without an agent integration.
 
 Run the real Reader workflow on Windows, Linux or macOS without SSH, tablet input

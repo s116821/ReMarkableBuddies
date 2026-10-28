@@ -24,7 +24,7 @@ pub(crate) enum ExportPhase {
     BeforeDestinationPoll,
     BeforeWritePoll,
 }
-#[derive(Default, Serialize)]
+#[derive(Clone, Copy, Default, Serialize)]
 pub struct ExportObservation {
     pub destination_polled: bool,
     pub write_polled: bool,
