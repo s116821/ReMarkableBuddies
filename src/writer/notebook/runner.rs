@@ -409,6 +409,9 @@ mod tests {
         }
     }
     fn input(ledger: &Ledger) -> Input {
+        input_with_text(ledger, "Force = 10 N.".into(), 2)
+    }
+    fn input_with_text(ledger: &Ledger, text: String, max_model_calls: usize) -> Input {
         let conversation = Uuid::new_v4();
         let operation = Uuid::new_v4();
         ledger.create(conversation, Uuid::new_v4(), 0).unwrap();
@@ -420,7 +423,7 @@ mod tests {
             units: vec![SourceUnit {
                 page: Some(1),
                 section: None,
-                text: "Force = 10 N.".into(),
+                text,
             }],
         };
         let bytes = serde_json::to_vec(&document).unwrap();
@@ -448,7 +451,7 @@ mod tests {
                 history: &[],
                 history_range: None,
                 prior: None,
-                max_model_calls: 2,
+                max_model_calls,
             },
         )
         .unwrap();
@@ -489,6 +492,7 @@ mod tests {
         lost_result: Option<usize>,
         bad_output: bool,
         bad_reduce: bool,
+        reduce_at: usize,
         cancel: Option<Arc<AtomicBool>>,
     }
     impl LLMEngine for Model {
@@ -515,7 +519,7 @@ mod tests {
                 "x".repeat(MAX_MAP_REPLY + 1)
             } else if self.bad_reduce && self.calls == 2 {
                 "Bounded but invalid reduction: Force = 10 N.".into()
-            } else if self.calls % 2 == 1 {
+            } else if self.calls < self.reduce_at {
                 "Force = 10 N. (page 1).".into()
             } else {
                 "# Force\n\nForce = 10 N. (page 1).".into()
@@ -530,6 +534,7 @@ mod tests {
             lost_result: None,
             bad_output: false,
             bad_reduce: false,
+            reduce_at: 2,
             cancel: None,
         }
     }
@@ -763,5 +768,34 @@ mod tests {
         assert!(!records.iter().any(
             |r| matches!(r,crate::conversation::Record::Turn(t) if t.outcome==Outcome::Generated)
         ));
+    }
+    #[test]
+    fn exact_maximum_selected_bytes_runs_all_eight_maps_and_one_reduction_through_store() {
+        let f = Fixture::new();
+        let store = Arc::new(Store::prepare_notebook(f.paths()).unwrap());
+        let ledger = Ledger::new(store.clone());
+        let mut text = "Force = 10 N. ".repeat(21_000);
+        text.truncate(256 * 1024);
+        assert_eq!(text.len(), 256 * 1024);
+        let input = input_with_text(&ledger, text, 9);
+        assert_eq!(input.admission.plan.chunks.len(), 8);
+        let conversation = input.admission.plan.conversation;
+        let mut model = model(store);
+        model.reduce_at = 9;
+        let result = run(&ledger, &mut model, input, &mut || false);
+        assert_eq!(result.report.status, Status::Generated);
+        assert_eq!(model.calls, 9);
+        assert_eq!(result.report.local_invocations, 9);
+        assert_eq!(result.report.confirmed_stage_results, 9);
+        assert!(result.finalized.is_some());
+        let records = ledger.inspect(conversation, false).unwrap();
+        assert_eq!(records.iter().filter(|r|matches!(r,crate::conversation::Record::NotebookStage(stage) if stage.outcome==Some(NotebookStageOutcome::Generated))).count(),9);
+        assert_eq!(
+            records
+                .iter()
+                .filter(|r| matches!(r, crate::conversation::Record::Turn(_)))
+                .count(),
+            2
+        );
     }
 }
