@@ -245,16 +245,15 @@ fn notebook_joined_flow_uses_real_mem_http_for_create_reopen_refinement_update_a
             assert_eq!(first.status, writer_flow::Status::Exported);
             drop(ledger);
             ledger = Ledger::new(local.open());
-            let Record::Turn(prior) = Ledger::decode(
-                &ledger
-                    .store()
-                    .value(Namespace::Conversation, first.draft.unwrap())
-                    .unwrap()
-                    .unwrap(),
-            )
-            .unwrap() else {
-                panic!("draft required")
-            };
+            let prior = ledger
+                .inspect(conversation, false)
+                .unwrap()
+                .into_iter()
+                .find_map(|record| match record {
+                    Record::Turn(turn) if Some(turn.id) == first.draft => Some(turn),
+                    _ => None,
+                })
+                .expect("draft required");
             let next = notebook::flow::Identity {
                 outer_operation: Uuid::new_v4(),
                 effect_operation: Uuid::new_v4(),
