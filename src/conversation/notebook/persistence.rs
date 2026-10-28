@@ -750,12 +750,12 @@ mod tests {
         let mut wrong = guarded(&original);
         wrong.payload = serde_json::to_value(Record::NotebookPlan(plan)).unwrap();
         assert!(store.commit(vec![wrong], BTreeMap::new()).is_err());
-        assert_eq!(
+        assert!(
             store
                 .value(Namespace::Conversation, plan_id)
                 .unwrap()
-                .unwrap(),
-            original
+                .unwrap()
+                == original
         );
         let prepared = ledger
             .prepare_notebook_stage(cursor, NotebookStageKind::Map, 0, map)
