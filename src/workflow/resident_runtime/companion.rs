@@ -185,6 +185,7 @@ impl Companion {
         ensure!(self.child.is_none(), "companion already spawned");
         self.hash_current(deadline)?;
         self.group.parent_current()?;
+        before(deadline)?;
         // Bind exec to the retained inode, not a mutable path. Root-owned file
         // changes remain integrity failures; this is not an atomic byte snapshot.
         self.child = Some(
