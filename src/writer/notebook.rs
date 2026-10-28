@@ -6,7 +6,7 @@ use crate::{
     storage::{digest, Uuid},
 };
 use anyhow::{ensure, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 pub const MAX_CANONICAL_BYTES: usize = 8 * 1024 * 1024;
@@ -38,8 +38,18 @@ pub struct SourceIdentity {
 
 /// Original unit ordinal and half-open UTF-8 byte range. Empty supplied units
 /// retain [unit,0,0] in authoritative coverage, never in optional context.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "[usize; 3]")]
 pub struct Segment(usize, usize, usize);
+impl TryFrom<[usize; 3]> for Segment {
+    type Error = &'static str;
+    fn try_from([unit, start, end]: [usize; 3]) -> std::result::Result<Self, Self::Error> {
+        if start > end || end > 4 * 1024 * 1024 {
+            return Err("invalid notebook range");
+        }
+        Ok(Self(unit, start, end))
+    }
+}
 impl Segment {
     pub fn unit(&self) -> usize {
         self.0
@@ -52,7 +62,8 @@ impl Segment {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Chunk {
     ordinal: usize,
     authoritative: Vec<Segment>,

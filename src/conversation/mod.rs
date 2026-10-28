@@ -124,6 +124,9 @@ impl Ledger {
                 }
                 Record::NormalizedText(_) => TEXT_SOURCE_SCHEMA,
                 Record::ArchivedNormalizedSource(_) => notebook::NOTEBOOK_SOURCE_SCHEMA,
+                Record::NotebookPlan(_) | Record::NotebookStage(_) => {
+                    notebook::NOTEBOOK_PROCESSING_SCHEMA
+                }
                 _ => SCHEMA,
             },
             record_id: id,
@@ -154,6 +157,10 @@ impl Ledger {
                 matches!(
                     (&record, envelope.namespace),
                     (Record::ArchivedNormalizedSource(_), Namespace::Source)
+                        | (
+                            Record::NotebookPlan(_) | Record::NotebookStage(_),
+                            Namespace::Conversation
+                        )
                 ),
                 "unsupported notebook record kind"
             );
@@ -163,6 +170,12 @@ impl Ledger {
                 envelope.namespace == Namespace::Source
                     && envelope.domain_schema_version == notebook::NOTEBOOK_SOURCE_SCHEMA,
                 "notebook archive schema mismatch"
+            );
+        } else if matches!(&record, Record::NotebookPlan(_) | Record::NotebookStage(_)) {
+            ensure!(
+                envelope.namespace == Namespace::Conversation
+                    && envelope.domain_schema_version == notebook::NOTEBOOK_PROCESSING_SCHEMA,
+                "notebook processing schema mismatch"
             );
         } else if let Record::Binding(binding) = &record {
             ensure!(
@@ -223,6 +236,14 @@ impl Ledger {
             Record::ArchivedNormalizedSource(source) => {
                 source.validate()?;
                 (source.id, Namespace::Source, source.conversation)
+            }
+            Record::NotebookPlan(plan) => {
+                plan.validate()?;
+                (plan.id, Namespace::Conversation, plan.conversation)
+            }
+            Record::NotebookStage(stage) => {
+                stage.validate()?;
+                (stage.id, Namespace::Conversation, stage.conversation)
             }
             Record::DevelopmentCapture(capture) => {
                 capture.validate()?;
@@ -519,6 +540,8 @@ impl Ledger {
                 Record::Capture(capture) => capture.conversation,
                 Record::NormalizedText(source) => source.conversation,
                 Record::ArchivedNormalizedSource(source) => source.conversation,
+                Record::NotebookPlan(plan) => plan.conversation,
+                Record::NotebookStage(stage) => stage.conversation,
                 Record::LegacyCapture(capture) => capture.conversation,
                 Record::DevelopmentCapture(capture) => capture.conversation,
                 _ => bail!("invalid existing source reference"),

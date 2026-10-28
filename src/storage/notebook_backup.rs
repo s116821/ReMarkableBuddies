@@ -12,6 +12,7 @@ struct NotebookBackup {
     manifests: Vec<Manifest>,
     objects: Vec<ObjectRef>,
     complete_media: bool,
+    config_snapshot: Option<crate::config::Config>,
 }
 impl NotebookBackup {
     fn read(source: &Path) -> Result<Self> {
@@ -27,6 +28,9 @@ impl NotebookBackup {
         Ok(value)
     }
     fn inspect(&self, source: &Path) -> Result<BackupInspection> {
+        if let Some(config) = &self.config_snapshot {
+            config.validate_values()?;
+        }
         ensure!(
             self.manifests.len() <= MAX_ITEMS && self.objects.len() <= MAX_ITEMS,
             "notebook backup inventory bound"
@@ -117,7 +121,7 @@ impl NotebookBackup {
             selected_scopes: 0,
             selection_receipts: 0,
             complete_media: true,
-            configuration_included: false,
+            configuration_included: self.config_snapshot.is_some(),
         })
     }
 }
@@ -127,7 +131,7 @@ impl Store {
         NotebookBackup::read(source)?.inspect(source)
     }
     /// Preserve all reachable original record/media objects and manifest lineage.
-    /// Configuration and credentials are outside this notebook archive contract.
+    /// Retains a validated optional configuration snapshot; credentials are excluded.
     pub fn export_notebook_backup(&self, destination: &Path) -> Result<BackupInspection> {
         files::safe_path(destination)?;
         for owned in [&self.paths.data, &self.paths.cache, &self.paths.credentials] {
@@ -168,6 +172,16 @@ impl Store {
             manifests: inner.index.manifests.values().cloned().collect(),
             objects: inventory.into_values().collect(),
             complete_media: true,
+            config_snapshot: if self.paths.data.join("config.snapshot.json").exists() {
+                let config: crate::config::Config = files::json(
+                    &self.paths.data.join("config.snapshot.json"),
+                    MAX_RECORD as u64,
+                )?;
+                config.validate()?;
+                Some(config)
+            } else {
+                None
+            },
         };
         let bytes = serde_json::to_vec(&backup)?;
         ensure!(
@@ -242,6 +256,9 @@ impl Store {
         let next = Uuid::new_v4();
         notebook_generation::create(&self.paths.data, self.actor_id, next, feedback)?;
         let next_root = self.generation(next);
+        if let Some(config) = &backup.config_snapshot {
+            files::atomic_json(&next_root.join("restored-config.json"), config)?;
+        }
         for (origin, manifests) in [
             (
                 &root,

@@ -303,6 +303,8 @@ pub enum Record {
     Capture(Box<CaptureEvidence>),
     NormalizedText(Box<super::NormalizedTextSource>),
     ArchivedNormalizedSource(Box<super::ArchivedNormalizedSource>),
+    NotebookPlan(Box<super::notebook::NotebookPlan>),
+    NotebookStage(Box<super::notebook::NotebookStage>),
     LegacyCapture(LegacyCapture),
     DevelopmentCapture(Box<super::development::DevelopmentCaptureHistory>),
     OutcomeFact(OutcomeFact),

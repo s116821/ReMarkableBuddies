@@ -191,3 +191,6 @@ impl ArchivedNormalizedSource {
 
 #[cfg(test)]
 mod tests;
+
+mod processing;
+pub use processing::*;

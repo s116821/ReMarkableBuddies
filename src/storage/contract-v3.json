@@ -670,6 +670,58 @@
     },
     "activation": "explicit-unique-custody-in-place",
     "live_sync": "unsupported",
-    "report1_report2": "unsupported-for-generation4; full-accounting-remains-required"
+    "report1_report2": "unsupported-for-generation4; full-accounting-remains-required",
+    "revision_references": "immutable-encoded-envelope-sha256; live expected-head UUIDs are separate",
+    "backup_schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "format",
+        "origin_actor",
+        "origin_generation",
+        "notebook_feature",
+        "feedback_feature",
+        "manifests",
+        "objects",
+        "complete_media",
+        "config_snapshot"
+      ],
+      "properties": {
+        "format": {
+          "const": 4
+        },
+        "origin_actor": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "origin_generation": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "notebook_feature": {
+          "const": 1
+        },
+        "feedback_feature": {
+          "type": "boolean"
+        },
+        "manifests": {
+          "type": "array",
+          "maxItems": 4096
+        },
+        "objects": {
+          "type": "array",
+          "maxItems": 4096
+        },
+        "complete_media": {
+          "const": true
+        },
+        "config_snapshot": {
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      }
+    }
   }
 }
