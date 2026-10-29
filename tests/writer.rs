@@ -1187,15 +1187,82 @@ fn relocated_notebook_scenario_binary_freezes_local_asset_and_retains_a_closed_r
         Store::open(paths.clone()).is_err(),
         "diagnostic relocation must not silently rebind path-bound capabilities"
     );
-    let store = Store::prepare_notebook(paths).unwrap();
-    let ledger = Ledger::new(Arc::new(store));
+    let store = Arc::new(Store::prepare_notebook(paths.clone()).unwrap());
+    let ledger = Ledger::new(store.clone());
     let conversation = serde_json::from_value(scenario["conversation"].clone()).unwrap();
     assert!(ledger
         .inspect(conversation, false)
         .unwrap()
         .iter()
         .any(|r| matches!(r,Record::Turn(t) if t.outcome==Outcome::Generated)));
+    let generated_records = ledger.inspect(conversation, false).unwrap();
+    assert!(generated_records
+        .iter()
+        .any(|r| matches!(r, Record::ArchivedNormalizedSource(_))));
+    assert!(generated_records
+        .iter()
+        .any(|r| matches!(r, Record::NotebookPlan(_))));
+    assert_eq!(
+        generated_records
+            .iter()
+            .filter(|r| matches!(r, Record::NotebookStage(_)))
+            .count(),
+        3
+    );
+    let before_records = serde_json::to_value(generated_records).unwrap();
     drop(ledger);
+    let before_current = std::fs::read(paths.data.join("CURRENT")).unwrap();
+    let generation: String = serde_json::from_slice(&before_current).unwrap();
+    let objects = paths
+        .data
+        .join("generations")
+        .join(&generation)
+        .join("objects");
+    let original_objects: Vec<_> = std::fs::read_dir(&objects)
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            (
+                path.file_name().unwrap().to_owned(),
+                std::fs::read(path).unwrap(),
+            )
+        })
+        .collect();
+    let archive = local.0.join("generated-notebook-backup");
+    let inspection = store.export_notebook_backup(&archive).unwrap();
+    assert_eq!(inspection.format, 4);
+    assert!(inspection.complete_media && inspection.objects > 0 && inspection.manifests > 0);
+    assert_eq!(
+        Store::inspect_notebook_backup(&archive).unwrap(),
+        inspection
+    );
+    assert!(Store::inspect_backup(&archive).is_err());
+    store.restore_notebook_backup(&archive).unwrap();
+    let after_current = std::fs::read(paths.data.join("CURRENT")).unwrap();
+    assert_ne!(after_current, before_current);
+    let next: String = serde_json::from_slice(&after_current).unwrap();
+    for (name, bytes) in original_objects {
+        assert_eq!(std::fs::read(objects.join(&name)).unwrap(), bytes);
+        assert_eq!(
+            std::fs::read(
+                paths
+                    .data
+                    .join("generations")
+                    .join(&next)
+                    .join("objects")
+                    .join(name)
+            )
+            .unwrap(),
+            bytes
+        );
+    }
+    let restored = Ledger::new(store.clone());
+    assert_eq!(
+        serde_json::to_value(restored.inspect(conversation, false).unwrap()).unwrap(),
+        before_records
+    );
+    drop(restored);
+    drop(store);
     let repeat = execute();
     assert!(
         !repeat.status.success(),
