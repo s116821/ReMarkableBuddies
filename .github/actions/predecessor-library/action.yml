@@ -28,7 +28,7 @@ runs:
         git rev-parse HEAD > qualification-evidence/current-source.txt
         git rev-parse 'HEAD^{tree}' > qualification-evidence/current-tree.txt
         python -B scripts/predecessor/capture_producer.py --workspace "$GITHUB_WORKSPACE" --cargo-messages "$CARGO_MESSAGES" --source-sha "$SOURCE_SHA" --source-head "$SOURCE_HEAD" --output qualification-evidence/current-producer.json
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
         ref: 68e42968b4c58b6f8ed1102078d78b40fad33ffc
         path: .predecessor-qualification-source
@@ -69,7 +69,7 @@ runs:
         OLD_SHA="$(python -c 'import json;print(json.load(open("qualification-evidence/build-receipt.json"))["old_driver_sha256"])')"
         CURRENT_SHA="$(python -c 'import json;print(json.load(open("qualification-evidence/build-receipt.json"))["current_binary_sha256"])')"
         python -B scripts/predecessor/old_library_outer.py --old-driver "$GITHUB_WORKSPACE/target/debug/examples/rem23_old_storage_lease" --old-driver-sha256 "$OLD_SHA" --current-binary "$GITHUB_WORKSPACE/target/debug/reader-buddy" --current-binary-sha256 "$CURRENT_SHA" --build-receipt "$GITHUB_WORKSPACE/qualification-evidence/build-receipt.json" --output "$GITHUB_WORKSPACE/qualification-evidence/runtime"
-    - uses: actions/upload-artifact@v4
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       if: always()
       with:
         name: predecessor-library-qualification-${{ github.run_id }}

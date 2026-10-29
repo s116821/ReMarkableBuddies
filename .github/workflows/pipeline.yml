@@ -23,7 +23,7 @@ jobs:
       sha: ${{ steps.freeze.outputs.sha }}
       artifact_id: ${{ steps.artifacts.outputs.artifact-id }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.source_sha }}
           fetch-depth: 0
@@ -67,14 +67,14 @@ jobs:
           cd "$RUNNER_TEMP/resident-observer"
           sha256sum resident_bootstrap_observer resident_bootstrap_control > artifact.sha256
           printf '%s\n' "$READER_BUDDY_CANDIDATE_SHA" > source.sha
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ !inputs.release }}
         with:
           name: resident-observer-${{ inputs.source_sha }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/resident-observer/*
           if-no-files-found: error
           retention-days: 14
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: artifacts
         with:
           name: candidate-${{ inputs.source_sha }}-${{ github.run_attempt }}
@@ -92,14 +92,14 @@ jobs:
       TAG: ${{ needs.build.outputs.tag }}
       SHA: ${{ needs.build.outputs.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.source_sha }}
           persist-credentials: false
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.build.outputs.artifact_id }}
           path: ${{ runner.temp }}/packages
@@ -123,7 +123,7 @@ jobs:
       TAG: ${{ needs.build.outputs.tag }}
       SHA: ${{ needs.build.outputs.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.source_sha }}
           fetch-depth: 0
@@ -153,7 +153,7 @@ jobs:
         env:
           RELEASE_OBSERVATION: ${{ steps.merged.outputs.data }}
         run: python cicd/release/admission.py merge --sha "$SHA"
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.build.outputs.artifact_id }}
           path: ${{ runner.temp }}/packages
