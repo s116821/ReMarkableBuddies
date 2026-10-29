@@ -129,6 +129,81 @@ fn interrupted_adoption_refuses_ordinary_open_and_explicitly_resumes() {
 }
 
 #[test]
+#[cfg(unix)]
+fn atomic_format_failure_uses_observed_format_and_never_returns_effect_custody() {
+    for fault in [
+        files::AtomicFailure::BeforeRename,
+        files::AtomicFailure::RenameAcknowledgment,
+        files::AtomicFailure::ParentSync,
+    ] {
+        let f = Fixture::new();
+        let store = Store::open(f.paths()).unwrap();
+        let record = retained(&store, b"immutable history through lost acknowledgment");
+        store
+            .commit(
+                vec![record],
+                BTreeMap::from([(
+                    digest(b"immutable history through lost acknowledgment"),
+                    b"immutable history through lost acknowledgment".to_vec(),
+                )]),
+            )
+            .unwrap();
+        drop(store);
+        let identity = fs::read(f.paths().data.join("identity.json")).unwrap();
+        let current = fs::read(f.paths().data.join("CURRENT")).unwrap();
+        let original = ["objects", "commits"]
+            .into_iter()
+            .flat_map(|directory| {
+                fs::read_dir(f.root().join(directory))
+                    .unwrap()
+                    .map(|entry| {
+                        let path = entry.unwrap().path();
+                        let bytes = fs::read(&path).unwrap();
+                        (path, bytes)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        files::fail_next_atomic(f.root().join("format.json"), fault);
+        let admission = Store::prepare_notebook_validated(f.paths(), |_| Ok(()));
+        assert!(
+            admission.is_err(),
+            "failed acknowledgment must not return Store/effect custody"
+        );
+        assert_eq!(
+            files::json::<u32>(&f.root().join("format.json"), 64).unwrap(),
+            if fault == files::AtomicFailure::BeforeRename {
+                1
+            } else {
+                VERSION
+            }
+        );
+        assert!(
+            Store::open(f.paths()).is_err(),
+            "ordinary reopen must not finish incomplete adoption"
+        );
+        assert_eq!(
+            fs::read(f.paths().data.join("identity.json")).unwrap(),
+            identity
+        );
+        assert_eq!(fs::read(f.paths().data.join("CURRENT")).unwrap(), current);
+        for (path, bytes) in &original {
+            assert_eq!(&fs::read(path).unwrap(), bytes);
+        }
+        drop(Store::prepare_notebook(f.paths()).unwrap());
+        drop(Store::open(f.paths()).unwrap());
+        assert_eq!(
+            fs::read(f.paths().data.join("identity.json")).unwrap(),
+            identity
+        );
+        assert_eq!(fs::read(f.paths().data.join("CURRENT")).unwrap(), current);
+        for (path, bytes) in original {
+            assert_eq!(fs::read(path).unwrap(), bytes);
+        }
+    }
+}
+
+#[test]
 fn complete_custody_is_required_and_corrupt_media_is_not_discarded() {
     let f = Fixture::new();
     let store = Store::open(f.paths()).unwrap();
