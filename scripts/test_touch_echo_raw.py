@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 
 root = Path(__file__).resolve().parents[1]
-tree = ast.parse((root / "tools/test_touch_echo.py").read_text())
+tree = ast.parse((root / "scripts/test_touch_echo.py").read_text())
 harness = next(n.value for n in ast.walk(tree) if isinstance(n, ast.Constant)
                and isinstance(n.value, str) and 'extern crate self as anyhow;' in n.value)
 touch = (root / "src/device/touch.rs").read_text()

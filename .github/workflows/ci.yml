@@ -91,7 +91,7 @@ jobs:
         env:
           BEFORE: ${{ github.event.before }}
           SOURCE_SHA: ${{ github.sha }}
-        run: python release/admission.py range --before "$BEFORE" --sha "$SOURCE_SHA"
+        run: python cicd/release/admission.py range --before "$BEFORE" --sha "$SOURCE_SHA"
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d
         id: paths
         with:
@@ -122,16 +122,16 @@ jobs:
           cat "$RUNNER_TEMP/current-cargo-test.jsonl"
           exit "$status"
         if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
-      - run: python -m unittest discover -s release -v
+      - run: python -m unittest discover -s cicd/release -v
         if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
-      - run: python -m unittest discover -s tools/systemd_fixture -p test_bootstrap_fixture.py -v
+      - run: python -m unittest discover -s scripts/systemd_fixture -p test_bootstrap_fixture.py -v
         if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
-      - run: npm ci --prefix release/fixtures --ignore-scripts --no-audit --no-fund
+      - run: npm ci --prefix cicd/release/fixtures --ignore-scripts --no-audit --no-fund
         if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
-      - run: npm audit --prefix release/fixtures
+      - run: npm audit --prefix cicd/release/fixtures
         if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
       - name: Verify CI stage and artifact gates
-        run: node --test release/fixtures/workflow.test.mjs
+        run: node --test cicd/release/fixtures/workflow.test.mjs
         if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
       - name: Qualify predecessor library inside the existing Checks budget
         uses: ./.github/actions/predecessor-library

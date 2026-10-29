@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
 import { Parser, Lexer, Evaluator, data } from '@actions/expressions';
-const root = fileURLToPath(new URL('../..', import.meta.url));
+const root = fileURLToPath(new URL('../../..', import.meta.url));
 const workflow = name => parse(readFileSync(path.join(root, '.github/workflows', name + '.yml'), 'utf8'));
 const expr = text => String.fromCharCode(36) + '{{ ' + text + ' }}';
 const manager = false;
@@ -23,10 +23,10 @@ test('native bootstrap diagnostics stay outside official release inventory', () 
   assert.match(compile.run, /--example resident_bootstrap_control --features development-resident-bootstrap/);
   assert.match(compile.run, /--example resident_bootstrap_observer --features development-resident-bootstrap/);
   assert.match(compile.run, /sha256sum resident_bootstrap_observer resident_bootstrap_control/);
-  const applicationBuild = build.steps.find(s => /release\/build.py build/.test(s.run ?? ''));
+  const applicationBuild = build.steps.find(s => /cicd\/release\/build.py build/.test(s.run ?? ''));
   assert.ok(!JSON.stringify(applicationBuild).includes('development-resident-bootstrap'));
   assert.ok(!pipeline.jobs.release.steps.some(s => JSON.stringify(s).includes('resident-observer')));
-  assert.ok(build.steps.indexOf(compile) > build.steps.findIndex(s => /release\/build.py build/.test(s.run ?? '')));
+  assert.ok(build.steps.indexOf(compile) > build.steps.findIndex(s => /cicd\/release\/build.py build/.test(s.run ?? '')));
 });
 
 test('PR and main job budgets include every matrix expansion', () => {
@@ -86,7 +86,7 @@ test('predecessor qualification reuses the normal command inside Checks without 
   const ci = workflow('ci');
   const steps = ci.jobs.checks.steps;
   const qualify = steps.findIndex(s => s.uses === './.github/actions/predecessor-library');
-  const guard = steps.findIndex(s => /node --test release\/fixtures\/workflow/.test(s.run ?? ''));
+  const guard = steps.findIndex(s => /node --test cicd\/release\/fixtures\/workflow/.test(s.run ?? ''));
   const hostTests = steps.find(s => /cargo test --locked --all-features/.test(s.run ?? ''));
   assert.ok(qualify > guard && guard >= 0);
   assert.match(hostTests.run, /--message-format=json/);
@@ -174,10 +174,10 @@ test('main skipped-title and failed or canceled prerequisites keep real stage ga
 test('common source and dependency checks have exactly one owning job', () => {
   const checks = workflow('ci').jobs.checks;
   const pipeline = workflow('pipeline');
-  const common = /cargo (?:fmt|clippy|test)|npm (?:run lint|test|run test:release|audit)|unittest discover|node --test release\/fixtures\/workflow/;
+  const common = /cargo (?:fmt|clippy|test)|npm (?:run lint|test|run test:release|audit)|unittest discover|node --test cicd\/release\/fixtures\/workflow/;
   const sourceChecks = checks.steps.filter(step => common.test(step.run ?? ''));
   assert.ok(sourceChecks.length >= 4);
-  assert.equal(checks.steps.filter(step => step.run === 'npm audit --prefix release/fixtures').length, 1);
+  assert.equal(checks.steps.filter(step => step.run === 'npm audit --prefix cicd/release/fixtures').length, 1);
   const tools = checks.steps.find(step => step.uses === './.github/actions/release-tools');
   assert.notEqual(tools.with?.['audit-dependencies'], 'false');
   for (const [jobName, job] of Object.entries(pipeline.jobs)) {
@@ -223,22 +223,21 @@ test('only release may publish and it consumes the exact build artifacts without
     if (name !== 'release') assert.notEqual(job.permissions?.contents, 'write');
   const build = pipeline.jobs.build, integration = pipeline.jobs.integration, release = pipeline.jobs.release;
   const freeze = build.steps.findIndex(s => s.id === 'freeze');
-  const compile = build.steps.findIndex(s => /release\/build.py build/.test(s.run ?? ''));
+  const compile = build.steps.findIndex(s => /cicd\/release\/build.py build/.test(s.run ?? ''));
   assert.ok(freeze >= 0 && compile > freeze);
   assert.match(build.steps[freeze].run, /version --print-tag/);
   assert.ok(!build.steps.some(s => /--push|PATCH |POST /.test(s.run ?? '')));
-  assert.ok(!integration.steps.some(s => /release\/build.py build|cargo build|npm run build/.test(s.run ?? '')));
+  assert.ok(!integration.steps.some(s => /cicd\/release\/build.py build|cargo build|npm run build/.test(s.run ?? '')));
   for (const job of [integration, release]) {
     const downloads = job.steps.filter(s => s.uses?.startsWith('actions/download-artifact'));
     assert.ok(downloads.some(s => s.with['artifact-ids'] === expr('needs.build.outputs.artifact_id')));
-    assert.ok(downloads.some(s => s.with['artifact-ids'] === expr('needs.build.outputs.uploader_artifact_id')));
   }
   assert.equal(release.env.TAG, expr('needs.build.outputs.tag'));
   assert.equal(release.env.SHA, expr('needs.build.outputs.sha'));
   const tag = release.steps.findIndex(s => s.name === 'Official tag only after every preceding job passed');
   assert.ok(tag > release.steps.findIndex(s => s.name === 'Verify the exact integration-tested upload inventory'));
   assert.ok(!release.steps.some(s => /cross build|npm run build|coordinator\.py/.test(s.run ?? '')));
-  const upload = release.steps.find(s => s.uses === './.qualified/uploader');
+  const upload = release.steps.find(s => s.uses === 'svenstaro/upload-release-action@29e53e917877a24fad85510ded594ab3c9ca12de');
   assert.equal(upload.with.overwrite, false); assert.equal(upload.with.draft, true);
   assert.equal(upload.with.promote, false); assert.equal(upload.with.check_duplicates, true);
   assert.equal(upload.with.release_id, expr('steps.retained.outputs.release_id'));

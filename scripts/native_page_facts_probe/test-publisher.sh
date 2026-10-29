@@ -3,9 +3,9 @@ set -eu
 if [ -n "${QT_PROBE_SDK_ENV:-}" ]; then . "$QT_PROBE_SDK_ENV"; fi
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-${CXX:-c++} -std=c++17 -Wall -Wextra -Werror -fPIC -fsyntax-only tools/native_page_facts_probe/facts-request-publisher.cpp $(pkg-config --cflags Qt6Core)
+${CXX:-c++} -std=c++17 -Wall -Wextra -Werror -fPIC -fsyntax-only scripts/native_page_facts_probe/facts-request-publisher.cpp $(pkg-config --cflags Qt6Core)
 ${CXX:-c++} -std=c++17 -Wall -Wextra -Werror -O2 -fPIC \
- tools/native_page_facts_probe/publisher-fixture.cpp \
+ scripts/native_page_facts_probe/publisher-fixture.cpp \
  $(pkg-config --cflags --libs Qt6Core) -o "$work/fixture"
 for case in good duplicate malformed late wrong-executable unmapped closed restoring callback request-existing temporary-existing owner-mode waiting-mode directory-mode waiting-symlink generation wrong-payload payload-fifo locked before-boundary budget-mismatch budget-exceed profile; do
  root="$work/rmb-qt-probe-0123456789abcdef0123456789abcdef"

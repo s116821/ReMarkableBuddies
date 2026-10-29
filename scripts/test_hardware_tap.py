@@ -4,7 +4,7 @@ import re
 import subprocess
 import tempfile
 
-source = (Path(__file__).resolve().parents[1] / "examples/hardware_probe.rs").read_text()
+source = (Path(__file__).resolve().parents[1] / "docs/examples/hardware_probe.rs").read_text()
 branch = re.search(r'Some\("tap"\).*?=> \{(.*?)\n        \}\n        Some\("strokes"\)', source, re.S).group(1)
 tail = source[source.index("    sleep(Duration::from_secs(2));\n    let mut screenshot = Screenshot::new()?;") : source.index('\n}\n\n#[cfg(not(target_os = "linux"))]')]
 harness = r'''

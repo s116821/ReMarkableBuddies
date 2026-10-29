@@ -37,7 +37,7 @@ reported version does not establish identical vendor behavior.
 From the repository root:
 
 ```sh
-docker build -t rem25-systemd-25521:host-fixture tools/systemd_fixture
+docker build -t rem25-systemd-25521:host-fixture scripts/systemd_fixture
 docker run --rm --network none --cgroupns private rem25-systemd-25521:host-fixture python3 /opt/buddy/parser_fixture.py
 ```
 
@@ -137,7 +137,7 @@ options and target as an argument array, without a remote command or password.
 Use the actual build-source SHA from the diagnostic artifact's `source.sha`.
 
 ```sh
-python tools/systemd_fixture/bootstrap_fixture.py \
+python scripts/systemd_fixture/bootstrap_fixture.py \
   --ssh-prefix-file /local/ssh-prefix.json \
   --binary /local/resident_bootstrap_control \
   --source-sha EXACT_40_CHARACTER_BUILD_SHA \
@@ -178,5 +178,5 @@ remove an assumed or computed parent directory.
 Offline verifier tests run without SSH or PID1:
 
 ```sh
-python -m unittest discover -s tools/systemd_fixture -p test_bootstrap_fixture.py -v
+python -m unittest discover -s scripts/systemd_fixture -p test_bootstrap_fixture.py -v
 ```

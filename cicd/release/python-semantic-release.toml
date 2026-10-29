@@ -20,7 +20,7 @@ scope_prefix = ""
 path_filters = [
   ".",
   "!README.md",
-  "!release/README.md",
+  "!cicd/release/README.md",
   "!AGENTS.md",
   "!CHANGELOG.md",
   "!LICENSE",
