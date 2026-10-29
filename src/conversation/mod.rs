@@ -6,10 +6,12 @@ pub(crate) mod cleanup;
 pub mod development;
 mod intent;
 mod legacy;
+pub mod notebook;
 pub use development::{DevelopmentCaptureHistory, PreparedDevelopmentCapture};
 pub mod evidence;
 mod export;
 pub mod feedback;
+mod historical_association;
 mod pending;
 #[cfg(test)]
 mod reader_dispatch;
@@ -34,7 +36,12 @@ pub use binding_projection::{
     SelectedBindingCandidate, SelectedBindingInspection, SelectedBindingUnresolved,
 };
 pub use export::*;
+pub use historical_association::{
+    HistoricalPageAssociation, HistoricalPageAssociationInspection,
+    HistoricalPageAssociationUnresolved,
+};
 pub use intent::*;
+pub use notebook::ArchivedNormalizedSource;
 pub use pending::{PendingIntentPublication, PendingIntentRequest, SourceAdmission};
 #[cfg(test)]
 pub(crate) use pending::{ReaderContext, ReaderPreparation};
@@ -112,7 +119,14 @@ impl Ledger {
                 Record::Receipt(receipt) if receipt.admitted_intent.is_some() => INTENT_SCHEMA,
                 Record::OutcomeFact(fact) if fact.settlement.is_some() => INTENT_SCHEMA,
                 Record::Export(export) if export.attempt.is_some() => EXPORT_SCHEMA,
+                Record::Binding(binding) if !binding.receipt.acquisition.is_inserted() => {
+                    EXISTING_BINDING_SCHEMA
+                }
                 Record::NormalizedText(_) => TEXT_SOURCE_SCHEMA,
+                Record::ArchivedNormalizedSource(_) => notebook::NOTEBOOK_SOURCE_SCHEMA,
+                Record::NotebookPlan(_) | Record::NotebookStage(_) => {
+                    notebook::NOTEBOOK_PROCESSING_SCHEMA
+                }
                 _ => SCHEMA,
             },
             record_id: id,
@@ -127,14 +141,54 @@ impl Ledger {
         envelope.validate()?;
         Ok(envelope)
     }
-    fn decode(envelope: &Envelope) -> Result<Record> {
+    pub(crate) fn decode(envelope: &Envelope) -> Result<Record> {
+        envelope.validate()?;
         ensure!(
-            matches!(envelope.domain_schema_version, SCHEMA | INTENT_SCHEMA),
+            matches!(
+                envelope.domain_schema_version,
+                SCHEMA | INTENT_SCHEMA | notebook::NOTEBOOK_SOURCE_SCHEMA
+            ),
             "unsupported conversation schema"
         );
         ensure!(envelope.kind == Kind::Value, "deleted conversation record");
         let record: Record = serde_json::from_value(envelope.payload.clone())?;
-        if matches!(&record, Record::NormalizedText(_)) {
+        if envelope.domain_schema_version == notebook::NOTEBOOK_SOURCE_SCHEMA {
+            ensure!(
+                matches!(
+                    (&record, envelope.namespace),
+                    (Record::ArchivedNormalizedSource(_), Namespace::Source)
+                        | (
+                            Record::NotebookPlan(_) | Record::NotebookStage(_),
+                            Namespace::Conversation
+                        )
+                ),
+                "unsupported notebook record kind"
+            );
+        }
+        if matches!(&record, Record::ArchivedNormalizedSource(_)) {
+            ensure!(
+                envelope.namespace == Namespace::Source
+                    && envelope.domain_schema_version == notebook::NOTEBOOK_SOURCE_SCHEMA,
+                "notebook archive schema mismatch"
+            );
+        } else if matches!(&record, Record::NotebookPlan(_) | Record::NotebookStage(_)) {
+            ensure!(
+                envelope.namespace == Namespace::Conversation
+                    && envelope.domain_schema_version == notebook::NOTEBOOK_PROCESSING_SCHEMA,
+                "notebook processing schema mismatch"
+            );
+        } else if let Record::Binding(binding) = &record {
+            ensure!(
+                (envelope.domain_schema_version == EXISTING_BINDING_SCHEMA)
+                    == !binding.receipt.acquisition.is_inserted(),
+                "binding schema/acquisition mismatch"
+            );
+            if envelope.domain_schema_version == EXISTING_BINDING_SCHEMA {
+                // Selected projection also decodes here. New shapes cannot bypass
+                // full receipt semantics by avoiding the explicit binding query.
+                Self::validate_binding_receipt(&binding.receipt)?;
+            }
+        } else if matches!(&record, Record::NormalizedText(_)) {
             ensure!(
                 envelope.namespace == Namespace::Source
                     && envelope.domain_schema_version == TEXT_SOURCE_SCHEMA,
@@ -178,6 +232,18 @@ impl Ledger {
             Record::NormalizedText(source) => {
                 source.validate()?;
                 (source.id, Namespace::Source, source.conversation)
+            }
+            Record::ArchivedNormalizedSource(source) => {
+                source.validate()?;
+                (source.id, Namespace::Source, source.conversation)
+            }
+            Record::NotebookPlan(plan) => {
+                plan.validate()?;
+                (plan.id, Namespace::Conversation, plan.conversation)
+            }
+            Record::NotebookStage(stage) => {
+                stage.validate()?;
+                (stage.id, Namespace::Conversation, stage.conversation)
             }
             Record::DevelopmentCapture(capture) => {
                 capture.validate()?;
@@ -241,6 +307,7 @@ impl Ledger {
             "domain envelope identity mismatch"
         );
         let mut media = match &record {
+            Record::ArchivedNormalizedSource(source) => vec![source.media.clone()],
             Record::Source(source) => vec![source.image.clone()],
             Record::Capture(capture) => capture.facts.media()?,
             Record::LegacyCapture(capture) => capture.media()?,
@@ -472,6 +539,7 @@ impl Ledger {
                 Record::Source(source) => source.conversation,
                 Record::Capture(capture) => capture.conversation,
                 Record::NormalizedText(source) => source.conversation,
+                Record::ArchivedNormalizedSource(source) => source.conversation,
                 Record::LegacyCapture(capture) => capture.conversation,
                 Record::DevelopmentCapture(capture) => capture.conversation,
                 _ => bail!("invalid existing source reference"),
@@ -1124,6 +1192,10 @@ impl Ledger {
     /// Historical receipt semantics shared by writes and selected inspection.
     /// Successful validation never reconstructs native qualification.
     fn validate_binding_receipt(receipt: &BindingReceipt) -> Result<()> {
+        ensure!(
+            !receipt.operation.is_nil() && !receipt.conversation.is_nil(),
+            "nil binding identity"
+        );
         Self::validate_observation(&receipt.source)?;
         ensure!(
             receipt.intended_target == Some(receipt.observed_page),
@@ -1151,7 +1223,6 @@ impl Ledger {
             !unique.is_empty()
                 && unique.len() == receipt.expected_order.len()
                 && unique.contains(&receipt.source.page)
-                && !unique.contains(&receipt.observed_page)
                 && !unique.contains(&Uuid::nil()),
             "ambiguous source order"
         );
@@ -1160,10 +1231,30 @@ impl Ledger {
             .iter()
             .position(|id| *id == receipt.source.page)
             .context("source outside order")?;
-        permitted.insert(position + 1, receipt.observed_page);
+        match receipt.acquisition {
+            BindingAcquisition::Inserted => {
+                ensure!(
+                    !unique.contains(&receipt.observed_page),
+                    "insertion target already exists"
+                );
+                permitted.insert(position + 1, receipt.observed_page);
+            }
+            BindingAcquisition::ExistingCurrent => {
+                ensure!(
+                    receipt.observed_page == receipt.source.page,
+                    "existing current target mismatch"
+                );
+            }
+            BindingAcquisition::ExistingAdjacent => {
+                ensure!(
+                    permitted.get(position + 1) == Some(&receipt.observed_page),
+                    "existing adjacent target mismatch"
+                );
+            }
+        }
         ensure!(
             permitted == receipt.observed_order,
-            "insertion receipt order mismatch"
+            "acquisition receipt order mismatch"
         );
         Ok(())
     }
@@ -1399,7 +1490,8 @@ impl Ledger {
         records.push(exported);
         let post = selection
             .as_ref()
-            .map(|_| WriterExportGuard::published(&root, &records));
+            .map(|_| WriterExportGuard::published(&root, &records, self.store.clone()))
+            .transpose()?;
         let (result, fresh) =
             self.publish_observed(operation, fingerprint, root, records, binding)?;
         Ok((result, fresh, if fresh { post } else { None }))
@@ -1443,6 +1535,7 @@ impl Ledger {
         self.validate_evidence_records(&records)?;
         Ok(records)
     }
+    /// Validate a single already-cloned snapshot without another Store read.
     fn inspect_snapshot(
         conversation: Uuid,
         retained: bool,
@@ -1612,6 +1705,7 @@ impl Ledger {
         let mut sources = Vec::new();
         let mut captures = Vec::new();
         let mut normalized_text = Vec::new();
+        let mut archived_sources = Vec::new();
         let mut legacy_captures = Vec::new();
         let mut development_captures = Vec::new();
         for record in records {
@@ -1622,6 +1716,9 @@ impl Ledger {
                 }
                 Record::NormalizedText(source) if source_ids.contains(&source.id) => {
                     normalized_text.push(*source)
+                }
+                Record::ArchivedNormalizedSource(source) if source_ids.contains(&source.id) => {
+                    archived_sources.push(*source)
                 }
                 Record::DevelopmentCapture(capture) if source_ids.contains(&capture.id) => {
                     development_captures.push(*capture)
@@ -1638,6 +1735,7 @@ impl Ledger {
                 + legacy_captures.len()
                 + development_captures.len()
                 + normalized_text.len()
+                + archived_sources.len()
                 == source_ids.len(),
             "source reference absent"
         );
@@ -1657,6 +1755,11 @@ impl Ledger {
                 missing_media.push(media.clone());
             }
         }
+        for source in &archived_sources {
+            if !media_available(&source.media) && !missing_media.contains(&source.media) {
+                missing_media.push(source.media.clone());
+            }
+        }
         for source in &sources {
             for media in std::iter::once(&source.image).chain(source.parent.iter()) {
                 if !media_available(media) && !missing_media.contains(media) {
@@ -1669,6 +1772,7 @@ impl Ledger {
             sources,
             captures,
             normalized_text,
+            archived_sources,
             legacy_captures,
             development_captures,
             missing_media,
@@ -1687,6 +1791,7 @@ impl Ledger {
         let mut media = BTreeMap::new();
         for envelope in revisions {
             let references = match Self::decode(&envelope)? {
+                Record::ArchivedNormalizedSource(source) => vec![source.media],
                 Record::Source(source) => {
                     std::iter::once(source.image).chain(source.parent).collect()
                 }

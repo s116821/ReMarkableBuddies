@@ -1924,6 +1924,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "memoffset"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
+dependencies = [
+ "autocfg",
+]
+
+[[package]]
 name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2036,6 +2045,7 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
+ "memoffset",
 ]
 
 [[package]]
@@ -2772,9 +2782,10 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 [[package]]
 name = "remarkable-open-sdk"
 version = "0.0.0"
-source = "git+https://github.com/s116821/ReMarkableOpenSDK?rev=32b86e4fef04844cbf2ec31129bf029cc1d9899a#32b86e4fef04844cbf2ec31129bf029cc1d9899a"
+source = "git+https://github.com/s116821/ReMarkableOpenSDK?rev=80b29ebec3a46b6976e5288d2e8d65fbeccca816#80b29ebec3a46b6976e5288d2e8d65fbeccca816"
 dependencies = [
  "image",
+ "nix 0.31.3",
  "serde",
  "serde_json",
  "sha2 0.10.9",

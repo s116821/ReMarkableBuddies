@@ -13,6 +13,9 @@ use std::time::Duration;
 #[command(author, version = env!("READER_BUDDY_VERSION"))]
 #[command(about = "ReMarkable Reader Buddy - AI-powered reading assistant for reMarkable tablets")]
 pub struct Args {
+    /// Fixed installed stock recovery; never starts ordinary application services
+    #[arg(long, exclusive = true)]
+    resident_stock_recovery: bool,
     /// Explicit offline confirmed handwriting records; strict bounded JSON stdin
     #[arg(long, exclusive = true)]
     handwriting: bool,
@@ -161,6 +164,9 @@ fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_lo
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    if args.resident_stock_recovery {
+        return stock_recovery();
+    }
     if args.handwriting {
         let report = remarkable_reader_buddy::handwriting::command::run(
             std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
@@ -455,6 +461,14 @@ fn main() -> Result<()> {
         report.write_to(&mut std::io::stdout().lock())?;
         return Ok(());
     }
+    #[cfg(target_os = "linux")]
+    remarkable_reader_buddy::workflow::resident_supervisor::recovery::refuse_occupied_activation()?;
+    #[cfg(target_os = "linux")]
+    let service_health = if args.simulate.is_none() {
+        remarkable_reader_buddy::workflow::resident_supervisor::health::ServiceHealth::from_environment()?
+    } else {
+        None
+    };
     dotenv().ok();
     if let Some(path) = args.simulate {
         logging(args.log_level, std::env::var("RUST_LOG").ok().as_deref()).init();
@@ -511,18 +525,50 @@ fn main() -> Result<()> {
     } else {
         None
     };
+    let personalization = config.personalization_snapshot()?;
     let workflow = Workflow::new(false, effective.trigger_corner, effective.debug_dump)?;
     sleep(Duration::from_millis(1000));
+    let _sync_worker = Worker::google(store.clone(), config.sync)?;
+    #[cfg(target_os = "linux")]
+    let workflow = {
+        let mut workflow = workflow;
+        if let Some(health) = service_health {
+            workflow.enable_service_health(health)?;
+        }
+        workflow
+    };
     let mut orchestrator = Orchestrator::new(
         workflow,
         llm,
         remarkable_reader_buddy::conversation::Ledger::new(store.clone()),
     );
-    orchestrator.set_personalization(config.personalization_snapshot()?);
+    orchestrator.set_personalization(personalization);
     orchestrator.set_subject_memory(reader_memory);
-    let _sync_worker = Worker::google(store.clone(), config.sync)?;
     info!("Initialization complete; starting main loop");
     orchestrator.run_loop()
+}
+
+fn stock_recovery() -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        use remarkable_reader_buddy::workflow::resident_supervisor::recovery::{
+            self, RecoveryOutcome,
+        };
+        match recovery::run_installed()? {
+            RecoveryOutcome::NoRecordedActivation => {
+                println!("no-recorded-activation; stock was not inspected or changed");
+            }
+            RecoveryOutcome::Restored(stock) => {
+                println!(
+                    "stock-restored pid={} invocation={} start_requested={}",
+                    stock.process.pid, stock.invocation, stock.start_requested
+                );
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    anyhow::bail!("installed stock recovery is supported only on Linux")
 }
 
 #[cfg(test)]
@@ -534,6 +580,7 @@ mod tests {
     fn handwriting_is_exclusive_before_any_runtime() {
         assert!(Args::try_parse_from(["reader-buddy", "--handwriting"]).is_ok());
         for extra in [
+            vec!["--resident-stock-recovery"],
             vec!["--writer-note"],
             vec!["--model", "unused"],
             vec!["--inspect-owned-data"],
@@ -543,6 +590,57 @@ mod tests {
             argv.extend(extra);
             assert!(Args::try_parse_from(argv).is_err());
         }
+    }
+
+    #[test]
+    fn stock_recovery_is_exclusive_before_all_other_dispatch() {
+        assert!(
+            Args::try_parse_from(["reader-buddy", "--resident-stock-recovery"])
+                .unwrap()
+                .resident_stock_recovery
+        );
+        for extra in [
+            vec!["--handwriting"],
+            vec!["--writer-note"],
+            vec!["--simulate", "scenario.json"],
+            vec!["--inspect-owned-data"],
+            vec!["--configuration-operation", "inspect"],
+            vec!["--model-credential-operation", "inspect"],
+            vec!["--api-key", "fixture-key"],
+            vec!["--model", "fixture-model"],
+            vec!["--base-url", "http://127.0.0.1:1"],
+            vec!["--trigger-corner", "UR"],
+            vec!["--debug-dump"],
+            vec!["--log-level", "trace"],
+            vec!["--export-note"],
+        ] {
+            assert!(Args::try_parse_from(
+                ["reader-buddy"].into_iter().chain(extra.iter().copied())
+            )
+            .is_ok());
+            let error = Args::try_parse_from(
+                ["reader-buddy", "--resident-stock-recovery"]
+                    .into_iter()
+                    .chain(extra.iter().copied()),
+            )
+            .err()
+            .expect("exclusive recovery");
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+        }
+        assert!(Args::try_parse_from([
+            "reader-buddy",
+            "--resident-stock-recovery",
+            "--unit",
+            "other.service"
+        ])
+        .is_err());
+        assert!(Args::try_parse_from([
+            "reader-buddy",
+            "--resident-stock-recovery",
+            "--lease-directory",
+            "/tmp/other"
+        ])
+        .is_err());
     }
 
     #[test]
@@ -714,6 +812,7 @@ mod tests {
                 "personalization-operation",
                 "research-settings-input",
                 "research-settings-operation",
+                "resident-stock-recovery",
                 "restore-input",
                 "restore-operation",
                 "simulate",
@@ -726,6 +825,7 @@ mod tests {
             ]
         );
         let args = Args::try_parse_from(["reader-buddy"]).unwrap();
+        assert!(!args.resident_stock_recovery);
         assert!(!args.handwriting);
         assert!(!args.inspect_conversations);
         assert!(args.conversation_operation.is_none());

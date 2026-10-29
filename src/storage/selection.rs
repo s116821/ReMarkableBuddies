@@ -381,20 +381,28 @@ struct SelectionFeature {
     generation: Uuid,
 }
 pub(crate) fn validate_generation(root: &Path, actor: Uuid, generation: Uuid) -> Result<()> {
-    validate_generation_policy(root, actor, generation, false)
+    validate_generation_policy(root, actor, generation, false, false)
 }
 pub(crate) fn validate_generation_preparing(
     root: &Path,
     actor: Uuid,
     generation: Uuid,
 ) -> Result<()> {
-    validate_generation_policy(root, actor, generation, true)
+    validate_generation_policy(root, actor, generation, true, false)
+}
+pub(crate) fn validate_generation_preparing_notebook(
+    root: &Path,
+    actor: Uuid,
+    generation: Uuid,
+) -> Result<()> {
+    validate_generation_policy(root, actor, generation, false, true)
 }
 fn validate_generation_policy(
     root: &Path,
     actor: Uuid,
     generation: Uuid,
     preparing: bool,
+    preparing_notebook: bool,
 ) -> Result<()> {
     ensure!(
         !actor.is_nil() && !generation.is_nil(),
@@ -404,11 +412,15 @@ fn validate_generation_policy(
     ensure!(
         matches!(
             version,
-            FORMAT | SELECTED_STORE_FORMAT | feedback_generation::VERSION
+            FORMAT
+                | SELECTED_STORE_FORMAT
+                | feedback_generation::VERSION
+                | notebook_generation::VERSION
         ),
         "unsupported generation format"
     );
     feedback_generation::validate_version(root, actor, generation, version, preparing)?;
+    notebook_generation::validate_version(root, actor, generation, version, preparing_notebook)?;
     if version == FORMAT {
         ensure!(
             !has_selected(root)?,
@@ -433,6 +445,10 @@ fn validate_generation_policy(
 pub(crate) fn prepare_generation(root: &Path, actor: Uuid, generation: Uuid) -> Result<()> {
     validate_generation(root, actor, generation)?;
     let version = files::json::<u32>(&root.join("format.json"), 64)?;
+    ensure!(
+        version != notebook_generation::VERSION,
+        "selected notebook storage unsupported"
+    );
     if version == FORMAT
         || (version == feedback_generation::VERSION
             && !root.join("selection-feature.json").exists())

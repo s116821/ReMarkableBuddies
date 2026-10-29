@@ -11,6 +11,24 @@ const workflow = name => parse(readFileSync(path.join(root, '.github/workflows',
 const expr = text => String.fromCharCode(36) + '{{ ' + text + ' }}';
 const manager = false;
 
+test('native bootstrap diagnostics stay outside official release inventory', () => {
+  const pipeline = workflow('pipeline');
+  const build = pipeline.jobs.build;
+  const compile = build.steps.find(s => /--example resident_bootstrap_observer/.test(s.run ?? ''));
+  const archive = build.steps.find(s => s.with?.name?.startsWith('resident-observer-'));
+  assert.equal(compile.if, expr('!inputs.release'));
+  assert.equal(archive.if, expr('!inputs.release'));
+  assert.equal(compile.env.READER_BUDDY_CANDIDATE_SHA, expr('steps.freeze.outputs.sha'));
+  assert.match(compile.run, /--locked --release --target armv7-unknown-linux-gnueabihf/);
+  assert.match(compile.run, /--example resident_bootstrap_control --features development-resident-bootstrap/);
+  assert.match(compile.run, /--example resident_bootstrap_observer --features development-resident-bootstrap/);
+  assert.match(compile.run, /sha256sum resident_bootstrap_observer resident_bootstrap_control/);
+  const applicationBuild = build.steps.find(s => /release\/build.py build/.test(s.run ?? ''));
+  assert.ok(!JSON.stringify(applicationBuild).includes('development-resident-bootstrap'));
+  assert.ok(!pipeline.jobs.release.steps.some(s => JSON.stringify(s).includes('resident-observer')));
+  assert.ok(build.steps.indexOf(compile) > build.steps.findIndex(s => /release\/build.py build/.test(s.run ?? '')));
+});
+
 test('PR and main job budgets include every matrix expansion', () => {
   const ci = workflow('ci'), pipeline = workflow('pipeline');
   const count = job => {
@@ -62,6 +80,27 @@ test('four stages preserve platform coverage and block dependent jobs on failure
   }
   assert.equal(ci.jobs.checks.defaults.run.shell, 'bash');
   assert.equal(pipeline.jobs.integration.defaults.run.shell, 'bash');
+});
+
+test('predecessor qualification reuses the normal command inside Checks without another PR workflow', () => {
+  const ci = workflow('ci');
+  const steps = ci.jobs.checks.steps;
+  const qualify = steps.findIndex(s => s.uses === './.github/actions/predecessor-library');
+  const guard = steps.findIndex(s => /node --test release\/fixtures\/workflow/.test(s.run ?? ''));
+  const hostTests = steps.find(s => /cargo test --locked --all-features/.test(s.run ?? ''));
+  assert.ok(qualify > guard && guard >= 0);
+  assert.match(hostTests.run, /--message-format=json/);
+  assert.match(hostTests.run, /exit "\$status"/);
+  assert.equal(steps[qualify].with.source_sha, expr('github.sha'));
+  assert.equal(steps[qualify].with.source_head, expr('github.event.pull_request.head.sha || github.sha'));
+  assert.equal(steps[qualify].if, hostTests.if);
+  const action = parse(readFileSync(path.join(root, '.github/actions/predecessor-library/action.yml'), 'utf8'));
+  assert.equal(action.runs.using, 'composite');
+  const build = action.runs.steps.find(s => /cargo build/.test(s.run ?? ''));
+  assert.match(build.run, /--example rem23_old_storage_lease/);
+  assert.match(build.run, /--target-dir "\$GITHUB_WORKSPACE\/target"/);
+  assert.ok(!/--bin reader-buddy/.test(JSON.stringify(action)), 'reuse existing current command, do not rebuild it');
+  assert.equal(action.runs.steps.at(-1).if, 'always()');
 });
 
 function evaluate(text, context, canceled = false) {

@@ -1398,6 +1398,7 @@ mod reservation_boundary_tests {
                 evidence_procedure: "synthetic".into(),
             };
             let claim = BindingReceipt {
+                acquisition: Default::default(),
                 operation,
                 conversation,
                 request_fingerprint: "synthetic".into(),

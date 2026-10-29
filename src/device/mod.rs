@@ -21,10 +21,14 @@ mod owned_touch_window;
 pub mod pen;
 #[cfg(any(target_os = "linux", test))]
 mod request_guard;
+#[cfg(target_os = "linux")]
+pub mod request_input;
 pub mod screenshot;
 #[cfg(any(target_os = "linux", test))]
 mod status_readiness;
 pub mod status_style;
+#[cfg(all(target_os = "linux", feature = "development-input-diagnostics"))]
+mod tap_echo_raw;
 pub mod touch;
 #[cfg(any(target_os = "linux", test))]
 mod trigger_dismiss;

@@ -996,3 +996,277 @@ fn joined_command_requires_destination_credentials_before_store_or_model() {
         assert_eq!(api.count(), 0);
     }
 }
+
+#[test]
+#[cfg(target_os = "linux")]
+fn notebook_binary_commands_use_actual_provider_http_archive_replay_and_restart_refinement() {
+    use remarkable_reader_buddy::writer::notebook::command::{
+        Generate, Refine, Request as NotebookRequest,
+    };
+    use std::process::{Command, Stdio};
+    let local = Local::new();
+    let (ledger, conversation) = local.ledger();
+    let paths = ledger.store().paths.clone();
+    drop(ledger);
+    let api = Api::new(vec![
+        reply("x = 7 (page 1)."),
+        reply("# Study\n\nx = 7 (page 1)."),
+        reply("x = 7 (page 1)."),
+        reply("# Study\n\nx = 7 (page 1). Refined."),
+    ]);
+    let config = remarkable_reader_buddy::config::Config {
+        model: Some("fixture-model".into()),
+        paths: paths.clone(),
+        ..Default::default()
+    };
+    let config_path = local.0.join("notebook-config.json");
+    std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    let document = NormalizedDocument {
+        document: Uuid::new_v4(),
+        format: SourceFormat::Notebook,
+        source_sha256: "a".repeat(64),
+        extractor_revision: "binary-notebook-fixture-v1".into(),
+        units: vec![SourceUnit {
+            page: Some(1),
+            section: None,
+            text: "Equation: x = 7.".into(),
+        }],
+    };
+    let raw = serde_json::to_vec_pretty(&document).unwrap();
+    let document_file = local.0.join("source.json");
+    std::fs::write(&document_file, &raw).unwrap();
+    let request = NotebookRequest::GenerateNotebook(Box::new(Generate {
+        conversation,
+        operation: Uuid::new_v4(),
+        request: "Keep x = 7 and page 1.".into(),
+        document_file: document_file.clone(),
+        document_sha256: remarkable_reader_buddy::storage::digest(&raw),
+        selection: TextScope::SuppliedNotebook,
+        guidance: None,
+        max_model_calls: 2,
+        history_range: None,
+    }));
+    let execute = |request: &NotebookRequest| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_reader-buddy"))
+            .arg("--writer-note")
+            .env("REMARKABLE_BUDDIES_CONFIG", &config_path)
+            .env("OPENAI_API_KEY", "fixture-key")
+            .env("OPENAI_BASE_URL", &api.origin)
+            .env_remove("MEM_API_KEY")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(&serde_json::to_vec(request).unwrap())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert!(
+            output.stderr.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    // Bad transport identity cannot adopt metadata or dispatch a provider call.
+    let mut bad = request.clone();
+    if let NotebookRequest::GenerateNotebook(input) = &mut bad {
+        input.document_sha256 = "b".repeat(64);
+    }
+    assert_eq!(execute(&bad)["status"], "refused");
+    assert_eq!(api.count(), 0);
+    let generation: Uuid =
+        serde_json::from_slice(&std::fs::read(paths.data.join("CURRENT")).unwrap()).unwrap();
+    assert!(!paths
+        .data
+        .join("generations")
+        .join(generation.to_string())
+        .join("notebook-feature.json")
+        .exists());
+    let result = execute(&request);
+    assert_eq!(result["status"], "generated");
+    assert_eq!(result["local_invocations"], 2);
+    assert_eq!(api.count(), 2);
+    let draft = serde_json::from_value(result["draft"].clone()).unwrap();
+    std::fs::remove_file(document_file).unwrap();
+    let replay = execute(&request);
+    assert_eq!(replay["status"], "historical");
+    assert_eq!(replay["local_invocations"], 0);
+    assert_eq!(api.count(), 2);
+    let refinement = NotebookRequest::RefineNotebook(Box::new(Refine {
+        conversation,
+        operation: Uuid::new_v4(),
+        request: "Refine while keeping x = 7.".into(),
+        draft,
+        max_model_calls: 2,
+        history_range: None,
+    }));
+    let result = execute(&refinement);
+    assert_eq!(result["status"], "generated");
+    assert_eq!(result["local_invocations"], 2);
+    assert_eq!(api.count(), 4);
+    let ledger = Ledger::new(local.open());
+    let records = ledger.inspect(conversation, true).unwrap();
+    assert!(records
+        .iter()
+        .any(|r| matches!(r, Record::ArchivedNormalizedSource(_))));
+    assert_eq!(
+        records
+            .iter()
+            .filter(|r| matches!(r,Record::Turn(t) if t.outcome==Outcome::Generated))
+            .count(),
+        2
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn relocated_notebook_scenario_binary_freezes_local_asset_and_retains_a_closed_real_store() {
+    use std::process::Command;
+    let local = Local::new();
+    let maintained = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/simulator/scenarios");
+    let mut scenario: Value = serde_json::from_slice(
+        &std::fs::read(maintained.join("writer-notebook-create-replay.json")).unwrap(),
+    )
+    .unwrap();
+    scenario["output"] = json!("output");
+    scenario["retain_store_fixture"] = json!(true);
+    std::fs::copy(
+        maintained.join("writer-notebook-source.json"),
+        local.0.join("writer-notebook-source.json"),
+    )
+    .unwrap();
+    let path = local.0.join("scenario.json");
+    std::fs::write(&path, serde_json::to_vec(&scenario).unwrap()).unwrap();
+    let execute = || {
+        Command::new(env!("CARGO_BIN_EXE_reader-buddy"))
+            .arg("--simulate")
+            .arg(&path)
+            .current_dir(&local.0)
+            .env_remove("OPENAI_API_KEY")
+            .env_remove("MEM_API_KEY")
+            .output()
+            .unwrap()
+    };
+    let output = execute();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report_path = local.0.join("output/report.json");
+    let report_bytes = std::fs::read(&report_path).unwrap();
+    let report: Value = serde_json::from_slice(&report_bytes).unwrap();
+    assert_eq!(report["store_fixture_saved"], true);
+    assert_eq!(report["model_calls"], 3);
+    assert_eq!(report["writes"], 1);
+    let fixture = local.0.join("output/store-fixture");
+    let manifest: Value =
+        serde_json::from_slice(&std::fs::read(fixture.join("manifest.json")).unwrap()).unwrap();
+    for entry in manifest["files"].as_array().unwrap() {
+        let bytes =
+            std::fs::read(fixture.join("data").join(entry["path"].as_str().unwrap())).unwrap();
+        assert_eq!(
+            remarkable_reader_buddy::storage::digest(&bytes),
+            entry["sha256"].as_str().unwrap()
+        );
+    }
+    assert!(!fixture.join("credentials").exists());
+    assert!(!fixture.join("cache").exists());
+    let paths = StorePaths {
+        data: fixture.join("data"),
+        cache: local.0.join("cache"),
+        credentials: local.0.join("credentials"),
+    };
+    assert!(
+        Store::open(paths.clone()).is_err(),
+        "diagnostic relocation must not silently rebind path-bound capabilities"
+    );
+    let store = Arc::new(Store::prepare_notebook(paths.clone()).unwrap());
+    let ledger = Ledger::new(store.clone());
+    let conversation = serde_json::from_value(scenario["conversation"].clone()).unwrap();
+    assert!(ledger
+        .inspect(conversation, false)
+        .unwrap()
+        .iter()
+        .any(|r| matches!(r,Record::Turn(t) if t.outcome==Outcome::Generated)));
+    let generated_records = ledger.inspect(conversation, false).unwrap();
+    assert!(generated_records
+        .iter()
+        .any(|r| matches!(r, Record::ArchivedNormalizedSource(_))));
+    assert!(generated_records
+        .iter()
+        .any(|r| matches!(r, Record::NotebookPlan(_))));
+    assert_eq!(
+        generated_records
+            .iter()
+            .filter(|r| matches!(r, Record::NotebookStage(_)))
+            .count(),
+        3
+    );
+    let before_records = serde_json::to_value(generated_records).unwrap();
+    drop(ledger);
+    let before_current = std::fs::read(paths.data.join("CURRENT")).unwrap();
+    let generation: String = serde_json::from_slice(&before_current).unwrap();
+    let objects = paths
+        .data
+        .join("generations")
+        .join(&generation)
+        .join("objects");
+    let original_objects: Vec<_> = std::fs::read_dir(&objects)
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            (
+                path.file_name().unwrap().to_owned(),
+                std::fs::read(path).unwrap(),
+            )
+        })
+        .collect();
+    let archive = local.0.join("generated-notebook-backup");
+    let inspection = store.export_notebook_backup(&archive).unwrap();
+    assert_eq!(inspection.format, 4);
+    assert!(inspection.complete_media && inspection.objects > 0 && inspection.manifests > 0);
+    assert_eq!(
+        Store::inspect_notebook_backup(&archive).unwrap(),
+        inspection
+    );
+    assert!(Store::inspect_backup(&archive).is_err());
+    store.restore_notebook_backup(&archive).unwrap();
+    let after_current = std::fs::read(paths.data.join("CURRENT")).unwrap();
+    assert_ne!(after_current, before_current);
+    let next: String = serde_json::from_slice(&after_current).unwrap();
+    for (name, bytes) in original_objects {
+        assert_eq!(std::fs::read(objects.join(&name)).unwrap(), bytes);
+        assert_eq!(
+            std::fs::read(
+                paths
+                    .data
+                    .join("generations")
+                    .join(&next)
+                    .join("objects")
+                    .join(name)
+            )
+            .unwrap(),
+            bytes
+        );
+    }
+    let restored = Ledger::new(store.clone());
+    assert_eq!(
+        serde_json::to_value(restored.inspect(conversation, false).unwrap()).unwrap(),
+        before_records
+    );
+    drop(restored);
+    drop(store);
+    let repeat = execute();
+    assert!(
+        !repeat.status.success(),
+        "an existing fixture destination must never be overwritten"
+    );
+    assert_eq!(std::fs::read(report_path).unwrap(), report_bytes);
+}

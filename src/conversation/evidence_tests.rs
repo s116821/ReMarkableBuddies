@@ -4,8 +4,10 @@ use std::{cell::RefCell, rc::Rc};
 
 thread_local! {
     static AFTER_ABSENCE: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+    static OPERATION_SNAPSHOTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 pub(super) fn after_operation_snapshot(pair: &[Option<Envelope>; 2]) {
+    OPERATION_SNAPSHOTS.with(|count| count.set(count.get() + 1));
     if pair.iter().all(Option::is_none) {
         let hook = AFTER_ABSENCE.with(|slot| slot.borrow_mut().take());
         if let Some(hook) = hook {
@@ -336,5 +338,141 @@ fn actually_inconsistent_imported_pairs_remain_refused() {
             .request_evidence(turn.conversation, turn.id, op)
             .is_err());
         assert!(ledger.persist_request_evidence(op, 7, &p).is_err());
+    }
+}
+
+fn bind_historical_target(ledger: &Ledger, conversation: Uuid) -> BindingReceipt {
+    let source = Uuid::new_v4();
+    let target = Uuid::new_v4();
+    let document = Uuid::new_v4();
+    let receipt = BindingReceipt {
+        acquisition: Default::default(),
+        operation: Uuid::new_v4(),
+        conversation,
+        request_fingerprint: "synthetic request".into(),
+        adapter_fingerprint: "synthetic adapter".into(),
+        source: SourceObservation {
+            document,
+            page: source,
+            session: "synthetic session".into(),
+            visit: "synthetic visit".into(),
+            content_revision: Some("content".into()),
+            order_revision: Some("order".into()),
+            capability_revision: "synthetic profile".into(),
+            evidence_procedure: "synthetic".into(),
+        },
+        intended_target: Some(target),
+        observed_document: document,
+        observed_page: target,
+        expected_order: vec![source],
+        observed_order: vec![source, target],
+        persisted_revision: "historical revision".into(),
+        observed_ms: 8,
+        evidence_origin: "synthetic".into(),
+    };
+    ledger
+        .bind(
+            receipt.operation,
+            ledger
+                .expected(Namespace::Conversation, conversation)
+                .unwrap(),
+            ledger
+                .expected(
+                    Namespace::Conversation,
+                    Ledger::binding_id(document, target),
+                )
+                .unwrap(),
+            receipt.clone(),
+        )
+        .unwrap();
+    receipt
+}
+
+#[test]
+fn historical_association_validates_evidence_without_refreshing_operation_heads() {
+    let fixture = Fixture::new();
+    let ledger = fixture.ledger();
+    let turn = seeded(&ledger, "orbit".into());
+    let prepared = prepare(&ledger, &turn);
+    ledger
+        .persist_request_evidence(Uuid::new_v4(), 7, &prepared)
+        .unwrap();
+    let binding = bind_historical_target(&ledger, turn.conversation);
+    let before = OPERATION_SNAPSHOTS.with(|count| count.get());
+    assert!(matches!(
+        ledger
+            .inspect_page_association(
+                turn.conversation,
+                binding.observed_document,
+                binding.observed_page,
+            )
+            .unwrap(),
+        HistoricalPageAssociationInspection::HistoricalCandidate(_)
+    ));
+    assert_eq!(OPERATION_SNAPSHOTS.with(|count| count.get()), before);
+}
+
+#[test]
+fn historical_association_refuses_orphan_and_replaced_evidence_receipt() {
+    for orphan in [true, false] {
+        let fixture = Fixture::new();
+        let ledger = fixture.ledger();
+        let turn = seeded(&ledger, "orbit".into());
+        let prepared = prepare(&ledger, &turn);
+        let operation = Uuid::new_v4();
+        ledger
+            .persist_request_evidence(operation, 7, &prepared)
+            .unwrap();
+        let binding = bind_historical_target(&ledger, turn.conversation);
+        if orphan {
+            let mut fact = ledger
+                .request_evidence(turn.conversation, turn.id, operation)
+                .unwrap()
+                .unwrap()
+                .record;
+            fact.operation = Uuid::new_v4();
+            fact.id = RequestEvidence::identity(fact.operation);
+            let envelope = ledger
+                .envelope(
+                    Namespace::Conversation,
+                    fact.id,
+                    ExpectedHeads::default(),
+                    Record::RequestEvidence(Box::new(fact)),
+                    vec![],
+                )
+                .unwrap();
+            ledger
+                .store
+                .commit(vec![envelope], BTreeMap::new())
+                .unwrap();
+        } else {
+            let mut receipt = ledger
+                .store
+                .value(Namespace::Conversation, Ledger::receipt_id(operation))
+                .unwrap()
+                .unwrap();
+            receipt.parents = BTreeSet::from([receipt.revision_id]);
+            receipt.revision_id = Uuid::new_v4();
+            receipt.operation_id = Uuid::new_v4();
+            // Keep a shape-valid payload: only its head/transaction identity is
+            // replaced. Basic decode must pass so the deeper check is exercised.
+            assert!(Ledger::decode(&receipt).is_ok());
+            ledger.store.commit(vec![receipt], BTreeMap::new()).unwrap();
+        }
+        let snapshot = ledger
+            .store
+            .snapshot_heads_matching(&[Namespace::Conversation], MAX_ITEMS, |_| true)
+            .unwrap();
+        assert!(Ledger::inspect_snapshot(turn.conversation, false, &snapshot).is_ok());
+        let before = OPERATION_SNAPSHOTS.with(|count| count.get());
+        assert!(ledger
+            .inspect_page_association(
+                turn.conversation,
+                binding.observed_document,
+                binding.observed_page,
+            )
+            .is_err());
+        assert_eq!(OPERATION_SNAPSHOTS.with(|count| count.get()), before);
+        assert!(ledger.inspect(turn.conversation, false).is_err());
     }
 }

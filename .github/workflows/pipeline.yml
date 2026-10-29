@@ -73,6 +73,28 @@ jobs:
         env:
           TAG: ${{ steps.freeze.outputs.tag }}
           SHA: ${{ steps.freeze.outputs.sha }}
+      - name: Build bounded resident bootstrap diagnostics for qualification
+        if: ${{ !inputs.release }}
+        env:
+          READER_BUDDY_CANDIDATE_TAG: ${{ steps.freeze.outputs.tag }}
+          READER_BUDDY_CANDIDATE_SHA: ${{ steps.freeze.outputs.sha }}
+          CROSS_CONFIG: release/Cross.release.toml
+        run: |
+          cross build --locked --release --target armv7-unknown-linux-gnueabihf --example resident_bootstrap_observer --features development-resident-bootstrap
+          cross build --locked --release --target armv7-unknown-linux-gnueabihf --example resident_bootstrap_control --features development-resident-bootstrap
+          mkdir "$RUNNER_TEMP/resident-observer"
+          cp target/armv7-unknown-linux-gnueabihf/release/examples/resident_bootstrap_observer "$RUNNER_TEMP/resident-observer/"
+          cp target/armv7-unknown-linux-gnueabihf/release/examples/resident_bootstrap_control "$RUNNER_TEMP/resident-observer/"
+          cd "$RUNNER_TEMP/resident-observer"
+          sha256sum resident_bootstrap_observer resident_bootstrap_control > artifact.sha256
+          printf '%s\n' "$READER_BUDDY_CANDIDATE_SHA" > source.sha
+      - uses: actions/upload-artifact@v4
+        if: ${{ !inputs.release }}
+        with:
+          name: resident-observer-${{ inputs.source_sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/resident-observer/*
+          if-no-files-found: error
+          retention-days: 14
       - uses: actions/upload-artifact@v4
         id: artifacts
         with:

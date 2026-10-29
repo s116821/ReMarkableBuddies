@@ -34,7 +34,7 @@ quick-xml = "=0.42.0"
 percent-encoding = "=2.3.2"
 lopdf = { version = "=0.46.0", default-features = false }
 
-remarkable-open-sdk = { git = "https://github.com/s116821/ReMarkableOpenSDK", rev = "32b86e4fef04844cbf2ec31129bf029cc1d9899a", default-features = false, features = ["development-capture"] }
+remarkable-open-sdk = { git = "https://github.com/s116821/ReMarkableOpenSDK", rev = "80b29ebec3a46b6976e5288d2e8d65fbeccca816", default-features = false, features = ["native-adapter", "development-capture"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.13"
@@ -44,8 +44,20 @@ nix = { version = "0.29", features = ["ioctl"] }
 name = "remarkable_reader_buddy"
 path = "src/lib.rs"
 
+[features]
+development-input-diagnostics = []
+development-resident-bootstrap = []
+
+[[example]]
+name = "resident_bootstrap_control"
+required-features = ["development-resident-bootstrap"]
+
+[[example]]
+name = "resident_bootstrap_observer"
+required-features = ["development-resident-bootstrap"]
+
 [dev-dependencies]
-remarkable-open-sdk = { git = "https://github.com/s116821/ReMarkableOpenSDK", rev = "32b86e4fef04844cbf2ec31129bf029cc1d9899a", default-features = false, features = ["mock", "development-capture"] }
+remarkable-open-sdk = { git = "https://github.com/s116821/ReMarkableOpenSDK", rev = "80b29ebec3a46b6976e5288d2e8d65fbeccca816", default-features = false, features = ["mock", "development-capture"] }
 # Explicit native-evidence example only; not linked into the installed runtime.
 sha2 = "0.10"
 

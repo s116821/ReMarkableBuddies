@@ -5,6 +5,9 @@ pub(crate) mod ordinary_export;
 #[path = "ordinary_restore.rs"]
 pub(crate) mod ordinary_restore;
 
+#[path = "notebook_backup.rs"]
+mod notebook_backup;
+
 /// Distinguish a proved prepublication conflict from a possible atomic publication.
 pub(crate) enum ConfigPublication {
     Verified(String),
@@ -313,7 +316,7 @@ impl Store {
                 version == feedback_generation::VERSION
                     && !root.join("selection-feature.json").exists()
             } else {
-                version != feedback_generation::VERSION
+                version != feedback_generation::VERSION && version != notebook_generation::VERSION
             },
             "unsupported backup generation policy"
         );
@@ -503,8 +506,8 @@ impl Store {
         );
         let root = self.generation(inner.generation);
         ensure!(
-            feedback_generation::version(&root)? != feedback_generation::VERSION,
-            "selected format3 backup unsupported"
+            !matches!(feedback_generation::version(&root)?, 3 | 4),
+            "selected feature backup unsupported"
         );
         let selected = selection::portable::collect(&root, self.actor_id, inner.generation)?;
         let manifests: Vec<_> = inner.index.manifests.values().cloned().collect();
@@ -670,6 +673,11 @@ impl Store {
         exclusive: bool,
         activation_attempted: &mut bool,
     ) -> Result<()> {
+        let current_root = self.generation(inner.generation);
+        ensure!(
+            feedback_generation::version(&current_root)? != notebook_generation::VERSION,
+            "legacy restore does not support notebook generation"
+        );
         if exclusive {
             let root = self.generation(next);
             files::safe_path(&root)?;

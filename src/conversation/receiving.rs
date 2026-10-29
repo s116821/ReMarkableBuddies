@@ -365,6 +365,7 @@ fn validate_key(key: &IndexKey) -> Result<()> {
 }
 pub(super) fn source_id(record: &Record) -> Option<Uuid> {
     match record {
+        Record::ArchivedNormalizedSource(_) => None, // Host archive, not native source admission.
         Record::Source(source) => Some(source.id),
         Record::Capture(source) => Some(source.id),
         Record::LegacyCapture(source) => Some(source.id),
@@ -374,6 +375,7 @@ pub(super) fn source_id(record: &Record) -> Option<Uuid> {
 }
 pub(super) fn source_media(record: &Record) -> Result<Vec<Media>> {
     match record {
+        Record::ArchivedNormalizedSource(_) => Err(ReceivingRefusal::OriginalUnavailable.into()),
         Record::Source(source) => Ok(std::iter::once(source.image.clone())
             .chain(source.parent.clone())
             .collect()),

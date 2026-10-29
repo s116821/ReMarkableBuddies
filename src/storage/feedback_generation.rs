@@ -42,7 +42,13 @@ pub(crate) fn validate_version(
             "unsupported feedback feature"
         );
         ensure!(
-            version == VERSION || allow_pending,
+            version == VERSION
+                || allow_pending
+                || (version == notebook_generation::VERSION
+                    && notebook_generation::validate_version(
+                        root, actor, generation, version, false
+                    )
+                    .is_ok()),
             "interrupted feedback preparation"
         );
     }
@@ -83,12 +89,23 @@ pub(crate) fn prepare(
         "feedback preparation requires unique complete custody"
     );
     ensure!(
-        sync::mode::load(store)?.is_none(),
+        if version(&store.generation(inner.generation))? == notebook_generation::VERSION {
+            sync::mode::ordinary_local(store)?
+        } else {
+            sync::mode::load(store)?.is_none()
+        },
         "feedback requires ordinary local mode"
     );
     let generation = inner.generation;
     let root = store.generation(generation);
     selection::validate_generation_preparing(&root, store.actor_id, generation)?;
+    if version(&root)? == notebook_generation::VERSION {
+        ensure!(
+            root.join(MARKER).exists(),
+            "feedback enablement on notebook storage unsupported"
+        );
+        return notebook_generation::validate_ready(&store.paths, store.actor_id, generation);
+    }
     if version(&root)? != VERSION {
         hook(PreparationStage::BeforeMarker)?;
         files::atomic_json(
@@ -128,7 +145,7 @@ pub(super) fn admit(
         "feedback is not selected/group data"
     );
     ensure!(
-        version(root)? == VERSION && index.unavailable == 0,
+        matches!(version(root)?, VERSION | notebook_generation::VERSION) && index.unavailable == 0,
         "feedback requires prepared complete generation"
     );
     validate(root, actor, generation, false)?;
@@ -161,14 +178,25 @@ pub(super) fn admit(
 }
 impl Store {
     pub(super) fn check_feedback(&self, inner: &Inner) -> Result<()> {
+        let notebook = version(&self.generation(inner.generation))? == notebook_generation::VERSION;
         ensure!(
             inner.index.unavailable == 0
-                && inner.mode_handles == 0
-                && sync::mode::load(self)?.is_none(),
+                && if notebook {
+                    sync::mode::ordinary_local(self)?
+                } else {
+                    inner.mode_handles == 0 && sync::mode::load(self)?.is_none()
+                },
             "feedback unavailable in current mode/history"
         );
         let root = self.generation(inner.generation);
-        ensure!(version(&root)? == VERSION, "feedback feature not prepared");
+        ensure!(
+            matches!(version(&root)?, VERSION | notebook_generation::VERSION),
+            "feedback feature not prepared"
+        );
+        if version(&root)? == notebook_generation::VERSION {
+            ensure!(root.join(MARKER).exists(), "feedback feature absent");
+            notebook_generation::validate_ready(&self.paths, self.actor_id, inner.generation)?;
+        }
         validate(&root, self.actor_id, inner.generation, false)
     }
     pub(crate) fn retain_feedback(&self, observation: Observation) -> Result<Description> {

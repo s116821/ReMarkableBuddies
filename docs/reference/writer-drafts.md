@@ -166,3 +166,57 @@ requires explicit known-ID reconciliation, never automatic resend. Writer/export
 owners span the joined invocation and contend with standalone calls. Existing
 model/export cooperative budgets remain 95/45 seconds with transport bounds;
 these are not a hard outer deadline on synchronous Store work.
+
+## Bounded supplied notebooks
+
+The same stdin entrypoint adds four explicit commands. Existing inline requests
+and their identities remain unchanged:
+
+- `generate-notebook`: `conversation`, new `operation`, exact `request`,
+  `document_file`, lowercase raw-file `document_sha256`, `selection`, optional
+  `guidance`, explicit `max_model_calls`, optional `history_range`.
+- `refine-notebook`: `conversation`, new `operation`, exact `request`, archived
+  notebook `draft`, `max_model_calls`, optional `history_range`.
+- `generate-notebook-and-export`: new `outer_operation`, nested
+  `generation` containing a complete `generate-notebook`, stable `correlation`,
+  new `effect_operation`.
+- `refine-notebook-and-export`: the corresponding complete `refinement` and
+  outer identities.
+
+`document_file` contains one complete strict `NormalizedDocument` JSON object.
+Its path is transport information; only validated content/provenance enters the
+archive and identities. Raw input is bounded at 8 MiB, all supplied text at
+4 MiB, selected text at 256 KiB/256 units. The caller's allowance must cover
+every ordered map and the one reduction; at most eight maps/nine calls are
+permitted. Encoded payload and Store publication bounds can refuse a request
+below these individual ceilings. Choose a smaller explicit history range when
+necessary; history and original requests are never silently truncated.
+
+File admission currently supports Linux ext4/XFS/Btrfs with retained directory
+handles, no-follow/nonblocking regular-file checks and raw-hash verification.
+Other platforms/filesystems refuse when those guarantees are unavailable.
+The command requires an existing owned conversation. Required credentials and
+the complete read-only request/payload preflight precede explicit notebook
+format adoption. Adoption preserves CURRENT, generation identity and immutable
+history/media while fencing unsupported predecessors; it is not native access.
+
+Maps and reduction use the existing model provider and retained stage receipts.
+Only the request and final proposal are visible conversation turns. Reports
+separate local model entries, confirmed stage results, observed publication loss
+and possible remote cost. Each call has the existing 95-second cooperative
+budget, within a 600-second aggregate budget; joined export uses the smaller of
+its existing 45-second budget and the remaining aggregate deadline. Synchronous
+Store work is not forcibly preempted.
+
+An unchanged retry reads its original frozen context and retained archive, even
+if the input file has disappeared. It returns historical information with no new
+model or export effects. Changed inputs/selections refuse; failed or uncertain
+stages never auto-resume. Deliberate refinement uses the retained archive after
+restart, including the exact selected draft revision. A new explicit
+`export-draft` can export a verified saved final proposal. Joined export retains
+the current invocation's fresh final witness and guards root, source, plan,
+stages and media through destination polls. Correlation and source scope remain
+stable across deliberate inline-to-archive re-export and subsequent refinement.
+
+These supplied-input paths do not establish physical notebook completeness,
+handwriting extraction, live model quality, native rendering or live Mem writes.
