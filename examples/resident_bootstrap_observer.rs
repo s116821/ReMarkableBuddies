@@ -26,6 +26,7 @@ fn nonce(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Stri
 #[cfg(target_os = "linux")]
 mod native {
     use super::*;
+    use anyhow::Context;
     use remarkable_open_sdk::{native_adapter::HistoricalCapture, OperationId};
     use remarkable_reader_buddy::workflow::resident_supervisor::service::bootstrap::setup::{
         capture_after_setup, visual, Binding, ObserverSetup,
@@ -162,34 +163,54 @@ mod native {
                 guard()
             })
         }
+        fn capture_diagnosed(
+            &mut self,
+            stage: visual::Stage,
+            deadline: Instant,
+            guard: &mut dyn FnMut() -> Result<()>,
+            diagnostics: &mut visual::Diagnostics,
+        ) -> Result<visual::Image> {
+            visual::capture_on_runtime_diagnosed(
+                self.runtime,
+                stage,
+                deadline,
+                &mut || {
+                    guard()?;
+                    inactive_services(deadline, self.vendor.as_deref())?;
+                    guard()
+                },
+                diagnostics,
+            )
+        }
     }
 
     fn capture(
         runtime: &mut ResidentRuntime,
         mut input: Option<RequestInput>,
         setup: &mut ObserverSetup,
-        nonce: &str,
+        binding: &Binding,
         operation: OperationId,
-        overall: Instant,
+        bounds: (Instant, Instant),
+        diagnostics: Option<&mut visual::Diagnostics>,
     ) -> Result<HistoricalCapture> {
-        let binding = Binding::new(nonce, &setup.candidate_sha256, runtime.identity())?;
-        let setup_deadline = overall.min(Instant::now() + Duration::from_secs(120));
+        let (overall, setup_deadline) = bounds;
         let vendor = setup.vendor();
         if setup.plan.visual_setup == Some(1) {
-            setup.admit_visual(
-                &binding,
+            setup.admit_visual_diagnosed(
+                binding,
                 &mut input,
                 setup_deadline,
                 &mut VisualTransport {
                     runtime,
                     vendor: vendor.clone(),
                 },
+                diagnostics.context("visual diagnostics unavailable")?,
             )?;
         } else {
             runtime.with_connection(
                 setup_deadline,
                 &mut || inactive_services(setup_deadline, vendor.as_deref()),
-                |_, progress| setup.admit(&binding, &mut input, setup_deadline, progress),
+                |_, progress| setup.admit(binding, &mut input, setup_deadline, progress),
             )?;
         }
         let deadline = overall.min(Instant::now() + Duration::from_secs(10));
@@ -266,16 +287,60 @@ mod native {
                 .expect("fresh UUID"),
         );
         if let Some(setup) = &mut capture_setup {
-            let captured = capture(
-                &mut runtime,
-                Some(input),
-                setup,
-                nonce,
-                operation,
-                start + Duration::from_secs(180),
-            );
-            // Setup and capture failures take the same owned-child cleanup path.
-            let shutdown = runtime.shutdown(Instant::now() + Duration::from_secs(3));
+            let overall = start + Duration::from_secs(180);
+            // Charge diagnostic construction and entry retention to this same
+            // original setup window; neither can move its 120-second anchor.
+            let setup_deadline = overall.min(Instant::now() + Duration::from_secs(120));
+            let binding = Binding::new(nonce, &setup.candidate_sha256, runtime.identity());
+            let mut diagnostics = binding
+                .as_ref()
+                .map_err(|error| anyhow::anyhow!("{error:#}"))
+                .and_then(|binding| {
+                    if setup.plan.visual_setup == Some(1) {
+                        visual::Diagnostics::new(
+                            &std::path::PathBuf::from(format!("/run/rsdk-control-{nonce}")),
+                            binding,
+                        )
+                        .map(Some)
+                    } else {
+                        Ok(None)
+                    }
+                });
+            let captured = match (&binding, &mut diagnostics) {
+                (Ok(binding), Ok(Some(trace))) => {
+                    trace.step(None, visual::Phase::CaptureResult, overall, |trace| {
+                        capture(
+                            &mut runtime,
+                            Some(input),
+                            setup,
+                            binding,
+                            operation,
+                            (overall, setup_deadline),
+                            Some(trace),
+                        )
+                    })
+                }
+                (Ok(binding), Ok(None)) => capture(
+                    &mut runtime,
+                    Some(input),
+                    setup,
+                    binding,
+                    operation,
+                    (overall, setup_deadline),
+                    None,
+                ),
+                (_, Err(error)) => Err(anyhow::anyhow!("{error:#}")),
+                (Err(error), _) => Err(anyhow::anyhow!("{error:#}")),
+            };
+            // CaptureResult retains errors before shutdown can block or Drop runs.
+            // Even failed diagnostic initialization/retention cannot bypass cleanup.
+            let shutdown_deadline = Instant::now() + Duration::from_secs(3);
+            let shutdown = match &mut diagnostics {
+                Ok(Some(trace)) => {
+                    trace.shutdown(shutdown_deadline, || runtime.shutdown(shutdown_deadline))
+                }
+                _ => runtime.shutdown(shutdown_deadline),
+            };
             let result = match &captured {
                 Ok(image) => serde_json::json!({"captured": true,
                     "before": format!("{:?}", image.before()), "after": format!("{:?}", image.after()),

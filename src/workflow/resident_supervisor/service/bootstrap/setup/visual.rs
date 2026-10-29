@@ -1,5 +1,7 @@
 //! Explicit development setup images. Never page identity or writing authority.
 use super::*;
+mod diagnostics;
+pub use diagnostics::{Diagnostics, Phase};
 use remarkable_open_sdk::{
     native_adapter::{HistoricalVisual, MAX_CAPTURE_PNG, VISUAL_PROCEDURE},
     OperationId,
@@ -39,6 +41,16 @@ pub trait Transport {
         deadline: Instant,
         guard: &mut dyn FnMut() -> Result<()>,
     ) -> Result<Image>;
+    fn capture_diagnosed(
+        &mut self,
+        stage: Stage,
+        deadline: Instant,
+        guard: &mut dyn FnMut() -> Result<()>,
+        diagnostics: &mut Diagnostics,
+    ) -> Result<Image> {
+        let _ = diagnostics;
+        self.capture(stage, deadline, guard)
+    }
 }
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -226,24 +238,44 @@ fn capture(
     transport: &mut impl Transport,
     guard: &mut dyn FnMut() -> Result<()>,
     deadline: Instant,
+    diagnostics: &mut Diagnostics,
 ) -> Result<()> {
     let capture_deadline = deadline.min(Instant::now() + Duration::from_secs(10));
-    progress(transport, guard, capture_deadline)?;
-    let image = transport.capture(stage, capture_deadline, &mut || {
-        guard()?;
-        mailbox.current()?;
-        check(capture_deadline)
+    diagnostics.step(
+        Some(stage),
+        Phase::CaptureProgress,
+        capture_deadline,
+        |_| progress(transport, guard, capture_deadline),
+    )?;
+    let image = diagnostics.step(Some(stage), Phase::Capture, capture_deadline, |trace| {
+        transport.capture_diagnosed(
+            stage,
+            capture_deadline,
+            &mut || {
+                guard()?;
+                mailbox.current()?;
+                check(capture_deadline)
+            },
+            trace,
+        )
     })?;
-    progress(transport, guard, capture_deadline)?;
+    diagnostics.step(
+        Some(stage),
+        Phase::CaptureProgress,
+        capture_deadline,
+        |_| progress(transport, guard, capture_deadline),
+    )?;
     let root = mailbox.root.clone();
-    mailbox.publish_visual(stage, binding, image, capture_deadline, &mut || {
-        progress(transport, guard, capture_deadline)?;
-        let mailbox = Mailbox::open(&root)?;
-        mailbox.absent(&["complete", "observer-admitted", "actor-admitted"])?;
-        if stage == Stage::Before {
-            mailbox.absent(&["ready", "visual-after-request", "visual-after"])?;
-        }
-        Ok(())
+    diagnostics.step(Some(stage), Phase::Publication, capture_deadline, |_| {
+        mailbox.publish_visual(stage, binding, image, capture_deadline, &mut || {
+            progress(transport, guard, capture_deadline)?;
+            let mailbox = Mailbox::open(&root)?;
+            mailbox.absent(&["complete", "observer-admitted", "actor-admitted"])?;
+            if stage == Stage::Before {
+                mailbox.absent(&["ready", "visual-after-request", "visual-after"])?;
+            }
+            Ok(())
+        })
     })
 }
 
@@ -258,13 +290,41 @@ pub fn observer<I: InputGuard>(
     transport: &mut impl Transport,
     guard: &mut dyn FnMut() -> Result<()>,
 ) -> Result<()> {
-    progress(transport, guard, deadline)?;
+    let mut diagnostics = Diagnostics::new(&mailbox.root, binding)?;
+    observer_diagnosed(
+        mailbox,
+        binding,
+        input,
+        acquire,
+        deadline,
+        transport,
+        guard,
+        &mut diagnostics,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn observer_diagnosed<I: InputGuard>(
+    mailbox: &mut Mailbox,
+    binding: &Binding,
+    input: &mut Option<I>,
+    acquire: impl FnOnce() -> Result<I>,
+    deadline: Instant,
+    transport: &mut impl Transport,
+    guard: &mut dyn FnMut() -> Result<()>,
+    diagnostics: &mut Diagnostics,
+) -> Result<()> {
+    diagnostics.step(None, Phase::SetupProgress, deadline, |_| {
+        progress(transport, guard, deadline)
+    })?;
     mailbox.empty()?;
     quiet(input)?;
     drop(input.take());
     mailbox.publish("observer-ended", binding, deadline)?;
-    mailbox.wait("actor-ended", binding, deadline, &mut || {
-        progress(transport, guard, deadline)
+    diagnostics.step(None, Phase::ActorEnded, deadline, |_| {
+        mailbox.wait("actor-ended", binding, deadline, &mut || {
+            progress(transport, guard, deadline)
+        })
     })?;
     mailbox.absent(&[
         "ready",
@@ -275,7 +335,15 @@ pub fn observer<I: InputGuard>(
         "visual-before",
         "visual-after",
     ])?;
-    capture(mailbox, binding, Stage::Before, transport, guard, deadline)?;
+    capture(
+        mailbox,
+        binding,
+        Stage::Before,
+        transport,
+        guard,
+        deadline,
+        diagnostics,
+    )?;
     let root = mailbox.root.clone();
     mailbox.publish_admitted("ready", binding, deadline, &mut || {
         progress(transport, guard, deadline)?;
@@ -296,7 +364,15 @@ pub fn observer<I: InputGuard>(
         "actor-admitted",
         "visual-after",
     ])?;
-    capture(mailbox, binding, Stage::After, transport, guard, deadline)?;
+    capture(
+        mailbox,
+        binding,
+        Stage::After,
+        transport,
+        guard,
+        deadline,
+        diagnostics,
+    )?;
     mailbox.wait("complete", binding, deadline, &mut || {
         progress(transport, guard, deadline)
     })?;
@@ -327,10 +403,25 @@ impl ObserverSetup {
             self.plan.visual_setup == Some(1),
             "visual setup not selected"
         );
+        let mut diagnostics = Diagnostics::new(&self.mailbox.root, binding)?;
+        self.admit_visual_diagnosed(binding, input, deadline, transport, &mut diagnostics)
+    }
+    pub fn admit_visual_diagnosed(
+        &mut self,
+        binding: &Binding,
+        input: &mut Option<RequestInput>,
+        deadline: Instant,
+        transport: &mut impl Transport,
+        diagnostics: &mut Diagnostics,
+    ) -> Result<()> {
+        ensure!(
+            self.plan.visual_setup == Some(1),
+            "visual setup not selected"
+        );
         let Self {
             mailbox, candidate, ..
         } = self;
-        observer(
+        observer_diagnosed(
             mailbox,
             binding,
             input,
@@ -338,6 +429,7 @@ impl ObserverSetup {
             deadline,
             transport,
             &mut || candidate.current(),
+            diagnostics,
         )
     }
 }
@@ -349,11 +441,45 @@ pub fn capture_on_runtime(
     deadline: Instant,
     progress: &mut dyn FnMut() -> Result<()>,
 ) -> Result<Image> {
+    capture_on_runtime_traced(runtime, deadline, progress, &mut |_, _, action| action())
+}
+
+pub fn capture_on_runtime_diagnosed(
+    runtime: &mut crate::workflow::resident_runtime::ResidentRuntime,
+    stage: Stage,
+    deadline: Instant,
+    progress: &mut dyn FnMut() -> Result<()>,
+    diagnostics: &mut Diagnostics,
+) -> Result<Image> {
+    capture_on_runtime_traced(
+        runtime,
+        deadline,
+        progress,
+        &mut |phase, deadline, action| diagnostics.step(Some(stage), phase, deadline, |_| action()),
+    )
+}
+
+#[allow(clippy::type_complexity)]
+fn capture_on_runtime_traced(
+    runtime: &mut crate::workflow::resident_runtime::ResidentRuntime,
+    deadline: Instant,
+    progress: &mut dyn FnMut() -> Result<()>,
+    trace: &mut dyn FnMut(Phase, Instant, &mut dyn FnMut() -> Result<()>) -> Result<()>,
+) -> Result<Image> {
     let operation =
         OperationId(Uuid::parse(&uuid::Uuid::new_v4().to_string()).expect("fresh UUID"));
-    runtime.reconnect(deadline, progress)?;
+    trace(Phase::Reconnect, deadline, &mut || {
+        runtime.reconnect(deadline, progress)
+    })?;
     let reply = runtime.with_connection(deadline, progress, |connection, progress| {
-        connection.capture_visual_with_progress(operation, deadline, progress)
+        let mut reply = None;
+        // Entry is immediately before the SDK API call, after Runtime companion
+        // admission. It still does NOT prove a socket write or native dispatch.
+        trace(Phase::CaptureApi, deadline, &mut || {
+            reply = Some(connection.capture_visual_with_progress(operation, deadline, progress)?);
+            Ok(())
+        })?;
+        reply.context("visual capture API returned no reply")
     })?;
     match reply {
         remarkable_open_sdk::native_adapter::Reply::VisualCaptured(image) => {

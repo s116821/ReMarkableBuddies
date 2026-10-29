@@ -170,6 +170,13 @@ fn inspected_pair_precedes_fresh_input_and_never_renews_setup_clock() {
     });
     assert_eq!(acquired.load(Ordering::SeqCst), 2);
     assert_eq!(drops.load(Ordering::SeqCst), 4);
+    // This actual completed visual flow plus the conservative full controller/
+    // recovery inventory reserve fits the unchanged 128-file collector. The
+    // production runtime adds eight reconnect/API events, outer result/shutdown
+    // four; even the hard 48-event cap leaves room for all 42 ordinary records.
+    let events = diagnostics(&root).len();
+    assert!(events + 12 <= 48);
+    assert!(fs::read_dir(&root).unwrap().count() + 12 + 42 <= 128);
 }
 
 #[test]
@@ -405,4 +412,224 @@ fn admission_loss_after_image_io_and_early_completion_never_admit_input() {
             );
         }
     }
+}
+
+fn diagnostics(root: &Path) -> Vec<serde_json::Value> {
+    let mut paths: Vec<_> = fs::read_dir(root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("visual-diagnostic-")
+        })
+        .collect();
+    paths.sort();
+    paths
+        .iter()
+        .map(|path| {
+            let bytes = fs::read(path).unwrap();
+            assert!(bytes.len() <= 4096);
+            serde_json::from_slice(&bytes).unwrap()
+        })
+        .collect()
+}
+
+struct FailingProgress {
+    root: PathBuf,
+    deadline: Instant,
+    fault: &'static str,
+    capture_calls: usize,
+}
+impl Transport for FailingProgress {
+    fn progress(&mut self, deadline: Instant) -> Result<()> {
+        ensure!(deadline <= self.deadline, "deadline renewed");
+        let records = diagnostics(&self.root);
+        if records.last().is_some_and(|record| {
+            record["phase"] == "capture-progress" && record["outcome"] == "entered"
+        }) {
+            // Entry is already readable before a delayed/stalled callback returns.
+            assert!(self.root.join("setup.actor-ended.json.complete").exists());
+            if self.fault == "expired" {
+                thread::sleep(
+                    deadline.saturating_duration_since(Instant::now()) + Duration::from_millis(2),
+                );
+                return check(deadline);
+            }
+            if self.fault == "delayed" {
+                thread::sleep(Duration::from_millis(20));
+            }
+            anyhow::bail!("injected progress refusal");
+        }
+        check(deadline)
+    }
+    fn capture(
+        &mut self,
+        _: Stage,
+        _: Instant,
+        _: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<Image> {
+        self.capture_calls += 1;
+        anyhow::bail!("must not request image after progress failure")
+    }
+}
+
+#[test]
+#[ignore = "protected root filesystem; run in the owned Linux root container"]
+fn diagnostic_progress_errors_are_durable_before_shutdown_without_request_or_ready() {
+    for fault in ["failed", "delayed", "expired"] {
+        let root = root();
+        let binding = binding();
+        let deadline = Instant::now() + Duration::from_millis(500);
+        let mut trace = Diagnostics::new(&root, &binding).unwrap();
+        let mut input = Some(Guard(Arc::new(AtomicUsize::new(0))));
+        let mut transport = FailingProgress {
+            root: root.clone(),
+            deadline,
+            fault,
+            capture_calls: 0,
+        };
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                let mut actor = Mailbox::open(&root).unwrap();
+                actor
+                    .wait("observer-ended", &binding, deadline, &mut || Ok(()))
+                    .unwrap();
+                actor.publish("actor-ended", &binding, deadline).unwrap();
+            });
+            let mut mailbox = Mailbox::open(&root).unwrap();
+            let result = trace.step(None, Phase::CaptureResult, deadline, |trace| {
+                observer_diagnosed(
+                    &mut mailbox,
+                    &binding,
+                    &mut input,
+                    || -> Result<Guard> { panic!("must not reacquire") },
+                    deadline,
+                    &mut transport,
+                    &mut || Ok(()),
+                    trace,
+                )
+            });
+            assert!(result.is_err(), "{fault}");
+            let before_shutdown = diagnostics(&root);
+            assert_eq!(before_shutdown.last().unwrap()["phase"], "capture-result");
+            assert_eq!(before_shutdown.last().unwrap()["outcome"], "error");
+            assert!(before_shutdown.iter().any(
+                |record| record["phase"] == "capture-progress" && record["outcome"] == "error"
+            ));
+            trace.shutdown(deadline, || {
+                let retained = diagnostics(&root);
+                assert_eq!(retained.last().unwrap()["phase"], "shutdown");
+                assert_eq!(retained.last().unwrap()["outcome"], "entered");
+                assert_eq!(retained[..before_shutdown.len()], before_shutdown);
+            });
+        });
+        assert_eq!(transport.capture_calls, 0);
+        assert!(input.is_none());
+        assert!(!root.join(Stage::Before.png()).exists());
+        assert!(!root.join("setup.ready.json.complete").exists());
+        let records = diagnostics(&root);
+        for (sequence, record) in records.iter().enumerate() {
+            assert_eq!(record["binding"], serde_json::to_value(&binding).unwrap());
+            assert_eq!(record["sequence"], sequence);
+            assert_eq!(record["native_authority"], false);
+        }
+        if fault == "expired" {
+            assert_eq!(
+                records
+                    .iter()
+                    .find(|record| record["outcome"] == "error")
+                    .unwrap()["remaining_ms"],
+                0
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "protected root filesystem; run in the owned Linux root container"]
+fn diagnostic_bounds_and_retention_failure_never_skip_shutdown() {
+    for fault in ["exhausted", "preexisting", "primary"] {
+        let root = root();
+        let mut trace = Diagnostics::new(&root, &binding()).unwrap();
+        if fault == "exhausted" {
+            for _ in 0..24 {
+                trace
+                    .step(None, Phase::SetupProgress, end(), |_| Ok(()))
+                    .unwrap();
+            }
+        } else if fault == "preexisting" {
+            write_new(&root, "visual-diagnostic-000.json", b"preserve").unwrap();
+        }
+        let result: Result<()> = trace.step(None, Phase::CaptureResult, end(), |_| {
+            assert_eq!(fault, "primary");
+            anyhow::bail!("primary capture failure {}", "x".repeat(10000))
+        });
+        let error = format!("{:#}", result.unwrap_err());
+        assert!(error.contains(if fault == "primary" {
+            "primary capture failure"
+        } else if fault == "exhausted" {
+            "event bound"
+        } else {
+            "File exists"
+        }));
+        let mut stopped = false;
+        trace.shutdown(end(), || {
+            stopped = true;
+        });
+        assert!(stopped);
+        if fault == "preexisting" {
+            assert_eq!(
+                fs::read(root.join("visual-diagnostic-000.json")).unwrap(),
+                b"preserve"
+            );
+        } else {
+            let records = diagnostics(&root);
+            assert!(records.len() <= 48);
+            if fault == "primary" {
+                let detail = records
+                    .iter()
+                    .find(|record| record["outcome"] == "error")
+                    .unwrap()["detail"]
+                    .as_str()
+                    .unwrap();
+                assert!(detail.starts_with("primary capture failure"));
+                assert_eq!(detail.chars().count(), 512);
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "protected root filesystem; run in the owned Linux root container"]
+fn diagnostic_success_retention_cannot_deliver_after_original_expiry() {
+    let root = root();
+    let mut trace = Diagnostics::new(&root, &binding()).unwrap();
+    let deadline = Instant::now() + Duration::from_millis(30);
+    let result = trace.step(None, Phase::CaptureResult, deadline, |_| {
+        // The callback can return success even when the remaining budget was
+        // consumed by synchronous work; retention must not admit onward work.
+        thread::sleep(
+            deadline.saturating_duration_since(Instant::now()) + Duration::from_millis(2),
+        );
+        Ok(())
+    });
+    assert!(format!("{:#}", result.unwrap_err()).contains("retention exhausted original deadline"));
+    let retained = diagnostics(&root);
+    assert_eq!(
+        retained
+            .iter()
+            .map(|record| record["outcome"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["entered", "returned", "error"]
+    );
+    assert_eq!(retained.last().unwrap()["remaining_ms"], 0);
+    let mut stopped = false;
+    trace.shutdown(deadline, || {
+        assert_eq!(diagnostics(&root)[..retained.len()], retained);
+        stopped = true;
+    });
+    assert!(stopped);
+    assert!(!root.join("setup.ready.json.complete").exists());
 }

@@ -305,3 +305,87 @@ fn capture_cancellation_and_deadline_allow_explicit_same_child_reconnect() {
         assert!(runtime.shutdown(end()).reaped);
     }
 }
+
+#[cfg(feature = "development-resident-bootstrap")]
+#[test]
+#[ignore = "protected root diagnostic evidence; run in the owned Linux root container"]
+fn diagnosed_visual_api_records_reconnect_and_failure_before_owned_shutdown() {
+    use crate::workflow::resident_supervisor::service::bootstrap::setup::{
+        visual::{capture_on_runtime_diagnosed, Diagnostics, Phase, Stage},
+        Binding,
+    };
+    for fault in ["input", "corrupt"] {
+        let fixture = Fixture::new();
+        let mut runtime = fixture
+            .start(
+                if fault == "corrupt" {
+                    "reconnect-capture-corrupt"
+                } else {
+                    "reconnect-idle"
+                },
+                Duration::from_secs(5),
+            )
+            .unwrap();
+        let root = PathBuf::from(format!(
+            "/root/visual-runtime-diagnostics-{}",
+            StoreUuid::new_v4()
+        ));
+        DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let binding = Binding::new(
+            "0123456789abcdef0123456789abcdef",
+            &"11".repeat(32),
+            runtime.identity(),
+        )
+        .unwrap();
+        let mut trace = Diagnostics::new(&root, &binding).unwrap();
+        let records = || {
+            let mut paths: Vec<_> = fs::read_dir(&root)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect();
+            paths.sort();
+            paths
+                .into_iter()
+                .map(|path| {
+                    serde_json::from_slice::<serde_json::Value>(&fs::read(path).unwrap()).unwrap()
+                })
+                .collect::<Vec<_>>()
+        };
+        let result = trace.step(None, Phase::CaptureResult, end(), |trace| {
+            capture_on_runtime_diagnosed(
+                &mut runtime,
+                Stage::Before,
+                end(),
+                &mut || {
+                    ensure!(fault != "input", "guard refused before reconnect");
+                    Ok(())
+                },
+                trace,
+            )
+        });
+        assert!(result.is_err());
+        let retained = records();
+        assert_eq!(retained.last().unwrap()["phase"], "capture-result");
+        assert_eq!(retained.last().unwrap()["outcome"], "error");
+        assert!(retained.iter().any(|record| record["phase"] == "reconnect"));
+        assert_eq!(
+            retained
+                .iter()
+                .any(|record| record["phase"] == "capture-api"),
+            fault == "corrupt"
+        );
+        assert_eq!(
+            fixture.0.join("run/capture-received").exists(),
+            fault == "corrupt"
+        );
+        let store = runtime.store.clone();
+        let shutdown = trace.shutdown(end(), || {
+            assert_eq!(records().last().unwrap()["phase"], "shutdown");
+            assert_eq!(records()[..retained.len()], retained);
+            runtime.shutdown(end())
+        });
+        assert!(shutdown.reaped);
+        assert!(resident_client::attempts(&store).unwrap().is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+}
