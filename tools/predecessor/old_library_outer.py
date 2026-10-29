@@ -28,11 +28,11 @@ def main():
     report = {'status': 'started', 'conversation': conversation, 'calls': [],
               'old_source': '68e42968b4c58b6f8ed1102078d78b40fad33ffc',
               'live_provider_requests': 0, 'tablet_operations': 0,
-              'limits': 'Host-compiled old library; idempotent existing-object controls; no sync engine qualification'}
+              'limits': 'Host-compiled old library; idempotent existing-object controls; real SyncEngine/Worker with pure-memory outbound transport; no inbound sync/new-object/native qualification'}
     receipt_raw = Path(args.build_receipt).read_bytes()
     receipt = json.loads(receipt_raw)
     assert receipt['old_source'] == report['old_source']
-    assert receipt['old_driver_source_sha256'] == 'ec3ed0f9c9dbe6f4f9aec911edfeb738c69f4a828fd0a3c88a692b39aa1c1cee'
+    assert receipt['old_driver_source_sha256'] == 'e0e1e547740f45cd2cebadbd6d1bcba98426d43633f00212961f7d8e56fb5297'
     for name, path, expected in [('old_driver', args.old_driver, args.old_driver_sha256),
                                  ('current_binary', args.current_binary, args.current_binary_sha256)]:
         actual = hashlib.sha256(Path(path).read_bytes()).hexdigest()
@@ -73,7 +73,7 @@ def main():
                     result[str(file.relative_to(root))] = hashlib.sha256(file.read_bytes()).hexdigest()
         return result
 
-    def run(label, argv, payload=None):
+    def run(label, argv, payload=None, decode=True):
         record = {'label': label, 'argv': argv, 'status': 'attempted'}
         report['calls'].append(record)
         try:
@@ -88,7 +88,7 @@ def main():
         (output / (label + '.stderr')).write_bytes(result.stderr)
         record.update(status='completed', exit=result.returncode)
         assert result.returncode == 0
-        return json.loads(result.stdout)
+        return json.loads(result.stdout) if decode else result.stdout.decode()
 
     child = None
     reader = None
@@ -96,6 +96,11 @@ def main():
     lines = queue.Queue()
     child_log = (output / 'old-hold.stderr').open('wb')
     try:
+        help_text = run("current-command-help", [args.current_binary, "--help"], decode=False)
+        assert "--writer-note" in help_text and "--simulate" in help_text, "normal application command required, not test harness"
+        report["current_help_sha256"] = hashlib.sha256(help_text.encode()).hexdigest()
+        report["current_version"] = run("current-command-version", [args.current_binary, "--version"], decode=False).strip()
+        assert report["current_version"]
         child = subprocess.Popen([args.old_driver, 'positive-controls-and-hold', str(root), conversation],
                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=child_log, env=environment, cwd=private)
         def preserve_stdout():
@@ -118,7 +123,12 @@ def main():
         reader.start()
         line = lines.get(timeout=60)
         (output / 'old-ready.stdout').write_bytes(line)
-        assert json.loads(line)['ready'] and child.poll() is None
+        ready = json.loads(line)
+        control = ready['sync_positive_control']
+        assert ready['ready'] and child.poll() is None
+        assert control['worker_authorize_entered'] and control['uploads'] > 0 and control['manifest_objects'] > 0
+        assert 1 <= control['engine_steps'] <= 8 and control['transport_calls'] > 0
+        report['old_positive_controls'] = ready
         before = snapshot()
         refused = run('current-while-old-held', [args.current_binary, '--writer-note'], json.dumps(request).encode())
         assert refused['status'] == 'refused' and refused['failure'] == 'storage' and refused['local_invocations'] == 0

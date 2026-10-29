@@ -115,7 +115,12 @@ jobs:
         if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
       - run: cargo clippy --locked --all-targets --all-features -- -D warnings
         if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
-      - run: cargo test --locked --all-features
+      - name: Run host tests and retain normal-command compiler provenance
+        run: |
+          status=0
+          cargo test --locked --all-features --message-format=json > "$RUNNER_TEMP/current-cargo-test.jsonl" || status=$?
+          cat "$RUNNER_TEMP/current-cargo-test.jsonl"
+          exit "$status"
         if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
       - run: python -m unittest discover -s release -v
         if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
@@ -128,6 +133,13 @@ jobs:
       - name: Verify CI stage and artifact gates
         run: node --test release/fixtures/workflow.test.mjs
         if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
+      - name: Qualify predecessor library inside the existing Checks budget
+        uses: ./.github/actions/predecessor-library
+        if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
+        with:
+          source_sha: ${{ github.sha }}
+          source_head: ${{ github.event.pull_request.head.sha || github.sha }}
+          cargo_messages: ${{ runner.temp }}/current-cargo-test.jsonl
     defaults:
       run:
         shell: bash
