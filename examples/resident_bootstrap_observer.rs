@@ -28,7 +28,7 @@ mod native {
     use super::*;
     use remarkable_open_sdk::{native_adapter::HistoricalCapture, OperationId};
     use remarkable_reader_buddy::workflow::resident_supervisor::service::bootstrap::setup::{
-        capture_after_setup, Binding, ObserverSetup,
+        capture_after_setup, visual, Binding, ObserverSetup,
     };
     use remarkable_reader_buddy::{
         device::{
@@ -53,10 +53,10 @@ mod native {
 
     // Reviewed read-only candidate only. A new native artifact requires a source
     // revision and review, not a command-line override of these identities.
-    // Revision-3 SDK80b29eb capture-native-library-r2 build. Historical revision-2
-    // observers remain frozen with their original candidates and are not replayed.
-    const PROFILE: &str = "cd1d38507aedadc7df1406b5a74843ba7ab307fb51c8213311d71cab6bb0d8ae";
-    const ADAPTER: &str = "3e5dee321c68384bfd042e3697dc405f6f5d0de3891bfadb541bb55efac2b21d";
+    // Revision-4 SDKf03cc72 visual-native-library-r1 build. Earlier observers
+    // remain frozen with their original spent candidates and are not replayed.
+    const PROFILE: &str = "c0d8cbbb9b4618a870de348fedaedbf242b8009bf4615d67bd83d4f3c03a538d";
+    const ADAPTER: &str = "c0121f577e19a484c962ad98ad8f60121e14d0695a3f9198e95978ad07895380";
     const STOCK: &str = "071d85beef3ef2d4cc0e11002140b27b82a2cc04a2ed740a5669f591069b77df";
 
     fn artifact(path: impl Into<std::path::PathBuf>, hash: &str) -> Artifact {
@@ -138,6 +138,32 @@ mod native {
         Ok(())
     }
 
+    struct VisualTransport<'a> {
+        runtime: &'a mut ResidentRuntime,
+        vendor: Option<Arc<service::vendor::OriginalCompanion>>,
+    }
+    impl visual::Transport for VisualTransport<'_> {
+        fn progress(&mut self, deadline: Instant) -> Result<()> {
+            self.runtime.with_connection(
+                deadline,
+                &mut || inactive_services(deadline, self.vendor.as_deref()),
+                |_, progress| progress(),
+            )
+        }
+        fn capture(
+            &mut self,
+            _stage: visual::Stage,
+            deadline: Instant,
+            guard: &mut dyn FnMut() -> Result<()>,
+        ) -> Result<visual::Image> {
+            visual::capture_on_runtime(self.runtime, deadline, &mut || {
+                guard()?;
+                inactive_services(deadline, self.vendor.as_deref())?;
+                guard()
+            })
+        }
+    }
+
     fn capture(
         runtime: &mut ResidentRuntime,
         mut input: Option<RequestInput>,
@@ -149,11 +175,23 @@ mod native {
         let binding = Binding::new(nonce, &setup.candidate_sha256, runtime.identity())?;
         let setup_deadline = overall.min(Instant::now() + Duration::from_secs(120));
         let vendor = setup.vendor();
-        runtime.with_connection(
-            setup_deadline,
-            &mut || inactive_services(setup_deadline, vendor.as_deref()),
-            |_, progress| setup.admit(&binding, &mut input, setup_deadline, progress),
-        )?;
+        if setup.plan.visual_setup == Some(1) {
+            setup.admit_visual(
+                &binding,
+                &mut input,
+                setup_deadline,
+                &mut VisualTransport {
+                    runtime,
+                    vendor: vendor.clone(),
+                },
+            )?;
+        } else {
+            runtime.with_connection(
+                setup_deadline,
+                &mut || inactive_services(setup_deadline, vendor.as_deref()),
+                |_, progress| setup.admit(&binding, &mut input, setup_deadline, progress),
+            )?;
+        }
         let deadline = overall.min(Instant::now() + Duration::from_secs(10));
         let facts = setup.plan.facts()?;
         capture_after_setup(runtime, facts, operation, deadline, &mut || {

@@ -9,6 +9,7 @@ const PAGES: [&str; 3] = [
 ];
 fn fixture() -> (CapturePlan, OpeningMetadata, Vec<SourceEntry>) {
     let plan = CapturePlan {
+        visual_setup: None,
         document: DOC.into(),
         page: PAGES[1].into(),
         order: PAGES.iter().map(|p| (*p).into()).collect(),

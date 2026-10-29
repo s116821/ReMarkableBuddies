@@ -3,19 +3,26 @@
 use super::*;
 use remarkable_open_sdk::{native_adapter::RuntimeIdentity, PageKey, Uuid};
 
+pub mod visual;
+
 const POLL: Duration = Duration::from_millis(20);
-const NAMES: [&str; 6] = [
+const NAMES: [&str; 9] = [
     "observer-ended",
     "actor-ended",
     "ready",
     "complete",
     "observer-admitted",
     "actor-admitted",
+    "visual-before",
+    "visual-after-request",
+    "visual-after",
 ];
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CapturePlan {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visual_setup: Option<u8>,
     pub document: String,
     pub page: String,
     pub order: Vec<String>,
@@ -24,6 +31,10 @@ pub struct CapturePlan {
 }
 impl CapturePlan {
     pub fn facts(&self) -> Result<remarkable_open_sdk::native_adapter::ReaderFacts> {
+        ensure!(
+            matches!(self.visual_setup, None | Some(1)),
+            "unsupported visual setup policy"
+        );
         fn id(value: &str) -> Result<Uuid> {
             let id = Uuid::parse(value).context("invalid fixture UUID")?;
             ensure!(id.to_string() == value, "noncanonical fixture UUID");
@@ -274,6 +285,7 @@ impl Mailbox {
         Ok(format!("setup.{name}.json"))
     }
     pub fn empty(&self) -> Result<()> {
+        self.absent_visual_files()?;
         self.absent(&NAMES)
     }
     fn absent(&self, names: &[&str]) -> Result<()> {
@@ -289,6 +301,15 @@ impl Mailbox {
         Ok(())
     }
     pub fn publish(&mut self, name: &str, binding: &Binding, deadline: Instant) -> Result<()> {
+        self.publish_admitted(name, binding, deadline, &mut || Ok(()))
+    }
+    fn publish_admitted(
+        &mut self,
+        name: &str,
+        binding: &Binding,
+        deadline: Instant,
+        admission: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
         check(deadline)?;
         binding.validate()?;
         self.current()?;
@@ -298,6 +319,9 @@ impl Mailbox {
             "preexisting setup completion"
         );
         write_new(&self.root, &leaf, &serde_json::to_vec(binding)?)?;
+        admission()?;
+        self.current()?;
+        check(deadline)?;
         write_new(&self.root, &format!("{leaf}.complete"), b"")?;
         ensure!(
             self.receive(name, deadline)?.as_ref() == Some(binding),
@@ -407,6 +431,29 @@ pub fn actor<I: InputGuard>(
     deadline: Instant,
     progress: &mut dyn FnMut() -> Result<()>,
 ) -> Result<()> {
+    actor_selected(mailbox, binding, input, acquire, deadline, progress, false)
+}
+
+pub fn actor_visual<I: InputGuard>(
+    mailbox: &mut Mailbox,
+    binding: &Binding,
+    input: &mut Option<I>,
+    acquire: impl FnOnce() -> Result<I>,
+    deadline: Instant,
+    progress: &mut dyn FnMut() -> Result<()>,
+) -> Result<()> {
+    actor_selected(mailbox, binding, input, acquire, deadline, progress, true)
+}
+
+pub fn actor_selected<I: InputGuard>(
+    mailbox: &mut Mailbox,
+    binding: &Binding,
+    input: &mut Option<I>,
+    acquire: impl FnOnce() -> Result<I>,
+    deadline: Instant,
+    progress: &mut dyn FnMut() -> Result<()>,
+    visual: bool,
+) -> Result<()> {
     check(deadline)?;
     progress()?;
     mailbox.absent(&[
@@ -420,6 +467,11 @@ pub fn actor<I: InputGuard>(
     drop(input.take());
     mailbox.publish("actor-ended", binding, deadline)?;
     mailbox.wait("complete", binding, deadline, progress)?;
+    if visual {
+        mailbox.require_visual_pair(binding, deadline)?;
+        progress()?;
+        check(deadline)?;
+    }
     *input = Some(acquire()?);
     quiet(input)?;
     mailbox.wait("observer-admitted", binding, deadline, &mut || {

@@ -96,7 +96,7 @@ while True:
     assert struct.unpack("3i", credentials)[:2] == (os.getppid(), os.geteuid())
     try:
         hello = bytearray(frame())
-        assert len(hello) == 203 and hello[:6] == b"RSDK\x00\x03" and hello[202] == 0
+        assert len(hello) == 203 and hello[:6] == b"RSDK\x00\x04" and hello[202] == 0
         assert hello[6:118] == admission[8:120]
         assert struct.unpack(">I", hello[118:122])[0] == os.getpid()
         assert hello[130:146] == admission[120:136]
@@ -125,9 +125,11 @@ while True:
                 with (root / "commands").open("ab") as commands:
                     commands.write(request[202:204])
             digest = hashlib.sha256(struct.pack(">I", len(request)) + request).digest()
-            if request[202:204] == b"\x02\x05":
+            if request[202:204] in (b"\x02\x05", b"\x02\x06"):
                 # Independent owned PNG encoder, not a native Reader model.
+                visual = request[203] == 6
                 facts = request[204:]
+                assert not visual or not facts
                 (root / "capture-received").touch()
                 if mode in ("reconnect-capture-cancel", "reconnect-capture-timeout") and count == 1:
                     assert peer.recv(1) == b""
@@ -145,10 +147,10 @@ while True:
                 image_hash = hashlib.sha256(png).digest()
                 if mode == "reconnect-capture-corrupt":
                     png = png[:-1] + bytes([png[-1] ^ 1])
-                if mode == "reconnect-capture-source":
+                if mode == "reconnect-capture-source" and not visual:
                     facts = bytes([facts[0] ^ 1]) + facts[1:]
-                capture = facts + facts + struct.pack(">IIdB", width, height, 1.0, 1) + image_hash + struct.pack(">I", len(png)) + png
-                response = request[:202] + b"\x03" + digest + b"\x07" + capture
+                capture = facts + facts + struct.pack(">IIdB", width, height, 1.0, 2 if visual else 1) + image_hash + struct.pack(">I", len(png)) + png
+                response = request[:202] + b"\x03" + digest + (b"\x08" if visual else b"\x07") + capture
                 if mode == "reconnect-capture-eof":
                     peer.sendall(struct.pack(">I", len(response)) + response[:500])
                     break

@@ -39,12 +39,22 @@ fn root() -> PathBuf {
 #[test]
 fn capture_plan_validates_full_order_and_canonical_ids() {
     let mut plan = CapturePlan {
+        visual_setup: None,
         opening_metadata: None,
         document: binding().boot,
         page: binding().activation,
         order: vec![binding().activation],
     };
     assert!(plan.facts().is_ok());
+    assert!(serde_json::to_value(&plan)
+        .unwrap()
+        .get("visual_setup")
+        .is_none());
+    for policy in [0, 1, 2] {
+        plan.visual_setup = Some(policy);
+        assert_eq!(plan.facts().is_ok(), policy == 1);
+    }
+    plan.visual_setup = None;
     plan.order.push(plan.page.clone());
     assert!(plan.facts().is_err());
     plan.order.clear();

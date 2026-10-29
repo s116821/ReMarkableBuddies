@@ -71,6 +71,106 @@ fn diagnostic_capture_reconnects_after_setup_idle_retirement_without_observe_or_
         assert!(runtime.shutdown(end()).reaped);
     }
 }
+
+#[cfg(feature = "development-resident-bootstrap")]
+#[test]
+fn visual_pair_then_source_use_three_explicit_connections_to_the_same_child() {
+    use crate::workflow::resident_supervisor::service::bootstrap::setup::{
+        capture_after_setup, visual::capture_on_runtime,
+    };
+    let fixture = Fixture::new();
+    let mut runtime = fixture
+        .start("reconnect-idle", Duration::from_secs(5))
+        .unwrap();
+    let identity = runtime.identity().clone();
+    let deadline = end();
+    while !fixture.0.join("run/idle-retired").exists() {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(10));
+    }
+    let before = capture_on_runtime(&mut runtime, deadline, &mut || Ok(())).unwrap();
+    let after = capture_on_runtime(&mut runtime, deadline, &mut || Ok(())).unwrap();
+    assert_ne!(before.operation, after.operation);
+    let pixels: Vec<u8> = (0..2304u32)
+        .flat_map(|i| Sha256::digest(i.to_be_bytes()).to_vec())
+        .collect();
+    for visual in [&before.image, &after.image] {
+        assert_eq!(visual.dimensions(), [192, 128]);
+        assert_eq!(
+            image::load_from_memory(visual.png())
+                .unwrap()
+                .into_rgb8()
+                .as_raw(),
+            &pixels
+        );
+    }
+    let expected = facts();
+    let source = capture_after_setup(
+        &mut runtime,
+        expected.clone(),
+        OperationId(nonce()),
+        deadline,
+        &mut || Ok(()),
+    )
+    .unwrap();
+    assert_eq!(source.before(), &expected);
+    assert_eq!(runtime.identity(), &identity);
+    assert_eq!(
+        fs::read(fixture.0.join("run/commands")).unwrap(),
+        [2, 6, 2, 6, 2, 5]
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.0.join("run/handshakes")).unwrap(),
+        "4"
+    );
+    assert!(resident_client::attempts(&runtime.store)
+        .unwrap()
+        .is_empty());
+    assert!(runtime.shutdown(end()).reaped);
+}
+
+#[cfg(feature = "development-resident-bootstrap")]
+#[test]
+fn visual_refusal_before_dispatch_and_damaged_responses_create_no_mutation_history() {
+    use crate::workflow::resident_supervisor::service::bootstrap::setup::visual::capture_on_runtime;
+    for fault in ["input", "expired", "after-handshake", "corrupt", "eof"] {
+        let fixture = Fixture::new();
+        let mode = match fault {
+            "corrupt" => "reconnect-capture-corrupt",
+            "eof" => "reconnect-capture-eof",
+            _ => "reconnect-idle",
+        };
+        let mut runtime = fixture.start(mode, Duration::from_secs(5)).unwrap();
+        let identity = runtime.identity().clone();
+        let result = capture_on_runtime(
+            &mut runtime,
+            if fault == "expired" {
+                Instant::now()
+            } else {
+                end()
+            },
+            &mut || {
+                ensure!(fault != "input", "fresh input canceled");
+                ensure!(
+                    fault != "after-handshake"
+                        || fs::read_to_string(fixture.0.join("run/handshakes"))? != "2",
+                    "guard canceled after reconnect"
+                );
+                Ok(())
+            },
+        );
+        assert!(result.is_err(), "{fault}");
+        assert_eq!(runtime.identity(), &identity);
+        assert_eq!(
+            fixture.0.join("run/capture-received").exists(),
+            matches!(fault, "corrupt" | "eof")
+        );
+        assert!(resident_client::attempts(&runtime.store)
+            .unwrap()
+            .is_empty());
+        assert!(runtime.shutdown(end()).reaped);
+    }
+}
 fn facts() -> ReaderFacts {
     let page = PageKey {
         document: nonce(),

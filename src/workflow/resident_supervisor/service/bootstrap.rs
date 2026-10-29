@@ -1068,7 +1068,7 @@ fn actor(mut context: Context, deadline: Instant) -> Result<()> {
             }
             pace(setup_deadline);
         };
-        setup::actor(
+        setup::actor_selected(
             mailbox,
             &binding,
             &mut input,
@@ -1082,6 +1082,11 @@ fn actor(mut context: Context, deadline: Instant) -> Result<()> {
                 }
                 Ok(())
             },
+            context
+                .candidate
+                .capture
+                .as_ref()
+                .is_some_and(|p| p.visual_setup == Some(1)),
         )?;
     }
     if matches!(context.candidate.fault, Fault::ActorKill | Fault::ActorHang) {
@@ -1439,7 +1444,7 @@ pub fn entry(arguments: Vec<String>) -> Result<()> {
     nonce(&arguments[1])?;
     let name = &arguments[1];
     let role = arguments[0].as_str();
-    if role == "setup-complete" {
+    if role == "setup-complete" || role == "setup-visual-after" {
         ensure!(arguments.len() == 2, "unexpected setup arguments");
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut context = Context::load(name, deadline)?;
@@ -1476,11 +1481,40 @@ pub fn entry(arguments: Vec<String>) -> Result<()> {
                 "original companion is not stopped"
             );
         }
+        let visual = context
+            .candidate
+            .capture
+            .as_ref()
+            .is_some_and(|p| p.visual_setup == Some(1));
+        if role == "setup-visual-after" {
+            ensure!(visual, "visual setup not selected");
+            mailbox.validate_visual_after_request(&binding, deadline)?;
+        } else if visual {
+            mailbox.require_visual_pair(&binding, deadline)?;
+        }
         context.current(deadline)?;
         ownership_pin.current()?;
         actor.current(deadline)?;
-        mailbox.publish("complete", &binding, deadline)?;
-        println!("setup_complete=true reader_identity=false");
+        binding.current(&context, binding.observer_pid())?;
+        for role in ["stock", "buddy"] {
+            stopped(
+                &ServiceBaseline::decode(context.expected(role).baseline.as_bytes())?,
+                deadline,
+            )?;
+        }
+        if let Some(vendor) = &context.vendor {
+            ensure!(
+                vendor.stopped(deadline)?,
+                "original companion is not stopped"
+            );
+        }
+        if role == "setup-visual-after" {
+            mailbox.publish("visual-after-request", &binding, deadline)?;
+            println!("visual_after_requested=true reader_identity=false");
+        } else {
+            mailbox.publish("complete", &binding, deadline)?;
+            println!("setup_complete=true reader_identity=false");
+        }
         return Ok(());
     }
     if role == "inspect-companion" {

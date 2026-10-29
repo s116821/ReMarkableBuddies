@@ -22,6 +22,7 @@ fn candidate(version: u32, kind: Kind, capture: bool, companion: bool) -> Candid
         source: Vec::new(),
         unit_files: Vec::new(),
         capture: capture.then(|| setup::CapturePlan {
+            visual_setup: None,
             document: String::new(),
             page: String::new(),
             order: Vec::new(),
