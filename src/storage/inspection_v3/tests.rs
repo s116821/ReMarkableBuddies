@@ -153,7 +153,7 @@ mod linux_controls {
         assert_eq!(f.snapshot(), before);
     }
     fn inject_tombstone(f: &Fixture, namespace: storage::Namespace) {
-        use storage::{digest, Envelope, Kind, Manifest, ObjectRef, Scope};
+        use storage::{Envelope, Kind};
         let identity: Value =
             storage::files::json(&f.paths().data.join("identity.json"), 4096).unwrap();
         let envelope = Envelope {
@@ -169,8 +169,12 @@ mod linux_controls {
             payload: Value::Null,
             media_descriptors: vec![],
         };
+        inject_envelope(f, &envelope);
+    }
+    fn inject_envelope(f: &Fixture, envelope: &storage::Envelope) -> (PathBuf, PathBuf) {
+        use storage::{digest, Coverage, Manifest, ObjectRef, Scope};
         envelope.validate().unwrap();
-        let bytes = serde_json::to_vec(&envelope).unwrap();
+        let bytes = serde_json::to_vec(envelope).unwrap();
         let hash = digest(&bytes);
         let transaction_id = Uuid::new_v4();
         let manifest = Manifest {
@@ -181,19 +185,32 @@ mod linux_controls {
                 sha256: hash.clone(),
                 bytes: bytes.len() as u64,
             }],
-            record_namespaces: BTreeMap::from([(hash.clone(), namespace)]),
-            media: vec![],
-            media_coverage: vec![],
+            record_namespaces: BTreeMap::from([(hash.clone(), envelope.namespace)]),
+            media: envelope
+                .media_descriptors
+                .iter()
+                .map(|m| ObjectRef {
+                    sha256: m.sha256.clone(),
+                    bytes: m.bytes,
+                })
+                .collect(),
+            media_coverage: envelope
+                .media_descriptors
+                .iter()
+                .map(|m| Coverage::Included {
+                    sha256: m.sha256.clone(),
+                })
+                .collect(),
         };
         manifest.validate().unwrap();
-        fs::write(f.generation().join("objects").join(hash), bytes).unwrap();
-        fs::write(
-            f.generation()
-                .join("commits")
-                .join(format!("{transaction_id}.json")),
-            serde_json::to_vec(&manifest).unwrap(),
-        )
-        .unwrap();
+        let object_path = f.generation().join("objects").join(hash);
+        let manifest_path = f
+            .generation()
+            .join("commits")
+            .join(format!("{transaction_id}.json"));
+        fs::write(&object_path, bytes).unwrap();
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        (object_path, manifest_path)
     }
     #[test]
     fn feedback_tombstones_refuse_with_or_without_feature_but_generic_tombstones_remain_valid() {
@@ -411,6 +428,7 @@ mod linux_controls {
             .unwrap(),
             media_descriptors: vec![media.clone()],
         };
+        let mut foreign_envelope = envelope.clone();
         let source_revision = digest(&serde_json::to_vec(&envelope).unwrap());
         store
             .commit(
@@ -519,7 +537,7 @@ mod linux_controls {
         let media_path = f.generation().join("objects").join(&media.sha256);
         use std::os::unix::fs::PermissionsExt;
         let original_permissions = fs::metadata(&media_path).unwrap().permissions();
-        fs::set_permissions(&media_path, fs::Permissions::from_mode(0)).unwrap();
+        fs::set_permissions(&media_path, fs::Permissions::from_mode(0o0)).unwrap();
         let denied_media_read = fs::File::open(&media_path).is_err();
         let v = f.report();
         fs::set_permissions(&media_path, original_permissions).unwrap();
@@ -545,6 +563,19 @@ mod linux_controls {
         assert!(!v.to_string().contains("PRIVATE_NOTE_REQUEST"));
         assert!(!v.to_string().contains("PRIVATE_ARCHIVED_TEXT"));
         assert_eq!(f.snapshot(), before);
+        foreign_envelope.actor_id = Uuid::new_v4();
+        foreign_envelope.revision_id = Uuid::new_v4();
+        foreign_envelope.operation_id = Uuid::new_v4();
+        let (foreign_object, foreign_manifest) = inject_envelope(&f, &foreign_envelope);
+        let v = f.report();
+        assert_eq!(v["status"], "partial");
+        assert!(v["issues"]["invalid-reference"].is_string());
+        assert_eq!(
+            v["observed_notebook_records"]["archived-normalized-source"]["files"],
+            "1"
+        );
+        fs::remove_file(foreign_manifest).unwrap();
+        fs::remove_file(foreign_object).unwrap();
         fs::remove_file(f.generation().join("objects").join(media.sha256)).unwrap();
         let v = f.report();
         assert_eq!(v["status"], "partial");

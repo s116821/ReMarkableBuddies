@@ -219,16 +219,18 @@ impl Scan {
         if envelope.kind == Kind::Tombstone {
             return Some(None);
         }
+        if envelope.domain_schema_version == 3
+            && (version != 4 || Some(envelope.actor_id) != self.report.owner_actor)
+        {
+            self.issue("invalid-reference");
+            return None;
+        }
         if matches!(
             envelope.namespace,
             Namespace::Source | Namespace::Conversation | Namespace::ExportAssociation
         ) {
             match Ledger::decode(envelope) {
                 Ok(record) => {
-                    if envelope.domain_schema_version == 3 && version != 4 {
-                        self.issue("invalid-reference");
-                        return None;
-                    }
                     return Some(match record {
                         Record::ArchivedNormalizedSource(_) => {
                             Some(NotebookKind::ArchivedNormalizedSource)
