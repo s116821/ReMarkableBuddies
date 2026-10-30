@@ -1,0 +1,4858 @@
+{
+  "fixture_version": 1,
+  "source_basis": "Synthetic literal/reference premises reconciled from Main b10caaaf. No producer/consumer/file/network execution. Catalog expectations are not direct literal executions.",
+  "reference": {
+    "config_path": "/home/root/.config/remarkable-buddies/config.json",
+    "original_utf8": "{}",
+    "target_utf8": "{\"product_settings\":{\"reader_enabled\":false,\"schema_version\":1}}",
+    "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+    "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+    "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+    "operation": "11111111-1111-4111-8111-111111111111",
+    "intent": {
+      "product_settings_version": 1,
+      "operation": "11111111-1111-4111-8111-111111111111",
+      "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+      "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+      "changes": {
+        "reader_enabled": {
+          "action": "set",
+          "value": false
+        }
+      }
+    }
+  },
+  "storage": [
+    {
+      "id": "set-reader-from-absent",
+      "original_utf8": "{}",
+      "changes": {
+        "reader_enabled": {
+          "action": "set",
+          "value": false
+        }
+      },
+      "expected_status": "ok",
+      "expected_target_utf8": "{\"product_settings\":{\"reader_enabled\":false,\"schema_version\":1}}",
+      "expected_changed": true
+    },
+    {
+      "id": "set-writer-from-null",
+      "original_utf8": "{\"product_settings\":null}",
+      "changes": {
+        "writer_enabled": {
+          "action": "set",
+          "value": false
+        }
+      },
+      "expected_status": "ok",
+      "expected_target_utf8": "{\"product_settings\":{\"schema_version\":1,\"writer_enabled\":false}}",
+      "expected_changed": true
+    },
+    {
+      "id": "clear-absent-whitespace",
+      "original_utf8": "{  }\n",
+      "changes": {
+        "writer_enabled": {
+          "action": "clear"
+        }
+      },
+      "expected_status": "ok",
+      "expected_target_utf8": "{  }\n",
+      "expected_changed": false
+    },
+    {
+      "id": "clear-beneath-null",
+      "original_utf8": "{\"product_settings\":null}",
+      "changes": {
+        "reader_enabled": {
+          "action": "clear"
+        }
+      },
+      "expected_status": "ok",
+      "expected_target_utf8": "{\"product_settings\":null}",
+      "expected_changed": false
+    },
+    {
+      "id": "clear-last-version",
+      "original_utf8": "{\"product_settings\":{\"schema_version\":1,\"reader_enabled\":false}}",
+      "changes": {
+        "reader_enabled": {
+          "action": "clear"
+        }
+      },
+      "expected_status": "ok",
+      "expected_target_utf8": "{\"product_settings\":{\"schema_version\":1}}",
+      "expected_changed": true
+    },
+    {
+      "id": "clear-last-no-version",
+      "original_utf8": "{\"product_settings\":{\"reader_enabled\":false}}",
+      "changes": {
+        "reader_enabled": {
+          "action": "clear"
+        }
+      },
+      "expected_status": "ok",
+      "expected_target_utf8": "{\"product_settings\":{}}",
+      "expected_changed": true
+    },
+    {
+      "id": "set-preserves-omitted-version",
+      "original_utf8": "{\"product_settings\":{}}",
+      "changes": {
+        "reader_enabled": {
+          "action": "set",
+          "value": false
+        }
+      },
+      "expected_status": "ok",
+      "expected_target_utf8": "{\"product_settings\":{\"reader_enabled\":false}}",
+      "expected_changed": true
+    },
+    {
+      "id": "declare-default",
+      "original_utf8": "{}",
+      "changes": {
+        "reader_enabled": {
+          "action": "set",
+          "value": true
+        }
+      },
+      "expected_status": "ok",
+      "expected_target_utf8": "{\"product_settings\":{\"reader_enabled\":true,\"schema_version\":1}}",
+      "expected_changed": true
+    },
+    {
+      "id": "no-change-preserves-format",
+      "original_utf8": "{ \"product_settings\": { \"reader_enabled\": true } }\n",
+      "changes": {
+        "reader_enabled": {
+          "action": "set",
+          "value": true
+        }
+      },
+      "expected_status": "ok",
+      "expected_target_utf8": "{ \"product_settings\": { \"reader_enabled\": true } }\n",
+      "expected_changed": false
+    },
+    {
+      "id": "preserve-sibling-and-private-model",
+      "original_utf8": "{\"model\":\"SYNTHETIC-PRIVATE\",\"product_settings\":{\"writer_enabled\":false,\"reader_enabled\":false}}",
+      "changes": {
+        "reader_enabled": {
+          "action": "clear"
+        }
+      },
+      "expected_status": "ok",
+      "expected_target_utf8": "{\"model\":\"SYNTHETIC-PRIVATE\",\"product_settings\":{\"writer_enabled\":false}}",
+      "expected_changed": true
+    },
+    {
+      "id": "disable-export",
+      "original_utf8": "{}",
+      "changes": {
+        "export_destination": {
+          "action": "set",
+          "value": "disabled"
+        }
+      },
+      "expected_status": "ok",
+      "expected_target_utf8": "{\"product_settings\":{\"export_destination\":\"disabled\",\"schema_version\":1}}",
+      "expected_changed": true
+    },
+    {
+      "id": "array",
+      "original_utf8": "{\"product_settings\":[]}",
+      "changes": {
+        "reader_enabled": {
+          "action": "set",
+          "value": false
+        }
+      },
+      "expected_status": "invalid-input",
+      "expected_target_utf8": null,
+      "expected_changed": false
+    },
+    {
+      "id": "null-leaf",
+      "original_utf8": "{\"product_settings\":{\"writer_enabled\":null}}",
+      "changes": {
+        "reader_enabled": {
+          "action": "set",
+          "value": false
+        }
+      },
+      "expected_status": "invalid-input",
+      "expected_target_utf8": null,
+      "expected_changed": false
+    },
+    {
+      "id": "null-version",
+      "original_utf8": "{\"product_settings\":{\"schema_version\":null}}",
+      "changes": {
+        "reader_enabled": {
+          "action": "set",
+          "value": false
+        }
+      },
+      "expected_status": "invalid-input",
+      "expected_target_utf8": null,
+      "expected_changed": false
+    },
+    {
+      "id": "float-version",
+      "original_utf8": "{\"product_settings\":{\"schema_version\":1.0}}",
+      "changes": {
+        "reader_enabled": {
+          "action": "set",
+          "value": false
+        }
+      },
+      "expected_status": "invalid-input",
+      "expected_target_utf8": null,
+      "expected_changed": false
+    },
+    {
+      "id": "future-version",
+      "original_utf8": "{\"product_settings\":{\"schema_version\":2}}",
+      "changes": {
+        "reader_enabled": {
+          "action": "set",
+          "value": false
+        }
+      },
+      "expected_status": "unsupported",
+      "expected_target_utf8": null,
+      "expected_changed": false
+    },
+    {
+      "id": "unknown-key",
+      "original_utf8": "{\"product_settings\":{\"other\":true}}",
+      "changes": {
+        "reader_enabled": {
+          "action": "set",
+          "value": false
+        }
+      },
+      "expected_status": "invalid-input",
+      "expected_target_utf8": null,
+      "expected_changed": false
+    },
+    {
+      "id": "duplicate-key",
+      "original_utf8": "{\"product_settings\":{\"reader_enabled\":true,\"reader_enabled\":false}}",
+      "changes": {
+        "reader_enabled": {
+          "action": "set",
+          "value": false
+        }
+      },
+      "expected_status": "invalid-input",
+      "expected_target_utf8": null,
+      "expected_changed": false
+    },
+    {
+      "id": "unknown-destination",
+      "original_utf8": "{\"product_settings\":{\"export_destination\":\"other\"}}",
+      "changes": {
+        "reader_enabled": {
+          "action": "set",
+          "value": false
+        }
+      },
+      "expected_status": "invalid-input",
+      "expected_target_utf8": null,
+      "expected_changed": false
+    }
+  ],
+  "raw_protocol": [
+    {
+      "id": "inspect-defaults",
+      "operation": "inspect",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"schema_version\":1,\"base_sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"config_path_sha256\":\"79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555\",\"current\":{\"export_destination\":{\"origin\":\"default\",\"value\":\"mem\"},\"reader_enabled\":{\"origin\":\"default\",\"value\":true},\"writer_enabled\":{\"origin\":\"default\",\"value\":true}}}}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "prepare-reader-false",
+      "operation": "prepare",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"ok\",\"outcome\":\"prepared\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"before\":{\"export_destination\":{\"origin\":\"default\",\"value\":\"mem\"},\"reader_enabled\":{\"origin\":\"default\",\"value\":true},\"writer_enabled\":{\"origin\":\"default\",\"value\":true}},\"after\":{\"export_destination\":{\"origin\":\"default\",\"value\":\"mem\"},\"reader_enabled\":{\"origin\":\"declared\",\"value\":false},\"writer_enabled\":{\"origin\":\"default\",\"value\":true}},\"intent\":{\"product_settings_version\":1,\"operation\":\"11111111-1111-4111-8111-111111111111\",\"base_sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"target_sha256\":\"6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f\",\"config_path_sha256\":\"79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555\",\"changes\":{\"reader_enabled\":{\"action\":\"set\",\"value\":false}}}}}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "apply-restart-required",
+      "operation": "apply",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"ok\",\"outcome\":\"verified\",\"disk_readback_verified\":true,\"runtime_activation\":\"restart-required\",\"data\":{\"current\":{\"export_destination\":{\"origin\":\"default\",\"value\":\"mem\"},\"reader_enabled\":{\"origin\":\"declared\",\"value\":false},\"writer_enabled\":{\"origin\":\"default\",\"value\":true}},\"target_sha256\":\"6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f\"}}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "status-desired",
+      "operation": "status",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"status\",\"status\":\"ok\",\"outcome\":\"desired-file-observed\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"current\":{\"export_destination\":{\"origin\":\"default\",\"value\":\"mem\"},\"reader_enabled\":{\"origin\":\"declared\",\"value\":false},\"writer_enabled\":{\"origin\":\"default\",\"value\":true}},\"observed_sha256\":\"6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f\"}}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "status-unresolved",
+      "operation": "status",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"status\",\"status\":\"ok\",\"outcome\":\"unresolved\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"current\":{\"export_destination\":{\"origin\":\"default\",\"value\":\"mem\"},\"reader_enabled\":{\"origin\":\"default\",\"value\":true},\"writer_enabled\":{\"origin\":\"default\",\"value\":true}},\"observed_sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\"}}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "prepare-no-change",
+      "operation": "prepare",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"ok\",\"outcome\":\"no-change\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"current\":{\"export_destination\":{\"origin\":\"default\",\"value\":\"mem\"},\"reader_enabled\":{\"origin\":\"default\",\"value\":true},\"writer_enabled\":{\"origin\":\"default\",\"value\":true}},\"base_sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\"}}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "writer_enabled": {
+            "action": "clear"
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "inspect-invalid-input",
+      "operation": "inspect",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"invalid-input\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "inspect-unsupported",
+      "operation": "inspect",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"unsupported\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "inspect-unavailable",
+      "operation": "inspect",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"unavailable\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "inspect-busy",
+      "operation": "inspect",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"busy\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "inspect-conflict",
+      "operation": "inspect",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"conflict\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "inspect-failed",
+      "operation": "inspect",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"failed\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "prepare-invalid-input",
+      "operation": "prepare",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "prepare-unsupported",
+      "operation": "prepare",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"unsupported\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "prepare-unavailable",
+      "operation": "prepare",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"unavailable\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "prepare-busy",
+      "operation": "prepare",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"busy\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "prepare-conflict",
+      "operation": "prepare",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"conflict\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "prepare-failed",
+      "operation": "prepare",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"failed\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "apply-invalid-input",
+      "operation": "apply",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "apply-unsupported",
+      "operation": "apply",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"unsupported\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "apply-unavailable",
+      "operation": "apply",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"unavailable\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "apply-busy",
+      "operation": "apply",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"busy\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "apply-conflict",
+      "operation": "apply",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"conflict\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "apply-failed",
+      "operation": "apply",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"failed\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "status-invalid-input",
+      "operation": "status",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"status\",\"status\":\"invalid-input\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "status-unsupported",
+      "operation": "status",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"status\",\"status\":\"unsupported\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "status-unavailable",
+      "operation": "status",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"status\",\"status\":\"unavailable\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "status-busy",
+      "operation": "status",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"status\",\"status\":\"busy\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "status-conflict",
+      "operation": "status",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"status\",\"status\":\"conflict\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "status-failed",
+      "operation": "status",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"status\",\"status\":\"failed\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "apply-unknown",
+      "operation": "apply",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"failed\",\"outcome\":\"unknown\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "extra-envelope",
+      "operation": "inspect",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"schema_version\":1,\"base_sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"config_path_sha256\":\"79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555\",\"current\":{\"export_destination\":{\"origin\":\"default\",\"value\":\"mem\"},\"reader_enabled\":{\"origin\":\"default\",\"value\":true},\"writer_enabled\":{\"origin\":\"default\",\"value\":true}}},\"private_path\":\"/synthetic/private\"}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "future-report",
+      "operation": "inspect",
+      "raw_utf8": "{\"report_version\":2,\"operation\":\"inspect\",\"status\":\"ok\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"schema_version\":1,\"base_sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"config_path_sha256\":\"79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555\",\"current\":{\"export_destination\":{\"origin\":\"default\",\"value\":\"mem\"},\"reader_enabled\":{\"origin\":\"default\",\"value\":true},\"writer_enabled\":{\"origin\":\"default\",\"value\":true}}}}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "bool-report-version",
+      "operation": "inspect",
+      "raw_utf8": "{\"report_version\":true,\"operation\":\"inspect\",\"status\":\"ok\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"schema_version\":1,\"base_sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"config_path_sha256\":\"79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555\",\"current\":{\"export_destination\":{\"origin\":\"default\",\"value\":\"mem\"},\"reader_enabled\":{\"origin\":\"default\",\"value\":true},\"writer_enabled\":{\"origin\":\"default\",\"value\":true}}}}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "null-data",
+      "operation": "inspect",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "wrong-operation",
+      "operation": "inspect",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"ok\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"schema_version\":1,\"base_sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"config_path_sha256\":\"79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555\",\"current\":{\"export_destination\":{\"origin\":\"default\",\"value\":\"mem\"},\"reader_enabled\":{\"origin\":\"default\",\"value\":true},\"writer_enabled\":{\"origin\":\"default\",\"value\":true}}}}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "true-readonly",
+      "operation": "inspect",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"outcome\":\"read-only\",\"disk_readback_verified\":true,\"runtime_activation\":\"unverified\",\"data\":{\"schema_version\":1,\"base_sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"config_path_sha256\":\"79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555\",\"current\":{\"export_destination\":{\"origin\":\"default\",\"value\":\"mem\"},\"reader_enabled\":{\"origin\":\"default\",\"value\":true},\"writer_enabled\":{\"origin\":\"default\",\"value\":true}}}}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "false-default",
+      "operation": "inspect",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"schema_version\":1,\"base_sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"config_path_sha256\":\"79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555\",\"current\":{\"export_destination\":{\"origin\":\"default\",\"value\":\"mem\"},\"reader_enabled\":{\"origin\":\"default\",\"value\":false},\"writer_enabled\":{\"origin\":\"default\",\"value\":true}}}}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "null-leaf",
+      "operation": "inspect",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"schema_version\":1,\"base_sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"config_path_sha256\":\"79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555\",\"current\":{\"export_destination\":{\"origin\":\"default\",\"value\":\"mem\"},\"reader_enabled\":{\"origin\":\"default\",\"value\":true},\"writer_enabled\":{\"origin\":\"default\",\"value\":null}}}}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "wrong-origin",
+      "operation": "inspect",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"schema_version\":1,\"base_sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"config_path_sha256\":\"79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555\",\"current\":{\"export_destination\":{\"origin\":\"default\",\"value\":\"mem\"},\"reader_enabled\":{\"origin\":\"default\",\"value\":true},\"writer_enabled\":{\"origin\":\"declared-null\",\"value\":true}}}}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "destination-url",
+      "operation": "inspect",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"schema_version\":1,\"base_sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"config_path_sha256\":\"79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555\",\"current\":{\"export_destination\":{\"origin\":\"declared\",\"value\":\"https://example.invalid\"},\"reader_enabled\":{\"origin\":\"default\",\"value\":true},\"writer_enabled\":{\"origin\":\"default\",\"value\":true}}}}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "private-current-member",
+      "operation": "inspect",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"schema_version\":1,\"base_sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"config_path_sha256\":\"79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555\",\"current\":{\"export_destination\":{\"origin\":\"default\",\"value\":\"mem\"},\"reader_enabled\":{\"origin\":\"default\",\"value\":true},\"writer_enabled\":{\"origin\":\"default\",\"value\":true},\"secret\":\"SYNTHETIC-PRIVATE\"}}}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "duplicate-version",
+      "operation": "inspect",
+      "raw_utf8": "{\"report_version\":1,\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"schema_version\":1,\"base_sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"config_path_sha256\":\"79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555\",\"current\":{\"export_destination\":{\"origin\":\"default\",\"value\":\"mem\"},\"reader_enabled\":{\"origin\":\"default\",\"value\":true},\"writer_enabled\":{\"origin\":\"default\",\"value\":true}}}}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "duplicate-nested",
+      "operation": "inspect",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"schema_version\":1,\"base_sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"config_path_sha256\":\"79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555\",\"current\":{\"export_destination\":{\"origin\":\"default\",\"origin\":\"default\",\"value\":\"mem\"},\"reader_enabled\":{\"origin\":\"default\",\"value\":true},\"writer_enabled\":{\"origin\":\"default\",\"value\":true}}}}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "fraction-version",
+      "operation": "inspect",
+      "raw_utf8": "{\"report_version\":1.0,\"operation\":\"inspect\",\"status\":\"ok\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"schema_version\":1,\"base_sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"config_path_sha256\":\"79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555\",\"current\":{\"export_destination\":{\"origin\":\"default\",\"value\":\"mem\"},\"reader_enabled\":{\"origin\":\"default\",\"value\":true},\"writer_enabled\":{\"origin\":\"default\",\"value\":true}}}}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "exponent-version",
+      "operation": "inspect",
+      "raw_utf8": "{\"report_version\":1e0,\"operation\":\"inspect\",\"status\":\"ok\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"schema_version\":1,\"base_sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"config_path_sha256\":\"79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555\",\"current\":{\"export_destination\":{\"origin\":\"default\",\"value\":\"mem\"},\"reader_enabled\":{\"origin\":\"default\",\"value\":true},\"writer_enabled\":{\"origin\":\"default\",\"value\":true}}}}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "bom",
+      "operation": "inspect",
+      "raw_utf8": "﻿{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"schema_version\":1,\"base_sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"config_path_sha256\":\"79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555\",\"current\":{\"export_destination\":{\"origin\":\"default\",\"value\":\"mem\"},\"reader_enabled\":{\"origin\":\"default\",\"value\":true},\"writer_enabled\":{\"origin\":\"default\",\"value\":true}}}}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "missing-LF",
+      "operation": "inspect",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"schema_version\":1,\"base_sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"config_path_sha256\":\"79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555\",\"current\":{\"export_destination\":{\"origin\":\"default\",\"value\":\"mem\"},\"reader_enabled\":{\"origin\":\"default\",\"value\":true},\"writer_enabled\":{\"origin\":\"default\",\"value\":true}}}}",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "second-document",
+      "operation": "inspect",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"schema_version\":1,\"base_sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"config_path_sha256\":\"79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555\",\"current\":{\"export_destination\":{\"origin\":\"default\",\"value\":\"mem\"},\"reader_enabled\":{\"origin\":\"default\",\"value\":true},\"writer_enabled\":{\"origin\":\"default\",\"value\":true}}}}\n{}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "oversize-frame",
+      "operation": "inspect",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"schema_version\":1,\"base_sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"config_path_sha256\":\"79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555\",\"current\":{\"export_destination\":{\"origin\":\"default\",\"value\":\"mem\"},\"reader_enabled\":{\"origin\":\"default\",\"value\":true},\"writer_enabled\":{\"origin\":\"default\",\"value\":true}}}}                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  \n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "wrong-target",
+      "operation": "apply",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"ok\",\"outcome\":\"verified\",\"disk_readback_verified\":true,\"runtime_activation\":\"restart-required\",\"data\":{\"current\":{\"export_destination\":{\"origin\":\"default\",\"value\":\"mem\"},\"reader_enabled\":{\"origin\":\"declared\",\"value\":false},\"writer_enabled\":{\"origin\":\"default\",\"value\":true}},\"target_sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\"}}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "activation-unverified",
+      "operation": "apply",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"ok\",\"outcome\":\"verified\",\"disk_readback_verified\":true,\"runtime_activation\":\"unverified\",\"data\":{\"current\":{\"export_destination\":{\"origin\":\"default\",\"value\":\"mem\"},\"reader_enabled\":{\"origin\":\"declared\",\"value\":false},\"writer_enabled\":{\"origin\":\"default\",\"value\":true}},\"target_sha256\":\"6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f\"}}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "unknown-current",
+      "operation": "apply",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"failed\",\"outcome\":\"unknown\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"current\":{\"export_destination\":{\"origin\":\"default\",\"value\":\"mem\"},\"reader_enabled\":{\"origin\":\"declared\",\"value\":false},\"writer_enabled\":{\"origin\":\"default\",\"value\":true}}}}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "status-fake-verified",
+      "operation": "status",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"status\",\"status\":\"ok\",\"outcome\":\"desired-file-observed\",\"disk_readback_verified\":true,\"runtime_activation\":\"unverified\",\"data\":{\"current\":{\"export_destination\":{\"origin\":\"default\",\"value\":\"mem\"},\"reader_enabled\":{\"origin\":\"declared\",\"value\":false},\"writer_enabled\":{\"origin\":\"default\",\"value\":true}},\"observed_sha256\":\"6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f\"}}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "status-wrong-target",
+      "operation": "status",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"status\",\"status\":\"ok\",\"outcome\":\"desired-file-observed\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"current\":{\"export_destination\":{\"origin\":\"default\",\"value\":\"mem\"},\"reader_enabled\":{\"origin\":\"declared\",\"value\":false},\"writer_enabled\":{\"origin\":\"default\",\"value\":true}},\"observed_sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\"}}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "unresolved-equal-target",
+      "operation": "status",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"status\",\"status\":\"ok\",\"outcome\":\"unresolved\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"current\":{\"export_destination\":{\"origin\":\"default\",\"value\":\"mem\"},\"reader_enabled\":{\"origin\":\"default\",\"value\":true},\"writer_enabled\":{\"origin\":\"default\",\"value\":true}},\"observed_sha256\":\"6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f\"}}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "prepare-intent-operation",
+      "operation": "prepare",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"ok\",\"outcome\":\"prepared\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"before\":{\"export_destination\":{\"origin\":\"default\",\"value\":\"mem\"},\"reader_enabled\":{\"origin\":\"default\",\"value\":true},\"writer_enabled\":{\"origin\":\"default\",\"value\":true}},\"after\":{\"export_destination\":{\"origin\":\"default\",\"value\":\"mem\"},\"reader_enabled\":{\"origin\":\"declared\",\"value\":false},\"writer_enabled\":{\"origin\":\"default\",\"value\":true}},\"intent\":{\"product_settings_version\":1,\"operation\":\"00000000-0000-0000-0000-000000000000\",\"base_sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"target_sha256\":\"6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f\",\"config_path_sha256\":\"79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555\",\"changes\":{\"reader_enabled\":{\"action\":\"set\",\"value\":false}}}}}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "prepare-intent-config_path_sha256",
+      "operation": "prepare",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"ok\",\"outcome\":\"prepared\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"before\":{\"export_destination\":{\"origin\":\"default\",\"value\":\"mem\"},\"reader_enabled\":{\"origin\":\"default\",\"value\":true},\"writer_enabled\":{\"origin\":\"default\",\"value\":true}},\"after\":{\"export_destination\":{\"origin\":\"default\",\"value\":\"mem\"},\"reader_enabled\":{\"origin\":\"declared\",\"value\":false},\"writer_enabled\":{\"origin\":\"default\",\"value\":true}},\"intent\":{\"product_settings_version\":1,\"operation\":\"11111111-1111-4111-8111-111111111111\",\"base_sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"target_sha256\":\"6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f\",\"config_path_sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"changes\":{\"reader_enabled\":{\"action\":\"set\",\"value\":false}}}}}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "prepare-intent-target_sha256",
+      "operation": "prepare",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"ok\",\"outcome\":\"prepared\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"before\":{\"export_destination\":{\"origin\":\"default\",\"value\":\"mem\"},\"reader_enabled\":{\"origin\":\"default\",\"value\":true},\"writer_enabled\":{\"origin\":\"default\",\"value\":true}},\"after\":{\"export_destination\":{\"origin\":\"default\",\"value\":\"mem\"},\"reader_enabled\":{\"origin\":\"declared\",\"value\":false},\"writer_enabled\":{\"origin\":\"default\",\"value\":true}},\"intent\":{\"product_settings_version\":1,\"operation\":\"11111111-1111-4111-8111-111111111111\",\"base_sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"target_sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"config_path_sha256\":\"79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555\",\"changes\":{\"reader_enabled\":{\"action\":\"set\",\"value\":false}}}}}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "prepare-intent-changes",
+      "operation": "prepare",
+      "raw_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"ok\",\"outcome\":\"prepared\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"before\":{\"export_destination\":{\"origin\":\"default\",\"value\":\"mem\"},\"reader_enabled\":{\"origin\":\"default\",\"value\":true},\"writer_enabled\":{\"origin\":\"default\",\"value\":true}},\"after\":{\"export_destination\":{\"origin\":\"default\",\"value\":\"mem\"},\"reader_enabled\":{\"origin\":\"declared\",\"value\":false},\"writer_enabled\":{\"origin\":\"default\",\"value\":true}},\"intent\":{\"product_settings_version\":1,\"operation\":\"11111111-1111-4111-8111-111111111111\",\"base_sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"target_sha256\":\"6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f\",\"config_path_sha256\":\"79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555\",\"changes\":{\"reader_enabled\":{\"action\":\"set\",\"value\":true}}}}}\n",
+      "context": {
+        "current": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "default",
+            "value": true
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        },
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        },
+        "after": {
+          "export_destination": {
+            "origin": "default",
+            "value": "mem"
+          },
+          "reader_enabled": {
+            "origin": "declared",
+            "value": false
+          },
+          "writer_enabled": {
+            "origin": "default",
+            "value": true
+          }
+        }
+      },
+      "accept": false
+    }
+  ],
+  "public_requests": [
+    {
+      "id": "valid-begin",
+      "input": {
+        "action": "begin",
+        "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "boot_id": "11111111-1111-1111-1111-111111111111"
+      },
+      "accept": true
+    },
+    {
+      "id": "valid-save",
+      "input": {
+        "action": "save",
+        "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "boot_id": "11111111-1111-1111-1111-111111111111",
+        "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "valid-status",
+      "input": {
+        "action": "status",
+        "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "boot_id": "11111111-1111-1111-1111-111111111111",
+        "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "accept": true
+    },
+    {
+      "id": "valid-retained",
+      "input": {
+        "action": "retained"
+      },
+      "accept": true
+    },
+    {
+      "id": "valid-cancel",
+      "input": {
+        "action": "cancel",
+        "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "accept": true
+    },
+    {
+      "id": "bad-changes-empty",
+      "input": {
+        "action": "save",
+        "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "boot_id": "11111111-1111-1111-1111-111111111111",
+        "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "changes": {}
+      },
+      "accept": false
+    },
+    {
+      "id": "bad-changes-unknown",
+      "input": {
+        "action": "save",
+        "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "boot_id": "11111111-1111-1111-1111-111111111111",
+        "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "changes": {
+          "other": {
+            "action": "clear"
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "bad-changes-null-leaf",
+      "input": {
+        "action": "save",
+        "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "boot_id": "11111111-1111-1111-1111-111111111111",
+        "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "changes": {
+          "reader_enabled": null
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "bad-changes-null-set",
+      "input": {
+        "action": "save",
+        "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "boot_id": "11111111-1111-1111-1111-111111111111",
+        "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "changes": {
+          "writer_enabled": {
+            "action": "set",
+            "value": null
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "bad-changes-numeric-bool",
+      "input": {
+        "action": "save",
+        "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "boot_id": "11111111-1111-1111-1111-111111111111",
+        "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": 1
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "bad-changes-unknown-backend",
+      "input": {
+        "action": "save",
+        "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "boot_id": "11111111-1111-1111-1111-111111111111",
+        "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "changes": {
+          "export_destination": {
+            "action": "set",
+            "value": "other"
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "bad-changes-extra-clear-value",
+      "input": {
+        "action": "save",
+        "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "boot_id": "11111111-1111-1111-1111-111111111111",
+        "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "changes": {
+          "reader_enabled": {
+            "action": "clear",
+            "value": true
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "bad-changes-keep",
+      "input": {
+        "action": "save",
+        "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "boot_id": "11111111-1111-1111-1111-111111111111",
+        "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "changes": {
+          "reader_enabled": {
+            "action": "keep"
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "raw-intent-in-public",
+      "input": {
+        "action": "save",
+        "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "boot_id": "11111111-1111-1111-1111-111111111111",
+        "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        },
+        "intent": {
+          "product_settings_version": 1,
+          "operation": "11111111-1111-4111-8111-111111111111",
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "target_sha256": "6eccfbafa41044443829f23afe6327dcb5fec694d47cc01667114af692ee389f",
+          "config_path_sha256": "79ec0b3bb5322aadfbce3ddbe54eb095d0dceb88f0875e9f04d8d72818ed2555",
+          "changes": {
+            "reader_enabled": {
+              "action": "set",
+              "value": false
+            }
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "status-foreign-boot",
+      "input": {
+        "action": "status",
+        "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "boot_id": "not-uuid",
+        "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "accept": false
+    },
+    {
+      "id": "cancel-extra-target",
+      "input": {
+        "action": "cancel",
+        "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "boot_id": "11111111-1111-1111-1111-111111111111"
+      },
+      "accept": false
+    },
+    {
+      "id": "retained-extra",
+      "input": {
+        "action": "retained",
+        "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "accept": false
+    },
+    {
+      "id": "unknown-action",
+      "input": {
+        "action": "apply",
+        "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "boot_id": "11111111-1111-1111-1111-111111111111",
+        "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "accept": false
+    },
+    {
+      "id": "array-request",
+      "input": [],
+      "accept": false
+    }
+  ],
+  "public_results": [
+    {
+      "id": "ready",
+      "request": {
+        "action": "begin",
+        "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "boot_id": "11111111-1111-1111-1111-111111111111"
+      },
+      "input": {
+        "contract_version": 1,
+        "status": "observed",
+        "observation": {
+          "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "boot_id": "11111111-1111-1111-1111-111111111111",
+          "model": "reMarkable 1.0",
+          "firmware": "3.28.0.172",
+          "firmware_conflict": false,
+          "architecture": "armv7l",
+          "installed_version": null,
+          "provenance": "unknown",
+          "service": {
+            "LoadState": "not-found",
+            "ActiveState": "inactive",
+            "SubState": "dead"
+          }
+        },
+        "product_settings": {
+          "state": "ready",
+          "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "current": {
+            "export_destination": {
+              "origin": "default",
+              "value": "mem"
+            },
+            "reader_enabled": {
+              "origin": "default",
+              "value": true
+            },
+            "writer_enabled": {
+              "origin": "default",
+              "value": true
+            }
+          },
+          "report": {
+            "operation": "inspect",
+            "status": "ok",
+            "outcome": "read-only",
+            "disk_readback_verified": false,
+            "runtime_activation": "unverified"
+          },
+          "retained": []
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "verified",
+      "request": {
+        "action": "save",
+        "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "boot_id": "11111111-1111-1111-1111-111111111111",
+        "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        }
+      },
+      "input": {
+        "contract_version": 1,
+        "status": "observed",
+        "observation": {
+          "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "boot_id": "11111111-1111-1111-1111-111111111111",
+          "model": "reMarkable 1.0",
+          "firmware": "3.28.0.172",
+          "firmware_conflict": false,
+          "architecture": "armv7l",
+          "installed_version": null,
+          "provenance": "unknown",
+          "service": {
+            "LoadState": "not-found",
+            "ActiveState": "inactive",
+            "SubState": "dead"
+          }
+        },
+        "product_settings": {
+          "state": "verified",
+          "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "current": {
+            "export_destination": {
+              "origin": "default",
+              "value": "mem"
+            },
+            "reader_enabled": {
+              "origin": "declared",
+              "value": false
+            },
+            "writer_enabled": {
+              "origin": "default",
+              "value": true
+            }
+          },
+          "report": {
+            "operation": "apply",
+            "status": "ok",
+            "outcome": "verified",
+            "disk_readback_verified": true,
+            "runtime_activation": "restart-required"
+          },
+          "retained": []
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "unknown",
+      "request": {
+        "action": "save",
+        "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "boot_id": "11111111-1111-1111-1111-111111111111",
+        "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        }
+      },
+      "input": {
+        "contract_version": 1,
+        "status": "unconfigured",
+        "observation": null,
+        "product_settings": {
+          "state": "unknown",
+          "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "current": null,
+          "report": {
+            "operation": "apply",
+            "status": "failed",
+            "outcome": "unknown",
+            "disk_readback_verified": false,
+            "runtime_activation": "unverified"
+          },
+          "retained": [
+            {
+              "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "boot_id": "11111111-1111-1111-1111-111111111111",
+              "state": "unknown"
+            }
+          ]
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "unresolved",
+      "request": {
+        "action": "status",
+        "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "boot_id": "11111111-1111-1111-1111-111111111111",
+        "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "input": {
+        "contract_version": 1,
+        "status": "observed",
+        "observation": {
+          "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "boot_id": "11111111-1111-1111-1111-111111111111",
+          "model": "reMarkable 1.0",
+          "firmware": "3.28.0.172",
+          "firmware_conflict": false,
+          "architecture": "armv7l",
+          "installed_version": null,
+          "provenance": "unknown",
+          "service": {
+            "LoadState": "not-found",
+            "ActiveState": "inactive",
+            "SubState": "dead"
+          }
+        },
+        "product_settings": {
+          "state": "unresolved",
+          "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "current": {
+            "export_destination": {
+              "origin": "default",
+              "value": "mem"
+            },
+            "reader_enabled": {
+              "origin": "default",
+              "value": true
+            },
+            "writer_enabled": {
+              "origin": "default",
+              "value": true
+            }
+          },
+          "report": {
+            "operation": "status",
+            "status": "ok",
+            "outcome": "unresolved",
+            "disk_readback_verified": false,
+            "runtime_activation": "unverified"
+          },
+          "retained": [
+            {
+              "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "boot_id": "11111111-1111-1111-1111-111111111111",
+              "state": "unknown"
+            }
+          ]
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "desired",
+      "request": {
+        "action": "status",
+        "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "boot_id": "11111111-1111-1111-1111-111111111111",
+        "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "input": {
+        "contract_version": 1,
+        "status": "observed",
+        "observation": {
+          "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "boot_id": "11111111-1111-1111-1111-111111111111",
+          "model": "reMarkable 1.0",
+          "firmware": "3.28.0.172",
+          "firmware_conflict": false,
+          "architecture": "armv7l",
+          "installed_version": null,
+          "provenance": "unknown",
+          "service": {
+            "LoadState": "not-found",
+            "ActiveState": "inactive",
+            "SubState": "dead"
+          }
+        },
+        "product_settings": {
+          "state": "desired-file-observed",
+          "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "current": {
+            "export_destination": {
+              "origin": "default",
+              "value": "mem"
+            },
+            "reader_enabled": {
+              "origin": "declared",
+              "value": false
+            },
+            "writer_enabled": {
+              "origin": "default",
+              "value": true
+            }
+          },
+          "report": {
+            "operation": "status",
+            "status": "ok",
+            "outcome": "desired-file-observed",
+            "disk_readback_verified": false,
+            "runtime_activation": "unverified"
+          },
+          "retained": []
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "no-change",
+      "request": {
+        "action": "save",
+        "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "boot_id": "11111111-1111-1111-1111-111111111111",
+        "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "changes": {
+          "writer_enabled": {
+            "action": "clear"
+          }
+        }
+      },
+      "input": {
+        "contract_version": 1,
+        "status": "observed",
+        "observation": {
+          "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "boot_id": "11111111-1111-1111-1111-111111111111",
+          "model": "reMarkable 1.0",
+          "firmware": "3.28.0.172",
+          "firmware_conflict": false,
+          "architecture": "armv7l",
+          "installed_version": null,
+          "provenance": "unknown",
+          "service": {
+            "LoadState": "not-found",
+            "ActiveState": "inactive",
+            "SubState": "dead"
+          }
+        },
+        "product_settings": {
+          "state": "no-change",
+          "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "current": {
+            "export_destination": {
+              "origin": "default",
+              "value": "mem"
+            },
+            "reader_enabled": {
+              "origin": "default",
+              "value": true
+            },
+            "writer_enabled": {
+              "origin": "default",
+              "value": true
+            }
+          },
+          "report": {
+            "operation": "prepare",
+            "status": "ok",
+            "outcome": "no-change",
+            "disk_readback_verified": false,
+            "runtime_activation": "unverified"
+          },
+          "retained": []
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "not-dispatched",
+      "request": {
+        "action": "save",
+        "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "boot_id": "11111111-1111-1111-1111-111111111111",
+        "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        }
+      },
+      "input": {
+        "contract_version": 1,
+        "status": "unconfigured",
+        "observation": null,
+        "product_settings": {
+          "state": "not-dispatched",
+          "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "current": null,
+          "report": null,
+          "retained": []
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "unavailable",
+      "request": {
+        "action": "save",
+        "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "boot_id": "11111111-1111-1111-1111-111111111111",
+        "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        }
+      },
+      "input": {
+        "contract_version": 1,
+        "status": "unconfigured",
+        "observation": null,
+        "product_settings": {
+          "state": "unavailable",
+          "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "current": null,
+          "report": null,
+          "retained": []
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "busy",
+      "request": {
+        "action": "save",
+        "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "boot_id": "11111111-1111-1111-1111-111111111111",
+        "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        }
+      },
+      "input": {
+        "contract_version": 1,
+        "status": "unconfigured",
+        "observation": null,
+        "product_settings": {
+          "state": "busy",
+          "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "current": null,
+          "report": null,
+          "retained": []
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "capacity",
+      "request": {
+        "action": "save",
+        "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "boot_id": "11111111-1111-1111-1111-111111111111",
+        "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        }
+      },
+      "input": {
+        "contract_version": 1,
+        "status": "unconfigured",
+        "observation": null,
+        "product_settings": {
+          "state": "capacity",
+          "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "current": null,
+          "report": null,
+          "retained": []
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "private-hash",
+      "request": {
+        "action": "begin",
+        "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "boot_id": "11111111-1111-1111-1111-111111111111"
+      },
+      "input": {
+        "contract_version": 1,
+        "status": "observed",
+        "observation": {
+          "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "boot_id": "11111111-1111-1111-1111-111111111111",
+          "model": "reMarkable 1.0",
+          "firmware": "3.28.0.172",
+          "firmware_conflict": false,
+          "architecture": "armv7l",
+          "installed_version": null,
+          "provenance": "unknown",
+          "service": {
+            "LoadState": "not-found",
+            "ActiveState": "inactive",
+            "SubState": "dead"
+          }
+        },
+        "product_settings": {
+          "state": "ready",
+          "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "current": {
+            "export_destination": {
+              "origin": "default",
+              "value": "mem"
+            },
+            "reader_enabled": {
+              "origin": "default",
+              "value": true
+            },
+            "writer_enabled": {
+              "origin": "default",
+              "value": true
+            }
+          },
+          "report": {
+            "operation": "inspect",
+            "status": "ok",
+            "outcome": "read-only",
+            "disk_readback_verified": false,
+            "runtime_activation": "unverified"
+          },
+          "retained": [],
+          "base_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "extra-current",
+      "request": {
+        "action": "begin",
+        "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "boot_id": "11111111-1111-1111-1111-111111111111"
+      },
+      "input": {
+        "contract_version": 1,
+        "status": "observed",
+        "observation": {
+          "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "boot_id": "11111111-1111-1111-1111-111111111111",
+          "model": "reMarkable 1.0",
+          "firmware": "3.28.0.172",
+          "firmware_conflict": false,
+          "architecture": "armv7l",
+          "installed_version": null,
+          "provenance": "unknown",
+          "service": {
+            "LoadState": "not-found",
+            "ActiveState": "inactive",
+            "SubState": "dead"
+          }
+        },
+        "product_settings": {
+          "state": "ready",
+          "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "current": {
+            "export_destination": {
+              "origin": "default",
+              "value": "mem"
+            },
+            "reader_enabled": {
+              "origin": "default",
+              "value": true
+            },
+            "writer_enabled": {
+              "origin": "default",
+              "value": true
+            },
+            "secret": "SYNTHETIC-PRIVATE"
+          },
+          "report": {
+            "operation": "inspect",
+            "status": "ok",
+            "outcome": "read-only",
+            "disk_readback_verified": false,
+            "runtime_activation": "unverified"
+          },
+          "retained": []
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "wrong-reference",
+      "request": {
+        "action": "begin",
+        "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "boot_id": "11111111-1111-1111-1111-111111111111"
+      },
+      "input": {
+        "contract_version": 1,
+        "status": "observed",
+        "observation": {
+          "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "boot_id": "11111111-1111-1111-1111-111111111111",
+          "model": "reMarkable 1.0",
+          "firmware": "3.28.0.172",
+          "firmware_conflict": false,
+          "architecture": "armv7l",
+          "installed_version": null,
+          "provenance": "unknown",
+          "service": {
+            "LoadState": "not-found",
+            "ActiveState": "inactive",
+            "SubState": "dead"
+          }
+        },
+        "product_settings": {
+          "state": "ready",
+          "reference": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "current": {
+            "export_destination": {
+              "origin": "default",
+              "value": "mem"
+            },
+            "reader_enabled": {
+              "origin": "default",
+              "value": true
+            },
+            "writer_enabled": {
+              "origin": "default",
+              "value": true
+            }
+          },
+          "report": {
+            "operation": "inspect",
+            "status": "ok",
+            "outcome": "read-only",
+            "disk_readback_verified": false,
+            "runtime_activation": "unverified"
+          },
+          "retained": []
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "unknown-state",
+      "request": {
+        "action": "begin",
+        "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "boot_id": "11111111-1111-1111-1111-111111111111"
+      },
+      "input": {
+        "contract_version": 1,
+        "status": "observed",
+        "observation": {
+          "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "boot_id": "11111111-1111-1111-1111-111111111111",
+          "model": "reMarkable 1.0",
+          "firmware": "3.28.0.172",
+          "firmware_conflict": false,
+          "architecture": "armv7l",
+          "installed_version": null,
+          "provenance": "unknown",
+          "service": {
+            "LoadState": "not-found",
+            "ActiveState": "inactive",
+            "SubState": "dead"
+          }
+        },
+        "product_settings": {
+          "state": "applied",
+          "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "current": {
+            "export_destination": {
+              "origin": "default",
+              "value": "mem"
+            },
+            "reader_enabled": {
+              "origin": "default",
+              "value": true
+            },
+            "writer_enabled": {
+              "origin": "default",
+              "value": true
+            }
+          },
+          "report": {
+            "operation": "inspect",
+            "status": "ok",
+            "outcome": "read-only",
+            "disk_readback_verified": false,
+            "runtime_activation": "unverified"
+          },
+          "retained": []
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "wrong-identity",
+      "request": {
+        "action": "begin",
+        "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "boot_id": "11111111-1111-1111-1111-111111111111"
+      },
+      "input": {
+        "contract_version": 1,
+        "status": "observed",
+        "observation": {
+          "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "boot_id": "22222222-2222-2222-2222-222222222222",
+          "model": "reMarkable 1.0",
+          "firmware": "3.28.0.172",
+          "firmware_conflict": false,
+          "architecture": "armv7l",
+          "installed_version": null,
+          "provenance": "unknown",
+          "service": {
+            "LoadState": "not-found",
+            "ActiveState": "inactive",
+            "SubState": "dead"
+          }
+        },
+        "product_settings": {
+          "state": "ready",
+          "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "current": {
+            "export_destination": {
+              "origin": "default",
+              "value": "mem"
+            },
+            "reader_enabled": {
+              "origin": "default",
+              "value": true
+            },
+            "writer_enabled": {
+              "origin": "default",
+              "value": true
+            }
+          },
+          "report": {
+            "operation": "inspect",
+            "status": "ok",
+            "outcome": "read-only",
+            "disk_readback_verified": false,
+            "runtime_activation": "unverified"
+          },
+          "retained": []
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "unknown-current",
+      "request": {
+        "action": "save",
+        "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "boot_id": "11111111-1111-1111-1111-111111111111",
+        "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        }
+      },
+      "input": {
+        "contract_version": 1,
+        "status": "unconfigured",
+        "observation": null,
+        "product_settings": {
+          "state": "unknown",
+          "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "current": {
+            "export_destination": {
+              "origin": "default",
+              "value": "mem"
+            },
+            "reader_enabled": {
+              "origin": "default",
+              "value": true
+            },
+            "writer_enabled": {
+              "origin": "default",
+              "value": true
+            }
+          },
+          "report": {
+            "operation": "apply",
+            "status": "failed",
+            "outcome": "unknown",
+            "disk_readback_verified": false,
+            "runtime_activation": "unverified"
+          },
+          "retained": [
+            {
+              "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "boot_id": "11111111-1111-1111-1111-111111111111",
+              "state": "unknown"
+            }
+          ]
+        }
+      },
+      "accept": false
+    },
+    {
+      "id": "uncertain-no-retained",
+      "request": {
+        "action": "save",
+        "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "boot_id": "11111111-1111-1111-1111-111111111111",
+        "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        }
+      },
+      "input": {
+        "contract_version": 1,
+        "status": "unconfigured",
+        "observation": null,
+        "product_settings": {
+          "state": "unknown",
+          "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "current": null,
+          "report": {
+            "operation": "apply",
+            "status": "failed",
+            "outcome": "unknown",
+            "disk_readback_verified": false,
+            "runtime_activation": "unverified"
+          },
+          "retained": []
+        }
+      },
+      "accept": false
+    }
+  ],
+  "lifecycle_catalog": [
+    {
+      "id": "roles-off-maintenance",
+      "expectation": "All settings maintenance admitted without credential resolution; re-enable possible."
+    },
+    {
+      "id": "reader-off-writer-on",
+      "expectation": "Ordinary startup refuses before credentials/Store/device; explicit Writer independent."
+    },
+    {
+      "id": "writer-off",
+      "expectation": "All actual new Writer/local preparation/export routes refuse through shared helper."
+    },
+    {
+      "id": "backend-off-local-draft",
+      "expectation": "Enabled Writer local draft/prepare-export may proceed without Mem."
+    },
+    {
+      "id": "joined-export-off",
+      "expectation": "Joined generate/refine/notebook-export checks Writer and backend before model."
+    },
+    {
+      "id": "disabled-historical-reconcile",
+      "expectation": "Original recorded effect/target only; no create/update/new association/target or replay."
+    },
+    {
+      "id": "export-error-order",
+      "expectation": "Valid request preflight then nonsecret config/policy then unchanged credential source/bytes."
+    },
+    {
+      "id": "ready-stop-late-save",
+      "expectation": "Permanent grant revocation survives any short fence; zero apply; successor intact."
+    },
+    {
+      "id": "cancel-status-wait",
+      "expectation": "Cancel exact wait; preserve original unknown; successor unaffected."
+    },
+    {
+      "id": "deadline",
+      "expectation": "120s ready; one13s host/14s UI; lower phases remaining budget; late replies cannot refill."
+    },
+    {
+      "id": "custody",
+      "expectation": "8 originals;30min nonrenewing;32 status calls; no eviction/reconstruction/retry."
+    },
+    {
+      "id": "all-owners",
+      "expectation": "240 directed grant/Busy preserving210; actual App peer/observer paths."
+    },
+    {
+      "id": "malformed-private",
+      "expectation": "Duplicate/BOM/frame/future/oversize/identity/intent mismatch cannot produce success."
+    },
+    {
+      "id": "schema-not-activation",
+      "expectation": "Saved file verification/runtime restart requirement separate; full destination and Reader-to-Writer remain open."
+    }
+  ]
+}

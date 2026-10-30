@@ -111,7 +111,13 @@ pub(crate) fn document(bytes: &[u8]) -> std::result::Result<(Config, Value), Sta
     {
         return Err(Status::InvalidInput);
     }
-    if config.config_schema_version != 1 || config.personalization.schema_version != 1 {
+    if config.config_schema_version != 1
+        || config.personalization.schema_version != 1
+        || config
+            .product_settings
+            .as_ref()
+            .is_some_and(|p| p.schema_version != 1)
+    {
         return Err(Status::Unsupported);
     }
     if let Some(namespaces) = raw.pointer("/sync/namespaces").and_then(Value::as_array) {

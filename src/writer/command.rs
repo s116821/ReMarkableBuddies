@@ -31,6 +31,9 @@ pub fn run(config_path: Option<PathBuf>, input: &mut impl Read) -> Report {
         identity = Some((request.conversation(), request.operation()));
         request.preflight()?;
         let config = Config::load(config_path).map_err(|_| Failure::Storage)?;
+        if !config.admits_writer(false) {
+            return Err(Failure::Unsupported);
+        }
         let preference = config
             .personalization_snapshot()
             .map_err(|_| Failure::Storage)?;
@@ -157,6 +160,11 @@ fn run_flow(
     let result = (|| -> std::result::Result<_, FlowFailure> {
         request.preflight().map_err(|_| FlowFailure::InvalidInput)?;
         let config = Config::load(config_path).map_err(|_| FlowFailure::Storage)?;
+        if !matches!(request, writer_flow::Request::ReconcileExport { .. })
+            && !config.admits_writer(true)
+        {
+            return Err(FlowFailure::Unsupported);
+        }
         let preference = config
             .personalization_snapshot()
             .map_err(|_| FlowFailure::Storage)?;

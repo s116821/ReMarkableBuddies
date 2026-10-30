@@ -19,6 +19,11 @@ pub struct Args {
     /// Explicit offline confirmed handwriting records; strict bounded JSON stdin
     #[arg(long, exclusive = true)]
     handwriting: bool,
+    /// Saved role and export-backend declarations; no runtime activation
+    #[arg(long, value_enum, conflicts_with_all = ["resident_stock_recovery", "handwriting", "research_settings_operation", "research_settings_input", "inspect_conversations", "conversation_operation", "conversation_input", "inspect_source_cache", "source_cache_operation", "source_cache_input", "credential_reference_operation", "credential_reference_input", "model_credential_operation", "model_credential_input", "memory_settings_operation", "memory_settings_input", "ordinary_export_operation", "ordinary_export_input", "model_settings_operation", "model_settings_input", "restore_operation", "restore_input", "basic_settings_operation", "basic_settings_input", "configuration_operation", "simulate", "inspect_owned_data", "api_key", "model", "base_url", "trigger_corner", "log_level", "debug_dump", "memory_operation", "memory_input", "sync_mode_operation", "sync_mode_input", "archive_operation", "archive_input", "personalization_operation", "export_note", "writer_note"])]
+    product_settings_operation: Option<config::product_settings::Operation>,
+    #[arg(long, value_name = "INPUT", requires = "product_settings_operation")]
+    product_settings_input: Option<std::path::PathBuf>,
     /// Deliberate saved research policy; no runtime/provider activation
     #[arg(long, value_enum, conflicts_with_all = ["inspect_conversations","conversation_operation","conversation_input","inspect_source_cache","source_cache_operation","source_cache_input","credential_reference_operation","credential_reference_input","model_credential_operation","model_credential_input","memory_settings_operation","memory_settings_input","ordinary_export_operation","ordinary_export_input","model_settings_operation","model_settings_input","restore_operation","restore_input","basic_settings_operation","basic_settings_input","configuration_operation","simulate","inspect_owned_data","api_key","model","base_url","trigger_corner","log_level","debug_dump","memory_operation","memory_input","sync_mode_operation","sync_mode_input","archive_operation","archive_input","personalization_operation","export_note"])]
     research_settings_operation: Option<config::research_settings::Operation>,
@@ -362,6 +367,31 @@ fn main() -> Result<()> {
         report.write_to(&mut std::io::stdout().lock())?;
         return Ok(());
     }
+    if let Some(operation) = args.product_settings_operation {
+        let report = if operation == config::product_settings::Operation::Inspect {
+            if args.product_settings_input.is_some() {
+                config::product_settings::invalid_input(operation)
+            } else {
+                config::product_settings::inspect(
+                    std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+                )
+            }
+        } else if args
+            .product_settings_input
+            .as_ref()
+            .is_some_and(|input| input.as_os_str() == std::ffi::OsStr::new("-"))
+        {
+            config::product_settings::run_stdin(
+                operation,
+                std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+                &mut std::io::stdin().lock(),
+            )
+        } else {
+            config::product_settings::unsupported_input(operation)
+        };
+        report.write_to(&mut std::io::stdout().lock())?;
+        return Ok(());
+    }
     if let Some(operation) = args.basic_settings_operation {
         let report = if operation == config::basic::Operation::Inspect {
             if args.basic_settings_input.is_some() {
@@ -476,6 +506,10 @@ fn main() -> Result<()> {
         return Ok(());
     }
     let config = Config::load(std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into))?;
+    anyhow::ensure!(
+        config.reader_enabled(),
+        "Reader is disabled in saved settings"
+    );
     remarkable_reader_buddy::memory::context::admit_ordinary(&config.memory)?;
     let effective = config::resolve(
         &config,
