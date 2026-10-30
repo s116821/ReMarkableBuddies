@@ -22,7 +22,7 @@ pub struct Args {
     /// Saved role and export-backend declarations; no runtime activation
     #[arg(long, value_enum, conflicts_with_all = ["resident_stock_recovery", "handwriting", "research_settings_operation", "research_settings_input", "inspect_conversations", "conversation_operation", "conversation_input", "inspect_source_cache", "source_cache_operation", "source_cache_input", "credential_reference_operation", "credential_reference_input", "model_credential_operation", "model_credential_input", "memory_settings_operation", "memory_settings_input", "ordinary_export_operation", "ordinary_export_input", "model_settings_operation", "model_settings_input", "restore_operation", "restore_input", "basic_settings_operation", "basic_settings_input", "configuration_operation", "simulate", "inspect_owned_data", "api_key", "model", "base_url", "trigger_corner", "log_level", "debug_dump", "memory_operation", "memory_input", "sync_mode_operation", "sync_mode_input", "archive_operation", "archive_input", "personalization_operation", "export_note", "writer_note"])]
     product_settings_operation: Option<config::product_settings::Operation>,
-    #[arg(long, value_name = "INPUT", requires = "product_settings_operation")]
+    #[arg(long, value_name = "INPUT", requires = "product_settings_operation", conflicts_with_all = ["resident_stock_recovery", "handwriting", "research_settings_operation", "research_settings_input", "inspect_conversations", "conversation_operation", "conversation_input", "inspect_source_cache", "source_cache_operation", "source_cache_input", "credential_reference_operation", "credential_reference_input", "model_credential_operation", "model_credential_input", "memory_settings_operation", "memory_settings_input", "ordinary_export_operation", "ordinary_export_input", "model_settings_operation", "model_settings_input", "restore_operation", "restore_input", "basic_settings_operation", "basic_settings_input", "configuration_operation", "simulate", "inspect_owned_data", "api_key", "model", "base_url", "trigger_corner", "log_level", "debug_dump", "memory_operation", "memory_input", "sync_mode_operation", "sync_mode_input", "archive_operation", "archive_input", "personalization_operation", "export_note", "writer_note"])]
     product_settings_input: Option<std::path::PathBuf>,
     /// Deliberate saved research policy; no runtime/provider activation
     #[arg(long, value_enum, conflicts_with_all = ["inspect_conversations","conversation_operation","conversation_input","inspect_source_cache","source_cache_operation","source_cache_input","credential_reference_operation","credential_reference_input","model_credential_operation","model_credential_input","memory_settings_operation","memory_settings_input","ordinary_export_operation","ordinary_export_input","model_settings_operation","model_settings_input","restore_operation","restore_input","basic_settings_operation","basic_settings_input","configuration_operation","simulate","inspect_owned_data","api_key","model","base_url","trigger_corner","log_level","debug_dump","memory_operation","memory_input","sync_mode_operation","sync_mode_input","archive_operation","archive_input","personalization_operation","export_note"])]
@@ -494,8 +494,8 @@ fn main() -> Result<()> {
     #[cfg(target_os = "linux")]
     remarkable_reader_buddy::workflow::resident_supervisor::recovery::refuse_occupied_activation()?;
     #[cfg(target_os = "linux")]
-    let service_health = if args.simulate.is_none() {
-        remarkable_reader_buddy::workflow::resident_supervisor::health::ServiceHealth::from_environment()?
+    let notification_environment = if args.simulate.is_none() {
+        Some(remarkable_reader_buddy::workflow::resident_supervisor::health::NotificationEnvironment::capture())
     } else {
         None
     };
@@ -510,6 +510,11 @@ fn main() -> Result<()> {
         config.reader_enabled(),
         "Reader is disabled in saved settings"
     );
+    #[cfg(target_os = "linux")]
+    let service_health = match notification_environment {
+        Some(environment) => environment.connect()?,
+        None => None,
+    };
     remarkable_reader_buddy::memory::context::admit_ordinary(&config.memory)?;
     let effective = config::resolve(
         &config,
@@ -844,6 +849,8 @@ mod tests {
                 "ordinary-export-input",
                 "ordinary-export-operation",
                 "personalization-operation",
+                "product-settings-input",
+                "product-settings-operation",
                 "research-settings-input",
                 "research-settings-operation",
                 "resident-stock-recovery",

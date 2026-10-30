@@ -34,8 +34,9 @@ impl Fixture {
             paths,
         }
     }
-    fn invoke(&self, args: &[&str], input: Option<&Value>) -> Output {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_reader-buddy"))
+    fn command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_reader-buddy"));
+        command
             .current_dir(&self.root)
             .args(args)
             .env("REMARKABLE_BUDDIES_CONFIG", &self.config)
@@ -44,11 +45,16 @@ impl Fixture {
             .env_remove("MEM_API_KEY")
             .env_remove("READER_BUDDY_DEBUG_DUMP")
             .env_remove("RUST_LOG")
+            .env_remove("NOTIFY_SOCKET")
+            .env_remove("WATCHDOG_USEC")
+            .env_remove("WATCHDOG_PID")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::piped());
+        command
+    }
+    fn invoke(&self, args: &[&str], input: Option<&Value>) -> Output {
+        let mut child = self.command(args).spawn().unwrap();
         if let Some(input) = input {
             child
                 .stdin
@@ -298,4 +304,77 @@ fn maintenance_can_reenable_all_disabled_without_credentials_and_selector_is_exc
     );
     let refused: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(refused["status"], "unsupported");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_reader_gate_precedes_notification_connect_and_keeps_trusted_predotenv_settings() {
+    use std::os::unix::net::UnixDatagram;
+    let disabled = Fixture::new(json!({"reader_enabled":false}));
+    let missing = disabled.root.join("missing-notification.sock");
+    let output = disabled
+        .command(&[])
+        .env("NOTIFY_SOCKET", &missing)
+        .env("WATCHDOG_USEC", "120000000")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("Reader is disabled in saved settings"),
+        "{error}"
+    );
+    assert!(!error.contains("notification socket"));
+    disabled.no_store();
+
+    let enabled = Fixture::new(json!({"reader_enabled":true}));
+    let output = enabled
+        .command(&[])
+        .env("NOTIFY_SOCKET", &missing)
+        .env("WATCHDOG_USEC", "120000000")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Connect service notification socket"));
+    enabled.no_store();
+
+    // An untrusted .env must neither introduce notification settings into an
+    // unsupervised process nor replace the original valid process settings.
+    fs::write(
+        enabled.root.join(".env"),
+        b"NOTIFY_SOCKET=/nonexistent/private-sentinel.sock\nWATCHDOG_USEC=poison\nWATCHDOG_PID=1\n",
+    )
+    .unwrap();
+    let output = enabled.command(&[]).output().unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !error.contains("notification")
+            && !error.contains("watchdog")
+            && !error.contains("private-sentinel"),
+        "{error}"
+    );
+    enabled.no_store();
+    let bound = enabled.root.join("notify.sock");
+    let receiver = UnixDatagram::bind(&bound).unwrap();
+    let output = enabled
+        .command(&[])
+        .env("NOTIFY_SOCKET", &bound)
+        .env("WATCHDOG_USEC", "120000000")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !error.contains("notification")
+            && !error.contains("watchdog")
+            && !error.contains("private-sentinel"),
+        "{error}"
+    );
+    enabled.no_store();
+    drop(receiver);
 }
