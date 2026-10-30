@@ -21,6 +21,43 @@ use std::{
 const WINDOW: Duration = Duration::from_secs(120);
 const CADENCE: Duration = Duration::from_secs(30);
 
+/// Trusted process settings captured before dotenv, without validating or opening
+/// a socket. Disabled Reader startup can refuse before notification admission.
+pub struct NotificationEnvironment {
+    socket: Option<OsString>,
+    interval: Option<OsString>,
+    pid: Option<OsString>,
+    own_pid: u32,
+}
+impl NotificationEnvironment {
+    pub fn capture() -> Self {
+        Self {
+            socket: std::env::var_os("NOTIFY_SOCKET"),
+            interval: std::env::var_os("WATCHDOG_USEC"),
+            pid: std::env::var_os("WATCHDOG_PID"),
+            own_pid: std::process::id(),
+        }
+    }
+
+    /// Validate and connect only after ordinary role admission, using the original
+    /// captured values rather than environment that dotenv may have changed.
+    pub fn connect(self) -> Result<Option<ServiceHealth>> {
+        ensure!(
+            self.own_pid == std::process::id(),
+            "Service health owner changed"
+        );
+        let Some(address) = settings(self.socket, self.interval, self.pid, self.own_pid)? else {
+            return Ok(None);
+        };
+        let socket = UnixDatagram::unbound().context("Create service notification socket")?;
+        socket.set_nonblocking(true)?;
+        socket
+            .connect_addr(&address)
+            .context("Connect service notification socket")?;
+        Ok(Some(ServiceHealth::new(socket)))
+    }
+}
+
 /// Owned by the ordinary runtime's main thread; never serviced by a timer thread.
 pub struct ServiceHealth {
     socket: UnixDatagram,
@@ -35,21 +72,7 @@ impl ServiceHealth {
     /// Capture once before dotenv/threads. Absence retains unsupervised behavior;
     /// partial or unsupported notification settings refuse startup.
     pub fn from_environment() -> Result<Option<Self>> {
-        let Some(address) = settings(
-            std::env::var_os("NOTIFY_SOCKET"),
-            std::env::var_os("WATCHDOG_USEC"),
-            std::env::var_os("WATCHDOG_PID"),
-            std::process::id(),
-        )?
-        else {
-            return Ok(None);
-        };
-        let socket = UnixDatagram::unbound().context("Create service notification socket")?;
-        socket.set_nonblocking(true)?;
-        socket
-            .connect_addr(&address)
-            .context("Connect service notification socket")?;
-        Ok(Some(Self::new(socket)))
+        NotificationEnvironment::capture().connect()
     }
 
     fn new(socket: UnixDatagram) -> Self {
