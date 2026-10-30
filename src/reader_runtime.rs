@@ -70,6 +70,8 @@ pub struct Report {
     pub data: Option<serde_json::Value>,
     #[serde(skip)]
     pending: Option<Pending>,
+    #[serde(skip)]
+    ordinary_startup_error: Option<&'static str>,
 }
 struct Pending {
     admission: SelectedAdmission,
@@ -90,7 +92,16 @@ impl Report {
             native_authority: false,
             data: None,
             pending: None,
+            ordinary_startup_error: None,
         }
+    }
+    /// Actual ordinary startup is a failing process, not a successful report command.
+    pub fn into_ordinary_startup_error(self) -> anyhow::Error {
+        anyhow::anyhow!(self.ordinary_startup_error.unwrap_or(match self.status {
+            Status::Busy => "ordinary Reader startup busy",
+            Status::Unsupported => "ordinary Reader startup unsupported",
+            _ => "ordinary Reader startup unavailable",
+        }))
     }
     fn encoded(&self) -> Result<Vec<u8>> {
         let mut bytes = serde_json::to_vec(self)?;
@@ -193,14 +204,38 @@ impl StartupDecision {
         Self::Report(Box::new(Report::new("startup", status)))
     }
 }
-fn ordinary_mode(store: &Store, config: &Config) -> std::result::Result<(), Status> {
+enum OrdinaryModeRefusal {
+    Unavailable,
+    Nonordinary,
+    LegacySync,
+}
+impl OrdinaryModeRefusal {
+    fn report(self) -> Report {
+        let (status, reason) = match self {
+            Self::Unavailable => (Status::Unavailable, "ordinary Reader startup unavailable"),
+            Self::Nonordinary => (
+                Status::Unsupported,
+                "ordinary mode requires absent or LocalOnly choice",
+            ),
+            Self::LegacySync => (
+                Status::Unsupported,
+                "explicit local mode requires legacy sync disabled",
+            ),
+        };
+        let mut report = Report::new("startup", status);
+        report.ordinary_startup_error = Some(reason);
+        report
+    }
+}
+fn ordinary_mode(store: &Store, config: &Config) -> std::result::Result<(), OrdinaryModeRefusal> {
     let mode = store
         .sync_mode_snapshot()
-        .map_err(|_| Status::Unavailable)?;
+        .map_err(|_| OrdinaryModeRefusal::Unavailable)?;
     match mode.mode {
         None => Ok(()),
         Some(SyncMode::LocalOnly) if !config.sync.enabled => Ok(()),
-        _ => Err(Status::Unsupported),
+        Some(SyncMode::LocalOnly) => Err(OrdinaryModeRefusal::LegacySync),
+        _ => Err(OrdinaryModeRefusal::Nonordinary),
     }
 }
 /// Consume the startup-admitted Store once. Fresh ordinary roots are created
@@ -227,7 +262,7 @@ pub fn ordinary_store(
             })?)
         }
     };
-    ordinary_mode(&store, config).map_err(|status| Box::new(Report::new("startup", status)))?;
+    ordinary_mode(&store, config).map_err(|refusal| Box::new(refusal.report()))?;
     Ok(store)
 }
 fn selected_mode(
@@ -278,7 +313,7 @@ pub fn startup(config: &Config) -> StartupDecision {
         };
         return match ordinary_mode(&store, config) {
             Ok(()) => StartupDecision::Ordinary(Some(store)),
-            Err(status) => StartupDecision::refused(status),
+            Err(refusal) => StartupDecision::Report(Box::new(refusal.report())),
         };
     }
     let scope = config.reader.selection.as_ref().expect("selected branch");
