@@ -310,7 +310,7 @@ fn regular(path: &Path) -> bool {
     files::safe_path(path).is_ok() && fs::symlink_metadata(path).is_ok_and(|m| m.is_file())
 }
 /// Pure state/path and nonblocking lock admission before normal Store startup.
-fn preflight(config: &Config, allow_initialization: bool) -> Result<(), ReportStatus> {
+pub(crate) fn preflight(config: &Config, allow_initialization: bool) -> Result<(), ReportStatus> {
     config
         .paths
         .validate()
@@ -544,7 +544,7 @@ fn execute(operation: Operation, input: Input, config: &Config, store: Arc<Store
 }
 
 // Called only for the trusted Store::open stage, never parser/user errors.
-fn store_open_status(error: &anyhow::Error) -> ReportStatus {
+pub(crate) fn store_open_status(error: &anyhow::Error) -> ReportStatus {
     if error.to_string() == "store is owned by another process" {
         ReportStatus::Busy
     } else {

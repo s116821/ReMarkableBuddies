@@ -7,12 +7,10 @@ use crate::analysis::{BoundingBox, SelectionCenter};
 use crate::conversation::{AttemptReason, Ledger, Outcome};
 use crate::device::screenshot::{SCREENSHOT_VIRTUAL_HEIGHT, SCREENSHOT_VIRTUAL_WIDTH};
 use crate::llm::{openai::OpenAI, LLMEngine};
-use crate::memory::Provider;
 use base64::{engine::general_purpose::STANDARD, Engine};
 
 /// Shared by the live workflow and bounded vision-comparison helper.
-pub const ANALYSIS_PROMPT: &str =
-    "Read the handwritten question annotation on this tablet page and answer it from \
+pub const ANALYSIS_PROMPT: &str = "Read the handwritten question annotation on this tablet page and answer it from \
              the technical concept selected by a hand-drawn closed outline or a deliberate \
              highlighted passage. A highlight can select content without any surrounding \
              outline and may appear gray on a grayscale tablet. Handwriting may be neat \
@@ -68,7 +66,7 @@ pub struct Orchestrator<M: LLMEngine = OpenAI> {
     llm: M,
     trigger_enabled: bool,
     ledger: Ledger,
-    memory: Option<std::sync::Arc<crate::memory::LocalMemory>>,
+    memory: Option<std::sync::Arc<dyn crate::memory::Provider>>,
     personalization: crate::config::PersonalizationSnapshot,
 }
 enum RenderOutcome {
@@ -94,15 +92,15 @@ impl<M: LLMEngine> Orchestrator<M> {
         self.trigger_enabled = enabled;
     }
 
-    /// Startup configuration only; the prepared request owns an immutable clone.
+    /// Startup preference only; each request retains an immutable snapshot.
     pub fn set_personalization(&mut self, snapshot: crate::config::PersonalizationSnapshot) {
         self.personalization = snapshot;
     }
 
-    /// Ordinary local context only. This cannot accept a selected provider.
+    /// Optional receiving context; never used for recognition or automatic learning.
     pub fn set_subject_memory(
         &mut self,
-        memory: Option<std::sync::Arc<crate::memory::LocalMemory>>,
+        memory: Option<std::sync::Arc<dyn crate::memory::Provider>>,
     ) {
         self.memory = memory;
     }
@@ -128,7 +126,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         let _timing = crate::measurement::Span::new("reader.iteration");
         self.workflow.begin_iteration()?;
         let result = self.run_iteration_inner(wait_for_trigger);
-        // A failed input guard or service health cannot be cleared by cleanup.
+        // A failed request guard must not be cleared by cleanup or another turn.
         if self.workflow.runtime_failed() {
             return result.and(Err(anyhow::anyhow!(
                 "Runtime health or input lost; further activity stopped"
@@ -234,7 +232,9 @@ impl<M: LLMEngine> Orchestrator<M> {
                     .map(|bytes| STANDARD.encode(bytes))
                     .collect();
                 if let Some(failure) = self.verify_question(&result, &verification)? {
-                    info!("Independent question reading disagreed or was uncertain; no answer written");
+                    info!(
+                        "Independent question reading disagreed or was uncertain; no answer written"
+                    );
                     self.workflow.report_failure(failure)?;
                     attempt.outcome(
                         &self.ledger,
@@ -251,22 +251,21 @@ impl<M: LLMEngine> Orchestrator<M> {
                 info!("Got verified Q&A");
 
                 attempt.interpret(&self.ledger, &result.question)?;
+                let mut memory_view = None;
                 if self.memory.is_some() || personalization.effective_text().is_some() {
-                    if let Err(error) =
-                        self.enrich_answer(&mut result, &verification, &personalization)
-                    {
-                        log::warn!("Contextual answer was not completed");
+                    let enriched = self.enrich_answer(&mut result, &verification, &personalization);
+                    if let Err(error) = enriched {
+                        log::warn!("Subject memory answer was not completed");
                         self.workflow.report_failure(Failure::Provider)?;
-                        let canceled = self.workflow.input_failed();
                         attempt.outcome(
                             &self.ledger,
                             false,
-                            if canceled {
+                            if self.workflow.input_failed() {
                                 Outcome::Canceled
                             } else {
                                 Outcome::Failed
                             },
-                            if canceled {
+                            if self.workflow.input_failed() {
                                 AttemptReason::Canceled
                             } else {
                                 AttemptReason::ProviderFailure
@@ -274,64 +273,105 @@ impl<M: LLMEngine> Orchestrator<M> {
                         )?;
                         return Err(error);
                     }
+                    memory_view = enriched?;
+                    info!("Got verified Q&A with optional subject memory");
                 }
-                attempt.generated(
-                    &self.ledger,
-                    Workflow::compose_qa(&result.question, &result.answer, result.selection_center),
-                )?;
-                if !attempt.legacy_output {
-                    attempt.outcome(
-                        &self.ledger,
-                        true,
-                        Outcome::Failed,
-                        AttemptReason::NativeOutputUnavailable,
-                    )?;
-                    return Ok(());
-                }
-                // Persist uncertainty before the first navigation/output effect.
-                attempt.outcome(
-                    &self.ledger,
-                    true,
-                    Outcome::ReconcileRequired,
-                    AttemptReason::OutputPending,
-                )?;
-                let rendered = self.render_answer(&result);
-                let recorded = match &rendered {
-                    Ok(RenderOutcome::NoOutput(reason)) => {
-                        attempt.outcome(&self.ledger, true, Outcome::Failed, reason.clone())
+
+                let memory = self.memory.clone();
+                if let (Some(memory), Some(view)) = (memory, memory_view.as_ref()) {
+                    let published = memory.with_current(view, &mut || {
+                        self.publish_answer(attempt, &result, !view.selected())
+                    });
+                    if let Err(error) = published {
+                        if attempt.assistant.is_none() {
+                            let canceled = self.workflow.input_failed();
+                            attempt.outcome(
+                                &self.ledger,
+                                false,
+                                if canceled {
+                                    Outcome::Canceled
+                                } else {
+                                    Outcome::Failed
+                                },
+                                if canceled {
+                                    AttemptReason::Canceled
+                                } else {
+                                    AttemptReason::ProviderFailure
+                                },
+                            )?;
+                        }
+                        return Err(error);
                     }
-                    Ok(RenderOutcome::SubmittedUnverified) => attempt.outcome(
-                        &self.ledger,
-                        true,
-                        Outcome::ReconcileRequired,
-                        AttemptReason::SubmittedUnverified,
-                    ),
-                    Err(_) => attempt.outcome(
-                        &self.ledger,
-                        true,
-                        Outcome::ReconcileRequired,
-                        AttemptReason::DeviceUncertain,
-                    ),
-                };
-                if let Err(recording) = recorded {
-                    return Err(anyhow::anyhow!(
-                        "output result {:?}; terminal recording failed: {recording:#}",
-                        rendered.as_ref().err()
-                    ));
-                }
-                if let Err(e) = rendered {
-                    error!("Error rendering answer: {}", e);
-                    if self.workflow.runtime_failed() {
-                        return Err(e);
-                    }
-                    // On error, retain the typed diagnostic without source feedback
-                    self.workflow.report_failure(Failure::Device)?;
-                    return Err(e);
+                } else {
+                    self.publish_answer(attempt, &result, true)?;
                 }
             }
         }
 
         info!("=== Iteration Complete ===");
+        Ok(())
+    }
+
+    fn publish_answer(
+        &mut self,
+        attempt: &mut Attempt,
+        result: &AnalysisResult,
+        allow_native: bool,
+    ) -> Result<()> {
+        self.workflow.check_request_progress()?;
+        attempt.generated(
+            &self.ledger,
+            Workflow::compose_qa(&result.question, &result.answer, result.selection_center),
+        )?;
+        if !attempt.legacy_output || !allow_native {
+            attempt.outcome(
+                &self.ledger,
+                true,
+                Outcome::Failed,
+                AttemptReason::NativeOutputUnavailable,
+            )?;
+            return Ok(());
+        }
+        // Persist uncertainty before the first navigation/output effect.
+        attempt.outcome(
+            &self.ledger,
+            true,
+            Outcome::ReconcileRequired,
+            AttemptReason::OutputPending,
+        )?;
+        let rendered = self.render_answer(result);
+        let recorded = match &rendered {
+            Ok(RenderOutcome::NoOutput(reason)) => {
+                attempt.outcome(&self.ledger, true, Outcome::Failed, reason.clone())
+            }
+            Ok(RenderOutcome::SubmittedUnverified) => attempt.outcome(
+                &self.ledger,
+                true,
+                Outcome::ReconcileRequired,
+                AttemptReason::SubmittedUnverified,
+            ),
+            Err(_) => attempt.outcome(
+                &self.ledger,
+                true,
+                Outcome::ReconcileRequired,
+                AttemptReason::DeviceUncertain,
+            ),
+        };
+        if let Err(recording) = recorded {
+            return Err(anyhow::anyhow!(
+                "output result {:?}; terminal recording failed: {recording:#}",
+                rendered.as_ref().err()
+            ));
+        }
+        if let Err(e) = rendered {
+            error!("Error rendering answer: {}", e);
+            if self.workflow.runtime_failed() {
+                return Err(e);
+            }
+            // On error, retain the typed diagnostic without source feedback
+            self.workflow.report_failure(Failure::Device)?;
+            return Err(e);
+        }
         Ok(())
     }
 
@@ -433,60 +473,6 @@ impl<M: LLMEngine> Orchestrator<M> {
             selection_center,
             _screenshot_data: screenshot_png_data,
         })
-    }
-
-    fn enrich_answer(
-        &mut self,
-        result: &mut AnalysisResult,
-        images: &[String],
-        preference: &crate::config::PersonalizationSnapshot,
-    ) -> Result<()> {
-        self.workflow.check_request_progress()?;
-        let retrieved = self
-            .memory
-            .as_ref()
-            .map(|memory| -> Result<_> {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)?
-                    .as_millis()
-                    .try_into()?;
-                // Ordinary historical capture has no verified document association.
-                memory
-                    .query(&crate::memory::Query::new(result.question.clone(), now))
-                    .map_err(|_| anyhow::anyhow!("subject memory retrieval failed"))
-            })
-            .transpose()?;
-        self.workflow.check_request_progress()?;
-        use crate::memory::Status;
-        if let Some(view) = &retrieved {
-            match view.status {
-                Status::Disabled | Status::CompleteEmpty
-                    if preference.effective_text().is_none() =>
-                {
-                    return Ok(())
-                }
-                Status::Unavailable => anyhow::bail!("subject memory retrieval unavailable"),
-                Status::Partial if view.context.facts.is_empty() => {
-                    anyhow::bail!("subject memory retrieval incomplete without usable facts")
-                }
-                _ => {}
-            }
-        }
-        let usable = retrieved.as_ref().filter(|view| {
-            matches!(view.status, Status::Complete | Status::Partial)
-                && !view.context.facts.is_empty()
-        });
-        let workflow = &mut self.workflow;
-        result.answer = crate::memory::context::answer_with_preference(
-            &mut self.llm,
-            &result.question,
-            images,
-            usable,
-            Some(preference),
-            &mut || workflow.check_request_progress(),
-        )?;
-        self.workflow.check_request_progress()?;
-        Ok(())
     }
 
     fn verify_question(
@@ -597,15 +583,72 @@ impl<M: LLMEngine> Orchestrator<M> {
         None
     }
 
-    /// Render the answer on the next page
-    ///
-    /// Simplified flow:
-    /// 1. Store original page screenshot for later comparison
-    /// 2. Navigate right to next page  
-    /// 3. Compare to original to verify we actually moved
-    /// 4. Check if page is valid (blank or existing QA page)
-    /// 5. If not valid or didn't move → verify the source and record a non-ink failure
-    /// 6. If valid → render Q&A on that page
+    fn enrich_answer(
+        &mut self,
+        result: &mut AnalysisResult,
+        images: &[String],
+        preference: &crate::config::PersonalizationSnapshot,
+    ) -> Result<Option<crate::memory::QueryResult>> {
+        self.workflow.check_request_progress()?;
+        let retrieved = self
+            .memory
+            .as_ref()
+            .map(|memory| -> Result<_> {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_millis()
+                    .try_into()?;
+                // Ordinary historical capture has no verified document association.
+                memory
+                    .query(&crate::memory::Query::new(result.question.clone(), now))
+                    .map_err(|_| anyhow::anyhow!("subject memory retrieval failed"))
+            })
+            .transpose()?;
+        self.workflow.check_request_progress()?;
+        use crate::memory::Status;
+        if let Some(view) = &retrieved {
+            match view.status {
+                Status::Disabled | Status::CompleteEmpty
+                    if preference.effective_text().is_none() =>
+                {
+                    return Ok(retrieved)
+                }
+                Status::Unavailable => anyhow::bail!("subject memory retrieval unavailable"),
+                Status::Partial if view.context.facts.is_empty() => {
+                    anyhow::bail!("subject memory retrieval incomplete without usable facts")
+                }
+                _ => {}
+            }
+        }
+        let usable = retrieved.as_ref().filter(|view| {
+            matches!(view.status, Status::Complete | Status::Partial)
+                && !view.context.facts.is_empty()
+        });
+        let workflow = &mut self.workflow;
+        result.answer = if let Some(view) = usable.filter(|view| view.selected()) {
+            crate::memory::context::answer_with_selected_view(
+                &mut self.llm,
+                &result.question,
+                images,
+                view,
+                self.ledger.store(),
+                Some(preference),
+                &mut || workflow.check_request_progress(),
+            )
+        } else {
+            crate::memory::context::answer_with_preference(
+                &mut self.llm,
+                &result.question,
+                images,
+                usable,
+                Some(preference),
+                &mut || workflow.check_request_progress(),
+            )
+        }?;
+        self.workflow.check_request_progress()?;
+        Ok(retrieved)
+    }
+
     fn render_answer(&mut self, result: &AnalysisResult) -> Result<RenderOutcome> {
         anyhow::ensure!(
             !self.workflow.is_selected(),
@@ -821,7 +864,9 @@ mod tests {
             "SELECTION_CENTER: 384,512\nSELECTION_CENTER: 1,2",
             "OUTLINE_BOX: 1,2,3,4",
         ] {
-            let response = format!("QUESTION: G unc.?\nQUESTION_BOX: 130,35,200,50\n{center}\n---\nANSWER: About 14 ppm.");
+            let response = format!(
+                "QUESTION: G unc.?\nQUESTION_BOX: 130,35,200,50\n{center}\n---\nANSWER: About 14 ppm."
+            );
             assert!(
                 Orchestrator::<OpenAI>::parse_analysis_response(&response, vec![]).is_none(),
                 "{center}"
