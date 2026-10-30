@@ -200,10 +200,20 @@ impl NativeHistory {
         touch: &mut Touch,
         timeout: Option<Duration>,
     ) -> Result<Vec<Interaction>> {
+        self.wait_with_progress(keyboard, touch, timeout, &mut || Ok(()))
+    }
+
+    pub fn wait_with_progress(
+        &mut self,
+        keyboard: &mut Keyboard,
+        touch: &mut Touch,
+        timeout: Option<Duration>,
+        progress: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<Vec<Interaction>> {
         let deadline = timeout.map(|duration| Instant::now() + duration);
         if !self.supported {
             ensure!(timeout.is_none(), "Bounded input observation unavailable");
-            touch.wait_for_trigger()?;
+            touch.wait_for_trigger_with_progress(progress)?;
             return Ok(vec![Interaction::Reader]);
         }
         if self.input.is_none() {
@@ -214,7 +224,7 @@ impl NativeHistory {
                     self.discard();
                     self.supported = false;
                     ensure!(timeout.is_none(), "Bounded input observation unavailable");
-                    touch.wait_for_trigger()?;
+                    touch.wait_for_trigger_with_progress(progress)?;
                     return Ok(vec![Interaction::Invalidated, Interaction::Reader]);
                 }
             }
@@ -225,8 +235,22 @@ impl NativeHistory {
                 "Input observation deadline reached"
             );
             match self.input.as_mut().unwrap().poll() {
-                Ok(events) if !events.is_empty() => return Ok(events),
-                Ok(_) => sleep(Duration::from_millis(10)),
+                Ok(events) => {
+                    ensure!(
+                        deadline.is_none_or(|limit| Instant::now() < limit),
+                        "Input observation deadline reached"
+                    );
+                    // Callback errors must escape, never enter the input fallback.
+                    progress()?;
+                    ensure!(
+                        deadline.is_none_or(|limit| Instant::now() < limit),
+                        "Input observation deadline reached"
+                    );
+                    if !events.is_empty() {
+                        return Ok(events);
+                    }
+                    sleep(Duration::from_millis(10));
+                }
                 Err(error) => {
                     log::warn!("Q&A input ownership lost: {error}");
                     self.discard();
@@ -242,6 +266,98 @@ impl NativeHistory {
 mod tests {
     use super::*;
     use crate::device::interaction::{Contact, ContactReducer};
+
+    #[test]
+    fn idle_progress_preserves_events_and_callback_failure_escapes() {
+        let mut history = NativeHistory::new(TriggerCorner::LowerLeft);
+        history.supported = true;
+        let events = vec![Interaction::Undo, Interaction::Reader];
+        history.input = Some(InputObserver::scripted(vec![
+            Ok(vec![]),
+            Ok(events.clone()),
+        ]));
+        let mut keyboard = Keyboard::new(true, true);
+        let mut touch = Touch::new(true, TriggerCorner::LowerLeft);
+        let mut polls = 0;
+        let observed = history
+            .wait_with_progress(
+                &mut keyboard,
+                &mut touch,
+                Some(Duration::from_secs(1)),
+                &mut || {
+                    polls += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(polls, 2);
+        assert_eq!(observed, events);
+
+        history.input = Some(InputObserver::scripted(vec![Ok(vec![])]));
+        let error = history
+            .wait_with_progress(
+                &mut keyboard,
+                &mut touch,
+                Some(Duration::from_secs(1)),
+                &mut || anyhow::bail!("health endpoint failed"),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("health endpoint failed"));
+        assert!(history.supported && history.input.is_some());
+
+        history.input = Some(InputObserver::scripted(vec![Ok(vec![Interaction::Reader])]));
+        let mut callback_entered = false;
+        let error = history
+            .wait_with_progress(
+                &mut keyboard,
+                &mut touch,
+                Some(Duration::from_millis(100)),
+                &mut || {
+                    callback_entered = true;
+                    // Cross the real caller deadline inside the owned callback.
+                    sleep(Duration::from_millis(110));
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+        assert!(callback_entered);
+        assert!(error
+            .to_string()
+            .contains("Input observation deadline reached"));
+    }
+
+    #[test]
+    fn failed_poll_and_expired_observation_cannot_report_health() {
+        let mut history = NativeHistory::new(TriggerCorner::LowerLeft);
+        history.supported = true;
+        history.input = Some(InputObserver::scripted(vec![Err(anyhow::anyhow!(
+            "lost input"
+        ))]));
+        let mut keyboard = Keyboard::new(true, true);
+        let mut touch = Touch::new(true, TriggerCorner::LowerLeft);
+        let mut progress = || -> Result<()> { panic!("failed or expired input reported health") };
+        assert_eq!(
+            history
+                .wait_with_progress(
+                    &mut keyboard,
+                    &mut touch,
+                    Some(Duration::from_secs(1)),
+                    &mut progress,
+                )
+                .unwrap(),
+            vec![Interaction::Invalidated]
+        );
+        assert!(history.input.is_none());
+        history.input = Some(InputObserver::scripted(vec![Ok(vec![Interaction::Reader])]));
+        assert!(history
+            .wait_with_progress(
+                &mut keyboard,
+                &mut touch,
+                Some(Duration::ZERO),
+                &mut progress,
+            )
+            .is_err());
+    }
 
     #[test]
     fn guard_failure_then_discard_retires_observer_and_reader_can_resume() {

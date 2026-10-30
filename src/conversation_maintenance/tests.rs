@@ -797,6 +797,7 @@ fn bind_historical_fixture(f: &Fixture) -> Uuid {
     let operation = Uuid::new_v4();
     let binding = Ledger::binding_id(source.document, page);
     let claim = BindingReceipt {
+        acquisition: Default::default(),
         operation,
         conversation: f.conversation,
         request_fingerprint: "synthetic request".into(),

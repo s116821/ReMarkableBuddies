@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+umask 077
+root='@ROOT@'
+nonce='@NONCE@'
+test -d "$root" && test ! -L "$root"
+test "$(stat -c '%a %u' "$root")" = '700 0'
+test -f "$root/owner" && test ! -L "$root/owner"
+test "$(stat -c '%a %u %h' "$root/owner")" = '600 0 1'
+test "$(cat "$root/owner")" = "$nonce"
+test -f "$root/activation.claim" && test ! -e "$root/restore.claim"
+test "$(sha256sum "$root/payload.so" | awk '{print $1}')" = '@PAYLOADHASH@'
+(set -C; printf '%s\n' "$nonce" > "$root/attempt.claim")
+start=$(sed 's/^.*) //' /proc/$$/stat | awk '{print $20}')
+(set -C; printf '%s %s\n' "$$" "$start" > "$root/attempt.identity")
+test ! -e "$root/restore.claim"
+unset LD_LIBRARY_PATH XOVI_ROOT
+LD_PRELOAD="$root/payload.so" exec /usr/bin/xochitl --system

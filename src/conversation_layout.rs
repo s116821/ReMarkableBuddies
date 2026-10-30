@@ -1,5 +1,6 @@
 //! Read-only logical presentation. A plan never grants current native authority.
 use crate::conversation::{ContextView, Role, Turn};
+use crate::conversation_feedback::FeedbackDescription;
 use crate::storage::{Uuid, MAX_ITEMS};
 use anyhow::{ensure, Result};
 use std::collections::{BTreeMap, BTreeSet};
@@ -56,6 +57,15 @@ pub struct PagePlan<'a> {
     pub history: Region,
     /// Newest exchange first. Full original text and source links stay borrowed.
     pub exchanges: Vec<Exchange<'a>>,
+}
+/// One explicit historical description linked to an original exchange and turn.
+/// The page retains original borrowed content; this is not an inserted error
+/// turn, live status, presentation acknowledgment or current native authority.
+#[derive(Debug)]
+pub struct HistoricalFeedbackPlan<'a> {
+    pub page: PagePlan<'a>,
+    pub exchange: Uuid,
+    pub description: FeedbackDescription,
 }
 /// Project an already validated domain context. No pixel/OCR/cache/device inputs,
 /// I/O, model calls, draft changes or native operations exist in this interface.

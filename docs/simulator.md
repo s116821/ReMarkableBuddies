@@ -1,5 +1,35 @@
 # Local Reader simulator
 
+Writer host scenarios also execute through `--simulate` with `mode: "writer"`.
+They use the separate strict Writer schema: scripted string `replies`, `steps`,
+`conversation`, `expect` and `output`. `run` steps use existing inline/export
+commands; `notebook` steps use the explicit joined notebook commands documented
+in [Writer drafts](reference/writer-drafts.md). Notebook source fixture paths
+are relative to the scenario file. Validated complete asset buffers freeze before
+fixture creation, with an 8 MiB total raw-asset bound. All are offline even when credentials
+exist. Notebook file admission currently requires supported Linux filesystems.
+
+Maintained `writer-notebook-create-replay`, `writer-notebook-create-refine`,
+`writer-notebook-final-cancel`, `writer-notebook-reconcile` and
+`writer-inline-to-notebook` scenarios exercise actual Store adoption, complete
+ordered map/reduction, restart, fresh final selection and the existing export
+journal. Reports retain common status/transport summaries and detailed typed
+`notebook_reports` with stage counts and provenance. Scripted replies establish
+workflow behavior, not model quality or device qualification. No tablet actions
+or live destination account writes occur.
+
+Optional `retain_store_fixture: true` saves the closed test-owned data directory
+under `output/store-fixture/data`, plus a relative-path/byte/hash manifest. It
+defaults off, excludes cache/credential roots and refuses existing/symlink
+destinations, more than 8192 files or 64 MiB. This is a diagnostic fixture rather
+than a backup/restore or fresh execution grant. A restart-only scenario with no
+replies can retain a fresh ordinary conversation with zero model/destination
+calls. Unused replies and unreached declared faults fail report assertions.
+Copied generation4 capabilities retain their original paths: ordinary open at a
+new location refuses until explicit notebook preparation revalidates the closed
+copy and publishes its new path binding. Snapshot retention does not perform
+that preparation or mint a model/export witness.
+
 For fixture selection and evidence gates, use the [local testing checklist](https://github.com/s116821/RemarkableBuddiesDocs/blob/main/.agents/skills/reader-simulator-testing/SKILL.md). It also works without an agent integration.
 
 Run the real Reader workflow on Windows, Linux or macOS without SSH, tablet input
@@ -46,6 +76,7 @@ based; operation call numbers are one based and span the whole scenario.
 | Field | Meaning |
 |---|---|
 | `llm` | Defaults to scripted/offline. Explicit live configuration is documented in local development setup. |
+| `personalization` | Optional version1 configured preference, default disabled/empty. Only verified ordinary Reader answer generation receives it; recognition and historical evidence remain separate. No running reload or native qualification is modeled. |
 | `name`, `mode` | Nonempty name; currently only `reader` executes. |
 | `pages` | Ordered pages. `{}` is blank. `image` loads a 768x1024 PNG; optional `text` and `strokes` add deterministic text or existing JSON pen paths. |
 | `active_page` | Starting page, default zero. |

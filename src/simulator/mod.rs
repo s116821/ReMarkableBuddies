@@ -6,6 +6,8 @@ mod reader_persistence_tests;
 pub mod scenario;
 #[cfg(test)]
 mod smart_erase_tests;
+#[cfg(test)]
+mod subject_memory_tests;
 pub mod writer;
 
 use crate::{LLMEngine, OpenAI, Orchestrator, Workflow};
@@ -213,6 +215,7 @@ fn execute_with_model<M: LLMEngine>(
     let workflow = Workflow::with_device(Box::new(SimDevice(state.clone())), false);
     let ledger_fixture = SimulatorLedger::new();
     let mut orchestrator = Orchestrator::new(workflow, model, ledger_fixture.open()?);
+    orchestrator.set_personalization(scenario.personalization.snapshot()?);
     let mut errors = Vec::new();
     for (index, iteration) in scenario.iterations.iter().enumerate() {
         if let Some(page) = iteration.page {
