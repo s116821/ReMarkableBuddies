@@ -1,5 +1,35 @@
 use super::*;
 
+#[path = "ordinary_export.rs"]
+pub(crate) mod ordinary_export;
+#[path = "ordinary_restore.rs"]
+pub(crate) mod ordinary_restore;
+
+#[path = "notebook_backup.rs"]
+mod notebook_backup;
+
+/// Distinguish a proved prepublication conflict from a possible atomic publication.
+pub(crate) enum ConfigPublication {
+    Verified(String),
+    Conflict,
+    Refused,
+    Unknown,
+}
+#[cfg(test)]
+pub(crate) enum ConfigFault {
+    AtomicCall,
+    AfterPublication,
+    ChangedReadback,
+}
+#[derive(Debug)]
+struct ConfigRevisionChanged;
+impl std::fmt::Display for ConfigRevisionChanged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("configuration revision changed")
+    }
+}
+impl std::error::Error for ConfigRevisionChanged {}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Backup {
@@ -10,6 +40,31 @@ struct Backup {
     config_snapshot: Option<crate::config::Config>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     selected_history: Option<selection::portable::SelectionArchive>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    feedback_history: Option<FeedbackHistory>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FeedbackHistory {
+    format: u32,
+    origin_actor: Uuid,
+    origin_generation: Uuid,
+    namespace: Namespace,
+    domain_schema_version: u32,
+}
+impl FeedbackHistory {
+    fn validate(&self) -> Result<()> {
+        ensure!(
+            self.format == 1
+                && !self.origin_actor.is_nil()
+                && !self.origin_generation.is_nil()
+                && self.namespace == Namespace::UnassociatedFeedback
+                && self.domain_schema_version == 1,
+            "unsupported feedback archive origin"
+        );
+        Ok(())
+    }
 }
 
 const SELECTED_BACKUP_FORMAT: u32 = 2;
@@ -50,9 +105,32 @@ impl Backup {
         if backup.format == FORMAT {
             let value: serde_json::Value = serde_json::from_slice(&bytes)?;
             ensure!(
-                value.get("selected_history").is_none(),
+                value.get("selected_history").is_none() && value.get("feedback_history").is_none(),
                 "legacy backup cannot carry selected metadata"
             );
+        }
+        let raw: serde_json::Value = serde_json::from_slice(&bytes)?;
+        if backup.format == feedback_generation::VERSION {
+            ensure!(
+                raw.get("selected_history").is_none(),
+                "selected feedback archives unsupported"
+            );
+        } else {
+            ensure!(
+                raw.get("feedback_history").is_none(),
+                "legacy feedback metadata unsupported"
+            );
+        }
+        match (backup.format, &backup.feedback_history) {
+            (feedback_generation::VERSION, Some(feature)) => {
+                feature.validate()?;
+                ensure!(
+                    backup.selected_history.is_none(),
+                    "selected feedback archives unsupported"
+                );
+            }
+            (1 | 2, None) => (),
+            _ => anyhow::bail!("unsupported feedback archive feature"),
         }
         Ok(backup)
     }
@@ -61,7 +139,10 @@ impl Backup {
             (self.format == FORMAT && self.selected_history.is_none())
                 || (self.format == SELECTED_BACKUP_FORMAT
                     && self.selected_history.is_some()
-                    && self.config_snapshot.is_none()),
+                    && self.config_snapshot.is_none())
+                || (self.format == feedback_generation::VERSION
+                    && self.feedback_history.is_some()
+                    && self.selected_history.is_none()),
             "unsupported backup format/policy"
         );
         ensure!(
@@ -116,6 +197,13 @@ impl Backup {
                 }
             }
             for (record, hash) in Store::validate_objects(source, manifest)? {
+                if record.namespace == Namespace::UnassociatedFeedback {
+                    let origin = self
+                        .feedback_history
+                        .as_ref()
+                        .context("feedback archive origin missing")?;
+                    crate::unassociated_feedback::validate_envelope(&record, origin.origin_actor)?;
+                }
                 if let Some((_, prior)) = records.get(&record.revision_id) {
                     ensure!(prior == &hash, "backup revision identity collision");
                 }
@@ -174,6 +262,12 @@ impl Store {
     /// Export only committed, verified data. A complete marker is published last.
     /// Configuration export is separate so credentials cannot enter through opaque input.
     pub fn export(&self, destination: &Path) -> Result<bool> {
+        self.export_policy(destination, false)
+    }
+    pub(crate) fn export_feedback(&self, destination: &Path) -> Result<bool> {
+        self.export_policy(destination, true)
+    }
+    fn export_policy(&self, destination: &Path, feedback: bool) -> Result<bool> {
         files::safe_path(destination)?;
         ensure!(
             !destination.starts_with(&self.paths.data) && !self.paths.data.starts_with(destination),
@@ -188,8 +282,44 @@ impl Store {
             inner.index.unavailable == 0,
             "unavailable commits prevent complete export"
         );
-        let root = self.generation(inner.generation);
+        let backup = if feedback {
+            self.check_feedback(&inner)?;
+            self.export_backup_policy(&inner, true)?
+        } else {
+            self.export_backup_locked(&inner)?
+        };
         files::directory(&destination.join("objects"))?;
+        let backup_bytes = serde_json::to_vec(&backup)?;
+        ensure!(
+            backup_bytes.len() <= MAX_METADATA,
+            "backup metadata exceeds supported restore bound"
+        );
+        self.export_write_locked(
+            &inner,
+            destination,
+            &backup,
+            &backup_bytes,
+            &mut false,
+            files::atomic,
+        )?;
+        Ok(backup.complete_media)
+    }
+    // Shared collection/serialization and publication path; old caller order stays intact.
+    fn export_backup_locked(&self, inner: &Inner) -> Result<Backup> {
+        self.export_backup_policy(inner, false)
+    }
+    fn export_backup_policy(&self, inner: &Inner, feedback: bool) -> Result<Backup> {
+        let root = self.generation(inner.generation);
+        let version = feedback_generation::version(&root)?;
+        ensure!(
+            if feedback {
+                version == feedback_generation::VERSION
+                    && !root.join("selection-feature.json").exists()
+            } else {
+                version != feedback_generation::VERSION && version != notebook_generation::VERSION
+            },
+            "unsupported backup generation policy"
+        );
         selection::refuse_selected_maintenance(&root)?;
         let manifests: Vec<_> = inner.index.manifests.values().cloned().collect();
         let mut inventory = BTreeMap::new();
@@ -214,20 +344,37 @@ impl Store {
         } else {
             None
         };
-        let backup = Backup {
-            format: FORMAT,
+        Ok(Backup {
+            format: if feedback {
+                feedback_generation::VERSION
+            } else {
+                FORMAT
+            },
             manifests,
             objects: inventory.values().cloned().collect(),
             complete_media,
             config_snapshot,
             selected_history: None,
-        };
-        let backup_bytes = serde_json::to_vec(&backup)?;
-        ensure!(
-            backup_bytes.len() <= MAX_METADATA,
-            "backup metadata exceeds supported restore bound"
-        );
-        for item in inventory.values() {
+            feedback_history: feedback.then_some(FeedbackHistory {
+                format: 1,
+                origin_actor: self.actor_id,
+                origin_generation: inner.generation,
+                namespace: Namespace::UnassociatedFeedback,
+                domain_schema_version: 1,
+            }),
+        })
+    }
+    fn export_write_locked(
+        &self,
+        inner: &Inner,
+        destination: &Path,
+        backup: &Backup,
+        backup_bytes: &[u8],
+        attempted: &mut bool,
+        publish: impl FnOnce(&Path, &[u8]) -> Result<()>,
+    ) -> Result<()> {
+        let root = self.generation(inner.generation);
+        for item in &backup.objects {
             let path = root.join("objects").join(&item.sha256);
             files::safe_path(&path)?;
             files::copy_verified(
@@ -236,8 +383,9 @@ impl Store {
                 item,
             )?;
         }
-        files::atomic(&destination.join("backup.json"), &backup_bytes)?;
-        Ok(complete_media)
+        *attempted = true;
+        publish(&destination.join("backup.json"), backup_bytes)?;
+        Ok(())
     }
 
     /// Verify a complete format-1 or selected format-2 archive without opening a
@@ -357,6 +505,10 @@ impl Store {
             "unavailable commits prevent complete export"
         );
         let root = self.generation(inner.generation);
+        ensure!(
+            !matches!(feedback_generation::version(&root)?, 3 | 4),
+            "selected feature backup unsupported"
+        );
         let selected = selection::portable::collect(&root, self.actor_id, inner.generation)?;
         let manifests: Vec<_> = inner.index.manifests.values().cloned().collect();
         let mut inventory = BTreeMap::new();
@@ -390,6 +542,7 @@ impl Store {
             objects: inventory.values().cloned().collect(),
             config_snapshot: None,
             selected_history: Some(selected.archive),
+            feedback_history: None,
         };
         let bytes = serde_json::to_vec(&backup)?;
         ensure!(bytes.len() <= MAX_METADATA, "backup metadata exceeds bound");
@@ -415,13 +568,20 @@ impl Store {
 
     /// Additive staged restore. Old generation and source are retained for rollback.
     pub fn restore(&self, source: &Path) -> Result<()> {
+        self.restore_policy(source, false)
+    }
+    pub(crate) fn restore_feedback(&self, source: &Path) -> Result<()> {
+        self.restore_policy(source, true)
+    }
+    fn restore_policy(&self, source: &Path, feedback: bool) -> Result<()> {
         files::safe_path(source)?;
         let backup = Backup::read(source)?;
         if let Some(config) = &backup.config_snapshot {
             config.validate_values()?;
         }
         ensure!(
-            backup.format == FORMAT
+            (backup.format == FORMAT
+                || (feedback && backup.format == feedback_generation::VERSION))
                 && backup.selected_history.is_none()
                 && backup.manifests.len() <= MAX_ITEMS
                 && backup.objects.len() <= MAX_ITEMS,
@@ -444,7 +604,16 @@ impl Store {
         let mut required = BTreeSet::new();
         let mut descriptors = BTreeSet::new();
         for manifest in &backup.manifests {
-            Self::validate_objects(source, manifest)?;
+            let records = Self::validate_objects(source, manifest)?;
+            for (record, _) in &records {
+                if record.namespace == Namespace::UnassociatedFeedback {
+                    ensure!(
+                        feedback && backup.format == feedback_generation::VERSION,
+                        "legacy feedback archive unsupported"
+                    );
+                    crate::unassociated_feedback::validate_envelope(record, self.actor_id)?;
+                }
+            }
             for item in manifest.records.iter().chain(&manifest.media) {
                 ensure!(
                     inventory.get(&item.sha256) == Some(item),
@@ -470,9 +639,58 @@ impl Store {
             inner.index.unavailable == 0,
             "repair unavailable local commits before restore"
         );
-        selection::refuse_selected_maintenance(&self.generation(inner.generation))?;
+        let root = self.generation(inner.generation);
+        if feedback {
+            self.check_feedback(&inner)?;
+            ensure!(
+                !root.join("selection-feature.json").exists(),
+                "selected feedback restore unsupported"
+            );
+            if let Some(origin) = &backup.feedback_history {
+                origin.validate()?;
+                ensure!(
+                    origin.origin_actor == self.actor_id,
+                    "cross-owner feedback restore unsupported"
+                );
+            }
+        } else {
+            ensure!(
+                feedback_generation::version(&root)? != feedback_generation::VERSION,
+                "ordinary restore does not support feedback3"
+            );
+        }
+        selection::refuse_selected_maintenance(&root)?;
         let next = Uuid::new_v4();
-        Self::create_generation(&self.paths.data, next)?;
+        self.restore_locked(&mut inner, source, backup, next, false, &mut false)
+    }
+    /// The existing staging/rebuild/CURRENT writer shared by both entrypoints.
+    fn restore_locked(
+        &self,
+        inner: &mut Inner,
+        source: &Path,
+        backup: Backup,
+        next: Uuid,
+        exclusive: bool,
+        activation_attempted: &mut bool,
+    ) -> Result<()> {
+        let current_root = self.generation(inner.generation);
+        ensure!(
+            feedback_generation::version(&current_root)? != notebook_generation::VERSION,
+            "legacy restore does not support notebook generation"
+        );
+        if exclusive {
+            let root = self.generation(next);
+            files::safe_path(&root)?;
+            // The old helper intentionally permits existing directories. This
+            // new admission reserves its own empty root atomically first.
+            fs::create_dir(&root)?;
+        }
+        let current_root = self.generation(inner.generation);
+        if feedback_generation::version(&current_root)? == feedback_generation::VERSION {
+            feedback_generation::create(&self.paths.data, next, self.actor_id)?;
+        } else {
+            Self::create_generation(&self.paths.data, next)?;
+        }
         let next_root = self.generation(next);
         if let Some(config) = &backup.config_snapshot {
             files::atomic_json(&next_root.join("restored-config.json"), config)?;
@@ -513,11 +731,12 @@ impl Store {
             rebuilt.unavailable == 0,
             "restore contains unresolved lineage or identities"
         );
-        Self::trip(&mut inner, Fault::BeforeActivation)?;
+        Self::trip(inner, Fault::BeforeActivation)?;
+        *activation_attempted = true;
         files::atomic_json(&self.paths.data.join("CURRENT"), &next)?;
         inner.generation = next;
         inner.index = rebuilt;
-        Self::trip(&mut inner, Fault::AfterActivation)?;
+        Self::trip(inner, Fault::AfterActivation)?;
         Ok(())
     }
     pub fn snapshot_config(&self, config: &crate::config::Config) -> Result<()> {
@@ -536,6 +755,91 @@ impl Store {
         config: &crate::config::Config,
     ) -> Result<String> {
         config.validate()?;
+        self.publish_config(
+            path,
+            expected,
+            || Ok(serde_json::to_vec(config)?),
+            &mut false,
+            files::atomic,
+            false,
+        )
+    }
+
+    /// Declaration-preserving sibling of the typed writer; same CAS and atomic path.
+    pub(crate) fn replace_config_document(
+        &self,
+        path: &Path,
+        expected: &str,
+        bytes: &[u8],
+    ) -> ConfigPublication {
+        self.replace_config_document_with(path, expected, bytes, files::atomic)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_config_document_fault(
+        &self,
+        path: &Path,
+        expected: &str,
+        bytes: &[u8],
+        fault: ConfigFault,
+    ) -> ConfigPublication {
+        self.replace_config_document_with(path, expected, bytes, |path, bytes| {
+            if matches!(fault, ConfigFault::AtomicCall) {
+                anyhow::bail!("injected atomic call failure");
+            }
+            files::atomic(path, bytes)?;
+            match fault {
+                ConfigFault::AfterPublication => anyhow::bail!("injected post-publication failure"),
+                ConfigFault::ChangedReadback => files::atomic(path, b"{}"),
+                ConfigFault::AtomicCall => unreachable!(),
+            }
+        })
+    }
+
+    fn replace_config_document_with(
+        &self,
+        path: &Path,
+        expected: &str,
+        bytes: &[u8],
+        publish: impl FnOnce(&Path, &[u8]) -> Result<()>,
+    ) -> ConfigPublication {
+        let Ok((config, _)) = crate::config::inspection::document(bytes) else {
+            return ConfigPublication::Refused;
+        };
+        if config.validate().is_err()
+            || config.paths.data != self.paths.data
+            || config.paths.cache != self.paths.cache
+            || config.paths.credentials != self.paths.credentials
+            || !valid_digest(expected)
+        {
+            return ConfigPublication::Refused;
+        }
+        let mut attempted = false;
+        let result = self.publish_config(
+            path,
+            Some(expected),
+            || Ok(bytes.to_vec()),
+            &mut attempted,
+            publish,
+            true,
+        );
+        match result {
+            Ok(hash) => ConfigPublication::Verified(hash),
+            Err(_) if attempted => ConfigPublication::Unknown,
+            Err(error) if error.is::<ConfigRevisionChanged>() => ConfigPublication::Conflict,
+            Err(_) => ConfigPublication::Refused,
+        }
+    }
+
+    fn publish_config(
+        &self,
+        path: &Path,
+        expected: Option<&str>,
+        encode: impl FnOnce() -> Result<Vec<u8>>,
+        attempted: &mut bool,
+        publish: impl FnOnce(&Path, &[u8]) -> Result<()>,
+        verify: bool,
+    ) -> Result<String> {
         files::safe_path(path)?;
         ensure!(
             !path.starts_with(&self.paths.data)
@@ -552,13 +856,71 @@ impl Store {
         } else {
             None
         };
-        ensure!(
-            current.as_deref() == expected,
-            "configuration revision changed"
-        );
-        let bytes = serde_json::to_vec(config)?;
+        if current.as_deref() != expected {
+            return Err(ConfigRevisionChanged.into());
+        }
+        let bytes = encode()?;
         ensure!(bytes.len() <= MAX_RECORD, "configuration exceeds bound");
-        files::atomic(path, &bytes)?;
+        *attempted = true;
+        publish(path, &bytes)?;
+        if verify {
+            ensure!(
+                files::read(path, MAX_RECORD as u64)? == bytes,
+                "configuration readback changed"
+            );
+        }
         Ok(digest(&bytes))
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Store {
+    /// Same Store mutex as configuration/data publication; no credential-specific owner.
+    pub(crate) fn publish_declared_model_credential(
+        &self,
+        path: &std::path::Path,
+        intent: &crate::config::model_credential::linux::Intent,
+        change: &crate::config::model_credential::linux::Change,
+    ) -> crate::config::model_credential::Report {
+        self.with_credential_mutex(|| {
+            crate::config::model_credential::linux::publish_locked(
+                path,
+                &self.paths,
+                intent,
+                change,
+            )
+        })
+    }
+    fn with_credential_mutex(
+        &self,
+        publish: impl FnOnce() -> crate::config::model_credential::Report,
+    ) -> crate::config::model_credential::Report {
+        let Ok(_inner) = self.inner.lock() else {
+            return crate::config::model_credential::Report::refusal(
+                crate::config::model_credential::Operation::Apply,
+                crate::config::basic::Status::Unavailable,
+            );
+        };
+        publish()
+    }
+    #[cfg(test)]
+    pub(crate) fn credential_publication_test_hook(
+        &self,
+        path: &std::path::Path,
+        intent: &crate::config::model_credential::linux::Intent,
+        change: &crate::config::model_credential::linux::Change,
+        hook: impl FnMut(
+            crate::config::model_credential::linux::Phase,
+        ) -> std::result::Result<(), crate::config::basic::Status>,
+    ) -> crate::config::model_credential::Report {
+        self.with_credential_mutex(|| {
+            crate::config::model_credential::linux::publish_with(
+                path,
+                &self.paths,
+                intent,
+                change,
+                hook,
+            )
+        })
     }
 }

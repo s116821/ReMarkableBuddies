@@ -1,6 +1,6 @@
 //! Original temporary Store/cache fixtures; no model, network or tablet.
 use remarkable_reader_buddy::{
-    retrieval::{disk::DiskCache, Index, NormalizedDocument, SourceFormat, SourceUnit},
+    retrieval::{disk::DiskCache, Index, NormalizedDocument, Provider, SourceFormat, SourceUnit},
     storage::{digest, Store, StorePaths, Uuid},
 };
 use std::{fs, path::PathBuf};
@@ -59,6 +59,62 @@ fn document(id: u128, text: &str) -> NormalizedDocument {
             text: text.into(),
         }],
     }
+}
+
+#[test]
+fn provider_preserves_index_results_budgets_neighbors_and_slot_bytes() {
+    let fixture = Fixture::new();
+    let cache = DiskCache::open(fixture.store()).unwrap();
+    let material = document(
+        1,
+        &format!(
+            "{} acceleration {}",
+            "context ".repeat(300),
+            "tail ".repeat(600)
+        ),
+    );
+    let direct = Index::build(material.clone()).unwrap();
+    let expected = direct.key();
+    assert_eq!(&cache.install(material).unwrap(), expected);
+    let before = fs::read(fixture.slot(expected.document)).unwrap();
+    let provider: &dyn Provider = &cache;
+    for question in ["acceleration", "missing", "  acceleration\n"] {
+        for count in [1, 3] {
+            for bytes in [512, 4096, 16384] {
+                for neighbors in [false, true] {
+                    let cached = provider.query(expected, question, count, bytes, neighbors);
+                    let plain = direct.query(expected, question, count, bytes, neighbors);
+                    match (cached, plain) {
+                        (Ok(a), Ok(b)) => assert_eq!(
+                            serde_json::to_vec(&a).unwrap(),
+                            serde_json::to_vec(&b).unwrap()
+                        ),
+                        (Err(a), Err(b)) => assert_eq!(a.to_string(), b.to_string()),
+                        _ => panic!("Provider changed Index admission"),
+                    }
+                }
+            }
+        }
+    }
+    for (question, count, bytes) in [
+        ("", 1, 4096),
+        ("acceleration", 0, 4096),
+        ("acceleration", 1, 511),
+    ] {
+        assert_eq!(
+            provider
+                .query(expected, question, count, bytes, false)
+                .err()
+                .unwrap()
+                .to_string(),
+            direct
+                .query(expected, question, count, bytes, false)
+                .err()
+                .unwrap()
+                .to_string()
+        );
+    }
+    assert_eq!(fs::read(fixture.slot(expected.document)).unwrap(), before);
 }
 
 #[test]

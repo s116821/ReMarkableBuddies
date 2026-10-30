@@ -71,6 +71,211 @@ fn prepared(conversation: Uuid) -> PreparedNote {
         markdown: "Original equation and source coordinates (12,34).".into(),
     }
 }
+
+#[test]
+fn notebook_joined_flow_uses_real_mem_http_for_create_reopen_refinement_update_and_lost_ack_reconciliation(
+) {
+    use remarkable_reader_buddy::{
+        config::Personalization,
+        conversation::{
+            notebook::NotebookAdmission, ArchivedNormalizedSource, Mode, Record, Role, TextScope,
+            Turn,
+        },
+        retrieval::{NormalizedDocument, SourceFormat, SourceUnit},
+        storage::{digest, Namespace},
+        writer::notebook::{self, FrozenNotebookPayloads, PayloadContext, ValidatedNotebook},
+        writer_flow, LLMEngine,
+    };
+    struct Model(usize);
+    impl LLMEngine for Model {
+        fn add_text_content(&mut self, _: &str) {}
+        fn add_image_content(&mut self, _: &str) {
+            panic!("text only")
+        }
+        fn clear_content(&mut self) {}
+        fn execute(&mut self) -> anyhow::Result<String> {
+            self.0 += 1;
+            Ok(if self.0 % 2 == 1 {
+                "x = 7 (page 1)."
+            } else if self.0 >= 4 {
+                "# Study\n\nx = 7 (page 1). Refined."
+            } else {
+                "# Study\n\nx = 7 (page 1)."
+            }
+            .into())
+        }
+    }
+    for lose_ack in [false, true] {
+        let local = LocalStore::new();
+        let (ledger, conversation) = local.ledger();
+        let paths = ledger.store().paths.clone();
+        drop(ledger);
+        let mut ledger = Ledger::new(Arc::new(Store::prepare_notebook(paths.clone()).unwrap()));
+        let raw = serde_json::to_vec(&NormalizedDocument {
+            document: Uuid::new_v4(),
+            format: SourceFormat::Notebook,
+            source_sha256: "a".repeat(64),
+            extractor_revision: "http-notebook-fixture-v1".into(),
+            units: vec![SourceUnit {
+                page: Some(1),
+                section: None,
+                text: "x = 7".into(),
+            }],
+        })
+        .unwrap();
+        let source = ValidatedNotebook::from_bytes(&raw, &digest(&raw)).unwrap();
+        let preference = Personalization::default().snapshot().unwrap();
+        let initial_operation = Uuid::new_v4();
+        let initial_user = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("urn:rmb:writer:v1:{initial_operation}:user").as_bytes(),
+        );
+        let archive = ArchivedNormalizedSource::from_notebook(
+            conversation,
+            initial_user,
+            &source,
+            TextScope::SuppliedNotebook,
+            None,
+        )
+        .unwrap();
+        let input = |ledger: &Ledger, operation, prior: Option<Turn>| {
+            let reference = prior.as_ref().map(|turn| {
+                ledger
+                    .store()
+                    .notebook_revision_reference(
+                        &ledger
+                            .store()
+                            .value(Namespace::Conversation, turn.id)
+                            .unwrap()
+                            .unwrap(),
+                    )
+                    .unwrap()
+                    .sha256
+            });
+            let payloads = FrozenNotebookPayloads::new(
+                &source,
+                &archive,
+                PayloadContext {
+                    operation,
+                    request: "Keep x = 7 and page 1",
+                    personalization: &preference,
+                    history: &[],
+                    history_range: None,
+                    prior: prior.as_ref().zip(reference),
+                    max_model_calls: 2,
+                },
+            )
+            .unwrap();
+            let user = Turn {
+                id: Uuid::new_v5(
+                    &Uuid::NAMESPACE_URL,
+                    format!("urn:rmb:writer:v1:{operation}:user").as_bytes(),
+                ),
+                conversation,
+                exchange: operation,
+                sequence: 0,
+                role: Role::User,
+                mode: Mode::Writer,
+                outcome: Outcome::Interpreted,
+                text: Some(payloads.plan().request.clone()),
+                sources: vec![archive.id],
+                correction_of: prior.as_ref().map(|turn| turn.id),
+                created_ms: 0,
+                updated_ms: 0,
+                completion: None,
+            };
+            let guards = prior
+                .as_ref()
+                .map(|turn| {
+                    ledger
+                        .store()
+                        .value(Namespace::Conversation, turn.id)
+                        .unwrap()
+                        .unwrap()
+                })
+                .into_iter()
+                .collect();
+            notebook::runner::Input {
+                admission: NotebookAdmission {
+                    plan: payloads.plan().clone(),
+                    archive: archive.clone(),
+                    canonical: source.canonical_bytes().to_vec(),
+                    user,
+                    expected: ledger
+                        .expected(Namespace::Conversation, conversation)
+                        .unwrap(),
+                    guards,
+                },
+                payloads,
+            }
+        };
+        let api = Api::new();
+        api.state.lock().unwrap().lose_ack = lose_ack;
+        let destination = api.client();
+        let mut model = Model(0);
+        let identity = notebook::flow::Identity {
+            outer_operation: Uuid::new_v4(),
+            correlation: Uuid::new_v4(),
+            effect_operation: Uuid::new_v4(),
+        };
+        let original = input(&ledger, initial_operation, None);
+        let replay = original.clone();
+        let (_tx, rx) = watch::channel(false);
+        let first = notebook::flow::run(&ledger, &mut model, &destination, original, identity, rx);
+        assert_eq!(model.0, 2);
+        assert_eq!(api.count("POST"), 1);
+        if lose_ack {
+            assert_eq!(first.status, writer_flow::Status::ReconcileRequired);
+            let (_tx, rx) = watch::channel(false);
+            let again =
+                notebook::flow::run(&ledger, &mut model, &destination, replay, identity, rx);
+            assert_eq!(again.status, writer_flow::Status::ReconcileRequired);
+            assert_eq!(model.0, 2);
+            assert_eq!(api.count("POST"), 1);
+            let request = writer_flow::Request::ReconcileExport {
+                conversation,
+                correlation: identity.correlation,
+            };
+            let (_tx, rx) = watch::channel(false);
+            let reconciled =
+                writer_flow::run(&ledger, &mut model, &destination, &request, &preference, rx);
+            assert_eq!(reconciled.status, writer_flow::Status::Exported);
+            assert_eq!(api.count("POST"), 1);
+        } else {
+            assert_eq!(first.status, writer_flow::Status::Exported);
+            drop(ledger);
+            ledger = Ledger::new(local.open());
+            let prior = ledger
+                .inspect(conversation, false)
+                .unwrap()
+                .into_iter()
+                .find_map(|record| match record {
+                    Record::Turn(turn) if Some(turn.id) == first.draft => Some(turn),
+                    _ => None,
+                })
+                .expect("draft required");
+            let next = notebook::flow::Identity {
+                outer_operation: Uuid::new_v4(),
+                effect_operation: Uuid::new_v4(),
+                ..identity
+            };
+            let (_tx, rx) = watch::channel(false);
+            let refined = notebook::flow::run(
+                &ledger,
+                &mut model,
+                &destination,
+                input(&ledger, Uuid::new_v4(), Some(prior)),
+                next,
+                rx,
+            );
+            assert_eq!(refined.status, writer_flow::Status::Exported);
+            assert_eq!(model.0, 4);
+            assert_eq!(api.count("POST"), 1);
+            assert_eq!(api.count("PATCH"), 1);
+            assert_eq!(api.state.lock().unwrap().notes.len(), 1);
+        }
+    }
+}
 fn wire(id: &str, content: &str, version: u64) -> Value {
     json!({"id":id,"title":content.lines().next().unwrap_or("").trim_start_matches("# "),
         "content":content,"version":version,"trashed_at":null})
@@ -823,7 +1028,7 @@ async fn export_domain_upgrade_refuses_other_namespaces_and_cross_schema_payload
             .pop()
             .unwrap();
         let mut unsupported = original.clone();
-        unsupported.namespace = Namespace::Source;
+        unsupported.namespace = Namespace::SubjectMemory;
         unsupported.record_id = Uuid::new_v4();
         unsupported.revision_id = Uuid::new_v4();
         unsupported.operation_id = Uuid::new_v4();
@@ -1049,4 +1254,120 @@ async fn cancellation_before_first_write_poll_is_no_send_and_can_be_deliberately
         ExportStatus::VerifiedCurrent
     );
     assert_eq!(destination.0.lock().unwrap().len(), 1);
+}
+
+/// Both actual HTTP adapters participate in one production Writer flow.
+#[test]
+fn joined_writer_actual_model_and_mem_http_create_restart_refine_update() {
+    use remarkable_reader_buddy::{
+        config::Personalization,
+        conversation::TextScope,
+        retrieval::{NormalizedDocument, SourceFormat, SourceUnit},
+        writer, writer_flow, OpenAI,
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let model_worker = thread::spawn(move || {
+        for body in [
+            "# Study\n\nx = 7 (page 1).",
+            "# Study\n\nx = 7 (page 1). Refined without a deadline.",
+        ] {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let (method, path, payload) = request(&mut socket);
+            assert_eq!(method, "POST");
+            assert_eq!(path, "/v1/chat/completions");
+            assert!(payload["messages"].is_array());
+            let reply = json!({"choices":[{"message":{"content":body}}]}).to_string();
+            write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",reply.len(),reply).unwrap();
+        }
+    });
+    let api = Api::new();
+    let local = LocalStore::new();
+    let (ledger, id) = local.ledger();
+    let correlation = Uuid::new_v4();
+    let generation = writer_flow::Request::GenerateAndExport {
+        outer_operation: Uuid::new_v4(),
+        correlation,
+        effect_operation: Uuid::new_v4(),
+        generation: writer::Request::Generate {
+            conversation: id,
+            operation: Uuid::new_v4(),
+            request: "Preserve the equation and cite page 1.".into(),
+            document: NormalizedDocument {
+                document: Uuid::new_v4(),
+                format: SourceFormat::Notebook,
+                source_sha256: "a".repeat(64),
+                extractor_revision: "loopback-v1".into(),
+                units: vec![SourceUnit {
+                    page: Some(1),
+                    section: None,
+                    text: "x = 7".into(),
+                }],
+            },
+            selection: TextScope::SuppliedNotebook,
+            guidance: None,
+        },
+    };
+    let mut engine = OpenAI::new("fixture-model".into(), "fixture-token".into(), Some(origin))
+        .with_timeout(Duration::from_secs(5));
+    let preference = Personalization::default().snapshot().unwrap();
+    let (_tx, rx) = watch::channel(false);
+    let first = writer_flow::run(
+        &ledger,
+        &mut engine,
+        &api.client(),
+        &generation,
+        &preference,
+        rx,
+    );
+    assert_eq!(first.status, writer_flow::Status::Exported);
+    let first_id = first.export.unwrap().native_note.unwrap();
+    let draft = first.draft.unwrap();
+    drop(ledger);
+    let reopened = Ledger::new(local.open());
+    let refinement = writer_flow::Request::RefineAndExport {
+        outer_operation: Uuid::new_v4(),
+        correlation,
+        effect_operation: Uuid::new_v4(),
+        refinement: writer::Request::Refine {
+            conversation: id,
+            operation: Uuid::new_v4(),
+            request: "Explicitly say no deadline.".into(),
+            draft,
+        },
+    };
+    let (_tx, rx) = watch::channel(false);
+    let second = writer_flow::run(
+        &reopened,
+        &mut engine,
+        &api.client(),
+        &refinement,
+        &preference,
+        rx,
+    );
+    assert_eq!(second.status, writer_flow::Status::Exported);
+    assert_eq!(
+        second.export.unwrap().native_note.as_deref(),
+        Some(first_id.as_str())
+    );
+    assert!(second.observation.write_polled);
+    assert_eq!(api.count("POST"), 1);
+    assert_eq!(api.count("PATCH"), 1);
+    assert_eq!(api.lists(), 1);
+    let before = api.state.lock().unwrap().requests.len();
+    let (_tx, rx) = watch::channel(false);
+    let replay = writer_flow::run(
+        &reopened,
+        &mut engine,
+        &api.client(),
+        &refinement,
+        &preference,
+        rx,
+    );
+    assert_eq!(replay.status, writer_flow::Status::Historical);
+    assert_eq!(api.state.lock().unwrap().requests.len(), before);
+    model_worker.join().unwrap();
 }
