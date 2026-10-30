@@ -42,7 +42,9 @@ pub use historical_association::{
 };
 pub use intent::*;
 pub use notebook::ArchivedNormalizedSource;
-pub use pending::{PendingIntentPublication, PendingIntentRequest, SourceAdmission};
+pub use pending::{
+    PendingIntentPublication, PendingIntentRequest, PendingRequestConflict, SourceAdmission,
+};
 #[cfg(test)]
 pub(crate) use pending::{ReaderContext, ReaderPreparation};
 pub use reader_plan::{ReaderEraseRectangle, ReaderHandoff, ReaderPlan, SmartEraseInput};
