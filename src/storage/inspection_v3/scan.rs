@@ -705,7 +705,8 @@ impl Scan {
 fn stage(path: &Path) -> bool {
     path.file_name()
         .and_then(|v| v.to_str())
-        .is_some_and(|v| v.starts_with(".stage-"))
+        .and_then(|v| v.strip_prefix(".stage-"))
+        .is_some_and(uuid_name)
 }
 fn uuid_name(name: &str) -> bool {
     Uuid::parse_str(name).is_ok_and(|id| !id.is_nil() && id.to_string() == name)

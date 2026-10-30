@@ -240,6 +240,31 @@ mod linux_controls {
         assert_eq!(f.snapshot(), before);
     }
     #[test]
+    fn unknown_stage_prefix_never_becomes_recognized_staging() {
+        let f = Fixture::new();
+        drop(Store::open(f.paths()).unwrap());
+        for parent in [
+            f.paths().data,
+            f.generation(),
+            f.generation().join("objects"),
+            f.generation().join("commits"),
+        ] {
+            let path = parent.join(".stage-not-an-id");
+            fs::write(&path, b"PRIVATE_UNKNOWN").unwrap();
+            let before = f.snapshot();
+            let v = f.report();
+            assert_eq!(v["status"], "partial");
+            assert!(v["issues"]["unexpected-entry"].is_string());
+            assert_eq!(f.snapshot(), before);
+            fs::remove_file(path).unwrap();
+        }
+        let path = f.paths().data.join(format!(".stage-{}", Uuid::new_v4()));
+        fs::write(path, b"owned interrupted stage").unwrap();
+        let v = f.report();
+        assert_eq!(v["status"], "complete");
+        assert_eq!(v["storage"]["staging"]["files"], "1");
+    }
+    #[test]
     fn custody_is_held_through_output_and_released_on_prefix_failure() {
         let f = Fixture::new();
         drop(Store::open(f.paths()).unwrap());
