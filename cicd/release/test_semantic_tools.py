@@ -91,7 +91,7 @@ class SemanticToolTests(unittest.TestCase):
         self.assertEqual(self.git("tag").splitlines(), ["v0.4.0", "v0.5.0"])
 
     def test_docs_types_bodies_and_paths_do_not_inflate_history(self):
-        for path in ("README.md", "release/README.md", "docs/guide.md", "docs/deep/guide.md", "docs/images/proof.png",
+        for path in ("README.md", "cicd/release/README.md", "docs/guide.md", "docs/deep/guide.md", "docs/images/proof.png",
                      "docs/images/deep/proof.svg", "docs/licenses/legal.txt", ".codex/skills/guide.md"):
             self.commit("feat(REM-56)!: documentation only\n\nBREAKING CHANGE: example", path)
             self.assertEqual(self.candidate(), "v0.4.0", path)

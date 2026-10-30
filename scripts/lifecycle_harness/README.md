@@ -7,7 +7,7 @@ tablet/service commands, accesses a device or uses network connections.
 Run from the Buddy checkout with ordinary Python 3.11 or newer:
 
 ```powershell
-python -m unittest discover -s tools/lifecycle_harness -p 'test_*.py' -v
+python -m unittest discover -s scripts/lifecycle_harness -p 'test_*.py' -v
 ```
 
 The deterministic policy model uses an injected monotonic clock. Real-process cases
