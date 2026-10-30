@@ -492,13 +492,23 @@ impl Ledger {
         &self,
         operation: Uuid,
         expected: ExpectedHeads,
-        mut turn: Turn,
+        turn: Turn,
         sources: Vec<ImageUse>,
     ) -> Result<WriteResult> {
         let fingerprint = Self::fingerprint(&("append", &turn, &sources))?;
         if let Some(prior) = self.replay(operation, &fingerprint)? {
             return Ok(prior);
         }
+        self.append_unreplayed(operation, expected, turn, sources, fingerprint)
+    }
+    fn append_unreplayed(
+        &self,
+        operation: Uuid,
+        expected: ExpectedHeads,
+        mut turn: Turn,
+        sources: Vec<ImageUse>,
+        fingerprint: String,
+    ) -> Result<WriteResult> {
         ensure!(
             !turn.id.is_nil() && !turn.exchange.is_nil(),
             "nil turn identity"
@@ -506,7 +516,18 @@ impl Ledger {
         ensure!(sources.len() <= MAX_ITEMS, "too many source uses");
         ensure!(turn.sequence == 0, "caller must not allocate chronology");
         Self::validate_turn(&turn)?;
-        let (_, mut root) = self.live_root(turn.conversation, Some(&expected))?;
+        let (_, mut root) = match self.live_root(turn.conversation, Some(&expected)) {
+            Ok(root) => root,
+            Err(error) => {
+                // An identical winner can commit after the initial receipt read
+                // but before this root read. Recover only its exact receipt;
+                // changed operations and unrelated stale heads still refuse.
+                if let Some(prior) = self.replay(operation, &fingerprint)? {
+                    return Ok(prior);
+                }
+                return Err(error);
+            }
+        };
         turn.sequence = root.next_sequence;
         root.next_sequence = root
             .next_sequence
@@ -1863,3 +1884,6 @@ impl Ledger {
         })
     }
 }
+
+#[cfg(test)]
+mod append_replay_tests;
