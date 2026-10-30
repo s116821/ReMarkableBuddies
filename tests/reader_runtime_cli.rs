@@ -173,12 +173,13 @@ fn inspect_routes_keep_ordinary_stdin_and_selected_file_contracts_distinct() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"invalid stdin JSON")
-        .unwrap();
+    let write = child.stdin.take().unwrap().write_all(b"invalid stdin JSON");
+    #[cfg(target_os = "linux")]
+    write.unwrap();
+    #[cfg(not(target_os = "linux"))]
+    if let Err(error) = write {
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+    }
     let output = child.wait_with_output().unwrap();
     assert!(output.status.success() && output.stderr.is_empty());
     let ordinary: Value = serde_json::from_slice(&output.stdout).unwrap();
