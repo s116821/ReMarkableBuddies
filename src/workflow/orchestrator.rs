@@ -583,15 +583,6 @@ impl<M: LLMEngine> Orchestrator<M> {
         None
     }
 
-    /// Render the answer on the next page
-    ///
-    /// Simplified flow:
-    /// 1. Store original page screenshot for later comparison
-    /// 2. Navigate right to next page  
-    /// 3. Compare to original to verify we actually moved
-    /// 4. Check if page is valid (blank or existing QA page)
-    /// 5. If not valid or didn't move → verify the source and record a non-ink failure
-    /// 6. If valid → render Q&A on that page
     fn enrich_answer(
         &mut self,
         result: &mut AnalysisResult,
