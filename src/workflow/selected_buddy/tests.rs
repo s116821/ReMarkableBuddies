@@ -153,6 +153,7 @@ fn envelope(store: &Store, record: Record) -> Envelope {
 }
 fn receipt(conversation: Uuid, document: Uuid, page: Uuid) -> BindingReceipt {
     BindingReceipt {
+        acquisition: Default::default(),
         operation: Uuid::new_v4(),
         conversation,
         request_fingerprint: "synthetic exact request".into(),
@@ -398,6 +399,94 @@ impl DeviceBackend for Recorder {
     }
     fn delay(&mut self, _: Duration) {
         self.record("delay");
+    }
+}
+
+#[test]
+fn existing_binding_forms_reach_actual_reader_only_as_historical_candidates() {
+    use crate::conversation::BindingAcquisition;
+    for acquisition in [
+        BindingAcquisition::ExistingCurrent,
+        BindingAcquisition::ExistingAdjacent,
+    ] {
+        let fixture = Fixture::new();
+        let store = fixture.open();
+        let mut records = values(&store);
+        let Record::Binding(mut binding) =
+            serde_json::from_value(records[1].payload.clone()).unwrap()
+        else {
+            panic!()
+        };
+        binding.receipt.acquisition = acquisition;
+        binding.receipt.expected_order = vec![id(3), id(2), id(4)];
+        if acquisition == BindingAcquisition::ExistingCurrent {
+            binding.receipt.source.page = id(2);
+        }
+        records[1].domain_schema_version = crate::conversation::EXISTING_BINDING_SCHEMA;
+        records[1].payload = serde_json::to_value(Record::Binding(binding.clone())).unwrap();
+        let (admission, token) = fixture.initialize(&store, &records, &[]);
+        let mut reader = Reader::new(admission);
+        let observation = platform().observe_page().unwrap();
+        let BuddyBindingInspection::HistoricalCandidate(candidate) = fixture
+            .inspect(&store, &reader, &token, id(6), &observation, &observation)
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(candidate.selected().receipt(), &binding.receipt);
+        assert!(reader
+            .workflow
+            .dispatch_reader(None, 0, &crate::conversation::ReaderHandoff::NextPage)
+            .is_err());
+        assert!(reader.calls.borrow().is_empty());
+        drop(reader);
+        drop(store);
+        let store = fixture.open();
+        let reader = Reader::new(Arc::new(
+            SelectedAdmission::new(store.clone(), fixture.scope.clone()).unwrap(),
+        ));
+        assert_eq!(
+            fixture
+                .inspect(&store, &reader, &token, id(6), &observation, &observation)
+                .unwrap(),
+            BuddyBindingInspection::HistoricalCandidate(candidate)
+        );
+    }
+}
+
+#[test]
+fn selected_projection_refuses_invalid_existing_binding_before_reader_actions() {
+    use crate::conversation::{BindingAcquisition, SelectedDomainProjection};
+    for mutation in 0..4 {
+        let fixture = Fixture::new();
+        let store = fixture.open();
+        let mut records = values(&store);
+        let Record::Binding(mut binding) =
+            serde_json::from_value(records[1].payload.clone()).unwrap()
+        else {
+            panic!()
+        };
+        binding.receipt.acquisition = BindingAcquisition::ExistingAdjacent;
+        binding.receipt.expected_order = vec![id(3), id(2), id(4)];
+        records[1].domain_schema_version = crate::conversation::EXISTING_BINDING_SCHEMA;
+        match mutation {
+            0 => records[1].domain_schema_version = 1,
+            1 => binding.receipt.observed_order.reverse(),
+            2 => binding.receipt.acquisition = BindingAcquisition::Inserted,
+            _ => binding.receipt.observed_document = id(90),
+        }
+        records[1].payload = serde_json::to_value(Record::Binding(binding)).unwrap();
+        let (admission, token) = fixture.initialize(&store, &records, &[]);
+        let snapshot = store
+            .selected_snapshot(&fixture.scope, MAX_ITEMS)
+            .unwrap()
+            .unwrap();
+        assert!(SelectedDomainProjection::from_snapshot(&snapshot).is_err());
+        let reader = Reader::new(admission);
+        let observation = platform().observe_page().unwrap();
+        assert!(fixture
+            .inspect(&store, &reader, &token, id(6), &observation, &observation)
+            .is_err());
     }
 }
 

@@ -71,6 +71,16 @@ fn server_with_metadata(
     delay: Duration,
     response_fields: Value,
 ) -> (String, thread::JoinHandle<Vec<Value>>) {
+    server_with_witness(replies, stall, delay, response_fields, None)
+}
+
+fn server_with_witness(
+    replies: Vec<String>,
+    stall: bool,
+    delay: Duration,
+    response_fields: Value,
+    request_received: Option<std::sync::mpsc::SyncSender<()>>,
+) -> (String, thread::JoinHandle<Vec<Value>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -94,13 +104,19 @@ fn server_with_metadata(
                 .unwrap();
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
+            assert!(
+                reader.read_line(&mut line).unwrap() > 0,
+                "local fixture request-line EOF"
+            );
             assert!(line.starts_with("POST /v1/chat/completions "));
             let mut length = 0;
             let mut authorized = false;
             loop {
                 line.clear();
-                reader.read_line(&mut line).unwrap();
+                assert!(
+                    reader.read_line(&mut line).unwrap() > 0,
+                    "local fixture header EOF before terminator"
+                );
                 if line == "\r\n" {
                     break;
                 }
@@ -117,6 +133,9 @@ fn server_with_metadata(
             let mut body = vec![0; length];
             reader.read_exact(&mut body).unwrap();
             bodies.push(serde_json::from_slice(&body).unwrap());
+            if let Some(witness) = &request_received {
+                witness.send(()).unwrap();
+            }
             if stall {
                 thread::sleep(Duration::from_secs(3));
                 continue;
@@ -380,7 +399,14 @@ fn live_timeout_is_bounded_and_retains_failure_evidence() {
 #[test]
 fn pending_http_ticks_on_caller_thread_and_callback_failure_stops_ticks() {
     use remarkable_reader_buddy::{LLMEngine, OpenAI};
-    let (endpoint, handle) = server(vec!["NONE".into()], true);
+    let (sent, received) = std::sync::mpsc::sync_channel(1);
+    let (endpoint, handle) = server_with_witness(
+        vec!["NONE".into()],
+        true,
+        Duration::ZERO,
+        json!({"model":"local-fixture"}),
+        Some(sent),
+    );
     let mut model = OpenAI::new(
         "local-fixture".into(),
         "local-test-secret-not-real".into(),
@@ -390,12 +416,26 @@ fn pending_http_ticks_on_caller_thread_and_callback_failure_stops_ticks() {
     model.add_text_content("bounded progress test");
     let caller = thread::current().id();
     let mut ticks = 0;
+    let mut witnessed = false;
+    let mut pending_ticks = 0;
     let start = Instant::now();
     let result = model.execute_with_progress(&mut || {
         assert_eq!(thread::current().id(), caller);
         ticks += 1;
-        if ticks == 2 {
-            anyhow::bail!("progress fixture failed");
+        if !witnessed {
+            match received.try_recv() {
+                Ok(()) => witnessed = true,
+                Err(std::sync::mpsc::TryRecvError::Empty) => (),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    anyhow::bail!("local fixture request witness unavailable");
+                }
+            }
+        }
+        if witnessed {
+            pending_ticks += 1;
+            if pending_ticks == 2 {
+                anyhow::bail!("progress fixture failed");
+            }
         }
         Ok(())
     });
@@ -403,7 +443,102 @@ fn pending_http_ticks_on_caller_thread_and_callback_failure_stops_ticks() {
         .unwrap_err()
         .to_string()
         .contains("progress fixture failed"));
-    assert_eq!(ticks, 2);
+    assert!(witnessed);
+    assert_eq!(pending_ticks, 2);
+    assert!(ticks >= pending_ticks);
     assert!(start.elapsed() < Duration::from_secs(3));
     assert_eq!(handle.join().unwrap().len(), 1);
+}
+
+// A separate process bounds regressions in the fixture itself: an old EOF loop
+// must not leak an unjoinable thread into the main test harness.
+#[test]
+fn fixture_eof_refuses_in_owned_bounded_children() {
+    for case in ["headers", "partial-header", "request-line"] {
+        let nonce = format!(
+            "{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "fixture_eof_child", "--nocapture"])
+            .env("RMB_FIXTURE_EOF_NONCE", &nonce)
+            .env("RMB_FIXTURE_EOF_CASE", case)
+            .env("RUST_BACKTRACE", "0")
+            .env_remove("OPENAI_API_KEY")
+            .env_remove("OPENAI_BASE_URL")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let timed_out = loop {
+            if child.try_wait().unwrap().is_some() {
+                break false;
+            }
+            if Instant::now() >= deadline {
+                break true;
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        if timed_out {
+            let _ = child.kill();
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            !timed_out,
+            "owned EOF fixture child exceeded deadline: {case}; stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.status.success(),
+            "EOF fixture child failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let marker = format!("fixture-eof-verified:{nonce}:{case}");
+        assert!(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|line| line == marker));
+    }
+}
+
+#[test]
+fn fixture_eof_child() {
+    let Ok(nonce) = std::env::var("RMB_FIXTURE_EOF_NONCE") else {
+        return;
+    };
+    assert!(!nonce.is_empty());
+    let case = std::env::var("RMB_FIXTURE_EOF_CASE").unwrap();
+    let (endpoint, handle) = server(vec!["NONE".into()], false);
+    let mut client =
+        std::net::TcpStream::connect(endpoint.strip_prefix("http://").unwrap()).unwrap();
+    let request: &[u8] = match case.as_str() {
+        "request-line" => b"",
+        "headers" => b"POST /v1/chat/completions HTTP/1.1\r\n",
+        "partial-header" => b"POST /v1/chat/completions HTTP/1.1\r\nAuthorization: Bearer local-test-secret-not-real",
+        _ => panic!("unsupported owned EOF case"),
+    };
+    client.write_all(request).unwrap();
+    client.shutdown(std::net::Shutdown::Write).unwrap();
+    println!("fixture-eof-sent:{nonce}:{case}");
+    std::io::stdout().flush().unwrap();
+    let failure = handle
+        .join()
+        .expect_err("incomplete request must not become an accepted body");
+    let message = failure
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| failure.downcast_ref::<String>().map(String::as_str))
+        .unwrap();
+    assert!(message.contains(if case == "request-line" {
+        "local fixture request-line EOF"
+    } else {
+        "local fixture header EOF before terminator"
+    }));
+    drop(client);
+    println!("fixture-eof-verified:{nonce}:{case}");
 }

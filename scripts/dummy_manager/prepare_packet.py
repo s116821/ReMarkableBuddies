@@ -1,0 +1,158 @@
+"""Generate local, explicitly non-runnable E0T unit/manifest drafts.
+
+No SSH, service manager, runtime directory, staging or process operation exists here.
+"""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import re
+import uuid
+
+ROLES = ("cleanup", "controller", "guard", "stock", "fail-a", "fail-b",
+         "claim", "norestart", "separate", "notify", "barrier", "queued")
+EVENT_ROLES = {
+    1: ("cleanup", "fail-a", "fail-b", "norestart"),
+    2: ("cleanup", "fail-a", "fail-b", "norestart", "claim"),
+    3: ("cleanup", "separate"), 4: ("cleanup", "notify"),
+    5: ("cleanup", "barrier", "queued"),
+    6: ("cleanup", "controller", "guard", "stock"),
+    7: ("cleanup", "controller", "guard", "stock"),
+    8: ("cleanup", "controller", "guard", "stock"),
+}
+
+
+def prepare(destination, nonce):
+    if not re.fullmatch("[0-9a-f]{32}", nonce):
+        raise ValueError("fixed 128-bit lowercase hexadecimal nonce required")
+    destination = Path(destination)
+    destination.mkdir(parents=False, exist_ok=False)
+    root = "/run/buddy-e0t-" + nonce
+    names = {role: "buddy-e0t-" + nonce + "-" + role + ".service" for role in ROLES}
+    fragments = []
+    owned_paths = [{"path": root, "kind": "directory", "mode": "0700"}]
+    for role in ROLES:
+        dependencies = ""
+        if role == "norestart":
+            dependencies += "OnFailure=" + names["fail-a"] + "\n"
+        if role == "queued":
+            dependencies += "Requires=" + names["barrier"] + "\nAfter=" + names["barrier"] + "\n"
+        kind = "notify" if role in ("notify", "barrier") else "simple"
+        restart = "Restart=on-failure\nRestartMode=direct\nRestartSec=100ms\n" if role == "claim" else "Restart=no\n"
+        watchdog = "WatchdogSec=3s\nNotifyAccess=main\n" if role == "notify" else "WatchdogSec=0\n"
+        if role == "barrier":
+            watchdog += "NotifyAccess=main\n"
+        runtime = "210s" if role == "cleanup" else "15s"
+        address_limit = "8M:20M" if role == "cleanup" else "8M"
+        text = ("[Unit]\nDescription=Owned E0T draft " + role + "\nDefaultDependencies=no\n"
+                "StartLimitIntervalSec=180s\nStartLimitBurst=4\nStartLimitAction=none\nFailureAction=none\n"
+                "JobTimeoutSec=15s\nJobRunningTimeoutSec=15s\nJobTimeoutAction=none\n" + dependencies
+                + "[Service]\nType=" + kind + "\nExecStart=" + root + "/helper " + role + " current\n"
+                "User=root\nGroup=root\nUMask=0077\nKillMode=control-group\nDelegate=no\n"
+                "TimeoutStartSec=10s\nTimeoutStopSec=2s\nTimeoutAbortSec=2s\nRuntimeMaxSec=" + runtime + "\n"
+                "LimitCORE=0\nLimitFSIZE=2048\nLimitSTACK=512K\nLimitDATA=1M\nLimitCPU=2\n"
+                "LimitAS=" + address_limit + "\n"
+                "StandardInput=null\nStandardOutput=null\nStandardError=null\n"
+                "UnsetEnvironment=LD_PRELOAD LD_LIBRARY_PATH\n" + restart + watchdog)
+        filename = names[role]
+        (destination / filename).write_text(text, newline="\n")
+        runtime_path = "/run/systemd/system/" + filename
+        owned_paths.append({"path": runtime_path, "kind": "regular", "mode": "0644"})
+        fragments.append({"role": role, "name": filename, "path": runtime_path,
+                          "sha256": hashlib.sha256(text.encode()).hexdigest()})
+    parent = "/run/systemd/system/" + names["norestart"] + ".d"
+    dropin = "[Unit]\nOnFailure=\nOnFailure=" + names["fail-b"] + "\n"
+    (destination / "norestart-owned.conf").write_text(dropin, newline="\n")
+    owned_paths.extend([{"path": parent, "kind": "directory", "mode": "0755"},
+                        {"path": parent + "/owned.conf", "kind": "regular", "mode": "0644"}])
+    for filename in ("helper", "owner", "case", "claim-T2"):
+        item = {"path": root + "/" + filename, "kind": "regular",
+                "mode": "0700" if filename == "helper" else "0600"}
+        if filename != "helper":
+            item["max_bytes"] = 1 if filename == "case" else 32
+        owned_paths.append(item)
+    for filename in ("manager-slot", "manager-claim", "manager-child"):
+        owned_paths.append({"path": root + "/" + filename, "kind": "regular",
+                            "mode": "0600", "max_bytes": 128})
+    for request in range(1, 97):
+        owned_paths.append({"path": root + f"/request-{request:03d}", "kind": "regular",
+                            "mode": "0600", "max_bytes": 64})
+    for filename, maximum in (("request-slot", 0), ("requests-closed", 32)):
+        owned_paths.append({"path": root + "/" + filename, "kind": "regular",
+                            "mode": "0600", "max_bytes": maximum})
+    owned_paths.append({"path": root + "/request.sock", "kind": "unix_socket", "mode": "0600"})
+    for role in ROLES:
+        owned_paths.append({"path": root + "/control-" + role, "kind": "fifo", "mode": "0600"})
+    for case in range(1, 9):
+        for role in EVENT_ROLES[case]:
+            owned_paths.append({"path": root + f"/events-T{case}-" + role,
+                                "kind": "regular", "mode": "0600", "max_bytes": 2048})
+    for case in (6, 7, 8):
+        files = [f"identity-T{case}-{role}" for role in ("controller", "guard", "stock")]
+        files += [f"{kind}-T{case}" for kind in ("state", "restore-claim", "closed", "receipt", "publication-lock")]
+        files += [f"{kind}-T{case}-{role}" for kind in ("state-partial", "activation-partial")
+                  for role in ("controller", "guard")]
+        owned_paths.extend({"path": root + "/" + name, "kind": "regular", "mode": "0600", "max_bytes": 128}
+                           for name in files)
+    lookup = set()
+    for name in names.values():
+        stem = name.removesuffix(".service")
+        directories = {"service.d", name + ".d"}
+        pieces = stem.split("-")
+        directories.update("-".join(pieces[:end]) + "-.service.d" for end in range(1, len(pieces)))
+        for base in ("/etc/systemd/system", "/run/systemd/system", "/usr/lib/systemd/system",
+                     "/usr/local/lib/systemd/system"):
+            lookup.update(base + "/" + directory for directory in directories)
+    manifest = {"schema": 1, "status": "INCOMPLETE_PREPARATION_ONLY", "runnable": False,
+                "nonce": nonce, "root": root, "roles": list(ROLES), "units": fragments,
+                "dropin": {"path": parent + "/owned.conf", "sha256": hashlib.sha256(dropin.encode()).hexdigest()},
+                "owned_paths": owned_paths, "read_only_dropin_lookup_paths": sorted(lookup),
+                "effective_profile_frozen": False, "helper_artifact_sha256": None, "operator_sha256": None,
+                "evidence_candidates": {
+                    "reachable_event_files": sum(len(roles) for roles in EVENT_ROLES.values()),
+                    "bounded_runtime_record_bytes": sum(item.get("max_bytes", 0) for item in owned_paths),
+                    "full_evidence_frozen": False,
+                    "unaccounted": ["complete command/IPC/lease/operator outputs and failure receipts",
+                                    "manifest/unit/target-profile evidence copies and transport receipts"]},
+                "missing_gates": ["experiment cleanup actor implementation",
+                                  "durable intent integration/completion/recovery and reserved cleanup capacity",
+                                  "independent review of preparation-only process/file actors",
+                                  "independent review of explicit barrier READY control",
+                                  "exact effective-property operator gate",
+                                  "original baselines and configuration/job drift rejection",
+                                  "identity/job/late-writer/cleanup fencing", "per-barrier concurrency measurement",
+                                  "writable command transport and exact pending-job reconciliation",
+                                  "command-specific resource peaks and headroom",
+                                  "cleanup role-specific 180/210-second deadline implementation",
+                                  "transport process/thread/mapping budget and finite cleanup command count",
+                                  "artifact imports/build manifest", "independent frozen packet review",
+                                  "final coordinator execution authorization"],
+                "resource_candidates": {
+                    "helper_as_soft_hard": [8388608, 8388608],
+                    "manager_parent_as_soft_hard": [8388608, 20971520],
+                    "command_as_soft_hard": [20971520, 20971520],
+                    "shared_command_slots": 1,
+                    "program_helper_soft_as_rows": 5,
+                    "program_process_maximum": 6,
+                    "transport_process_reservation": 2,
+                    "transport_profile_frozen": False,
+                    "aggregate_kernel_enforcement": False,
+                    "concurrency_schedule_verified": False,
+                    "readonly_transport_only": True},
+                "limits": {"units": 12, "processes": 8, "program_helpers": 5,
+                           "command_children": 1, "transport_processes": 2,
+                           "tasks": 16, "case_seconds": 15,
+                           "cleanup_initiation_seconds": 180, "cleanup_seconds": 30,
+                           "stage_bytes": 16777216, "evidence_bytes": 262144}}
+    (destination / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", newline="\n")
+    return manifest
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("destination", help="new local preparation directory")
+    parser.add_argument("--nonce", default=None)
+    arguments = parser.parse_args()
+    packet = prepare(arguments.destination, arguments.nonce or uuid.uuid4().hex)
+    print(json.dumps({"status": packet["status"], "runnable": False, "nonce": packet["nonce"],
+                      "unit_count": len(packet["units"]), "path_count": len(packet["owned_paths"])}))
