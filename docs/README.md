@@ -10,8 +10,11 @@
 | [Native history fixtures](fixtures/native-history.md) | Persistence, text/style preservation and failure cases |
 | [Status-style fixtures](fixtures/status-style.md) | Captured layout/style evidence and limits |
 
-Fixture data and source stay at their existing paths; these guides preserve their
-provenance. OpenSpec requirements and delivery workflow remain in the central
+Runnable Rust examples and their fixtures live under `docs/examples/`, with
+explicit targets in `Cargo.toml`. Developer tools live under `scripts/`; build,
+release and service installation assets live under `cicd/release/` and
+`cicd/deploy/`. Historical evidence retains its recorded paths and provenance.
+OpenSpec requirements and delivery workflow remain in the central
 [Docs repository](https://github.com/s116821/ReMarkableBuddiesDocs). New reusable
 documentation belongs here; root project guidance and conventional discovery files
 are exceptions. Historical plans are not current behavior or execution authority.

@@ -2,6 +2,7 @@
 name = "remarkable-reader-buddy"
 # Own version is intentionally omitted; release identity comes from Git history.
 publish = false
+autoexamples = false
 edition = "2021"
 rust-version = "1.96"
 repository = "https://github.com/s116821/ReMarkableBuddies"
@@ -50,10 +51,12 @@ development-resident-bootstrap = []
 
 [[example]]
 name = "resident_bootstrap_control"
+path = "docs/examples/resident_bootstrap_control.rs"
 required-features = ["development-resident-bootstrap"]
 
 [[example]]
 name = "resident_bootstrap_observer"
+path = "docs/examples/resident_bootstrap_observer.rs"
 required-features = ["development-resident-bootstrap"]
 
 [dev-dependencies]
@@ -65,3 +68,75 @@ sha2 = "0.10"
 name = "reader-buddy"
 path = "src/main.rs"
 
+
+[[example]]
+name = "append_probe"
+path = "docs/examples/append_probe.rs"
+
+[[example]]
+name = "hardware_probe"
+path = "docs/examples/hardware_probe.rs"
+
+[[example]]
+name = "history_cycle"
+path = "docs/examples/history_cycle.rs"
+
+[[example]]
+name = "native_page"
+path = "docs/examples/native_page.rs"
+
+[[example]]
+name = "native_text"
+path = "docs/examples/native_text.rs"
+
+[[example]]
+name = "normalize_epub_source"
+path = "docs/examples/normalize_epub_source.rs"
+
+[[example]]
+name = "normalize_pdf_source"
+path = "docs/examples/normalize_pdf_source.rs"
+
+[[example]]
+name = "notebook_ocr_check"
+path = "docs/examples/notebook_ocr_check.rs"
+
+[[example]]
+name = "observe_input"
+path = "docs/examples/observe_input.rs"
+
+[[example]]
+name = "owned_frame"
+path = "docs/examples/owned_frame.rs"
+
+[[example]]
+name = "owned_relative_gesture"
+path = "docs/examples/owned_relative_gesture.rs"
+
+[[example]]
+name = "page_eligibility"
+path = "docs/examples/page_eligibility.rs"
+
+[[example]]
+name = "reader_once"
+path = "docs/examples/reader_once.rs"
+
+[[example]]
+name = "readiness_probe"
+path = "docs/examples/readiness_probe.rs"
+
+[[example]]
+name = "research_provider_check"
+path = "docs/examples/research_provider_check.rs"
+
+[[example]]
+name = "researched_answer_check"
+path = "docs/examples/researched_answer_check.rs"
+
+[[example]]
+name = "screenshot"
+path = "docs/examples/screenshot.rs"
+
+[[example]]
+name = "vision_probe"
+path = "docs/examples/vision_probe.rs"

@@ -107,7 +107,7 @@ They mock service/process observations and do not prove hardware or lifecycle.
 No historical private packet is required by these reusable fixtures.
 
 Run in the existing Linux fixture image with network disabled and read-only source:
-`python3 -B tools/native_insertion_probe/test_actor.py -v`.
+`python3 -B scripts/native_insertion_probe/test_actor.py -v`.
 
 Pending: independent exact source review;
 fresh target build/config/artifact review; fresh hardware identity/full backup;
