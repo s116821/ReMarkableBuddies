@@ -83,7 +83,7 @@ pub enum Progress {
     BeforeReturn,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct ImageIdentity {
     pub page: u32,
     pub png_sha256: String,
@@ -96,6 +96,8 @@ pub struct Profile {
     pub protocol: u32,
     pub prompt_revision: &'static str,
     pub caller_model_profile: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmed_context: Option<crate::handwriting::ContextIdentity>,
 }
 /// Explicit serialization only; callers decide whether to persist unverified text.
 #[derive(Serialize)]
@@ -137,7 +139,7 @@ enum Status {
 
 // Validate complete chunk framing/CRC, including IEND; a single-frame decode alone
 // can otherwise ignore trailing container damage. This also excludes all APNG.
-fn png_container(bytes: &[u8]) -> Result<()> {
+pub(crate) fn static_png(bytes: &[u8]) -> Result<()> {
     ensure!(
         bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
         "invalid notebook PNG"
@@ -208,24 +210,12 @@ fn png_container(bytes: &[u8]) -> Result<()> {
 
 /// Exactly one call for a fully admitted set. Arbitrary engines are cooperative,
 /// not forcibly preemptible. This function never writes files or installs a cache.
-pub fn normalize(
-    document: Uuid,
+fn admit_pages(
     pages: &[PageImage<'_>],
-    model_profile: &str,
-    engine: &mut dyn LLMEngine,
     options: Options,
     progress: &mut dyn FnMut(Progress) -> Result<()>,
-) -> Result<NotebookText> {
-    let owned = Content(engine);
-    owned.0.clear_content();
+) -> Result<(Vec<ImageIdentity>, String)> {
     options.validate()?;
-    ensure!(
-        !document.is_nil()
-            && !model_profile.trim().is_empty()
-            && model_profile.len() <= 128
-            && !model_profile.chars().any(char::is_control),
-        "invalid notebook identity"
-    );
     ensure!(
         !pages.is_empty() && pages.len() <= options.max_pages,
         "invalid notebook page count"
@@ -257,7 +247,7 @@ pub fn normalize(
     for (i, p) in pages.iter().enumerate() {
         progress(Progress::BeforeDecode(i))
             .map_err(|_| anyhow::anyhow!("notebook progress refused"))?;
-        png_container(p.png)?;
+        static_png(p.png)?;
         let mut limits = Limits::default();
         limits.max_image_width = Some(options.max_side);
         limits.max_image_height = Some(options.max_side);
@@ -301,24 +291,217 @@ pub fn normalize(
             height,
         });
     }
+    Ok((images, format!("{:x}", source.finalize())))
+}
+
+/// Immutable ownership binds these already-admitted bytes to their metadata.
+pub(crate) struct AdmittedTarget {
+    page: u32,
+    png: Vec<u8>,
+    identity: ImageIdentity,
+    source_sha256: String,
+}
+impl AdmittedTarget {
+    pub(crate) fn sha256(&self) -> &str {
+        &self.identity.png_sha256
+    }
+}
+fn target_options() -> Options {
+    Options {
+        max_pages: 1,
+        max_image_bytes: 8 * MIB,
+        max_total_pixels: 8_000_000,
+        max_response_bytes: 16384,
+        max_page_text_bytes: 4096,
+        max_text_bytes: 4096,
+        max_result_bytes: 32768,
+        ..Options::default()
+    }
+}
+pub(crate) fn admit_target(
+    page: u32,
+    png: Vec<u8>,
+    progress: &mut dyn FnMut(Progress) -> Result<()>,
+) -> Result<AdmittedTarget> {
+    let (mut images, source_sha256) =
+        admit_pages(&[PageImage { page, png: &png }], target_options(), progress)?;
+    Ok(AdmittedTarget {
+        page,
+        png,
+        identity: images.remove(0),
+        source_sha256,
+    })
+}
+#[derive(Default)]
+enum Phase {
+    #[default]
+    Admission,
+    Prompt,
+    Provider,
+    Response,
+}
+#[derive(Default)]
+struct Trace {
+    called: bool,
+    phase: Phase,
+    unreadable: bool,
+}
+pub(crate) enum Normalized {
+    Page(Box<NotebookText>),
+    Unreadable,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NormalizeFailure {
+    Canceled,
+    InvalidInput,
+    PromptLimit,
+    ProviderFailed,
+    InvalidResponse,
+}
+/// The generic engine is cooperative. Only its implementation can own/join work.
+pub(crate) fn normalize_admitted(
+    document: Uuid,
+    target: &AdmittedTarget,
+    model_profile: &str,
+    context: Option<&crate::handwriting::ConfirmedContext>,
+    engine: &mut dyn LLMEngine,
+    progress: &mut dyn FnMut(Progress) -> Result<()>,
+) -> (std::result::Result<Normalized, NormalizeFailure>, bool) {
+    let mut trace = Trace::default();
+    let mut canceled = false;
+    let result = normalize_inner(
+        document,
+        &[PageImage {
+            page: target.page,
+            png: &target.png,
+        }],
+        model_profile,
+        engine,
+        target_options(),
+        &mut |event| {
+            if canceled || progress(event).is_err() {
+                canceled = true;
+                anyhow::bail!("notebook progress refused");
+            }
+            Ok(())
+        },
+        Some(target),
+        context,
+        &mut trace,
+    );
+    let outcome = if canceled {
+        Err(NormalizeFailure::Canceled)
+    } else if trace.unreadable {
+        Ok(Normalized::Unreadable)
+    } else {
+        result
+            .map(|page| Normalized::Page(Box::new(page)))
+            .map_err(|_| match trace.phase {
+                Phase::Admission => NormalizeFailure::InvalidInput,
+                Phase::Prompt => NormalizeFailure::PromptLimit,
+                Phase::Provider => NormalizeFailure::ProviderFailed,
+                Phase::Response => NormalizeFailure::InvalidResponse,
+            })
+    };
+    (outcome, trace.called)
+}
+
+pub fn normalize(
+    document: Uuid,
+    pages: &[PageImage<'_>],
+    model_profile: &str,
+    engine: &mut dyn LLMEngine,
+    options: Options,
+    progress: &mut dyn FnMut(Progress) -> Result<()>,
+) -> Result<NotebookText> {
+    normalize_inner(
+        document,
+        pages,
+        model_profile,
+        engine,
+        options,
+        progress,
+        None,
+        None,
+        &mut Trace::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn normalize_inner(
+    document: Uuid,
+    pages: &[PageImage<'_>],
+    model_profile: &str,
+    engine: &mut dyn LLMEngine,
+    options: Options,
+    progress: &mut dyn FnMut(Progress) -> Result<()>,
+    prepared: Option<&AdmittedTarget>,
+    context: Option<&crate::handwriting::ConfirmedContext>,
+    trace: &mut Trace,
+) -> Result<NotebookText> {
+    let owned = Content(engine);
+    owned.0.clear_content();
+    options.validate()?;
+    ensure!(
+        !document.is_nil()
+            && !model_profile.trim().is_empty()
+            && model_profile.len() <= 128
+            && !model_profile.chars().any(char::is_control),
+        "invalid notebook identity"
+    );
+    let (images, source_sha256) = match prepared {
+        Some(target) => (vec![target.identity.clone()], target.source_sha256.clone()),
+        None => admit_pages(pages, options, progress)?,
+    };
+    trace.phase = Phase::Prompt;
     let profile = Profile {
-        protocol: 1,
-        prompt_revision: "transcribe-visible-v1",
+        protocol: if context.is_some() { 2 } else { 1 },
+        prompt_revision: if context.is_some() {
+            "transcribe-confirmed-examples-v1"
+        } else {
+            "transcribe-visible-v1"
+        },
         caller_model_profile: model_profile.into(),
+        confirmed_context: context.map(|c| c.identity().clone()),
     };
     let revision = format!(
-        "{PROFILE_REVISION}{}",
+        "{}{}",
+        if context.is_some() {
+            "notebook-ocr-confirmed-v1:"
+        } else {
+            PROFILE_REVISION
+        },
         digest(&serde_json::to_vec(&profile)?)
     );
     let manifest =
         json!({"protocol":1,"pages":pages.iter().map(|p|p.page).collect::<Vec<_>>()}).to_string();
-    let mut parts = vec![
-        json!({"type":"text","text":INSTRUCTIONS}),
-        json!({"type":"text","text":manifest}),
-    ];
+    let mut parts = vec![json!({"type":"text","text":INSTRUCTIONS})];
+    if let Some(context) = context {
+        parts.push(
+            json!({"type":"text","text":include_str!("../handwriting/context-instructions.txt")}),
+        );
+        for (i, e) in context.examples.iter().enumerate() {
+            let descriptor = json!({"kind":"confirmed-example", "index":i+1,
+                "original_text":e.original_text,"corrected_text":e.corrected_text})
+            .to_string();
+            parts.push(json!({"type":"text","text":descriptor}));
+            parts.push(json!({"type":"image_url","image_url":STANDARD.encode(&e.png)}));
+        }
+    }
+    parts.push(json!({"type":"text","text":manifest}));
     for p in pages {
         parts.push(json!({"type":"text","text":format!("Page {} PNG follows",p.page)}));
         parts.push(json!({"type":"image_url","image_url":STANDARD.encode(p.png)}));
+    }
+    if prepared.is_some() {
+        let text_parts = parts
+            .iter()
+            .filter(|p| p["type"] == "text")
+            .collect::<Vec<_>>();
+        ensure!(
+            serde_json::to_vec(&text_parts)?.len() <= 32768,
+            "notebook text input exceeds bound"
+        );
     }
     let descriptor = serde_json::to_vec(&parts)?;
     ensure!(
@@ -340,6 +523,8 @@ pub fn normalize(
     }
     drop(parts);
     let mut failed = false;
+    trace.phase = Phase::Provider;
+    trace.called = true;
     let returned = owned.0.execute_with_progress(&mut || {
         if failed || progress(Progress::EngineProgress).is_err() {
             failed = true;
@@ -349,6 +534,7 @@ pub fn normalize(
     });
     ensure!(!failed, "notebook progress refused");
     let returned = returned.map_err(|_| anyhow::anyhow!("notebook engine failed"))?;
+    trace.phase = Phase::Response;
     progress(Progress::AfterResponse).map_err(|_| anyhow::anyhow!("notebook progress refused"))?;
     ensure!(
         returned.len() <= options.max_response_bytes,
@@ -383,7 +569,13 @@ pub fn normalize(
                 ensure!(t.text.is_empty(), "invalid notebook transcription");
                 blank_pages.push(t.page);
             }
-            Status::Unreadable => anyhow::bail!("notebook page unreadable"),
+            Status::Unreadable => {
+                if prepared.is_some() {
+                    ensure!(t.text.is_empty(), "invalid notebook transcription");
+                }
+                trace.unreadable = true;
+                anyhow::bail!("notebook page unreadable");
+            }
         }
         text_bytes = text_bytes
             .checked_add(t.text.len())
@@ -402,14 +594,18 @@ pub fn normalize(
         document: NormalizedDocument {
             document,
             format: SourceFormat::Notebook,
-            source_sha256: format!("{:x}", source.finalize()),
+            source_sha256,
             extractor_revision: revision,
             units,
         },
         images,
         profile,
         blank_pages,
-        authority: "unverified-historical-page-image-ocr",
+        authority: if context.is_some() {
+            "unverified-historical-page-image-ocr-with-confirmed-examples"
+        } else {
+            "unverified-historical-page-image-ocr"
+        },
         prompt_sha256,
         prompt_bytes,
         response_sha256: digest(returned.as_bytes()),
