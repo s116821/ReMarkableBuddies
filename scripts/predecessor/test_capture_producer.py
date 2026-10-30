@@ -31,7 +31,7 @@ class CommandArtifactTests(unittest.TestCase):
                 if field == 'test':
                     value['profile']['test'] = True
                 elif field == 'source':
-                    value['target']['src_path'] = str(self.workspace / 'examples/other.rs')
+                    value['target']['src_path'] = str(self.workspace / 'docs/examples/other.rs')
                 else:
                     value['executable'] += '-other'
                 with self.assertRaises(ValueError):

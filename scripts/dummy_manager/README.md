@@ -29,7 +29,7 @@ notify to an owned fake Unix datagram socket. No live systemd manager runs. Run 
 Linux environment with GCC and Python3:
 
 ```sh
-python3 tools/dummy_manager/test_helper.py -v
+python3 scripts/dummy_manager/test_helper.py -v
 ```
 
 The initial vendor-SDK ARM32 hard-float build uses a clearly synthetic placeholder

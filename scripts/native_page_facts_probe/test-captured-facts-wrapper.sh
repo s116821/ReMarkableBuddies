@@ -14,7 +14,7 @@ printf 'Main local reviewed decision bytes\n' > "$root/capture-visual-review.jso
 chmod 600 "$root/capture-visual-review.json"
 publisher=$(sha256sum "$root/facts-publisher" | awk '{print $1}')
 review=$(sha256sum "$root/capture-visual-review.json" | awk '{print $1}')
-tr -d '\r' < tools/native_page_facts_probe/publish-captured-facts-source.sh > "$work/template"
+tr -d '\r' < scripts/native_page_facts_probe/publish-captured-facts-source.sh > "$work/template"
 # Guard removal and ephemeral bindings are confined to this owned fixture.
 sed -e '/^exit 90$/d' -e "s|^root=.*|root=$root|" \
  -e "s|= 0000000000000000000000000000000000000000000000000000000000000000$|= $publisher|" \

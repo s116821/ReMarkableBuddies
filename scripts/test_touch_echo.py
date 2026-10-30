@@ -9,7 +9,7 @@ import tempfile
 
 root = Path(__file__).resolve().parents[1]
 touch = (root / "src/device/touch.rs").read_text()
-example = (root / "examples/hardware_probe.rs").read_text()
+example = (root / "docs/examples/hardware_probe.rs").read_text()
 method = re.search(r'    pub fn diagnostic_tap_echo\(.*?(?=\n    pub\(super\) fn input_identity)', touch, re.S).group()
 # Substitute only the firmware file read; all guard/control-flow code is exact.
 method = method.replace('std::fs::read_to_string("/etc/os-release")', 'crate::release_file()')
