@@ -529,6 +529,9 @@ fn main() -> Result<()> {
     let admitted_store = match remarkable_reader_buddy::reader_runtime::startup(&config) {
         remarkable_reader_buddy::reader_runtime::StartupDecision::Ordinary(store) => store,
         remarkable_reader_buddy::reader_runtime::StartupDecision::Report(mut report) => {
+            if config.reader.selection.is_none() {
+                return Err(report.into_ordinary_startup_error());
+            }
             report.write_to(&mut std::io::stdout().lock())?;
             return Ok(());
         }
@@ -557,6 +560,9 @@ fn main() -> Result<()> {
         match remarkable_reader_buddy::reader_runtime::ordinary_store(&config, admitted_store) {
             Ok(store) => store,
             Err(mut report) => {
+                if config.reader.selection.is_none() {
+                    return Err(report.into_ordinary_startup_error());
+                }
                 report.write_to(&mut std::io::stdout().lock())?;
                 return Ok(());
             }
