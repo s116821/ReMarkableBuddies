@@ -1,2 +1,4 @@
 # Shared cross-repository literal corpus has a byte-pinned SHA-256.
 tests/fixtures/product-settings-contract-v1.json -text
+src/config/configuration-schema.json text eol=lf
+tests/fixtures/configuration-schema-corpus.json text eol=lf
