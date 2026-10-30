@@ -1,0 +1,80 @@
+{
+  "name": "writer-notebook-create-replay",
+  "mode": "writer",
+  "conversation": "20000000-0000-4000-8000-000000000001",
+  "replies": [
+    "Force = 10 N. (page 1).",
+    "Force = 10 N. (page 1).",
+    "# Force\n\nForce = 10 N. (page 1)."
+  ],
+  "reader_history": [
+    "Keep the physical units."
+  ],
+  "steps": [
+    {
+      "step": "notebook",
+      "request": {
+        "command": "generate-notebook-and-export",
+        "outer_operation": "20000000-0000-4000-8000-000000000004",
+        "generation": {
+          "command": "generate-notebook",
+          "conversation": "20000000-0000-4000-8000-000000000001",
+          "operation": "20000000-0000-4000-8000-000000000002",
+          "request": "Preserve Force = 10 N and cite page 1.",
+          "document_file": "writer-notebook-source.json",
+          "document_sha256": "debb857e44ea06ddb46af489beed2146cfad8743f8ec08ab0f03771a7c3d93bd",
+          "selection": {
+            "scope": "supplied-notebook"
+          },
+          "guidance": null,
+          "max_model_calls": 3,
+          "history_range": null
+        },
+        "correlation": "20000000-0000-4000-8000-000000000005",
+        "effect_operation": "20000000-0000-4000-8000-000000000006"
+      },
+      "fault": null
+    },
+    {
+      "step": "restart"
+    },
+    {
+      "step": "notebook",
+      "request": {
+        "command": "generate-notebook-and-export",
+        "outer_operation": "20000000-0000-4000-8000-000000000004",
+        "generation": {
+          "command": "generate-notebook",
+          "conversation": "20000000-0000-4000-8000-000000000001",
+          "operation": "20000000-0000-4000-8000-000000000002",
+          "request": "Preserve Force = 10 N and cite page 1.",
+          "document_file": "writer-notebook-source.json",
+          "document_sha256": "debb857e44ea06ddb46af489beed2146cfad8743f8ec08ab0f03771a7c3d93bd",
+          "selection": {
+            "scope": "supplied-notebook"
+          },
+          "guidance": null,
+          "max_model_calls": 3,
+          "history_range": null
+        },
+        "correlation": "20000000-0000-4000-8000-000000000005",
+        "effect_operation": "20000000-0000-4000-8000-000000000006"
+      },
+      "fault": null
+    }
+  ],
+  "output": "../output/writer-notebook-create-replay",
+  "expect": {
+    "statuses": [
+      "exported",
+      "historical"
+    ],
+    "model_calls": 3,
+    "destination_calls": 3,
+    "writes": 1,
+    "note_contains": [
+      "Force = 10 N",
+      "page 1"
+    ]
+  }
+}

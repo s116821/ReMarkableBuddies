@@ -19,6 +19,11 @@ pub enum DocumentOwnership {
     DeferredAmbiguous(BTreeSet<Uuid>),
 }
 impl SelectedDomainProjection {
+    fn hashed_record(&self, hash: &str) -> Option<&Record> {
+        self.records.iter().find_map(|(revision, record)| {
+            (self.objects.get(revision)?.sha256 == hash).then_some(record)
+        })
+    }
     pub fn document_ownership(&self) -> Result<BTreeMap<Uuid, DocumentOwnership>> {
         let mut owners: BTreeMap<Uuid, BTreeSet<Uuid>> = BTreeMap::new();
         for record in self.records.values() {
@@ -68,6 +73,14 @@ impl SelectedDomainProjection {
                                             if origin.conversation == conversation
                                                 && origin.sequence <= turn.sequence
                                                 && origin.sources.contains(&s.id)),
+                                Record::ArchivedNormalizedSource(s) =>
+                                    s.id == *source
+                                        && s.conversation == conversation
+                                        && matches!(self.head(Namespace::Conversation, s.turn),
+                                            Some((_, Some(Record::Turn(origin))))
+                                            if origin.conversation == conversation
+                                                && origin.sequence <= turn.sequence
+                                                && origin.sources.contains(&s.id)),
                                 _ => false,
                             }),
                             "selected turn source closure missing or foreign"
@@ -104,6 +117,41 @@ impl SelectedDomainProjection {
                             if origin.sources.contains(&source.id)),
                         "selected normalized source origin relationship missing"
                     );
+                }
+                Record::ArchivedNormalizedSource(source) => {
+                    self.require_turn(source.turn, conversation)?;
+                    ensure!(
+                        matches!(self.head(Namespace::Conversation, source.turn),
+                        Some((_, Some(Record::Turn(origin)))) if origin.sources.contains(&source.id)),
+                        "selected notebook archive origin relationship missing"
+                    );
+                    // Historical document metadata never grants native ownership.
+                }
+                Record::NotebookPlan(plan) => {
+                    ensure!(
+                        matches!(self.hashed_record(&plan.source_revision),
+                        Some(Record::ArchivedNormalizedSource(source)) if source.id == plan.archive_id
+                        && source.conversation == conversation && source.identity_digest()? == plan.source_identity_digest),
+                        "selected notebook plan source revision absent"
+                    );
+                }
+                Record::NotebookStage(stage) => {
+                    ensure!(
+                        matches!(self.hashed_record(&stage.plan_revision),
+                        Some(Record::NotebookPlan(plan)) if plan.id == stage.plan_id
+                        && plan.conversation == conversation && plan.core_digest == stage.core_digest
+                        && plan.source_revision == stage.source_revision),
+                        "selected notebook stage plan revision absent"
+                    );
+                    for (id, revision, digest) in &stage.predecessors {
+                        ensure!(
+                            matches!(self.hashed_record(revision), Some(Record::NotebookStage(prior))
+                            if prior.id == *id && prior.conversation == conversation
+                            && prior.outcome == Some(super::notebook::NotebookStageOutcome::Generated)
+                            && prior.observed_output_digest.as_ref() == Some(digest)),
+                            "selected notebook predecessor absent"
+                        );
+                    }
                 }
                 Record::Binding(binding) => {
                     ensure!(
@@ -451,6 +499,9 @@ pub(super) fn conversation_id(record: &Record) -> Uuid {
         Record::Turn(r) => r.conversation,
         Record::Source(r) => r.conversation,
         Record::NormalizedText(r) => r.conversation,
+        Record::ArchivedNormalizedSource(r) => r.conversation,
+        Record::NotebookPlan(r) => r.conversation,
+        Record::NotebookStage(r) => r.conversation,
         Record::Capture(r) => r.conversation,
         Record::LegacyCapture(r) => r.conversation,
         Record::DevelopmentCapture(r) => r.conversation,

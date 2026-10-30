@@ -33,6 +33,10 @@ impl Store {
             .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
         let source = self.generation(inner.generation);
         let from: u32 = files::json(&source.join("format.json"), 64)?;
+        ensure!(
+            from < feedback_generation::VERSION && target < feedback_generation::VERSION,
+            "feedback migrations require separately qualified policy"
+        );
         let migration = registry
             .entries
             .get(&(from, target))

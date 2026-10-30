@@ -3,12 +3,14 @@ pub(crate) mod captured;
 pub(crate) mod conditional;
 pub(crate) mod conversation_cleanup;
 pub mod drive;
+pub(crate) mod feedback_generation;
 pub mod files;
 pub mod inspection;
 #[cfg(all(test, unix))]
 mod lease_tests;
 pub mod maintenance;
 pub mod migration;
+pub(crate) mod notebook_generation;
 mod recovery;
 #[cfg(test)]
 mod selected_projection_tests;
@@ -128,6 +130,13 @@ pub struct Store {
 
 struct Lease(File);
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OpenPreparation {
+    None,
+    Feedback,
+    Notebook,
+}
+
 impl Drop for Lease {
     fn drop(&mut self) {
         // A concurrent subprocess fork can temporarily inherit this descriptor.
@@ -183,7 +192,7 @@ impl Store {
     }
 
     pub(crate) fn local_domain_lease(self: &Arc<Self>) -> Result<LocalDomainLease> {
-        let legacy = self.legacy_sync_lease()?;
+        let legacy = self.local_compatibility_lease(true)?;
         let mut inner = self
             .inner
             .lock()
@@ -203,7 +212,7 @@ impl Store {
     }
     pub(crate) fn legacy_publisher_lease(self: &Arc<Self>) -> Result<LegacyPublisherLease> {
         // Preserve the domain lease while adding publisher-only lifetime accounting.
-        let legacy = self.legacy_sync_lease()?;
+        let legacy = self.local_compatibility_lease(false)?;
         let mut inner = self
             .inner
             .lock()
@@ -226,10 +235,24 @@ impl Store {
         })
     }
     pub(crate) fn legacy_sync_lease(self: &Arc<Self>) -> Result<LegacySyncLease> {
+        self.local_compatibility_lease(false)
+    }
+    fn local_compatibility_lease(
+        self: &Arc<Self>,
+        local_notebook: bool,
+    ) -> Result<LegacySyncLease> {
         let mut inner = self
             .inner
             .lock()
             .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        let root = self.generation(inner.generation);
+        if feedback_generation::version(&root)? == notebook_generation::VERSION {
+            ensure!(
+                local_notebook,
+                "notebook storage does not support legacy sync"
+            );
+            notebook_generation::validate_ready(&self.paths, self.actor_id, inner.generation)?;
+        }
         ensure!(
             !selection::has_selected(&self.generation(inner.generation))?,
             "selected storage requires coordinated sync, not the legacy all-history worker"
@@ -241,6 +264,12 @@ impl Store {
         Ok(LegacySyncLease(self.clone()))
     }
     pub fn open(paths: StorePaths) -> Result<Self> {
+        Self::open_policy(paths, OpenPreparation::None)
+    }
+    pub(crate) fn open_for_feedback(paths: StorePaths) -> Result<Self> {
+        Self::open_policy(paths, OpenPreparation::Feedback)
+    }
+    fn open_policy(paths: StorePaths, preparation: OpenPreparation) -> Result<Self> {
         paths.validate()?;
         let identity_path = paths.data.join("identity.json");
         if !identity_path.exists() {
@@ -330,7 +359,31 @@ impl Store {
             export_active: std::sync::atomic::AtomicBool::new(false),
             writer_active: std::sync::atomic::AtomicBool::new(false),
         };
-        selection::validate_generation(&store.generation(generation), store.actor_id, generation)?;
+        if preparation == OpenPreparation::Notebook {
+            selection::validate_generation_preparing_notebook(
+                &store.generation(generation),
+                store.actor_id,
+                generation,
+            )?;
+        } else if preparation == OpenPreparation::Feedback {
+            selection::validate_generation_preparing(
+                &store.generation(generation),
+                store.actor_id,
+                generation,
+            )?;
+        } else {
+            selection::validate_generation(
+                &store.generation(generation),
+                store.actor_id,
+                generation,
+            )?;
+        }
+        if preparation != OpenPreparation::Notebook
+            && feedback_generation::version(&store.generation(generation))?
+                == notebook_generation::VERSION
+        {
+            notebook_generation::validate_ready(&store.paths, store.actor_id, generation)?;
+        }
         for directory in [
             store.paths.data.clone(),
             store.paths.credentials.clone(),
@@ -352,19 +405,55 @@ impl Store {
                 .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
             inner.index = store.recover(generation)?;
         }
+        if preparation != OpenPreparation::Notebook {
+            store.publish_capabilities(&store.generation(generation))?;
+        }
+        Ok(store)
+    }
+    fn publish_capabilities(&self, root: &Path) -> Result<()> {
+        if feedback_generation::version(root)? == notebook_generation::VERSION {
+            let generation = Uuid::parse_str(
+                root.file_name()
+                    .and_then(|s| s.to_str())
+                    .context("invalid notebook generation path")?,
+            )?;
+            return notebook_generation::publish_capabilities(self, generation);
+        }
         files::atomic(
-            &store.paths.data.join("contract-v1.json"),
+            &self.paths.data.join("contract-v1.json"),
             CONTRACT_V1.as_bytes(),
         )?;
-        files::atomic_json(
-            &store.paths.data.join("capabilities.json"),
-            &serde_json::json!({
-            "contract_version": 1, "schema_file":"contract-v1.json", "store_versions": [1, 2], "selected_store_feature": "actor-generation-bound-v1", "envelope_versions": [1], "config_versions": [1],
-                "paths": store.paths, "lock": "stable-inode-exclusive-os-lease", "linux_lock": "flock",
-                "maintenance": "stop-confirm-lock-stage-commit-release-restart", "namespaces": ["conversation","source","export-association","subject-memory","handwriting"], "sync": "optional-immutable-drive-v1"
-            }),
-        )?;
-        Ok(store)
+        let store = self;
+        let mut capabilities = serde_json::json!({
+        "contract_version": 1, "schema_file":"contract-v1.json", "store_versions": [1, 2], "selected_store_feature": "actor-generation-bound-v1", "envelope_versions": [1], "config_versions": [1],
+            "paths": store.paths, "lock": "stable-inode-exclusive-os-lease", "linux_lock": "flock",
+            "maintenance": "stop-confirm-lock-stage-commit-release-restart", "namespaces": ["conversation","source","export-association","subject-memory","handwriting"], "sync": "optional-immutable-drive-v1"
+        });
+        if feedback_generation::version(root)? == feedback_generation::VERSION {
+            let contract = include_str!("contract-v2.json");
+            files::atomic(
+                &self.paths.data.join("contract-v2.json"),
+                contract.as_bytes(),
+            )?;
+            capabilities["contract_version"] = serde_json::json!(2);
+            capabilities["schema_file"] = serde_json::json!("contract-v2.json");
+            capabilities["store_versions"] = serde_json::json!([1, 2, 3]);
+            capabilities["unassociated_feedback_feature"] =
+                serde_json::json!("actor-generation-bound-v1");
+            capabilities["namespaces"]
+                .as_array_mut()
+                .context("invalid capabilities")?
+                .push(serde_json::json!("unassociated-feedback"));
+        }
+        files::atomic_json(&self.paths.data.join("capabilities.json"), &capabilities)?;
+        ensure!(
+            files::json::<serde_json::Value>(
+                &self.paths.data.join("capabilities.json"),
+                MAX_RECORD as u64
+            )? == capabilities,
+            "capability publication unverified"
+        );
+        Ok(())
     }
     fn create_generation(root: &Path, id: Uuid) -> Result<()> {
         for child in ["objects", "commits"] {
@@ -407,7 +496,18 @@ impl Store {
         while !pending.is_empty() {
             let before = pending.len();
             pending.retain(|(manifest, records)| {
-                if Self::can_apply(&index, records).is_ok() {
+                if feedback_generation::admit(
+                    &root,
+                    self.actor_id,
+                    generation,
+                    &index,
+                    records,
+                    &manifest.scope,
+                )
+                .is_ok()
+                    && Self::can_apply(&index, records).is_ok()
+                    && notebook_generation::validate_records(&root, &index, records).is_ok()
+                {
                     Self::apply_index(&mut index, manifest.clone(), records.clone());
                     false
                 } else {
@@ -427,7 +527,15 @@ impl Store {
     fn validate_objects_with_budget(
         root: &Path,
         manifest: &Manifest,
+        budget: Option<&mut selection::SelectedReadBudget>,
+    ) -> Result<Vec<(Envelope, String)>> {
+        Self::validate_objects_policy(root, manifest, budget, None)
+    }
+    fn validate_objects_policy(
+        root: &Path,
+        manifest: &Manifest,
         mut budget: Option<&mut selection::SelectedReadBudget>,
+        notebook_archive_actor: Option<Uuid>,
     ) -> Result<Vec<(Envelope, String)>> {
         manifest.validate()?;
         for (item, media) in manifest
@@ -462,6 +570,51 @@ impl Store {
             let envelope: Envelope = serde_json::from_slice(&encoded)
                 .map_err(|_| anyhow::anyhow!("invalid or unsupported stored JSON"))?;
             envelope.validate()?;
+            if envelope.domain_schema_version == 3 {
+                if let Some(actor) = notebook_archive_actor {
+                    ensure!(
+                        envelope.actor_id == actor,
+                        "notebook archive actor mismatch"
+                    );
+                } else {
+                    ensure!(
+                        feedback_generation::version(root)? == notebook_generation::VERSION,
+                        "notebook records require adopted generation4"
+                    );
+                    let generation = Uuid::parse_str(
+                        root.file_name()
+                            .and_then(|s| s.to_str())
+                            .context("invalid notebook generation path")?,
+                    )?;
+                    notebook_generation::validate_version(
+                        root,
+                        envelope.actor_id,
+                        generation,
+                        notebook_generation::VERSION,
+                        false,
+                    )?;
+                }
+                if let crate::conversation::Record::ArchivedNormalizedSource(source) =
+                    crate::conversation::Ledger::decode(&envelope)?
+                {
+                    ensure!(
+                        manifest
+                            .media
+                            .iter()
+                            .any(|reference| reference.sha256 == source.media.sha256
+                                && reference.bytes == source.media.bytes),
+                        "notebook archive requires complete JSON media"
+                    );
+                    if let Some(budget) = budget.as_deref_mut() {
+                        budget.charge(0, 0, 0, source.media.bytes)?;
+                    }
+                    let bytes = files::read(
+                        &root.join("objects").join(&source.media.sha256),
+                        crate::writer::notebook::MAX_CANONICAL_BYTES as u64,
+                    )?;
+                    source.validate_bytes(&bytes)?;
+                }
+            }
             ensure!(
                 manifest.record_namespaces.get(&item.sha256) == Some(&envelope.namespace),
                 "manifest namespace mismatch"
@@ -829,6 +982,27 @@ impl Store {
         local: bool,
     ) -> Result<(Uuid, bool)> {
         let root = self.generation(inner.generation);
+        for reference in &manifest.records {
+            if let Some(bytes) = objects.get(&reference.sha256) {
+                if let Ok(envelope) = serde_json::from_slice::<Envelope>(bytes) {
+                    if envelope.domain_schema_version == 3 {
+                        ensure!(
+                            feedback_generation::version(&root)? == notebook_generation::VERSION,
+                            "notebook records require adopted generation4"
+                        );
+                    }
+                }
+            }
+        }
+        if feedback_generation::version(&root)? == notebook_generation::VERSION {
+            notebook_generation::validate_ready(&self.paths, self.actor_id, inner.generation)?;
+            ensure!(
+                inner.index.unavailable == 0
+                    && sync::mode::ordinary_local(self)?
+                    && manifest.scope == Scope::LocalTransaction,
+                "notebook publication requires complete ordinary local custody"
+            );
+        }
         if let Some(previous) = inner.index.manifests.get(&manifest.transaction_id) {
             ensure!(previous == &manifest, "transaction identity collision");
             return Ok((manifest.transaction_id, false));
@@ -846,7 +1020,29 @@ impl Store {
         }
         Self::trip(inner, Fault::AfterObjects)?;
         let records = Self::validate_objects(&root, &manifest)?;
+        if records
+            .iter()
+            .any(|(e, _)| e.namespace == Namespace::UnassociatedFeedback)
+        {
+            ensure!(
+                if feedback_generation::version(&root)? == notebook_generation::VERSION {
+                    sync::mode::ordinary_local(self)?
+                } else {
+                    inner.mode_handles == 0 && sync::mode::load(self)?.is_none()
+                },
+                "feedback publication requires ordinary local mode"
+            );
+        }
+        feedback_generation::admit(
+            &root,
+            self.actor_id,
+            inner.generation,
+            &inner.index,
+            &records,
+            &manifest.scope,
+        )?;
         Self::can_apply(&inner.index, &records)?;
+        notebook_generation::validate_records(&root, &inner.index, &records)?;
         if local {
             for (e, hash) in &records {
                 if inner.index.operations.get(&e.operation_id) == Some(hash) {
