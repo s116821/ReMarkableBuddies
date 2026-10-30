@@ -524,6 +524,74 @@ impl<M: LLMEngine> Orchestrator<M> {
             .then_some(Failure::Transcription))
     }
 
+    fn transcriptions_agree(question: &str, reading: &str) -> bool {
+        let independent = Self::extract_field(reading, "TRANSCRIPTION:");
+        let normalize = |text: &str| -> String {
+            let chars: Vec<char> = text.to_lowercase().chars().collect();
+            let mut normalized = String::new();
+            for (i, &c) in chars.iter().enumerate() {
+                let numeric_separator = matches!(c, '.' | ',')
+                    && i > 0
+                    && chars[i - 1].is_ascii_digit()
+                    && chars.get(i + 1).is_some_and(char::is_ascii_digit);
+                if c.is_alphanumeric() || numeric_separator {
+                    normalized.push(c);
+                } else if c.is_whitespace() || ".?,;:".contains(c) {
+                    normalized.push(' ');
+                } else {
+                    // Keep operators/grouping distinct, regardless of spacing.
+                    normalized.push(' ');
+                    normalized.push(c);
+                    normalized.push(' ');
+                }
+            }
+            normalized.split_whitespace().collect::<Vec<_>>().join(" ")
+        };
+        let a = normalize(question);
+        let b = normalize(&independent);
+        !a.is_empty() && !b.is_empty() && b != "none" && a == b
+    }
+
+    /// Extract a field value from the response
+    fn extract_field(text: &str, field_name: &str) -> String {
+        for line in text.lines() {
+            if let Some(value) = line.trim().strip_prefix(field_name) {
+                return value.trim().to_string();
+            }
+        }
+        "".to_string()
+    }
+
+    /// Parse bounding box from "x,y,width,height" format
+    fn parse_bounding_box(text: &str) -> Option<BoundingBox> {
+        let parts: Vec<&str> = text.split(',').collect();
+        if parts.len() == 4 {
+            if let (Ok(x), Ok(y), Ok(w), Ok(h)) = (
+                parts[0].trim().parse::<i32>(),
+                parts[1].trim().parse::<i32>(),
+                parts[2].trim().parse::<i32>(),
+                parts[3].trim().parse::<i32>(),
+            ) {
+                return Some(BoundingBox {
+                    x,
+                    y,
+                    width: w,
+                    height: h,
+                });
+            }
+        }
+        None
+    }
+
+    /// Render the answer on the next page
+    ///
+    /// Simplified flow:
+    /// 1. Store original page screenshot for later comparison
+    /// 2. Navigate right to next page  
+    /// 3. Compare to original to verify we actually moved
+    /// 4. Check if page is valid (blank or existing QA page)
+    /// 5. If not valid or didn't move → verify the source and record a non-ink failure
+    /// 6. If valid → render Q&A on that page
     fn enrich_answer(
         &mut self,
         result: &mut AnalysisResult,
