@@ -1,11 +1,51 @@
 //! Separate report3 wire. Released report1/2 types are not modified.
-use crate::storage::{inspection::{InspectionStatus, StorageKind}, Namespace};
+#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+use crate::storage::{
+    inspection::{InspectionStatus, StorageKind},
+    Namespace,
+};
 use serde::{Serialize, Serializer};
-use std::{collections::BTreeMap, io::{self, Write}};
+use std::{
+    collections::BTreeMap,
+    io::{self, Write},
+};
 use uuid::Uuid;
 
 pub(super) const MAX_WIRE: usize = 32768;
-pub(super) const ISSUE_CODES: &[&str] = &["configuration-unavailable", "invalid-paths", "missing-owner", "invalid-owner", "missing-current", "missing-lock", "busy-writer", "lock-unavailable", "lock-unsupported", "lease-identity-changed", "unsupported-generation", "missing-entry", "unreadable-entry", "unsafe-entry", "unexpected-entry", "entry-limit", "metadata-limit", "byte-count-overflow", "invalid-metadata", "invalid-reference", "missing-object", "uninspected-reference", "omitted-media", "size-mismatch", "inconsistent-reference", "state-changed", "state-unverifiable", "cache-unavailable", "cache-owner-mismatch", "unsupported-platform", "report-limit", "unclassified-object"];
+pub(super) const ISSUE_CODES: &[&str] = &[
+    "configuration-unavailable",
+    "invalid-paths",
+    "missing-owner",
+    "invalid-owner",
+    "missing-current",
+    "missing-lock",
+    "busy-writer",
+    "lock-unavailable",
+    "lock-unsupported",
+    "lease-identity-changed",
+    "unsupported-generation",
+    "missing-entry",
+    "unreadable-entry",
+    "unsafe-entry",
+    "unexpected-entry",
+    "entry-limit",
+    "metadata-limit",
+    "byte-count-overflow",
+    "invalid-metadata",
+    "invalid-reference",
+    "missing-object",
+    "uninspected-reference",
+    "omitted-media",
+    "size-mismatch",
+    "inconsistent-reference",
+    "state-changed",
+    "state-unverifiable",
+    "cache-unavailable",
+    "cache-owner-mismatch",
+    "unsupported-platform",
+    "report-limit",
+    "unclassified-object",
+];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct Count(pub u64);
@@ -20,8 +60,12 @@ impl Serialize for Count {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct Bytes(pub u128);
 impl Bytes {
-    pub(super) fn add(&mut self, value: u64) { self.0 += u128::from(value); }
-    pub(super) fn value(self) -> Option<u64> { u64::try_from(self.0).ok() }
+    pub(super) fn add(&mut self, value: u64) {
+        self.0 += u128::from(value);
+    }
+    pub(super) fn value(self) -> Option<u64> {
+        u64::try_from(self.0).ok()
+    }
 }
 impl Serialize for Bytes {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -32,7 +76,10 @@ impl Serialize for Bytes {
     }
 }
 #[derive(Clone, Debug, Default, Serialize)]
-pub(super) struct FileUsage { pub files: Count, pub apparent_bytes: Bytes }
+pub(super) struct FileUsage {
+    pub files: Count,
+    pub apparent_bytes: Bytes,
+}
 impl FileUsage {
     pub(super) fn add(&mut self, bytes: u64) {
         self.files.0 += 1;
@@ -52,13 +99,22 @@ pub(super) struct DomainUsage {
 }
 impl DomainUsage {
     pub(super) fn overflowed(&self) -> bool {
-        [self.observed_record_bytes, self.declared_media_bytes, self.present_referenced_media_bytes]
-            .iter().any(|bytes| bytes.value().is_none())
+        [
+            self.observed_record_bytes,
+            self.declared_media_bytes,
+            self.present_referenced_media_bytes,
+        ]
+        .iter()
+        .any(|bytes| bytes.value().is_none())
     }
 }
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all="kebab-case")]
-pub(super) enum NotebookKind { ArchivedNormalizedSource, NotebookPlan, NotebookStage }
+#[serde(rename_all = "kebab-case")]
+pub(super) enum NotebookKind {
+    ArchivedNormalizedSource,
+    NotebookPlan,
+    NotebookStage,
+}
 
 #[derive(Clone, Debug, Serialize)]
 pub(super) struct Report {
@@ -107,7 +163,10 @@ impl Report {
         }
     }
     pub(super) fn issue(&mut self, code: &'static str) {
-        assert!(ISSUE_CODES.contains(&code), "unknown fixed report3 issue code");
+        assert!(
+            ISSUE_CODES.contains(&code),
+            "unknown fixed report3 issue code"
+        );
         self.issues.entry(code).or_default().0 += 1;
     }
     pub(super) fn failure(status: InspectionStatus, code: &'static str) -> Self {
@@ -116,15 +175,25 @@ impl Report {
         report
     }
     pub(super) fn overflowed(&self) -> bool {
-        self.observed_apparent_bytes.value().is_none() || self.shared_media_apparent_bytes.value().is_none()
-            || self.storage.values().any(|usage| usage.apparent_bytes.value().is_none())
+        self.observed_apparent_bytes.value().is_none()
+            || self.shared_media_apparent_bytes.value().is_none()
+            || self
+                .storage
+                .values()
+                .any(|usage| usage.apparent_bytes.value().is_none())
             || self.observed_domains.values().any(DomainUsage::overflowed)
-            || self.observed_notebook_records.values().any(|usage| usage.apparent_bytes.value().is_none())
+            || self
+                .observed_notebook_records
+                .values()
+                .any(|usage| usage.apparent_bytes.value().is_none())
     }
     pub(super) fn write_to(&self, output: &mut impl Write) -> io::Result<()> {
-        let mut bytes = serde_json::to_vec(self).map_err(|_| io::Error::other("report3 encoding unavailable"))?;
+        let mut bytes = serde_json::to_vec(self)
+            .map_err(|_| io::Error::other("report3 encoding unavailable"))?;
         bytes.push(b'\n');
-        if bytes.len() > MAX_WIRE { return Err(io::Error::other("report3 output bound")); }
+        if bytes.len() > MAX_WIRE {
+            return Err(io::Error::other("report3 output bound"));
+        }
         output.write_all(&bytes)
     }
 }
