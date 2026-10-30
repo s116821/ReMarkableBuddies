@@ -15,11 +15,7 @@ pub(super) struct Frame {
 
 pub(super) trait NavigationIo {
     fn observe(&mut self) -> Result<Frame>;
-    fn swipe(
-        &mut self,
-        direction: NavigationDirection,
-        orientation: remarkable_open_sdk::navigation::gesture::Orientation,
-    ) -> Result<()>;
+    fn swipe(&mut self, direction: NavigationDirection) -> Result<()>;
     fn now(&self) -> Duration;
     fn pace(&mut self, duration: Duration);
     fn begin_guard(&mut self) -> Result<()>;
@@ -58,10 +54,6 @@ fn check_metadata(
     ensure!(
         current.order == source.order,
         "Navigation page order or redirect changed"
-    );
-    ensure!(
-        current.orientation == source.orientation,
-        "Navigation gesture orientation changed"
     );
     if current.owner.page == source.owner.page {
         ensure!(
@@ -105,12 +97,6 @@ pub(super) fn navigate(
             source.image.dimensions() == (768, 1024),
             "Unknown navigation image dimensions"
         );
-        ensure!(
-            source.before.orientation
-                == remarkable_open_sdk::navigation::gesture::Orientation::Portrait
-                && chrome_ready(&source.image),
-            "Unsupported or unobserved portrait navigation configuration"
-        );
         let index = source
             .before
             .order
@@ -132,7 +118,7 @@ pub(super) fn navigate(
         // intervals on either side without pretending to attribute own events.
         io.check_request()?;
         io.end_guard();
-        io.swipe(direction, source.before.orientation)?;
+        io.swipe(direction)?;
         let deadline = io.now().saturating_add(Duration::from_secs(5));
         io.begin_guard()?;
         let source_image = DynamicImage::ImageLuma8(source.image.clone());
@@ -224,7 +210,6 @@ mod tests {
             })
             .collect(),
             index_matches: true,
-            orientation: remarkable_open_sdk::navigation::gesture::Orientation::Portrait,
         }
     }
     fn frame(target: bool) -> Frame {
@@ -287,15 +272,7 @@ mod tests {
             self.clock += self.cost;
             Ok(self.frames.pop_front().unwrap_or_else(|| self.last.clone()))
         }
-        fn swipe(
-            &mut self,
-            _: NavigationDirection,
-            orientation: remarkable_open_sdk::navigation::gesture::Orientation,
-        ) -> Result<()> {
-            assert_eq!(
-                orientation,
-                remarkable_open_sdk::navigation::gesture::Orientation::Portrait
-            );
+        fn swipe(&mut self, _: NavigationDirection) -> Result<()> {
             assert!(!self.guarding);
             self.swipes += 1;
             self.clock += Duration::from_millis(200);
@@ -341,39 +318,6 @@ mod tests {
             self.finished_owner = Some(owner.clone());
             Ok(())
         }
-    }
-
-    #[test]
-    fn unsupported_source_configuration_or_chrome_refuses_before_dispatch() {
-        for fault in 0..3 {
-            let mut source = frame(false);
-            if fault == 0 {
-                source.before.orientation =
-                    remarkable_open_sdk::navigation::gesture::Orientation::Unknown;
-                source.after = source.before.clone();
-            } else if fault == 1 {
-                source.after.orientation =
-                    remarkable_open_sdk::navigation::gesture::Orientation::Unknown;
-            } else {
-                source.image.put_pixel(736, 400, Luma([0]));
-            }
-            let mut io = Scripted::new(vec![source]);
-            assert!(navigate(&mut io, NavigationDirection::Next).is_err());
-            assert_eq!(io.swipes, 0);
-            assert!(io.finished_owner.is_none());
-        }
-    }
-
-    #[test]
-    fn orientation_drift_after_one_dispatch_never_settles_or_replays() {
-        let mut destination = frame(true);
-        destination.before.orientation =
-            remarkable_open_sdk::navigation::gesture::Orientation::Unknown;
-        destination.after = destination.before.clone();
-        let mut io = Scripted::new(vec![frame(false), destination]);
-        assert!(navigate(&mut io, NavigationDirection::Next).is_err());
-        assert_eq!(io.swipes, 1);
-        assert!(io.finished_owner.is_none());
     }
 
     #[test]

@@ -4,11 +4,18 @@ pub mod indicator;
 mod navigation;
 pub mod orchestrator;
 mod reader_attempt;
+pub mod resident_client;
+#[cfg(target_os = "linux")]
+pub mod resident_request;
+#[cfg(target_os = "linux")]
+pub mod resident_runtime;
+#[cfg(target_os = "linux")]
+pub mod resident_supervisor;
+pub mod sdk_acquisition;
+pub mod sdk_buddy_decision;
 pub mod selected_buddy;
 #[cfg(test)]
 pub(crate) use reader_attempt::assert_attachment_behavior;
-#[cfg(test)]
-pub(crate) use reader_attempt::assert_selected_retry_control;
 pub(crate) mod selected_backend;
 pub mod symbol_pool;
 pub mod xochitl_integration;
@@ -57,28 +64,19 @@ const BLANK_PAGE_SAMPLE_RATE: u32 = 2;
 pub struct Workflow {
     device: Box<dyn DeviceBackend>,
     selected: Option<selected_backend::SelectedBackendFacade>,
+    #[cfg(test)]
     development_non_output: bool,
     frame: Frame,
     debug_dump: bool,
     iteration_count: u32,
     failure_attempted: bool,
     input_failed: bool,
+    #[cfg(target_os = "linux")]
+    service_health: Option<resident_supervisor::health::ServiceHealth>,
     history: history::History,
 }
 
 impl Workflow {
-    /// Explicit executable selected mode. Unsupported transport never opens a
-    /// RealDevice or converts historical membership into live effect authority.
-    pub(crate) fn selected_runtime(
-        admission: std::sync::Arc<crate::conversation::SelectedAdmission>,
-        debug_dump: bool,
-    ) -> Self {
-        let facade = selected_backend::SelectedBackendFacade::new(
-            admission,
-            Box::new(selected_backend::RefusingBackend::new()),
-        );
-        Self::with_selected(facade, debug_dump)
-    }
     pub fn new(
         no_draw: bool,
         trigger_corner: crate::device::touch::TriggerCorner,
@@ -94,16 +92,20 @@ impl Workflow {
         Self {
             device,
             selected: None,
+            #[cfg(test)]
             development_non_output: false,
             frame: Frame::default(),
             debug_dump,
             iteration_count: 0,
             failure_attempted: false,
             input_failed: false,
+            #[cfg(target_os = "linux")]
+            service_health: None,
             history: history::History::default(),
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn with_selected(
         facade: selected_backend::SelectedBackendFacade,
         debug_dump: bool,
@@ -134,14 +136,6 @@ impl Workflow {
     pub(crate) fn is_selected(&self) -> bool {
         self.selected.is_some()
     }
-    pub(super) fn selected_admission(
-        &self,
-    ) -> Result<std::sync::Arc<crate::conversation::SelectedAdmission>> {
-        self.selected
-            .as_ref()
-            .map(|selected| selected.admission())
-            .ok_or_else(|| anyhow::anyhow!("selected Workflow absent"))
-    }
     #[cfg(test)]
     pub(crate) fn dispatch_reader(
         &mut self,
@@ -162,6 +156,33 @@ impl Workflow {
         facade.dispatch(context, ordinal, handoff)
     }
 
+    /// Attach once after ordinary initialization, on the main-loop thread.
+    #[cfg(target_os = "linux")]
+    pub fn enable_service_health(
+        &mut self,
+        mut health: resident_supervisor::health::ServiceHealth,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.service_health.is_none(),
+            "Service health already attached"
+        );
+        health.ready()?;
+        self.service_health = Some(health);
+        Ok(())
+    }
+
+    pub(super) fn runtime_failed(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        if self
+            .service_health
+            .as_ref()
+            .is_some_and(|health| health.failed())
+        {
+            return true;
+        }
+        self.input_failed
+    }
+
     pub fn delay(&mut self, duration: std::time::Duration) {
         self.device.delay(duration);
     }
@@ -169,12 +190,16 @@ impl Workflow {
     /// Read-only request checks replace source-page progress drawing.
     pub fn check_request_progress(&mut self) -> Result<()> {
         anyhow::ensure!(
-            !self.input_failed,
-            "Request input lost; further activity stopped"
+            !self.runtime_failed(),
+            "Runtime health or input lost; further activity stopped"
         );
         if let Err(error) = self.device.check_request_guard() {
             self.input_failed = true;
             return Err(error);
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(health) = self.service_health.as_mut() {
+            health.progress()?;
         }
         Ok(())
     }
@@ -218,17 +243,12 @@ impl Workflow {
     pub fn detail_images_base64(&self) -> Result<Vec<String>> {
         self.device.detail_images()
     }
-    /// Pure transport availability for startup; no request guard or acquisition.
-    pub(crate) fn reader_acquisition_kind(&self) -> crate::device::backend::AcquisitionKind {
-        self.device.acquisition_kind()
-    }
-
     /// Select first, acquire once, freeze all actual provider bytes under the guard.
     pub fn acquire_reader_evidence(&mut self) -> Result<AcquiredEvidence> {
         use crate::device::backend::AcquisitionKind;
         use base64::{engine::general_purpose::STANDARD, Engine};
         self.check_request_progress()?;
-        match self.reader_acquisition_kind() {
+        match self.device.acquisition_kind() {
             AcquisitionKind::Unsupported => anyhow::bail!("Reader acquisition unsupported"),
             AcquisitionKind::LegacyUnqualified => {
                 let (_, png) = self.capture_screenshot_with_data()?;
@@ -284,7 +304,19 @@ impl Workflow {
     /// Wait for user to trigger the workflow (touch in corner)
     pub fn wait_for_trigger(&mut self) -> Result<()> {
         info!("Waiting for trigger...");
-        self.device.wait_for_trigger()?;
+        anyhow::ensure!(
+            !self.runtime_failed(),
+            "Prior runtime failure blocks trigger"
+        );
+        #[cfg(target_os = "linux")]
+        let health = &mut self.service_health;
+        self.device.wait_for_trigger_with_progress(&mut || {
+            #[cfg(target_os = "linux")]
+            if let Some(health) = health.as_mut() {
+                health.progress()?;
+            }
+            Ok(())
+        })?;
         self.prepare_reader_trigger()
     }
 
@@ -293,8 +325,8 @@ impl Workflow {
             let _release = crate::measurement::Span::new("reader.trigger_release_observed");
         }
         anyhow::ensure!(
-            !self.input_failed,
-            "Prior input failure blocks Reader trigger"
+            !self.runtime_failed(),
+            "Prior runtime failure blocks Reader trigger"
         );
         let result = self.device.prepare_reader_trigger();
         if result.is_err() {
@@ -322,7 +354,21 @@ impl Workflow {
         loop {
             let timeout =
                 deadline.map(|limit| limit.saturating_duration_since(std::time::Instant::now()));
-            let events = self.device.wait_for_interactions(timeout)?;
+            anyhow::ensure!(
+                !self.runtime_failed(),
+                "Prior runtime failure blocks idle input"
+            );
+            #[cfg(target_os = "linux")]
+            let health = &mut self.service_health;
+            let events = self
+                .device
+                .wait_for_interactions_with_progress(timeout, &mut || {
+                    #[cfg(target_os = "linux")]
+                    if let Some(health) = health.as_mut() {
+                        health.progress()?;
+                    }
+                    Ok(())
+                })?;
             let invalidated = events.contains(&Interaction::Invalidated);
             if invalidated {
                 self.invalidate_history();
@@ -578,7 +624,7 @@ impl Workflow {
     pub fn render_text(&mut self, text: &str) -> Result<()> {
         self.invalidate_history();
         // Typing may partially change the page before a backend failure.
-        info!("Rendering text: {}", text);
+        info!("Rendering text ({} bytes)", text.len());
         self.device.render_text(text)?;
         Ok(())
     }

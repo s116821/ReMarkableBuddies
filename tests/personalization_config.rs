@@ -153,6 +153,13 @@ fn revision_conflict_busy_and_missing_store_preserve_config_bytes() {
         fixture.run(Operation::Disable, fixture.request()).status,
         Status::Busy
     );
+    let child = fixture.command("clear", &serde_json::to_vec(&fixture.request()).unwrap());
+    assert!(child.status.success());
+    assert!(child.stderr.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&child.stdout).unwrap()["status"],
+        "busy"
+    );
     drop(active);
     assert_eq!(fs::read(&fixture.path).unwrap(), bytes);
     let missing = Fixture::new(false);
@@ -229,4 +236,151 @@ fn actual_cli_set_readback_disable_clear_needs_no_credentials_or_device() {
     assert!(!String::from_utf8(result.stdout)
         .unwrap()
         .contains("PRIVATE_SENTINEL"));
+}
+
+fn tree_bytes(root: &std::path::Path) -> std::collections::BTreeMap<PathBuf, Option<Vec<u8>>> {
+    let mut result = std::collections::BTreeMap::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            let relative = path.strip_prefix(root).unwrap().to_path_buf();
+            if path.is_dir() {
+                result.insert(relative, None);
+                pending.push(path);
+            } else if path.file_name().is_some_and(|name| name == "store.lock") {
+                // Windows locks the file's byte range while the Store is held.
+                // These fixtures use an empty lock; metadata still proves that.
+                assert_eq!(fs::metadata(&path).unwrap().len(), 0);
+                result.insert(relative, Some(Vec::new()));
+            } else {
+                result.insert(relative, Some(fs::read(path).unwrap()));
+            }
+        }
+    }
+    result
+}
+
+#[test]
+fn incomplete_existing_store_is_not_initialized_or_repaired() {
+    for missing in [
+        "identity",
+        "lock",
+        "current",
+        "cache-owner",
+        "credentials-owner",
+        "generation-format",
+        "objects",
+        "commits",
+    ] {
+        let fixture = Fixture::new(true);
+        let generation: Uuid =
+            files::json(&fixture.config.paths.data.join("CURRENT"), 128).unwrap();
+        let generation_root = fixture
+            .config
+            .paths
+            .data
+            .join("generations")
+            .join(generation.to_string());
+        let path = match missing {
+            "identity" => fixture.config.paths.data.join("identity.json"),
+            "lock" => fixture.config.paths.data.join("store.lock"),
+            "current" => fixture.config.paths.data.join("CURRENT"),
+            "cache-owner" => fixture.config.paths.cache.join("owner.json"),
+            "credentials-owner" => fixture.config.paths.credentials.join("owner.json"),
+            "generation-format" => generation_root.join("format.json"),
+            other => generation_root.join(other),
+        };
+        if path.is_dir() {
+            fs::remove_dir(&path).unwrap();
+        } else {
+            fs::remove_file(&path).unwrap();
+        }
+        let before = tree_bytes(&fixture.root);
+        assert_eq!(
+            fixture.run(Operation::Clear, fixture.request()).status,
+            Status::Unavailable,
+            "{missing}"
+        );
+        assert_eq!(tree_bytes(&fixture.root), before, "{missing}");
+        assert!(!path.exists(), "{missing}");
+    }
+}
+
+#[test]
+fn invalid_ownership_or_generation_refuses_and_releases_lease() {
+    for corrupt in [
+        "foreign-owner",
+        "unsupported-format",
+        "nil-generation",
+        "broken-commit",
+    ] {
+        let fixture = Fixture::new(true);
+        let generation: Uuid =
+            files::json(&fixture.config.paths.data.join("CURRENT"), 128).unwrap();
+        let generation_root = fixture
+            .config
+            .paths
+            .data
+            .join("generations")
+            .join(generation.to_string());
+        let (path, invalid) = match corrupt {
+            "foreign-owner" => (
+                fixture.config.paths.cache.join("owner.json"),
+                json!({"format":1,"actor":Uuid::new_v4()}),
+            ),
+            "unsupported-format" => (generation_root.join("format.json"), json!(2)),
+            "nil-generation" => (
+                fixture.config.paths.data.join("CURRENT"),
+                json!(Uuid::nil()),
+            ),
+            _ => (
+                generation_root.join("commits").join("invalid.json"),
+                json!({"invalid":true}),
+            ),
+        };
+        let original = fs::read(&path).ok();
+        fs::write(&path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        let before = tree_bytes(&fixture.root);
+        assert_eq!(
+            fixture.run(Operation::Clear, fixture.request()).status,
+            Status::Unsupported,
+            "{corrupt}"
+        );
+        assert_eq!(tree_bytes(&fixture.root), before, "{corrupt}");
+        if let Some(bytes) = original {
+            fs::write(&path, bytes).unwrap();
+        } else {
+            fs::remove_file(&path).unwrap();
+        }
+        // Refusal must not leak the lease. A new OS process can now mutate.
+        let child = fixture.command("clear", &serde_json::to_vec(&fixture.request()).unwrap());
+        assert!(child.status.success());
+        assert_eq!(
+            serde_json::from_slice::<Value>(&child.stdout).unwrap()["status"],
+            "ok",
+            "{corrupt}"
+        );
+    }
+}
+
+#[test]
+fn existing_store_open_only_reads_and_holds_one_lease() {
+    let fixture = Fixture::new(true);
+    let staging = fixture.config.paths.data.join(".stage-retained-fixture");
+    fs::write(staging, b"maintenance does not clean or initialize").unwrap();
+    let before = tree_bytes(&fixture.root);
+    let store = Store::open_existing(fixture.config.paths.clone()).unwrap();
+    assert_eq!(tree_bytes(&fixture.root), before);
+    assert!(matches!(
+        Store::open_existing(fixture.config.paths.clone()),
+        Err(remarkable_reader_buddy::storage::maintenance::Refusal::Busy)
+    ));
+    assert!(Store::open(fixture.config.paths.clone()).is_err());
+    assert_eq!(tree_bytes(&fixture.root), before);
+    drop(store);
+    assert_eq!(
+        fixture.run(Operation::Clear, fixture.request()).status,
+        Status::Ok
+    );
 }

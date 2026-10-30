@@ -205,24 +205,16 @@ they did not provide a working offline simulator.
 
 ## CI/CD Integration
 
-Uses pinned **git-cliff** for semantic versions and **vergen-gitcl** for runtime metadata:
+The maintained-tool pipeline is checks -> candidate build -> integration of the
+retained build artifacts -> one final tag/release job on an exact merged main
+source. Read-only candidate calculation may precede build; official remote tags
+and releases follow all required preceding gates. A failed source is not released
+by a later successful run. No maintained Cargo version or version-bump commit is
+added. Pure documentation is noncompiling; ambiguous main batch history refuses.
 
-**Version Bump Rules**:
-1. **Major**: Scoped `!` syntax or `BREAKING CHANGE:` footer, including 0.x to 1.0.
-2. **Minor**: Scoped `feat` squash commit, including 0.x.
-3. **Patch**: Scoped fix/perf/refactor/build/ci/chore/test/revert application changes.
-4. **None**: Only explicit documentation paths changed; no main application compilation.
-
-**Path policy**: `release/cliff.toml` excludes explicit documentation paths; other
-paths are relevant, including build/dependency changes. Misclassified application
-messages fail visibly. Mixed and multi-commit history is evaluated in full.
-
-**Workflows**:
-- `.github/workflows/ci.yml` - Required checks with docs-only application build gates.
-- `.github/workflows/release.yml` - Serialized immutable tag, exact-source builds,
-  runtime/checksum verification and recoverable draft publication. No version commit.
-- `build.rs` - Tag-derived CLI version; strict official source checks, explicit dev fallback.
-- [Release tests and recovery](../release/README.md) - Public, isolated fixtures and retry commands.
+See [release tools and recovery](../release/README.md) and
+[workflow diagram](WORKFLOW_DIAGRAM.md). Native/physical qualification remains
+separate from emulator/package integration. Canonical requirements live in Docs.
 
 ## Testing Strategy
 
@@ -235,7 +227,8 @@ messages fail visibly. Mixed and multi-commit history is evaluated in full.
   either, dependency logging stays at info. Image dumps remain opt-in.
 
 ### Simulator extensions
-- REM-23 must add production Writer and combined-mode simulator regressions.
+- Writer host scenarios run the production supplied-text joined export flow;
+  combined/native routing remains unsupported. See [the simulator guide](simulator.md).
 - REM-25 must extend the backend/scenarios for native insertion and preservation.
 - REM-17 must cover final gesture arbitration and combined workflows before 1.0.
 
@@ -292,7 +285,7 @@ Implement in `src/analysis/circle_detector.rs`:
 ## References
 
 - **ghostwriter**: Core device interaction code source
-- **git-cliff / vergen-gitcl**: Semantic releases and Git-derived application versions
+- **Python Semantic Release / vergen-gitcl**: Semantic releases and Git-derived application versions
 - **reMarkable Community**: Device documentation
 - **OpenAI**: Vision API capabilities
 

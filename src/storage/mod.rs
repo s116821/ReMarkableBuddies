@@ -1,15 +1,30 @@
 //! Versioned local persistence, independent of Reader/Writer domain semantics.
+pub(crate) mod captured;
+pub(crate) mod conditional;
+pub(crate) mod conversation_cleanup;
 pub mod drive;
+pub(crate) mod feedback_generation;
 pub mod files;
+pub mod inspection;
+#[cfg(all(test, unix))]
+mod lease_tests;
+pub mod maintenance;
 pub mod migration;
+pub(crate) mod notebook_generation;
 mod recovery;
 #[cfg(test)]
 mod selected_projection_tests;
 pub mod selection;
+#[cfg(test)]
+mod snapshot_status_tests;
 pub mod sync;
 pub mod types;
 use anyhow::{ensure, Context, Result};
-pub use recovery::BackupInspection;
+pub(crate) use recovery::ordinary_restore;
+#[cfg(test)]
+pub(crate) use recovery::ConfigFault;
+pub(crate) use recovery::ConfigPublication;
+pub use recovery::{ArchivedSelectedSnapshot, BackupInspection};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -87,6 +102,9 @@ struct Index {
     operations: BTreeMap<Uuid, String>,
     heads: BTreeMap<(Namespace, Uuid), BTreeSet<Uuid>>,
     manifests: BTreeMap<Uuid, Manifest>,
+    // Derived from accepted manifests, rebuilt on recovery; no on-disk format.
+    record_refs: BTreeMap<String, ObjectRef>,
+    record_transactions: BTreeMap<String, BTreeSet<Uuid>>,
     unavailable: usize,
 }
 struct Inner {
@@ -96,13 +114,35 @@ struct Inner {
     legacy_sync_handles: usize,
     mode_handles: usize,
     legacy_publisher_handles: usize,
+    local_domain_handles: usize,
 }
 pub struct Store {
     pub paths: StorePaths,
     pub actor_id: Uuid,
-    _lease: File,
+    _lease: Lease,
     inner: Mutex<Inner>,
     wake: Mutex<Option<SyncSender<()>>>,
+    // Process-local export invocation exclusion, shared by every Ledger over
+    // this Store. Independent of the index mutex; no index lock spans HTTP.
+    pub(crate) export_active: std::sync::atomic::AtomicBool,
+    pub(crate) writer_active: std::sync::atomic::AtomicBool,
+}
+
+struct Lease(File);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OpenPreparation {
+    None,
+    Feedback,
+    Notebook,
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        // A concurrent subprocess fork can temporarily inherit this descriptor.
+        // Closing our copy alone would retain flock until that child execs.
+        let _ = self.0.unlock();
+    }
 }
 
 pub(crate) struct LegacySyncLease(Arc<Store>);
@@ -118,6 +158,18 @@ pub(crate) struct LegacyPublisherLease {
     store: Arc<Store>,
     _legacy: LegacySyncLease,
 }
+/// Pins a local-only domain against existing and future legacy publishers.
+pub(crate) struct LocalDomainLease {
+    store: Arc<Store>,
+    _legacy: LegacySyncLease,
+}
+impl Drop for LocalDomainLease {
+    fn drop(&mut self) {
+        if let Ok(mut inner) = self.store.inner.lock() {
+            inner.local_domain_handles -= 1;
+        }
+    }
+}
 impl Drop for LegacyPublisherLease {
     fn drop(&mut self) {
         if let Ok(mut inner) = self.store.inner.lock() {
@@ -125,18 +177,42 @@ impl Drop for LegacyPublisherLease {
         }
     }
 }
-impl Drop for Store {
-    fn drop(&mut self) {
-        // A concurrent subprocess fork can temporarily inherit this descriptor.
-        // Closing our copy alone would retain flock until that child execs.
-        let _ = self._lease.unlock();
-    }
-}
-
 impl Store {
+    /// Serialize domain-owned local journal IO under the existing Store lease.
+    /// The callback may perform bounded owned-file IO, never network/native work.
+    pub(crate) fn with_owned_local_io<T>(
+        &self,
+        action: impl FnOnce(&std::path::Path, Uuid) -> Result<T>,
+    ) -> Result<T> {
+        let _guard = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex poisoned"))?;
+        action(&self.paths.data, self.actor_id)
+    }
+
+    pub(crate) fn local_domain_lease(self: &Arc<Self>) -> Result<LocalDomainLease> {
+        let legacy = self.local_compatibility_lease(true)?;
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        ensure!(
+            inner.legacy_publisher_handles == 0,
+            "legacy publisher is active"
+        );
+        inner.local_domain_handles = inner
+            .local_domain_handles
+            .checked_add(1)
+            .context("local domain lease overflow")?;
+        Ok(LocalDomainLease {
+            store: self.clone(),
+            _legacy: legacy,
+        })
+    }
     pub(crate) fn legacy_publisher_lease(self: &Arc<Self>) -> Result<LegacyPublisherLease> {
         // Preserve the domain lease while adding publisher-only lifetime accounting.
-        let legacy = self.legacy_sync_lease()?;
+        let legacy = self.local_compatibility_lease(false)?;
         let mut inner = self
             .inner
             .lock()
@@ -144,6 +220,10 @@ impl Store {
         ensure!(
             sync::mode::load(self)?.is_none(),
             "explicit sync mode requires its matched worker"
+        );
+        ensure!(
+            inner.local_domain_handles == 0,
+            "local-only domain is active"
         );
         inner.legacy_publisher_handles = inner
             .legacy_publisher_handles
@@ -155,10 +235,24 @@ impl Store {
         })
     }
     pub(crate) fn legacy_sync_lease(self: &Arc<Self>) -> Result<LegacySyncLease> {
+        self.local_compatibility_lease(false)
+    }
+    fn local_compatibility_lease(
+        self: &Arc<Self>,
+        local_notebook: bool,
+    ) -> Result<LegacySyncLease> {
         let mut inner = self
             .inner
             .lock()
             .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        let root = self.generation(inner.generation);
+        if feedback_generation::version(&root)? == notebook_generation::VERSION {
+            ensure!(
+                local_notebook,
+                "notebook storage does not support legacy sync"
+            );
+            notebook_generation::validate_ready(&self.paths, self.actor_id, inner.generation)?;
+        }
         ensure!(
             !selection::has_selected(&self.generation(inner.generation))?,
             "selected storage requires coordinated sync, not the legacy all-history worker"
@@ -170,6 +264,12 @@ impl Store {
         Ok(LegacySyncLease(self.clone()))
     }
     pub fn open(paths: StorePaths) -> Result<Self> {
+        Self::open_policy(paths, OpenPreparation::None)
+    }
+    pub(crate) fn open_for_feedback(paths: StorePaths) -> Result<Self> {
+        Self::open_policy(paths, OpenPreparation::Feedback)
+    }
+    fn open_policy(paths: StorePaths, preparation: OpenPreparation) -> Result<Self> {
         paths.validate()?;
         let identity_path = paths.data.join("identity.json");
         if !identity_path.exists() {
@@ -204,6 +304,7 @@ impl Store {
         lease
             .try_lock()
             .map_err(|_| anyhow::anyhow!("store is owned by another process"))?;
+        let lease = Lease(lease);
         for root in [&paths.cache, &paths.credentials] {
             if root.exists() && !root.join("owner.json").exists() {
                 ensure!(
@@ -252,15 +353,43 @@ impl Store {
                 legacy_sync_handles: 0,
                 mode_handles: 0,
                 legacy_publisher_handles: 0,
+                local_domain_handles: 0,
             }),
             wake: Mutex::new(None),
+            export_active: std::sync::atomic::AtomicBool::new(false),
+            writer_active: std::sync::atomic::AtomicBool::new(false),
         };
-        selection::validate_generation(&store.generation(generation), store.actor_id, generation)?;
+        if preparation == OpenPreparation::Notebook {
+            selection::validate_generation_preparing_notebook(
+                &store.generation(generation),
+                store.actor_id,
+                generation,
+            )?;
+        } else if preparation == OpenPreparation::Feedback {
+            selection::validate_generation_preparing(
+                &store.generation(generation),
+                store.actor_id,
+                generation,
+            )?;
+        } else {
+            selection::validate_generation(
+                &store.generation(generation),
+                store.actor_id,
+                generation,
+            )?;
+        }
+        if preparation != OpenPreparation::Notebook
+            && feedback_generation::version(&store.generation(generation))?
+                == notebook_generation::VERSION
+        {
+            notebook_generation::validate_ready(&store.paths, store.actor_id, generation)?;
+        }
         for directory in [
             store.paths.data.clone(),
             store.paths.credentials.clone(),
             store.paths.data.join("sync"),
             store.paths.data.join("sync/incoming"),
+            store.paths.data.join("sync/selected-outbox"),
             store.generation(generation),
             store.generation(generation).join("objects"),
             store.generation(generation).join("commits"),
@@ -276,19 +405,55 @@ impl Store {
                 .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
             inner.index = store.recover(generation)?;
         }
+        if preparation != OpenPreparation::Notebook {
+            store.publish_capabilities(&store.generation(generation))?;
+        }
+        Ok(store)
+    }
+    fn publish_capabilities(&self, root: &Path) -> Result<()> {
+        if feedback_generation::version(root)? == notebook_generation::VERSION {
+            let generation = Uuid::parse_str(
+                root.file_name()
+                    .and_then(|s| s.to_str())
+                    .context("invalid notebook generation path")?,
+            )?;
+            return notebook_generation::publish_capabilities(self, generation);
+        }
         files::atomic(
-            &store.paths.data.join("contract-v1.json"),
+            &self.paths.data.join("contract-v1.json"),
             CONTRACT_V1.as_bytes(),
         )?;
-        files::atomic_json(
-            &store.paths.data.join("capabilities.json"),
-            &serde_json::json!({
-            "contract_version": 1, "schema_file":"contract-v1.json", "store_versions": [1, 2], "selected_store_feature": "actor-generation-bound-v1", "envelope_versions": [1], "config_versions": [1],
-                "paths": store.paths, "lock": "stable-inode-exclusive-os-lease", "linux_lock": "flock",
-                "maintenance": "stop-confirm-lock-stage-commit-release-restart", "namespaces": ["conversation","source","export-association","subject-memory","handwriting"], "sync": "optional-immutable-drive-v1"
-            }),
-        )?;
-        Ok(store)
+        let store = self;
+        let mut capabilities = serde_json::json!({
+        "contract_version": 1, "schema_file":"contract-v1.json", "store_versions": [1, 2], "selected_store_feature": "actor-generation-bound-v1", "envelope_versions": [1], "config_versions": [1],
+            "paths": store.paths, "lock": "stable-inode-exclusive-os-lease", "linux_lock": "flock",
+            "maintenance": "stop-confirm-lock-stage-commit-release-restart", "namespaces": ["conversation","source","export-association","subject-memory","handwriting"], "sync": "optional-immutable-drive-v1"
+        });
+        if feedback_generation::version(root)? == feedback_generation::VERSION {
+            let contract = include_str!("contract-v2.json");
+            files::atomic(
+                &self.paths.data.join("contract-v2.json"),
+                contract.as_bytes(),
+            )?;
+            capabilities["contract_version"] = serde_json::json!(2);
+            capabilities["schema_file"] = serde_json::json!("contract-v2.json");
+            capabilities["store_versions"] = serde_json::json!([1, 2, 3]);
+            capabilities["unassociated_feedback_feature"] =
+                serde_json::json!("actor-generation-bound-v1");
+            capabilities["namespaces"]
+                .as_array_mut()
+                .context("invalid capabilities")?
+                .push(serde_json::json!("unassociated-feedback"));
+        }
+        files::atomic_json(&self.paths.data.join("capabilities.json"), &capabilities)?;
+        ensure!(
+            files::json::<serde_json::Value>(
+                &self.paths.data.join("capabilities.json"),
+                MAX_RECORD as u64
+            )? == capabilities,
+            "capability publication unverified"
+        );
+        Ok(())
     }
     fn create_generation(root: &Path, id: Uuid) -> Result<()> {
         for child in ["objects", "commits"] {
@@ -331,7 +496,18 @@ impl Store {
         while !pending.is_empty() {
             let before = pending.len();
             pending.retain(|(manifest, records)| {
-                if Self::can_apply(&index, records).is_ok() {
+                if feedback_generation::admit(
+                    &root,
+                    self.actor_id,
+                    generation,
+                    &index,
+                    records,
+                    &manifest.scope,
+                )
+                .is_ok()
+                    && Self::can_apply(&index, records).is_ok()
+                    && notebook_generation::validate_records(&root, &index, records).is_ok()
+                {
                     Self::apply_index(&mut index, manifest.clone(), records.clone());
                     false
                 } else {
@@ -351,7 +527,15 @@ impl Store {
     fn validate_objects_with_budget(
         root: &Path,
         manifest: &Manifest,
+        budget: Option<&mut selection::SelectedReadBudget>,
+    ) -> Result<Vec<(Envelope, String)>> {
+        Self::validate_objects_policy(root, manifest, budget, None)
+    }
+    fn validate_objects_policy(
+        root: &Path,
+        manifest: &Manifest,
         mut budget: Option<&mut selection::SelectedReadBudget>,
+        notebook_archive_actor: Option<Uuid>,
     ) -> Result<Vec<(Envelope, String)>> {
         manifest.validate()?;
         for (item, media) in manifest
@@ -386,6 +570,51 @@ impl Store {
             let envelope: Envelope = serde_json::from_slice(&encoded)
                 .map_err(|_| anyhow::anyhow!("invalid or unsupported stored JSON"))?;
             envelope.validate()?;
+            if envelope.domain_schema_version == 3 {
+                if let Some(actor) = notebook_archive_actor {
+                    ensure!(
+                        envelope.actor_id == actor,
+                        "notebook archive actor mismatch"
+                    );
+                } else {
+                    ensure!(
+                        feedback_generation::version(root)? == notebook_generation::VERSION,
+                        "notebook records require adopted generation4"
+                    );
+                    let generation = Uuid::parse_str(
+                        root.file_name()
+                            .and_then(|s| s.to_str())
+                            .context("invalid notebook generation path")?,
+                    )?;
+                    notebook_generation::validate_version(
+                        root,
+                        envelope.actor_id,
+                        generation,
+                        notebook_generation::VERSION,
+                        false,
+                    )?;
+                }
+                if let crate::conversation::Record::ArchivedNormalizedSource(source) =
+                    crate::conversation::Ledger::decode(&envelope)?
+                {
+                    ensure!(
+                        manifest
+                            .media
+                            .iter()
+                            .any(|reference| reference.sha256 == source.media.sha256
+                                && reference.bytes == source.media.bytes),
+                        "notebook archive requires complete JSON media"
+                    );
+                    if let Some(budget) = budget.as_deref_mut() {
+                        budget.charge(0, 0, 0, source.media.bytes)?;
+                    }
+                    let bytes = files::read(
+                        &root.join("objects").join(&source.media.sha256),
+                        crate::writer::notebook::MAX_CANONICAL_BYTES as u64,
+                    )?;
+                    source.validate_bytes(&bytes)?;
+                }
+            }
             ensure!(
                 manifest.record_namespaces.get(&item.sha256) == Some(&envelope.namespace),
                 "manifest namespace mismatch"
@@ -460,6 +689,16 @@ impl Store {
         Ok(())
     }
     fn apply_index(index: &mut Index, manifest: Manifest, records: Vec<(Envelope, String)>) {
+        for reference in &manifest.records {
+            index
+                .record_refs
+                .insert(reference.sha256.clone(), reference.clone());
+            index
+                .record_transactions
+                .entry(reference.sha256.clone())
+                .or_default()
+                .insert(manifest.transaction_id);
+        }
         for (e, hash) in records {
             index.operations.insert(e.operation_id, hash.clone());
             index.records.insert(e.revision_id, (e, hash));
@@ -492,7 +731,13 @@ impl Store {
             .get(&(namespace, record))
             .into_iter()
             .flatten()
-            .filter_map(|id| inner.index.records.get(id).map(|p| p.0.clone()))
+            .filter_map(|id| {
+                inner.index.records.get(id).map(|p| {
+                    #[cfg(test)]
+                    captured::head_cloned();
+                    p.0.clone()
+                })
+            })
             .collect())
     }
     pub fn value(&self, namespace: Namespace, record: Uuid) -> Result<Option<Envelope>> {
@@ -513,6 +758,18 @@ impl Store {
         limit: usize,
         matches: impl Fn(&Envelope) -> bool,
     ) -> Result<Vec<Envelope>> {
+        self.snapshot_heads_matching_with_status(namespaces, limit, matches)
+            .map(|(_, records)| records)
+    }
+
+    /// Availability and cloned heads describe the same locked index snapshot.
+    /// Domain callers decide whether incomplete history permits their query.
+    pub(crate) fn snapshot_heads_matching_with_status(
+        &self,
+        namespaces: &[Namespace],
+        limit: usize,
+        matches: impl Fn(&Envelope) -> bool,
+    ) -> Result<(usize, Vec<Envelope>)> {
         ensure!((1..=MAX_ITEMS).contains(&limit), "invalid inspection bound");
         let inner = self
             .inner
@@ -555,7 +812,7 @@ impl Store {
                 result.push(record.clone());
             }
         }
-        Ok(result)
+        Ok((inner.index.unavailable, result))
     }
     /// Bounded retained revisions, including superseded facts; never a live lookup.
     pub fn snapshot_revisions_matching(
@@ -631,6 +888,22 @@ impl Store {
         Ok(())
     }
     pub fn commit(&self, records: Vec<Envelope>, media: BTreeMap<String, Vec<u8>>) -> Result<Uuid> {
+        let (manifest, objects) = Self::ordinary_transaction(records, media)?;
+        self.publish(manifest, objects, true)
+    }
+    /// Existing atomic publication disposition; no new persisted format or grant.
+    pub(crate) fn commit_with_disposition(
+        &self,
+        records: Vec<Envelope>,
+        media: BTreeMap<String, Vec<u8>>,
+    ) -> Result<(Uuid, bool)> {
+        let (manifest, objects) = Self::ordinary_transaction(records, media)?;
+        self.publish_with_disposition(manifest, objects, true)
+    }
+    fn ordinary_transaction(
+        records: Vec<Envelope>,
+        media: BTreeMap<String, Vec<u8>>,
+    ) -> Result<(Manifest, BTreeMap<String, Vec<u8>>)> {
         let mut objects = media;
         let mut refs = Vec::new();
         let mut record_namespaces = BTreeMap::new();
@@ -667,7 +940,7 @@ impl Store {
                 .map(|h| Coverage::Included { sha256: h.clone() })
                 .collect(),
         };
-        self.publish(manifest, objects, true)
+        Ok((manifest, objects))
     }
     pub fn import(&self, manifest: Manifest, objects: BTreeMap<String, Vec<u8>>) -> Result<Uuid> {
         self.publish(manifest, objects, false)
@@ -678,17 +951,63 @@ impl Store {
         objects: BTreeMap<String, Vec<u8>>,
         local: bool,
     ) -> Result<Uuid> {
+        self.publish_with_disposition(manifest, objects, local)
+            .map(|(receipt, _)| receipt)
+    }
+    fn publish_with_disposition(
+        &self,
+        manifest: Manifest,
+        objects: BTreeMap<String, Vec<u8>>,
+        local: bool,
+    ) -> Result<(Uuid, bool)> {
         manifest.validate()?;
         let mut inner = self
             .inner
             .lock()
             .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        let (receipt, changed) = self.publish_locked(&mut inner, manifest, objects, local)?;
+        drop(inner);
+        if changed {
+            self.notify_commit();
+        }
+        Ok((receipt, changed))
+    }
+    // Callers hold exactly one inner mutex guard. Legacy publish keeps its old
+    // admission/order; conditional publication validates its extra evidence first.
+    fn publish_locked(
+        &self,
+        inner: &mut Inner,
+        manifest: Manifest,
+        objects: BTreeMap<String, Vec<u8>>,
+        local: bool,
+    ) -> Result<(Uuid, bool)> {
         let root = self.generation(inner.generation);
+        for reference in &manifest.records {
+            if let Some(bytes) = objects.get(&reference.sha256) {
+                if let Ok(envelope) = serde_json::from_slice::<Envelope>(bytes) {
+                    if envelope.domain_schema_version == 3 {
+                        ensure!(
+                            feedback_generation::version(&root)? == notebook_generation::VERSION,
+                            "notebook records require adopted generation4"
+                        );
+                    }
+                }
+            }
+        }
+        if feedback_generation::version(&root)? == notebook_generation::VERSION {
+            notebook_generation::validate_ready(&self.paths, self.actor_id, inner.generation)?;
+            ensure!(
+                inner.index.unavailable == 0
+                    && sync::mode::ordinary_local(self)?
+                    && manifest.scope == Scope::LocalTransaction,
+                "notebook publication requires complete ordinary local custody"
+            );
+        }
         if let Some(previous) = inner.index.manifests.get(&manifest.transaction_id) {
             ensure!(previous == &manifest, "transaction identity collision");
-            return Ok(manifest.transaction_id);
+            return Ok((manifest.transaction_id, false));
         }
-        Self::trip(&mut inner, Fault::BeforeObjects)?;
+        Self::trip(inner, Fault::BeforeObjects)?;
         for item in manifest.records.iter().chain(&manifest.media) {
             if let Some(bytes) = objects.get(&item.sha256) {
                 ensure!(bytes.len() as u64 == item.bytes, "object size mismatch");
@@ -699,9 +1018,31 @@ impl Store {
                 )?;
             }
         }
-        Self::trip(&mut inner, Fault::AfterObjects)?;
+        Self::trip(inner, Fault::AfterObjects)?;
         let records = Self::validate_objects(&root, &manifest)?;
+        if records
+            .iter()
+            .any(|(e, _)| e.namespace == Namespace::UnassociatedFeedback)
+        {
+            ensure!(
+                if feedback_generation::version(&root)? == notebook_generation::VERSION {
+                    sync::mode::ordinary_local(self)?
+                } else {
+                    inner.mode_handles == 0 && sync::mode::load(self)?.is_none()
+                },
+                "feedback publication requires ordinary local mode"
+            );
+        }
+        feedback_generation::admit(
+            &root,
+            self.actor_id,
+            inner.generation,
+            &inner.index,
+            &records,
+            &manifest.scope,
+        )?;
         Self::can_apply(&inner.index, &records)?;
+        notebook_generation::validate_records(&root, &inner.index, &records)?;
         if local {
             for (e, hash) in &records {
                 if inner.index.operations.get(&e.operation_id) == Some(hash) {
@@ -736,11 +1077,11 @@ impl Store {
                     })
                     .map(|m| m.transaction_id)
                 {
-                    return Ok(prior);
+                    return Ok((prior, false));
                 }
             }
         }
-        Self::trip(&mut inner, Fault::BeforeCommit)?;
+        Self::trip(inner, Fault::BeforeCommit)?;
         files::atomic_json(
             &root
                 .join("commits")
@@ -750,15 +1091,16 @@ impl Store {
         let after_commit = inner.fault == Fault::AfterCommit;
         Self::apply_index(&mut inner.index, manifest.clone(), records);
         if after_commit {
-            Self::trip(&mut inner, Fault::AfterCommit)?;
+            Self::trip(inner, Fault::AfterCommit)?;
         }
-        drop(inner);
+        Ok((manifest.transaction_id, true))
+    }
+    fn notify_commit(&self) {
         if let Ok(wake) = self.wake.lock() {
             if let Some(wake) = wake.as_ref() {
                 let _ = wake.try_send(());
             }
         }
-        Ok(manifest.transaction_id)
     }
     pub fn set_wake(&self, wake: Option<SyncSender<()>>) {
         if let Ok(mut target) = self.wake.lock() {
@@ -832,3 +1174,5 @@ impl Store {
         self.import(manifest, BTreeMap::new())
     }
 }
+
+pub(crate) use recovery::ordinary_export;

@@ -196,21 +196,20 @@ pub fn run(operation: Operation, path: Option<PathBuf>, input: &mut impl Read) -
         if expected != revision {
             return Report::new(operation, Status::Conflict);
         }
-        // Reuse REM-36 ownership admission and its stable Store lease. Never initialize.
-        if let Err(status) = crate::memory::maintenance::preflight(&config, false) {
-            use crate::memory::maintenance::ReportStatus as Existing;
-            return Report::new(
-                operation,
-                match status {
-                    Existing::Busy => Status::Busy,
-                    Existing::Unsupported => Status::Unsupported,
-                    _ => Status::Unavailable,
-                },
-            );
-        }
-        let store = match Store::open(config.paths.clone()) {
+        // Shared storage owns admission and keeps the same lease through readback.
+        let store = match Store::open_existing(config.paths.clone()) {
             Ok(store) => store,
-            Err(_) => return Report::new(operation, Status::Unavailable),
+            Err(refusal) => {
+                use crate::storage::maintenance::Refusal;
+                return Report::new(
+                    operation,
+                    match refusal {
+                        Refusal::Busy => Status::Busy,
+                        Refusal::Unsupported => Status::Unsupported,
+                        Refusal::Unavailable => Status::Unavailable,
+                    },
+                );
+            }
         };
         let published = match store.replace_config(&path, Some(&expected), &config) {
             Ok(value) => value,

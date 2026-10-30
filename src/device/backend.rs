@@ -10,9 +10,7 @@ use super::{
     screenshot::Screenshot,
     touch::{Touch, TriggerCorner},
 };
-use crate::workflow::xochitl_integration::NavigationDirection;
-#[cfg(target_os = "linux")]
-use crate::workflow::xochitl_integration::XochitlIntegration;
+use crate::workflow::xochitl_integration::{NavigationDirection, XochitlIntegration};
 
 #[derive(Clone, Default)]
 pub struct Frame {
@@ -71,6 +69,16 @@ pub trait DeviceBackend {
         self.wait_for_trigger()?;
         Ok(vec![super::interaction::Interaction::Reader])
     }
+    /// Real input backends override this to report each successful idle poll.
+    fn wait_for_interactions_with_progress(
+        &mut self,
+        timeout: Option<Duration>,
+        progress: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<Vec<super::interaction::Interaction>> {
+        let events = self.wait_for_interactions(timeout)?;
+        progress()?;
+        Ok(events)
+    }
     fn capture(&mut self) -> Result<Frame>;
     fn detail_images(&self) -> Result<Vec<String>>;
     fn check_request_guard(&mut self) -> Result<()> {
@@ -82,6 +90,13 @@ pub trait DeviceBackend {
     fn record_failure(&mut self, _failure: crate::workflow::indicator::Failure) {}
 
     fn wait_for_trigger(&mut self) -> Result<()>;
+    fn wait_for_trigger_with_progress(
+        &mut self,
+        progress: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        self.wait_for_trigger()?;
+        progress()
+    }
     fn prepare_reader_trigger(&mut self) -> Result<()>;
     fn navigate(&mut self, direction: NavigationDirection) -> Result<NavigationCompletion>;
     fn render_text(&mut self, text: &str) -> Result<()>;
@@ -165,15 +180,11 @@ impl super::navigation_completion::NavigationIo for NativeNavigation<'_> {
             image,
         })
     }
-    fn swipe(
-        &mut self,
-        direction: NavigationDirection,
-        orientation: remarkable_open_sdk::navigation::gesture::Orientation,
-    ) -> Result<()> {
+    fn swipe(&mut self, direction: NavigationDirection) -> Result<()> {
         // The successor observer and source capture have already overlapped
         // the retained request. Only the deliberate physical gesture is unobserved.
         self.device.finish_request_guard()?;
-        XochitlIntegration::swipe_with_orientation(&mut self.device.touch, direction, orientation)
+        XochitlIntegration::swipe(&mut self.device.touch, direction)
     }
     fn now(&self) -> Duration {
         self.device.clock.elapsed()
@@ -678,6 +689,15 @@ impl DeviceBackend for RealDevice {
         self.history
             .wait(&mut self.keyboard, &mut self.touch, timeout)
     }
+    #[cfg(target_os = "linux")]
+    fn wait_for_interactions_with_progress(
+        &mut self,
+        timeout: Option<Duration>,
+        progress: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<Vec<super::interaction::Interaction>> {
+        self.history
+            .wait_with_progress(&mut self.keyboard, &mut self.touch, timeout, progress)
+    }
     fn check_request_guard(&mut self) -> Result<()> {
         self.status_wait_cancellation.check()?;
         #[cfg(target_os = "linux")]
@@ -721,6 +741,13 @@ impl DeviceBackend for RealDevice {
     fn wait_for_trigger(&mut self) -> Result<()> {
         self.touch.wait_for_trigger()
     }
+    #[cfg(target_os = "linux")]
+    fn wait_for_trigger_with_progress(
+        &mut self,
+        progress: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        self.touch.wait_for_trigger_with_progress(progress)
+    }
     fn prepare_reader_trigger(&mut self) -> Result<()> {
         let _timing = crate::measurement::Span::new("reader.trigger_dismiss");
         self.status_wait_cancellation.check()?;
@@ -749,8 +776,6 @@ impl DeviceBackend for RealDevice {
         self.status_wait_cancellation.record(result)
     }
     fn navigate(&mut self, direction: NavigationDirection) -> Result<NavigationCompletion> {
-        #[cfg(not(target_os = "linux"))]
-        let _ = direction;
         self.check_request_guard()?;
         let _timing = crate::measurement::Span::new("device.navigation");
         #[cfg(target_os = "linux")]
@@ -769,9 +794,9 @@ impl DeviceBackend for RealDevice {
             }
             return result;
         }
-        Err(anyhow::anyhow!(
-            "Navigation requires a supported current document orientation and source layout"
-        ))
+        self.finish_request_guard()?;
+        XochitlIntegration::navigate_to_page(&mut self.touch, direction)?;
+        Ok(NavigationCompletion::Legacy)
     }
     fn render_text(&mut self, text: &str) -> Result<()> {
         self.check_request_guard()?;

@@ -82,6 +82,66 @@ fn replicate(source: &Store, target: &Store) {
 }
 
 #[test]
+fn integrated_domain_versions_preserve_all_accepted_namespaces_on_reopen() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    let mut accepted = Vec::new();
+    for namespace in [
+        Namespace::Conversation,
+        Namespace::Source,
+        Namespace::ExportAssociation,
+        Namespace::SubjectMemory,
+        Namespace::Handwriting,
+    ] {
+        for version in [0, 1, 2, 3] {
+            let mut value = record(&store, namespace);
+            value.domain_schema_version = version;
+            let supported = version == 1
+                || (version == 2
+                    && matches!(
+                        namespace,
+                        Namespace::Conversation | Namespace::Source | Namespace::ExportAssociation
+                    ));
+            let before = store.manifests().unwrap().len();
+            let result = store.commit(vec![value.clone()], BTreeMap::new());
+            assert_eq!(result.is_ok(), supported, "{namespace:?}/v{version}");
+            if supported {
+                accepted.push(value);
+            } else {
+                assert_eq!(store.manifests().unwrap().len(), before);
+            }
+        }
+    }
+    drop(store);
+    let reopened = fixture.open();
+    assert_eq!(reopened.manifests().unwrap().len(), 8);
+    for value in accepted {
+        assert_eq!(
+            reopened
+                .value(value.namespace, value.record_id)
+                .unwrap()
+                .unwrap()
+                .domain_schema_version,
+            value.domain_schema_version
+        );
+    }
+    let contract: serde_json::Value = serde_json::from_str(CONTRACT_V1).unwrap();
+    let schema = &contract["schemas"]["envelope"];
+    assert_eq!(
+        schema["properties"]["domain_schema_version"]["enum"],
+        json!([1, 2])
+    );
+    assert_eq!(
+        schema["allOf"][0]["if"]["properties"]["domain_schema_version"]["const"],
+        2
+    );
+    assert_eq!(
+        schema["allOf"][0]["then"]["properties"]["namespace"]["enum"],
+        json!(["conversation", "source", "export-association"])
+    );
+}
+
+#[test]
 fn interruption_boundaries_publish_only_complete_commits_and_rebuild() {
     for fault in [
         Fault::BeforeObjects,

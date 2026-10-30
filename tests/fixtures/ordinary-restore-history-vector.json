@@ -1,0 +1,76 @@
+{
+  "basis": "Docs5ed60540 contract; current c50 storage/types.rs serde declaration order.",
+  "limit": "Synthetic serialization only; object contents and lineage are not qualified by this vector.",
+  "manifests_in_unsorted_input_order": [
+    {
+      "format": 1,
+      "transaction_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      "scope": "local-transaction",
+      "records": [
+        {
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "bytes": 17
+        },
+        {
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "bytes": 23
+        }
+      ],
+      "record_namespaces": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "subject-memory",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": "conversation"
+      },
+      "media": [
+        {
+          "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "bytes": 29
+        }
+      ],
+      "media_coverage": [
+        {
+          "availability": "omitted",
+          "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "reason": "policy-disabled"
+        },
+        {
+          "availability": "included",
+          "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        }
+      ]
+    },
+    {
+      "format": 1,
+      "transaction_id": "11111111-1111-4111-8111-111111111111",
+      "scope": "selected-records",
+      "records": [
+        {
+          "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "bytes": 31
+        }
+      ],
+      "record_namespaces": {
+        "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd": "export-association"
+      },
+      "media": [],
+      "media_coverage": []
+    }
+  ],
+  "serialized_manifests": [
+    {
+      "transaction_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      "serialized_utf8": "{\"format\":1,\"transaction_id\":\"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\",\"scope\":\"local-transaction\",\"records\":[{\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"bytes\":17},{\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"bytes\":23}],\"record_namespaces\":{\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\":\"subject-memory\",\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\":\"conversation\"},\"media\":[{\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"bytes\":29}],\"media_coverage\":[{\"availability\":\"omitted\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"reason\":\"policy-disabled\"},{\"availability\":\"included\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"}]}",
+      "serialized_bytes": 826,
+      "sha256": "3bf2d3a1a59e84754945713ace85c7580531af361d4922bfa0e6e4f89df72da5"
+    },
+    {
+      "transaction_id": "11111111-1111-4111-8111-111111111111",
+      "serialized_utf8": "{\"format\":1,\"transaction_id\":\"11111111-1111-4111-8111-111111111111\",\"scope\":\"selected-records\",\"records\":[{\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"bytes\":31}],\"record_namespaces\":{\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\":\"export-association\"},\"media\":[],\"media_coverage\":[]}",
+      "serialized_bytes": 337,
+      "sha256": "326d88f82fcc6cce4a908b4ceb8ebe686766e7cd7187e0df1fea137893417397"
+    }
+  ],
+  "history_framing_utf8": "urn:remarkable-buddies:ordinary-history:v1:\n11111111-1111-4111-8111-111111111111 326d88f82fcc6cce4a908b4ceb8ebe686766e7cd7187e0df1fea137893417397\nbbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb 3bf2d3a1a59e84754945713ace85c7580531af361d4922bfa0e6e4f89df72da5\n",
+  "history_framing_bytes": 248,
+  "history_sha256": "8df8ee19ccf766193ae7d6064bb62c724a66268fb0a904e6b2d34f3e1d904b94",
+  "empty_history_sha256": "19bf4c537633f421ba1fcec5e6897e9a29a392d701b7fe2ecdce93c21ec1272b"
+}
