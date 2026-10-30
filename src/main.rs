@@ -543,7 +543,9 @@ fn main() -> Result<()> {
         remarkable_reader_buddy::conversation::Ledger::new(store.clone()),
     );
     orchestrator.set_personalization(personalization);
-    orchestrator.set_subject_memory(reader_memory);
+    orchestrator.set_subject_memory(
+        reader_memory.map(|memory| memory as Arc<dyn remarkable_reader_buddy::memory::Provider>),
+    );
     info!("Initialization complete; starting main loop");
     orchestrator.run_loop()
 }
