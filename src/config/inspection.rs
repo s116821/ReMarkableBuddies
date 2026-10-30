@@ -116,6 +116,7 @@ pub(crate) fn document(bytes: &[u8]) -> std::result::Result<(Config, Value), Sta
         || config
             .product_settings
             .as_ref()
+            .and_then(Option::as_ref)
             .is_some_and(|p| p.schema_version != 1)
     {
         return Err(Status::Unsupported);

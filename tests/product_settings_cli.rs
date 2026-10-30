@@ -247,6 +247,99 @@ fn backend_off_blocks_joined_work_before_model_and_allows_original_reconciliatio
 }
 
 #[test]
+fn export_preflight_then_nonsecret_configuration_deliberately_precedes_missing_token() {
+    let f = Fixture::new(json!({}));
+    let (conversation, _, _, correlation, effect, _) = identities();
+    let mut request = json!({"command":"export","note":{"conversation":conversation,"correlation":correlation,"effect_operation":effect,"source_scope":"synthetic","source_revision":"r1","title":"Title","markdown":"synthetic"}});
+    fs::write(
+        &f.config,
+        br#"{"product_settings":"PRIVATE_INVALID_PARENT"}"#,
+    )
+    .unwrap();
+    let report = f.report(&["--export-note"], &request);
+    assert_eq!(report["failure"], "storage");
+    assert!(!report.to_string().contains("PRIVATE_INVALID_PARENT"));
+    f.no_store();
+    request["note"]["conversation"] = json!(Uuid::nil());
+    assert_eq!(
+        f.report(&["--export-note"], &request)["failure"],
+        "invalid-input"
+    );
+    f.no_store();
+}
+
+#[test]
+fn actual_personalization_edits_preserve_product_parent_shape_and_cleared_default_origins() {
+    for parent in [
+        None,
+        Some(Value::Null),
+        Some(json!({})),
+        Some(json!({"schema_version":1})),
+        Some(json!({"reader_enabled":false,"export_destination":"disabled"})),
+        Some(json!({"writer_enabled":false})),
+    ] {
+        let f = Fixture::new(parent.clone().unwrap_or(Value::Null));
+        if parent.is_none() {
+            let mut config: Value = serde_json::from_slice(&fs::read(&f.config).unwrap()).unwrap();
+            config.as_object_mut().unwrap().remove("product_settings");
+            fs::write(&f.config, serde_json::to_vec(&config).unwrap()).unwrap();
+        }
+        drop(Store::open(f.paths.clone()).unwrap());
+        let inspect = || {
+            serde_json::from_slice::<Value>(
+                &f.invoke(&["--product-settings-operation", "inspect"], None)
+                    .stdout,
+            )
+            .unwrap()
+        };
+        if parent
+            .as_ref()
+            .and_then(|p| p.get("writer_enabled"))
+            .is_some()
+        {
+            let current = inspect();
+            let request = json!({"product_settings_version":1,"operation":Uuid::new_v4(),"base_sha256":current["data"]["base_sha256"],"config_path_sha256":current["data"]["config_path_sha256"],"changes":{"writer_enabled":{"action":"clear"}}});
+            let prepared = f.report(
+                &[
+                    "--product-settings-operation",
+                    "prepare",
+                    "--product-settings-input",
+                    "-",
+                ],
+                &request,
+            );
+            let applied = f.report(
+                &[
+                    "--product-settings-operation",
+                    "apply",
+                    "--product-settings-input",
+                    "-",
+                ],
+                &json!({"intent":prepared["data"]["intent"]}),
+            );
+            assert_eq!(applied["outcome"], "verified");
+        }
+        let before = inspect();
+        let original: Value = serde_json::from_slice(&fs::read(&f.config).unwrap()).unwrap();
+        let request = json!({"contract_version":1,"expected_config_sha256":before["data"]["base_sha256"],"enabled":true,"text":"synthetic preference"});
+        let changed = f.report(&["--personalization-operation", "set"], &request);
+        assert_eq!(changed["status"], "ok");
+        assert_eq!(changed["disk_reload_verified"], true);
+        let after = inspect();
+        assert_eq!(
+            after["data"]["current"], before["data"]["current"],
+            "{parent:?}"
+        );
+        let saved: Value = serde_json::from_slice(&fs::read(&f.config).unwrap()).unwrap();
+        assert_eq!(
+            saved.get("product_settings"),
+            original.get("product_settings"),
+            "{parent:?}"
+        );
+    }
+}
+
+#[test]
 fn maintenance_can_reenable_all_disabled_without_credentials_and_selector_is_exclusive() {
     let f = Fixture::new(
         json!({"reader_enabled":false,"writer_enabled":false,"export_destination":"disabled"}),

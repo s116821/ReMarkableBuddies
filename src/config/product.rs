@@ -9,12 +9,13 @@ pub enum ExportDestination {
     Disabled,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug)]
 pub struct ProductConfiguration {
-    pub schema_version: i128,
-    pub reader_enabled: bool,
-    pub writer_enabled: bool,
-    pub export_destination: ExportDestination,
+    pub(super) schema_version: i128,
+    pub(super) reader_enabled: bool,
+    pub(super) writer_enabled: bool,
+    pub(super) export_destination: ExportDestination,
+    declarations: u8,
 }
 impl Default for ProductConfiguration {
     fn default() -> Self {
@@ -23,7 +24,35 @@ impl Default for ProductConfiguration {
             reader_enabled: true,
             writer_enabled: true,
             export_destination: ExportDestination::Mem,
+            declarations: 0,
         }
+    }
+}
+
+/// Present null is retained distinctly from an absent parent by the existing
+/// optional-field pattern; typed edits must not declare effective defaults.
+pub(super) fn present_configuration<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<Option<Option<ProductConfiguration>>, D::Error> {
+    Option::<ProductConfiguration>::deserialize(d).map(Some)
+}
+impl Serialize for ProductConfiguration {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(self.declarations.count_ones() as usize))?;
+        if self.declarations & 1 != 0 {
+            map.serialize_entry("schema_version", &self.schema_version)?;
+        }
+        if self.declarations & 2 != 0 {
+            map.serialize_entry("reader_enabled", &self.reader_enabled)?;
+        }
+        if self.declarations & 4 != 0 {
+            map.serialize_entry("writer_enabled", &self.writer_enabled)?;
+        }
+        if self.declarations & 8 != 0 {
+            map.serialize_entry("export_destination", &self.export_destination)?;
+        }
+        map.end()
     }
 }
 
@@ -49,6 +78,7 @@ impl<'de> Deserialize<'de> for ProductConfiguration {
                         .map_err(|_| de::Error::custom("invalid product setting"))?;
                     match key.as_str() {
                         "schema_version" => {
+                            result.declarations |= 1;
                             result.schema_version = value
                                 .as_i64()
                                 .map(i128::from)
@@ -58,16 +88,19 @@ impl<'de> Deserialize<'de> for ProductConfiguration {
                                 })?
                         }
                         "reader_enabled" => {
+                            result.declarations |= 2;
                             result.reader_enabled = value
                                 .as_bool()
                                 .ok_or_else(|| de::Error::custom("invalid product setting"))?
                         }
                         "writer_enabled" => {
+                            result.declarations |= 4;
                             result.writer_enabled = value
                                 .as_bool()
                                 .ok_or_else(|| de::Error::custom("invalid product setting"))?
                         }
                         "export_destination" => {
+                            result.declarations |= 8;
                             result.export_destination = match value.as_str() {
                                 Some("mem") => ExportDestination::Mem,
                                 Some("disabled") => ExportDestination::Disabled,
@@ -89,14 +122,19 @@ impl super::Config {
     pub fn reader_enabled(&self) -> bool {
         self.product_settings
             .as_ref()
+            .and_then(Option::as_ref)
             .is_none_or(|p| p.reader_enabled)
     }
     /// Shared by every current new Writer entry; independent of the caller role.
     /// Original-only reconciliation deliberately does not call this new-work gate.
     pub fn admits_writer(&self, external_export: bool) -> bool {
-        self.product_settings.as_ref().is_none_or(|p| {
-            p.writer_enabled && (!external_export || p.export_destination == ExportDestination::Mem)
-        })
+        self.product_settings
+            .as_ref()
+            .and_then(Option::as_ref)
+            .is_none_or(|p| {
+                p.writer_enabled
+                    && (!external_export || p.export_destination == ExportDestination::Mem)
+            })
     }
 }
 

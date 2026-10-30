@@ -224,7 +224,11 @@ impl Document {
     }
 }
 fn fields(config: &Config, raw: &Value) -> Fields {
-    let effective = config.product_settings.clone().unwrap_or_default();
+    let effective = config
+        .product_settings
+        .clone()
+        .flatten()
+        .unwrap_or_default();
     [
         ("reader_enabled", json!(effective.reader_enabled)),
         ("writer_enabled", json!(effective.writer_enabled)),
@@ -628,7 +632,7 @@ mod tests {
             digest(include_bytes!(
                 "../../tests/fixtures/product-settings-contract-v1.json"
             )),
-            "183db82898d9f94fc0f9a8ec853362b3ec1b37062466cee9486850fa52a541fe"
+            "9f0f2b6e1f2e9c49323390f8038f93fc5a0cd6765dde9f2400e0215e08914152"
         );
         for case in corpus["storage"].as_array().unwrap() {
             let bytes = case["original_utf8"].as_str().unwrap().as_bytes().to_vec();

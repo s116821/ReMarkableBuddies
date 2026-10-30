@@ -4549,9 +4549,16 @@
     {
       "id": "wrong-reference",
       "request": {
-        "action": "begin",
+        "action": "save",
         "connection_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "boot_id": "11111111-1111-1111-1111-111111111111"
+        "boot_id": "11111111-1111-1111-1111-111111111111",
+        "reference": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "changes": {
+          "reader_enabled": {
+            "action": "set",
+            "value": false
+          }
+        }
       },
       "input": {
         "contract_version": 1,
@@ -4572,7 +4579,7 @@
           }
         },
         "product_settings": {
-          "state": "ready",
+          "state": "verified",
           "reference": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
           "current": {
             "export_destination": {
@@ -4580,8 +4587,8 @@
               "value": "mem"
             },
             "reader_enabled": {
-              "origin": "default",
-              "value": true
+              "origin": "declared",
+              "value": false
             },
             "writer_enabled": {
               "origin": "default",
@@ -4589,11 +4596,11 @@
             }
           },
           "report": {
-            "operation": "inspect",
+            "operation": "apply",
             "status": "ok",
-            "outcome": "read-only",
-            "disk_readback_verified": false,
-            "runtime_activation": "unverified"
+            "outcome": "verified",
+            "disk_readback_verified": true,
+            "runtime_activation": "restart-required"
           },
           "retained": []
         }

@@ -7,7 +7,8 @@ The optional `product_settings` object uses the existing configuration schema 1:
 ```
 
 Omitted settings default to Reader enabled, Writer enabled and Mem export. A missing
-or null parent also uses these defaults. Explicit null leaves, unknown members,
+or null parent also uses these defaults. Other typed configuration edits preserve the new parent and leaf declarations;
+effective defaults are not persisted as new choices. Explicit null leaves, unknown members,
 arrays and unsupported values refuse. `export_destination` accepts only `mem` or
 `disabled`; it selects a backend, not a Mem account, workspace, collection or note.
 The fixed Mem origin and `MEM_API_KEY` credential selection are unchanged.
