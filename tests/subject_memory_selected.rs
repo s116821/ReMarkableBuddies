@@ -560,6 +560,7 @@ fn mixed_document_edit_preserves_exact_other_profile_and_noncanonical_conversati
             id: binding,
             conversation,
             receipt: BindingReceipt {
+                acquisition: Default::default(),
                 operation: Uuid::new_v4(),
                 conversation,
                 request_fingerprint: "historical-fixture-request".into(),

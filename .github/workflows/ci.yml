@@ -21,12 +21,26 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       application: ${{ steps.paths.outputs.application }}
+      body_only: ${{ steps.metadata.outputs.body_only }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Classify only exact body edits as metadata
+        id: metadata
+        shell: bash
+        run: |
+          jq --version
+          body_only="$(jq -r '
+            if .action == "edited" and (.changes | type) == "object" then
+              .changes | if keys == ["body"] and (.body | type) == "object" then
+                .body | keys == ["from"] and (.from | type) == "string"
+              else false end
+            else false end
+          ' "$GITHUB_EVENT_PATH")"
+          printf 'body_only=%s\n' "$body_only" >> "$GITHUB_OUTPUT"
       - name: Refuse an incomplete PR file inventory
         if: github.event_name == 'pull_request' && (github.event.pull_request.changed_files <= 0 || github.event.pull_request.changed_files >= 3000)
         run: exit 1
@@ -61,15 +75,15 @@ jobs:
           requireScope: true
         if: github.event_name == 'pull_request' && steps.paths.outputs.application != 'true'
   checks:
-    name: Checks
+    name: ${{ needs.title.outputs.body_only == 'true' && 'PR metadata (no source checks)' || 'Checks' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
       - name: Require unambiguous main push range
@@ -77,7 +91,7 @@ jobs:
         env:
           BEFORE: ${{ github.event.before }}
           SOURCE_SHA: ${{ github.sha }}
-        run: python release/admission.py range --before "$BEFORE" --sha "$SOURCE_SHA"
+        run: python cicd/release/admission.py range --before "$BEFORE" --sha "$SOURCE_SHA"
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d
         id: paths
         with:
@@ -87,12 +101,13 @@ jobs:
           base: ${{ github.event_name == 'push' && github.event.before || '' }}
           ref: ${{ github.sha }}
         if: github.event_name == 'push'
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24.21.0
         if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
         with:
+          toolchain: stable
           components: rustfmt, clippy
         if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
       - uses: ./.github/actions/release-tools
@@ -101,26 +116,41 @@ jobs:
         if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
       - run: cargo clippy --locked --all-targets --all-features -- -D warnings
         if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
-      - run: cargo test --locked --all-features
+      - name: Run host tests and retain normal-command compiler provenance
+        run: |
+          status=0
+          cargo test --locked --all-features --message-format=json > "$RUNNER_TEMP/current-cargo-test.jsonl" || status=$?
+          cat "$RUNNER_TEMP/current-cargo-test.jsonl"
+          exit "$status"
         if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
-      - run: python -m unittest discover -s release -v
+      - run: python -m unittest discover -s cicd/release -v
         if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
-      - run: npm ci --prefix release/fixtures --ignore-scripts --no-audit --no-fund
+      - run: python -m unittest discover -s scripts/systemd_fixture -p test_bootstrap_fixture.py -v
         if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
-      - run: npm audit --prefix release/fixtures
+      - run: npm ci --prefix cicd/release/fixtures --ignore-scripts --no-audit --no-fund
+        if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
+      - run: npm audit --prefix cicd/release/fixtures
         if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
       - name: Verify CI stage and artifact gates
-        run: node --test release/fixtures/workflow.test.mjs
+        run: node --test cicd/release/fixtures/workflow.test.mjs
         if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
+      - name: Qualify predecessor library inside the existing Checks budget
+        uses: ./.github/actions/predecessor-library
+        if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
+        with:
+          source_sha: ${{ github.sha }}
+          source_head: ${{ github.event.pull_request.head.sha || github.sha }}
+          cargo_messages: ${{ runner.temp }}/current-cargo-test.jsonl
     defaults:
       run:
         shell: bash
     outputs:
       application: ${{ github.event_name == 'pull_request' && needs.title.outputs.application || steps.paths.outputs.application }}
     needs: title
-    if: "!cancelled() && (github.event_name == 'push' || needs.title.result == 'success')"
+    if: "!cancelled() && (github.event_name == 'push' || needs.title.result == 'success') && needs.title.outputs.body_only != 'true'"
   application:
-    needs: checks
+    name: ${{ needs.title.outputs.body_only == 'true' && 'PR metadata (no artifact jobs)' || 'application' }}
+    needs: [title, checks]
     if: "!cancelled() && needs.checks.result == 'success' && needs.checks.outputs.application == 'true'"
     uses: ./.github/workflows/pipeline.yml
     permissions:

@@ -1,0 +1,104 @@
+{
+  "vector_version": 1,
+  "scope": "Synthetic closed report encoding only; no execution, eligibility or authority",
+  "field_order": [
+    "report_version",
+    "status",
+    "scope",
+    "complete",
+    "candidates",
+    "candidate_count",
+    "eligibility_evaluated",
+    "mutation_authority",
+    "native_authority",
+    "runtime_unverified",
+    "physical_reclamation",
+    "local_only",
+    "service_observation"
+  ],
+  "cases": [
+    {
+      "label": "empty",
+      "report": {
+        "report_version": 1,
+        "status": "complete",
+        "scope": "ordinary-current-root-candidates",
+        "complete": true,
+        "candidates": [],
+        "candidate_count": 0,
+        "eligibility_evaluated": false,
+        "mutation_authority": false,
+        "native_authority": false,
+        "runtime_unverified": true,
+        "physical_reclamation": false,
+        "local_only": true,
+        "service_observation": "inactive"
+      },
+      "encoded_utf8": "{\"report_version\":1,\"status\":\"complete\",\"scope\":\"ordinary-current-root-candidates\",\"complete\":true,\"candidates\":[],\"candidate_count\":0,\"eligibility_evaluated\":false,\"mutation_authority\":false,\"native_authority\":false,\"runtime_unverified\":true,\"physical_reclamation\":false,\"local_only\":true,\"service_observation\":\"inactive\"}\n",
+      "sha256": "ce010848aeea2b192e89ce4c3c991ee693c78c903a11e1ea4422c272ee74722d"
+    },
+    {
+      "label": "two-sorted",
+      "report": {
+        "report_version": 1,
+        "status": "complete",
+        "scope": "ordinary-current-root-candidates",
+        "complete": true,
+        "candidates": [
+          "11111111-1111-4111-8111-111111111111",
+          "22222222-2222-4222-8222-222222222222"
+        ],
+        "candidate_count": 2,
+        "eligibility_evaluated": false,
+        "mutation_authority": false,
+        "native_authority": false,
+        "runtime_unverified": true,
+        "physical_reclamation": false,
+        "local_only": true,
+        "service_observation": "inactive"
+      },
+      "encoded_utf8": "{\"report_version\":1,\"status\":\"complete\",\"scope\":\"ordinary-current-root-candidates\",\"complete\":true,\"candidates\":[\"11111111-1111-4111-8111-111111111111\",\"22222222-2222-4222-8222-222222222222\"],\"candidate_count\":2,\"eligibility_evaluated\":false,\"mutation_authority\":false,\"native_authority\":false,\"runtime_unverified\":true,\"physical_reclamation\":false,\"local_only\":true,\"service_observation\":\"inactive\"}\n",
+      "sha256": "860e2defed8867f93eab9af0743ade7e05a231c2cefed1607de8d951071cb5fd"
+    },
+    {
+      "label": "too-many-refusal",
+      "report": {
+        "report_version": 1,
+        "status": "too-large",
+        "scope": "ordinary-current-root-candidates",
+        "complete": false,
+        "candidates": null,
+        "candidate_count": null,
+        "eligibility_evaluated": false,
+        "mutation_authority": false,
+        "native_authority": false,
+        "runtime_unverified": true,
+        "physical_reclamation": false,
+        "local_only": true,
+        "service_observation": "unverified"
+      },
+      "encoded_utf8": "{\"report_version\":1,\"status\":\"too-large\",\"scope\":\"ordinary-current-root-candidates\",\"complete\":false,\"candidates\":null,\"candidate_count\":null,\"eligibility_evaluated\":false,\"mutation_authority\":false,\"native_authority\":false,\"runtime_unverified\":true,\"physical_reclamation\":false,\"local_only\":true,\"service_observation\":\"unverified\"}\n",
+      "sha256": "3de783a6d6ee83c8d88a134304e5708920a60f460fddba843c0eb522ce844ad6"
+    },
+    {
+      "label": "unsupported-platform",
+      "report": {
+        "report_version": 1,
+        "status": "unsupported",
+        "scope": "ordinary-current-root-candidates",
+        "complete": false,
+        "candidates": null,
+        "candidate_count": null,
+        "eligibility_evaluated": false,
+        "mutation_authority": false,
+        "native_authority": false,
+        "runtime_unverified": true,
+        "physical_reclamation": false,
+        "local_only": true,
+        "service_observation": "unverified"
+      },
+      "encoded_utf8": "{\"report_version\":1,\"status\":\"unsupported\",\"scope\":\"ordinary-current-root-candidates\",\"complete\":false,\"candidates\":null,\"candidate_count\":null,\"eligibility_evaluated\":false,\"mutation_authority\":false,\"native_authority\":false,\"runtime_unverified\":true,\"physical_reclamation\":false,\"local_only\":true,\"service_observation\":\"unverified\"}\n",
+      "sha256": "0bf64c0fb9e8571731d076c0da19841c33637a16fd0a1c0af894f8ed55d1a135"
+    }
+  ]
+}

@@ -25,6 +25,18 @@ impl XochitlIntegration {
         Ok(())
     }
 
+    /// One explicitly selected development geometry; never a completion claim.
+    #[cfg(feature = "development-input-diagnostics")]
+    pub fn swipe_fixed_gap10_development(
+        touch: &mut Touch,
+        direction: NavigationDirection,
+    ) -> Result<()> {
+        match direction {
+            NavigationDirection::Next => Self::horizontal(touch, 700, 110),
+            NavigationDirection::Previous => Self::horizontal(touch, 100, 690),
+        }
+    }
+
     /// Swipe left (go to next page)
     fn swipe_left(touch: &mut Touch) -> Result<()> {
         debug!("Swiping left to next page");

@@ -632,6 +632,7 @@ pub(in crate::conversation) mod tests {
                 id: binding_id,
                 conversation,
                 receipt: BindingReceipt {
+                    acquisition: Default::default(),
                     operation: Uuid::new_v4(),
                     conversation,
                     request_fingerprint: digest(b"binding fixture"),

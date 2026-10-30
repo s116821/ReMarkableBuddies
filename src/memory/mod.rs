@@ -3,6 +3,7 @@ pub(crate) mod aggregate;
 pub mod catalog;
 pub mod context;
 pub mod maintenance;
+pub(crate) mod prepared;
 pub mod selected;
 
 use crate::storage::{Envelope, Kind, Namespace, Store, Uuid, MAX_ITEMS};
@@ -206,7 +207,7 @@ impl Query {
             max_context_bytes: 8192,
         }
     }
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         ensure!(text(&self.text, 2048), "invalid memory query");
         ensure!(
             self.document.is_none_or(|id| !id.is_nil()),
