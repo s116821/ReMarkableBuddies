@@ -67,6 +67,7 @@ pub struct Orchestrator<M: LLMEngine = OpenAI> {
     trigger_enabled: bool,
     ledger: Ledger,
     memory: Option<std::sync::Arc<dyn crate::memory::Provider>>,
+    personalization: crate::config::PersonalizationSnapshot,
 }
 enum RenderOutcome {
     NoOutput(AttemptReason),
@@ -81,11 +82,19 @@ impl<M: LLMEngine> Orchestrator<M> {
             trigger_enabled: true,
             ledger,
             memory: None,
+            personalization: crate::config::Personalization::default()
+                .snapshot()
+                .expect("valid default preference"),
         }
     }
 
     pub fn set_trigger_enabled(&mut self, enabled: bool) {
         self.trigger_enabled = enabled;
+    }
+
+    /// Startup preference only; each request retains an immutable snapshot.
+    pub fn set_personalization(&mut self, snapshot: crate::config::PersonalizationSnapshot) {
+        self.personalization = snapshot;
     }
 
     /// Optional receiving context; never used for recognition or automatic learning.
@@ -118,9 +127,9 @@ impl<M: LLMEngine> Orchestrator<M> {
         self.workflow.begin_iteration()?;
         let result = self.run_iteration_inner(wait_for_trigger);
         // A failed request guard must not be cleared by cleanup or another turn.
-        if self.workflow.input_failed() {
+        if self.workflow.runtime_failed() {
             return result.and(Err(anyhow::anyhow!(
-                "Request input lost; further input stopped"
+                "Runtime health or input lost; further activity stopped"
             )));
         }
         if let Err(error) = self.workflow.finish_request() {
@@ -183,6 +192,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         result
     }
     fn run_prepared(&mut self, attempt: &mut Attempt) -> Result<()> {
+        let personalization = self.personalization.clone();
         let images = attempt.images(&self.ledger)?;
         let screenshot_png_data = images
             .first()
@@ -242,8 +252,8 @@ impl<M: LLMEngine> Orchestrator<M> {
 
                 attempt.interpret(&self.ledger, &result.question)?;
                 let mut memory_view = None;
-                if self.memory.is_some() {
-                    let enriched = self.enrich_answer(&mut result, &verification);
+                if self.memory.is_some() || personalization.effective_text().is_some() {
+                    let enriched = self.enrich_answer(&mut result, &verification, &personalization);
                     if let Err(error) = enriched {
                         log::warn!("Subject memory answer was not completed");
                         self.workflow.report_failure(Failure::Provider)?;
@@ -263,7 +273,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                         )?;
                         return Err(error);
                     }
-                    memory_view = Some(enriched?);
+                    memory_view = enriched?;
                     info!("Got verified Q&A with optional subject memory");
                 }
 
@@ -355,7 +365,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         }
         if let Err(e) = rendered {
             error!("Error rendering answer: {}", e);
-            if self.workflow.input_failed() {
+            if self.workflow.runtime_failed() {
                 return Err(e);
             }
             // On error, retain the typed diagnostic without source feedback
@@ -518,114 +528,68 @@ impl<M: LLMEngine> Orchestrator<M> {
         &mut self,
         result: &mut AnalysisResult,
         images: &[String],
-    ) -> Result<crate::memory::QueryResult> {
-        use crate::memory::{context, Query, Status};
-        let memory = self
+        preference: &crate::config::PersonalizationSnapshot,
+    ) -> Result<Option<crate::memory::QueryResult>> {
+        self.workflow.check_request_progress()?;
+        let retrieved = self
             .memory
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("memory absent"))?;
+            .map(|memory| -> Result<_> {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_millis()
+                    .try_into()?;
+                // Ordinary historical capture has no verified document association.
+                memory
+                    .query(&crate::memory::Query::new(result.question.clone(), now))
+                    .map_err(|_| anyhow::anyhow!("subject memory retrieval failed"))
+            })
+            .transpose()?;
         self.workflow.check_request_progress()?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_millis()
-            .try_into()?;
-        // No qualified document association is inferred from legacy image capture.
-        let query = Query::new(result.question.clone(), now);
-        let retrieved = memory
-            .query(&query)
-            .map_err(|_| anyhow::anyhow!("subject memory retrieval failed"))?;
-        self.workflow.check_request_progress()?;
-        info!(
-            "Subject memory retrieval: {:?} {:?}",
-            retrieved.status, retrieved.diagnostics
-        );
-        match retrieved.status {
-            Status::Disabled | Status::CompleteEmpty => return Ok(retrieved),
-            Status::Unavailable => anyhow::bail!("subject memory retrieval unavailable"),
-            Status::Partial if retrieved.context.facts.is_empty() => {
-                anyhow::bail!("subject memory retrieval incomplete without usable facts")
+        use crate::memory::Status;
+        if let Some(view) = &retrieved {
+            match view.status {
+                Status::Disabled | Status::CompleteEmpty
+                    if preference.effective_text().is_none() =>
+                {
+                    return Ok(retrieved)
+                }
+                Status::Unavailable => anyhow::bail!("subject memory retrieval unavailable"),
+                Status::Partial if view.context.facts.is_empty() => {
+                    anyhow::bail!("subject memory retrieval incomplete without usable facts")
+                }
+                _ => {}
             }
-            _ => {}
         }
-        let answer = context::answer(
-            &mut self.llm,
-            &result.question,
-            images,
-            &retrieved,
-            &mut || self.workflow.check_request_progress(),
-        )?;
-        result.answer = answer;
+        let usable = retrieved.as_ref().filter(|view| {
+            matches!(view.status, Status::Complete | Status::Partial)
+                && !view.context.facts.is_empty()
+        });
+        let workflow = &mut self.workflow;
+        result.answer = if let Some(view) = usable.filter(|view| view.selected()) {
+            crate::memory::context::answer_with_selected_view(
+                &mut self.llm,
+                &result.question,
+                images,
+                view,
+                self.ledger.store(),
+                Some(preference),
+                &mut || workflow.check_request_progress(),
+            )
+        } else {
+            crate::memory::context::answer_with_preference(
+                &mut self.llm,
+                &result.question,
+                images,
+                usable,
+                Some(preference),
+                &mut || workflow.check_request_progress(),
+            )
+        }?;
+        self.workflow.check_request_progress()?;
         Ok(retrieved)
     }
 
-    fn transcriptions_agree(question: &str, reading: &str) -> bool {
-        let independent = Self::extract_field(reading, "TRANSCRIPTION:");
-        let normalize = |text: &str| -> String {
-            let chars: Vec<char> = text.to_lowercase().chars().collect();
-            let mut normalized = String::new();
-            for (i, &c) in chars.iter().enumerate() {
-                let numeric_separator = matches!(c, '.' | ',')
-                    && i > 0
-                    && chars[i - 1].is_ascii_digit()
-                    && chars.get(i + 1).is_some_and(char::is_ascii_digit);
-                if c.is_alphanumeric() || numeric_separator {
-                    normalized.push(c);
-                } else if c.is_whitespace() || ".?,;:".contains(c) {
-                    normalized.push(' ');
-                } else {
-                    // Keep operators/grouping distinct, regardless of spacing.
-                    normalized.push(' ');
-                    normalized.push(c);
-                    normalized.push(' ');
-                }
-            }
-            normalized.split_whitespace().collect::<Vec<_>>().join(" ")
-        };
-        let a = normalize(question);
-        let b = normalize(&independent);
-        !a.is_empty() && !b.is_empty() && b != "none" && a == b
-    }
-
-    /// Extract a field value from the response
-    fn extract_field(text: &str, field_name: &str) -> String {
-        for line in text.lines() {
-            if let Some(value) = line.trim().strip_prefix(field_name) {
-                return value.trim().to_string();
-            }
-        }
-        "".to_string()
-    }
-
-    /// Parse bounding box from "x,y,width,height" format
-    fn parse_bounding_box(text: &str) -> Option<BoundingBox> {
-        let parts: Vec<&str> = text.split(',').collect();
-        if parts.len() == 4 {
-            if let (Ok(x), Ok(y), Ok(w), Ok(h)) = (
-                parts[0].trim().parse::<i32>(),
-                parts[1].trim().parse::<i32>(),
-                parts[2].trim().parse::<i32>(),
-                parts[3].trim().parse::<i32>(),
-            ) {
-                return Some(BoundingBox {
-                    x,
-                    y,
-                    width: w,
-                    height: h,
-                });
-            }
-        }
-        None
-    }
-
-    /// Render the answer on the next page
-    ///
-    /// Simplified flow:
-    /// 1. Store original page screenshot for later comparison
-    /// 2. Navigate right to next page  
-    /// 3. Compare to original to verify we actually moved
-    /// 4. Check if page is valid (blank or existing QA page)
-    /// 5. If not valid or didn't move → verify the source and record a non-ink failure
-    /// 6. If valid → render Q&A on that page
     fn render_answer(&mut self, result: &AnalysisResult) -> Result<RenderOutcome> {
         anyhow::ensure!(
             !self.workflow.is_selected(),
@@ -744,7 +708,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                 Ok(_) => info!("Iteration completed successfully"),
                 Err(e) => {
                     error!("Error in iteration: {}", e);
-                    if self.workflow.input_failed() {
+                    if self.workflow.runtime_failed() {
                         return Err(e);
                     }
                     // The iteration already attempted the non-ink failure diagnostic.

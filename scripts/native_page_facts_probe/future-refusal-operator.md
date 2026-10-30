@@ -1,0 +1,86 @@
+# Future diagnostic operator source gate
+
+SDK `b58a59bcaa08362741df0302f0a4f50e1ff98e1a` is the selected refusal-record source.
+Main/Astra accepted its source and Main reproduced32 entry+1 integration+21 format
+checks. No fresh nonce, native artifact, transfer or trial is selected by this gate.
+
+`run-qt-page-facts-diagnostic-source.ps1` is a concrete future source template over
+the exact spent e3988 operator. Its unconditional SOURCE ONLY stop precedes all
+path reads, preparation and transport. Old b3e3 nonce/hash/baseline literals are
+reference placeholders: a separately selected fresh packet must replace them and
+the source provenance, pin all source/decoder hashes and undergo exact review.
+The spent operator and packet remain byte-identical and cannot be reused.
+
+The future template imports the fixed `facts-refusal-proof.ps1` by exact SHA256.
+It preserves the public four-field callback, successful23-field private validator,
+one request/read, 120000/accepted+5000 bounds, original before-arming150000 host
+clock, prearmed180 rollback initiation and distinct240 restoration bound.
+Launcher/restoration/positive waiting/publisher semantics are unchanged.
+
+After a non-success callback and the existing durable request/current generation
+proof, the live branch reads refusal.json ONCE through the original ObservationSSH
+clock. It verifies same root/process/empty Job after collection and the original
+host cutoff before recording diagnostic correlation. It never sets callback/facts/
+generation success from refusal. Missing or malformed bounded evidence stays
+absent/undecodable; no wait, retry or clock reset is added. The trial remains refused
+and the same mandatory singleton restoration runs.
+
+After proven restoration, the final branch performs a separate bounded refusal
+presence/read and decodes against the saved attempted PID/start. Final evidence
+and callback correlation are explicitly historical; they never update live flags.
+Malformed JSON is preserved as bounded text with decoded=false. Unknown transport,
+framing, mode, type or size keeps recovery/stage uncertainty instead of claiming
+cleanup. Exact cleanup adds only refusal.json; an unknown extra file prevents rmdir.
+The remote reader uses `dd bs=2049 count=1` rather than unrestricted cat; the host rejects
+the 2049th-byte oversize sentinel. Size/mode/path samples are sequential and do not
+establish hostile-file atomicity or general no-follow authority. The selected SDK
+writer/private-root contract still applies. A future preflight must verify the
+target's dd byte-cap and short-file behavior before arming; no target command is executed by this gate.
+
+The fixed decoder requires UTF8<=2048, one JSON object, exactly27 unique case-sensitive
+keys, exact field types, kind/version, expected nonce/PID/start, allowed18 stage labels
+(17 existing labels plus unlisted-reader-stage), fixed clocks/profile/budgets,
+consistent refusal path and sample-minus-accepted timing/deadline flag. Authority
+flags must be typed false. Expired timing is valid refusal evidence, never successful
+facts. The -1 unknown-clock sentinel remains unknown and cannot claim a deadline.
+Raw duplicate keys, arbitrary labels, extra/missing keys, strings posing as numbers
+or booleans, partial/oversized data and wrong correlation refuse decoding.
+The decoder does not establish the first failure, native ownership or live authority.
+
+Owned checks: test-facts-refusal.ps1 has144 portable checks/145 with the actual
+owned C++27-field output; test-diagnostic-operator.ps1 has49 exact extracted
+live/recovery assertions with mocked transport; test-refusal-shell.py has13 exact
+Linux presence/read/cleanup cases against real owned files, no service calls.
+The growth regression mutates the file after the final size sample and proves
+actual read output remains capped at2049 bytes for host-side rejection.
+The successful validator and spent operator are checked unchanged. Full template
+execution is blocked, including PrepareOnly; fixtures never perform SSH/SCP.
+
+Before a later fresh candidate, its SDK source inventory/build inputs must include
+the new exact tools/qt_page_facts_refusal.h as well as existing facts/entry/owner
+headers, and the SDK pin must be b58a59b. Independently rebuild artifacts, refresh
+Main's stock/fixture baseline, prepare/hash the complete new literal packet and
+review its refusal decoding/collection/exact cleanup. Those are future gates,
+not effects or artifacts produced by this source change.
+
+Collector portability correction after54b: Main reported the target BusyBox1.36.1
+head lacks -c. The bounded reader now uses dd with one2049-byte block, preserving
+the host oversize rejection. Main separately reported read-only target dd short-input
+and2049-byte cap checks passing. These reports are target capability evidence,
+not a native facts trial; this source gate performs no target commands.
+
+The later Main-owned7866 candidate is spent. Its first SSH command failed with
+`set: -\r: invalid option` before arming; no native facts outcome was observed.
+The CRLF source here-string reached SSH with carriage returns even though the
+extracted shell-syntax fixtures had normalized their copies. Future source now
+normalizes CRLF to LF at both SSH argument boundaries, preserving transport
+options, results and the original observation clock. The spent private packet
+and its false lifecycle flags remain unchanged.
+
+`test-transport-lines.ps1 -FixturePath <owned-output.json>` evaluates the exact
+source transport functions with only Native mocked. It parses an actual CRLF
+literal here-string and captures the command passed to Native, checking both
+paths, unchanged LF input and pre/post transport deadline rejection (10 checks).
+`test-transport-shell.py <owned-output.json>` executes those captured arguments
+in an owned local Linux shell: raw CRLF refuses; both normalized commands pass
+with literal quoting preserved (3 cases). Neither test invokes SSH or a device.

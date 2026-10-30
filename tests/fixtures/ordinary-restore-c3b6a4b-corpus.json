@@ -1,0 +1,940 @@
+{
+  "fixture_version": 1,
+  "source_commit": "c3b6a4b62370f283bdaa733609f36e08cd73282d",
+  "capture_platform": "Windows host, synthetic ordinary Stores; not tablet/native qualification",
+  "producer_executable_sha256": "f6da18046ae4c880c2f143030468464bc134b0f15d85d2b7004e0a4b858567fa",
+  "fixture_helper_executable_sha256": "4f0042d46a19b9364320f68586549a892fe975073554b86c144620c1c1ee5c07",
+  "fixture_helper_source_sha256": "b584d1941b10da08a5c6d0ddd1de942385379aee106ae2c72a742a37b284fd5a",
+  "fixture_library_rlib_sha256": "20fe04ccdabb9ec12ff5073c554b46c201519b87c96f7ba836ea91f1e9cf008b",
+  "setup_basis": "Separate library API fixture creation/commit/export/mode setup; none is attributed to a restore command. Synthetic public fixture paths contain no personal account name. Native raw requests/reports and setup evidence retained privately.",
+  "cases": [
+    {
+      "name": "ordinary-prepare",
+      "operation": "prepare",
+      "stdin_base64": "eyJyZXN0b3JlX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6ImQ0MTRhNzNmLTNiYmUtNDg2My1hNWE4LWI4OTExMDVhMTA5MCIsInNvdXJjZSI6IkM6XFxVc2Vyc1xcUHVibGljXFxEb2N1bWVudHNcXGJ1ZGR5LXJlc3RvcmUtYzNiNmE0Yi01MzY5MDcyYi05MDAwLTQ2YzEtOGVlYS01MzgwMzYxZDc2NjJcXHNvdXJjZS1hcmNoaXZlIn0=",
+      "stdin_sha256": "614fc419e1672b941b6e7f48423270708859567abd4ca752133e569157907677",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"ok\",\"outcome\":\"prepared\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"preview\":{\"source\":{\"manifests\":2,\"objects\":2,\"complete_media\":true,\"configuration_included\":true},\"target\":{\"manifests\":3,\"objects\":3,\"complete_media\":true,\"configuration_included\":true},\"additional_manifests\":2,\"additive\":true,\"configuration_applied\":false},\"intent\":{\"restore_version\":1,\"operation\":\"d414a73f-3bbe-4863-a5a8-b891105a1090\",\"config_path_sha256\":\"f17b6ef38f5de5a4d63ef7c14c351bf618bc3b2e7b9a4d8db8acf4fe781861af\",\"config_sha256\":\"a75ab51b1437c729caf687d4f4408d24047bd7dc7422e78d1be6f965b3cde608\",\"source_path_sha256\":\"8a1687711a7b46598fcbc6969241b645940ee321f21e2a46c3bc1aca9e924617\",\"archive_sha256\":\"e22fe72746b8c432851d6b4bf96383bde80e482c45bd7d07364ef3e1df129d16\",\"actor\":\"2e4c5e07-e565-4f4a-ba93-3bfcf6130f6c\",\"mode_sha256\":\"5d2269d70c4b56f7e459c46eaed9f7299ace1e80627ca2e7b551927ac8e31de8\",\"base_generation\":\"d3c47976-fc99-48af-ae6b-8c98a820e640\",\"base_history_sha256\":\"b8c382b2a9ffdbe806586a0fd47334917a359e96b86c20b926ee2454a8107414\",\"target_generation\":\"f8bd74bd-25e9-430b-a420-3847f8a527d3\",\"target_history_sha256\":\"d145c87e22a55da5208219165dba3ffd7cea0957648fcd89691f6b4ed9f14832\",\"staged_configuration_sha256\":\"dd581317d3c7701bc8a885fc436c055e8ee8479f292836631a09c3dbf1ee31bd\",\"complete_media\":true}}}\n",
+      "stdout_sha256": "ca7746da0dcfada7b9f6392d51fbbc7255f4a4956b9330e0b9020a1a4a6a0e7f",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "a75ab51b1437c729caf687d4f4408d24047bd7dc7422e78d1be6f965b3cde608",
+        "current_sha256": "cdd864cd3778b4a6e64a8775724b6c84eb3dba018b48e5d11ecfc1c9a1d94b01"
+      },
+      "after": {
+        "config_sha256": "a75ab51b1437c729caf687d4f4408d24047bd7dc7422e78d1be6f965b3cde608",
+        "current_sha256": "cdd864cd3778b4a6e64a8775724b6c84eb3dba018b48e5d11ecfc1c9a1d94b01"
+      },
+      "owned_inventory_sha256_before": "a8c00e34ba41b9bc64f01961235bc1e0ebb18972bbb4a70870040d6eb8ea6838",
+      "owned_inventory_sha256_after": "a8c00e34ba41b9bc64f01961235bc1e0ebb18972bbb4a70870040d6eb8ea6838",
+      "lock_inventory_basis": "Raw file bytes in initial partial capture; per-case before/after recipes match."
+    },
+    {
+      "name": "ordinary-before-apply-status",
+      "operation": "status",
+      "stdin_base64": "eyJzb3VyY2UiOiJDOlxcVXNlcnNcXFB1YmxpY1xcRG9jdW1lbnRzXFxidWRkeS1yZXN0b3JlLWMzYjZhNGItNTM2OTA3MmItOTAwMC00NmMxLThlZWEtNTM4MDM2MWQ3NjYyXFxzb3VyY2UtYXJjaGl2ZSIsImludGVudCI6eyJyZXN0b3JlX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6ImQ0MTRhNzNmLTNiYmUtNDg2My1hNWE4LWI4OTExMDVhMTA5MCIsImNvbmZpZ19wYXRoX3NoYTI1NiI6ImYxN2I2ZWYzOGY1ZGU1YTRkNjNlZjdjMTRjMzUxYmY2MThiYzNiMmU3YjlhNGQ4ZGI4YWNmNGZlNzgxODYxYWYiLCJjb25maWdfc2hhMjU2IjoiYTc1YWI1MWIxNDM3YzcyOWNhZjY4N2Q0ZjQ0MDhkMjQwNDdiZDdkYzc0MjJlNzhkMWJlNmY5NjViM2NkZTYwOCIsInNvdXJjZV9wYXRoX3NoYTI1NiI6IjhhMTY4NzcxMWE3YjQ2NTk4ZmNiYzY5NjkyNDFiNjQ1OTQwZWUzMjFmMjFlMmE0NmMzYmMxYWNhOWU5MjQ2MTciLCJhcmNoaXZlX3NoYTI1NiI6ImUyMmZlNzI3NDZiOGM0MzI4NTFkNmI0YmY5NjM4M2JkZTgwZTQ4MmM0NWJkN2QwNzM2NGVmM2UxZGYxMjlkMTYiLCJhY3RvciI6IjJlNGM1ZTA3LWU1NjUtNGY0YS1iYTkzLTNiZmNmNjEzMGY2YyIsIm1vZGVfc2hhMjU2IjoiNWQyMjY5ZDcwYzRiNTZmN2U0NTljNDZlYWVkOWY3Mjk5YWNlMWU4MDYyN2NhMmU3YjU1MTkyN2FjOGUzMWRlOCIsImJhc2VfZ2VuZXJhdGlvbiI6ImQzYzQ3OTc2LWZjOTktNDhhZi1hZTZiLThjOThhODIwZTY0MCIsImJhc2VfaGlzdG9yeV9zaGEyNTYiOiJiOGMzODJiMmE5ZmZkYmU4MDY1ODZhMGZkNDczMzQ5MTdhMzU5ZTk2Yjg2YzIwYjkyNmVlMjQ1NGE4MTA3NDE0IiwidGFyZ2V0X2dlbmVyYXRpb24iOiJmOGJkNzRiZC0yNWU5LTQzMGItYTQyMC0zODQ3ZjhhNTI3ZDMiLCJ0YXJnZXRfaGlzdG9yeV9zaGEyNTYiOiJkMTQ1Yzg3ZTIyYTU1ZGE1MjA4MjE5MTY1ZGJhM2ZmZDdjZWEwOTU3NjQ4ZmNkODk2OTFmNmI0ZWQ5ZjE0ODMyIiwic3RhZ2VkX2NvbmZpZ3VyYXRpb25fc2hhMjU2IjoiZGQ1ODEzMTdkM2M3NzAxYmM4YTg4NWZjNDM2YzA1NWU4ZWU4NDc5ZjI5MjgzNjYzMWEwOWMzZGJmMWVlMzFiZCIsImNvbXBsZXRlX21lZGlhIjp0cnVlfX0=",
+      "stdin_sha256": "9f52c5d234cf2d240cdaa0a73df050b42d349ad045865b741d50132820d9c5a5",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"status\",\"status\":\"ok\",\"outcome\":\"unresolved\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "5acdf15d758fc98bb9afa2de9f7691103b32522841bd31e83068274ce0944352",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "a75ab51b1437c729caf687d4f4408d24047bd7dc7422e78d1be6f965b3cde608",
+        "current_sha256": "cdd864cd3778b4a6e64a8775724b6c84eb3dba018b48e5d11ecfc1c9a1d94b01"
+      },
+      "after": {
+        "config_sha256": "a75ab51b1437c729caf687d4f4408d24047bd7dc7422e78d1be6f965b3cde608",
+        "current_sha256": "cdd864cd3778b4a6e64a8775724b6c84eb3dba018b48e5d11ecfc1c9a1d94b01"
+      },
+      "owned_inventory_sha256_before": "a8c00e34ba41b9bc64f01961235bc1e0ebb18972bbb4a70870040d6eb8ea6838",
+      "owned_inventory_sha256_after": "a8c00e34ba41b9bc64f01961235bc1e0ebb18972bbb4a70870040d6eb8ea6838",
+      "lock_inventory_basis": "Raw file bytes in initial partial capture; per-case before/after recipes match."
+    },
+    {
+      "name": "forged-target_history_sha256",
+      "operation": "apply",
+      "stdin_base64": "eyJzb3VyY2UiOiJDOlxcVXNlcnNcXFB1YmxpY1xcRG9jdW1lbnRzXFxidWRkeS1yZXN0b3JlLWMzYjZhNGItNTM2OTA3MmItOTAwMC00NmMxLThlZWEtNTM4MDM2MWQ3NjYyXFxzb3VyY2UtYXJjaGl2ZSIsImludGVudCI6eyJyZXN0b3JlX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6ImQ0MTRhNzNmLTNiYmUtNDg2My1hNWE4LWI4OTExMDVhMTA5MCIsImNvbmZpZ19wYXRoX3NoYTI1NiI6ImYxN2I2ZWYzOGY1ZGU1YTRkNjNlZjdjMTRjMzUxYmY2MThiYzNiMmU3YjlhNGQ4ZGI4YWNmNGZlNzgxODYxYWYiLCJjb25maWdfc2hhMjU2IjoiYTc1YWI1MWIxNDM3YzcyOWNhZjY4N2Q0ZjQ0MDhkMjQwNDdiZDdkYzc0MjJlNzhkMWJlNmY5NjViM2NkZTYwOCIsInNvdXJjZV9wYXRoX3NoYTI1NiI6IjhhMTY4NzcxMWE3YjQ2NTk4ZmNiYzY5NjkyNDFiNjQ1OTQwZWUzMjFmMjFlMmE0NmMzYmMxYWNhOWU5MjQ2MTciLCJhcmNoaXZlX3NoYTI1NiI6ImUyMmZlNzI3NDZiOGM0MzI4NTFkNmI0YmY5NjM4M2JkZTgwZTQ4MmM0NWJkN2QwNzM2NGVmM2UxZGYxMjlkMTYiLCJhY3RvciI6IjJlNGM1ZTA3LWU1NjUtNGY0YS1iYTkzLTNiZmNmNjEzMGY2YyIsIm1vZGVfc2hhMjU2IjoiNWQyMjY5ZDcwYzRiNTZmN2U0NTljNDZlYWVkOWY3Mjk5YWNlMWU4MDYyN2NhMmU3YjU1MTkyN2FjOGUzMWRlOCIsImJhc2VfZ2VuZXJhdGlvbiI6ImQzYzQ3OTc2LWZjOTktNDhhZi1hZTZiLThjOThhODIwZTY0MCIsImJhc2VfaGlzdG9yeV9zaGEyNTYiOiJiOGMzODJiMmE5ZmZkYmU4MDY1ODZhMGZkNDczMzQ5MTdhMzU5ZTk2Yjg2YzIwYjkyNmVlMjQ1NGE4MTA3NDE0IiwidGFyZ2V0X2dlbmVyYXRpb24iOiJmOGJkNzRiZC0yNWU5LTQzMGItYTQyMC0zODQ3ZjhhNTI3ZDMiLCJ0YXJnZXRfaGlzdG9yeV9zaGEyNTYiOiIwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwIiwic3RhZ2VkX2NvbmZpZ3VyYXRpb25fc2hhMjU2IjoiZGQ1ODEzMTdkM2M3NzAxYmM4YTg4NWZjNDM2YzA1NWU4ZWU4NDc5ZjI5MjgzNjYzMWEwOWMzZGJmMWVlMzFiZCIsImNvbXBsZXRlX21lZGlhIjp0cnVlfX0=",
+      "stdin_sha256": "fb4b4c6aee0f5ba424ca938ea1ae1ae6dd00bec24d5087ad51c274b1bd1b43ff",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"conflict\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "f63c557f2b0f378ab3181a82e272ad0171ac0683d6401ccad78a4eaca997a7ab",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "a75ab51b1437c729caf687d4f4408d24047bd7dc7422e78d1be6f965b3cde608",
+        "current_sha256": "cdd864cd3778b4a6e64a8775724b6c84eb3dba018b48e5d11ecfc1c9a1d94b01"
+      },
+      "after": {
+        "config_sha256": "a75ab51b1437c729caf687d4f4408d24047bd7dc7422e78d1be6f965b3cde608",
+        "current_sha256": "cdd864cd3778b4a6e64a8775724b6c84eb3dba018b48e5d11ecfc1c9a1d94b01"
+      },
+      "owned_inventory_sha256_before": "a8c00e34ba41b9bc64f01961235bc1e0ebb18972bbb4a70870040d6eb8ea6838",
+      "owned_inventory_sha256_after": "a8c00e34ba41b9bc64f01961235bc1e0ebb18972bbb4a70870040d6eb8ea6838",
+      "lock_inventory_basis": "Raw file bytes in initial partial capture; per-case before/after recipes match."
+    },
+    {
+      "name": "forged-archive_sha256",
+      "operation": "apply",
+      "stdin_base64": "eyJzb3VyY2UiOiJDOlxcVXNlcnNcXFB1YmxpY1xcRG9jdW1lbnRzXFxidWRkeS1yZXN0b3JlLWMzYjZhNGItNTM2OTA3MmItOTAwMC00NmMxLThlZWEtNTM4MDM2MWQ3NjYyXFxzb3VyY2UtYXJjaGl2ZSIsImludGVudCI6eyJyZXN0b3JlX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6ImQ0MTRhNzNmLTNiYmUtNDg2My1hNWE4LWI4OTExMDVhMTA5MCIsImNvbmZpZ19wYXRoX3NoYTI1NiI6ImYxN2I2ZWYzOGY1ZGU1YTRkNjNlZjdjMTRjMzUxYmY2MThiYzNiMmU3YjlhNGQ4ZGI4YWNmNGZlNzgxODYxYWYiLCJjb25maWdfc2hhMjU2IjoiYTc1YWI1MWIxNDM3YzcyOWNhZjY4N2Q0ZjQ0MDhkMjQwNDdiZDdkYzc0MjJlNzhkMWJlNmY5NjViM2NkZTYwOCIsInNvdXJjZV9wYXRoX3NoYTI1NiI6IjhhMTY4NzcxMWE3YjQ2NTk4ZmNiYzY5NjkyNDFiNjQ1OTQwZWUzMjFmMjFlMmE0NmMzYmMxYWNhOWU5MjQ2MTciLCJhcmNoaXZlX3NoYTI1NiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJhY3RvciI6IjJlNGM1ZTA3LWU1NjUtNGY0YS1iYTkzLTNiZmNmNjEzMGY2YyIsIm1vZGVfc2hhMjU2IjoiNWQyMjY5ZDcwYzRiNTZmN2U0NTljNDZlYWVkOWY3Mjk5YWNlMWU4MDYyN2NhMmU3YjU1MTkyN2FjOGUzMWRlOCIsImJhc2VfZ2VuZXJhdGlvbiI6ImQzYzQ3OTc2LWZjOTktNDhhZi1hZTZiLThjOThhODIwZTY0MCIsImJhc2VfaGlzdG9yeV9zaGEyNTYiOiJiOGMzODJiMmE5ZmZkYmU4MDY1ODZhMGZkNDczMzQ5MTdhMzU5ZTk2Yjg2YzIwYjkyNmVlMjQ1NGE4MTA3NDE0IiwidGFyZ2V0X2dlbmVyYXRpb24iOiJmOGJkNzRiZC0yNWU5LTQzMGItYTQyMC0zODQ3ZjhhNTI3ZDMiLCJ0YXJnZXRfaGlzdG9yeV9zaGEyNTYiOiJkMTQ1Yzg3ZTIyYTU1ZGE1MjA4MjE5MTY1ZGJhM2ZmZDdjZWEwOTU3NjQ4ZmNkODk2OTFmNmI0ZWQ5ZjE0ODMyIiwic3RhZ2VkX2NvbmZpZ3VyYXRpb25fc2hhMjU2IjoiZGQ1ODEzMTdkM2M3NzAxYmM4YTg4NWZjNDM2YzA1NWU4ZWU4NDc5ZjI5MjgzNjYzMWEwOWMzZGJmMWVlMzFiZCIsImNvbXBsZXRlX21lZGlhIjp0cnVlfX0=",
+      "stdin_sha256": "91a1258021dcad8b635970f28872bb1c7ae6d6d8e9cc12bee9098ad1f93bd89e",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"conflict\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "f63c557f2b0f378ab3181a82e272ad0171ac0683d6401ccad78a4eaca997a7ab",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "a75ab51b1437c729caf687d4f4408d24047bd7dc7422e78d1be6f965b3cde608",
+        "current_sha256": "cdd864cd3778b4a6e64a8775724b6c84eb3dba018b48e5d11ecfc1c9a1d94b01"
+      },
+      "after": {
+        "config_sha256": "a75ab51b1437c729caf687d4f4408d24047bd7dc7422e78d1be6f965b3cde608",
+        "current_sha256": "cdd864cd3778b4a6e64a8775724b6c84eb3dba018b48e5d11ecfc1c9a1d94b01"
+      },
+      "owned_inventory_sha256_before": "a8c00e34ba41b9bc64f01961235bc1e0ebb18972bbb4a70870040d6eb8ea6838",
+      "owned_inventory_sha256_after": "a8c00e34ba41b9bc64f01961235bc1e0ebb18972bbb4a70870040d6eb8ea6838",
+      "lock_inventory_basis": "Raw file bytes in initial partial capture; per-case before/after recipes match."
+    },
+    {
+      "name": "forged-mode_sha256",
+      "operation": "apply",
+      "stdin_base64": "eyJzb3VyY2UiOiJDOlxcVXNlcnNcXFB1YmxpY1xcRG9jdW1lbnRzXFxidWRkeS1yZXN0b3JlLWMzYjZhNGItNTM2OTA3MmItOTAwMC00NmMxLThlZWEtNTM4MDM2MWQ3NjYyXFxzb3VyY2UtYXJjaGl2ZSIsImludGVudCI6eyJyZXN0b3JlX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6ImQ0MTRhNzNmLTNiYmUtNDg2My1hNWE4LWI4OTExMDVhMTA5MCIsImNvbmZpZ19wYXRoX3NoYTI1NiI6ImYxN2I2ZWYzOGY1ZGU1YTRkNjNlZjdjMTRjMzUxYmY2MThiYzNiMmU3YjlhNGQ4ZGI4YWNmNGZlNzgxODYxYWYiLCJjb25maWdfc2hhMjU2IjoiYTc1YWI1MWIxNDM3YzcyOWNhZjY4N2Q0ZjQ0MDhkMjQwNDdiZDdkYzc0MjJlNzhkMWJlNmY5NjViM2NkZTYwOCIsInNvdXJjZV9wYXRoX3NoYTI1NiI6IjhhMTY4NzcxMWE3YjQ2NTk4ZmNiYzY5NjkyNDFiNjQ1OTQwZWUzMjFmMjFlMmE0NmMzYmMxYWNhOWU5MjQ2MTciLCJhcmNoaXZlX3NoYTI1NiI6ImUyMmZlNzI3NDZiOGM0MzI4NTFkNmI0YmY5NjM4M2JkZTgwZTQ4MmM0NWJkN2QwNzM2NGVmM2UxZGYxMjlkMTYiLCJhY3RvciI6IjJlNGM1ZTA3LWU1NjUtNGY0YS1iYTkzLTNiZmNmNjEzMGY2YyIsIm1vZGVfc2hhMjU2IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsImJhc2VfZ2VuZXJhdGlvbiI6ImQzYzQ3OTc2LWZjOTktNDhhZi1hZTZiLThjOThhODIwZTY0MCIsImJhc2VfaGlzdG9yeV9zaGEyNTYiOiJiOGMzODJiMmE5ZmZkYmU4MDY1ODZhMGZkNDczMzQ5MTdhMzU5ZTk2Yjg2YzIwYjkyNmVlMjQ1NGE4MTA3NDE0IiwidGFyZ2V0X2dlbmVyYXRpb24iOiJmOGJkNzRiZC0yNWU5LTQzMGItYTQyMC0zODQ3ZjhhNTI3ZDMiLCJ0YXJnZXRfaGlzdG9yeV9zaGEyNTYiOiJkMTQ1Yzg3ZTIyYTU1ZGE1MjA4MjE5MTY1ZGJhM2ZmZDdjZWEwOTU3NjQ4ZmNkODk2OTFmNmI0ZWQ5ZjE0ODMyIiwic3RhZ2VkX2NvbmZpZ3VyYXRpb25fc2hhMjU2IjoiZGQ1ODEzMTdkM2M3NzAxYmM4YTg4NWZjNDM2YzA1NWU4ZWU4NDc5ZjI5MjgzNjYzMWEwOWMzZGJmMWVlMzFiZCIsImNvbXBsZXRlX21lZGlhIjp0cnVlfX0=",
+      "stdin_sha256": "c7c864a6964479e214f10601704a1d13ba4dc104fb22c4e636e2e9967765f3a2",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"conflict\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "f63c557f2b0f378ab3181a82e272ad0171ac0683d6401ccad78a4eaca997a7ab",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "a75ab51b1437c729caf687d4f4408d24047bd7dc7422e78d1be6f965b3cde608",
+        "current_sha256": "cdd864cd3778b4a6e64a8775724b6c84eb3dba018b48e5d11ecfc1c9a1d94b01"
+      },
+      "after": {
+        "config_sha256": "a75ab51b1437c729caf687d4f4408d24047bd7dc7422e78d1be6f965b3cde608",
+        "current_sha256": "cdd864cd3778b4a6e64a8775724b6c84eb3dba018b48e5d11ecfc1c9a1d94b01"
+      },
+      "owned_inventory_sha256_before": "a8c00e34ba41b9bc64f01961235bc1e0ebb18972bbb4a70870040d6eb8ea6838",
+      "owned_inventory_sha256_after": "a8c00e34ba41b9bc64f01961235bc1e0ebb18972bbb4a70870040d6eb8ea6838",
+      "lock_inventory_basis": "Raw file bytes in initial partial capture; per-case before/after recipes match."
+    },
+    {
+      "name": "forged-config_sha256",
+      "operation": "apply",
+      "stdin_base64": "eyJzb3VyY2UiOiJDOlxcVXNlcnNcXFB1YmxpY1xcRG9jdW1lbnRzXFxidWRkeS1yZXN0b3JlLWMzYjZhNGItNTM2OTA3MmItOTAwMC00NmMxLThlZWEtNTM4MDM2MWQ3NjYyXFxzb3VyY2UtYXJjaGl2ZSIsImludGVudCI6eyJyZXN0b3JlX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6ImQ0MTRhNzNmLTNiYmUtNDg2My1hNWE4LWI4OTExMDVhMTA5MCIsImNvbmZpZ19wYXRoX3NoYTI1NiI6ImYxN2I2ZWYzOGY1ZGU1YTRkNjNlZjdjMTRjMzUxYmY2MThiYzNiMmU3YjlhNGQ4ZGI4YWNmNGZlNzgxODYxYWYiLCJjb25maWdfc2hhMjU2IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsInNvdXJjZV9wYXRoX3NoYTI1NiI6IjhhMTY4NzcxMWE3YjQ2NTk4ZmNiYzY5NjkyNDFiNjQ1OTQwZWUzMjFmMjFlMmE0NmMzYmMxYWNhOWU5MjQ2MTciLCJhcmNoaXZlX3NoYTI1NiI6ImUyMmZlNzI3NDZiOGM0MzI4NTFkNmI0YmY5NjM4M2JkZTgwZTQ4MmM0NWJkN2QwNzM2NGVmM2UxZGYxMjlkMTYiLCJhY3RvciI6IjJlNGM1ZTA3LWU1NjUtNGY0YS1iYTkzLTNiZmNmNjEzMGY2YyIsIm1vZGVfc2hhMjU2IjoiNWQyMjY5ZDcwYzRiNTZmN2U0NTljNDZlYWVkOWY3Mjk5YWNlMWU4MDYyN2NhMmU3YjU1MTkyN2FjOGUzMWRlOCIsImJhc2VfZ2VuZXJhdGlvbiI6ImQzYzQ3OTc2LWZjOTktNDhhZi1hZTZiLThjOThhODIwZTY0MCIsImJhc2VfaGlzdG9yeV9zaGEyNTYiOiJiOGMzODJiMmE5ZmZkYmU4MDY1ODZhMGZkNDczMzQ5MTdhMzU5ZTk2Yjg2YzIwYjkyNmVlMjQ1NGE4MTA3NDE0IiwidGFyZ2V0X2dlbmVyYXRpb24iOiJmOGJkNzRiZC0yNWU5LTQzMGItYTQyMC0zODQ3ZjhhNTI3ZDMiLCJ0YXJnZXRfaGlzdG9yeV9zaGEyNTYiOiJkMTQ1Yzg3ZTIyYTU1ZGE1MjA4MjE5MTY1ZGJhM2ZmZDdjZWEwOTU3NjQ4ZmNkODk2OTFmNmI0ZWQ5ZjE0ODMyIiwic3RhZ2VkX2NvbmZpZ3VyYXRpb25fc2hhMjU2IjoiZGQ1ODEzMTdkM2M3NzAxYmM4YTg4NWZjNDM2YzA1NWU4ZWU4NDc5ZjI5MjgzNjYzMWEwOWMzZGJmMWVlMzFiZCIsImNvbXBsZXRlX21lZGlhIjp0cnVlfX0=",
+      "stdin_sha256": "6ff3c0250653a7160ad0ba99989d5ead7772e02120df6708a6c46533f11eb63e",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"conflict\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "f63c557f2b0f378ab3181a82e272ad0171ac0683d6401ccad78a4eaca997a7ab",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "a75ab51b1437c729caf687d4f4408d24047bd7dc7422e78d1be6f965b3cde608",
+        "current_sha256": "cdd864cd3778b4a6e64a8775724b6c84eb3dba018b48e5d11ecfc1c9a1d94b01"
+      },
+      "after": {
+        "config_sha256": "a75ab51b1437c729caf687d4f4408d24047bd7dc7422e78d1be6f965b3cde608",
+        "current_sha256": "cdd864cd3778b4a6e64a8775724b6c84eb3dba018b48e5d11ecfc1c9a1d94b01"
+      },
+      "owned_inventory_sha256_before": "a8c00e34ba41b9bc64f01961235bc1e0ebb18972bbb4a70870040d6eb8ea6838",
+      "owned_inventory_sha256_after": "a8c00e34ba41b9bc64f01961235bc1e0ebb18972bbb4a70870040d6eb8ea6838",
+      "lock_inventory_basis": "Raw file bytes in initial partial capture; per-case before/after recipes match."
+    },
+    {
+      "name": "forged-source_path_sha256",
+      "operation": "apply",
+      "stdin_base64": "eyJzb3VyY2UiOiJDOlxcVXNlcnNcXFB1YmxpY1xcRG9jdW1lbnRzXFxidWRkeS1yZXN0b3JlLWMzYjZhNGItNTM2OTA3MmItOTAwMC00NmMxLThlZWEtNTM4MDM2MWQ3NjYyXFxzb3VyY2UtYXJjaGl2ZSIsImludGVudCI6eyJyZXN0b3JlX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6ImQ0MTRhNzNmLTNiYmUtNDg2My1hNWE4LWI4OTExMDVhMTA5MCIsImNvbmZpZ19wYXRoX3NoYTI1NiI6ImYxN2I2ZWYzOGY1ZGU1YTRkNjNlZjdjMTRjMzUxYmY2MThiYzNiMmU3YjlhNGQ4ZGI4YWNmNGZlNzgxODYxYWYiLCJjb25maWdfc2hhMjU2IjoiYTc1YWI1MWIxNDM3YzcyOWNhZjY4N2Q0ZjQ0MDhkMjQwNDdiZDdkYzc0MjJlNzhkMWJlNmY5NjViM2NkZTYwOCIsInNvdXJjZV9wYXRoX3NoYTI1NiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJhcmNoaXZlX3NoYTI1NiI6ImUyMmZlNzI3NDZiOGM0MzI4NTFkNmI0YmY5NjM4M2JkZTgwZTQ4MmM0NWJkN2QwNzM2NGVmM2UxZGYxMjlkMTYiLCJhY3RvciI6IjJlNGM1ZTA3LWU1NjUtNGY0YS1iYTkzLTNiZmNmNjEzMGY2YyIsIm1vZGVfc2hhMjU2IjoiNWQyMjY5ZDcwYzRiNTZmN2U0NTljNDZlYWVkOWY3Mjk5YWNlMWU4MDYyN2NhMmU3YjU1MTkyN2FjOGUzMWRlOCIsImJhc2VfZ2VuZXJhdGlvbiI6ImQzYzQ3OTc2LWZjOTktNDhhZi1hZTZiLThjOThhODIwZTY0MCIsImJhc2VfaGlzdG9yeV9zaGEyNTYiOiJiOGMzODJiMmE5ZmZkYmU4MDY1ODZhMGZkNDczMzQ5MTdhMzU5ZTk2Yjg2YzIwYjkyNmVlMjQ1NGE4MTA3NDE0IiwidGFyZ2V0X2dlbmVyYXRpb24iOiJmOGJkNzRiZC0yNWU5LTQzMGItYTQyMC0zODQ3ZjhhNTI3ZDMiLCJ0YXJnZXRfaGlzdG9yeV9zaGEyNTYiOiJkMTQ1Yzg3ZTIyYTU1ZGE1MjA4MjE5MTY1ZGJhM2ZmZDdjZWEwOTU3NjQ4ZmNkODk2OTFmNmI0ZWQ5ZjE0ODMyIiwic3RhZ2VkX2NvbmZpZ3VyYXRpb25fc2hhMjU2IjoiZGQ1ODEzMTdkM2M3NzAxYmM4YTg4NWZjNDM2YzA1NWU4ZWU4NDc5ZjI5MjgzNjYzMWEwOWMzZGJmMWVlMzFiZCIsImNvbXBsZXRlX21lZGlhIjp0cnVlfX0=",
+      "stdin_sha256": "e74bd470a323ff231bed49a4eca5a3e2c9c5f977619e3506b79e5b57a527cfed",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"conflict\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "f63c557f2b0f378ab3181a82e272ad0171ac0683d6401ccad78a4eaca997a7ab",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "a75ab51b1437c729caf687d4f4408d24047bd7dc7422e78d1be6f965b3cde608",
+        "current_sha256": "cdd864cd3778b4a6e64a8775724b6c84eb3dba018b48e5d11ecfc1c9a1d94b01"
+      },
+      "after": {
+        "config_sha256": "a75ab51b1437c729caf687d4f4408d24047bd7dc7422e78d1be6f965b3cde608",
+        "current_sha256": "cdd864cd3778b4a6e64a8775724b6c84eb3dba018b48e5d11ecfc1c9a1d94b01"
+      },
+      "owned_inventory_sha256_before": "a8c00e34ba41b9bc64f01961235bc1e0ebb18972bbb4a70870040d6eb8ea6838",
+      "owned_inventory_sha256_after": "a8c00e34ba41b9bc64f01961235bc1e0ebb18972bbb4a70870040d6eb8ea6838",
+      "lock_inventory_basis": "Raw file bytes in initial partial capture; per-case before/after recipes match."
+    },
+    {
+      "name": "ordinary-owner-busy-apply",
+      "operation": "apply",
+      "stdin_base64": "eyJzb3VyY2UiOiJDOlxcVXNlcnNcXFB1YmxpY1xcRG9jdW1lbnRzXFxidWRkeS1yZXN0b3JlLWMzYjZhNGItNTM2OTA3MmItOTAwMC00NmMxLThlZWEtNTM4MDM2MWQ3NjYyXFxzb3VyY2UtYXJjaGl2ZSIsImludGVudCI6eyJyZXN0b3JlX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6ImQ0MTRhNzNmLTNiYmUtNDg2My1hNWE4LWI4OTExMDVhMTA5MCIsImNvbmZpZ19wYXRoX3NoYTI1NiI6ImYxN2I2ZWYzOGY1ZGU1YTRkNjNlZjdjMTRjMzUxYmY2MThiYzNiMmU3YjlhNGQ4ZGI4YWNmNGZlNzgxODYxYWYiLCJjb25maWdfc2hhMjU2IjoiYTc1YWI1MWIxNDM3YzcyOWNhZjY4N2Q0ZjQ0MDhkMjQwNDdiZDdkYzc0MjJlNzhkMWJlNmY5NjViM2NkZTYwOCIsInNvdXJjZV9wYXRoX3NoYTI1NiI6IjhhMTY4NzcxMWE3YjQ2NTk4ZmNiYzY5NjkyNDFiNjQ1OTQwZWUzMjFmMjFlMmE0NmMzYmMxYWNhOWU5MjQ2MTciLCJhcmNoaXZlX3NoYTI1NiI6ImUyMmZlNzI3NDZiOGM0MzI4NTFkNmI0YmY5NjM4M2JkZTgwZTQ4MmM0NWJkN2QwNzM2NGVmM2UxZGYxMjlkMTYiLCJhY3RvciI6IjJlNGM1ZTA3LWU1NjUtNGY0YS1iYTkzLTNiZmNmNjEzMGY2YyIsIm1vZGVfc2hhMjU2IjoiNWQyMjY5ZDcwYzRiNTZmN2U0NTljNDZlYWVkOWY3Mjk5YWNlMWU4MDYyN2NhMmU3YjU1MTkyN2FjOGUzMWRlOCIsImJhc2VfZ2VuZXJhdGlvbiI6ImQzYzQ3OTc2LWZjOTktNDhhZi1hZTZiLThjOThhODIwZTY0MCIsImJhc2VfaGlzdG9yeV9zaGEyNTYiOiJiOGMzODJiMmE5ZmZkYmU4MDY1ODZhMGZkNDczMzQ5MTdhMzU5ZTk2Yjg2YzIwYjkyNmVlMjQ1NGE4MTA3NDE0IiwidGFyZ2V0X2dlbmVyYXRpb24iOiJmOGJkNzRiZC0yNWU5LTQzMGItYTQyMC0zODQ3ZjhhNTI3ZDMiLCJ0YXJnZXRfaGlzdG9yeV9zaGEyNTYiOiJkMTQ1Yzg3ZTIyYTU1ZGE1MjA4MjE5MTY1ZGJhM2ZmZDdjZWEwOTU3NjQ4ZmNkODk2OTFmNmI0ZWQ5ZjE0ODMyIiwic3RhZ2VkX2NvbmZpZ3VyYXRpb25fc2hhMjU2IjoiZGQ1ODEzMTdkM2M3NzAxYmM4YTg4NWZjNDM2YzA1NWU4ZWU4NDc5ZjI5MjgzNjYzMWEwOWMzZGJmMWVlMzFiZCIsImNvbXBsZXRlX21lZGlhIjp0cnVlfX0=",
+      "stdin_sha256": "9f52c5d234cf2d240cdaa0a73df050b42d349ad045865b741d50132820d9c5a5",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"busy\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "c374bd070b4d82d4eab71625bfe8a9e6c4a9665a29339202d820c5099c71df57",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "a75ab51b1437c729caf687d4f4408d24047bd7dc7422e78d1be6f965b3cde608",
+        "current_sha256": "cdd864cd3778b4a6e64a8775724b6c84eb3dba018b48e5d11ecfc1c9a1d94b01"
+      },
+      "after": {
+        "config_sha256": "a75ab51b1437c729caf687d4f4408d24047bd7dc7422e78d1be6f965b3cde608",
+        "current_sha256": "cdd864cd3778b4a6e64a8775724b6c84eb3dba018b48e5d11ecfc1c9a1d94b01"
+      },
+      "owned_inventory_sha256_before": "4df1103fd7230d798b71c7283ad729d06474e5868bff16aecb93478796bd5fb5",
+      "owned_inventory_sha256_after": "4df1103fd7230d798b71c7283ad729d06474e5868bff16aecb93478796bd5fb5",
+      "lock_inventory_basis": "Lock file represented by encoded length; all other files by exact content."
+    },
+    {
+      "name": "ordinary-owner-busy-status",
+      "operation": "status",
+      "stdin_base64": "eyJzb3VyY2UiOiJDOlxcVXNlcnNcXFB1YmxpY1xcRG9jdW1lbnRzXFxidWRkeS1yZXN0b3JlLWMzYjZhNGItNTM2OTA3MmItOTAwMC00NmMxLThlZWEtNTM4MDM2MWQ3NjYyXFxzb3VyY2UtYXJjaGl2ZSIsImludGVudCI6eyJyZXN0b3JlX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6ImQ0MTRhNzNmLTNiYmUtNDg2My1hNWE4LWI4OTExMDVhMTA5MCIsImNvbmZpZ19wYXRoX3NoYTI1NiI6ImYxN2I2ZWYzOGY1ZGU1YTRkNjNlZjdjMTRjMzUxYmY2MThiYzNiMmU3YjlhNGQ4ZGI4YWNmNGZlNzgxODYxYWYiLCJjb25maWdfc2hhMjU2IjoiYTc1YWI1MWIxNDM3YzcyOWNhZjY4N2Q0ZjQ0MDhkMjQwNDdiZDdkYzc0MjJlNzhkMWJlNmY5NjViM2NkZTYwOCIsInNvdXJjZV9wYXRoX3NoYTI1NiI6IjhhMTY4NzcxMWE3YjQ2NTk4ZmNiYzY5NjkyNDFiNjQ1OTQwZWUzMjFmMjFlMmE0NmMzYmMxYWNhOWU5MjQ2MTciLCJhcmNoaXZlX3NoYTI1NiI6ImUyMmZlNzI3NDZiOGM0MzI4NTFkNmI0YmY5NjM4M2JkZTgwZTQ4MmM0NWJkN2QwNzM2NGVmM2UxZGYxMjlkMTYiLCJhY3RvciI6IjJlNGM1ZTA3LWU1NjUtNGY0YS1iYTkzLTNiZmNmNjEzMGY2YyIsIm1vZGVfc2hhMjU2IjoiNWQyMjY5ZDcwYzRiNTZmN2U0NTljNDZlYWVkOWY3Mjk5YWNlMWU4MDYyN2NhMmU3YjU1MTkyN2FjOGUzMWRlOCIsImJhc2VfZ2VuZXJhdGlvbiI6ImQzYzQ3OTc2LWZjOTktNDhhZi1hZTZiLThjOThhODIwZTY0MCIsImJhc2VfaGlzdG9yeV9zaGEyNTYiOiJiOGMzODJiMmE5ZmZkYmU4MDY1ODZhMGZkNDczMzQ5MTdhMzU5ZTk2Yjg2YzIwYjkyNmVlMjQ1NGE4MTA3NDE0IiwidGFyZ2V0X2dlbmVyYXRpb24iOiJmOGJkNzRiZC0yNWU5LTQzMGItYTQyMC0zODQ3ZjhhNTI3ZDMiLCJ0YXJnZXRfaGlzdG9yeV9zaGEyNTYiOiJkMTQ1Yzg3ZTIyYTU1ZGE1MjA4MjE5MTY1ZGJhM2ZmZDdjZWEwOTU3NjQ4ZmNkODk2OTFmNmI0ZWQ5ZjE0ODMyIiwic3RhZ2VkX2NvbmZpZ3VyYXRpb25fc2hhMjU2IjoiZGQ1ODEzMTdkM2M3NzAxYmM4YTg4NWZjNDM2YzA1NWU4ZWU4NDc5ZjI5MjgzNjYzMWEwOWMzZGJmMWVlMzFiZCIsImNvbXBsZXRlX21lZGlhIjp0cnVlfX0=",
+      "stdin_sha256": "9f52c5d234cf2d240cdaa0a73df050b42d349ad045865b741d50132820d9c5a5",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"status\",\"status\":\"busy\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "d7782f668b82dc2e0a5890d54fa21a55b7a7823026ed1bd216abf14f6d23b65d",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "a75ab51b1437c729caf687d4f4408d24047bd7dc7422e78d1be6f965b3cde608",
+        "current_sha256": "cdd864cd3778b4a6e64a8775724b6c84eb3dba018b48e5d11ecfc1c9a1d94b01"
+      },
+      "after": {
+        "config_sha256": "a75ab51b1437c729caf687d4f4408d24047bd7dc7422e78d1be6f965b3cde608",
+        "current_sha256": "cdd864cd3778b4a6e64a8775724b6c84eb3dba018b48e5d11ecfc1c9a1d94b01"
+      },
+      "owned_inventory_sha256_before": "4df1103fd7230d798b71c7283ad729d06474e5868bff16aecb93478796bd5fb5",
+      "owned_inventory_sha256_after": "4df1103fd7230d798b71c7283ad729d06474e5868bff16aecb93478796bd5fb5",
+      "lock_inventory_basis": "Lock file represented by encoded length; all other files by exact content."
+    },
+    {
+      "name": "ordinary-apply",
+      "operation": "apply",
+      "stdin_base64": "eyJzb3VyY2UiOiJDOlxcVXNlcnNcXFB1YmxpY1xcRG9jdW1lbnRzXFxidWRkeS1yZXN0b3JlLWMzYjZhNGItNTM2OTA3MmItOTAwMC00NmMxLThlZWEtNTM4MDM2MWQ3NjYyXFxzb3VyY2UtYXJjaGl2ZSIsImludGVudCI6eyJyZXN0b3JlX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6ImQ0MTRhNzNmLTNiYmUtNDg2My1hNWE4LWI4OTExMDVhMTA5MCIsImNvbmZpZ19wYXRoX3NoYTI1NiI6ImYxN2I2ZWYzOGY1ZGU1YTRkNjNlZjdjMTRjMzUxYmY2MThiYzNiMmU3YjlhNGQ4ZGI4YWNmNGZlNzgxODYxYWYiLCJjb25maWdfc2hhMjU2IjoiYTc1YWI1MWIxNDM3YzcyOWNhZjY4N2Q0ZjQ0MDhkMjQwNDdiZDdkYzc0MjJlNzhkMWJlNmY5NjViM2NkZTYwOCIsInNvdXJjZV9wYXRoX3NoYTI1NiI6IjhhMTY4NzcxMWE3YjQ2NTk4ZmNiYzY5NjkyNDFiNjQ1OTQwZWUzMjFmMjFlMmE0NmMzYmMxYWNhOWU5MjQ2MTciLCJhcmNoaXZlX3NoYTI1NiI6ImUyMmZlNzI3NDZiOGM0MzI4NTFkNmI0YmY5NjM4M2JkZTgwZTQ4MmM0NWJkN2QwNzM2NGVmM2UxZGYxMjlkMTYiLCJhY3RvciI6IjJlNGM1ZTA3LWU1NjUtNGY0YS1iYTkzLTNiZmNmNjEzMGY2YyIsIm1vZGVfc2hhMjU2IjoiNWQyMjY5ZDcwYzRiNTZmN2U0NTljNDZlYWVkOWY3Mjk5YWNlMWU4MDYyN2NhMmU3YjU1MTkyN2FjOGUzMWRlOCIsImJhc2VfZ2VuZXJhdGlvbiI6ImQzYzQ3OTc2LWZjOTktNDhhZi1hZTZiLThjOThhODIwZTY0MCIsImJhc2VfaGlzdG9yeV9zaGEyNTYiOiJiOGMzODJiMmE5ZmZkYmU4MDY1ODZhMGZkNDczMzQ5MTdhMzU5ZTk2Yjg2YzIwYjkyNmVlMjQ1NGE4MTA3NDE0IiwidGFyZ2V0X2dlbmVyYXRpb24iOiJmOGJkNzRiZC0yNWU5LTQzMGItYTQyMC0zODQ3ZjhhNTI3ZDMiLCJ0YXJnZXRfaGlzdG9yeV9zaGEyNTYiOiJkMTQ1Yzg3ZTIyYTU1ZGE1MjA4MjE5MTY1ZGJhM2ZmZDdjZWEwOTU3NjQ4ZmNkODk2OTFmNmI0ZWQ5ZjE0ODMyIiwic3RhZ2VkX2NvbmZpZ3VyYXRpb25fc2hhMjU2IjoiZGQ1ODEzMTdkM2M3NzAxYmM4YTg4NWZjNDM2YzA1NWU4ZWU4NDc5ZjI5MjgzNjYzMWEwOWMzZGJmMWVlMzFiZCIsImNvbXBsZXRlX21lZGlhIjp0cnVlfX0=",
+      "stdin_sha256": "9f52c5d234cf2d240cdaa0a73df050b42d349ad045865b741d50132820d9c5a5",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"ok\",\"outcome\":\"restored\",\"disk_readback_verified\":true,\"runtime_activation\":\"unverified\",\"data\":{\"inspection\":{\"manifests\":3,\"objects\":3,\"complete_media\":true,\"configuration_included\":true},\"configuration_applied\":false}}\n",
+      "stdout_sha256": "5a3c19fa0dddfe2ccab50a9339fc510a47a79216ae630d9c64b872293aa1221b",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "a75ab51b1437c729caf687d4f4408d24047bd7dc7422e78d1be6f965b3cde608",
+        "current_sha256": "cdd864cd3778b4a6e64a8775724b6c84eb3dba018b48e5d11ecfc1c9a1d94b01"
+      },
+      "after": {
+        "config_sha256": "a75ab51b1437c729caf687d4f4408d24047bd7dc7422e78d1be6f965b3cde608",
+        "current_sha256": "7dffa493f42145e281e8c85ade238e40d77bff654a6eabffc74b93e965bf3058"
+      },
+      "owned_inventory_sha256_before": "4df1103fd7230d798b71c7283ad729d06474e5868bff16aecb93478796bd5fb5",
+      "owned_inventory_sha256_after": "6d331368414583a4bb0fe3a2376905d3804c6fcbcc54b2a1e1d8fa9da3f0cdd2",
+      "lock_inventory_basis": "Lock file represented by encoded length; all other files by exact content."
+    },
+    {
+      "name": "ordinary-exact-desired-status",
+      "operation": "status",
+      "stdin_base64": "eyJzb3VyY2UiOiJDOlxcVXNlcnNcXFB1YmxpY1xcRG9jdW1lbnRzXFxidWRkeS1yZXN0b3JlLWMzYjZhNGItNTM2OTA3MmItOTAwMC00NmMxLThlZWEtNTM4MDM2MWQ3NjYyXFxzb3VyY2UtYXJjaGl2ZSIsImludGVudCI6eyJyZXN0b3JlX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6ImQ0MTRhNzNmLTNiYmUtNDg2My1hNWE4LWI4OTExMDVhMTA5MCIsImNvbmZpZ19wYXRoX3NoYTI1NiI6ImYxN2I2ZWYzOGY1ZGU1YTRkNjNlZjdjMTRjMzUxYmY2MThiYzNiMmU3YjlhNGQ4ZGI4YWNmNGZlNzgxODYxYWYiLCJjb25maWdfc2hhMjU2IjoiYTc1YWI1MWIxNDM3YzcyOWNhZjY4N2Q0ZjQ0MDhkMjQwNDdiZDdkYzc0MjJlNzhkMWJlNmY5NjViM2NkZTYwOCIsInNvdXJjZV9wYXRoX3NoYTI1NiI6IjhhMTY4NzcxMWE3YjQ2NTk4ZmNiYzY5NjkyNDFiNjQ1OTQwZWUzMjFmMjFlMmE0NmMzYmMxYWNhOWU5MjQ2MTciLCJhcmNoaXZlX3NoYTI1NiI6ImUyMmZlNzI3NDZiOGM0MzI4NTFkNmI0YmY5NjM4M2JkZTgwZTQ4MmM0NWJkN2QwNzM2NGVmM2UxZGYxMjlkMTYiLCJhY3RvciI6IjJlNGM1ZTA3LWU1NjUtNGY0YS1iYTkzLTNiZmNmNjEzMGY2YyIsIm1vZGVfc2hhMjU2IjoiNWQyMjY5ZDcwYzRiNTZmN2U0NTljNDZlYWVkOWY3Mjk5YWNlMWU4MDYyN2NhMmU3YjU1MTkyN2FjOGUzMWRlOCIsImJhc2VfZ2VuZXJhdGlvbiI6ImQzYzQ3OTc2LWZjOTktNDhhZi1hZTZiLThjOThhODIwZTY0MCIsImJhc2VfaGlzdG9yeV9zaGEyNTYiOiJiOGMzODJiMmE5ZmZkYmU4MDY1ODZhMGZkNDczMzQ5MTdhMzU5ZTk2Yjg2YzIwYjkyNmVlMjQ1NGE4MTA3NDE0IiwidGFyZ2V0X2dlbmVyYXRpb24iOiJmOGJkNzRiZC0yNWU5LTQzMGItYTQyMC0zODQ3ZjhhNTI3ZDMiLCJ0YXJnZXRfaGlzdG9yeV9zaGEyNTYiOiJkMTQ1Yzg3ZTIyYTU1ZGE1MjA4MjE5MTY1ZGJhM2ZmZDdjZWEwOTU3NjQ4ZmNkODk2OTFmNmI0ZWQ5ZjE0ODMyIiwic3RhZ2VkX2NvbmZpZ3VyYXRpb25fc2hhMjU2IjoiZGQ1ODEzMTdkM2M3NzAxYmM4YTg4NWZjNDM2YzA1NWU4ZWU4NDc5ZjI5MjgzNjYzMWEwOWMzZGJmMWVlMzFiZCIsImNvbXBsZXRlX21lZGlhIjp0cnVlfX0=",
+      "stdin_sha256": "9f52c5d234cf2d240cdaa0a73df050b42d349ad045865b741d50132820d9c5a5",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"status\",\"status\":\"ok\",\"outcome\":\"desired-generation-observed\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"inspection\":{\"manifests\":3,\"objects\":3,\"complete_media\":true,\"configuration_included\":true},\"configuration_applied\":false}}\n",
+      "stdout_sha256": "1bb80d59e62866e6fb7e38a90f5090bfaa9a430b077eb2b93e4a77399df175f4",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "a75ab51b1437c729caf687d4f4408d24047bd7dc7422e78d1be6f965b3cde608",
+        "current_sha256": "7dffa493f42145e281e8c85ade238e40d77bff654a6eabffc74b93e965bf3058"
+      },
+      "after": {
+        "config_sha256": "a75ab51b1437c729caf687d4f4408d24047bd7dc7422e78d1be6f965b3cde608",
+        "current_sha256": "7dffa493f42145e281e8c85ade238e40d77bff654a6eabffc74b93e965bf3058"
+      },
+      "owned_inventory_sha256_before": "6d331368414583a4bb0fe3a2376905d3804c6fcbcc54b2a1e1d8fa9da3f0cdd2",
+      "owned_inventory_sha256_after": "6d331368414583a4bb0fe3a2376905d3804c6fcbcc54b2a1e1d8fa9da3f0cdd2",
+      "lock_inventory_basis": "Lock file represented by encoded length; all other files by exact content."
+    },
+    {
+      "name": "ordinary-spent-base-apply",
+      "operation": "apply",
+      "stdin_base64": "eyJzb3VyY2UiOiJDOlxcVXNlcnNcXFB1YmxpY1xcRG9jdW1lbnRzXFxidWRkeS1yZXN0b3JlLWMzYjZhNGItNTM2OTA3MmItOTAwMC00NmMxLThlZWEtNTM4MDM2MWQ3NjYyXFxzb3VyY2UtYXJjaGl2ZSIsImludGVudCI6eyJyZXN0b3JlX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6ImQ0MTRhNzNmLTNiYmUtNDg2My1hNWE4LWI4OTExMDVhMTA5MCIsImNvbmZpZ19wYXRoX3NoYTI1NiI6ImYxN2I2ZWYzOGY1ZGU1YTRkNjNlZjdjMTRjMzUxYmY2MThiYzNiMmU3YjlhNGQ4ZGI4YWNmNGZlNzgxODYxYWYiLCJjb25maWdfc2hhMjU2IjoiYTc1YWI1MWIxNDM3YzcyOWNhZjY4N2Q0ZjQ0MDhkMjQwNDdiZDdkYzc0MjJlNzhkMWJlNmY5NjViM2NkZTYwOCIsInNvdXJjZV9wYXRoX3NoYTI1NiI6IjhhMTY4NzcxMWE3YjQ2NTk4ZmNiYzY5NjkyNDFiNjQ1OTQwZWUzMjFmMjFlMmE0NmMzYmMxYWNhOWU5MjQ2MTciLCJhcmNoaXZlX3NoYTI1NiI6ImUyMmZlNzI3NDZiOGM0MzI4NTFkNmI0YmY5NjM4M2JkZTgwZTQ4MmM0NWJkN2QwNzM2NGVmM2UxZGYxMjlkMTYiLCJhY3RvciI6IjJlNGM1ZTA3LWU1NjUtNGY0YS1iYTkzLTNiZmNmNjEzMGY2YyIsIm1vZGVfc2hhMjU2IjoiNWQyMjY5ZDcwYzRiNTZmN2U0NTljNDZlYWVkOWY3Mjk5YWNlMWU4MDYyN2NhMmU3YjU1MTkyN2FjOGUzMWRlOCIsImJhc2VfZ2VuZXJhdGlvbiI6ImQzYzQ3OTc2LWZjOTktNDhhZi1hZTZiLThjOThhODIwZTY0MCIsImJhc2VfaGlzdG9yeV9zaGEyNTYiOiJiOGMzODJiMmE5ZmZkYmU4MDY1ODZhMGZkNDczMzQ5MTdhMzU5ZTk2Yjg2YzIwYjkyNmVlMjQ1NGE4MTA3NDE0IiwidGFyZ2V0X2dlbmVyYXRpb24iOiJmOGJkNzRiZC0yNWU5LTQzMGItYTQyMC0zODQ3ZjhhNTI3ZDMiLCJ0YXJnZXRfaGlzdG9yeV9zaGEyNTYiOiJkMTQ1Yzg3ZTIyYTU1ZGE1MjA4MjE5MTY1ZGJhM2ZmZDdjZWEwOTU3NjQ4ZmNkODk2OTFmNmI0ZWQ5ZjE0ODMyIiwic3RhZ2VkX2NvbmZpZ3VyYXRpb25fc2hhMjU2IjoiZGQ1ODEzMTdkM2M3NzAxYmM4YTg4NWZjNDM2YzA1NWU4ZWU4NDc5ZjI5MjgzNjYzMWEwOWMzZGJmMWVlMzFiZCIsImNvbXBsZXRlX21lZGlhIjp0cnVlfX0=",
+      "stdin_sha256": "9f52c5d234cf2d240cdaa0a73df050b42d349ad045865b741d50132820d9c5a5",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"conflict\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "f63c557f2b0f378ab3181a82e272ad0171ac0683d6401ccad78a4eaca997a7ab",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "a75ab51b1437c729caf687d4f4408d24047bd7dc7422e78d1be6f965b3cde608",
+        "current_sha256": "7dffa493f42145e281e8c85ade238e40d77bff654a6eabffc74b93e965bf3058"
+      },
+      "after": {
+        "config_sha256": "a75ab51b1437c729caf687d4f4408d24047bd7dc7422e78d1be6f965b3cde608",
+        "current_sha256": "7dffa493f42145e281e8c85ade238e40d77bff654a6eabffc74b93e965bf3058"
+      },
+      "owned_inventory_sha256_before": "6d331368414583a4bb0fe3a2376905d3804c6fcbcc54b2a1e1d8fa9da3f0cdd2",
+      "owned_inventory_sha256_after": "6d331368414583a4bb0fe3a2376905d3804c6fcbcc54b2a1e1d8fa9da3f0cdd2",
+      "lock_inventory_basis": "Lock file represented by encoded length; all other files by exact content."
+    },
+    {
+      "name": "same-uuid-changed-staged-config-status",
+      "operation": "status",
+      "stdin_base64": "eyJzb3VyY2UiOiJDOlxcVXNlcnNcXFB1YmxpY1xcRG9jdW1lbnRzXFxidWRkeS1yZXN0b3JlLWMzYjZhNGItNTM2OTA3MmItOTAwMC00NmMxLThlZWEtNTM4MDM2MWQ3NjYyXFxzb3VyY2UtYXJjaGl2ZSIsImludGVudCI6eyJyZXN0b3JlX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6ImQ0MTRhNzNmLTNiYmUtNDg2My1hNWE4LWI4OTExMDVhMTA5MCIsImNvbmZpZ19wYXRoX3NoYTI1NiI6ImYxN2I2ZWYzOGY1ZGU1YTRkNjNlZjdjMTRjMzUxYmY2MThiYzNiMmU3YjlhNGQ4ZGI4YWNmNGZlNzgxODYxYWYiLCJjb25maWdfc2hhMjU2IjoiYTc1YWI1MWIxNDM3YzcyOWNhZjY4N2Q0ZjQ0MDhkMjQwNDdiZDdkYzc0MjJlNzhkMWJlNmY5NjViM2NkZTYwOCIsInNvdXJjZV9wYXRoX3NoYTI1NiI6IjhhMTY4NzcxMWE3YjQ2NTk4ZmNiYzY5NjkyNDFiNjQ1OTQwZWUzMjFmMjFlMmE0NmMzYmMxYWNhOWU5MjQ2MTciLCJhcmNoaXZlX3NoYTI1NiI6ImUyMmZlNzI3NDZiOGM0MzI4NTFkNmI0YmY5NjM4M2JkZTgwZTQ4MmM0NWJkN2QwNzM2NGVmM2UxZGYxMjlkMTYiLCJhY3RvciI6IjJlNGM1ZTA3LWU1NjUtNGY0YS1iYTkzLTNiZmNmNjEzMGY2YyIsIm1vZGVfc2hhMjU2IjoiNWQyMjY5ZDcwYzRiNTZmN2U0NTljNDZlYWVkOWY3Mjk5YWNlMWU4MDYyN2NhMmU3YjU1MTkyN2FjOGUzMWRlOCIsImJhc2VfZ2VuZXJhdGlvbiI6ImQzYzQ3OTc2LWZjOTktNDhhZi1hZTZiLThjOThhODIwZTY0MCIsImJhc2VfaGlzdG9yeV9zaGEyNTYiOiJiOGMzODJiMmE5ZmZkYmU4MDY1ODZhMGZkNDczMzQ5MTdhMzU5ZTk2Yjg2YzIwYjkyNmVlMjQ1NGE4MTA3NDE0IiwidGFyZ2V0X2dlbmVyYXRpb24iOiJmOGJkNzRiZC0yNWU5LTQzMGItYTQyMC0zODQ3ZjhhNTI3ZDMiLCJ0YXJnZXRfaGlzdG9yeV9zaGEyNTYiOiJkMTQ1Yzg3ZTIyYTU1ZGE1MjA4MjE5MTY1ZGJhM2ZmZDdjZWEwOTU3NjQ4ZmNkODk2OTFmNmI0ZWQ5ZjE0ODMyIiwic3RhZ2VkX2NvbmZpZ3VyYXRpb25fc2hhMjU2IjoiZGQ1ODEzMTdkM2M3NzAxYmM4YTg4NWZjNDM2YzA1NWU4ZWU4NDc5ZjI5MjgzNjYzMWEwOWMzZGJmMWVlMzFiZCIsImNvbXBsZXRlX21lZGlhIjp0cnVlfX0=",
+      "stdin_sha256": "9f52c5d234cf2d240cdaa0a73df050b42d349ad045865b741d50132820d9c5a5",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"status\",\"status\":\"ok\",\"outcome\":\"unresolved\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "5acdf15d758fc98bb9afa2de9f7691103b32522841bd31e83068274ce0944352",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "a75ab51b1437c729caf687d4f4408d24047bd7dc7422e78d1be6f965b3cde608",
+        "current_sha256": "7dffa493f42145e281e8c85ade238e40d77bff654a6eabffc74b93e965bf3058"
+      },
+      "after": {
+        "config_sha256": "a75ab51b1437c729caf687d4f4408d24047bd7dc7422e78d1be6f965b3cde608",
+        "current_sha256": "7dffa493f42145e281e8c85ade238e40d77bff654a6eabffc74b93e965bf3058"
+      },
+      "owned_inventory_sha256_before": "e2e0c81612da32b1f952c368d038a44643730047e641465fe384ee4fd08347ba",
+      "owned_inventory_sha256_after": "e2e0c81612da32b1f952c368d038a44643730047e641465fe384ee4fd08347ba",
+      "lock_inventory_basis": "Lock file represented by encoded length; all other files by exact content."
+    },
+    {
+      "name": "local-mode-prepare",
+      "operation": "prepare",
+      "stdin_base64": "eyJyZXN0b3JlX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6IjVhOGU5MGY1LWRmMjItNDFlYS1iMmZiLTVlMGI3NjI0MTFjMCIsInNvdXJjZSI6IkM6XFxVc2Vyc1xcUHVibGljXFxEb2N1bWVudHNcXGJ1ZGR5LXJlc3RvcmUtYzNiNmE0Yi01MzY5MDcyYi05MDAwLTQ2YzEtOGVlYS01MzgwMzYxZDc2NjJcXHNvdXJjZS1hcmNoaXZlIn0=",
+      "stdin_sha256": "906d68822ec0277591dfea6476ef4744621ee19a17d821ac7100c168189279b0",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"ok\",\"outcome\":\"prepared\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"preview\":{\"source\":{\"manifests\":2,\"objects\":2,\"complete_media\":true,\"configuration_included\":true},\"target\":{\"manifests\":3,\"objects\":3,\"complete_media\":true,\"configuration_included\":true},\"additional_manifests\":2,\"additive\":true,\"configuration_applied\":false},\"intent\":{\"restore_version\":1,\"operation\":\"5a8e90f5-df22-41ea-b2fb-5e0b762411c0\",\"config_path_sha256\":\"51afde33fa1ad62c04e0a5cf3f87c7121f85ca65cb00c022e38d4e8efe2d3e20\",\"config_sha256\":\"fcb8166ef5500a60581025d3690643ceb27c583076197e1c476053cb663b513c\",\"source_path_sha256\":\"8a1687711a7b46598fcbc6969241b645940ee321f21e2a46c3bc1aca9e924617\",\"archive_sha256\":\"e22fe72746b8c432851d6b4bf96383bde80e482c45bd7d07364ef3e1df129d16\",\"actor\":\"29eecf9b-13aa-410b-ae33-c929b6c88739\",\"mode_sha256\":\"12e59e98a3298335bd3e37ebd7a839a3e90f25fc10413132dcc09c9fb18f6026\",\"base_generation\":\"5cbf3fb6-16c0-4211-8f28-d74f1ad733eb\",\"base_history_sha256\":\"bac9bf15cdcc34b1df231e8fc64a4f2ca797b0aca28c4c0d370945f8f01a2c8a\",\"target_generation\":\"279696f7-b2e5-4fc4-beb9-ba997ff8b12f\",\"target_history_sha256\":\"a645292ff680732f35afe2d6e51b12d674719603d00241f08c8e40403367658d\",\"staged_configuration_sha256\":\"dd581317d3c7701bc8a885fc436c055e8ee8479f292836631a09c3dbf1ee31bd\",\"complete_media\":true}}}\n",
+      "stdout_sha256": "241dd44267634da68e8b4a9c74408ada3cff6b4681c1c6a92e0e9ddf4d77de80",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "fcb8166ef5500a60581025d3690643ceb27c583076197e1c476053cb663b513c",
+        "current_sha256": "e2852ea0def336de61f2c5a4053e18ccaf9926ab5615bdf17f6066feffc94ab8"
+      },
+      "after": {
+        "config_sha256": "fcb8166ef5500a60581025d3690643ceb27c583076197e1c476053cb663b513c",
+        "current_sha256": "e2852ea0def336de61f2c5a4053e18ccaf9926ab5615bdf17f6066feffc94ab8"
+      },
+      "owned_inventory_sha256_before": "9ee17cd015f9620e80af7d199e8f9990b93a12c69b1a14cf5313d1df912d14a8",
+      "owned_inventory_sha256_after": "9ee17cd015f9620e80af7d199e8f9990b93a12c69b1a14cf5313d1df912d14a8",
+      "lock_inventory_basis": "Lock file represented by encoded length; all other files by exact content."
+    },
+    {
+      "name": "local-mode-apply",
+      "operation": "apply",
+      "stdin_base64": "eyJzb3VyY2UiOiJDOlxcVXNlcnNcXFB1YmxpY1xcRG9jdW1lbnRzXFxidWRkeS1yZXN0b3JlLWMzYjZhNGItNTM2OTA3MmItOTAwMC00NmMxLThlZWEtNTM4MDM2MWQ3NjYyXFxzb3VyY2UtYXJjaGl2ZSIsImludGVudCI6eyJyZXN0b3JlX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6IjVhOGU5MGY1LWRmMjItNDFlYS1iMmZiLTVlMGI3NjI0MTFjMCIsImNvbmZpZ19wYXRoX3NoYTI1NiI6IjUxYWZkZTMzZmExYWQ2MmMwNGUwYTVjZjNmODdjNzEyMWY4NWNhNjVjYjAwYzAyMmUzOGQ0ZThlZmUyZDNlMjAiLCJjb25maWdfc2hhMjU2IjoiZmNiODE2NmVmNTUwMGE2MDU4MTAyNWQzNjkwNjQzY2ViMjdjNTgzMDc2MTk3ZTFjNDc2MDUzY2I2NjNiNTEzYyIsInNvdXJjZV9wYXRoX3NoYTI1NiI6IjhhMTY4NzcxMWE3YjQ2NTk4ZmNiYzY5NjkyNDFiNjQ1OTQwZWUzMjFmMjFlMmE0NmMzYmMxYWNhOWU5MjQ2MTciLCJhcmNoaXZlX3NoYTI1NiI6ImUyMmZlNzI3NDZiOGM0MzI4NTFkNmI0YmY5NjM4M2JkZTgwZTQ4MmM0NWJkN2QwNzM2NGVmM2UxZGYxMjlkMTYiLCJhY3RvciI6IjI5ZWVjZjliLTEzYWEtNDEwYi1hZTMzLWM5MjliNmM4ODczOSIsIm1vZGVfc2hhMjU2IjoiMTJlNTllOThhMzI5ODMzNWJkM2UzN2ViZDdhODM5YTNlOTBmMjVmYzEwNDEzMTMyZGNjMDljOWZiMThmNjAyNiIsImJhc2VfZ2VuZXJhdGlvbiI6IjVjYmYzZmI2LTE2YzAtNDIxMS04ZjI4LWQ3NGYxYWQ3MzNlYiIsImJhc2VfaGlzdG9yeV9zaGEyNTYiOiJiYWM5YmYxNWNkY2MzNGIxZGYyMzFlOGZjNjRhNGYyY2E3OTdiMGFjYTI4YzRjMGQzNzA5NDVmOGYwMWEyYzhhIiwidGFyZ2V0X2dlbmVyYXRpb24iOiIyNzk2OTZmNy1iMmU1LTRmYzQtYmViOS1iYTk5N2ZmOGIxMmYiLCJ0YXJnZXRfaGlzdG9yeV9zaGEyNTYiOiJhNjQ1MjkyZmY2ODA3MzJmMzVhZmUyZDZlNTFiMTJkNjc0NzE5NjAzZDAwMjQxZjA4YzhlNDA0MDMzNjc2NThkIiwic3RhZ2VkX2NvbmZpZ3VyYXRpb25fc2hhMjU2IjoiZGQ1ODEzMTdkM2M3NzAxYmM4YTg4NWZjNDM2YzA1NWU4ZWU4NDc5ZjI5MjgzNjYzMWEwOWMzZGJmMWVlMzFiZCIsImNvbXBsZXRlX21lZGlhIjp0cnVlfX0=",
+      "stdin_sha256": "386bad6a4622b25b5146770d0f34ed3cc0930c6550164c58f3fcd8eb38c01cf8",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"ok\",\"outcome\":\"restored\",\"disk_readback_verified\":true,\"runtime_activation\":\"unverified\",\"data\":{\"inspection\":{\"manifests\":3,\"objects\":3,\"complete_media\":true,\"configuration_included\":true},\"configuration_applied\":false}}\n",
+      "stdout_sha256": "5a3c19fa0dddfe2ccab50a9339fc510a47a79216ae630d9c64b872293aa1221b",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "fcb8166ef5500a60581025d3690643ceb27c583076197e1c476053cb663b513c",
+        "current_sha256": "e2852ea0def336de61f2c5a4053e18ccaf9926ab5615bdf17f6066feffc94ab8"
+      },
+      "after": {
+        "config_sha256": "fcb8166ef5500a60581025d3690643ceb27c583076197e1c476053cb663b513c",
+        "current_sha256": "437e12606ed7f15d4affb41661c8d908b95b69da8f3f6325447e363a5cf2e23a"
+      },
+      "owned_inventory_sha256_before": "9ee17cd015f9620e80af7d199e8f9990b93a12c69b1a14cf5313d1df912d14a8",
+      "owned_inventory_sha256_after": "748ceae9d87c4d17ee8ba9dadc6e59a9f6556586098ebd77ff5f9796dd891f9a",
+      "lock_inventory_basis": "Lock file represented by encoded length; all other files by exact content."
+    },
+    {
+      "name": "local-mode-status",
+      "operation": "status",
+      "stdin_base64": "eyJzb3VyY2UiOiJDOlxcVXNlcnNcXFB1YmxpY1xcRG9jdW1lbnRzXFxidWRkeS1yZXN0b3JlLWMzYjZhNGItNTM2OTA3MmItOTAwMC00NmMxLThlZWEtNTM4MDM2MWQ3NjYyXFxzb3VyY2UtYXJjaGl2ZSIsImludGVudCI6eyJyZXN0b3JlX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6IjVhOGU5MGY1LWRmMjItNDFlYS1iMmZiLTVlMGI3NjI0MTFjMCIsImNvbmZpZ19wYXRoX3NoYTI1NiI6IjUxYWZkZTMzZmExYWQ2MmMwNGUwYTVjZjNmODdjNzEyMWY4NWNhNjVjYjAwYzAyMmUzOGQ0ZThlZmUyZDNlMjAiLCJjb25maWdfc2hhMjU2IjoiZmNiODE2NmVmNTUwMGE2MDU4MTAyNWQzNjkwNjQzY2ViMjdjNTgzMDc2MTk3ZTFjNDc2MDUzY2I2NjNiNTEzYyIsInNvdXJjZV9wYXRoX3NoYTI1NiI6IjhhMTY4NzcxMWE3YjQ2NTk4ZmNiYzY5NjkyNDFiNjQ1OTQwZWUzMjFmMjFlMmE0NmMzYmMxYWNhOWU5MjQ2MTciLCJhcmNoaXZlX3NoYTI1NiI6ImUyMmZlNzI3NDZiOGM0MzI4NTFkNmI0YmY5NjM4M2JkZTgwZTQ4MmM0NWJkN2QwNzM2NGVmM2UxZGYxMjlkMTYiLCJhY3RvciI6IjI5ZWVjZjliLTEzYWEtNDEwYi1hZTMzLWM5MjliNmM4ODczOSIsIm1vZGVfc2hhMjU2IjoiMTJlNTllOThhMzI5ODMzNWJkM2UzN2ViZDdhODM5YTNlOTBmMjVmYzEwNDEzMTMyZGNjMDljOWZiMThmNjAyNiIsImJhc2VfZ2VuZXJhdGlvbiI6IjVjYmYzZmI2LTE2YzAtNDIxMS04ZjI4LWQ3NGYxYWQ3MzNlYiIsImJhc2VfaGlzdG9yeV9zaGEyNTYiOiJiYWM5YmYxNWNkY2MzNGIxZGYyMzFlOGZjNjRhNGYyY2E3OTdiMGFjYTI4YzRjMGQzNzA5NDVmOGYwMWEyYzhhIiwidGFyZ2V0X2dlbmVyYXRpb24iOiIyNzk2OTZmNy1iMmU1LTRmYzQtYmViOS1iYTk5N2ZmOGIxMmYiLCJ0YXJnZXRfaGlzdG9yeV9zaGEyNTYiOiJhNjQ1MjkyZmY2ODA3MzJmMzVhZmUyZDZlNTFiMTJkNjc0NzE5NjAzZDAwMjQxZjA4YzhlNDA0MDMzNjc2NThkIiwic3RhZ2VkX2NvbmZpZ3VyYXRpb25fc2hhMjU2IjoiZGQ1ODEzMTdkM2M3NzAxYmM4YTg4NWZjNDM2YzA1NWU4ZWU4NDc5ZjI5MjgzNjYzMWEwOWMzZGJmMWVlMzFiZCIsImNvbXBsZXRlX21lZGlhIjp0cnVlfX0=",
+      "stdin_sha256": "386bad6a4622b25b5146770d0f34ed3cc0930c6550164c58f3fcd8eb38c01cf8",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"status\",\"status\":\"ok\",\"outcome\":\"desired-generation-observed\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"inspection\":{\"manifests\":3,\"objects\":3,\"complete_media\":true,\"configuration_included\":true},\"configuration_applied\":false}}\n",
+      "stdout_sha256": "1bb80d59e62866e6fb7e38a90f5090bfaa9a430b077eb2b93e4a77399df175f4",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "fcb8166ef5500a60581025d3690643ceb27c583076197e1c476053cb663b513c",
+        "current_sha256": "437e12606ed7f15d4affb41661c8d908b95b69da8f3f6325447e363a5cf2e23a"
+      },
+      "after": {
+        "config_sha256": "fcb8166ef5500a60581025d3690643ceb27c583076197e1c476053cb663b513c",
+        "current_sha256": "437e12606ed7f15d4affb41661c8d908b95b69da8f3f6325447e363a5cf2e23a"
+      },
+      "owned_inventory_sha256_before": "748ceae9d87c4d17ee8ba9dadc6e59a9f6556586098ebd77ff5f9796dd891f9a",
+      "owned_inventory_sha256_after": "748ceae9d87c4d17ee8ba9dadc6e59a9f6556586098ebd77ff5f9796dd891f9a",
+      "lock_inventory_basis": "Lock file represented by encoded length; all other files by exact content."
+    },
+    {
+      "name": "isolated-mode-prepare-refusal",
+      "operation": "prepare",
+      "stdin_base64": "eyJyZXN0b3JlX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6IjlmNTMyY2M2LWE0NmEtNGI3MC1hNWE2LTAzMDU4YjkyOTdlYyIsInNvdXJjZSI6IkM6XFxVc2Vyc1xcUHVibGljXFxEb2N1bWVudHNcXGJ1ZGR5LXJlc3RvcmUtYzNiNmE0Yi01MzY5MDcyYi05MDAwLTQ2YzEtOGVlYS01MzgwMzYxZDc2NjJcXHNvdXJjZS1hcmNoaXZlIn0=",
+      "stdin_sha256": "8cfeb478f69a72678a809937d7719aafc12f12534c72127d877fdde481591369",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"unsupported\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "cc325ce69cf39610f929b6399a04308021c860d654ee0d8a0b4846ae6deb0094",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "3006a67f452468e3577aac1de74799111cc5303801955f92c34f34a22f6d5e7e",
+        "current_sha256": "740ecad83d243a7de6d8fff09fcbf04eda2a9ecac9a9b4bb512163a142433fcd"
+      },
+      "after": {
+        "config_sha256": "3006a67f452468e3577aac1de74799111cc5303801955f92c34f34a22f6d5e7e",
+        "current_sha256": "740ecad83d243a7de6d8fff09fcbf04eda2a9ecac9a9b4bb512163a142433fcd"
+      },
+      "owned_inventory_sha256_before": "8a0773c55f05db005d9af51cd4e1813d6919156c4652ef0a589f0d1dc953c05a",
+      "owned_inventory_sha256_after": "8a0773c55f05db005d9af51cd4e1813d6919156c4652ef0a589f0d1dc953c05a",
+      "lock_inventory_basis": "Lock file represented by encoded length; all other files by exact content."
+    },
+    {
+      "name": "shared-mode-prepare-refusal",
+      "operation": "prepare",
+      "stdin_base64": "eyJyZXN0b3JlX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6ImY5NGUxYTU3LTMwNjEtNDM5ZC05OWUxLWRiOGY2MWQ2ZTEzOCIsInNvdXJjZSI6IkM6XFxVc2Vyc1xcUHVibGljXFxEb2N1bWVudHNcXGJ1ZGR5LXJlc3RvcmUtYzNiNmE0Yi01MzY5MDcyYi05MDAwLTQ2YzEtOGVlYS01MzgwMzYxZDc2NjJcXHNvdXJjZS1hcmNoaXZlIn0=",
+      "stdin_sha256": "63024b7d8de4d59498471b2fa80b4e8ac4cdf981ff58281923561ed4e885119d",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"unsupported\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "cc325ce69cf39610f929b6399a04308021c860d654ee0d8a0b4846ae6deb0094",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "19c1784b592d4dd689c79d168e2974056f94ee241dbeecf72e3053f32354818f",
+        "current_sha256": "2b04e02514e9fcfcb687553d4281d066d74aa8ec919a08ee4efa0d60f2a29780"
+      },
+      "after": {
+        "config_sha256": "19c1784b592d4dd689c79d168e2974056f94ee241dbeecf72e3053f32354818f",
+        "current_sha256": "2b04e02514e9fcfcb687553d4281d066d74aa8ec919a08ee4efa0d60f2a29780"
+      },
+      "owned_inventory_sha256_before": "22d3d8997128c72af2dba6d13aef3ee27960829b504982a1fbc945226171a5ee",
+      "owned_inventory_sha256_after": "22d3d8997128c72af2dba6d13aef3ee27960829b504982a1fbc945226171a5ee",
+      "lock_inventory_basis": "Lock file represented by encoded length; all other files by exact content."
+    },
+    {
+      "name": "stale-target-prepare",
+      "operation": "prepare",
+      "stdin_base64": "eyJyZXN0b3JlX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6IjRmMjdmMjc1LWIxODEtNDhkZS1iZGUzLWYzN2YyMTBiNDM5YyIsInNvdXJjZSI6IkM6XFxVc2Vyc1xcUHVibGljXFxEb2N1bWVudHNcXGJ1ZGR5LXJlc3RvcmUtYzNiNmE0Yi01MzY5MDcyYi05MDAwLTQ2YzEtOGVlYS01MzgwMzYxZDc2NjJcXHNvdXJjZS1hcmNoaXZlIn0=",
+      "stdin_sha256": "b5a43afdecf746cb8091aaca9b13d703c12181d0f106bfce08823e24683e6759",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"ok\",\"outcome\":\"prepared\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"preview\":{\"source\":{\"manifests\":2,\"objects\":2,\"complete_media\":true,\"configuration_included\":true},\"target\":{\"manifests\":3,\"objects\":3,\"complete_media\":true,\"configuration_included\":true},\"additional_manifests\":2,\"additive\":true,\"configuration_applied\":false},\"intent\":{\"restore_version\":1,\"operation\":\"4f27f275-b181-48de-bde3-f37f210b439c\",\"config_path_sha256\":\"2cba5ac0b63b9e382863cde95dc125af063a7e1fb8f20effbf24b83a8e4f2359\",\"config_sha256\":\"98a9bb78ceb4103b0efd1c1c940533b226434cfa249a24985fc1ea27b4c9649d\",\"source_path_sha256\":\"8a1687711a7b46598fcbc6969241b645940ee321f21e2a46c3bc1aca9e924617\",\"archive_sha256\":\"e22fe72746b8c432851d6b4bf96383bde80e482c45bd7d07364ef3e1df129d16\",\"actor\":\"39e5ebce-a9fd-4754-bc96-1cc7e7edba1b\",\"mode_sha256\":\"d4574bf43cb280bbd1f569bdf7c2d174d403cf2db662fbc1d8a0cf5e2c6154be\",\"base_generation\":\"88899f06-c55a-4167-99dc-f1fe71128ee2\",\"base_history_sha256\":\"4f1cd564ce476d8c3165abc7c78405cc1a21be98873dc9ed4d9b7336cd309069\",\"target_generation\":\"b8187e3c-9aca-4be0-bbe0-028b7fbf6aa2\",\"target_history_sha256\":\"39945a7d154a55d49d5ebe5c1eaf709577d6f0ebe28babd0d0d5caab2ff7a0e6\",\"staged_configuration_sha256\":\"dd581317d3c7701bc8a885fc436c055e8ee8479f292836631a09c3dbf1ee31bd\",\"complete_media\":true}}}\n",
+      "stdout_sha256": "3300a752012739fe05c3935aad8c01ee9f6cac4f4bb3cb5120abbd26f58e1f1f",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "98a9bb78ceb4103b0efd1c1c940533b226434cfa249a24985fc1ea27b4c9649d",
+        "current_sha256": "34cf625928c018372a429e6cbc09175671b981f12ed65796067d4b3357050421"
+      },
+      "after": {
+        "config_sha256": "98a9bb78ceb4103b0efd1c1c940533b226434cfa249a24985fc1ea27b4c9649d",
+        "current_sha256": "34cf625928c018372a429e6cbc09175671b981f12ed65796067d4b3357050421"
+      },
+      "owned_inventory_sha256_before": "2bffaed27e3c747283b7fe2b10c5a0d643ab581fcc4dce4e2b443c3878159834",
+      "owned_inventory_sha256_after": "2bffaed27e3c747283b7fe2b10c5a0d643ab581fcc4dce4e2b443c3878159834",
+      "lock_inventory_basis": "Lock file represented by encoded length; all other files by exact content."
+    },
+    {
+      "name": "same-generation-commit-refuses-apply",
+      "operation": "apply",
+      "stdin_base64": "eyJzb3VyY2UiOiJDOlxcVXNlcnNcXFB1YmxpY1xcRG9jdW1lbnRzXFxidWRkeS1yZXN0b3JlLWMzYjZhNGItNTM2OTA3MmItOTAwMC00NmMxLThlZWEtNTM4MDM2MWQ3NjYyXFxzb3VyY2UtYXJjaGl2ZSIsImludGVudCI6eyJyZXN0b3JlX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6IjRmMjdmMjc1LWIxODEtNDhkZS1iZGUzLWYzN2YyMTBiNDM5YyIsImNvbmZpZ19wYXRoX3NoYTI1NiI6IjJjYmE1YWMwYjYzYjllMzgyODYzY2RlOTVkYzEyNWFmMDYzYTdlMWZiOGYyMGVmZmJmMjRiODNhOGU0ZjIzNTkiLCJjb25maWdfc2hhMjU2IjoiOThhOWJiNzhjZWI0MTAzYjBlZmQxYzFjOTQwNTMzYjIyNjQzNGNmYTI0OWEyNDk4NWZjMWVhMjdiNGM5NjQ5ZCIsInNvdXJjZV9wYXRoX3NoYTI1NiI6IjhhMTY4NzcxMWE3YjQ2NTk4ZmNiYzY5NjkyNDFiNjQ1OTQwZWUzMjFmMjFlMmE0NmMzYmMxYWNhOWU5MjQ2MTciLCJhcmNoaXZlX3NoYTI1NiI6ImUyMmZlNzI3NDZiOGM0MzI4NTFkNmI0YmY5NjM4M2JkZTgwZTQ4MmM0NWJkN2QwNzM2NGVmM2UxZGYxMjlkMTYiLCJhY3RvciI6IjM5ZTVlYmNlLWE5ZmQtNDc1NC1iYzk2LTFjYzdlN2VkYmExYiIsIm1vZGVfc2hhMjU2IjoiZDQ1NzRiZjQzY2IyODBiYmQxZjU2OWJkZjdjMmQxNzRkNDAzY2YyZGI2NjJmYmMxZDhhMGNmNWUyYzYxNTRiZSIsImJhc2VfZ2VuZXJhdGlvbiI6Ijg4ODk5ZjA2LWM1NWEtNDE2Ny05OWRjLWYxZmU3MTEyOGVlMiIsImJhc2VfaGlzdG9yeV9zaGEyNTYiOiI0ZjFjZDU2NGNlNDc2ZDhjMzE2NWFiYzdjNzg0MDVjYzFhMjFiZTk4ODczZGM5ZWQ0ZDliNzMzNmNkMzA5MDY5IiwidGFyZ2V0X2dlbmVyYXRpb24iOiJiODE4N2UzYy05YWNhLTRiZTAtYmJlMC0wMjhiN2ZiZjZhYTIiLCJ0YXJnZXRfaGlzdG9yeV9zaGEyNTYiOiIzOTk0NWE3ZDE1NGE1NWQ0OWQ1ZWJlNWMxZWFmNzA5NTc3ZDZmMGViZTI4YmFiZDBkMGQ1Y2FhYjJmZjdhMGU2Iiwic3RhZ2VkX2NvbmZpZ3VyYXRpb25fc2hhMjU2IjoiZGQ1ODEzMTdkM2M3NzAxYmM4YTg4NWZjNDM2YzA1NWU4ZWU4NDc5ZjI5MjgzNjYzMWEwOWMzZGJmMWVlMzFiZCIsImNvbXBsZXRlX21lZGlhIjp0cnVlfX0=",
+      "stdin_sha256": "3dcd4af0930c646cd1d0c02b7479577a4ad44536c86ad910a4610dc913c66f9f",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"conflict\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "f63c557f2b0f378ab3181a82e272ad0171ac0683d6401ccad78a4eaca997a7ab",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "98a9bb78ceb4103b0efd1c1c940533b226434cfa249a24985fc1ea27b4c9649d",
+        "current_sha256": "34cf625928c018372a429e6cbc09175671b981f12ed65796067d4b3357050421"
+      },
+      "after": {
+        "config_sha256": "98a9bb78ceb4103b0efd1c1c940533b226434cfa249a24985fc1ea27b4c9649d",
+        "current_sha256": "34cf625928c018372a429e6cbc09175671b981f12ed65796067d4b3357050421"
+      },
+      "owned_inventory_sha256_before": "a998eaf0eb79dba0e1d9ada5377b577ca11996dadae510f0d0f145e2b601c166",
+      "owned_inventory_sha256_after": "a998eaf0eb79dba0e1d9ada5377b577ca11996dadae510f0d0f145e2b601c166",
+      "lock_inventory_basis": "Lock file represented by encoded length; all other files by exact content."
+    },
+    {
+      "name": "source-change-prepare",
+      "operation": "prepare",
+      "stdin_base64": "eyJyZXN0b3JlX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6IjMzY2YzYWZmLWZiODctNGQ2NC1iMDJiLTJlMTk3ZGFkMTYyYSIsInNvdXJjZSI6IkM6XFxVc2Vyc1xcUHVibGljXFxEb2N1bWVudHNcXGJ1ZGR5LXJlc3RvcmUtYzNiNmE0Yi01MzY5MDcyYi05MDAwLTQ2YzEtOGVlYS01MzgwMzYxZDc2NjJcXHNvdXJjZS1hcmNoaXZlIn0=",
+      "stdin_sha256": "833047583a35f6b9b193b1aecd72284992461fb5708c6e0011b001bf22a89506",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"ok\",\"outcome\":\"prepared\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"preview\":{\"source\":{\"manifests\":2,\"objects\":2,\"complete_media\":true,\"configuration_included\":true},\"target\":{\"manifests\":3,\"objects\":3,\"complete_media\":true,\"configuration_included\":true},\"additional_manifests\":2,\"additive\":true,\"configuration_applied\":false},\"intent\":{\"restore_version\":1,\"operation\":\"33cf3aff-fb87-4d64-b02b-2e197dad162a\",\"config_path_sha256\":\"5454277e43c2d07ed76c6b4f78da1fa32100fa7d5d7e8c4e65ff3cf9fcba511e\",\"config_sha256\":\"794b428767f1f471728ecf4a1fc32c38abb214001be0b1aa87973d54162a16ea\",\"source_path_sha256\":\"8a1687711a7b46598fcbc6969241b645940ee321f21e2a46c3bc1aca9e924617\",\"archive_sha256\":\"e22fe72746b8c432851d6b4bf96383bde80e482c45bd7d07364ef3e1df129d16\",\"actor\":\"ce0ea71d-9b41-4148-8dfe-aa8b6fc432f6\",\"mode_sha256\":\"5c389cdb01db04adf0be9e5cd3b011bceb7780cfd7fcd4d88f4c138da5de3044\",\"base_generation\":\"b01090ab-af43-4edc-8080-248ac06f9c99\",\"base_history_sha256\":\"9e2a50fe6c71ad51bee4a63481451e92c0e1f9f259f0d43504e6dbd7302c274d\",\"target_generation\":\"2e11073d-9045-4352-9c87-4febc8283fd1\",\"target_history_sha256\":\"0bc4eea90bf12f81da2231d636ecc502e3c8f751ca9042cd43780e3f4c54ef9e\",\"staged_configuration_sha256\":\"dd581317d3c7701bc8a885fc436c055e8ee8479f292836631a09c3dbf1ee31bd\",\"complete_media\":true}}}\n",
+      "stdout_sha256": "6d8cc470fa9062b9e1ac1a3cbe0e304786438f5b046f8e05213cafec94d2730b",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "794b428767f1f471728ecf4a1fc32c38abb214001be0b1aa87973d54162a16ea",
+        "current_sha256": "2cd5ec317e40cc51d422616403e377f8f0f472f4f259e1523cf18b301691185a"
+      },
+      "after": {
+        "config_sha256": "794b428767f1f471728ecf4a1fc32c38abb214001be0b1aa87973d54162a16ea",
+        "current_sha256": "2cd5ec317e40cc51d422616403e377f8f0f472f4f259e1523cf18b301691185a"
+      },
+      "owned_inventory_sha256_before": "f70655f443286e40e605510bfdbdf979a8b34db1dfbc306003aa96dbcae81713",
+      "owned_inventory_sha256_after": "f70655f443286e40e605510bfdbdf979a8b34db1dfbc306003aa96dbcae81713",
+      "lock_inventory_basis": "Lock file represented by encoded length; all other files by exact content."
+    },
+    {
+      "name": "source-raw-revision-refuses-apply",
+      "operation": "apply",
+      "stdin_base64": "eyJzb3VyY2UiOiJDOlxcVXNlcnNcXFB1YmxpY1xcRG9jdW1lbnRzXFxidWRkeS1yZXN0b3JlLWMzYjZhNGItNTM2OTA3MmItOTAwMC00NmMxLThlZWEtNTM4MDM2MWQ3NjYyXFxzb3VyY2UtYXJjaGl2ZSIsImludGVudCI6eyJyZXN0b3JlX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6IjMzY2YzYWZmLWZiODctNGQ2NC1iMDJiLTJlMTk3ZGFkMTYyYSIsImNvbmZpZ19wYXRoX3NoYTI1NiI6IjU0NTQyNzdlNDNjMmQwN2VkNzZjNmI0Zjc4ZGExZmEzMjEwMGZhN2Q1ZDdlOGM0ZTY1ZmYzY2Y5ZmNiYTUxMWUiLCJjb25maWdfc2hhMjU2IjoiNzk0YjQyODc2N2YxZjQ3MTcyOGVjZjRhMWZjMzJjMzhhYmIyMTQwMDFiZTBiMWFhODc5NzNkNTQxNjJhMTZlYSIsInNvdXJjZV9wYXRoX3NoYTI1NiI6IjhhMTY4NzcxMWE3YjQ2NTk4ZmNiYzY5NjkyNDFiNjQ1OTQwZWUzMjFmMjFlMmE0NmMzYmMxYWNhOWU5MjQ2MTciLCJhcmNoaXZlX3NoYTI1NiI6ImUyMmZlNzI3NDZiOGM0MzI4NTFkNmI0YmY5NjM4M2JkZTgwZTQ4MmM0NWJkN2QwNzM2NGVmM2UxZGYxMjlkMTYiLCJhY3RvciI6ImNlMGVhNzFkLTliNDEtNDE0OC04ZGZlLWFhOGI2ZmM0MzJmNiIsIm1vZGVfc2hhMjU2IjoiNWMzODljZGIwMWRiMDRhZGYwYmU5ZTVjZDNiMDExYmNlYjc3ODBjZmQ3ZmNkNGQ4OGY0YzEzOGRhNWRlMzA0NCIsImJhc2VfZ2VuZXJhdGlvbiI6ImIwMTA5MGFiLWFmNDMtNGVkYy04MDgwLTI0OGFjMDZmOWM5OSIsImJhc2VfaGlzdG9yeV9zaGEyNTYiOiI5ZTJhNTBmZTZjNzFhZDUxYmVlNGE2MzQ4MTQ1MWU5MmMwZTFmOWYyNTlmMGQ0MzUwNGU2ZGJkNzMwMmMyNzRkIiwidGFyZ2V0X2dlbmVyYXRpb24iOiIyZTExMDczZC05MDQ1LTQzNTItOWM4Ny00ZmViYzgyODNmZDEiLCJ0YXJnZXRfaGlzdG9yeV9zaGEyNTYiOiIwYmM0ZWVhOTBiZjEyZjgxZGEyMjMxZDYzNmVjYzUwMmUzYzhmNzUxY2E5MDQyY2Q0Mzc4MGUzZjRjNTRlZjllIiwic3RhZ2VkX2NvbmZpZ3VyYXRpb25fc2hhMjU2IjoiZGQ1ODEzMTdkM2M3NzAxYmM4YTg4NWZjNDM2YzA1NWU4ZWU4NDc5ZjI5MjgzNjYzMWEwOWMzZGJmMWVlMzFiZCIsImNvbXBsZXRlX21lZGlhIjp0cnVlfX0=",
+      "stdin_sha256": "6664b1fc8078caf5472e2916f5ab65fb16aaf6c700da6e16a19b0e0795ac7eda",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"conflict\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "f63c557f2b0f378ab3181a82e272ad0171ac0683d6401ccad78a4eaca997a7ab",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "794b428767f1f471728ecf4a1fc32c38abb214001be0b1aa87973d54162a16ea",
+        "current_sha256": "2cd5ec317e40cc51d422616403e377f8f0f472f4f259e1523cf18b301691185a"
+      },
+      "after": {
+        "config_sha256": "794b428767f1f471728ecf4a1fc32c38abb214001be0b1aa87973d54162a16ea",
+        "current_sha256": "2cd5ec317e40cc51d422616403e377f8f0f472f4f259e1523cf18b301691185a"
+      },
+      "owned_inventory_sha256_before": "f70655f443286e40e605510bfdbdf979a8b34db1dfbc306003aa96dbcae81713",
+      "owned_inventory_sha256_after": "f70655f443286e40e605510bfdbdf979a8b34db1dfbc306003aa96dbcae81713",
+      "lock_inventory_basis": "Lock file represented by encoded length; all other files by exact content."
+    },
+    {
+      "name": "retained-stage-prepare",
+      "operation": "prepare",
+      "stdin_base64": "eyJyZXN0b3JlX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6ImJkZDU5MjVmLWEzOWEtNGI3NS1iY2NlLTJjYzk3ZThlMjIxMyIsInNvdXJjZSI6IkM6XFxVc2Vyc1xcUHVibGljXFxEb2N1bWVudHNcXGJ1ZGR5LXJlc3RvcmUtYzNiNmE0Yi01MzY5MDcyYi05MDAwLTQ2YzEtOGVlYS01MzgwMzYxZDc2NjJcXHNvdXJjZS1hcmNoaXZlIn0=",
+      "stdin_sha256": "ae4d8d0c676753693be72d72f8ce1152b0e585773bec6c56b12cb9dcc0ee5409",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"ok\",\"outcome\":\"prepared\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"preview\":{\"source\":{\"manifests\":2,\"objects\":2,\"complete_media\":true,\"configuration_included\":true},\"target\":{\"manifests\":3,\"objects\":3,\"complete_media\":true,\"configuration_included\":true},\"additional_manifests\":2,\"additive\":true,\"configuration_applied\":false},\"intent\":{\"restore_version\":1,\"operation\":\"bdd5925f-a39a-4b75-bcce-2cc97e8e2213\",\"config_path_sha256\":\"ac259e2309ee943b48d625a5c7abb5c0b0a340958c416897288f701accbd6c22\",\"config_sha256\":\"14a3d2d934e8d189b9cacc3165d2c66cad6818c0fd1180fcea203b655976b7be\",\"source_path_sha256\":\"8a1687711a7b46598fcbc6969241b645940ee321f21e2a46c3bc1aca9e924617\",\"archive_sha256\":\"e22fe72746b8c432851d6b4bf96383bde80e482c45bd7d07364ef3e1df129d16\",\"actor\":\"85274c1f-decd-422c-a48f-4e42dc57c801\",\"mode_sha256\":\"0ed81dddd1c162e5eedd8b027b944a0fc9c6a525c7a286bfccdd0340e1623b2c\",\"base_generation\":\"e45ecb0e-9c6e-4085-bbc2-cebf0b345e66\",\"base_history_sha256\":\"cd45e662c155267c59f23c0989852d2704dbae7e749ae953784d398289ace178\",\"target_generation\":\"d9fe50ec-209a-4ea0-b98b-97bbc9463515\",\"target_history_sha256\":\"375d7e34716ef26aee8e7c24c1495a4bd00f3453c09f32abf47fe4c32e7327bb\",\"staged_configuration_sha256\":\"dd581317d3c7701bc8a885fc436c055e8ee8479f292836631a09c3dbf1ee31bd\",\"complete_media\":true}}}\n",
+      "stdout_sha256": "46654e1119b326b252fdfd003a191eff8d7b13b89b5cb47a695378e0a1d6d784",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "14a3d2d934e8d189b9cacc3165d2c66cad6818c0fd1180fcea203b655976b7be",
+        "current_sha256": "d738aed59f9fc415e910e79723408016ea4d1aee85be680cfae94809ebc39f7d"
+      },
+      "after": {
+        "config_sha256": "14a3d2d934e8d189b9cacc3165d2c66cad6818c0fd1180fcea203b655976b7be",
+        "current_sha256": "d738aed59f9fc415e910e79723408016ea4d1aee85be680cfae94809ebc39f7d"
+      },
+      "owned_inventory_sha256_before": "b3b66b55598d22dc78945f927170d3cc9aa594ffbaf217a11351de0c2eed74e6",
+      "owned_inventory_sha256_after": "b3b66b55598d22dc78945f927170d3cc9aa594ffbaf217a11351de0c2eed74e6",
+      "lock_inventory_basis": "Lock file represented by encoded length; all other files by exact content."
+    },
+    {
+      "name": "retained-stage-never-reused",
+      "operation": "apply",
+      "stdin_base64": "eyJzb3VyY2UiOiJDOlxcVXNlcnNcXFB1YmxpY1xcRG9jdW1lbnRzXFxidWRkeS1yZXN0b3JlLWMzYjZhNGItNTM2OTA3MmItOTAwMC00NmMxLThlZWEtNTM4MDM2MWQ3NjYyXFxzb3VyY2UtYXJjaGl2ZSIsImludGVudCI6eyJyZXN0b3JlX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6ImJkZDU5MjVmLWEzOWEtNGI3NS1iY2NlLTJjYzk3ZThlMjIxMyIsImNvbmZpZ19wYXRoX3NoYTI1NiI6ImFjMjU5ZTIzMDllZTk0M2I0OGQ2MjVhNWM3YWJiNWMwYjBhMzQwOTU4YzQxNjg5NzI4OGY3MDFhY2NiZDZjMjIiLCJjb25maWdfc2hhMjU2IjoiMTRhM2QyZDkzNGU4ZDE4OWI5Y2FjYzMxNjVkMmM2NmNhZDY4MThjMGZkMTE4MGZjZWEyMDNiNjU1OTc2YjdiZSIsInNvdXJjZV9wYXRoX3NoYTI1NiI6IjhhMTY4NzcxMWE3YjQ2NTk4ZmNiYzY5NjkyNDFiNjQ1OTQwZWUzMjFmMjFlMmE0NmMzYmMxYWNhOWU5MjQ2MTciLCJhcmNoaXZlX3NoYTI1NiI6ImUyMmZlNzI3NDZiOGM0MzI4NTFkNmI0YmY5NjM4M2JkZTgwZTQ4MmM0NWJkN2QwNzM2NGVmM2UxZGYxMjlkMTYiLCJhY3RvciI6Ijg1Mjc0YzFmLWRlY2QtNDIyYy1hNDhmLTRlNDJkYzU3YzgwMSIsIm1vZGVfc2hhMjU2IjoiMGVkODFkZGRkMWMxNjJlNWVlZGQ4YjAyN2I5NDRhMGZjOWM2YTUyNWM3YTI4NmJmY2NkZDAzNDBlMTYyM2IyYyIsImJhc2VfZ2VuZXJhdGlvbiI6ImU0NWVjYjBlLTljNmUtNDA4NS1iYmMyLWNlYmYwYjM0NWU2NiIsImJhc2VfaGlzdG9yeV9zaGEyNTYiOiJjZDQ1ZTY2MmMxNTUyNjdjNTlmMjNjMDk4OTg1MmQyNzA0ZGJhZTdlNzQ5YWU5NTM3ODRkMzk4Mjg5YWNlMTc4IiwidGFyZ2V0X2dlbmVyYXRpb24iOiJkOWZlNTBlYy0yMDlhLTRlYTAtYjk4Yi05N2JiYzk0NjM1MTUiLCJ0YXJnZXRfaGlzdG9yeV9zaGEyNTYiOiIzNzVkN2UzNDcxNmVmMjZhZWU4ZTdjMjRjMTQ5NWE0YmQwMGYzNDUzYzA5ZjMyYWJmNDdmZTRjMzJlNzMyN2JiIiwic3RhZ2VkX2NvbmZpZ3VyYXRpb25fc2hhMjU2IjoiZGQ1ODEzMTdkM2M3NzAxYmM4YTg4NWZjNDM2YzA1NWU4ZWU4NDc5ZjI5MjgzNjYzMWEwOWMzZGJmMWVlMzFiZCIsImNvbXBsZXRlX21lZGlhIjp0cnVlfX0=",
+      "stdin_sha256": "f7547de6d9134c18fda608e8c4b2155de1c8239f59b93855963f32e0ba6fd664",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"conflict\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "f63c557f2b0f378ab3181a82e272ad0171ac0683d6401ccad78a4eaca997a7ab",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "14a3d2d934e8d189b9cacc3165d2c66cad6818c0fd1180fcea203b655976b7be",
+        "current_sha256": "d738aed59f9fc415e910e79723408016ea4d1aee85be680cfae94809ebc39f7d"
+      },
+      "after": {
+        "config_sha256": "14a3d2d934e8d189b9cacc3165d2c66cad6818c0fd1180fcea203b655976b7be",
+        "current_sha256": "d738aed59f9fc415e910e79723408016ea4d1aee85be680cfae94809ebc39f7d"
+      },
+      "owned_inventory_sha256_before": "321b85e146dc1d1d92db28726bdf05f1f109c27e1a551bda2bac79aad5e4e3cf",
+      "owned_inventory_sha256_after": "321b85e146dc1d1d92db28726bdf05f1f109c27e1a551bda2bac79aad5e4e3cf",
+      "lock_inventory_basis": "Lock file represented by encoded length; all other files by exact content."
+    },
+    {
+      "name": "strict-target-prepare",
+      "operation": "prepare",
+      "stdin_base64": "eyJyZXN0b3JlX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6Ijk2MjY5ZDgxLTM4OGItNGJmZi05NGFjLTJkNWRjNGY1MjkyMSIsInNvdXJjZSI6IkM6XFxVc2Vyc1xcUHVibGljXFxEb2N1bWVudHNcXGJ1ZGR5LXJlc3RvcmUtYzNiNmE0Yi01MzY5MDcyYi05MDAwLTQ2YzEtOGVlYS01MzgwMzYxZDc2NjJcXHNvdXJjZS1hcmNoaXZlIn0=",
+      "stdin_sha256": "d7b5c25c4860b8fef67d67cf5f0e799e742aa456181d4a170de0a7b2f2a20aa6",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"ok\",\"outcome\":\"prepared\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"preview\":{\"source\":{\"manifests\":2,\"objects\":2,\"complete_media\":true,\"configuration_included\":true},\"target\":{\"manifests\":3,\"objects\":3,\"complete_media\":true,\"configuration_included\":true},\"additional_manifests\":2,\"additive\":true,\"configuration_applied\":false},\"intent\":{\"restore_version\":1,\"operation\":\"96269d81-388b-4bff-94ac-2d5dc4f52921\",\"config_path_sha256\":\"dfd073a31583246373eb73dbf80d56e2c2c90dccb137eed8c938f0fc83efa180\",\"config_sha256\":\"5bfdae45e03e090a62a0883a772596ff4e37940846b0ca6f02b684f8d2dffdb7\",\"source_path_sha256\":\"8a1687711a7b46598fcbc6969241b645940ee321f21e2a46c3bc1aca9e924617\",\"archive_sha256\":\"e22fe72746b8c432851d6b4bf96383bde80e482c45bd7d07364ef3e1df129d16\",\"actor\":\"feb14276-5846-44b7-8f90-e0887723245f\",\"mode_sha256\":\"bd78b32bd59e7d32018060d33c0f89a5d31bfd4c946f216d2be9800eb1092652\",\"base_generation\":\"edda2784-fcd3-48e0-ba63-78b53fefab5a\",\"base_history_sha256\":\"0f9c0380492e846d46eb10f069e0740a9264ab4645fae463c411d69b55c27a3f\",\"target_generation\":\"8bf59c6a-d25a-476e-bd2c-2e708ad4ef62\",\"target_history_sha256\":\"b6a93a5b1359d21bfd9a5df0ced3f3559ede3e4d74e258ace88fecd586160d99\",\"staged_configuration_sha256\":\"dd581317d3c7701bc8a885fc436c055e8ee8479f292836631a09c3dbf1ee31bd\",\"complete_media\":true}}}\n",
+      "stdout_sha256": "06daddeab8a831ba006772e08313abb6c79a1fbbb64cfecb539138c64750dda3",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "5bfdae45e03e090a62a0883a772596ff4e37940846b0ca6f02b684f8d2dffdb7",
+        "current_sha256": "c205505d61014aafaf5fcde187e69cde535f5b8bfe33964257a66c603996f854"
+      },
+      "after": {
+        "config_sha256": "5bfdae45e03e090a62a0883a772596ff4e37940846b0ca6f02b684f8d2dffdb7",
+        "current_sha256": "c205505d61014aafaf5fcde187e69cde535f5b8bfe33964257a66c603996f854"
+      },
+      "owned_inventory_sha256_before": "a8d5a5af781885f8a58dac27a1dc1038f77fda8feaa8cd07efa6d713dabe9991",
+      "owned_inventory_sha256_after": "a8d5a5af781885f8a58dac27a1dc1038f77fda8feaa8cd07efa6d713dabe9991",
+      "lock_inventory_basis": "Lock file represented by encoded length; all other files by exact content."
+    },
+    {
+      "name": "root-array",
+      "operation": "apply",
+      "stdin_base64": "W10=",
+      "stdin_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "5160ee218c635824c6271a2c9984dc7c0729aee94d04cee79e2cb357de2ae39d",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "5bfdae45e03e090a62a0883a772596ff4e37940846b0ca6f02b684f8d2dffdb7",
+        "current_sha256": "c205505d61014aafaf5fcde187e69cde535f5b8bfe33964257a66c603996f854"
+      },
+      "after": {
+        "config_sha256": "5bfdae45e03e090a62a0883a772596ff4e37940846b0ca6f02b684f8d2dffdb7",
+        "current_sha256": "c205505d61014aafaf5fcde187e69cde535f5b8bfe33964257a66c603996f854"
+      },
+      "owned_inventory_sha256_before": "a8d5a5af781885f8a58dac27a1dc1038f77fda8feaa8cd07efa6d713dabe9991",
+      "owned_inventory_sha256_after": "a8d5a5af781885f8a58dac27a1dc1038f77fda8feaa8cd07efa6d713dabe9991",
+      "lock_inventory_basis": "Lock file represented by encoded length; all other files by exact content."
+    },
+    {
+      "name": "intent-array",
+      "operation": "apply",
+      "stdin_base64": "eyJzb3VyY2UiOiJ4IiwiaW50ZW50IjpbXX0=",
+      "stdin_sha256": "08fd985ca40ec428e78202139b2dc64c934b8a5f3baead58bd5d427117a29ae0",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "5160ee218c635824c6271a2c9984dc7c0729aee94d04cee79e2cb357de2ae39d",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "5bfdae45e03e090a62a0883a772596ff4e37940846b0ca6f02b684f8d2dffdb7",
+        "current_sha256": "c205505d61014aafaf5fcde187e69cde535f5b8bfe33964257a66c603996f854"
+      },
+      "after": {
+        "config_sha256": "5bfdae45e03e090a62a0883a772596ff4e37940846b0ca6f02b684f8d2dffdb7",
+        "current_sha256": "c205505d61014aafaf5fcde187e69cde535f5b8bfe33964257a66c603996f854"
+      },
+      "owned_inventory_sha256_before": "a8d5a5af781885f8a58dac27a1dc1038f77fda8feaa8cd07efa6d713dabe9991",
+      "owned_inventory_sha256_after": "a8d5a5af781885f8a58dac27a1dc1038f77fda8feaa8cd07efa6d713dabe9991",
+      "lock_inventory_basis": "Lock file represented by encoded length; all other files by exact content."
+    },
+    {
+      "name": "missing-required-nullable",
+      "operation": "apply",
+      "stdin_base64": "eyJzb3VyY2UiOiJDOlxcVXNlcnNcXFB1YmxpY1xcRG9jdW1lbnRzXFxidWRkeS1yZXN0b3JlLWMzYjZhNGItNTM2OTA3MmItOTAwMC00NmMxLThlZWEtNTM4MDM2MWQ3NjYyXFxzb3VyY2UtYXJjaGl2ZSIsImludGVudCI6eyJyZXN0b3JlX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6Ijk2MjY5ZDgxLTM4OGItNGJmZi05NGFjLTJkNWRjNGY1MjkyMSIsImNvbmZpZ19wYXRoX3NoYTI1NiI6ImRmZDA3M2EzMTU4MzI0NjM3M2ViNzNkYmY4MGQ1NmUyYzJjOTBkY2NiMTM3ZWVkOGM5MzhmMGZjODNlZmExODAiLCJjb25maWdfc2hhMjU2IjoiNWJmZGFlNDVlMDNlMDkwYTYyYTA4ODNhNzcyNTk2ZmY0ZTM3OTQwODQ2YjBjYTZmMDJiNjg0ZjhkMmRmZmRiNyIsInNvdXJjZV9wYXRoX3NoYTI1NiI6IjhhMTY4NzcxMWE3YjQ2NTk4ZmNiYzY5NjkyNDFiNjQ1OTQwZWUzMjFmMjFlMmE0NmMzYmMxYWNhOWU5MjQ2MTciLCJhcmNoaXZlX3NoYTI1NiI6ImUyMmZlNzI3NDZiOGM0MzI4NTFkNmI0YmY5NjM4M2JkZTgwZTQ4MmM0NWJkN2QwNzM2NGVmM2UxZGYxMjlkMTYiLCJhY3RvciI6ImZlYjE0Mjc2LTU4NDYtNDRiNy04ZjkwLWUwODg3NzIzMjQ1ZiIsIm1vZGVfc2hhMjU2IjoiYmQ3OGIzMmJkNTllN2QzMjAxODA2MGQzM2MwZjg5YTVkMzFiZmQ0Yzk0NmYyMTZkMmJlOTgwMGViMTA5MjY1MiIsImJhc2VfZ2VuZXJhdGlvbiI6ImVkZGEyNzg0LWZjZDMtNDhlMC1iYTYzLTc4YjUzZmVmYWI1YSIsImJhc2VfaGlzdG9yeV9zaGEyNTYiOiIwZjljMDM4MDQ5MmU4NDZkNDZlYjEwZjA2OWUwNzQwYTkyNjRhYjQ2NDVmYWU0NjNjNDExZDY5YjU1YzI3YTNmIiwidGFyZ2V0X2dlbmVyYXRpb24iOiI4YmY1OWM2YS1kMjVhLTQ3NmUtYmQyYy0yZTcwOGFkNGVmNjIiLCJ0YXJnZXRfaGlzdG9yeV9zaGEyNTYiOiJiNmE5M2E1YjEzNTlkMjFiZmQ5YTVkZjBjZWQzZjM1NTllZGUzZTRkNzRlMjU4YWNlODhmZWNkNTg2MTYwZDk5IiwiY29tcGxldGVfbWVkaWEiOnRydWV9fQ==",
+      "stdin_sha256": "8598d28c30b27cf8dd20680f0375087b95029689756d6f9215fd1611593a3890",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "5160ee218c635824c6271a2c9984dc7c0729aee94d04cee79e2cb357de2ae39d",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "5bfdae45e03e090a62a0883a772596ff4e37940846b0ca6f02b684f8d2dffdb7",
+        "current_sha256": "c205505d61014aafaf5fcde187e69cde535f5b8bfe33964257a66c603996f854"
+      },
+      "after": {
+        "config_sha256": "5bfdae45e03e090a62a0883a772596ff4e37940846b0ca6f02b684f8d2dffdb7",
+        "current_sha256": "c205505d61014aafaf5fcde187e69cde535f5b8bfe33964257a66c603996f854"
+      },
+      "owned_inventory_sha256_before": "a8d5a5af781885f8a58dac27a1dc1038f77fda8feaa8cd07efa6d713dabe9991",
+      "owned_inventory_sha256_after": "a8d5a5af781885f8a58dac27a1dc1038f77fda8feaa8cd07efa6d713dabe9991",
+      "lock_inventory_basis": "Lock file represented by encoded length; all other files by exact content."
+    },
+    {
+      "name": "unknown-intent-field",
+      "operation": "apply",
+      "stdin_base64": "eyJzb3VyY2UiOiJDOlxcVXNlcnNcXFB1YmxpY1xcRG9jdW1lbnRzXFxidWRkeS1yZXN0b3JlLWMzYjZhNGItNTM2OTA3MmItOTAwMC00NmMxLThlZWEtNTM4MDM2MWQ3NjYyXFxzb3VyY2UtYXJjaGl2ZSIsImludGVudCI6eyJyZXN0b3JlX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6Ijk2MjY5ZDgxLTM4OGItNGJmZi05NGFjLTJkNWRjNGY1MjkyMSIsImNvbmZpZ19wYXRoX3NoYTI1NiI6ImRmZDA3M2EzMTU4MzI0NjM3M2ViNzNkYmY4MGQ1NmUyYzJjOTBkY2NiMTM3ZWVkOGM5MzhmMGZjODNlZmExODAiLCJjb25maWdfc2hhMjU2IjoiNWJmZGFlNDVlMDNlMDkwYTYyYTA4ODNhNzcyNTk2ZmY0ZTM3OTQwODQ2YjBjYTZmMDJiNjg0ZjhkMmRmZmRiNyIsInNvdXJjZV9wYXRoX3NoYTI1NiI6IjhhMTY4NzcxMWE3YjQ2NTk4ZmNiYzY5NjkyNDFiNjQ1OTQwZWUzMjFmMjFlMmE0NmMzYmMxYWNhOWU5MjQ2MTciLCJhcmNoaXZlX3NoYTI1NiI6ImUyMmZlNzI3NDZiOGM0MzI4NTFkNmI0YmY5NjM4M2JkZTgwZTQ4MmM0NWJkN2QwNzM2NGVmM2UxZGYxMjlkMTYiLCJhY3RvciI6ImZlYjE0Mjc2LTU4NDYtNDRiNy04ZjkwLWUwODg3NzIzMjQ1ZiIsIm1vZGVfc2hhMjU2IjoiYmQ3OGIzMmJkNTllN2QzMjAxODA2MGQzM2MwZjg5YTVkMzFiZmQ0Yzk0NmYyMTZkMmJlOTgwMGViMTA5MjY1MiIsImJhc2VfZ2VuZXJhdGlvbiI6ImVkZGEyNzg0LWZjZDMtNDhlMC1iYTYzLTc4YjUzZmVmYWI1YSIsImJhc2VfaGlzdG9yeV9zaGEyNTYiOiIwZjljMDM4MDQ5MmU4NDZkNDZlYjEwZjA2OWUwNzQwYTkyNjRhYjQ2NDVmYWU0NjNjNDExZDY5YjU1YzI3YTNmIiwidGFyZ2V0X2dlbmVyYXRpb24iOiI4YmY1OWM2YS1kMjVhLTQ3NmUtYmQyYy0yZTcwOGFkNGVmNjIiLCJ0YXJnZXRfaGlzdG9yeV9zaGEyNTYiOiJiNmE5M2E1YjEzNTlkMjFiZmQ5YTVkZjBjZWQzZjM1NTllZGUzZTRkNzRlMjU4YWNlODhmZWNkNTg2MTYwZDk5Iiwic3RhZ2VkX2NvbmZpZ3VyYXRpb25fc2hhMjU2IjoiZGQ1ODEzMTdkM2M3NzAxYmM4YTg4NWZjNDM2YzA1NWU4ZWU4NDc5ZjI5MjgzNjYzMWEwOWMzZGJmMWVlMzFiZCIsImNvbXBsZXRlX21lZGlhIjp0cnVlLCJleHRyYSI6dHJ1ZX19",
+      "stdin_sha256": "d6ba02a660ac6357c0e37ae6144264aca5f6bfbfe9f40fe93e388eab3840fb5b",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "5160ee218c635824c6271a2c9984dc7c0729aee94d04cee79e2cb357de2ae39d",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "5bfdae45e03e090a62a0883a772596ff4e37940846b0ca6f02b684f8d2dffdb7",
+        "current_sha256": "c205505d61014aafaf5fcde187e69cde535f5b8bfe33964257a66c603996f854"
+      },
+      "after": {
+        "config_sha256": "5bfdae45e03e090a62a0883a772596ff4e37940846b0ca6f02b684f8d2dffdb7",
+        "current_sha256": "c205505d61014aafaf5fcde187e69cde535f5b8bfe33964257a66c603996f854"
+      },
+      "owned_inventory_sha256_before": "a8d5a5af781885f8a58dac27a1dc1038f77fda8feaa8cd07efa6d713dabe9991",
+      "owned_inventory_sha256_after": "a8d5a5af781885f8a58dac27a1dc1038f77fda8feaa8cd07efa6d713dabe9991",
+      "lock_inventory_basis": "Lock file represented by encoded length; all other files by exact content."
+    },
+    {
+      "name": "unsupported-version",
+      "operation": "apply",
+      "stdin_base64": "eyJzb3VyY2UiOiJDOlxcVXNlcnNcXFB1YmxpY1xcRG9jdW1lbnRzXFxidWRkeS1yZXN0b3JlLWMzYjZhNGItNTM2OTA3MmItOTAwMC00NmMxLThlZWEtNTM4MDM2MWQ3NjYyXFxzb3VyY2UtYXJjaGl2ZSIsImludGVudCI6eyJyZXN0b3JlX3ZlcnNpb24iOjIsIm9wZXJhdGlvbiI6Ijk2MjY5ZDgxLTM4OGItNGJmZi05NGFjLTJkNWRjNGY1MjkyMSIsImNvbmZpZ19wYXRoX3NoYTI1NiI6ImRmZDA3M2EzMTU4MzI0NjM3M2ViNzNkYmY4MGQ1NmUyYzJjOTBkY2NiMTM3ZWVkOGM5MzhmMGZjODNlZmExODAiLCJjb25maWdfc2hhMjU2IjoiNWJmZGFlNDVlMDNlMDkwYTYyYTA4ODNhNzcyNTk2ZmY0ZTM3OTQwODQ2YjBjYTZmMDJiNjg0ZjhkMmRmZmRiNyIsInNvdXJjZV9wYXRoX3NoYTI1NiI6IjhhMTY4NzcxMWE3YjQ2NTk4ZmNiYzY5NjkyNDFiNjQ1OTQwZWUzMjFmMjFlMmE0NmMzYmMxYWNhOWU5MjQ2MTciLCJhcmNoaXZlX3NoYTI1NiI6ImUyMmZlNzI3NDZiOGM0MzI4NTFkNmI0YmY5NjM4M2JkZTgwZTQ4MmM0NWJkN2QwNzM2NGVmM2UxZGYxMjlkMTYiLCJhY3RvciI6ImZlYjE0Mjc2LTU4NDYtNDRiNy04ZjkwLWUwODg3NzIzMjQ1ZiIsIm1vZGVfc2hhMjU2IjoiYmQ3OGIzMmJkNTllN2QzMjAxODA2MGQzM2MwZjg5YTVkMzFiZmQ0Yzk0NmYyMTZkMmJlOTgwMGViMTA5MjY1MiIsImJhc2VfZ2VuZXJhdGlvbiI6ImVkZGEyNzg0LWZjZDMtNDhlMC1iYTYzLTc4YjUzZmVmYWI1YSIsImJhc2VfaGlzdG9yeV9zaGEyNTYiOiIwZjljMDM4MDQ5MmU4NDZkNDZlYjEwZjA2OWUwNzQwYTkyNjRhYjQ2NDVmYWU0NjNjNDExZDY5YjU1YzI3YTNmIiwidGFyZ2V0X2dlbmVyYXRpb24iOiI4YmY1OWM2YS1kMjVhLTQ3NmUtYmQyYy0yZTcwOGFkNGVmNjIiLCJ0YXJnZXRfaGlzdG9yeV9zaGEyNTYiOiJiNmE5M2E1YjEzNTlkMjFiZmQ5YTVkZjBjZWQzZjM1NTllZGUzZTRkNzRlMjU4YWNlODhmZWNkNTg2MTYwZDk5Iiwic3RhZ2VkX2NvbmZpZ3VyYXRpb25fc2hhMjU2IjoiZGQ1ODEzMTdkM2M3NzAxYmM4YTg4NWZjNDM2YzA1NWU4ZWU4NDc5ZjI5MjgzNjYzMWEwOWMzZGJmMWVlMzFiZCIsImNvbXBsZXRlX21lZGlhIjp0cnVlfX0=",
+      "stdin_sha256": "48aae0ed8a49da1d7403470f593ff8ef3c529c10810889b0b5bd465f6f83f9cd",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"unsupported\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "facde4e87ef1007e152efd1f5ade787da52a368c8f1d957b020927d96764b9ed",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "5bfdae45e03e090a62a0883a772596ff4e37940846b0ca6f02b684f8d2dffdb7",
+        "current_sha256": "c205505d61014aafaf5fcde187e69cde535f5b8bfe33964257a66c603996f854"
+      },
+      "after": {
+        "config_sha256": "5bfdae45e03e090a62a0883a772596ff4e37940846b0ca6f02b684f8d2dffdb7",
+        "current_sha256": "c205505d61014aafaf5fcde187e69cde535f5b8bfe33964257a66c603996f854"
+      },
+      "owned_inventory_sha256_before": "a8d5a5af781885f8a58dac27a1dc1038f77fda8feaa8cd07efa6d713dabe9991",
+      "owned_inventory_sha256_after": "a8d5a5af781885f8a58dac27a1dc1038f77fda8feaa8cd07efa6d713dabe9991",
+      "lock_inventory_basis": "Lock file represented by encoded length; all other files by exact content."
+    },
+    {
+      "name": "oversized-stdin",
+      "operation": "apply",
+      "stdin_base64": "ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICA=",
+      "stdin_sha256": "0a6f21fda2a49df0c6671aacfe31136e24b4880f334ee89182752f35c2f0cb3d",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "5160ee218c635824c6271a2c9984dc7c0729aee94d04cee79e2cb357de2ae39d",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "5bfdae45e03e090a62a0883a772596ff4e37940846b0ca6f02b684f8d2dffdb7",
+        "current_sha256": "c205505d61014aafaf5fcde187e69cde535f5b8bfe33964257a66c603996f854"
+      },
+      "after": {
+        "config_sha256": "5bfdae45e03e090a62a0883a772596ff4e37940846b0ca6f02b684f8d2dffdb7",
+        "current_sha256": "c205505d61014aafaf5fcde187e69cde535f5b8bfe33964257a66c603996f854"
+      },
+      "owned_inventory_sha256_before": "a8d5a5af781885f8a58dac27a1dc1038f77fda8feaa8cd07efa6d713dabe9991",
+      "owned_inventory_sha256_after": "a8d5a5af781885f8a58dac27a1dc1038f77fda8feaa8cd07efa6d713dabe9991",
+      "lock_inventory_basis": "Lock file represented by encoded length; all other files by exact content."
+    },
+    {
+      "name": "trailing-json",
+      "operation": "apply",
+      "stdin_base64": "e30ge30=",
+      "stdin_sha256": "2cec2bbf1a64ea5249e8a7ab9ecc782fa48be13f0b35ad5f52bdea741841a230",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "5160ee218c635824c6271a2c9984dc7c0729aee94d04cee79e2cb357de2ae39d",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "5bfdae45e03e090a62a0883a772596ff4e37940846b0ca6f02b684f8d2dffdb7",
+        "current_sha256": "c205505d61014aafaf5fcde187e69cde535f5b8bfe33964257a66c603996f854"
+      },
+      "after": {
+        "config_sha256": "5bfdae45e03e090a62a0883a772596ff4e37940846b0ca6f02b684f8d2dffdb7",
+        "current_sha256": "c205505d61014aafaf5fcde187e69cde535f5b8bfe33964257a66c603996f854"
+      },
+      "owned_inventory_sha256_before": "a8d5a5af781885f8a58dac27a1dc1038f77fda8feaa8cd07efa6d713dabe9991",
+      "owned_inventory_sha256_after": "a8d5a5af781885f8a58dac27a1dc1038f77fda8feaa8cd07efa6d713dabe9991",
+      "lock_inventory_basis": "Lock file represented by encoded length; all other files by exact content."
+    },
+    {
+      "name": "duplicate-intent",
+      "operation": "apply",
+      "stdin_base64": "eyJpbnRlbnQiOnt9LCJpbnRlbnQiOnt9fQ==",
+      "stdin_sha256": "f694f98d83cfa48741102286a0f7ea6ae5c52136cb869672e5b29cf92215234c",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "5160ee218c635824c6271a2c9984dc7c0729aee94d04cee79e2cb357de2ae39d",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "5bfdae45e03e090a62a0883a772596ff4e37940846b0ca6f02b684f8d2dffdb7",
+        "current_sha256": "c205505d61014aafaf5fcde187e69cde535f5b8bfe33964257a66c603996f854"
+      },
+      "after": {
+        "config_sha256": "5bfdae45e03e090a62a0883a772596ff4e37940846b0ca6f02b684f8d2dffdb7",
+        "current_sha256": "c205505d61014aafaf5fcde187e69cde535f5b8bfe33964257a66c603996f854"
+      },
+      "owned_inventory_sha256_before": "a8d5a5af781885f8a58dac27a1dc1038f77fda8feaa8cd07efa6d713dabe9991",
+      "owned_inventory_sha256_after": "a8d5a5af781885f8a58dac27a1dc1038f77fda8feaa8cd07efa6d713dabe9991",
+      "lock_inventory_basis": "Lock file represented by encoded length; all other files by exact content."
+    },
+    {
+      "name": "owned-root-exact-refusal",
+      "operation": "prepare",
+      "stdin_base64": "eyJyZXN0b3JlX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6ImQ4N2I4NzkxLTU4NTAtNDljOS04ZjJkLTIyODczZTBlZWY2MiIsInNvdXJjZSI6IkM6XFxVc2Vyc1xcUHVibGljXFxEb2N1bWVudHNcXGJ1ZGR5LXJlc3RvcmUtYzNiNmE0Yi01MzY5MDcyYi05MDAwLTQ2YzEtOGVlYS01MzgwMzYxZDc2NjJcXHN0cmljdC10YXJnZXRcXGRhdGFcXGluc2lkZS1hcmNoaXZlIn0=",
+      "stdin_sha256": "c89010a8c1454fde30a2c475351c0d9e599c6c61e87bc65ac27fbd83de339763",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "dcada7fb674c564d3fa0e6bd129084ac20b5f3b1501715e5eaa1db0f61c5db9b",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "5bfdae45e03e090a62a0883a772596ff4e37940846b0ca6f02b684f8d2dffdb7",
+        "current_sha256": "c205505d61014aafaf5fcde187e69cde535f5b8bfe33964257a66c603996f854"
+      },
+      "after": {
+        "config_sha256": "5bfdae45e03e090a62a0883a772596ff4e37940846b0ca6f02b684f8d2dffdb7",
+        "current_sha256": "c205505d61014aafaf5fcde187e69cde535f5b8bfe33964257a66c603996f854"
+      },
+      "owned_inventory_sha256_before": "f54d6639829f77030d0ac5118dfb7ee2938ae8fc5b7cbde07a0c0fad2c1dbcdc",
+      "owned_inventory_sha256_after": "f54d6639829f77030d0ac5118dfb7ee2938ae8fc5b7cbde07a0c0fad2c1dbcdc",
+      "lock_inventory_basis": "Lock file represented by encoded length; all other files by exact content."
+    },
+    {
+      "name": "owned-root-case-alias-refusal",
+      "operation": "prepare",
+      "stdin_base64": "eyJyZXN0b3JlX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6IjNkOGVkNjU3LWZlMWMtNGI2NC1iMTEwLTU2ZjM2OGVmZGZjZSIsInNvdXJjZSI6ImM6XFx1U0VSU1xccFVCTElDXFxkT0NVTUVOVFNcXEJVRERZLVJFU1RPUkUtQzNCNkE0Qi01MzY5MDcyQi05MDAwLTQ2QzEtOEVFQS01MzgwMzYxRDc2NjJcXFNUUklDVC1UQVJHRVRcXERBVEFcXElOU0lERS1BUkNISVZFIn0=",
+      "stdin_sha256": "3d02129760b96a03753bbe855daba7d051c2e4e802e97c89a7b4a65c42d3c42c",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "dcada7fb674c564d3fa0e6bd129084ac20b5f3b1501715e5eaa1db0f61c5db9b",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "5bfdae45e03e090a62a0883a772596ff4e37940846b0ca6f02b684f8d2dffdb7",
+        "current_sha256": "c205505d61014aafaf5fcde187e69cde535f5b8bfe33964257a66c603996f854"
+      },
+      "after": {
+        "config_sha256": "5bfdae45e03e090a62a0883a772596ff4e37940846b0ca6f02b684f8d2dffdb7",
+        "current_sha256": "c205505d61014aafaf5fcde187e69cde535f5b8bfe33964257a66c603996f854"
+      },
+      "owned_inventory_sha256_before": "f54d6639829f77030d0ac5118dfb7ee2938ae8fc5b7cbde07a0c0fad2c1dbcdc",
+      "owned_inventory_sha256_after": "f54d6639829f77030d0ac5118dfb7ee2938ae8fc5b7cbde07a0c0fad2c1dbcdc",
+      "lock_inventory_basis": "Lock file represented by encoded length; all other files by exact content."
+    },
+    {
+      "name": "uninitialized-store-refusal",
+      "operation": "prepare",
+      "stdin_base64": "eyJyZXN0b3JlX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6IjEyODAwMWMxLTA3Y2UtNDY1NC1hNjEzLWJlNmQ5YTc4MTlmMSIsInNvdXJjZSI6IkM6XFxVc2Vyc1xcUHVibGljXFxEb2N1bWVudHNcXGJ1ZGR5LXJlc3RvcmUtYzNiNmE0Yi01MzY5MDcyYi05MDAwLTQ2YzEtOGVlYS01MzgwMzYxZDc2NjJcXHNvdXJjZS1hcmNoaXZlIn0=",
+      "stdin_sha256": "c832eb6c28e4266603c9162535bce01cf68481ed156103f15cb6335eadb5a5ae",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"unavailable\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "002922d87922930f7896fd423e85496919ce247c986a8f368d29d2dd31b1b4e0",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "f7a12ab72f8c708eab2dc8e7ab9cbf3388ca08d8ac091e2341a4ed496c0eac92",
+        "current_sha256": null
+      },
+      "after": {
+        "config_sha256": "f7a12ab72f8c708eab2dc8e7ab9cbf3388ca08d8ac091e2341a4ed496c0eac92",
+        "current_sha256": null
+      },
+      "owned_inventory_sha256_before": "a9a94757d2cf4a60ef1a28f62f1dd0aa5d79cba11aef6df4caf4343d5f8a02e7",
+      "owned_inventory_sha256_after": "a9a94757d2cf4a60ef1a28f62f1dd0aa5d79cba11aef6df4caf4343d5f8a02e7",
+      "lock_inventory_basis": "Lock file represented by encoded length; all other files by exact content."
+    },
+    {
+      "name": "corrupt-current-refusal",
+      "operation": "prepare",
+      "stdin_base64": "eyJyZXN0b3JlX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6ImNhZWZjNTI3LWZkODgtNGIzZS1iZGQ1LTIxM2VhYzFjMzBmYSIsInNvdXJjZSI6IkM6XFxVc2Vyc1xcUHVibGljXFxEb2N1bWVudHNcXGJ1ZGR5LXJlc3RvcmUtYzNiNmE0Yi01MzY5MDcyYi05MDAwLTQ2YzEtOGVlYS01MzgwMzYxZDc2NjJcXHNvdXJjZS1hcmNoaXZlIn0=",
+      "stdin_sha256": "b4eb92cb7458cf6f41b549a39f8a581553c2b5b60d297537979159319b440d8f",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"unsupported\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "cc325ce69cf39610f929b6399a04308021c860d654ee0d8a0b4846ae6deb0094",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "079b6679504d55f60421f670244ff5de262f7e93a024d1360066f477efe0b9f0",
+        "current_sha256": "b2b7d4a0af9fd823f6e772862fce16abf7bd9c6beb982e5948cfe16698e70c49"
+      },
+      "after": {
+        "config_sha256": "079b6679504d55f60421f670244ff5de262f7e93a024d1360066f477efe0b9f0",
+        "current_sha256": "b2b7d4a0af9fd823f6e772862fce16abf7bd9c6beb982e5948cfe16698e70c49"
+      },
+      "owned_inventory_sha256_before": "1ebffc9427c1882c63914f674415fe5629d93d179b0a761f632b98b299f5033b",
+      "owned_inventory_sha256_after": "1ebffc9427c1882c63914f674415fe5629d93d179b0a761f632b98b299f5033b",
+      "lock_inventory_basis": "Lock file represented by encoded length; all other files by exact content."
+    },
+    {
+      "name": "closed-output-prepare",
+      "operation": "prepare",
+      "stdin_base64": "eyJyZXN0b3JlX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6ImZjZDQzYzI1LTFjYTEtNGJmMC05YTc2LTM2NDNhZjYyY2NkZSIsInNvdXJjZSI6IkM6XFxVc2Vyc1xcUHVibGljXFxEb2N1bWVudHNcXGJ1ZGR5LXJlc3RvcmUtYzNiNmE0Yi01MzY5MDcyYi05MDAwLTQ2YzEtOGVlYS01MzgwMzYxZDc2NjJcXHNvdXJjZS1hcmNoaXZlIn0=",
+      "stdin_sha256": "ad093c480e77e8fcb8dd58f639ebdee5d6a3a637dd051ad4454f93695adf946b",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"ok\",\"outcome\":\"prepared\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"preview\":{\"source\":{\"manifests\":2,\"objects\":2,\"complete_media\":true,\"configuration_included\":true},\"target\":{\"manifests\":3,\"objects\":3,\"complete_media\":true,\"configuration_included\":true},\"additional_manifests\":2,\"additive\":true,\"configuration_applied\":false},\"intent\":{\"restore_version\":1,\"operation\":\"fcd43c25-1ca1-4bf0-9a76-3643af62ccde\",\"config_path_sha256\":\"64af13f9dd4b2b615af883d350ef0f986c50b30f79e61543807837fa97d2babf\",\"config_sha256\":\"7dc728132dcb7cc30cb1a01456863cde4f72813b6322fd31e506f95f88440154\",\"source_path_sha256\":\"8a1687711a7b46598fcbc6969241b645940ee321f21e2a46c3bc1aca9e924617\",\"archive_sha256\":\"e22fe72746b8c432851d6b4bf96383bde80e482c45bd7d07364ef3e1df129d16\",\"actor\":\"de2befa8-8c3a-4dc6-bf22-bfcb4471a78b\",\"mode_sha256\":\"aa4d462177e58ffb9f4e29b84e7b457758af8b0ca4f901c9a2a549bf2b6cd7a3\",\"base_generation\":\"1a86e259-ba7b-4983-bb36-29e2234375b5\",\"base_history_sha256\":\"212daba82986cf3bc1330ab2227ebb910082d706320cf295045ec27aaee7fe7a\",\"target_generation\":\"f0921055-c517-4e23-a7f8-f969b576fe85\",\"target_history_sha256\":\"dacd00a83d95e11003fd04921d11fd7a3be047e349d1dece59984a436c191a67\",\"staged_configuration_sha256\":\"dd581317d3c7701bc8a885fc436c055e8ee8479f292836631a09c3dbf1ee31bd\",\"complete_media\":true}}}\n",
+      "stdout_sha256": "01ccf80b7b2c97e2c8cdd2d7eb48fc17da8f2c1e6309a31a67d7063c0617541b",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "7dc728132dcb7cc30cb1a01456863cde4f72813b6322fd31e506f95f88440154",
+        "current_sha256": "bbc2ab0552dcd916676b04f7e65a8a272e439146a68dd0666257ff0b8ad2158b"
+      },
+      "after": {
+        "config_sha256": "7dc728132dcb7cc30cb1a01456863cde4f72813b6322fd31e506f95f88440154",
+        "current_sha256": "bbc2ab0552dcd916676b04f7e65a8a272e439146a68dd0666257ff0b8ad2158b"
+      },
+      "owned_inventory_sha256_before": "c8fcb0e89d237622424a1b84ac8548b706b5354e8a78848ca2c15834d08c79a2",
+      "owned_inventory_sha256_after": "c8fcb0e89d237622424a1b84ac8548b706b5354e8a78848ca2c15834d08c79a2",
+      "lock_inventory_basis": "Lock file represented by encoded length; all other files by exact content."
+    },
+    {
+      "name": "status-after-actual-closed-output-apply",
+      "operation": "status",
+      "stdin_base64": "eyJzb3VyY2UiOiJDOlxcVXNlcnNcXFB1YmxpY1xcRG9jdW1lbnRzXFxidWRkeS1yZXN0b3JlLWMzYjZhNGItNTM2OTA3MmItOTAwMC00NmMxLThlZWEtNTM4MDM2MWQ3NjYyXFxzb3VyY2UtYXJjaGl2ZSIsImludGVudCI6eyJyZXN0b3JlX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6ImZjZDQzYzI1LTFjYTEtNGJmMC05YTc2LTM2NDNhZjYyY2NkZSIsImNvbmZpZ19wYXRoX3NoYTI1NiI6IjY0YWYxM2Y5ZGQ0YjJiNjE1YWY4ODNkMzUwZWYwZjk4NmM1MGIzMGY3OWU2MTU0MzgwNzgzN2ZhOTdkMmJhYmYiLCJjb25maWdfc2hhMjU2IjoiN2RjNzI4MTMyZGNiN2NjMzBjYjFhMDE0NTY4NjNjZGU0ZjcyODEzYjYzMjJmZDMxZTUwNmY5NWY4ODQ0MDE1NCIsInNvdXJjZV9wYXRoX3NoYTI1NiI6IjhhMTY4NzcxMWE3YjQ2NTk4ZmNiYzY5NjkyNDFiNjQ1OTQwZWUzMjFmMjFlMmE0NmMzYmMxYWNhOWU5MjQ2MTciLCJhcmNoaXZlX3NoYTI1NiI6ImUyMmZlNzI3NDZiOGM0MzI4NTFkNmI0YmY5NjM4M2JkZTgwZTQ4MmM0NWJkN2QwNzM2NGVmM2UxZGYxMjlkMTYiLCJhY3RvciI6ImRlMmJlZmE4LThjM2EtNGRjNi1iZjIyLWJmY2I0NDcxYTc4YiIsIm1vZGVfc2hhMjU2IjoiYWE0ZDQ2MjE3N2U1OGZmYjlmNGUyOWI4NGU3YjQ1Nzc1OGFmOGIwY2E0ZjkwMWM5YTJhNTQ5YmYyYjZjZDdhMyIsImJhc2VfZ2VuZXJhdGlvbiI6IjFhODZlMjU5LWJhN2ItNDk4My1iYjM2LTI5ZTIyMzQzNzViNSIsImJhc2VfaGlzdG9yeV9zaGEyNTYiOiIyMTJkYWJhODI5ODZjZjNiYzEzMzBhYjIyMjdlYmI5MTAwODJkNzA2MzIwY2YyOTUwNDVlYzI3YWFlZTdmZTdhIiwidGFyZ2V0X2dlbmVyYXRpb24iOiJmMDkyMTA1NS1jNTE3LTRlMjMtYTdmOC1mOTY5YjU3NmZlODUiLCJ0YXJnZXRfaGlzdG9yeV9zaGEyNTYiOiJkYWNkMDBhODNkOTVlMTEwMDNmZDA0OTIxZDExZmQ3YTNiZTA0N2UzNDlkMWRlY2U1OTk4NGE0MzZjMTkxYTY3Iiwic3RhZ2VkX2NvbmZpZ3VyYXRpb25fc2hhMjU2IjoiZGQ1ODEzMTdkM2M3NzAxYmM4YTg4NWZjNDM2YzA1NWU4ZWU4NDc5ZjI5MjgzNjYzMWEwOWMzZGJmMWVlMzFiZCIsImNvbXBsZXRlX21lZGlhIjp0cnVlfX0=",
+      "stdin_sha256": "2b0801a532237c06738f57b2906acba1e6c47d9a8df1a4d926eb5a023d743428",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"status\",\"status\":\"ok\",\"outcome\":\"desired-generation-observed\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"inspection\":{\"manifests\":3,\"objects\":3,\"complete_media\":true,\"configuration_included\":true},\"configuration_applied\":false}}\n",
+      "stdout_sha256": "1bb80d59e62866e6fb7e38a90f5090bfaa9a430b077eb2b93e4a77399df175f4",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "7dc728132dcb7cc30cb1a01456863cde4f72813b6322fd31e506f95f88440154",
+        "current_sha256": "c6d74ceef9b0c23904fd5f6ddced2e06c70dd8d8697d62dc3f3c9e552bd34676"
+      },
+      "after": {
+        "config_sha256": "7dc728132dcb7cc30cb1a01456863cde4f72813b6322fd31e506f95f88440154",
+        "current_sha256": "c6d74ceef9b0c23904fd5f6ddced2e06c70dd8d8697d62dc3f3c9e552bd34676"
+      },
+      "owned_inventory_sha256_before": "2c12f19b45eab2a58fad3cda04873d5c145e76e4f075020d5924f5e440d62640",
+      "owned_inventory_sha256_after": "2c12f19b45eab2a58fad3cda04873d5c145e76e4f075020d5924f5e440d62640",
+      "lock_inventory_basis": "Lock file represented by encoded length; all other files by exact content."
+    },
+    {
+      "name": "source-absent-prepare",
+      "operation": "prepare",
+      "stdin_base64": "eyJyZXN0b3JlX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6ImZhNzEzYjU0LTgzYmUtNDNjMC05MjJiLTJlN2E4YzI0OTkzNiIsInNvdXJjZSI6IkM6XFxVc2Vyc1xcUHVibGljXFxEb2N1bWVudHNcXGJ1ZGR5LXJlc3RvcmUtYzNiNmE0Yi01MzY5MDcyYi05MDAwLTQ2YzEtOGVlYS01MzgwMzYxZDc2NjJcXHNvdXJjZS1hcmNoaXZlIn0=",
+      "stdin_sha256": "585e9dae757a7ac6c5264094a9e8ec65e9d6d49e0309d8d686aec3b572d1ade0",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"ok\",\"outcome\":\"prepared\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"preview\":{\"source\":{\"manifests\":2,\"objects\":2,\"complete_media\":true,\"configuration_included\":true},\"target\":{\"manifests\":3,\"objects\":3,\"complete_media\":true,\"configuration_included\":true},\"additional_manifests\":2,\"additive\":true,\"configuration_applied\":false},\"intent\":{\"restore_version\":1,\"operation\":\"fa713b54-83be-43c0-922b-2e7a8c249936\",\"config_path_sha256\":\"2e5594e3b6b5700679adcffe8f65e2fdeec0d36f9a81b964c04567d98fda9115\",\"config_sha256\":\"3c84bfc4390b33882a41e1a29cc36fb3124c2cd2a592df4478d57216597bdefd\",\"source_path_sha256\":\"8a1687711a7b46598fcbc6969241b645940ee321f21e2a46c3bc1aca9e924617\",\"archive_sha256\":\"e22fe72746b8c432851d6b4bf96383bde80e482c45bd7d07364ef3e1df129d16\",\"actor\":\"eac5fccf-3913-4f02-afe6-fa138dbdbfdd\",\"mode_sha256\":\"eeedbd1acd368a2fd24e8e924c62e1df4cd61dfed6ab6811c37344e5a18739b7\",\"base_generation\":\"9814e00b-9640-4488-8fd1-bf5f2434859f\",\"base_history_sha256\":\"cfb7ae788d4f8379393ded8d5893503edaa5741c6f43d08c4a1007683af1be5d\",\"target_generation\":\"0cacca18-3381-472f-82c3-48fd69df1f08\",\"target_history_sha256\":\"8729ea6a1666c4ef97940ee8ffd4ae9243d64323b595e648ed1f2116b3807caa\",\"staged_configuration_sha256\":\"dd581317d3c7701bc8a885fc436c055e8ee8479f292836631a09c3dbf1ee31bd\",\"complete_media\":true}}}\n",
+      "stdout_sha256": "c0c7fe260b798f097f3a6a3bb64f2019573342c7296c6774eebe92982440be67",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "3c84bfc4390b33882a41e1a29cc36fb3124c2cd2a592df4478d57216597bdefd",
+        "current_sha256": "491aebc64275d8225695692a14213eae407cdf77eec9e749a860431d2bd72e59"
+      },
+      "after": {
+        "config_sha256": "3c84bfc4390b33882a41e1a29cc36fb3124c2cd2a592df4478d57216597bdefd",
+        "current_sha256": "491aebc64275d8225695692a14213eae407cdf77eec9e749a860431d2bd72e59"
+      },
+      "owned_inventory_sha256_before": "e6329032f8f1a2d878221cbd19caa372bade947a8c6d25e3d3c06e43a0481235",
+      "owned_inventory_sha256_after": "e6329032f8f1a2d878221cbd19caa372bade947a8c6d25e3d3c06e43a0481235",
+      "lock_inventory_basis": "Lock file represented by encoded length; all other files by exact content."
+    },
+    {
+      "name": "source-absent-apply",
+      "operation": "apply",
+      "stdin_base64": "eyJzb3VyY2UiOiJDOlxcVXNlcnNcXFB1YmxpY1xcRG9jdW1lbnRzXFxidWRkeS1yZXN0b3JlLWMzYjZhNGItNTM2OTA3MmItOTAwMC00NmMxLThlZWEtNTM4MDM2MWQ3NjYyXFxzb3VyY2UtYXJjaGl2ZSIsImludGVudCI6eyJyZXN0b3JlX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6ImZhNzEzYjU0LTgzYmUtNDNjMC05MjJiLTJlN2E4YzI0OTkzNiIsImNvbmZpZ19wYXRoX3NoYTI1NiI6IjJlNTU5NGUzYjZiNTcwMDY3OWFkY2ZmZThmNjVlMmZkZWVjMGQzNmY5YTgxYjk2NGMwNDU2N2Q5OGZkYTkxMTUiLCJjb25maWdfc2hhMjU2IjoiM2M4NGJmYzQzOTBiMzM4ODJhNDFlMWEyOWNjMzZmYjMxMjRjMmNkMmE1OTJkZjQ0NzhkNTcyMTY1OTdiZGVmZCIsInNvdXJjZV9wYXRoX3NoYTI1NiI6IjhhMTY4NzcxMWE3YjQ2NTk4ZmNiYzY5NjkyNDFiNjQ1OTQwZWUzMjFmMjFlMmE0NmMzYmMxYWNhOWU5MjQ2MTciLCJhcmNoaXZlX3NoYTI1NiI6ImUyMmZlNzI3NDZiOGM0MzI4NTFkNmI0YmY5NjM4M2JkZTgwZTQ4MmM0NWJkN2QwNzM2NGVmM2UxZGYxMjlkMTYiLCJhY3RvciI6ImVhYzVmY2NmLTM5MTMtNGYwMi1hZmU2LWZhMTM4ZGJkYmZkZCIsIm1vZGVfc2hhMjU2IjoiZWVlZGJkMWFjZDM2OGEyZmQyNGU4ZTkyNGM2MmUxZGY0Y2Q2MWRmZWQ2YWI2ODExYzM3MzQ0ZTVhMTg3MzliNyIsImJhc2VfZ2VuZXJhdGlvbiI6Ijk4MTRlMDBiLTk2NDAtNDQ4OC04ZmQxLWJmNWYyNDM0ODU5ZiIsImJhc2VfaGlzdG9yeV9zaGEyNTYiOiJjZmI3YWU3ODhkNGY4Mzc5MzkzZGVkOGQ1ODkzNTAzZWRhYTU3NDFjNmY0M2QwOGM0YTEwMDc2ODNhZjFiZTVkIiwidGFyZ2V0X2dlbmVyYXRpb24iOiIwY2FjY2ExOC0zMzgxLTQ3MmYtODJjMy00OGZkNjlkZjFmMDgiLCJ0YXJnZXRfaGlzdG9yeV9zaGEyNTYiOiI4NzI5ZWE2YTE2NjZjNGVmOTc5NDBlZThmZmQ0YWU5MjQzZDY0MzIzYjU5NWU2NDhlZDFmMjExNmIzODA3Y2FhIiwic3RhZ2VkX2NvbmZpZ3VyYXRpb25fc2hhMjU2IjoiZGQ1ODEzMTdkM2M3NzAxYmM4YTg4NWZjNDM2YzA1NWU4ZWU4NDc5ZjI5MjgzNjYzMWEwOWMzZGJmMWVlMzFiZCIsImNvbXBsZXRlX21lZGlhIjp0cnVlfX0=",
+      "stdin_sha256": "0805d699742cf2477b074c041b09d7409990b1b7d3a79141c5d4f1f94d565edb",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"ok\",\"outcome\":\"restored\",\"disk_readback_verified\":true,\"runtime_activation\":\"unverified\",\"data\":{\"inspection\":{\"manifests\":3,\"objects\":3,\"complete_media\":true,\"configuration_included\":true},\"configuration_applied\":false}}\n",
+      "stdout_sha256": "5a3c19fa0dddfe2ccab50a9339fc510a47a79216ae630d9c64b872293aa1221b",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "3c84bfc4390b33882a41e1a29cc36fb3124c2cd2a592df4478d57216597bdefd",
+        "current_sha256": "491aebc64275d8225695692a14213eae407cdf77eec9e749a860431d2bd72e59"
+      },
+      "after": {
+        "config_sha256": "3c84bfc4390b33882a41e1a29cc36fb3124c2cd2a592df4478d57216597bdefd",
+        "current_sha256": "16cdae14008a9bc2731a4f564e08a23f4a5ea524d794456e93c55d999ce0bb99"
+      },
+      "owned_inventory_sha256_before": "e6329032f8f1a2d878221cbd19caa372bade947a8c6d25e3d3c06e43a0481235",
+      "owned_inventory_sha256_after": "8fb58c189ccae6ef5e0952f5c615a592062e528f56336b69c874da907a05fc8f",
+      "lock_inventory_basis": "Lock file represented by encoded length; all other files by exact content."
+    },
+    {
+      "name": "status-with-original-archive-path-absent",
+      "operation": "status",
+      "stdin_base64": "eyJzb3VyY2UiOiJDOlxcVXNlcnNcXFB1YmxpY1xcRG9jdW1lbnRzXFxidWRkeS1yZXN0b3JlLWMzYjZhNGItNTM2OTA3MmItOTAwMC00NmMxLThlZWEtNTM4MDM2MWQ3NjYyXFxzb3VyY2UtYXJjaGl2ZSIsImludGVudCI6eyJyZXN0b3JlX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6ImZhNzEzYjU0LTgzYmUtNDNjMC05MjJiLTJlN2E4YzI0OTkzNiIsImNvbmZpZ19wYXRoX3NoYTI1NiI6IjJlNTU5NGUzYjZiNTcwMDY3OWFkY2ZmZThmNjVlMmZkZWVjMGQzNmY5YTgxYjk2NGMwNDU2N2Q5OGZkYTkxMTUiLCJjb25maWdfc2hhMjU2IjoiM2M4NGJmYzQzOTBiMzM4ODJhNDFlMWEyOWNjMzZmYjMxMjRjMmNkMmE1OTJkZjQ0NzhkNTcyMTY1OTdiZGVmZCIsInNvdXJjZV9wYXRoX3NoYTI1NiI6IjhhMTY4NzcxMWE3YjQ2NTk4ZmNiYzY5NjkyNDFiNjQ1OTQwZWUzMjFmMjFlMmE0NmMzYmMxYWNhOWU5MjQ2MTciLCJhcmNoaXZlX3NoYTI1NiI6ImUyMmZlNzI3NDZiOGM0MzI4NTFkNmI0YmY5NjM4M2JkZTgwZTQ4MmM0NWJkN2QwNzM2NGVmM2UxZGYxMjlkMTYiLCJhY3RvciI6ImVhYzVmY2NmLTM5MTMtNGYwMi1hZmU2LWZhMTM4ZGJkYmZkZCIsIm1vZGVfc2hhMjU2IjoiZWVlZGJkMWFjZDM2OGEyZmQyNGU4ZTkyNGM2MmUxZGY0Y2Q2MWRmZWQ2YWI2ODExYzM3MzQ0ZTVhMTg3MzliNyIsImJhc2VfZ2VuZXJhdGlvbiI6Ijk4MTRlMDBiLTk2NDAtNDQ4OC04ZmQxLWJmNWYyNDM0ODU5ZiIsImJhc2VfaGlzdG9yeV9zaGEyNTYiOiJjZmI3YWU3ODhkNGY4Mzc5MzkzZGVkOGQ1ODkzNTAzZWRhYTU3NDFjNmY0M2QwOGM0YTEwMDc2ODNhZjFiZTVkIiwidGFyZ2V0X2dlbmVyYXRpb24iOiIwY2FjY2ExOC0zMzgxLTQ3MmYtODJjMy00OGZkNjlkZjFmMDgiLCJ0YXJnZXRfaGlzdG9yeV9zaGEyNTYiOiI4NzI5ZWE2YTE2NjZjNGVmOTc5NDBlZThmZmQ0YWU5MjQzZDY0MzIzYjU5NWU2NDhlZDFmMjExNmIzODA3Y2FhIiwic3RhZ2VkX2NvbmZpZ3VyYXRpb25fc2hhMjU2IjoiZGQ1ODEzMTdkM2M3NzAxYmM4YTg4NWZjNDM2YzA1NWU4ZWU4NDc5ZjI5MjgzNjYzMWEwOWMzZGJmMWVlMzFiZCIsImNvbXBsZXRlX21lZGlhIjp0cnVlfX0=",
+      "stdin_sha256": "0805d699742cf2477b074c041b09d7409990b1b7d3a79141c5d4f1f94d565edb",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"status\",\"status\":\"ok\",\"outcome\":\"desired-generation-observed\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"inspection\":{\"manifests\":3,\"objects\":3,\"complete_media\":true,\"configuration_included\":true},\"configuration_applied\":false}}\n",
+      "stdout_sha256": "1bb80d59e62866e6fb7e38a90f5090bfaa9a430b077eb2b93e4a77399df175f4",
+      "stderr_utf8": "",
+      "exit": 0,
+      "before": {
+        "config_sha256": "3c84bfc4390b33882a41e1a29cc36fb3124c2cd2a592df4478d57216597bdefd",
+        "current_sha256": "16cdae14008a9bc2731a4f564e08a23f4a5ea524d794456e93c55d999ce0bb99"
+      },
+      "after": {
+        "config_sha256": "3c84bfc4390b33882a41e1a29cc36fb3124c2cd2a592df4478d57216597bdefd",
+        "current_sha256": "16cdae14008a9bc2731a4f564e08a23f4a5ea524d794456e93c55d999ce0bb99"
+      },
+      "owned_inventory_sha256_before": "8fb58c189ccae6ef5e0952f5c615a592062e528f56336b69c874da907a05fc8f",
+      "owned_inventory_sha256_after": "8fb58c189ccae6ef5e0952f5c615a592062e528f56336b69c874da907a05fc8f",
+      "lock_inventory_basis": "Lock file represented by encoded length; all other files by exact content."
+    }
+  ],
+  "output_failure_specimens": [
+    {
+      "name": "closed-output-apply",
+      "operation": "apply",
+      "stdin_base64": "eyJzb3VyY2UiOiJDOlxcVXNlcnNcXFB1YmxpY1xcRG9jdW1lbnRzXFxidWRkeS1yZXN0b3JlLWMzYjZhNGItNTM2OTA3MmItOTAwMC00NmMxLThlZWEtNTM4MDM2MWQ3NjYyXFxzb3VyY2UtYXJjaGl2ZSIsImludGVudCI6eyJyZXN0b3JlX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6ImZjZDQzYzI1LTFjYTEtNGJmMC05YTc2LTM2NDNhZjYyY2NkZSIsImNvbmZpZ19wYXRoX3NoYTI1NiI6IjY0YWYxM2Y5ZGQ0YjJiNjE1YWY4ODNkMzUwZWYwZjk4NmM1MGIzMGY3OWU2MTU0MzgwNzgzN2ZhOTdkMmJhYmYiLCJjb25maWdfc2hhMjU2IjoiN2RjNzI4MTMyZGNiN2NjMzBjYjFhMDE0NTY4NjNjZGU0ZjcyODEzYjYzMjJmZDMxZTUwNmY5NWY4ODQ0MDE1NCIsInNvdXJjZV9wYXRoX3NoYTI1NiI6IjhhMTY4NzcxMWE3YjQ2NTk4ZmNiYzY5NjkyNDFiNjQ1OTQwZWUzMjFmMjFlMmE0NmMzYmMxYWNhOWU5MjQ2MTciLCJhcmNoaXZlX3NoYTI1NiI6ImUyMmZlNzI3NDZiOGM0MzI4NTFkNmI0YmY5NjM4M2JkZTgwZTQ4MmM0NWJkN2QwNzM2NGVmM2UxZGYxMjlkMTYiLCJhY3RvciI6ImRlMmJlZmE4LThjM2EtNGRjNi1iZjIyLWJmY2I0NDcxYTc4YiIsIm1vZGVfc2hhMjU2IjoiYWE0ZDQ2MjE3N2U1OGZmYjlmNGUyOWI4NGU3YjQ1Nzc1OGFmOGIwY2E0ZjkwMWM5YTJhNTQ5YmYyYjZjZDdhMyIsImJhc2VfZ2VuZXJhdGlvbiI6IjFhODZlMjU5LWJhN2ItNDk4My1iYjM2LTI5ZTIyMzQzNzViNSIsImJhc2VfaGlzdG9yeV9zaGEyNTYiOiIyMTJkYWJhODI5ODZjZjNiYzEzMzBhYjIyMjdlYmI5MTAwODJkNzA2MzIwY2YyOTUwNDVlYzI3YWFlZTdmZTdhIiwidGFyZ2V0X2dlbmVyYXRpb24iOiJmMDkyMTA1NS1jNTE3LTRlMjMtYTdmOC1mOTY5YjU3NmZlODUiLCJ0YXJnZXRfaGlzdG9yeV9zaGEyNTYiOiJkYWNkMDBhODNkOTVlMTEwMDNmZDA0OTIxZDExZmQ3YTNiZTA0N2UzNDlkMWRlY2U1OTk4NGE0MzZjMTkxYTY3Iiwic3RhZ2VkX2NvbmZpZ3VyYXRpb25fc2hhMjU2IjoiZGQ1ODEzMTdkM2M3NzAxYmM4YTg4NWZjNDM2YzA1NWU4ZWU4NDc5ZjI5MjgzNjYzMWEwOWMzZGJmMWVlMzFiZCIsImNvbXBsZXRlX21lZGlhIjp0cnVlfX0=",
+      "stdin_sha256": "2b0801a532237c06738f57b2906acba1e6c47d9a8df1a4d926eb5a023d743428",
+      "stdout_observed": false,
+      "stdout_utf8": null,
+      "stderr_utf8": "Error: The pipe is being closed. (os error 232)\n",
+      "stderr_sha256": "b67cd26fcf246e997aeb26667e1e96150942d38b16a96b2534f4c6cce2570328",
+      "exit": 1,
+      "before": {
+        "config_sha256": "7dc728132dcb7cc30cb1a01456863cde4f72813b6322fd31e506f95f88440154",
+        "current_sha256": "bbc2ab0552dcd916676b04f7e65a8a272e439146a68dd0666257ff0b8ad2158b"
+      },
+      "after": {
+        "config_sha256": "7dc728132dcb7cc30cb1a01456863cde4f72813b6322fd31e506f95f88440154",
+        "current_sha256": "c6d74ceef9b0c23904fd5f6ddced2e06c70dd8d8697d62dc3f3c9e552bd34676"
+      },
+      "induction": "Actual subprocess stdout read-end closed before dispatch; no complete report was observed. This is not a captured producer JSON report."
+    }
+  ],
+  "before_fix_windows_boundary": {
+    "source_commit": "2093e2ca606fe93cd07e33417aa1848fb6d3bf94",
+    "producer_executable_sha256": "eddb04b4214b02c3ede6a1287602364fd34ce9387d040fb32f79e40c665a9ebb",
+    "resolved_same_archive": true,
+    "cases": [
+      {
+        "name": "exact",
+        "stdin_base64": "eyJyZXN0b3JlX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6ImFjNzJkZjdjLWRhOWQtNGZiZC05Yjk5LTg1Zjg0YjI3ODk1MSIsInNvdXJjZSI6IkM6XFxVc2Vyc1xcUHVibGljXFxEb2N1bWVudHNcXGJ1ZGR5LXJlc3RvcmUtY2FzZS1mMjRlZTJlNi0wZDI3LTRlODAtOTkzNC0xNTVlNjNlMjY2ZjdcXHRhcmdldFxcZGF0YVxcaW5zaWRlLWFyY2hpdmUifQ==",
+        "stdin_sha256": "c499003a360724924d42e2902128d162f9b3bc5528955ec5c0bd976109f8d478",
+        "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+        "stdout_sha256": "dcada7fb674c564d3fa0e6bd129084ac20b5f3b1501715e5eaa1db0f61c5db9b"
+      },
+      {
+        "name": "case-alias",
+        "stdin_base64": "eyJyZXN0b3JlX3ZlcnNpb24iOjEsIm9wZXJhdGlvbiI6IjY5Y2RjYTMxLWZmYTAtNDhhMS1iYjA2LTU2ZmE5MjdjYmZjMSIsInNvdXJjZSI6ImM6XFx1U0VSU1xccFVCTElDXFxkT0NVTUVOVFNcXEJVRERZLVJFU1RPUkUtQ0FTRS1GMjRFRTJFNi0wRDI3LTRFODAtOTkzNC0xNTVFNjNFMjY2RjdcXFRBUkdFVFxcREFUQVxcSU5TSURFLUFSQ0hJVkUifQ==",
+        "stdin_sha256": "9858165d9e1678d1b49ae080d76f8ecb30ac87dbaf3bfdd94c68d9927ea34671",
+        "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"ok\",\"outcome\":\"prepared\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"preview\":{\"source\":{\"manifests\":1,\"objects\":1,\"complete_media\":true,\"configuration_included\":true},\"target\":{\"manifests\":2,\"objects\":2,\"complete_media\":true,\"configuration_included\":true},\"additional_manifests\":1,\"additive\":true,\"configuration_applied\":false},\"intent\":{\"restore_version\":1,\"operation\":\"69cdca31-ffa0-48a1-bb06-56fa927cbfc1\",\"config_path_sha256\":\"dec89960c72dfccdefc13ffac4659c4a14d3ae19465c8dc3c1a65f5255b414de\",\"config_sha256\":\"957cf349163d2d4e52e2510a7f60c9893ade83b3970ba42ee292810a04271408\",\"source_path_sha256\":\"468b4f2dd1a3da6658005e47d9f787606044095cf6d502c4b3a6327574a075b9\",\"archive_sha256\":\"f1fa442cc7a6e5b38a055030443e38d956c349210c342b13ea8cc5ce1c77166c\",\"actor\":\"46f7b3ec-6fef-4218-9915-2d9ba7bf363b\",\"mode_sha256\":\"0df0f108936eedacd52093072f010a0e62d85403ec4e342039b6208f2cab4aa9\",\"base_generation\":\"6ed6fc95-b77e-4fcc-9ec1-215df0681cea\",\"base_history_sha256\":\"f1977e92ecfdcd6e44ff4c6d4093bf5a9d3c19c314cd02b03f01e566357508f6\",\"target_generation\":\"10c2ce77-a241-4a3b-9159-3b6afb4a05fb\",\"target_history_sha256\":\"3f801d8c487ba4c8ed6b84a0ffabf390720e23218186eb5defcaa479b39b9dfa\",\"staged_configuration_sha256\":\"055e4201c9bc41b83c4e9d5a7cf5d4685885e1249a9bf0321d8d9076f3bcdadc\",\"complete_media\":true}}}\n",
+        "stdout_sha256": "27475796bbb62c93bed0d33b0abbf5fae83332ecc81390aab8e88eebd705cd1d"
+      }
+    ],
+    "basis": "Separately retained before-fix preparation observation. No apply ran. This is not a current-source successful admission or a replay during this capture."
+  },
+  "limitations": "Selected-format/missing-media/concurrency/in-process activation/readback/prefix fault controls remain separately attributed to tests. The closed-output specimen is actual CLI pipe failure, not a JSON report, network loss or USB test. Desired-state status proves neither historical publisher identity nor runtime/native readiness.",
+  "capture_resume_basis": "Initial partial capture stopped on an exact owned lock-file inventory read before busy dispatch. Original stdout/stdin bytes are reused and hashed without replay; original executable digest was computed but not durably persisted before that diagnostic. No product rebuild or code change occurred. Digest is durably sampled before resumed commands and at capture end. Per-case inventory recipe distinguishes initial raw lock bytes from resumed exact-owned-lock length normalization."
+}

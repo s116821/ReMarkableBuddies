@@ -289,6 +289,9 @@ fn input(operation: Operation, path: &Path, scope: &SelectionScope) -> Result<In
 }
 pub fn run(operation: Operation, path: &Path, config_path: Option<PathBuf>) -> Report {
     let name = operation.name();
+    if path == Path::new("-") {
+        return Report::new(name, Status::InvalidInput);
+    }
     let Some(config_path) = config_path else {
         return Report::new(name, Status::Unavailable);
     };

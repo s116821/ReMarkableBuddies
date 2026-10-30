@@ -1,0 +1,98 @@
+{
+  "recipe_version": 1,
+  "basis": "Python stdlib recipe calculation; artificial PNG descriptor, not image/recognition/confirmation qualification.",
+  "profile": "11111111-1111-4111-8111-111111111111",
+  "correction": "22222222-2222-4222-8222-222222222222",
+  "operation": "33333333-3333-4333-8333-333333333333",
+  "record_id": "10b80489-3eb7-534e-84a0-3e39b40dcda8",
+  "value": {
+    "input": {
+      "kind": "confirmed-correction",
+      "profile": "11111111-1111-4111-8111-111111111111",
+      "correction": "22222222-2222-4222-8222-222222222222",
+      "original_text": "F = 1O N.\n",
+      "corrected_text": "F = 10 N; m/s².\n",
+      "confirmed_ms": 1,
+      "provenance": {
+        "kind": "caller-confirmed-sample",
+        "description": "Recipe vector only.",
+        "source": null
+      },
+      "sample": {
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "bytes": 512,
+        "media_type": "image/png"
+      },
+      "width": 32,
+      "height": 16
+    },
+    "compact_utf8": "{\"kind\":\"confirmed-correction\",\"profile\":\"11111111-1111-4111-8111-111111111111\",\"correction\":\"22222222-2222-4222-8222-222222222222\",\"original_text\":\"F = 1O N.\\n\",\"corrected_text\":\"F = 10 N; m/s².\\n\",\"confirmed_ms\":1,\"provenance\":{\"kind\":\"caller-confirmed-sample\",\"description\":\"Recipe vector only.\",\"source\":null},\"sample\":{\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"bytes\":512,\"media_type\":\"image/png\"},\"width\":32,\"height\":16}",
+    "sha256": "bf1005644d6d30920ba0c5a21562c9e805f7722af8c5f81f323e34f3dcef6b0c"
+  },
+  "changed_value": {
+    "input": {
+      "kind": "confirmed-correction",
+      "profile": "11111111-1111-4111-8111-111111111111",
+      "correction": "22222222-2222-4222-8222-222222222222",
+      "original_text": "F = 1O N.\n",
+      "corrected_text": "F = 11 N; m/s².\n",
+      "confirmed_ms": 2,
+      "provenance": {
+        "kind": "caller-confirmed-sample",
+        "description": "Recipe vector only.",
+        "source": null
+      },
+      "sample": {
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "bytes": 512,
+        "media_type": "image/png"
+      },
+      "width": 32,
+      "height": 16
+    },
+    "compact_utf8": "{\"kind\":\"confirmed-correction\",\"profile\":\"11111111-1111-4111-8111-111111111111\",\"correction\":\"22222222-2222-4222-8222-222222222222\",\"original_text\":\"F = 1O N.\\n\",\"corrected_text\":\"F = 11 N; m/s².\\n\",\"confirmed_ms\":2,\"provenance\":{\"kind\":\"caller-confirmed-sample\",\"description\":\"Recipe vector only.\",\"source\":null},\"sample\":{\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"bytes\":512,\"media_type\":\"image/png\"},\"width\":32,\"height\":16}",
+    "sha256": "f4454fa45a2f7aba87ce134bd8e8043cd8c08bc505008bc46d90b26056409bec"
+  },
+  "mutations": [
+    {
+      "input": [
+        "handwriting-mutation-v1",
+        "confirm",
+        "10b80489-3eb7-534e-84a0-3e39b40dcda8",
+        [],
+        "bf1005644d6d30920ba0c5a21562c9e805f7722af8c5f81f323e34f3dcef6b0c"
+      ],
+      "compact_utf8": "[\"handwriting-mutation-v1\",\"confirm\",\"10b80489-3eb7-534e-84a0-3e39b40dcda8\",[],\"bf1005644d6d30920ba0c5a21562c9e805f7722af8c5f81f323e34f3dcef6b0c\"]",
+      "sha256": "c44f963b06d666f0aecf6aa5d9d33bed3c5a08de665cad864484ccf53d7da9d3",
+      "revision_id": "134c25fc-9f7d-503c-9d22-d0131e31e521"
+    },
+    {
+      "input": [
+        "handwriting-mutation-v1",
+        "update",
+        "10b80489-3eb7-534e-84a0-3e39b40dcda8",
+        [
+          "44444444-4444-4444-8444-444444444444"
+        ],
+        "f4454fa45a2f7aba87ce134bd8e8043cd8c08bc505008bc46d90b26056409bec"
+      ],
+      "compact_utf8": "[\"handwriting-mutation-v1\",\"update\",\"10b80489-3eb7-534e-84a0-3e39b40dcda8\",[\"44444444-4444-4444-8444-444444444444\"],\"f4454fa45a2f7aba87ce134bd8e8043cd8c08bc505008bc46d90b26056409bec\"]",
+      "sha256": "121745f5e43f9e8799c64c30d2ad5a085016783ee5a43f540e5a24fa0fa7e825",
+      "revision_id": "408692d4-489e-5e02-95ee-934c7bde9cdb"
+    },
+    {
+      "input": [
+        "handwriting-mutation-v1",
+        "forget",
+        "10b80489-3eb7-534e-84a0-3e39b40dcda8",
+        [
+          "44444444-4444-4444-8444-444444444444"
+        ],
+        null
+      ],
+      "compact_utf8": "[\"handwriting-mutation-v1\",\"forget\",\"10b80489-3eb7-534e-84a0-3e39b40dcda8\",[\"44444444-4444-4444-8444-444444444444\"],null]",
+      "sha256": "2bcf0f78d4604a965cfce7618a8981976c856b4a7f090fdeaac82bcbda809622",
+      "revision_id": "5688a102-ff3e-50a5-9071-b9591571ee89"
+    }
+  ]
+}

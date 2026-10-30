@@ -4,6 +4,15 @@ pub mod indicator;
 mod navigation;
 pub mod orchestrator;
 mod reader_attempt;
+pub mod resident_client;
+#[cfg(target_os = "linux")]
+pub mod resident_request;
+#[cfg(target_os = "linux")]
+pub mod resident_runtime;
+#[cfg(target_os = "linux")]
+pub mod resident_supervisor;
+pub mod sdk_acquisition;
+pub mod sdk_buddy_decision;
 pub mod selected_buddy;
 #[cfg(test)]
 pub(crate) use reader_attempt::assert_attachment_behavior;
@@ -62,6 +71,8 @@ pub struct Workflow {
     iteration_count: u32,
     failure_attempted: bool,
     input_failed: bool,
+    #[cfg(target_os = "linux")]
+    service_health: Option<resident_supervisor::health::ServiceHealth>,
     history: history::History,
 }
 
@@ -100,6 +111,8 @@ impl Workflow {
             iteration_count: 0,
             failure_attempted: false,
             input_failed: false,
+            #[cfg(target_os = "linux")]
+            service_health: None,
             history: history::History::default(),
         }
     }
@@ -154,6 +167,33 @@ impl Workflow {
         facade.dispatch(context, ordinal, handoff)
     }
 
+    /// Attach once after ordinary initialization, on the main-loop thread.
+    #[cfg(target_os = "linux")]
+    pub fn enable_service_health(
+        &mut self,
+        mut health: resident_supervisor::health::ServiceHealth,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.service_health.is_none(),
+            "Service health already attached"
+        );
+        health.ready()?;
+        self.service_health = Some(health);
+        Ok(())
+    }
+
+    pub(super) fn runtime_failed(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        if self
+            .service_health
+            .as_ref()
+            .is_some_and(|health| health.failed())
+        {
+            return true;
+        }
+        self.input_failed
+    }
+
     pub fn delay(&mut self, duration: std::time::Duration) {
         self.device.delay(duration);
     }
@@ -161,12 +201,16 @@ impl Workflow {
     /// Read-only request checks replace source-page progress drawing.
     pub fn check_request_progress(&mut self) -> Result<()> {
         anyhow::ensure!(
-            !self.input_failed,
-            "Request input lost; further activity stopped"
+            !self.runtime_failed(),
+            "Runtime health or input lost; further activity stopped"
         );
         if let Err(error) = self.device.check_request_guard() {
             self.input_failed = true;
             return Err(error);
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(health) = self.service_health.as_mut() {
+            health.progress()?;
         }
         Ok(())
     }
@@ -276,7 +320,19 @@ impl Workflow {
     /// Wait for user to trigger the workflow (touch in corner)
     pub fn wait_for_trigger(&mut self) -> Result<()> {
         info!("Waiting for trigger...");
-        self.device.wait_for_trigger()?;
+        anyhow::ensure!(
+            !self.runtime_failed(),
+            "Prior runtime failure blocks trigger"
+        );
+        #[cfg(target_os = "linux")]
+        let health = &mut self.service_health;
+        self.device.wait_for_trigger_with_progress(&mut || {
+            #[cfg(target_os = "linux")]
+            if let Some(health) = health.as_mut() {
+                health.progress()?;
+            }
+            Ok(())
+        })?;
         self.prepare_reader_trigger()
     }
 
@@ -285,8 +341,8 @@ impl Workflow {
             let _release = crate::measurement::Span::new("reader.trigger_release_observed");
         }
         anyhow::ensure!(
-            !self.input_failed,
-            "Prior input failure blocks Reader trigger"
+            !self.runtime_failed(),
+            "Prior runtime failure blocks Reader trigger"
         );
         let result = self.device.prepare_reader_trigger();
         if result.is_err() {
@@ -314,7 +370,21 @@ impl Workflow {
         loop {
             let timeout =
                 deadline.map(|limit| limit.saturating_duration_since(std::time::Instant::now()));
-            let events = self.device.wait_for_interactions(timeout)?;
+            anyhow::ensure!(
+                !self.runtime_failed(),
+                "Prior runtime failure blocks idle input"
+            );
+            #[cfg(target_os = "linux")]
+            let health = &mut self.service_health;
+            let events = self
+                .device
+                .wait_for_interactions_with_progress(timeout, &mut || {
+                    #[cfg(target_os = "linux")]
+                    if let Some(health) = health.as_mut() {
+                        health.progress()?;
+                    }
+                    Ok(())
+                })?;
             let invalidated = events.contains(&Interaction::Invalidated);
             if invalidated {
                 self.invalidate_history();
