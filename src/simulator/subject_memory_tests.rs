@@ -250,7 +250,7 @@ fn setup() -> (Shared, Workflow) {
 
 #[test]
 fn reader_personalization_is_once_after_verification_with_optional_memory() {
-    let text = "Use short explanations.\r\nPreserve units: Âµ and Î±.";
+    let text = "Use short explanations.\r\nPreserve units: µ and α.";
     for (enabled, value, memory_mode, agrees) in [
         (true, text, 0, true),
         (true, text, 1, true),
@@ -503,7 +503,7 @@ fn reader_withheld_only_abstention_provider_failure_and_cancel_never_publish_pro
             replies.push_back("Unframed malformed answer".into());
         }
         if mode == 5 {
-            replies.push_back("ANSWER: Non-ASCII Î±".into());
+            replies.push_back("ANSWER: Non-ASCII α".into());
         }
         let model = Model {
             current: Request::default(),
