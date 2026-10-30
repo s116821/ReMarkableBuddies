@@ -1,5 +1,7 @@
 use crate::device::{touch::Touch, DeviceModel};
 use anyhow::{ensure, Result};
+#[cfg(feature = "development-input-diagnostics")]
+use log::debug;
 use remarkable_open_sdk::navigation::{
     gesture::{plan_gesture, GesturePlan, Orientation, TabletModel},
     LogicalDirection,
@@ -27,6 +29,62 @@ impl XochitlIntegration {
             "Touch device model changed"
         );
         dispatch(touch, touch_model(touch.model()), orientation, direction)
+    }
+
+    /// Gesture only; completion is verified separately on supported layouts.
+    #[cfg(feature = "development-input-diagnostics")]
+    pub fn swipe(touch: &mut Touch, direction: NavigationDirection) -> Result<()> {
+        match direction {
+            NavigationDirection::Next => Self::swipe_left(touch)?,
+            NavigationDirection::Previous => Self::swipe_right(touch)?,
+        }
+        Ok(())
+    }
+
+    /// One explicitly selected development geometry; never a completion claim.
+    #[cfg(feature = "development-input-diagnostics")]
+    pub fn swipe_fixed_gap10_development(
+        touch: &mut Touch,
+        direction: NavigationDirection,
+    ) -> Result<()> {
+        match direction {
+            NavigationDirection::Next => Self::horizontal(touch, 700, 110),
+            NavigationDirection::Previous => Self::horizontal(touch, 100, 690),
+        }
+    }
+
+    /// Swipe left (go to next page)
+    #[cfg(feature = "development-input-diagnostics")]
+    fn swipe_left(touch: &mut Touch) -> Result<()> {
+        debug!("Swiping left to next page");
+        Self::horizontal(touch, 700, 100)
+    }
+
+    /// Swipe right (go to previous page)
+    #[cfg(feature = "development-input-diagnostics")]
+    fn swipe_right(touch: &mut Touch) -> Result<()> {
+        debug!("Swiping right to previous page");
+        Self::horizontal(touch, 100, 700)
+    }
+
+    #[cfg(feature = "development-input-diagnostics")]
+    fn horizontal(touch: &mut Touch, start_x: i32, end_x: i32) -> Result<()> {
+        let gesture = (|| -> Result<()> {
+            touch.touch_start((start_x, 512))?;
+            sleep(Duration::from_millis(50));
+            for i in 1..=15 {
+                // Preserve the old per-direction truncation arithmetic exactly.
+                let offset = (((end_x - start_x).abs() as f32) * (i as f32 / 15.0)) as i32;
+                let x = start_x + (end_x - start_x).signum() * offset;
+                touch.goto_xy((x, 512))?;
+                sleep(Duration::from_millis(10));
+            }
+            Ok(())
+        })();
+        let released = touch.touch_stop();
+        gesture?;
+        released?;
+        Ok(())
     }
 }
 fn touch_model(model: DeviceModel) -> TabletModel {

@@ -1,0 +1,86 @@
+{
+  "vector_version": 1,
+  "basis": "Synthetic encoding-only vectors; no service/filesystem/native authority.",
+  "cases": [
+    {
+      "name": "unbound",
+      "original_fields": {
+        "intent_version": 1,
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "conversation": "22222222-2222-4222-8222-222222222222",
+        "config_path_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "config_bytes_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "roots_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "actor": "33333333-3333-4333-8333-333333333333",
+        "generation": "44444444-4444-4444-8444-444444444444",
+        "mode_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "target_history_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "root": {
+          "revision": "55555555-5555-4555-8555-555555555555",
+          "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        "binding": null,
+        "summary": {
+          "turns": 2,
+          "source_records": 1,
+          "export_associations": 0
+        }
+      },
+      "canonical_json": "{\"intent_version\":1,\"operation\":\"11111111-1111-4111-8111-111111111111\",\"conversation\":\"22222222-2222-4222-8222-222222222222\",\"config_path_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"config_bytes_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"roots_sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"actor\":\"33333333-3333-4333-8333-333333333333\",\"generation\":\"44444444-4444-4444-8444-444444444444\",\"mode_sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"target_history_sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"root\":{\"revision\":\"55555555-5555-4555-8555-555555555555\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},\"binding\":null,\"summary\":{\"turns\":2,\"source_records\":1,\"export_associations\":0}}",
+      "intent_sha256": "85d1bb343d1d12701fac3fc6ab3f0fa2dc4b888fbd7e3c8b1be1139b672b9ed3",
+      "derived_uuids": {
+        "root-revision": "6e504255-1011-5671-b426-ec24a11cc0d6",
+        "root-operation": "6b6c4a67-386a-55a4-86b9-7aeee03fd473",
+        "binding-revision": "d6dce57b-8d44-5472-8bd8-b833a452c9ef",
+        "binding-operation": "5d351992-70d6-5913-b3e5-bc5d95cb7132",
+        "receipt-revision": "655ded01-c3e3-5361-939f-0f4c0051e2ed",
+        "receipt-operation": "3f75bcf5-8e6d-54b8-98fb-85dd2cc5da78",
+        "transaction": "ccf1f488-c06d-5e36-85e1-304b28a5c14b"
+      },
+      "receipt_record_id": "c10e1ad7-8e93-5852-8541-11cbf0ffb173",
+      "receipt_fingerprint": "abed9c282f2b0411cc898343be3dba3ab12004f7f3d76a561fcb801030235b64"
+    },
+    {
+      "name": "bound",
+      "original_fields": {
+        "intent_version": 1,
+        "operation": "11111111-1111-4111-8111-111111111111",
+        "conversation": "22222222-2222-4222-8222-222222222222",
+        "config_path_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "config_bytes_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "roots_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "actor": "33333333-3333-4333-8333-333333333333",
+        "generation": "44444444-4444-4444-8444-444444444444",
+        "mode_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "target_history_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "root": {
+          "revision": "55555555-5555-4555-8555-555555555555",
+          "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        "binding": {
+          "id": "66666666-6666-4666-8666-666666666666",
+          "revision": "77777777-7777-4777-8777-777777777777",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        "summary": {
+          "turns": 2,
+          "source_records": 1,
+          "export_associations": 0
+        }
+      },
+      "canonical_json": "{\"intent_version\":1,\"operation\":\"11111111-1111-4111-8111-111111111111\",\"conversation\":\"22222222-2222-4222-8222-222222222222\",\"config_path_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"config_bytes_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"roots_sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"actor\":\"33333333-3333-4333-8333-333333333333\",\"generation\":\"44444444-4444-4444-8444-444444444444\",\"mode_sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"target_history_sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"root\":{\"revision\":\"55555555-5555-4555-8555-555555555555\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},\"binding\":{\"id\":\"66666666-6666-4666-8666-666666666666\",\"revision\":\"77777777-7777-4777-8777-777777777777\",\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"},\"summary\":{\"turns\":2,\"source_records\":1,\"export_associations\":0}}",
+      "intent_sha256": "6df2e04ad75bb79628a0e92efa711679e8bb41f4b355e4c94767697049827fda",
+      "derived_uuids": {
+        "root-revision": "6e504255-1011-5671-b426-ec24a11cc0d6",
+        "root-operation": "6b6c4a67-386a-55a4-86b9-7aeee03fd473",
+        "binding-revision": "d6dce57b-8d44-5472-8bd8-b833a452c9ef",
+        "binding-operation": "5d351992-70d6-5913-b3e5-bc5d95cb7132",
+        "receipt-revision": "655ded01-c3e3-5361-939f-0f4c0051e2ed",
+        "receipt-operation": "3f75bcf5-8e6d-54b8-98fb-85dd2cc5da78",
+        "transaction": "ccf1f488-c06d-5e36-85e1-304b28a5c14b"
+      },
+      "receipt_record_id": "c10e1ad7-8e93-5852-8541-11cbf0ffb173",
+      "receipt_fingerprint": "a14cafcdcc39e2edcd7b28b278fdc0ee996de54443beea09018763b5bdf0c9ca"
+    }
+  ]
+}

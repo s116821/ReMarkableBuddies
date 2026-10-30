@@ -71,6 +71,16 @@ pub trait DeviceBackend {
         self.wait_for_trigger()?;
         Ok(vec![super::interaction::Interaction::Reader])
     }
+    /// Real input backends override this to report each successful idle poll.
+    fn wait_for_interactions_with_progress(
+        &mut self,
+        timeout: Option<Duration>,
+        progress: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<Vec<super::interaction::Interaction>> {
+        let events = self.wait_for_interactions(timeout)?;
+        progress()?;
+        Ok(events)
+    }
     fn capture(&mut self) -> Result<Frame>;
     fn detail_images(&self) -> Result<Vec<String>>;
     fn check_request_guard(&mut self) -> Result<()> {
@@ -82,6 +92,13 @@ pub trait DeviceBackend {
     fn record_failure(&mut self, _failure: crate::workflow::indicator::Failure) {}
 
     fn wait_for_trigger(&mut self) -> Result<()>;
+    fn wait_for_trigger_with_progress(
+        &mut self,
+        progress: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        self.wait_for_trigger()?;
+        progress()
+    }
     fn prepare_reader_trigger(&mut self) -> Result<()>;
     fn navigate(&mut self, direction: NavigationDirection) -> Result<NavigationCompletion>;
     fn render_text(&mut self, text: &str) -> Result<()>;
@@ -678,6 +695,15 @@ impl DeviceBackend for RealDevice {
         self.history
             .wait(&mut self.keyboard, &mut self.touch, timeout)
     }
+    #[cfg(target_os = "linux")]
+    fn wait_for_interactions_with_progress(
+        &mut self,
+        timeout: Option<Duration>,
+        progress: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<Vec<super::interaction::Interaction>> {
+        self.history
+            .wait_with_progress(&mut self.keyboard, &mut self.touch, timeout, progress)
+    }
     fn check_request_guard(&mut self) -> Result<()> {
         self.status_wait_cancellation.check()?;
         #[cfg(target_os = "linux")]
@@ -720,6 +746,13 @@ impl DeviceBackend for RealDevice {
     }
     fn wait_for_trigger(&mut self) -> Result<()> {
         self.touch.wait_for_trigger()
+    }
+    #[cfg(target_os = "linux")]
+    fn wait_for_trigger_with_progress(
+        &mut self,
+        progress: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        self.touch.wait_for_trigger_with_progress(progress)
     }
     fn prepare_reader_trigger(&mut self) -> Result<()> {
         let _timing = crate::measurement::Span::new("reader.trigger_dismiss");

@@ -1,0 +1,20 @@
+{
+  "source": "Independent Python standard-library reference; synthetic fixture strings only",
+  "prefix_utf8": "urn:remarkable-buddies:model-settings-patch:v1:",
+  "changes": {
+    "model": {
+      "value": "模型\r\n α\t ",
+      "action": "set"
+    },
+    "base_url": {
+      "value": "https://fixture-user:fixture-pass@example.invalid/v1?token=fixture-token#fragment\r\n \t",
+      "action": "set"
+    }
+  },
+  "alternate_input_utf8": "{\n  \"model\": {\n    \"value\": \"\\u6a21\\u578b\\r\\n \\u03b1\\t \",\n    \"action\": \"set\"\n  },\n  \"base_url\": {\n    \"value\": \"https://fixture-user:fixture-pass@example.invalid/v1?token=fixture-token#fragment\\r\\n \\t\",\n    \"action\": \"set\"\n  }\n}",
+  "canonical_patch_utf8": "{\"base_url\":{\"action\":\"set\",\"value\":\"https://fixture-user:fixture-pass@example.invalid/v1?token=fixture-token#fragment\\r\\n \\t\"},\"model\":{\"action\":\"set\",\"value\":\"模型\\r\\n α\\t \"}}",
+  "canonical_patch_bytes": 180,
+  "prefixed_bytes": 227,
+  "changes_sha256": "7b8b312e53ce731e251614648218ebf89f994b4d03b047e67278ae0b8ff2c226",
+  "scope": "Canonical serialization and digest only; no producer execution, saved config, provider or device operation."
+}

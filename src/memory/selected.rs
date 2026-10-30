@@ -1,4 +1,5 @@
 //! Receiving selected memory over existing storage and admission, never a sync engine.
+mod prepared;
 use super::{
     aggregate::Aggregate,
     catalog::{Catalog, Identity, Owner, Record, Registration, MAX_AGGREGATES},
@@ -704,6 +705,23 @@ impl Provider for SelectedMemory {
         pins.consumed = true;
         output
     }
+}
+
+/// Validate the existing sealed view under its current domain gates before a
+/// candidate model request. Do not consume it or hold gates across model IO;
+/// the original Provider::with_current still guards actual journal publication.
+pub(super) fn validate_answer_view(result: &QueryResult, store: &Store) -> Result<()> {
+    let mut pins = result
+        .pins
+        .as_ref()
+        .context("selected memory pins absent")?
+        .lock()
+        .map_err(|_| anyhow::anyhow!("selected memory pins unavailable"))?;
+    ensure!(
+        pins.result_sha256.as_deref() == Some(result_identity(result)?.as_str()),
+        "selected memory result payload changed"
+    );
+    pins.guard(store, || Ok(()))
 }
 
 fn result_identity(result: &QueryResult) -> Result<String> {

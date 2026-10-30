@@ -1,0 +1,259 @@
+#!/bin/sh
+# Main-only, one remote arming call after separate staging; no xochitl mutations.
+set -eu
+umask 077
+root='@ROOT@'
+nonce='@NONCE@'
+control_policy='@CONTROL_POLICY@'
+control_shell_sha256='@CONTROL_SHELL_SHA256@'
+unit='rmb-qt-insertion-@NONCE@-actor.service'
+private() {
+    test -f "$1" && test ! -L "$1" || return 90
+    test "$(stat -c '%a %u %h' "$1")" = '600 0 1' || return 90
+}
+control_shell() {
+    test "$(readlink /bin/sh)" = /usr/bin/bash.bash || return 90
+    test "$(sha256sum /bin/sh | awk '{print $1}')" = "$control_shell_sha256" || return 90
+}
+control_outputs() {
+    case "$control_policy" in legacy) return 0;; source5-child-fsize4096-v1) :;; *) return 90;; esac
+    for stream in stdout stderr; do
+        output="$root/$1.$stream"
+        if test -e "$output" || test -L "$output"; then private "$output" || return 90; fi
+    done
+}
+control_child() {
+    case "$control_policy" in legacy) return 0;; source5-child-fsize4096-v1) :;; *) return 90;; esac
+    control_shell || return 90
+    control_child_pid=$BASHPID
+    case "$control_child_pid" in ""|*[!0-9]*) return 90;; esac
+    private "$root/$1.stdout" && private "$root/$1.stderr" || return 90
+    test "$(stat -Lc '%d %i %a %u %h' /proc/$control_child_pid/fd/1)" = "$(stat -c '%d %i %a %u %h' "$root/$1.stdout")" || return 90
+    test "$(stat -Lc '%d %i %a %u %h' /proc/$control_child_pid/fd/2)" = "$(stat -c '%d %i %a %u %h' "$root/$1.stderr")" || return 90
+    ulimit -c 0 || return 90
+    ulimit -f 8 || return 90
+    inherited=$(cat /proc/self/limits) || return 90
+    printf '%s\n' "$inherited" | awk '$1=="Max" && $2=="file" && $3=="size" {n++; if($4!=4096 || $5!=4096 || $6!="bytes") bad=1} END {exit !(n==1 && !bad)}' || return 90
+    printf '%s\n' "$inherited" | awk '$1=="Max" && $2=="core" && $3=="file" && $4=="size" {n++; if($5!=0 || $6!=0 || $7!="bytes") bad=1} END {exit !(n==1 && !bad)}' || return 90
+}
+control_grammar() {
+    test "$control_policy" = source5-child-fsize4096-v1 || return 0
+    prefix=$1; shift
+    if test "${1-}" = /usr/bin/systemctl; then shift; fi
+    if test "${1-}" = --no-pager; then shift; fi
+    test "${1-}" = show || return 0
+    shift
+    requested=''; scalar=no
+    for argument in "$@"; do
+        case "$argument" in --property=*) test -z "$requested" || return 90; requested=${argument#--property=};; --value) scalar=yes;; xochitl.service|rmb-qt-insertion-*-actor.service) :;; *) return 90;; esac
+    done
+    test -n "$requested" || return 90
+    awk -v keys="$requested" -v scalar="$scalar" '
+    function bound(key) { if(key=="ExecStart") return 2048; if(key=="DropInPaths") return 512; if(key=="OnFailure") return 256; if(key=="FragmentPath") return 192; return 64 }
+    BEGIN { count=split(keys,list,","); for(i=1;i<=count;i++) { if(list[i] !~ /^(OnFailure|OnFailureJobMode|FailureAction|StartLimitAction|Restart|RestartMode|TimeoutStopUSec|WatchdogUSec|KillMode|KillSignal|FinalKillSignal|SendSIGKILL|FragmentPath|DropInPaths|ExecStart|Type|TimeoutStartUSec|ActiveState|SubState|MainPID|ExecMainPID|BindsTo|PartOf|StopWhenUnneeded|Result|ExecMainCode|ExecMainStatus|Job|ControlGroup)$/ || need[list[i]]++) bad=1 } }
+    { if($0 ~ /[^ -~]/) bad=1; if(scalar=="yes") { if(count!=1 || NR!=1 || length($0)>bound(list[1])) bad=1 }
+      else { separator=index($0,"="); key=substr($0,1,separator-1); value=substr($0,separator+1); if(!separator || !need[key] || seen[key]++ || length(value)>bound(key)) bad=1 } }
+    END { if(scalar=="yes") { if(NR!=1) bad=1 } else { for(key in need) if(seen[key]!=1) bad=1 }; exit bad ? 90 : 0 }
+    ' "$root/$prefix.stdout" || return 90
+}
+control_failure() {
+    test "$control_policy" = source5-child-fsize4096-v1 || return 0
+    case "$1" in query|host-query) :;; *) return 90;; esac
+    if test -e "$root/$1.output-unknown" || test -L "$root/$1.output-unknown"; then
+        private "$root/$1.output-unknown" || return 90
+        test "$(cat "$root/$1.output-unknown")" = "$nonce" || return 90
+    else
+        claim "$1.output-unknown" || return 90
+    fi
+}
+control_complete() {
+    case "$control_policy" in legacy) return 0;; source5-child-fsize4096-v1) :;; *) return 90;; esac
+    for stream in stdout stderr; do
+        private "$root/$1.$stream" || return 90
+        test "$(stat -c '%s' "$root/$1.$stream")" -lt 4096 || return 90
+    done
+}
+now() { awk '{print int($1)}' /proc/uptime; }
+start_of() { sed 's/^.*) //' "/proc/$1/stat" | awk '{print $20}'; }
+claim() { (set -C; printf '%s\n' "$nonce" > "$root/$1") 2>/dev/null; }
+bounded() {
+    # Only fixed systemctl/systemd-run clients at the call sites below.
+    test ! -e "$root/host-query.unconfirmed" || return 94
+    q_end=$(($(now)+3))
+    test "$q_end" -le "$deadline" || q_end=$deadline
+    if test -n "${stage_deadline-}" && test "$q_end" -gt "$stage_deadline"; then q_end=$stage_deadline; fi
+    test "$(now)" -lt "$q_end" || return 90
+    control_outputs host-query || return 90
+    (control_child host-query || exit 90; exec "$@") > "$root/host-query.stdout" 2> "$root/host-query.stderr" &
+    q_pid=$!; q_start=''
+    if test -d "/proc/$q_pid"; then q_start=$(start_of "$q_pid") || :; fi
+    while kill -0 "$q_pid" 2>/dev/null; do
+        q_state=$(sed 's/^.*) //' "/proc/$q_pid/stat" 2>/dev/null | awk '{print $1}')
+        test "$q_state" != Z || break
+        if test "$(now)" -ge "$q_end"; then
+            if test -n "$q_start" && test "$(start_of "$q_pid")" = "$q_start"; then kill -KILL "$q_pid" || :; fi
+            q_state=$(sed 's/^.*) //' "/proc/$q_pid/stat" 2>/dev/null | awk '{print $1}')
+            if kill -0 "$q_pid" 2>/dev/null && test "$q_state" != Z; then
+                claim host-query.unconfirmed || :; return 94
+            fi
+            wait "$q_pid" 2>/dev/null || :; return 91
+        fi
+        sleep 1
+    done
+    if wait "$q_pid"; then :; else
+        q_status=$?
+        control_failure host-query || :
+        return "$q_status"
+    fi
+    if ! control_complete host-query || ! control_grammar host-query "$@"; then
+        control_failure host-query || :
+        return 90
+    fi
+}
+control_copy() {
+    if test "$control_policy" = source5-child-fsize4096-v1; then
+        case "$1" in "$root/host-actor.properties"|"$root/host-guard.properties") :;; *) return 90;; esac
+        if test -e "$1" || test -L "$1"; then private "$1" || return 90; fi
+        control_complete host-query || return 90
+    fi
+    cp "$root/host-query.stdout" "$1" || return 90
+}
+show() { bounded /usr/bin/systemctl --no-pager show "$@"; }
+require_line() { test "$(grep -Fxc "$1" "$root/host-query.stdout")" = 1; }
+actor_proof() {
+    show --property=Type,TimeoutStartUSec,Restart,OnFailure,FailureAction,StartLimitAction,KillMode,ActiveState,SubState,MainPID,ExecMainPID,ExecStart,BindsTo,PartOf,StopWhenUnneeded "$unit" || return $?
+    for expected in Type=oneshot TimeoutStartUSec=6min Restart=no OnFailure= FailureAction=none StartLimitAction=none KillMode=control-group ActiveState=activating SubState=start BindsTo= PartOf= StopWhenUnneeded=no; do
+        require_line "$expected" || return 90
+    done
+    actor_pid=$(sed -n 's/^MainPID=//p' "$root/host-query.stdout")
+    case "$actor_pid" in ''|*[!0-9]*) return 90;; esac
+    test "$actor_pid" -gt 1 || return 90
+    require_line "ExecMainPID=$actor_pid" || return 90
+    grep -Fq "path=/bin/sh ; argv[]=/bin/sh $root/actor.sh ;" "$root/host-query.stdout" || return 90
+    current_start=$(start_of "$actor_pid") || return 90
+    case "$current_start" in ''|*[!0-9]*) return 90;; esac
+    test "$current_start" -gt 0 || return 90
+    test "$(tr '\000' '\n' < "/proc/$actor_pid/cmdline")" = "$(printf '/bin/sh\n%s/actor.sh\n' "$root")" || return 90
+    private "$root/actor.ready" || return 90
+    private "$root/actor.claim" || return 90
+    private "$root/actor.lock" || return 90
+    test "$(stat -Lc '%d %i' "/proc/$actor_pid/fd/9")" = "$(stat -c '%d %i' "$root/actor.lock")" || return 90
+    test "$(cat "$root/actor.ready")" = "$nonce" || return 90
+    test "$(cat "$root/actor.claim")" = "$nonce" || return 90
+    if test -n "${saved_actor_pid-}"; then
+        test "$actor_pid:$current_start" = "$saved_actor_pid:$saved_actor_start" || return 90
+    else
+        saved_actor_pid=$actor_pid; saved_actor_start=$current_start
+    fi
+    control_copy "$root/host-actor.properties" || return 90
+    printf '%s %s\n' "$saved_actor_pid" "$saved_actor_start" > "$root/host-actor.identity" || return 90
+}
+guard_proof() {
+    private "$root/guard.ready" || return 90
+    test "$(cat "$root/guard.ready")" = "$nonce" || return 90
+    guard="/run/systemd/system/xochitl.service.d/zz-rmb-insertion-$nonce-guard.conf"
+    private "$guard" || return 90
+    test "$(sha256sum "$guard" | awk '{print $1}')" = '@GUARDHASH@' || return 90
+    unit_shadow=/run/systemd/system/xochitl.service
+    vendor_shadow=/run/systemd/system/xochitl.service.d/xochitl-service-override.conf
+    private "$unit_shadow" || return 90
+    private "$vendor_shadow" || return 90
+    test "$(sha256sum "$unit_shadow" | awk '{print $1}')" = '@UNITSHADOWHASH@' || return 90
+    test "$(sha256sum "$vendor_shadow" | awk '{print $1}')" = '@VENDORSHADOWHASH@' || return 90
+    show --property=OnFailure,OnFailureJobMode,FailureAction,StartLimitAction,Restart,RestartMode,TimeoutStopUSec,WatchdogUSec,KillMode,KillSignal,FinalKillSignal,SendSIGKILL,FragmentPath,DropInPaths,ExecStart xochitl.service || return $?
+    while IFS= read -r expected; do require_line "$expected" || return 90; done < "$root/guard.policy"
+    require_line "FragmentPath=$unit_shadow" || return 90
+    require_line "DropInPaths=$vendor_shadow $guard" || return 90
+    grep -Fq 'path=/usr/bin/xochitl ; argv[]=/usr/bin/xochitl --system ;' "$root/host-query.stdout" || return 90
+    control_copy "$root/host-guard.properties" || return 90
+}
+main() {
+    test "$#" = 0
+    test -d "$root" && test ! -L "$root"
+    test "$(stat -c '%a %u' "$root")" = '700 0'
+    private "$root/owner"
+    test "$(cat "$root/owner")" = "$nonce"
+    # Refuse spent/uncertain roots before any deadline or unit creation.
+    for name in deadline host-arm.claim actor.claim actor.ready guard.request start.request restore.claim; do
+        test ! -e "$root/$name"
+        test ! -L "$root/$name"
+    done
+    test ! -e /run/systemd/system/xochitl.service.d
+    test ! -L /run/systemd/system/xochitl.service.d
+    test ! -e /run/systemd/system/xochitl.service
+    test ! -L /run/systemd/system/xochitl.service
+    test ! -e "/run/systemd/transient/$unit"
+    # Whole reviewed packet checked before independently arming recovery.
+    private "$root/packet.files"
+    test "$(sha256sum "$root/packet.files" | awk '{print $1}')" = '@MANIFESTHASH@'
+    # No pre-staged query/state symlink or unrelated file can become an output.
+    for file in "$root"/* "$root"/.[!.]* "$root"/..?*; do
+        if ! test -e "$file" && ! test -L "$file"; then continue; fi
+        case "${file##*/}" in
+            @ALLOWEDFILES@)
+                case "${file##*/}" in
+                    owned_tap_guardian|observe_input|publish_creation_arm|native_frame_acquire|owned_frame|owned_frame_alarm|owned_relative_gesture)
+                        test -f "$file" && test ! -L "$file"
+                        test "$(stat -c '%a %u %h' "$file")" = '700 0 1';;
+                    *) private "$file";;
+                esac;;
+            *) exit 90;;
+        esac
+    done
+    if test -e "$root/preparation.json"; then
+        test "$(sha256sum "$root/preparation.json" | awk '{print $1}')" = '@RECEIPTHASH@'
+    fi
+    @PRIVATEFILES@
+    # Successful per-file listings exceed the bounded arming reply. Keep
+    # verification status and failure stderr; emit only final admission on success.
+    (cd "$root"; sha256sum -c packet.files) > /dev/null
+    sha256sum -c "$root/baseline.files" > /dev/null
+    sha256sum -c "$root/service.files" > /dev/null
+    @CAPTURESPACE@
+    claim host-arm.claim
+    armed_at=$(now); deadline=$((armed_at+360))
+    (set -C; printf '%s %s\n' "$armed_at" "$deadline" > "$root/deadline")
+    private "$root/deadline"
+    # No --scope, --wait, --pty, --pipe, --collect or host/session dependency.
+    bounded /usr/bin/systemd-run --no-block --unit="$unit" --property=Type=oneshot --property=TimeoutStartSec=360 --property=Restart=no --property=OnFailure= --property=FailureAction=none --property=StartLimitAction=none --property=KillMode=control-group --property=UMask=0077 --property=StopWhenUnneeded=no /bin/sh "$root/actor.sh"
+    # Initial actor hashing and six bounded queries precede actor.ready.
+    # Waiting six seconds confused validation latency with readiness failure.
+    setup_cutoff=$((armed_at+48))
+    ready_end=$((armed_at+30))
+    while ! test -e "$root/actor.ready"; do
+        test "$(now)" -lt "$ready_end"
+        test ! -e "$root/insertion.outcome"
+        sleep 1
+    done
+    test "$(now)" -lt "$ready_end"
+    # Observe readiness once; never slide a request cutoff or replay admission.
+    guard_request_before=$(($(now)+9))
+    stage_deadline=$guard_request_before
+    test "$stage_deadline" -le "$setup_cutoff" || stage_deadline=$setup_cutoff
+    actor_proof
+    test "$(now)" -lt "$guard_request_before"
+    test "$(now)" -lt "$setup_cutoff"
+    test ! -e "$root/restore.claim"
+    test ! -e "$root/insertion.outcome"
+    guard_requested_at=$(now)
+    claim guard.request
+    # Earlier conservative cutoff: actual actor start window opens after this.
+    stage_deadline=$((guard_requested_at+9))
+    test "$stage_deadline" -le "$setup_cutoff" || stage_deadline=$setup_cutoff
+    guard_end=$(($(now)+6))
+    while ! test -e "$root/guard.ready"; do
+        test "$(now)" -lt "$guard_end"
+        test ! -e "$root/insertion.outcome"
+        sleep 1
+    done
+    guard_proof
+    actor_proof
+    test ! -e "$root/restore.claim"
+    test ! -e "$root/insertion.outcome"
+    # Guard verification plus actor verification cannot renew either window.
+    test "$(now)" -lt "$stage_deadline"
+    claim start.request
+    printf '%s actor=%s start=%s deadline=%s admitted-once\n' "$nonce" "$saved_actor_pid" "$saved_actor_start" "$deadline"
+}
+# Fixture source boundary: exact functions above, no automatic entry when sourced.
+main "$@"
