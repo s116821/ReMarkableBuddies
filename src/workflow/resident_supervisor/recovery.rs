@@ -112,6 +112,8 @@ pub fn publish_installed(record: LeaseRecord) -> Result<Lease> {
 #[serde(deny_unknown_fields)]
 struct Profile {
     version: u32,
+    #[serde(default)]
+    companion: Option<String>,
     firmware: String,
     kernel: String,
     native_profile_sha256: [u8; 32],
@@ -331,6 +333,7 @@ struct Installed {
     helper_group: GroupBaseline,
     helper_invocation: String,
     helper_start: u64,
+    vendor: Option<service::vendor::OriginalCompanion>,
 }
 impl Installed {
     fn load(lease: &Lease, deadline: Instant) -> Result<Self> {
@@ -360,12 +363,18 @@ impl Installed {
             &[APP, "--resident-stock-recovery"],
             deadline,
         )?;
+        let vendor = record
+            .companion
+            .as_deref()
+            .map(|record| service::vendor::OriginalCompanion::load(record, deadline))
+            .transpose()?;
         let result = Self {
             profile,
             artifacts,
             helper_group,
             helper_invocation: before.invocation().to_owned(),
             helper_start: before.start_micros(),
+            vendor,
         };
         result.current(lease, deadline)?;
         Ok(result)
@@ -375,6 +384,9 @@ impl Installed {
         lease.current()?;
         for file in &self.artifacts {
             file.current()?;
+        }
+        if let Some(vendor) = &self.vendor {
+            vendor.policy(deadline)?;
         }
         let before = service::observe(HELPER, deadline)?;
         helper_state(
@@ -407,12 +419,14 @@ impl Installed {
 impl Profile {
     fn validate(&self, record: &LeaseRecord) -> Result<()> {
         self.validate_definition()?;
+        record.validate()?;
         ensure!(
             self.native_profile_sha256 == record.profile_sha256
                 && self.adapter_sha256 == record.adapter_sha256
                 && self.stock_executable_sha256 == record.stock.executable_sha256
                 && self.stock_unit_sha256 == record.stock.unit_sha256
-                && self.stock_dropin_sha256 == record.stock.dropin_sha256,
+                && self.stock_dropin_sha256 == record.stock.dropin_sha256
+                && self.companion.is_some() == record.companion.is_some(),
             "recovery profile differs from admitted activation"
         );
         Ok(())
@@ -431,7 +445,9 @@ impl Profile {
             ensure!(digest != [0; 32], "missing installed artifact digest");
         }
         ensure!(
-            self.version == 1
+            ((self.version == 1 && self.companion.is_none())
+                || (self.version == 2
+                    && self.companion.as_deref() == Some(service::vendor::PROFILE_ID)))
                 && self.firmware == "3.28.0.172"
                 && self.kernel == "5.4.70-v1.6.3-rm11x",
             "unsupported recovery profile"
@@ -490,7 +506,7 @@ fn require(policy: &BTreeMap<String, String>, key: &str, value: &str) -> Result<
     );
     Ok(())
 }
-fn firmware_version(input: &str) -> Result<&str> {
+pub(super) fn firmware_version(input: &str) -> Result<&str> {
     let mut values = input
         .lines()
         .filter_map(|line| line.strip_prefix("IMG_VERSION="));
@@ -738,6 +754,14 @@ pub struct RestoredStock {
     pub process: ProcessIdentity,
     pub invocation: String,
     pub start_requested: bool,
+    pub companion: Option<RestoredCompanion>,
+}
+
+/// Observed original vendor service, separate from reader/UI readiness.
+#[derive(Debug)]
+pub struct RestoredCompanion {
+    pub process: ProcessIdentity,
+    pub invocation: String,
 }
 
 #[derive(Debug)]
@@ -766,7 +790,15 @@ pub fn run_installed() -> Result<RecoveryOutcome> {
         return Ok(RecoveryOutcome::NoRecordedActivation);
     };
     let installed = Installed::load(&lease, deadline)?;
-    restore(&mut Native { installed, lease }, deadline).map(RecoveryOutcome::Restored)
+    restore(
+        &mut Native {
+            installed,
+            lease,
+            restored_companion: None,
+        },
+        deadline,
+    )
+    .map(RecoveryOutcome::Restored)
 }
 
 // Private test seam runs the same sequencing; callers cannot inject a command,
@@ -777,6 +809,8 @@ trait Backend {
     fn stock(&mut self, deadline: Instant) -> Result<service::Snapshot>;
     fn start(&mut self, deadline: Instant) -> Result<()>;
     fn empty_stock_group(&mut self, deadline: Instant) -> Result<()>;
+    fn companion_stopped(&mut self, deadline: Instant) -> Result<bool>;
+    fn companion_current(&mut self, deadline: Instant) -> Result<Option<RestoredCompanion>>;
     fn verify(
         &mut self,
         snapshot: &service::Snapshot,
@@ -791,6 +825,7 @@ trait Backend {
 struct Native {
     installed: Installed,
     lease: Lease,
+    restored_companion: Option<service::baseline::ServiceBaseline>,
 }
 impl Native {
     fn stock_group(&self, deadline: Instant) -> Result<Option<super::Identity>> {
@@ -845,6 +880,25 @@ impl Backend for Native {
     fn empty_stock_group(&mut self, deadline: Instant) -> Result<()> {
         self.stock_group(deadline).map(|_| ())
     }
+    fn companion_stopped(&mut self, deadline: Instant) -> Result<bool> {
+        self.installed
+            .vendor
+            .as_ref()
+            .map_or(Ok(true), |vendor| vendor.stopped(deadline))
+    }
+    fn companion_current(&mut self, deadline: Instant) -> Result<Option<RestoredCompanion>> {
+        match (&self.installed.vendor, &self.restored_companion) {
+            (None, None) => Ok(None),
+            (Some(vendor), Some(running)) => {
+                vendor.verify_running(running, deadline)?;
+                Ok(Some(RestoredCompanion {
+                    process: running.group().parent().clone(),
+                    invocation: running.original().invocation().into(),
+                }))
+            }
+            _ => bail!("missing restored companion evidence"),
+        }
+    }
     fn verify(
         &mut self,
         snapshot: &service::Snapshot,
@@ -868,6 +922,18 @@ impl Backend for Native {
             snapshot == &after && stock_state(&after)? == StockState::Ready,
             "stock changed during verification"
         );
+        if let Some(vendor) = &self.installed.vendor {
+            let running = vendor.restored(deadline, &mut || {
+                self.installed.admit(&self.lease, deadline)?;
+                group.current_process()?;
+                ensure!(
+                    service::observe(STOCK, deadline)? == *snapshot,
+                    "stock changed while restoring sync"
+                );
+                check_deadline(deadline)
+            })?;
+            self.restored_companion = Some(running);
+        }
         Ok(group.parent)
     }
 }
@@ -883,6 +949,7 @@ fn restore(backend: &mut impl Backend, deadline: Instant) -> Result<RestoredStoc
             StockState::Ready => {
                 let process = backend.verify(&snapshot, deadline)?;
                 backend.admit(deadline)?;
+                let companion = backend.companion_current(deadline)?;
                 // Admission can take time; do not report a now-replaced stock.
                 ensure!(
                     backend.stock(deadline)? == snapshot,
@@ -893,6 +960,7 @@ fn restore(backend: &mut impl Backend, deadline: Instant) -> Result<RestoredStoc
                     process,
                     invocation: snapshot.invocation().to_owned(),
                     start_requested: requested,
+                    companion,
                 });
             }
             StockState::Startable => {
@@ -904,10 +972,18 @@ fn restore(backend: &mut impl Backend, deadline: Instant) -> Result<RestoredStoc
                     identity.terminal(&snapshot)?;
                 }
                 backend.admit(deadline)?;
+                if !backend.companion_stopped(deadline)? {
+                    backend.pace(deadline);
+                    continue;
+                }
                 backend.empty_stock_group(deadline)?;
                 ensure!(
                     backend.stock(deadline)?.same_observation(&snapshot),
                     "stock changed before start request"
+                );
+                ensure!(
+                    backend.companion_stopped(deadline)?,
+                    "original companion changed before stock start"
                 );
                 check_deadline(deadline)?;
                 requested = true;

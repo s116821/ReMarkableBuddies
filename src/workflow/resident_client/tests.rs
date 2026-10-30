@@ -360,7 +360,7 @@ fn v1_bytes_and_reservations_survive_upgrade_restart_and_append() {
                 .unwrap()
                 .request
                 .wire_revision(),
-            3
+            remarkable_open_sdk::native_adapter::PROTOCOL_REVISION
         );
     }
 }
@@ -415,62 +415,75 @@ fn mixed_revision_and_reencoded_digest_refuse_without_rewriting_history() {
 }
 
 #[test]
-fn original_v2_insert_and_select_history_survives_v3_append() {
-    let insertion = include_bytes!("fixtures/v2-insertion.bin").as_slice();
-    let observed = include_bytes!("fixtures/v2-insertion-observed.bin").as_slice();
-    let selection = include_bytes!("fixtures/v2-selection.bin").as_slice();
-    for (original, outcome) in [
-        (insertion, Outcome::Reserved {}),
+fn original_v2_and_v3_insert_and_select_history_survives_current_append() {
+    for (revision, insertion, observed, selection) in [
         (
-            insertion,
-            Outcome::HistoricalReply {
-                frame: STANDARD.encode(observed),
-            },
+            2,
+            include_bytes!("fixtures/v2-insertion.bin").as_slice(),
+            include_bytes!("fixtures/v2-insertion-observed.bin").as_slice(),
+            include_bytes!("fixtures/v2-selection.bin").as_slice(),
         ),
-        (insertion, Outcome::NotDispatched {}),
-        (selection, Outcome::Reserved {}),
-        (selection, Outcome::NotDispatched {}),
+        (
+            3,
+            include_bytes!("fixtures/v3-insertion.bin").as_slice(),
+            include_bytes!("fixtures/v3-insertion-observed.bin").as_slice(),
+            include_bytes!("fixtures/v3-selection.bin").as_slice(),
+        ),
     ] {
-        let fixture = Fixture::new();
-        let store = fixture.open();
-        let conversation = Uuid::new_v4();
-        let mut state = legacy_state(&store, conversation, outcome.clone());
-        state.attempts[0].frame = STANDARD.encode(original);
-        state.attempts[0].sha256 = crate::storage::digest(original);
-        state.format = 2;
-        let path = store.paths.data.join(JOURNAL_FILE);
-        persist(&path, &state).unwrap();
-        let initial: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        drop(store);
-        let store = fixture.open();
-        let saved = attempts(&store).unwrap();
-        assert_eq!(saved[0].request.wire_revision(), 2);
-        assert_eq!(saved[0].request.encoded(), original);
-        assert_eq!(
-            saved[0].request.fingerprint(),
-            sha2::Sha256::digest(original).as_slice()
-        );
-        let reencoded = saved[0].request.frame().clone();
-        assert!(finish(&store, &reencoded, Outcome::NotDispatched {}).is_err());
-        assert!(claim(&store, Uuid::new_v4(), &reencoded).is_err());
-        let before = fs::read(&path).unwrap();
-        if !matches!(outcome, Outcome::NotDispatched {}) {
-            assert!(claim(&store, conversation, &request(70, 14)).is_err());
-            assert_eq!(fs::read(&path).unwrap(), before);
+        for (original, outcome) in [
+            (insertion, Outcome::Reserved {}),
+            (
+                insertion,
+                Outcome::HistoricalReply {
+                    frame: STANDARD.encode(observed),
+                },
+            ),
+            (insertion, Outcome::NotDispatched {}),
+            (selection, Outcome::Reserved {}),
+            (selection, Outcome::NotDispatched {}),
+        ] {
+            let fixture = Fixture::new();
+            let store = fixture.open();
+            let conversation = Uuid::new_v4();
+            let mut state = legacy_state(&store, conversation, outcome.clone());
+            state.attempts[0].frame = STANDARD.encode(original);
+            state.attempts[0].sha256 = crate::storage::digest(original);
+            state.format = 2;
+            let path = store.paths.data.join(JOURNAL_FILE);
+            persist(&path, &state).unwrap();
+            let initial: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            drop(store);
+            let store = fixture.open();
+            let saved = attempts(&store).unwrap();
+            assert_eq!(saved[0].request.wire_revision(), revision);
+            assert_eq!(saved[0].request.encoded(), original);
+            assert_eq!(
+                saved[0].request.fingerprint(),
+                sha2::Sha256::digest(original).as_slice()
+            );
+            let reencoded = saved[0].request.frame().clone();
+            assert!(finish(&store, &reencoded, Outcome::NotDispatched {}).is_err());
+            assert!(claim(&store, Uuid::new_v4(), &reencoded).is_err());
+            let before = fs::read(&path).unwrap();
+            if !matches!(outcome, Outcome::NotDispatched {}) {
+                assert!(claim(&store, conversation, &request(70, 14)).is_err());
+                assert_eq!(fs::read(&path).unwrap(), before);
+            }
+            claim(&store, Uuid::new_v4(), &request(71, 15)).unwrap();
+            let appended: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            assert_eq!(appended["attempts"][0], initial["attempts"][0]);
+            assert_eq!(
+                attempts(&store)
+                    .unwrap()
+                    .last()
+                    .unwrap()
+                    .request
+                    .wire_revision(),
+                remarkable_open_sdk::native_adapter::PROTOCOL_REVISION
+            );
         }
-        claim(&store, Uuid::new_v4(), &request(71, 15)).unwrap();
-        let appended: serde_json::Value =
-            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert_eq!(appended["attempts"][0], initial["attempts"][0]);
-        assert_eq!(
-            attempts(&store)
-                .unwrap()
-                .last()
-                .unwrap()
-                .request
-                .wire_revision(),
-            3
-        );
     }
 }
 #[cfg(target_os = "linux")]

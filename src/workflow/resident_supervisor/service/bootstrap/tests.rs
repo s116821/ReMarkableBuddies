@@ -1,6 +1,122 @@
 use super::*;
 const NONCE: &str = "0123456789abcdef0123456789abcdef";
 
+fn candidate(version: u32, kind: Kind, capture: bool, companion: bool) -> Candidate {
+    Candidate {
+        version,
+        kind,
+        nonce: NONCE.into(),
+        fault: Fault::None,
+        boot: String::new(),
+        controller_sha256: "11".repeat(32),
+        observer_sha256: "22".repeat(32),
+        backup_sha256: "33".repeat(32),
+        stock: ExpectedService {
+            baseline: "original-stock".into(),
+            executable_sha256: "44".repeat(32),
+        },
+        buddy: ExpectedService {
+            baseline: "original-buddy".into(),
+            executable_sha256: "55".repeat(32),
+        },
+        source: Vec::new(),
+        unit_files: Vec::new(),
+        capture: capture.then(|| setup::CapturePlan {
+            visual_setup: None,
+            document: String::new(),
+            page: String::new(),
+            order: Vec::new(),
+            opening_metadata: None,
+        }),
+        companion: companion.then(|| "original-sync".into()),
+    }
+}
+
+#[test]
+fn native_companion_requires_explicit_candidate_version_and_capture() {
+    for version in 1..=4 {
+        for kind in [Kind::Native, Kind::Fixture] {
+            for capture in [false, true] {
+                for companion in [false, true] {
+                    let c = candidate(version, kind, capture, companion);
+                    let valid = matches!(
+                        (version, kind, capture, companion),
+                        (1, _, false, false)
+                            | (2, Kind::Native, true, false)
+                            | (3, Kind::Native, true, true)
+                    );
+                    assert_eq!(
+                        c.validate_version().is_ok(),
+                        valid,
+                        "{version} {kind:?} {capture} {companion}"
+                    );
+                    let json = serde_json::to_value(&c).unwrap();
+                    assert_eq!(json.get("companion").is_some(), companion);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn ownership_binds_the_exact_original_companion_and_version_to_candidate() {
+    for c in [
+        candidate(1, Kind::Fixture, false, false),
+        candidate(2, Kind::Native, true, false),
+        candidate(3, Kind::Native, true, true),
+    ] {
+        let record = Ownership {
+            version: if c.companion.is_some() { 2 } else { 1 },
+            candidate_sha256: "66".repeat(32),
+            actor: "original-actor".into(),
+            stock: c.stock.baseline.clone(),
+            buddy: c.buddy.baseline.clone(),
+            companion: c.companion.clone(),
+        };
+        record.validate(&c, &"66".repeat(32)).unwrap();
+        assert!(record.validate(&c, &"77".repeat(32)).is_err());
+        let bytes = serde_json::to_vec(&record).unwrap();
+        for field in ["stock", "buddy", "companion"] {
+            let mut changed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            changed[field] = "other-incarnation".into();
+            assert!(serde_json::from_value::<Ownership>(changed)
+                .unwrap()
+                .validate(&c, &"66".repeat(32))
+                .is_err());
+        }
+        let mut changed: Ownership = serde_json::from_slice(&bytes).unwrap();
+        changed.version = 3 - changed.version;
+        assert!(changed.validate(&c, &"66".repeat(32)).is_err());
+    }
+}
+
+#[test]
+fn recovery_retains_the_verified_pair_and_withholds_buddy_on_later_change() {
+    use std::cell::Cell;
+    let observed = Cell::new((41, 42));
+    let captures = Cell::new(0);
+    let result = recovery_sequence(
+        || {
+            captures.set(captures.get() + 1);
+            Ok(observed.get())
+        },
+        |original| {
+            assert_eq!(*original, (41, 42));
+            observed.set((41, 43)); // companion replaced during source inspection
+            Ok(())
+        },
+        |original| {
+            ensure!(
+                *original == observed.get(),
+                "restored pair changed; Buddy withheld"
+            );
+            panic!("must not restore Buddy after replacement")
+        },
+    );
+    assert!(result.unwrap_err().to_string().contains("Buddy withheld"));
+    assert_eq!(captures.get(), 1);
+}
+
 #[test]
 fn fixture_targets_and_native_units_cannot_be_substituted() {
     for role in ["stock", "buddy"] {
@@ -290,11 +406,11 @@ fn diagnostic_expiry_cannot_prevent_stock_recovery_or_admit_buddy() {
             restored.set(true);
             Ok(())
         },
-        || {
+        |_| {
             assert!(restored.get(), "inventory ran before stock recovery");
             check(Instant::now())
         },
-        || panic!("expired preservation must withhold Buddy"),
+        |_| panic!("expired preservation must withhold Buddy"),
     );
     assert!(result.is_err());
     assert!(restored.get());
@@ -302,10 +418,10 @@ fn diagnostic_expiry_cannot_prevent_stock_recovery_or_admit_buddy() {
 
 #[test]
 fn uncertain_stock_restoration_withholds_diagnostics_and_buddy() {
-    let result = recovery_sequence(
+    let result = recovery_sequence::<()>(
         || anyhow::bail!("uncertain original group"),
-        || panic!("stock restoration was not verified"),
-        || panic!("Buddy must remain stopped"),
+        |_| panic!("stock restoration was not verified"),
+        |_| panic!("Buddy must remain stopped"),
     );
     assert!(result.unwrap_err().to_string().contains("uncertain"));
 }

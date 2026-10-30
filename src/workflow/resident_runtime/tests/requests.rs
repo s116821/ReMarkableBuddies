@@ -349,6 +349,15 @@ fn dispatched_cancellation_remains_original_through_dispatcher_reconnect_and_rec
             Reply::Captured(_)
         ));
         assert_eq!(fs::read(&journal).unwrap(), before_capture);
+        #[cfg(feature = "development-resident-bootstrap")]
+        {
+            use crate::workflow::resident_supervisor::service::bootstrap::setup::visual::capture_on_runtime;
+            let loss = runtime.retired_loss.clone();
+            capture_on_runtime(&mut runtime, end(), &mut || Ok(())).unwrap();
+            assert_eq!(runtime.identity(), &identity);
+            assert_eq!(runtime.retired_loss, loss);
+            assert_eq!(fs::read(&journal).unwrap(), before_capture);
+        }
         let refused = request::execute(
             &mut runtime,
             OperationId(nonce()),

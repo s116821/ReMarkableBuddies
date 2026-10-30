@@ -4109,7 +4109,7 @@ mod owned {
             validate_fault(&fault).unwrap();
         }
         #[test]
-        #[ignore = "Requires isolated C-header ioctl fixture; see examples/fixtures/owned_gesture_ioctl_fixture.c"]
+        #[ignore = "Requires isolated C-header ioctl fixture; see docs/examples/fixtures/owned_gesture_ioctl_fixture.c"]
         fn actual_snapshot_and_tracking_requests_match_linux_header() {
             let reset = unsafe {
                 libc::dlsym(libc::RTLD_DEFAULT, b"owned_fixture_reset\0".as_ptr().cast())

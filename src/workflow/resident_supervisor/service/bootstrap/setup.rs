@@ -3,25 +3,38 @@
 use super::*;
 use remarkable_open_sdk::{native_adapter::RuntimeIdentity, PageKey, Uuid};
 
+pub mod visual;
+
 const POLL: Duration = Duration::from_millis(20);
-const NAMES: [&str; 6] = [
+const NAMES: [&str; 9] = [
     "observer-ended",
     "actor-ended",
     "ready",
     "complete",
     "observer-admitted",
     "actor-admitted",
+    "visual-before",
+    "visual-after-request",
+    "visual-after",
 ];
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CapturePlan {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visual_setup: Option<u8>,
     pub document: String,
     pub page: String,
     pub order: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opening_metadata: Option<super::opening::OpeningMetadata>,
 }
 impl CapturePlan {
     pub fn facts(&self) -> Result<remarkable_open_sdk::native_adapter::ReaderFacts> {
+        ensure!(
+            matches!(self.visual_setup, None | Some(1)),
+            "unsupported visual setup policy"
+        );
         fn id(value: &str) -> Result<Uuid> {
             let id = Uuid::parse(value).context("invalid fixture UUID")?;
             ensure!(id.to_string() == value, "noncanonical fixture UUID");
@@ -99,15 +112,19 @@ impl Binding {
         ensure!(self.observer != self.runtime, "setup processes must differ");
         Ok(())
     }
-    pub(super) fn current(&self, context: &Context, observer: u32) -> Result<()> {
+    fn candidate(&self, context: &Context) -> Result<()> {
         self.validate()?;
         ensure!(
             self.nonce == context.nonce
                 && self.candidate_sha256 == context.digest
-                && self.boot == context.candidate.boot
-                && self.observer.pid == observer,
-            "setup candidate/process mismatch"
+                && self.boot == context.candidate.boot,
+            "setup candidate mismatch"
         );
+        Ok(())
+    }
+    pub(super) fn current(&self, context: &Context, observer: u32) -> Result<()> {
+        self.candidate(context)?;
+        ensure!(self.observer.pid == observer, "setup observer mismatch");
         ensure!(
             ProcessIdentity::read(observer)? == self.observer
                 && ProcessIdentity::read(self.runtime.pid)? == self.runtime,
@@ -126,17 +143,37 @@ impl Binding {
     }
 }
 
+/// Recovery reads historical bindings after the original processes have exited;
+/// liveness belongs to admission, not proof that both guards ended before setup.
+pub(super) fn historical_ready(context: &Context, deadline: Instant) -> Result<Option<Mailbox>> {
+    let mut mailbox = Mailbox::open(&context.root)?;
+    let Some(binding) = mailbox.receive("ready", deadline)? else {
+        return Ok(None);
+    };
+    binding.candidate(context)?;
+    for name in ["observer-ended", "actor-ended"] {
+        ensure!(
+            mailbox.receive(name, deadline)?.as_ref() == Some(&binding),
+            "opening policy lacks matching ended-admission proof"
+        );
+    }
+    mailbox.current()?;
+    Ok(Some(mailbox))
+}
+
 pub struct ObserverSetup {
     pub plan: CapturePlan,
     pub candidate_sha256: String,
     pub mailbox: Mailbox,
     candidate: Pinned,
+    vendor: Option<std::sync::Arc<vendor::OriginalCompanion>>,
 }
 impl ObserverSetup {
     pub fn load(name: &str, deadline: Instant) -> Result<Option<Self>> {
         nonce(name)?;
         let (pin, bytes) = read_pin(&stage(name).join("candidate.json"), deadline)?;
         let candidate: Candidate = serde_json::from_slice(&bytes)?;
+        candidate.validate_version()?;
         ensure!(
             candidate.nonce == name
                 && candidate.kind == Kind::Native
@@ -146,7 +183,17 @@ impl ObserverSetup {
         if candidate.version == 1 && candidate.capture.is_none() {
             return Ok(None);
         }
-        ensure!(candidate.version == 2, "unsupported capture candidate");
+        ensure!(
+            matches!(candidate.version, 2 | 3),
+            "unsupported capture candidate"
+        );
+        let vendor = candidate
+            .companion
+            .as_deref()
+            .map(|record| {
+                vendor::OriginalCompanion::load(record, deadline).map(std::sync::Arc::new)
+            })
+            .transpose()?;
         let plan = candidate.capture.context("missing capture plan")?;
         plan.facts()?;
         verify_process(
@@ -170,7 +217,11 @@ impl ObserverSetup {
             candidate_sha256: sha(&bytes),
             mailbox,
             candidate: pin,
+            vendor,
         }))
+    }
+    pub fn vendor(&self) -> Option<std::sync::Arc<vendor::OriginalCompanion>> {
+        self.vendor.clone()
     }
     pub fn current(&self) -> Result<()> {
         self.candidate.current()?;
@@ -234,6 +285,7 @@ impl Mailbox {
         Ok(format!("setup.{name}.json"))
     }
     pub fn empty(&self) -> Result<()> {
+        self.absent_visual_files()?;
         self.absent(&NAMES)
     }
     fn absent(&self, names: &[&str]) -> Result<()> {
@@ -249,6 +301,15 @@ impl Mailbox {
         Ok(())
     }
     pub fn publish(&mut self, name: &str, binding: &Binding, deadline: Instant) -> Result<()> {
+        self.publish_admitted(name, binding, deadline, &mut || Ok(()))
+    }
+    fn publish_admitted(
+        &mut self,
+        name: &str,
+        binding: &Binding,
+        deadline: Instant,
+        admission: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
         check(deadline)?;
         binding.validate()?;
         self.current()?;
@@ -258,6 +319,9 @@ impl Mailbox {
             "preexisting setup completion"
         );
         write_new(&self.root, &leaf, &serde_json::to_vec(binding)?)?;
+        admission()?;
+        self.current()?;
+        check(deadline)?;
         write_new(&self.root, &format!("{leaf}.complete"), b"")?;
         ensure!(
             self.receive(name, deadline)?.as_ref() == Some(binding),
@@ -367,6 +431,29 @@ pub fn actor<I: InputGuard>(
     deadline: Instant,
     progress: &mut dyn FnMut() -> Result<()>,
 ) -> Result<()> {
+    actor_selected(mailbox, binding, input, acquire, deadline, progress, false)
+}
+
+pub fn actor_visual<I: InputGuard>(
+    mailbox: &mut Mailbox,
+    binding: &Binding,
+    input: &mut Option<I>,
+    acquire: impl FnOnce() -> Result<I>,
+    deadline: Instant,
+    progress: &mut dyn FnMut() -> Result<()>,
+) -> Result<()> {
+    actor_selected(mailbox, binding, input, acquire, deadline, progress, true)
+}
+
+pub fn actor_selected<I: InputGuard>(
+    mailbox: &mut Mailbox,
+    binding: &Binding,
+    input: &mut Option<I>,
+    acquire: impl FnOnce() -> Result<I>,
+    deadline: Instant,
+    progress: &mut dyn FnMut() -> Result<()>,
+    visual: bool,
+) -> Result<()> {
     check(deadline)?;
     progress()?;
     mailbox.absent(&[
@@ -380,6 +467,11 @@ pub fn actor<I: InputGuard>(
     drop(input.take());
     mailbox.publish("actor-ended", binding, deadline)?;
     mailbox.wait("complete", binding, deadline, progress)?;
+    if visual {
+        mailbox.require_visual_pair(binding, deadline)?;
+        progress()?;
+        check(deadline)?;
+    }
     *input = Some(acquire()?);
     quiet(input)?;
     mailbox.wait("observer-admitted", binding, deadline, &mut || {

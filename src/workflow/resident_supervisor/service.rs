@@ -14,6 +14,8 @@ use std::{
 pub mod baseline;
 #[cfg(feature = "development-resident-bootstrap")]
 pub mod bootstrap;
+pub mod companion;
+pub mod vendor;
 
 const LIMIT: usize = 16 * 1024;
 const POLL: Duration = Duration::from_millis(5);
@@ -462,7 +464,14 @@ fn reap(child: &mut Child) -> bool {
         thread::sleep(POLL.min(deadline.saturating_duration_since(Instant::now())));
     }
 }
-fn run(mut command: Command, deadline: Instant) -> Result<Vec<u8>> {
+fn run(command: Command, deadline: Instant) -> Result<Vec<u8>> {
+    run_with_progress(command, deadline, &mut || Ok(()))
+}
+fn run_with_progress(
+    mut command: Command,
+    deadline: Instant,
+    progress: &mut dyn FnMut() -> Result<()>,
+) -> Result<Vec<u8>> {
     let caller_deadline = deadline;
     let deadline = deadline.min(Instant::now() + Duration::from_secs(3));
     let check = || -> Result<()> {
@@ -479,6 +488,8 @@ fn run(mut command: Command, deadline: Instant) -> Result<Vec<u8>> {
             Ok(())
         }
     };
+    check()?;
+    progress()?;
     check()?;
     let mut child = command
         .env_clear()
@@ -497,12 +508,15 @@ fn run(mut command: Command, deadline: Instant) -> Result<Vec<u8>> {
         let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
         loop {
             check()?;
+            progress()?;
+            check()?;
             let out_eof = drain(&mut out, &mut stdout)?;
             let err_eof = drain(&mut err, &mut stderr)?;
             ensure!(stderr.is_empty(), "service command wrote stderr");
             if let Some(status) = child.try_wait()? {
                 ensure!(status.success(), "service command exited unsuccessfully");
                 if out_eof && err_eof {
+                    progress()?;
                     check()?;
                     return Ok(stdout);
                 }

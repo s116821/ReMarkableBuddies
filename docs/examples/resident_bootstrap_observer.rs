@@ -26,9 +26,10 @@ fn nonce(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Stri
 #[cfg(target_os = "linux")]
 mod native {
     use super::*;
+    use anyhow::Context;
     use remarkable_open_sdk::{native_adapter::HistoricalCapture, OperationId};
     use remarkable_reader_buddy::workflow::resident_supervisor::service::bootstrap::setup::{
-        capture_after_setup, Binding, ObserverSetup,
+        capture_after_setup, visual, Binding, ObserverSetup,
     };
     use remarkable_reader_buddy::{
         device::{
@@ -37,7 +38,7 @@ mod native {
         },
         storage::{Store, StorePaths},
         workflow::{
-            resident_runtime::{Artifact, Launch, ResidentRuntime},
+            resident_runtime::{Artifact, CompanionProfile, Launch, ResidentRuntime},
             resident_supervisor::service,
         },
     };
@@ -53,10 +54,10 @@ mod native {
 
     // Reviewed read-only candidate only. A new native artifact requires a source
     // revision and review, not a command-line override of these identities.
-    // Revision-3 SDK80b29eb capture-native-library-r2 build. Historical revision-2
-    // observers remain frozen with their original candidates and are not replayed.
-    const PROFILE: &str = "cd1d38507aedadc7df1406b5a74843ba7ab307fb51c8213311d71cab6bb0d8ae";
-    const ADAPTER: &str = "3e5dee321c68384bfd042e3697dc405f6f5d0de3891bfadb541bb55efac2b21d";
+    // Revision-4 SDKf03cc72 visual-native-library-r1 build. Earlier observers
+    // remain frozen with their original spent candidates and are not replayed.
+    const PROFILE: &str = "c0d8cbbb9b4618a870de348fedaedbf242b8009bf4615d67bd83d4f3c03a538d";
+    const ADAPTER: &str = "c0121f577e19a484c962ad98ad8f60121e14d0695a3f9198e95978ad07895380";
     const STOCK: &str = "071d85beef3ef2d4cc0e11002140b27b82a2cc04a2ed740a5669f591069b77df";
 
     fn artifact(path: impl Into<std::path::PathBuf>, hash: &str) -> Artifact {
@@ -70,7 +71,10 @@ mod native {
         }
     }
 
-    fn inactive_services(deadline: Instant) -> Result<()> {
+    fn inactive_services(
+        deadline: Instant,
+        vendor: Option<&service::vendor::OriginalCompanion>,
+    ) -> Result<()> {
         // This prevents accidental invocation against the running legacy stack.
         // It does NOT replace the controller's original-cgroup and recovery proof.
         for unit in ["xochitl.service", "reader-buddy.service"] {
@@ -93,16 +97,26 @@ mod native {
                 "{unit} changed during admission"
             );
         }
+        if let Some(vendor) = vendor {
+            ensure!(
+                vendor.stopped(deadline)?,
+                "original companion is not stopped"
+            );
+        }
         Ok(())
     }
 
-    fn admit(input: &mut RequestInput, deadline: Instant) -> Result<()> {
+    fn admit(
+        input: &mut RequestInput,
+        deadline: Instant,
+        vendor: Option<&service::vendor::OriginalCompanion>,
+    ) -> Result<()> {
         ensure!(Instant::now() < deadline, "Observation deadline expired");
         ensure!(
             input.poll()? == InputProgress::Quiet,
             "Observation canceled by input"
         );
-        inactive_services(deadline)?;
+        inactive_services(deadline, vendor)?;
         ensure!(
             input.poll()? == InputProgress::Quiet,
             "Observation canceled during service check"
@@ -125,21 +139,80 @@ mod native {
         Ok(())
     }
 
+    struct VisualTransport<'a> {
+        runtime: &'a mut ResidentRuntime,
+        vendor: Option<Arc<service::vendor::OriginalCompanion>>,
+    }
+    impl visual::Transport for VisualTransport<'_> {
+        fn progress(&mut self, deadline: Instant) -> Result<()> {
+            self.runtime.with_connection(
+                deadline,
+                &mut || inactive_services(deadline, self.vendor.as_deref()),
+                |_, progress| progress(),
+            )
+        }
+        fn capture(
+            &mut self,
+            _stage: visual::Stage,
+            deadline: Instant,
+            guard: &mut dyn FnMut() -> Result<()>,
+        ) -> Result<visual::Image> {
+            visual::capture_on_runtime(self.runtime, deadline, &mut || {
+                guard()?;
+                inactive_services(deadline, self.vendor.as_deref())?;
+                guard()
+            })
+        }
+        fn capture_diagnosed(
+            &mut self,
+            stage: visual::Stage,
+            deadline: Instant,
+            guard: &mut dyn FnMut() -> Result<()>,
+            diagnostics: &mut visual::Diagnostics,
+        ) -> Result<visual::Image> {
+            visual::capture_on_runtime_diagnosed(
+                self.runtime,
+                stage,
+                deadline,
+                &mut || {
+                    guard()?;
+                    inactive_services(deadline, self.vendor.as_deref())?;
+                    guard()
+                },
+                diagnostics,
+            )
+        }
+    }
+
     fn capture(
         runtime: &mut ResidentRuntime,
         mut input: Option<RequestInput>,
         setup: &mut ObserverSetup,
-        nonce: &str,
+        binding: &Binding,
         operation: OperationId,
-        overall: Instant,
+        bounds: (Instant, Instant),
+        diagnostics: Option<&mut visual::Diagnostics>,
     ) -> Result<HistoricalCapture> {
-        let binding = Binding::new(nonce, &setup.candidate_sha256, runtime.identity())?;
-        let setup_deadline = overall.min(Instant::now() + Duration::from_secs(120));
-        runtime.with_connection(
-            setup_deadline,
-            &mut || inactive_services(setup_deadline),
-            |_, progress| setup.admit(&binding, &mut input, setup_deadline, progress),
-        )?;
+        let (overall, setup_deadline) = bounds;
+        let vendor = setup.vendor();
+        if setup.plan.visual_setup == Some(1) {
+            setup.admit_visual_diagnosed(
+                binding,
+                &mut input,
+                setup_deadline,
+                &mut VisualTransport {
+                    runtime,
+                    vendor: vendor.clone(),
+                },
+                diagnostics.context("visual diagnostics unavailable")?,
+            )?;
+        } else {
+            runtime.with_connection(
+                setup_deadline,
+                &mut || inactive_services(setup_deadline, vendor.as_deref()),
+                |_, progress| setup.admit(binding, &mut input, setup_deadline, progress),
+            )?;
+        }
         let deadline = overall.min(Instant::now() + Duration::from_secs(10));
         let facts = setup.plan.facts()?;
         capture_after_setup(runtime, facts, operation, deadline, &mut || {
@@ -149,6 +222,7 @@ mod native {
                     .as_mut()
                     .ok_or_else(|| anyhow::anyhow!("missing capture guard"))?,
                 deadline,
+                vendor.as_deref(),
             )
         })
     }
@@ -161,9 +235,10 @@ mod native {
         let start = Instant::now();
         let deadline = start + Duration::from_secs(60);
         let mut capture_setup = ObserverSetup::load(nonce, deadline)?;
-        inactive_services(deadline)?;
+        let vendor = capture_setup.as_ref().and_then(ObserverSetup::vendor);
+        inactive_services(deadline, vendor.as_deref())?;
         let mut input = RequestInput::new(TriggerCorner::LowerLeft, None)?;
-        admit(&mut input, deadline)?;
+        admit(&mut input, deadline, vendor.as_deref())?;
         let root = std::path::PathBuf::from(format!("/run/rsdk-bootstrap-{nonce}"));
         let stage = std::path::PathBuf::from(format!("/home/root/rsdk-bootstrap-{nonce}"));
         ensure!(
@@ -177,6 +252,8 @@ mod native {
             credentials: root.join("credentials"),
         })?);
         let launch = Launch {
+            // Only the pinned, versioned candidate selects this contract.
+            companion: vendor.as_ref().map(|_| CompanionProfile::rm2_3_28_0_172()),
             profile: artifact(stage.join("profile.json"), PROFILE),
             executable: artifact("/usr/bin/xochitl", STOCK),
             adapter: artifact(stage.join("libremarkable-resident.so"), ADAPTER),
@@ -192,7 +269,7 @@ mod native {
             operation_budget_ms: 10_000,
         };
         let mut runtime = match ResidentRuntime::launch_admitted(store, launch, deadline, |end| {
-            admit(&mut input, end)
+            admit(&mut input, end, vendor.as_deref())
         }) {
             Ok(runtime) => runtime,
             Err(error) => {
@@ -210,16 +287,60 @@ mod native {
                 .expect("fresh UUID"),
         );
         if let Some(setup) = &mut capture_setup {
-            let captured = capture(
-                &mut runtime,
-                Some(input),
-                setup,
-                nonce,
-                operation,
-                start + Duration::from_secs(180),
-            );
-            // Setup and capture failures take the same owned-child cleanup path.
-            let shutdown = runtime.shutdown(Instant::now() + Duration::from_secs(3));
+            let overall = start + Duration::from_secs(180);
+            // Charge diagnostic construction and entry retention to this same
+            // original setup window; neither can move its 120-second anchor.
+            let setup_deadline = overall.min(Instant::now() + Duration::from_secs(120));
+            let binding = Binding::new(nonce, &setup.candidate_sha256, runtime.identity());
+            let mut diagnostics = binding
+                .as_ref()
+                .map_err(|error| anyhow::anyhow!("{error:#}"))
+                .and_then(|binding| {
+                    if setup.plan.visual_setup == Some(1) {
+                        visual::Diagnostics::new(
+                            &std::path::PathBuf::from(format!("/run/rsdk-control-{nonce}")),
+                            binding,
+                        )
+                        .map(Some)
+                    } else {
+                        Ok(None)
+                    }
+                });
+            let captured = match (&binding, &mut diagnostics) {
+                (Ok(binding), Ok(Some(trace))) => {
+                    trace.step(None, visual::Phase::CaptureResult, overall, |trace| {
+                        capture(
+                            &mut runtime,
+                            Some(input),
+                            setup,
+                            binding,
+                            operation,
+                            (overall, setup_deadline),
+                            Some(trace),
+                        )
+                    })
+                }
+                (Ok(binding), Ok(None)) => capture(
+                    &mut runtime,
+                    Some(input),
+                    setup,
+                    binding,
+                    operation,
+                    (overall, setup_deadline),
+                    None,
+                ),
+                (_, Err(error)) => Err(anyhow::anyhow!("{error:#}")),
+                (Err(error), _) => Err(anyhow::anyhow!("{error:#}")),
+            };
+            // CaptureResult retains errors before shutdown can block or Drop runs.
+            // Even failed diagnostic initialization/retention cannot bypass cleanup.
+            let shutdown_deadline = Instant::now() + Duration::from_secs(3);
+            let shutdown = match &mut diagnostics {
+                Ok(Some(trace)) => {
+                    trace.shutdown(shutdown_deadline, || runtime.shutdown(shutdown_deadline))
+                }
+                _ => runtime.shutdown(shutdown_deadline),
+            };
             let result = match &captured {
                 Ok(image) => serde_json::json!({"captured": true,
                     "before": format!("{:?}", image.before()), "after": format!("{:?}", image.after()),
@@ -254,7 +375,7 @@ mod native {
         let observe_deadline = Instant::now() + Duration::from_secs(10);
         let observed = runtime.with_connection(
             observe_deadline,
-            &mut || admit(&mut input, observe_deadline),
+            &mut || admit(&mut input, observe_deadline, vendor.as_deref()),
             |connection, progress| {
                 connection.observe_with_progress(operation, observe_deadline, progress)
             },

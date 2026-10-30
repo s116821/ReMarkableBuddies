@@ -15,7 +15,7 @@ tokio = { version = "1.28", features = ["full"] }
 ureq = { version = "3.0", features = ["json"] }
 reqwest = { version = "=0.13.4", default-features = false, features = ["json", "rustls", "hickory-dns"] }
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde_json = { version = "1.0", features = ["raw_value"] }
 anyhow = "1.0"
 base64 = "0.22"
 image = "0.25.5"
@@ -35,7 +35,7 @@ quick-xml = "=0.42.0"
 percent-encoding = "=2.3.2"
 lopdf = { version = "=0.46.0", default-features = false }
 
-remarkable-open-sdk = { git = "https://github.com/s116821/ReMarkableOpenSDK", rev = "80b29ebec3a46b6976e5288d2e8d65fbeccca816", default-features = false, features = ["native-adapter", "development-capture"] }
+remarkable-open-sdk = { git = "https://github.com/s116821/ReMarkableOpenSDK", rev = "f03cc7227d6b32213d6d49ae8c61a1cef6d43711", default-features = false, features = ["native-adapter", "development-capture"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.13"
@@ -60,7 +60,7 @@ path = "docs/examples/resident_bootstrap_observer.rs"
 required-features = ["development-resident-bootstrap"]
 
 [dev-dependencies]
-remarkable-open-sdk = { git = "https://github.com/s116821/ReMarkableOpenSDK", rev = "80b29ebec3a46b6976e5288d2e8d65fbeccca816", default-features = false, features = ["mock", "development-capture"] }
+remarkable-open-sdk = { git = "https://github.com/s116821/ReMarkableOpenSDK", rev = "f03cc7227d6b32213d6d49ae8c61a1cef6d43711", default-features = false, features = ["mock", "development-capture"] }
 # Explicit native-evidence example only; not linked into the installed runtime.
 sha2 = "0.10"
 

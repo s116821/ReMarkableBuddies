@@ -544,6 +544,24 @@ mod linux {
                 )
                 .map_err(|error| self.transport_failure(error).into())
         }
+        /// Visual-only evidence cannot enter the mutation journal or establish
+        /// Reader identity. Earlier unresolved effects remain untouched.
+        pub fn capture_visual_with_progress(
+            &mut self,
+            operation: OperationId,
+            deadline: Instant,
+            progress: &mut dyn FnMut() -> Result<()>,
+        ) -> Result<Reply> {
+            self.client
+                .execute_with_progress(
+                    operation,
+                    Command::CaptureVisual,
+                    deadline,
+                    |_, _| Ok(()),
+                    &mut || progress().map_err(progress_error),
+                )
+                .map_err(|error| self.transport_failure(error).into())
+        }
         /// Capture preserves expected source and the caller's original admission.
         /// The SDK validates the bounded image and both source samples. This
         /// read-only request neither journals nor reconciles an earlier effect.

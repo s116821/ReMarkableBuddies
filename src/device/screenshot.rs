@@ -6,6 +6,9 @@ use std::io::Write;
 use std::io::{Read, Seek};
 use std::process;
 
+#[cfg(feature = "development-resident-bootstrap")]
+mod resident;
+
 use base64::{engine::general_purpose, Engine as _};
 use image::ImageEncoder;
 
@@ -15,6 +18,8 @@ pub struct CaptureIdentity {
     pid: u32,
     start_ticks: u64,
     boot_id: String,
+    #[cfg(feature = "development-resident-bootstrap")]
+    resident: Option<resident::Binding>,
 }
 
 impl CaptureIdentity {
@@ -38,17 +43,46 @@ impl CaptureIdentity {
             pid,
             start_ticks,
             boot_id,
+            #[cfg(feature = "development-resident-bootstrap")]
+            resident: None,
         })
+    }
+
+    /// Explicit developer-only copied-reader binding; never process discovery.
+    #[cfg(feature = "development-resident-bootstrap")]
+    pub fn new_for_resident(
+        pid: u32,
+        start_ticks: u64,
+        boot_id: String,
+        candidate_nonce: &str,
+        executable_sha256: &str,
+    ) -> Result<Self> {
+        let mut identity = Self::new(pid, start_ticks, boot_id)?;
+        identity.resident = Some(resident::Binding::new(candidate_nonce, executable_sha256)?);
+        Ok(identity)
+    }
+
+    fn is_resident(&self) -> bool {
+        #[cfg(feature = "development-resident-bootstrap")]
+        if self.resident.is_some() {
+            return true;
+        }
+        false
     }
 
     fn check(&self) -> Result<()> {
         let boot = bounded_text("/proc/sys/kernel/random/boot_id", 128)?;
         let stat = bounded_text(&format!("/proc/{}/stat", self.pid), 8192)?;
-        self.check_sample(boot.trim(), &stat)
+        self.check_sample(boot.trim(), &stat)?;
+        #[cfg(feature = "development-resident-bootstrap")]
+        if let Some(binding) = &self.resident {
+            binding.check_path(self.pid)?;
+        }
+        Ok(())
     }
 
     fn check_sample(&self, boot: &str, stat: &str) -> Result<()> {
-        let (pid, start, state) = process_stat(stat)?;
+        let (pid, start, state) = process_stat_for(stat, self.is_resident())?;
         anyhow::ensure!(
             boot == self.boot_id && pid == self.pid && start == self.start_ticks,
             "Capture process identity changed; expected {self:?}"
@@ -59,11 +93,18 @@ impl CaptureIdentity {
 }
 
 fn process_stat(stat: &str) -> Result<(u32, u64, &str)> {
+    process_stat_for(stat, false)
+}
+
+fn process_stat_for(stat: &str, copied_reader: bool) -> Result<(u32, u64, &str)> {
     let (prefix, suffix) = stat.rsplit_once(')').context("Malformed process stat")?;
     let (pid, comm) = prefix
         .split_once('(')
         .context("Malformed process stat name")?;
-    anyhow::ensure!(comm == "xochitl", "Bound capture process is not xochitl");
+    anyhow::ensure!(
+        comm == "xochitl" || (copied_reader && comm == "reader"),
+        "Bound capture process name is not admitted"
+    );
     let fields: Vec<_> = suffix.split_whitespace().collect();
     anyhow::ensure!(
         fields.len() >= 20 && fields[0].len() == 1,
@@ -393,11 +434,24 @@ impl Screenshot {
                 }
             };
             identity.check()?;
+            #[cfg(all(target_os = "linux", feature = "development-resident-bootstrap"))]
+            let executable = identity
+                .resident
+                .as_ref()
+                .map(|binding| binding.pin(identity.pid))
+                .transpose()?;
             // Hold this exact process memory handle through discovery and read.
             let mut mem = File::open(format!("/proc/{}/mem", identity.pid))?;
             info!("Capture bound process={identity:?}");
-            return Self::capture_bound_rm2(
-                || identity.check(),
+            let captured = Self::capture_bound_rm2(
+                || {
+                    identity.check()?;
+                    #[cfg(all(target_os = "linux", feature = "development-resident-bootstrap"))]
+                    if let Some(pin) = &executable {
+                        pin.current()?;
+                    }
+                    Ok(())
+                },
                 || bounded_text(&format!("/proc/{}/maps", identity.pid), MAPS_CAP),
                 |address, bytes| {
                     mem.seek(std::io::SeekFrom::Start(address))?;
@@ -405,7 +459,13 @@ impl Screenshot {
                     Ok(())
                 },
             )
-            .with_context(|| format!("Bound RM2 capture {identity:?}"));
+            .with_context(|| format!("Bound RM2 capture {identity:?}"))?;
+            #[cfg(all(target_os = "linux", feature = "development-resident-bootstrap"))]
+            if let Some(pin) = &executable {
+                pin.verify_content()?;
+            }
+            identity.check()?;
+            return Ok(captured);
         }
         // Find xochitl's process
         debug!("screenshot: finding pid");
@@ -1159,6 +1219,48 @@ mod tests {
         assert!(CaptureIdentity::new(0, 1, identity.boot_id.clone()).is_err());
         assert!(CaptureIdentity::new(42, 0, identity.boot_id.clone()).is_err());
         assert!(CaptureIdentity::new(42, 1, "not-a-boot".into()).is_err());
+    }
+
+    #[cfg(feature = "development-resident-bootstrap")]
+    #[test]
+    fn copied_reader_name_requires_explicit_bound_mode() {
+        let ordinary = identity_fixture();
+        let reader = stat_fixture(42, 123, "S").replace("xochitl", "reader");
+        assert!(ordinary.check_sample(&ordinary.boot_id, &reader).is_err());
+        let identity = CaptureIdentity::new_for_resident(
+            42,
+            123,
+            ordinary.boot_id.clone(),
+            "12121212121212121212121212121212",
+            &"a".repeat(64),
+        )
+        .unwrap();
+        identity.check_sample(&identity.boot_id, &reader).unwrap();
+        identity
+            .check_sample(&identity.boot_id, &stat_fixture(42, 123, "S"))
+            .unwrap();
+        assert!(identity
+            .check_sample(&identity.boot_id, &reader.replace("reader", "other"))
+            .is_err());
+        assert!(identity
+            .check_sample(&identity.boot_id, &stat_fixture(42, 124, "S"))
+            .is_err());
+        assert!(CaptureIdentity::new_for_resident(
+            42,
+            123,
+            ordinary.boot_id.clone(),
+            "../escape",
+            &"a".repeat(64)
+        )
+        .is_err());
+        assert!(CaptureIdentity::new_for_resident(
+            42,
+            123,
+            ordinary.boot_id,
+            &"a".repeat(32),
+            &"A".repeat(64)
+        )
+        .is_err());
     }
 
     #[test]

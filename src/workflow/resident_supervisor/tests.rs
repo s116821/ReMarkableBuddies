@@ -78,6 +78,79 @@ impl Fixture {
         )
         .unwrap()
     }
+    pub(super) fn companion_record(&self) -> String {
+        let mut group = self.baseline.clone();
+        group.unit = "rm-sync.service".into();
+        let path = group.mount_path.join("system.slice/rm-sync.service");
+        fs::create_dir_all(&path).unwrap();
+        group.group = Identity::of(&fs::metadata(path).unwrap());
+        group.parent = ProcessIdentity {
+            pid: 43,
+            start_ticks: 100,
+        };
+        let mut fields: std::collections::BTreeMap<String, String> = service::STATE
+            .iter()
+            .chain(service::POLICY)
+            .map(|key| ((*key).into(), String::new()))
+            .collect();
+        for (key, value) in [
+            ("Id", "rm-sync.service"),
+            ("LoadState", "loaded"),
+            ("ActiveState", "active"),
+            ("SubState", "running"),
+            ("ControlPID", "0"),
+            ("Job", ""),
+            ("ControlGroup", "/system.slice/rm-sync.service"),
+            ("MainPID", "43"),
+            ("ExecMainPID", "43"),
+            ("ExecMainStartTimestampMonotonic", "1234"),
+            ("InvocationID", "34343434343434343434343434343434"),
+            ("WatchdogUSec", "0"),
+        ] {
+            fields.insert(key.into(), value.into());
+        }
+        let snapshot: String = fields
+            .iter()
+            .map(|(key, value)| format!("{key}={value}\n"))
+            .collect();
+        let record = serde_json::json!({"version": 1, "snapshot": snapshot, "group": group});
+        let bytes = serde_json::to_vec(&record).unwrap();
+        service::baseline::ServiceBaseline::decode(&bytes).unwrap();
+        String::from_utf8(bytes).unwrap()
+    }
+}
+
+#[test]
+fn installed_companion_lease_requires_version_and_same_distinct_group_context() {
+    let f = Fixture::new();
+    let original = f.record();
+    let companion = f.companion_record();
+    let admitted = original.clone().with_companion(companion.clone()).unwrap();
+    assert_eq!(admitted.version, 3);
+    let mut old = admitted.clone();
+    old.version = 2;
+    assert!(old.validate().is_err());
+    let mut missing = admitted;
+    missing.companion = None;
+    assert!(missing.validate().is_err());
+    for mode in 0..3 {
+        let mut record: serde_json::Value = serde_json::from_str(&companion).unwrap();
+        match mode {
+            0 => record["group"]["context"]["boot"] = Uuid::new_v4().to_string().into(),
+            1 => record["group"]["group"] = serde_json::to_value(&original.group.group).unwrap(),
+            _ => {
+                record["group"]["unit"] = "other.service".into();
+                record["snapshot"] = record["snapshot"]
+                    .as_str()
+                    .unwrap()
+                    .replace("rm-sync.service", "other.service")
+                    .into();
+            }
+        }
+        assert!(original.clone().with_companion(record.to_string()).is_err());
+    }
+    let encoded = serde_json::to_value(original).unwrap();
+    assert!(encoded.get("companion").is_none());
 }
 impl Drop for Fixture {
     fn drop(&mut self) {

@@ -6,7 +6,7 @@ use crate::{
     storage::Store,
     workflow::{
         resident_request::{self, FailureKind, InputProgress, Request, RequestFailure},
-        resident_runtime::{Artifact, Launch, ResidentRuntime},
+        resident_runtime::{Artifact, CompanionProfile, Launch, ResidentRuntime},
         resident_supervisor::{
             health::{ExitOnDrop, ServiceHealth},
             GroupObservation, StockBaseline,
@@ -39,6 +39,7 @@ struct Pending {
     helper: service::Snapshot,
     stock: service::Snapshot,
     stock_group: GroupBaseline,
+    vendor: Option<service::vendor::OriginalCompanion>,
 }
 
 impl Session {
@@ -121,6 +122,16 @@ impl Session {
             stock == service::observe(STOCK, deadline)?,
             "stock changed during admission"
         );
+        let companion_record = installation
+            .profile
+            .companion
+            .as_ref()
+            .map(|_| service::vendor::OriginalCompanion::inspect(deadline))
+            .transpose()?;
+        let vendor = companion_record
+            .as_deref()
+            .map(|record| service::vendor::OriginalCompanion::load(record, deadline))
+            .transpose()?;
         let record = LeaseRecord::new(
             group,
             buddy.invocation().to_owned(),
@@ -136,6 +147,11 @@ impl Session {
             installation.profile.adapter_sha256,
             installation.digest,
         )?;
+        let record = if let Some(companion) = companion_record {
+            record.with_companion(companion)?
+        } else {
+            record
+        };
         installation.profile.validate(&record)?;
         installation.current(deadline)?;
         progress()?;
@@ -154,12 +170,15 @@ impl Session {
             helper,
             stock,
             stock_group,
+            vendor,
         };
         pending.current(health, progress, deadline)?;
-        pending.original_stock(deadline)?;
         checked_handoff(
             deadline,
             || {
+                progress()?;
+                pending.exit.check(health)?;
+                pending.original_stock(deadline)?;
                 progress()?;
                 pending.exit.check(health)
             },
@@ -180,6 +199,10 @@ impl Session {
             .join(format!("session-{}", pending.lease.record().activation()));
         let profile = &pending.installation.profile;
         let launch = Launch {
+            companion: pending
+                .vendor
+                .as_ref()
+                .map(|_| CompanionProfile::rm2_3_28_0_172()),
             profile: Artifact {
                 path: NATIVE_PROFILE.into(),
                 sha256: profile.native_profile_sha256,
@@ -336,6 +359,9 @@ impl Pending {
         progress()?;
         self.exit.check(health)?;
         self.installation.current(deadline)?;
+        if let Some(vendor) = &self.vendor {
+            vendor.policy(deadline)?;
+        }
         self.lease.current()?;
         let buddy = service::observe(BUDDY, deadline)?;
         buddy_state(
@@ -364,6 +390,9 @@ impl Pending {
         let before = service::observe(STOCK, deadline)?;
         ensure!(before == self.stock, "original stock changed before stop");
         self.stock_group.current_process()?;
+        if let Some(vendor) = &self.vendor {
+            vendor.current(deadline)?;
+        }
         ensure!(
             service::observe(STOCK, deadline)? == self.stock,
             "stock changed across stop admission"
@@ -374,6 +403,10 @@ impl Pending {
     fn stock_stopped(&self, deadline: Instant) -> Result<bool> {
         let before = service::observe(STOCK, deadline)?;
         let group = self.stock_group.observe()?;
+        let companion_stopped = self
+            .vendor
+            .as_ref()
+            .map_or(Ok(true), |vendor| vendor.stopped(deadline))?;
         let after = service::observe(STOCK, deadline)?;
         match_observed_policy(
             &before.policy(),
@@ -390,7 +423,7 @@ impl Pending {
         check_deadline(deadline)?;
         // A legitimate shutdown can advance across a read. Wait for a stable
         // terminal bracket; both samples must still satisfy original identity.
-        Ok(before.same_observation(&after) && before_stopped && after_stopped)
+        Ok(before.same_observation(&after) && before_stopped && after_stopped && companion_stopped)
     }
 }
 

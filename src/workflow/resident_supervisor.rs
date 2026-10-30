@@ -364,6 +364,8 @@ pub struct LeaseRecord {
     profile_sha256: [u8; 32],
     adapter_sha256: [u8; 32],
     recovery_profile_sha256: [u8; 32],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    companion: Option<String>,
 }
 impl LeaseRecord {
     pub fn new(
@@ -385,9 +387,16 @@ impl LeaseRecord {
             profile_sha256,
             adapter_sha256,
             recovery_profile_sha256,
+            companion: None,
         };
         record.validate()?;
         Ok(record)
+    }
+    fn with_companion(mut self, baseline: String) -> Result<Self> {
+        self.version = 3;
+        self.companion = Some(baseline);
+        self.validate()?;
+        Ok(self)
     }
     pub fn group(&self) -> &GroupBaseline {
         &self.group
@@ -409,10 +418,22 @@ impl LeaseRecord {
     }
     fn validate(&self) -> Result<()> {
         ensure!(
-            self.version == 2 && !self.activation.is_nil(),
+            ((self.version == 2 && self.companion.is_none())
+                || (self.version == 3 && self.companion.is_some()))
+                && !self.activation.is_nil(),
             "unsupported or empty lease"
         );
         self.group.validate()?;
+        if let Some(record) = &self.companion {
+            let original = service::baseline::ServiceBaseline::decode(record.as_bytes())?;
+            ensure!(
+                original.group().unit == "rm-sync.service"
+                    && original.group().group != self.group.group
+                    && original.group().mount_path == self.group.mount_path
+                    && original.group().context == self.group.context,
+                "companion lease context mismatch"
+            );
+        }
         self.stock.process.validate()?;
         validate_invocation(&self.buddy_invocation)?;
         ensure!(

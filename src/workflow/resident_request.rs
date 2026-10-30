@@ -218,6 +218,12 @@ fn classify(error: &anyhow::Error) -> FailureKind {
     }
     FailureKind::Refused
 }
+pub(super) fn is_request_retirement(error: &anyhow::Error) -> bool {
+    matches!(
+        classify(error),
+        FailureKind::Canceled | FailureKind::Deadline
+    )
+}
 fn finish<T>(
     runtime: &mut ResidentRuntime,
     result: Result<T>,
