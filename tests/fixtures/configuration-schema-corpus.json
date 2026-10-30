@@ -281,6 +281,13 @@
       "schema_valid": true,
       "typed_valid": false,
       "basis": "duplicate JSON keys require original-byte parser"
+    },
+    {
+      "name": "sync-duplicate-namespaces",
+      "raw_utf8": "{\"sync\":{\"namespaces\":[\"conversation\",\"conversation\"]}}",
+      "schema_valid": false,
+      "typed_valid": false,
+      "basis": "Existing canonical inspector rejects duplicate namespace array entries; legacy set decoding stays unchanged."
     }
   ]
 }

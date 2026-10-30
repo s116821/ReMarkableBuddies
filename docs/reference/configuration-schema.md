@@ -7,10 +7,10 @@ configuration file, load `.env`, resolve credentials, open Store or start servic
 Its output is at most65,536 bytes. An older executable can refuse the unknown flag;
 do not substitute its historical storage schema or infer support from an app tag.
 
-The document uses JSON Schema2020-12 and the independent identity
+The document uses JSON Schema 2020-12 and the independent identity
 `urn:remarkable-buddies:configuration-object-schema:v1`. This is a document revision,
 not a new runtime configuration or storage version. Runtime `config_schema_version`
-remains1. Legacy storage contracts1/2/3 and their capabilities remain unchanged.
+remains1. Legacy storage contracts 1/2/3 and their capabilities remain unchanged.
 No separate installed schema file, running query service or schema engine is needed.
 
 The root object has thirteen supported properties: config_schema_version, model,
@@ -25,7 +25,9 @@ annotations only: consumers must not insert them as new saved choices.
 
 This schema describes the canonical object form supported by saved inspection.
 The legacy loader's permissive Serde positional-array spellings are unchanged and
-are outside that form. Schema success is not complete configuration admission:
+are outside that form. Canonical saved inspection also rejects repeated sync
+namespace entries, while legacy set deserialization can deduplicate them; that
+loader behavior is unchanged. Schema success is not complete configuration admission:
 
 - Original-byte parsing still enforces duplicate-member and lexical integer rules;
   a JSON Schema integer can accept numeric1.0 where the Rust integer parser refuses.
@@ -40,7 +42,7 @@ are outside that form. Schema success is not complete configuration admission:
   separate. This command neither reads secrets nor verifies or changes live state.
 
 For development, `scripts/check_configuration_schema.mjs` replays the actual CLI
-document through an existing Ajv Draft2020-12 module and the shared40-case corpus:
+document through an existing Ajv Draft 2020-12 module and the shared 41-case corpus:
 pass `--validator /existing/ajv/dist/2020.js --binary /built/reader-buddy` to Node.
 It validates the meta-schema, checks expected structural outcomes and proves that
 defaults do not mutate inputs. Rust separately checks original corpus bytes through

@@ -76,6 +76,10 @@ mod tests {
             );
         }
         assert!(serde_json::from_slice::<super::super::Config>(b"[]").is_ok());
+        let repeated = br#"{"sync":{"namespaces":["conversation","conversation"]}}"#;
+        let legacy: super::super::Config = serde_json::from_slice(repeated).unwrap();
+        assert_eq!(legacy.sync.namespaces.len(), 1);
+        assert!(super::super::inspection::document(repeated).is_err());
     }
 
     #[test]
