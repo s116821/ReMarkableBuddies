@@ -6,9 +6,7 @@ use crate::conversation::{ReaderContext, ReaderHandoff};
 #[cfg(test)]
 use std::rc::Rc;
 use std::sync::Arc;
-#[cfg(test)]
 mod refusing;
-#[cfg(test)]
 pub(super) use refusing::RefusingBackend;
 
 /// Process-local association only, never native qualification or stored evidence.
@@ -32,22 +30,31 @@ impl ReaderBackendBinding {
 pub(crate) struct SelectedBackendFacade {
     #[cfg(test)]
     backend: Box<dyn DeviceBackend>,
+    // Retain ownership until facade destruction without exposing unqualified effects.
+    #[cfg(not(test))]
+    _retained_backend: Box<dyn DeviceBackend>,
     admission: Arc<SelectedAdmission>,
     #[cfg(test)]
     binding: ReaderBackendBinding,
 }
 impl SelectedBackendFacade {
-    #[cfg(test)]
     pub(crate) fn new(admission: Arc<SelectedAdmission>, backend: Box<dyn DeviceBackend>) -> Self {
         Self {
+            #[cfg(test)]
             backend,
+            #[cfg(not(test))]
+            _retained_backend: backend,
             admission,
+            #[cfg(test)]
             binding: ReaderBackendBinding::new(),
         }
     }
     #[cfg(test)]
     pub(crate) fn binding(&self) -> ReaderBackendBinding {
         self.binding.clone()
+    }
+    pub(super) fn admission(&self) -> Arc<SelectedAdmission> {
+        self.admission.clone()
     }
     /// Uses this facade's existing admission, without exposing its mutable backend.
     pub(super) fn inspect_buddy_binding(
