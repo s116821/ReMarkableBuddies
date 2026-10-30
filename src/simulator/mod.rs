@@ -746,3 +746,6 @@ mod dispatch_admission_tests {
         assert!(parse_scenario(duplicate).is_err());
     }
 }
+
+#[cfg(test)]
+mod provider_cancellation_tests;
