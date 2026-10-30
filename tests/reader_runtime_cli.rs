@@ -153,6 +153,14 @@ impl Drop for Fixture {
     }
 }
 
+fn assert_ordinary_refusal(output: std::process::Output, expected: &str) {
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains(expected), "{stderr}");
+    assert!(!stderr.to_ascii_lowercase().contains("private"));
+}
+
 #[test]
 fn inspect_routes_keep_ordinary_stdin_and_selected_file_contracts_distinct() {
     let fixture = Fixture::new();
@@ -359,11 +367,7 @@ fn explicit_local_isolated_and_shared_modes_route_before_private_runtime_setup()
     )
     .unwrap();
     let output = fixture.command().output().unwrap();
-    assert!(output.status.success() && output.stderr.is_empty());
-    assert_eq!(
-        serde_json::from_slice::<Value>(&output.stdout).unwrap()["status"],
-        "unsupported"
-    );
+    assert_ordinary_refusal(output, "ordinary mode requires absent or LocalOnly choice");
 }
 
 #[test]
@@ -394,10 +398,7 @@ fn corrupt_mode_and_partial_default_state_refuse_without_credential_or_device_se
     )
     .unwrap();
     let output = partial.command().output().unwrap();
-    assert!(output.status.success() && output.stderr.is_empty());
-    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["status"], "unavailable");
-    assert!(report["data"].is_null());
+    assert_ordinary_refusal(output, "ordinary Reader startup unavailable");
 }
 
 #[test]
@@ -411,10 +412,7 @@ fn local_only_contradictory_publisher_and_busy_mode_keep_pure_input_precedence()
     )
     .unwrap();
     let output = fixture.command().output().unwrap();
-    assert!(output.status.success() && output.stderr.is_empty());
-    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["status"], "unsupported");
-    assert!(report["data"].is_null());
+    assert_ordinary_refusal(output, "explicit local mode requires legacy sync disabled");
     fs::write(
         fixture.root.join("config.json"),
         serde_json::to_vec(
@@ -489,13 +487,7 @@ fn fresh_default_rejects_foreign_auxiliary_state_before_credentials_without_data
                 .env("OPENAI_API_KEY", "")
                 .output()
                 .unwrap();
-            assert!(
-                output.status.success() && output.stderr.is_empty(),
-                "case {case}, empty {empty_data}"
-            );
-            let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-            assert_eq!(report["status"], "unavailable");
-            assert!(report["data"].is_null());
+            assert_ordinary_refusal(output, "ordinary Reader startup unavailable");
             if empty_data {
                 assert!(fs::read_dir(fixture.paths().data).unwrap().next().is_none());
             } else {
