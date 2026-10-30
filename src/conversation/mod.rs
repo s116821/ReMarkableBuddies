@@ -21,6 +21,11 @@ mod reader_uncertainty;
 pub mod receiving;
 pub mod resolution;
 mod selected;
+mod selected_reader_write;
+pub use selected_reader_write::{
+    SelectedReaderAcknowledgment, SelectedReaderPublication, SelectedReaderText,
+    SelectedReaderWrite,
+};
 #[cfg(test)]
 mod selected_context_tests;
 mod settlement;
@@ -42,7 +47,9 @@ pub use historical_association::{
 };
 pub use intent::*;
 pub use notebook::ArchivedNormalizedSource;
-pub use pending::{PendingIntentPublication, PendingIntentRequest, SourceAdmission};
+pub use pending::{
+    PendingIntentPublication, PendingIntentRequest, PendingRequestConflict, SourceAdmission,
+};
 #[cfg(test)]
 pub(crate) use pending::{ReaderContext, ReaderPreparation};
 pub use reader_plan::{ReaderEraseRectangle, ReaderHandoff, ReaderPlan, SmartEraseInput};
