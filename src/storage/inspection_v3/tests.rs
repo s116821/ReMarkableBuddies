@@ -152,6 +152,93 @@ mod linux_controls {
         assert_eq!(v["retained_generation_formats"], serde_json::json!([4]));
         assert_eq!(f.snapshot(), before);
     }
+    fn inject_tombstone(f: &Fixture, namespace: storage::Namespace) {
+        use storage::{digest, Envelope, Kind, Manifest, ObjectRef, Scope};
+        let identity: Value =
+            storage::files::json(&f.paths().data.join("identity.json"), 4096).unwrap();
+        let envelope = Envelope {
+            envelope_version: 1,
+            namespace,
+            domain_schema_version: 1,
+            record_id: Uuid::new_v4(),
+            revision_id: Uuid::new_v4(),
+            parents: Default::default(),
+            operation_id: Uuid::new_v4(),
+            actor_id: serde_json::from_value(identity["actor"].clone()).unwrap(),
+            kind: Kind::Tombstone,
+            payload: Value::Null,
+            media_descriptors: vec![],
+        };
+        envelope.validate().unwrap();
+        let bytes = serde_json::to_vec(&envelope).unwrap();
+        let hash = digest(&bytes);
+        let transaction_id = Uuid::new_v4();
+        let manifest = Manifest {
+            format: 1,
+            transaction_id,
+            scope: Scope::LocalTransaction,
+            records: vec![ObjectRef {
+                sha256: hash.clone(),
+                bytes: bytes.len() as u64,
+            }],
+            record_namespaces: BTreeMap::from([(hash.clone(), namespace)]),
+            media: vec![],
+            media_coverage: vec![],
+        };
+        manifest.validate().unwrap();
+        fs::write(f.generation().join("objects").join(hash), bytes).unwrap();
+        fs::write(
+            f.generation()
+                .join("commits")
+                .join(format!("{transaction_id}.json")),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+    }
+    #[test]
+    fn feedback_tombstones_refuse_with_or_without_feature_but_generic_tombstones_remain_valid() {
+        for feature in [false, true] {
+            let f = Fixture::new();
+            if feature {
+                drop(crate::unassociated_feedback::Feedback::prepare(f.paths()).unwrap());
+            }
+            drop(Store::prepare_notebook(f.paths()).unwrap());
+            inject_tombstone(&f, storage::Namespace::UnassociatedFeedback);
+            let before = f.snapshot();
+            let v = f.report();
+            assert_eq!(v["status"], "partial");
+            assert!(v["issues"]["invalid-reference"].is_string());
+            assert_eq!(f.snapshot(), before);
+        }
+        for namespace in [storage::Namespace::Source, storage::Namespace::Conversation] {
+            let f = Fixture::new();
+            drop(Store::open(f.paths()).unwrap());
+            inject_tombstone(&f, namespace);
+            let v = f.report();
+            assert_eq!(v["status"], "complete");
+        }
+    }
+    #[test]
+    fn retained_unknown_object_matches_the_explicit_unclassified_physical_bucket() {
+        let f = Fixture::new();
+        drop(Store::prepare_notebook(f.paths()).unwrap());
+        let retained = f.generation();
+        let legacy = Uuid::new_v4();
+        Store::create_generation(&f.paths().data, legacy).unwrap();
+        storage::files::atomic_json(&f.paths().data.join("CURRENT"), &legacy).unwrap();
+        let unknown = b"PRIVATE_UNCLASSIFIED_OBJECT";
+        fs::write(retained.join("objects").join("a".repeat(64)), unknown).unwrap();
+        let before = f.snapshot();
+        let v = f.report();
+        assert_eq!(v["status"], "partial");
+        assert_eq!(v["storage"]["unclassified-object"]["files"], "1");
+        assert_eq!(
+            v["storage"]["unclassified-object"]["apparent_bytes"],
+            unknown.len().to_string()
+        );
+        assert!(!v.to_string().contains("PRIVATE_UNCLASSIFIED_OBJECT"));
+        assert_eq!(f.snapshot(), before);
+    }
     #[test]
     fn custody_is_held_through_output_and_released_on_prefix_failure() {
         let f = Fixture::new();
@@ -198,6 +285,21 @@ mod linux_controls {
         assert!(v["complete_apparent_bytes"].is_null());
     }
     #[test]
+    fn renamed_root_ancestor_with_retained_handles_refuses_output_completion() {
+        let f = Fixture::new();
+        drop(Store::open(f.paths()).unwrap());
+        let inspection = inspect_owned_data(&f.paths());
+        let moved = f.0.with_extension("moved");
+        fs::rename(&f.0, &moved).unwrap();
+        let mut output = vec![];
+        let result = inspection.write_to(&mut output);
+        fs::rename(&moved, &f.0).unwrap();
+        assert!(result.is_err());
+        let v: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(v["status"], "partial");
+        assert!(v["complete_apparent_bytes"].is_null());
+    }
+    #[test]
     fn nofollow_fifo_unknown_objects_and_foreign_feature_refuse_without_reads_or_repair() {
         let f = Fixture::new();
         drop(Store::prepare_notebook(f.paths()).unwrap());
@@ -234,7 +336,12 @@ mod linux_controls {
     #[test]
     fn notebook_archive_descriptor_counts_metadata_without_reading_media_payload() {
         use crate::{
-            conversation::{notebook::ArchivedNormalizedSource, Record, TextScope},
+            conversation::{
+                notebook::{
+                    ArchivedNormalizedSource, NotebookPlan, NotebookStage, NotebookStageKind,
+                },
+                Record, TextScope,
+            },
             retrieval::{NormalizedDocument, SourceFormat, SourceUnit},
             writer::notebook::ValidatedNotebook,
         };
@@ -273,16 +380,108 @@ mod linux_controls {
             operation_id: Uuid::new_v4(),
             actor_id: store.actor_id,
             kind: Kind::Value,
-            payload: serde_json::to_value(Record::ArchivedNormalizedSource(Box::new(archive)))
-                .unwrap(),
+            payload: serde_json::to_value(Record::ArchivedNormalizedSource(Box::new(
+                archive.clone(),
+            )))
+            .unwrap(),
             media_descriptors: vec![media.clone()],
         };
+        let source_revision = digest(&serde_json::to_vec(&envelope).unwrap());
         store
             .commit(
                 vec![envelope],
                 BTreeMap::from([(media.sha256.clone(), source.canonical_bytes().to_vec())]),
             )
             .unwrap();
+        let operation = Uuid::new_v4();
+        let mut plan = NotebookPlan {
+            id: NotebookPlan::identity(operation),
+            conversation: archive.conversation,
+            operation,
+            archive_id: archive.id,
+            source_revision: source_revision.clone(),
+            source_identity_digest: archive.identity_digest().unwrap(),
+            request: "PRIVATE_NOTE_REQUEST".into(),
+            guidance: None,
+            personalization_digest: digest(b"preference"),
+            history_digest: digest(b"history"),
+            prior: None,
+            caller_max_model_calls: 2,
+            chunks: source
+                .coverage(&TextScope::SuppliedNotebook, 2)
+                .unwrap()
+                .chunks()
+                .to_vec(),
+            core_digest: String::new(),
+            map_input_digests: vec![digest(b"map input")],
+            reducer_prefix_digest: digest(b"reducer"),
+            reducer_reserved_bytes: 8192,
+        };
+        plan.core_digest = plan.core_identity().unwrap();
+        let plan_envelope = Envelope {
+            envelope_version: 1,
+            namespace: Namespace::Conversation,
+            domain_schema_version: 3,
+            record_id: plan.id,
+            revision_id: Uuid::new_v4(),
+            parents: Default::default(),
+            operation_id: Uuid::new_v4(),
+            actor_id: store.actor_id,
+            kind: Kind::Value,
+            payload: serde_json::to_value(Record::NotebookPlan(Box::new(plan.clone()))).unwrap(),
+            media_descriptors: vec![],
+        };
+        let stage = NotebookStage {
+            id: NotebookStage::identity(operation, NotebookStageKind::Map, 0),
+            conversation: archive.conversation,
+            operation,
+            plan_id: plan.id,
+            core_digest: plan.core_digest.clone(),
+            plan_revision: digest(&serde_json::to_vec(&plan_envelope).unwrap()),
+            kind: NotebookStageKind::Map,
+            ordinal: 0,
+            archive_id: archive.id,
+            source_revision,
+            input_digest: plan.map_input_digests[0].clone(),
+            predecessors: vec![],
+            prepared_revision: None,
+            outcome: None,
+            invoked: None,
+            output: None,
+            observed_output_digest: None,
+            observed_output_bytes: None,
+            failure: None,
+        };
+        let stage_envelope = Envelope {
+            envelope_version: 1,
+            namespace: Namespace::Conversation,
+            domain_schema_version: 3,
+            record_id: stage.id,
+            revision_id: Uuid::new_v4(),
+            parents: Default::default(),
+            operation_id: Uuid::new_v4(),
+            actor_id: store.actor_id,
+            kind: Kind::Value,
+            payload: serde_json::to_value(Record::NotebookStage(Box::new(stage))).unwrap(),
+            media_descriptors: vec![],
+        };
+        store
+            .commit(vec![plan_envelope, stage_envelope], BTreeMap::new())
+            .unwrap();
+        let shared = Envelope {
+            envelope_version: 1,
+            namespace: Namespace::SubjectMemory,
+            domain_schema_version: 1,
+            record_id: Uuid::new_v4(),
+            revision_id: Uuid::new_v4(),
+            parents: Default::default(),
+            operation_id: Uuid::new_v4(),
+            actor_id: store.actor_id,
+            kind: Kind::Value,
+            payload: serde_json::json!({"fixture":"shared-owned-reference"}),
+            media_descriptors: vec![media.clone()],
+        };
+        store.commit(vec![shared], BTreeMap::new()).unwrap();
         drop(store);
         // Same-length corruption is deliberately invisible: this observer sizes
         // the owned media file and never claims to hash/decode its payload.
@@ -292,13 +491,33 @@ mod linux_controls {
         )
         .unwrap();
         let before = f.snapshot();
+        let media_path = f.generation().join("objects").join(&media.sha256);
+        use std::os::unix::fs::PermissionsExt;
+        let original_permissions = fs::metadata(&media_path).unwrap().permissions();
+        fs::set_permissions(&media_path, fs::Permissions::from_mode(0)).unwrap();
+        let denied_media_read = fs::File::open(&media_path).is_err();
         let v = f.report();
+        fs::set_permissions(&media_path, original_permissions).unwrap();
+        // Privileged manual runners cannot establish permission-denied reads.
+        if unsafe { nix::libc::geteuid() } != 0 {
+            assert!(denied_media_read);
+        }
         assert_eq!(v["status"], "complete");
         assert_eq!(
             v["observed_notebook_records"]["archived-normalized-source"]["files"],
             "1"
         );
         assert_eq!(v["media_content_verified"], false);
+        assert_eq!(v["shared_media_files"], "1");
+        assert_eq!(
+            v["observed_notebook_records"]["notebook-plan"]["files"],
+            "1"
+        );
+        assert_eq!(
+            v["observed_notebook_records"]["notebook-stage"]["files"],
+            "1"
+        );
+        assert!(!v.to_string().contains("PRIVATE_NOTE_REQUEST"));
         assert!(!v.to_string().contains("PRIVATE_ARCHIVED_TEXT"));
         assert_eq!(f.snapshot(), before);
         fs::remove_file(f.generation().join("objects").join(media.sha256)).unwrap();

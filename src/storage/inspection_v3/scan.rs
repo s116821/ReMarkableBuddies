@@ -88,6 +88,9 @@ impl Scan {
                 v
             }
             Err(e) => {
+                // A failing enumeration may already have visited its entire
+                // remaining allowance. Never renew that allowance elsewhere.
+                self.entries = MAX_ITEMS;
                 self.failure(e);
                 vec![]
             }
@@ -202,9 +205,6 @@ impl Scan {
             self.issue("invalid-reference");
             return None;
         }
-        if envelope.kind == Kind::Tombstone {
-            return Some(None);
-        }
         if envelope.namespace == Namespace::UnassociatedFeedback
             && (!feedback
                 || crate::unassociated_feedback::validate_envelope(
@@ -215,6 +215,9 @@ impl Scan {
         {
             self.issue("invalid-reference");
             return None;
+        }
+        if envelope.kind == Kind::Tombstone {
+            return Some(None);
         }
         if matches!(
             envelope.namespace,
@@ -623,20 +626,18 @@ impl Scan {
                 self.report.issue("omitted-media");
             }
         }
-        for (path, file) in &self.files {
-            // Retained unreferenced objects remain physical retained files, but
-            // cannot silently become semantically complete.
-            if let Some((generation, root)) = self
+        for (path, file) in &mut self.files {
+            if let Some((generation, _)) = self
                 .generations
                 .iter()
                 .find(|(_, p)| path.parent() == Some(p.join("objects").as_path()))
             {
-                let _ = root;
                 let hash = path.file_name().and_then(|v| v.to_str()).unwrap_or("");
                 if valid_digest(hash)
                     && !self.records.contains_key(&(*generation, hash.to_owned()))
                     && !self.media.contains_key(&(*generation, hash.to_owned()))
                 {
+                    file.kind = StorageKind::UnclassifiedObject;
                     self.report.issue("unclassified-object");
                 }
             }
@@ -873,5 +874,81 @@ pub(super) fn inspect(paths: &StorePaths) -> Inspection {
     Inspection {
         report: scan.report,
         custody: Some((scan.access, lease)),
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    #[test]
+    fn failed_directory_enumeration_exhausts_the_global_remaining_allowance() {
+        let root = std::env::temp_dir().join(format!("report3-entries-{}", Uuid::new_v4()));
+        let paths = StorePaths {
+            data: root.join("data"),
+            cache: root.join("cache"),
+            credentials: root.join("credentials"),
+        };
+        drop(Store::open(paths.clone()).unwrap());
+        let first = paths.cache.join("first");
+        let second = paths.cache.join("second");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        for n in 0..3 {
+            std::fs::write(first.join(n.to_string()), b"x").unwrap();
+        }
+        std::fs::write(second.join("must-not-be-traversed"), b"x").unwrap();
+        let mut scan = Scan {
+            report: Report::empty(InspectionStatus::Unavailable),
+            access: Access::new(&paths).unwrap(),
+            entries: MAX_ITEMS - 2,
+            read_bytes: 0,
+            files: BTreeMap::new(),
+            records: BTreeMap::new(),
+            media: BTreeMap::new(),
+            generations: BTreeMap::new(),
+            history: BTreeSet::new(),
+        };
+        assert!(scan.entries(&first).is_empty());
+        assert_eq!(scan.entries, MAX_ITEMS);
+        assert!(scan.entries(&second).is_empty());
+        assert_eq!(scan.entries, MAX_ITEMS);
+        assert_eq!(scan.report.issues["entry-limit"].0, 2);
+        assert!(scan
+            .entries(&paths.cache.join("nonexistent-after-exhaustion"))
+            .is_empty());
+        assert!(!scan.report.issues.contains_key("missing-entry"));
+        drop(scan);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn every_repeated_metadata_read_consumes_the_same_cumulative_budget() {
+        let root = std::env::temp_dir().join(format!("report3-budget-{}", Uuid::new_v4()));
+        let paths = StorePaths {
+            data: root.join("data"),
+            cache: root.join("cache"),
+            credentials: root.join("credentials"),
+        };
+        drop(Store::open(paths.clone()).unwrap());
+        let path = paths.cache.join("opaque-test-input");
+        std::fs::write(&path, vec![b'x'; MAX_RECORD]).unwrap();
+        let mut scan = Scan {
+            report: Report::empty(InspectionStatus::Unavailable),
+            access: Access::new(&paths).unwrap(),
+            entries: 0,
+            read_bytes: 0,
+            files: BTreeMap::new(),
+            records: BTreeMap::new(),
+            media: BTreeMap::new(),
+            generations: BTreeMap::new(),
+            history: BTreeSet::new(),
+        };
+        for _ in 0..8 {
+            assert_eq!(scan.read(&path, MAX_RECORD).unwrap().len(), MAX_RECORD);
+        }
+        assert_eq!(scan.read_bytes, MAX_METADATA);
+        assert!(scan.read(&path, MAX_RECORD).is_none());
+        assert!(scan.report.issues.contains_key("metadata-limit"));
+        drop(scan);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

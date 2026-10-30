@@ -82,6 +82,7 @@ struct Root {
     path: PathBuf,
     file: File,
     ancestors: Vec<(u64, u64)>,
+    ancestor_handles: Vec<File>,
 }
 impl Root {
     fn open(path: &Path) -> Result<Self, Failure> {
@@ -90,12 +91,14 @@ impl Root {
         }
         let mut file = File::open("/").map_err(failure)?;
         let mut ancestors = vec![Stamp::of(&file.metadata().map_err(failure)?).identity()];
+        let mut ancestor_handles = vec![file.try_clone().map_err(failure)?];
         for component in path.components() {
             match component {
                 Component::RootDir => (),
                 Component::Normal(name) => {
                     file = open_at(&file, name, directory_flags())?;
                     ancestors.push(Stamp::of(&file.metadata().map_err(failure)?).identity());
+                    ancestor_handles.push(file.try_clone().map_err(failure)?);
                 }
                 _ => return Err(Failure::Unsafe),
             }
@@ -104,9 +107,15 @@ impl Root {
             path: path.to_owned(),
             file,
             ancestors,
+            ancestor_handles,
         })
     }
     fn verify(&self) -> Result<(), Failure> {
+        for (file, identity) in self.ancestor_handles.iter().zip(&self.ancestors) {
+            if Stamp::of(&file.metadata().map_err(failure)?).identity() != *identity {
+                return Err(Failure::Changed);
+            }
+        }
         let named = Self::open(&self.path)?;
         if named.ancestors != self.ancestors {
             return Err(Failure::Changed);
@@ -125,6 +134,7 @@ pub(super) struct Access {
     data: Root,
     cache: Option<Root>,
     witnesses: BTreeMap<PathBuf, Stamp>,
+    held: BTreeMap<PathBuf, File>,
     absent: BTreeSet<PathBuf>,
     path_bytes: usize,
 }
@@ -133,6 +143,7 @@ impl Access {
         let roots = [&paths.data, &paths.cache, &paths.credentials];
         for (index, root) in roots.iter().enumerate() {
             if !root.is_absolute()
+                || root.to_str().is_none()
                 || root.as_os_str().len() > 4096
                 || root
                     .components()
@@ -163,6 +174,7 @@ impl Access {
             data,
             cache,
             witnesses: BTreeMap::new(),
+            held: BTreeMap::new(),
             absent: BTreeSet::new(),
             path_bytes: 0,
         };
@@ -173,7 +185,7 @@ impl Access {
         }
         Ok(result)
     }
-    fn remember(&mut self, path: &Path, stamp: Stamp) -> Result<(), Failure> {
+    fn remember(&mut self, path: &Path, stamp: Stamp, file: &File) -> Result<(), Failure> {
         if self.absent.contains(path) {
             return Err(Failure::Changed);
         }
@@ -188,6 +200,8 @@ impl Access {
                 return Err(Failure::WorkLimit);
             }
             self.path_bytes += path.as_os_str().len();
+            self.held
+                .insert(path.to_owned(), file.try_clone().map_err(failure)?);
             self.witnesses.insert(path.to_owned(), stamp);
         }
         Ok(())
@@ -240,10 +254,10 @@ impl Access {
             if meta.file_type().is_symlink() {
                 return Err(Failure::Unsafe);
             }
-            self.remember(&current, Stamp::of(&meta))?;
+            self.remember(&current, Stamp::of(&meta), &file)?;
         }
         let meta = file.metadata().map_err(failure)?;
-        self.remember(path, Stamp::of(&meta))?;
+        self.remember(path, Stamp::of(&meta), &file)?;
         Ok(file)
     }
     pub(super) fn metadata(&mut self, path: &Path) -> Result<Metadata, Failure> {
@@ -257,10 +271,15 @@ impl Access {
                 if self.witnesses.contains_key(path) {
                     return Err(Failure::Changed);
                 }
-                if self.absent.len() + self.witnesses.len() >= MAX_ITEMS {
+                if !self.absent.contains(path)
+                    && (self.absent.len() + self.witnesses.len() >= MAX_ITEMS
+                        || self.path_bytes.saturating_add(path.as_os_str().len()) > MAX_METADATA)
+                {
                     return Err(Failure::WorkLimit);
                 }
-                self.absent.insert(path.to_owned());
+                if self.absent.insert(path.to_owned()) {
+                    self.path_bytes += path.as_os_str().len();
+                }
                 Ok(false)
             }
             Err(error) => Err(error),
@@ -290,7 +309,7 @@ impl Access {
             if bytes.len() != size || Stamp::of(&before) != Stamp::of(&after) {
                 return Err(Failure::Changed);
             }
-            self.remember(path, Stamp::of(&after))?;
+            self.remember(path, Stamp::of(&after), &file)?;
             Ok(bytes)
         })();
         (result, charged)
@@ -328,7 +347,7 @@ impl Access {
             }
             result.push(path.join(OsString::from_vec(name.to_vec())));
         }
-        self.remember(path, Stamp::of(&file.metadata().map_err(failure)?))?;
+        self.remember(path, Stamp::of(&file.metadata().map_err(failure)?), &file)?;
         result.sort();
         Ok(result)
     }
@@ -350,6 +369,13 @@ impl Access {
             .map(|(path, stamp)| (path.clone(), *stamp))
             .collect();
         for (path, stamp) in witnesses {
+            if !self
+                .held
+                .get(&path)
+                .is_some_and(|file| file.metadata().is_ok_and(|meta| Stamp::of(&meta) == stamp))
+            {
+                return Err(Failure::Changed);
+            }
             if Stamp::of(&self.metadata(&path)?) != stamp {
                 return Err(Failure::Changed);
             }
