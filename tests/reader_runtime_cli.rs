@@ -12,8 +12,9 @@ use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
+    io::Write,
     path::PathBuf,
-    process::Command,
+    process::{Command, Stdio},
 };
 
 struct Fixture {
@@ -149,6 +150,115 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         assert!(self.root.starts_with(std::env::temp_dir()));
         let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+#[test]
+fn inspect_routes_keep_ordinary_stdin_and_selected_file_contracts_distinct() {
+    let fixture = Fixture::new();
+    let selected = fixture.report("inspect", json!({"conversation": fixture.conversation}));
+    assert_eq!(selected["status"], "complete");
+    assert!(selected.get("runtime_unverified").is_none());
+
+    // A valid selected inspect file named '-' must not be opened by the stdin
+    // maintenance route, even while that selected configuration is present.
+    fs::write(
+        fixture.root.join("-"),
+        serde_json::to_vec(&json!({"conversation": fixture.conversation})).unwrap(),
+    )
+    .unwrap();
+    let mut child = fixture
+        .command()
+        .args([
+            "--conversation-operation",
+            "inspect",
+            "--conversation-input",
+            "-",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let write = child.stdin.take().unwrap().write_all(b"invalid stdin JSON");
+    #[cfg(target_os = "linux")]
+    write.unwrap();
+    #[cfg(not(target_os = "linux"))]
+    if let Err(error) = write {
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success() && output.stderr.is_empty());
+    let ordinary: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(ordinary["runtime_unverified"], true);
+    assert_eq!(ordinary["local_only"], true);
+    assert!(ordinary.get("native_authority").is_none());
+    #[cfg(target_os = "linux")]
+    assert_eq!(ordinary["status"], "invalid-input");
+    #[cfg(not(target_os = "linux"))]
+    assert_eq!(ordinary["status"], "unsupported");
+}
+
+#[test]
+fn selected_commands_refuse_reserved_stdin_and_wrong_family_input_without_fallback() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.root.join("-"),
+        serde_json::to_vec(&json!({
+            "conversation": fixture.conversation,
+            "range": null,
+            "budget": {"max_text_bytes": 1024, "max_turns": 2, "provider_token_limit": null}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    for operation in ["context", "recover-pending"] {
+        let output = fixture
+            .command()
+            .args([
+                "--conversation-operation",
+                operation,
+                "--conversation-input",
+                "-",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success() && output.stderr.is_empty());
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["status"], "invalid-input");
+        assert_eq!(report["native_authority"], false);
+        assert!(report["data"].is_null());
+        assert_eq!(
+            fixture.report(
+                operation,
+                json!({"request_version": 1, "conversation": fixture.conversation})
+            )["status"],
+            "invalid-input"
+        );
+    }
+
+    let input = fixture.root.join("selected-inspect.json");
+    fs::write(
+        &input,
+        serde_json::to_vec(&json!({"conversation": fixture.conversation})).unwrap(),
+    )
+    .unwrap();
+    for operation in ["prepare", "apply", "status"] {
+        let output = fixture
+            .command()
+            .args([
+                "--conversation-operation",
+                operation,
+                "--conversation-input",
+            ])
+            .arg(&input)
+            .output()
+            .unwrap();
+        assert!(output.status.success() && output.stderr.is_empty());
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["status"], "unsupported");
+        assert_eq!(report["runtime_unverified"], true);
+        assert!(report.get("native_authority").is_none());
     }
 }
 

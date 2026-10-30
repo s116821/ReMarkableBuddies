@@ -56,3 +56,7 @@ This uses the production LLM abstraction and Reader policy with simulated pages.
 It establishes laptop provider access and model interpretation, not native tablet
 input, typography, insertion or physical gesture fidelity. CI remains offline;
 its provider tests use a local HTTP fixture with dummy credentials.
+
+## Optional ordinary Reader preference check
+
+The maintained `docs/simulator/scenarios/personalized-answer.json` uses scripted replies and makes no provider call. `docs/simulator/live/personalized-reader.json` is an explicit future live check, not authorization to run it. The preference is startup configuration applied after independent question verification, never recognition or a fake transcript turn. Ordinary receiving accepts local memory only; enabled selected memory refuses before effective credential/provider/device initialization or Store mutation. Saved configuration remains restart-required. The historical simulated image is tied to its original be95c29 evidence, not a new integrated-build result.

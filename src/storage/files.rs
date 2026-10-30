@@ -286,6 +286,42 @@ struct Temporary {
     path: PathBuf,
     file: Option<File>,
 }
+#[cfg(all(test, unix))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AtomicFailure {
+    BeforeRename,
+    RenameAcknowledgment,
+    ParentSync,
+}
+#[cfg(all(test, unix))]
+thread_local! {
+    static ATOMIC_FAILURE: std::cell::RefCell<Option<(PathBuf, AtomicFailure)>> = const { std::cell::RefCell::new(None) };
+}
+/// One thread, one exact destination, one consumed test fault. No runtime switch.
+#[cfg(all(test, unix))]
+pub(crate) fn fail_next_atomic(path: PathBuf, failure: AtomicFailure) {
+    ATOMIC_FAILURE.with(|slot| *slot.borrow_mut() = Some((path, failure)));
+}
+#[cfg(all(test, unix))]
+fn atomic_failure(path: &Path, failure: AtomicFailure) -> Result<()> {
+    let fail = ATOMIC_FAILURE.with(|slot| {
+        let mut value = slot.borrow_mut();
+        if value
+            .as_ref()
+            .is_some_and(|(target, at)| target == path && *at == failure)
+        {
+            value.take();
+            true
+        } else {
+            false
+        }
+    });
+    if fail {
+        return Err(std::io::Error::other("test atomic acknowledgment failure"))
+            .context("injected atomic acknowledgment failure");
+    }
+    Ok(())
+}
 impl Drop for Temporary {
     fn drop(&mut self) {
         drop(self.file.take());
@@ -313,7 +349,15 @@ fn atomic_with(path: &Path, write: impl FnOnce(&mut File) -> Result<()>) -> Resu
     write(file)?;
     file.sync_all()?;
     drop(temporary.file.take());
+    #[cfg(all(test, unix))]
+    atomic_failure(path, AtomicFailure::BeforeRename)?;
     fs::rename(&temporary.path, path).context("atomic publication failed")?;
+    #[cfg(all(test, unix))]
+    atomic_failure(path, AtomicFailure::RenameAcknowledgment)?;
+    // Unix sync_dir performs the actual parent fsync; Windows is a no-op.
+    // The test fault models its error result, not physical power-loss durability.
+    #[cfg(all(test, unix))]
+    atomic_failure(path, AtomicFailure::ParentSync)?;
     sync_dir(parent)
 }
 

@@ -733,7 +733,7 @@ fn namespace_schema_boundary_survives_commit_import_selection_and_reopen() {
                 || (version == 2
                     && matches!(
                         namespace,
-                        Namespace::Conversation | Namespace::ExportAssociation
+                        Namespace::Conversation | Namespace::Source | Namespace::ExportAssociation
                     ));
             let (manifest, objects) = closure(std::slice::from_ref(&envelope), BTreeMap::new());
             let result = store.import(manifest, objects);

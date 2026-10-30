@@ -4,11 +4,378 @@ use remarkable_reader_buddy::{
     storage::{self, Store, StorePaths, Uuid},
 };
 use serde_json::{json, Value};
-use std::{collections::BTreeSet, fs, path::PathBuf, process::Command, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    io::{Read, Write},
+    path::PathBuf,
+    process::Command,
+    process::Stdio,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 struct Fixture {
     root: PathBuf,
     profile: Uuid,
+}
+
+fn inspection_fork(store: &Store, original: &storage::Envelope, payload: Value, tombstone: bool) {
+    let mut fork = original.clone();
+    fork.parents = BTreeSet::from([original.revision_id]);
+    fork.revision_id = Uuid::new_v4();
+    fork.operation_id = Uuid::new_v4();
+    fork.actor_id = Uuid::new_v4();
+    fork.kind = if tombstone {
+        storage::Kind::Tombstone
+    } else {
+        storage::Kind::Value
+    };
+    fork.payload = payload;
+    let bytes = serde_json::to_vec(&fork).unwrap();
+    let hash = storage::digest(&bytes);
+    store
+        .import(
+            storage::Manifest {
+                format: 1,
+                transaction_id: Uuid::new_v4(),
+                scope: storage::Scope::LocalTransaction,
+                records: vec![storage::ObjectRef {
+                    sha256: hash.clone(),
+                    bytes: bytes.len() as u64,
+                }],
+                record_namespaces: BTreeMap::from([(
+                    hash.clone(),
+                    storage::Namespace::SubjectMemory,
+                )]),
+                media: vec![],
+                media_coverage: vec![],
+            },
+            BTreeMap::from([(hash, bytes)]),
+        )
+        .unwrap();
+}
+fn inspection_selected_pair(f: &Fixture) -> (catalog::Identity, Fact, Fact) {
+    let identity = selected_config(f);
+    let fact = f.fact();
+    let other = f.fact();
+    let initialize = |fact: &Fact| {
+        f.run("initialize-aggregate",&json!({"operation":Uuid::new_v4(),"accepted_base_sha256":storage::digest(b"inspect-stdin aggregate"),"fact":fact}))
+    };
+    let first = initialize(&fact);
+    let second = initialize(&other);
+    assert_eq!(first["status"], "ok");
+    assert_eq!(second["status"], "ok");
+    assert_eq!(f.run("initialize-selection",&json!({"operation":Uuid::new_v4(),"accepted_base_sha256":storage::digest(b"inspect-stdin catalog"),"registrations":[first["data"]["registration"],second["data"]["registration"]]}))["status"],"ok");
+    (identity, fact, other)
+}
+
+#[test]
+fn actual_inspect_stdin_local_heads_tombstones_empty_and_opaque_are_file_compatible() {
+    let f = Fixture::new();
+    let fact = f.fact();
+    assert_eq!(
+        f.run(
+            "put",
+            &Mutation {
+                operation: Uuid::new_v4(),
+                expected: BTreeSet::new(),
+                fact: fact.clone()
+            }
+        )["status"],
+        "ok"
+    );
+    let input = serde_json::to_vec(&fact.key).unwrap();
+    let initial = f.stdin_inspect("local-value", &input);
+    assert_eq!(initial, f.run("inspect", &fact.key));
+    assert_eq!(initial["status"], "ok");
+    assert_eq!(initial["data"][0]["payload"]["value"], fact.value);
+    assert_eq!(
+        initial["data"][0]["record_id"],
+        fact.key.record_id().unwrap().to_string()
+    );
+    let mut absent = fact.key.clone();
+    absent.fact = Uuid::new_v4();
+    let empty = f.stdin_inspect("local-empty", &serde_json::to_vec(&absent).unwrap());
+    assert_eq!(empty["status"], "ok");
+    assert_eq!(empty["data"], json!([]));
+    let held = Store::open(f.paths()).unwrap();
+    assert_eq!(f.stdin_inspect("busy", &input)["status"], "busy");
+    drop(held);
+    let original: storage::Envelope = serde_json::from_value(initial["data"][0].clone()).unwrap();
+    let store = Store::open(f.paths()).unwrap();
+    inspection_fork(&store, &original, original.payload.clone(), false);
+    inspection_fork(&store, &original, Value::Null, true);
+    drop(store);
+    let conflict = f.stdin_inspect("local-conflict", &input);
+    assert_eq!(conflict, f.run("inspect", &fact.key));
+    assert_eq!(conflict["status"], "ok");
+    assert_eq!(conflict["data"].as_array().unwrap().len(), 2);
+    assert!(conflict["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|head| head["kind"] == "tombstone" && head["payload"].is_null()));
+    let store = Store::open(f.paths()).unwrap();
+    inspection_fork(
+        &store,
+        &original,
+        json!({"unsupported_future_payload":true}),
+        false,
+    );
+    drop(store);
+    let opaque = f.stdin_inspect("local-opaque", &input);
+    assert_eq!(opaque, f.run("inspect", &fact.key));
+    assert_eq!(opaque["data"].as_array().unwrap().len(), 3);
+    assert!(opaque["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|head| head["payload"]["unsupported_future_payload"] == true));
+    let expected = opaque["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|head| Uuid::parse_str(head["revision_id"].as_str().unwrap()).unwrap())
+        .collect();
+    assert_eq!(
+        f.run(
+            "forget",
+            &Forget {
+                operation: Uuid::new_v4(),
+                expected,
+                key: fact.key.clone()
+            }
+        )["status"],
+        "ok"
+    );
+    let tombstone = f.stdin_inspect("local-tombstone", &input);
+    assert_eq!(tombstone, f.run("inspect", &fact.key));
+    assert_eq!(tombstone["data"].as_array().unwrap().len(), 1);
+    assert_eq!(tombstone["data"][0]["kind"], "tombstone");
+    assert!(tombstone["data"][0]["payload"].is_null());
+    let missing = Fixture::new();
+    let key = missing.fact().key;
+    assert_eq!(
+        missing.stdin_inspect("unavailable", &serde_json::to_vec(&key).unwrap())["status"],
+        "unavailable"
+    );
+    assert!(!missing.paths().data.exists());
+}
+
+#[test]
+fn actual_inspect_stdin_strict_bounds_and_file_global_compatibility_precede_store() {
+    let f = Fixture::new();
+    let key = f.fact().key;
+    let mut bytes = serde_json::to_vec(&key).unwrap();
+    bytes.resize(storage::MAX_RECORD, b' ');
+    assert_eq!(f.stdin_inspect("", &bytes)["status"], "unavailable");
+    bytes.push(b' ');
+    assert_eq!(f.stdin_inspect("", &bytes)["status"], "invalid-input");
+    for bytes in [b"{truncated".as_slice(), b"\xff".as_slice()] {
+        assert_eq!(f.stdin_inspect("", bytes)["status"], "invalid-input");
+    }
+    let extra = json!({"profile":f.profile,"scope":{"kind":"global","unknown":"PRIVATE_SCOPE_SENTINEL"},"fact":key.fact});
+    assert_eq!(f.run("inspect", &extra)["status"], "unavailable");
+    assert_eq!(
+        f.stdin_inspect("invalid", &serde_json::to_vec(&extra).unwrap())["status"],
+        "invalid-input"
+    );
+    for value in [
+        json!({"profile":Uuid::new_v4(),"scope":{"kind":"global"},"fact":key.fact}),
+        json!({"profile":f.profile,"scope":{"kind":"document","document":Uuid::nil()},"fact":key.fact}),
+    ] {
+        assert_eq!(
+            f.stdin_inspect("", &serde_json::to_vec(&value).unwrap())["status"],
+            "invalid-input"
+        );
+    }
+    assert!(
+        !f.paths().data.exists() && !f.paths().cache.exists() && !f.paths().credentials.exists()
+    );
+}
+
+#[test]
+fn actual_inspect_stdin_selected_value_empty_tombstone_and_whole_view_refusals() {
+    let f = Fixture::new();
+    let (identity, fact, _) = inspection_selected_pair(&f);
+    let input = serde_json::to_vec(&fact.key).unwrap();
+    let value = f.stdin_inspect("selected-value", &input);
+    assert_eq!(value, f.run("inspect", &fact.key));
+    assert_eq!(value["status"], "ok");
+    let mut absent = fact.key.clone();
+    absent.fact = Uuid::new_v4();
+    let empty = f.stdin_inspect("selected-empty", &serde_json::to_vec(&absent).unwrap());
+    assert_eq!(empty["status"], "ok");
+    assert_eq!(empty["data"], json!([]));
+    let expected = value["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|head| Uuid::parse_str(head["revision_id"].as_str().unwrap()).unwrap())
+        .collect();
+    assert_eq!(
+        f.run(
+            "forget",
+            &Forget {
+                operation: Uuid::new_v4(),
+                expected,
+                key: fact.key.clone()
+            }
+        )["status"],
+        "ok"
+    );
+    let tombstone = f.stdin_inspect("selected-tombstone", &input);
+    assert_eq!(tombstone, f.run("inspect", &fact.key));
+    assert_eq!(tombstone["data"][0]["kind"], "tombstone");
+    assert!(tombstone["data"][0]["payload"].is_null());
+    // Explicit generic membership can be valid custody but invalid domain projection.
+    let store = Store::open(f.paths()).unwrap();
+    let scope = identity
+        .aggregate_scope(&catalog::Owner::GlobalFact {
+            key: fact.key.clone(),
+        })
+        .unwrap();
+    let snapshot = store.selected_snapshot(&scope, 4096).unwrap().unwrap();
+    let original = snapshot
+        .selected_records
+        .iter()
+        .find(|head| head.kind == storage::Kind::Value)
+        .unwrap();
+    let mut fork = original.clone();
+    fork.parents = BTreeSet::from([original.revision_id]);
+    fork.revision_id = Uuid::new_v4();
+    fork.operation_id = Uuid::new_v4();
+    let bytes = serde_json::to_vec(&fork).unwrap();
+    let hash = storage::digest(&bytes);
+    let mut manifest = snapshot.transaction.selected.clone();
+    manifest.transaction_id = Uuid::new_v4();
+    manifest.records.push(storage::ObjectRef {
+        sha256: hash.clone(),
+        bytes: bytes.len() as u64,
+    });
+    manifest
+        .record_namespaces
+        .insert(hash.clone(), storage::Namespace::SubjectMemory);
+    let refused_publication = store
+        .activate_selected(
+            &snapshot.token,
+            storage::selection::SelectionChange {
+                operation: Uuid::new_v4(),
+                accepted_base_sha256: snapshot.transaction.accepted_base_sha256.clone(),
+                selected: manifest,
+                retained: snapshot.transaction.retained.clone(),
+            },
+            BTreeMap::from([(hash, bytes)]),
+        )
+        .err()
+        .expect("conflicting membership must refuse");
+    assert_eq!(
+        refused_publication.to_string(),
+        "conflicted selected record membership"
+    );
+    assert_eq!(
+        store
+            .selected_snapshot(&scope, 4096)
+            .unwrap()
+            .unwrap()
+            .token,
+        snapshot.token
+    );
+    drop(store);
+    let unchanged = f.stdin_inspect("selected-after-refused-conflict", &input);
+    assert_eq!(unchanged, f.run("inspect", &fact.key));
+    assert_eq!(unchanged, tombstone);
+    // Independent owned fixture: only the OTHER registered aggregate is invalid.
+    let f = Fixture::new();
+    let (identity, fact, other) = inspection_selected_pair(&f);
+    let input = serde_json::to_vec(&fact.key).unwrap();
+    let store = Store::open(f.paths()).unwrap();
+    let scope = identity
+        .aggregate_scope(&catalog::Owner::GlobalFact {
+            key: other.key.clone(),
+        })
+        .unwrap();
+    let snapshot = store.selected_snapshot(&scope, 4096).unwrap().unwrap();
+    let mut bad = snapshot.selected_records[0].clone();
+    bad.parents = BTreeSet::from([bad.revision_id]);
+    bad.revision_id = Uuid::new_v4();
+    bad.operation_id = Uuid::new_v4();
+    bad.payload = json!({"unsupported_future_payload":true});
+    store
+        .commit_selected(&snapshot.token, Uuid::new_v4(), vec![bad], BTreeMap::new())
+        .unwrap();
+    drop(store);
+    let refused = f.stdin_inspect("selected-unrelated-refusal", &input);
+    assert_eq!(refused, f.run("inspect", &fact.key));
+    assert_eq!(refused["status"], "unavailable");
+    assert!(refused["data"].is_null());
+}
+
+#[test]
+fn actual_manager_query_report_contract() {
+    let query = json!({"document":null,"text":"gravity","now_ms":100,"current_claims":[],"max_matches":8,"max_context_bytes":8192});
+    let local = Fixture::new();
+    let fact = local.fact();
+    assert_eq!(
+        local.run(
+            "put",
+            &Mutation {
+                operation: Uuid::new_v4(),
+                expected: BTreeSet::new(),
+                fact
+            }
+        )["status"],
+        "ok"
+    );
+    let populated = local.stdin_query(&serde_json::to_vec(&query).unwrap());
+    assert_eq!(
+        populated["data"]["context"]["facts"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let mut empty_query = query.clone();
+    empty_query["text"] = json!("unmatchedword");
+    let empty = local.stdin_query(&serde_json::to_vec(&empty_query).unwrap());
+    assert_eq!(empty["data"]["query_status"], "complete-empty");
+    let held = Store::open(local.paths()).unwrap();
+    let busy = local.stdin_query(&serde_json::to_vec(&query).unwrap());
+    assert_eq!(busy["status"], "busy");
+    drop(held);
+    let missing = Fixture::new();
+    let unavailable = missing.stdin_query(&serde_json::to_vec(&query).unwrap());
+    assert_eq!(unavailable["status"], "unavailable");
+    let mut invalid_query = query.clone();
+    invalid_query["text"] = json!("");
+    let invalid = missing.stdin_query(&serde_json::to_vec(&invalid_query).unwrap());
+    assert_eq!(invalid["status"], "invalid-input");
+    assert!(!missing.paths().data.exists());
+    let selected = Fixture::new();
+    selected_config(&selected);
+    let initialized = selected.run("initialize-aggregate", &json!({"operation":Uuid::new_v4(),"accepted_base_sha256":storage::digest(b"actual compatibility aggregate"),"fact":selected.fact()}));
+    assert_eq!(initialized["status"], "ok");
+    assert_eq!(selected.run("initialize-selection", &json!({"operation":Uuid::new_v4(),"accepted_base_sha256":storage::digest(b"actual compatibility catalog"),"registrations":[initialized["data"]["registration"]]}))["status"], "ok");
+    let selected_report = selected.stdin_query(&serde_json::to_vec(&query).unwrap());
+    assert_eq!(
+        selected_report["data"]["context"]["facts"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let reports = json!({"local":populated,"selected":selected_report,"empty":empty,"busy":busy,"unavailable":unavailable,"invalid":invalid});
+    for report in reports.as_object().unwrap().values() {
+        assert_eq!(report["report_version"], 1);
+        assert!(serde_json::to_vec(report).unwrap().len() < 128 * 1024);
+    }
+    // Optional evidence export for an independently pinned consumer parser.
+    if let Some(path) = std::env::var_os("HOST_MEMORY_REPORT_PATH") {
+        let path = PathBuf::from(path);
+        assert!(path.is_absolute());
+        fs::write(path, serde_json::to_vec_pretty(&reports).unwrap()).unwrap();
+    }
 }
 impl Fixture {
     fn new() -> Self {
@@ -63,6 +430,37 @@ impl Fixture {
             .env("READER_BUDDY_DEBUG_DUMP", "invalid-unused-setting");
         command
     }
+    fn stdin_query(&self, input: &[u8]) -> Value {
+        let command = self.command("query");
+        let args: Vec<_> = command.get_args().map(|a| a.to_os_string()).collect();
+        let mut replacement = Command::new(command.get_program());
+        replacement
+            .current_dir(&self.root)
+            .args(&args[..args.len() - 1])
+            .arg("-");
+        for (key, value) in command.get_envs() {
+            if let Some(value) = value {
+                replacement.env(key, value);
+            }
+        }
+        let mut child = replacement
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut writer = child.stdin.take().unwrap();
+        writer.write_all(input).unwrap();
+        drop(writer); // EOF is part of the explicit stdin contract.
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        assert!(output.stdout.len() <= maintenance::MAX_RESPONSE);
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["report_version"], 1);
+        assert_eq!(report["operation"], "query");
+        report
+    }
     fn run(&self, operation: &str, input: &impl serde::Serialize) -> Value {
         fs::write(
             self.root.join("input.json"),
@@ -76,6 +474,154 @@ impl Fixture {
         assert_eq!(report["report_version"], 1);
         report
     }
+    fn stdin_inspect(&self, label: &str, input: &[u8]) -> Value {
+        let command = self.command("inspect");
+        let args: Vec<_> = command.get_args().map(|a| a.to_os_string()).collect();
+        let mut replacement = Command::new(command.get_program());
+        replacement
+            .current_dir(&self.root)
+            .args(&args[..args.len() - 1])
+            .arg("-");
+        for (key, value) in command.get_envs() {
+            if let Some(value) = value {
+                replacement.env(key, value);
+            }
+        }
+        let mut child = replacement
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut pipe = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let out_reader = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            stdout
+                .take((maintenance::MAX_RESPONSE + 1) as u64)
+                .read_to_end(&mut bytes)
+                .unwrap();
+            bytes
+        });
+        let err_reader = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            stderr.take(4096).read_to_end(&mut bytes).unwrap();
+            bytes
+        });
+        let bytes = input.to_vec();
+        let sender = std::thread::spawn(move || pipe.write_all(&bytes));
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                let _ = child.wait();
+                let _ = sender.join();
+                let _ = out_reader.join();
+                let _ = err_reader.join();
+                panic!("inspection exceeded caller deadline");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if let Err(error) = sender.join().unwrap() {
+            assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+        }
+        let status = child.wait().unwrap();
+        let stdout = out_reader.join().unwrap();
+        let stderr = err_reader.join().unwrap();
+        assert!(status.success());
+        assert!(stderr.is_empty());
+        assert!(stdout.len() <= maintenance::MAX_RESPONSE);
+        assert!(stdout.ends_with(b"\n"));
+        let report: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(report["report_version"], 1);
+        assert_eq!(report["operation"], "inspect");
+        if !label.is_empty() {
+            if let Some(directory) = std::env::var_os("HOST_MEMORY_INSPECTION_REPORT_DIR") {
+                let directory = PathBuf::from(directory);
+                assert!(directory.is_absolute());
+                fs::create_dir_all(&directory).unwrap();
+                assert!(label.chars().all(|c| c.is_ascii_lowercase() || c == '-'));
+                fs::write(directory.join(format!("{label}.json")), &stdout).unwrap();
+                fs::write(directory.join(format!("{label}.request.json")), input).unwrap();
+            }
+        }
+        report
+    }
+    fn stdin_prepared(&self, operation: &str, label: &str, input: &[u8]) -> Value {
+        let command = self.command(operation);
+        let args: Vec<_> = command.get_args().map(|a| a.to_os_string()).collect();
+        let mut replacement = Command::new(command.get_program());
+        replacement
+            .current_dir(&self.root)
+            .args(&args[..args.len() - 1])
+            .arg("-");
+        for (key, value) in command.get_envs() {
+            if let Some(value) = value {
+                replacement.env(key, value);
+            }
+        }
+        let mut child = replacement
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut pipe = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let out_reader = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            stdout
+                .take((maintenance::MAX_RESPONSE + 1) as u64)
+                .read_to_end(&mut bytes)
+                .unwrap();
+            bytes
+        });
+        let err_reader = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            stderr.take(4096).read_to_end(&mut bytes).unwrap();
+            bytes
+        });
+        let bytes = input.to_vec();
+        let sender = std::thread::spawn(move || pipe.write_all(&bytes));
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                let _ = child.wait();
+                let _ = sender.join();
+                let _ = out_reader.join();
+                let _ = err_reader.join();
+                panic!("inspection exceeded caller deadline");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if let Err(error) = sender.join().unwrap() {
+            assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+        }
+        let status = child.wait().unwrap();
+        let stdout = out_reader.join().unwrap();
+        let stderr = err_reader.join().unwrap();
+        assert!(status.success());
+        assert!(stderr.is_empty());
+        assert!(stdout.len() <= maintenance::MAX_RESPONSE);
+        assert!(stdout.ends_with(b"\n"));
+        let report: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(report["report_version"], 1);
+        assert_eq!(report["operation"], operation);
+        if !label.is_empty() {
+            if let Some(directory) = std::env::var_os("HOST_MEMORY_PREPARED_REPORT_DIR") {
+                let directory = PathBuf::from(directory);
+                assert!(directory.is_absolute());
+                fs::create_dir_all(&directory).unwrap();
+                assert!(label.chars().all(|c| c.is_ascii_lowercase() || c == '-'));
+                fs::write(directory.join(format!("{label}.json")), &stdout).unwrap();
+                fs::write(directory.join(format!("{label}.request.json")), input).unwrap();
+            }
+        }
+        report
+    }
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -84,7 +630,7 @@ impl Drop for Fixture {
     }
 }
 
-fn selected_config(fixture: &Fixture) -> catalog::Identity {
+fn selected_config_only(fixture: &Fixture) -> catalog::Identity {
     let identity = catalog::Identity {
         group: Uuid::new_v4(),
         profile: fixture.profile,
@@ -93,6 +639,23 @@ fn selected_config(fixture: &Fixture) -> catalog::Identity {
     fs::write(fixture.root.join("config.json"), serde_json::to_vec(&json!({
         "paths": fixture.paths(), "memory": {"enabled":false,"profile":fixture.profile,"selection":identity}
     })).unwrap()).unwrap();
+    identity
+}
+fn selected_config(fixture: &Fixture) -> catalog::Identity {
+    let identity = selected_config_only(fixture);
+    let store = Store::open(fixture.paths()).unwrap();
+    store
+        .set_sync_mode(
+            &store.sync_mode_snapshot().unwrap().token,
+            Uuid::new_v4(),
+            storage::sync::mode::SyncModeChoice::SharedGroup {
+                group: identity.group,
+                binding_sha256: identity.binding_sha256.clone(),
+                root_id: "host-memory-fixture".into(),
+            },
+        )
+        .unwrap();
+    drop(store);
     identity
 }
 
@@ -238,7 +801,7 @@ fn actual_selected_cli_orphans_registration_adoption_retry_and_forgetting_preser
 #[test]
 fn actual_selected_cli_invalid_setup_refuses_before_store_creation() {
     let fixture = Fixture::new();
-    selected_config(&fixture);
+    selected_config_only(&fixture);
     let bad =
         json!({"operation":Uuid::nil(),"accepted_base_sha256":"NOT-A-DIGEST","registrations":[]});
     assert_eq!(
@@ -658,4 +1221,578 @@ fn fifo_lock_is_refused_before_a_blocking_open_in_actual_cli() {
         fixture.run("query", &Query::new("physics units".into(), 100))["status"],
         "unavailable"
     );
+}
+
+#[test]
+fn actual_cli_stdin_query_matches_file_for_local_and_selected_memory() {
+    for selected in [false, true] {
+        let fixture = Fixture::new();
+        let fact = fixture.fact();
+        if selected {
+            selected_config(&fixture);
+            let aggregate = fixture.run("initialize-aggregate", &json!({"operation":Uuid::new_v4(),"accepted_base_sha256":storage::digest(b"stdin aggregate"),"fact":fact}));
+            assert_eq!(aggregate["status"], "ok");
+            let selection = fixture.run("initialize-selection", &json!({"operation":Uuid::new_v4(),"accepted_base_sha256":storage::digest(b"stdin catalog"),"registrations":[aggregate["data"]["registration"].clone()]}));
+            assert_eq!(selection["status"], "ok");
+        } else {
+            assert_eq!(
+                fixture.run(
+                    "put",
+                    &Mutation {
+                        operation: Uuid::new_v4(),
+                        expected: BTreeSet::new(),
+                        fact: fact.clone()
+                    }
+                )["status"],
+                "ok"
+            );
+        }
+        let query = Query::new("physics gravity units\r\nα".into(), 100);
+        let file_report = fixture.run("query", &query);
+        let bytes = serde_json::to_vec(&query).unwrap();
+        let stdin_report = fixture.stdin_query(&bytes);
+        assert_eq!(stdin_report, file_report);
+        assert_eq!(stdin_report["status"], "ok");
+        assert_eq!(
+            stdin_report["data"]["context"]["facts"][0]["fact"]["value"],
+            fact.value
+        );
+        assert_eq!(
+            stdin_report["data"]["context"]["facts"][0]["fact"]["provenance"]["description"],
+            fact.provenance.description
+        );
+        assert!(serde_json::to_vec(&stdin_report).unwrap().len() < 128 * 1024);
+        if !selected {
+            let mut padded = bytes;
+            padded.resize(storage::MAX_RECORD, b' ');
+            assert_eq!(fixture.stdin_query(&padded), file_report);
+        }
+    }
+}
+
+#[test]
+fn actual_cli_stdin_invalid_query_refuses_before_store_and_does_not_echo() {
+    let query = Query::new("PRIVATE_STDIN_CANARY".into(), 100);
+    let valid = serde_json::to_vec(&query).unwrap();
+    let mut oversized = valid.clone();
+    oversized.resize(storage::MAX_RECORD + 1, b' ');
+    let mut trailing = valid.clone();
+    trailing.extend_from_slice(b" {}");
+    let mut bad_query = serde_json::to_value(&query).unwrap();
+    bad_query["max_matches"] = json!(0);
+    for bytes in [
+        b"PRIVATE_STDIN_CANARY".to_vec(),
+        vec![0xff, 0xfe],
+        oversized,
+        trailing,
+        serde_json::to_vec(&bad_query).unwrap(),
+    ] {
+        let fixture = Fixture::new();
+        let report = fixture.stdin_query(&bytes);
+        assert_eq!(report["status"], "invalid-input");
+        assert!(report["data"].is_null());
+        assert!(!serde_json::to_string(&report)
+            .unwrap()
+            .contains("PRIVATE_STDIN_CANARY"));
+        assert!(!fixture.paths().data.exists());
+        assert!(!fixture.paths().cache.exists());
+        assert!(!fixture.paths().credentials.exists());
+    }
+    let fixture = Fixture::new();
+    assert_eq!(fixture.stdin_query(&valid)["status"], "unavailable");
+    assert!(!fixture.paths().data.exists());
+}
+
+fn prepare_forget(f: &Fixture, fact: &Fact, label: &str) -> Value {
+    let report = f.stdin_prepared(
+        "prepare-forget",
+        label,
+        &serde_json::to_vec(
+            &json!({"prepared_version":1,"operation":Uuid::new_v4(),"key":fact.key}),
+        )
+        .unwrap(),
+    );
+    assert_eq!(report["status"], "ok", "{report}");
+    assert_eq!(report["incomplete"], false);
+    assert_eq!(
+        report["data"]["preview"]["payload"],
+        serde_json::to_value(fact).unwrap()
+    );
+    report["data"]["intent"].clone()
+}
+fn original_intent_call(f: &Fixture, operation: &str, label: &str, intent: &Value) -> Value {
+    f.stdin_prepared(
+        operation,
+        label,
+        &serde_json::to_vec(&json!({"intent":intent})).unwrap(),
+    )
+}
+#[test]
+fn actual_prepared_forget_local_original_receipt_survives_later_value_without_redeleting() {
+    let f = Fixture::new();
+    let mut fact = f.fact();
+    assert_eq!(
+        f.run(
+            "put",
+            &json!({"operation":Uuid::new_v4(),"expected":[],"fact":fact})
+        )["status"],
+        "ok"
+    );
+    let intent = prepare_forget(&f, &fact, "local-prepare");
+    let absent = original_intent_call(&f, "forget-receipt", "local-receipt-absent", &intent);
+    assert_eq!(absent["status"], "unavailable");
+    assert_eq!(absent["data"]["outcome"], "unresolved");
+    let ack = original_intent_call(&f, "forget", "local-confirm", &intent);
+    assert_eq!(ack["status"], "ok", "{ack}");
+    assert_eq!(ack["data"]["outcome"], "acknowledged");
+    assert_eq!(ack["data"]["operation"], intent["operation"]);
+    let old = f.run("inspect", &serde_json::to_value(&fact.key).unwrap());
+    let tombstone = old["data"][0]["revision_id"].clone();
+    assert_eq!(old["data"][0]["kind"], "tombstone");
+    fact.value = "A later value must survive old acknowledgement".into();
+    assert_eq!(
+        f.run(
+            "put",
+            &json!({"operation":Uuid::new_v4(),"expected":[tombstone],"fact":fact})
+        )["status"],
+        "ok"
+    );
+    let store = Store::open(f.paths()).unwrap();
+    let manifests = store.manifests().unwrap();
+    drop(store);
+    let receipt = original_intent_call(&f, "forget-receipt", "local-later-receipt", &intent);
+    assert_eq!(receipt["data"], ack["data"]);
+    assert_eq!(
+        original_intent_call(&f, "forget", "local-exact-replay", &intent)["data"],
+        ack["data"]
+    );
+    let mut forged = intent.clone();
+    forged["expected"][0]["sha256"] = json!(storage::digest(b"forged original content"));
+    assert_eq!(
+        original_intent_call(&f, "forget-receipt", "local-tampered-receipt", &forged)["data"]
+            ["outcome"],
+        "unresolved"
+    );
+    assert_eq!(
+        original_intent_call(&f, "forget", "local-tampered-confirm", &forged)["data"]["outcome"],
+        "not-dispatched"
+    );
+    let now = f.run("inspect", &serde_json::to_value(&fact.key).unwrap());
+    assert_eq!(now["data"][0]["payload"]["value"], fact.value);
+    let store = Store::open(f.paths()).unwrap();
+    assert_eq!(store.manifests().unwrap(), manifests);
+}
+#[test]
+fn actual_prepared_forget_selected_predecessor_and_other_pins_bind_historical_ack() {
+    let f = Fixture::new();
+    let (_, mut fact, mut other) = inspection_selected_pair(&f);
+    let intent = prepare_forget(&f, &fact, "selected-prepare");
+    assert_eq!(
+        original_intent_call(&f, "forget-receipt", "selected-receipt-absent", &intent)["data"]
+            ["outcome"],
+        "unresolved"
+    );
+    let ack = original_intent_call(&f, "forget", "selected-confirm", &intent);
+    assert_eq!(ack["status"], "ok", "{ack}");
+    let tombstone = f.run("inspect", &serde_json::to_value(&fact.key).unwrap())["data"][0]
+        ["revision_id"]
+        .clone();
+    fact.value = "Later selected value survives".into();
+    assert_eq!(
+        f.run(
+            "put",
+            &json!({"operation":Uuid::new_v4(),"expected":[tombstone],"fact":fact})
+        )["status"],
+        "ok"
+    );
+    assert_eq!(
+        original_intent_call(&f, "forget-receipt", "selected-later-receipt", &intent)["data"],
+        ack["data"]
+    );
+    assert_eq!(
+        original_intent_call(&f, "forget", "selected-exact-replay", &intent)["data"],
+        ack["data"]
+    );
+    let mut forged = intent.clone();
+    forged["expected"][0]["sha256"] = json!(storage::digest(b"changed expected content"));
+    assert_eq!(
+        original_intent_call(&f, "forget-receipt", "selected-tampered-receipt", &forged)["data"]
+            ["outcome"],
+        "unresolved"
+    );
+    let mut forged = intent.clone();
+    forged["binding"]["domain"]["pins"][0]["accepted_base_sha256"] =
+        json!(storage::digest(b"changed accepted base"));
+    assert_eq!(
+        original_intent_call(&f, "forget-receipt", "selected-changed-pin", &forged)["data"]
+            ["outcome"],
+        "unresolved"
+    );
+    let old = f.run("inspect", &serde_json::to_value(&other.key).unwrap())["data"][0]
+        ["revision_id"]
+        .clone();
+    other.value = "Unrelated admitted aggregate changed".into();
+    assert_eq!(
+        f.run(
+            "put",
+            &json!({"operation":Uuid::new_v4(),"expected":[old],"fact":other})
+        )["status"],
+        "ok"
+    );
+    assert_eq!(
+        original_intent_call(&f, "forget-receipt", "selected-other-drift", &intent)["data"]
+            ["outcome"],
+        "unresolved"
+    );
+    assert_eq!(
+        f.run("inspect", &serde_json::to_value(&fact.key).unwrap())["data"][0]["payload"]["value"],
+        fact.value
+    );
+}
+#[test]
+fn actual_prepared_forget_binding_reentry_strict_limits_and_no_initialization() {
+    let f = Fixture::new();
+    let fact = f.fact();
+    let request = json!({"prepared_version":1,"operation":Uuid::new_v4(),"key":fact.key});
+    let valid = serde_json::to_vec(&request).unwrap();
+    assert_eq!(
+        f.stdin_prepared("prepare-forget", "missing-prepare", &valid)["status"],
+        "unavailable"
+    );
+    assert!(!f.paths().data.exists());
+    let mut malformed = request.clone();
+    malformed["key"]["scope"]["extra"] = json!(true);
+    assert_eq!(
+        f.stdin_prepared(
+            "prepare-forget",
+            "invalid-prepare",
+            &serde_json::to_vec(&malformed).unwrap()
+        )["status"],
+        "invalid-input"
+    );
+    let mut exact = valid.clone();
+    exact.resize(storage::MAX_RECORD, b' ');
+    assert_eq!(
+        f.stdin_prepared("prepare-forget", "", &exact)["status"],
+        "unavailable"
+    );
+    exact.push(b' ');
+    assert_eq!(
+        f.stdin_prepared("prepare-forget", "", &exact)["status"],
+        "invalid-input"
+    );
+    assert!(!f.paths().data.exists());
+    assert_eq!(
+        f.run(
+            "put",
+            &json!({"operation":Uuid::new_v4(),"expected":[],"fact":fact})
+        )["status"],
+        "ok"
+    );
+    let intent = prepare_forget(&f, &fact, "binding-prepare");
+    let store = Store::open(f.paths()).unwrap();
+    for choice in [
+        storage::sync::mode::SyncModeChoice::LocalOnly,
+        storage::sync::mode::SyncModeChoice::IsolatedBackup {
+            binding_sha256: storage::digest(b"different mode"),
+        },
+        storage::sync::mode::SyncModeChoice::LocalOnly,
+    ] {
+        store
+            .set_sync_mode(
+                &store.sync_mode_snapshot().unwrap().token,
+                Uuid::new_v4(),
+                choice,
+            )
+            .unwrap();
+    }
+    drop(store);
+    assert_eq!(
+        original_intent_call(&f, "forget", "mode-reentry-refusal", &intent)["data"]["outcome"],
+        "not-dispatched"
+    );
+    let intent = prepare_forget(&f, &fact, "config-prepare");
+    let path = f.root.join("config.json");
+    let mut config: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    config["memory"]["enabled"] = json!(true);
+    fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+    assert_eq!(
+        original_intent_call(&f, "forget", "config-refusal", &intent)["status"],
+        "conflict"
+    );
+    assert_eq!(
+        f.run("inspect", &serde_json::to_value(&fact.key).unwrap())["data"][0]["kind"],
+        "value"
+    );
+}
+#[test]
+fn actual_prepared_forget_same_heads_do_not_rebind_replaced_storage() {
+    let f = Fixture::new();
+    let fact = f.fact();
+    assert_eq!(
+        f.run(
+            "put",
+            &json!({"operation":Uuid::new_v4(),"expected":[],"fact":fact})
+        )["status"],
+        "ok"
+    );
+    let intent = prepare_forget(&f, &fact, "restore-prepare");
+    let store = Store::open(f.paths()).unwrap();
+    let backup = f.root.join("backup");
+    store.export(&backup).unwrap();
+    store.restore(&backup).unwrap();
+    drop(store);
+    assert_eq!(
+        original_intent_call(&f, "forget", "restored-generation-refusal", &intent)["data"]
+            ["outcome"],
+        "not-dispatched"
+    );
+    assert_eq!(
+        f.run("inspect", &serde_json::to_value(&fact.key).unwrap())["data"][0]["kind"],
+        "value"
+    );
+    for catalog in [false, true] {
+        let f = Fixture::new();
+        let (identity, fact, _) = inspection_selected_pair(&f);
+        let intent = prepare_forget(
+            &f,
+            &fact,
+            if catalog {
+                "catalog-replace-prepare"
+            } else {
+                "target-replace-prepare"
+            },
+        );
+        let store = Store::open(f.paths()).unwrap();
+        let scope = if catalog {
+            identity.scope().unwrap()
+        } else {
+            identity
+                .aggregate_scope(&catalog::Owner::GlobalFact {
+                    key: fact.key.clone(),
+                })
+                .unwrap()
+        };
+        let old = store.selected_snapshot(&scope, 4096).unwrap().unwrap();
+        store
+            .activate_selected(
+                &old.token,
+                storage::selection::SelectionChange {
+                    operation: Uuid::new_v4(),
+                    accepted_base_sha256: storage::digest(
+                        b"new acceptance with identical envelopes",
+                    ),
+                    selected: old.transaction.selected.clone(),
+                    retained: old.transaction.retained.clone(),
+                },
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let new = store.selected_snapshot(&scope, 4096).unwrap().unwrap();
+        assert!(new.selected_records == old.selected_records);
+        assert_ne!(
+            new.token.aggregate_generation(),
+            old.token.aggregate_generation()
+        );
+        drop(store);
+        // Establish the new state is still valid domain data, not a manufactured invalid fixture.
+        assert_eq!(
+            f.run("inspect", &serde_json::to_value(&fact.key).unwrap())["status"],
+            "ok"
+        );
+        let refusal = original_intent_call(
+            &f,
+            "forget",
+            if catalog {
+                "catalog-replacement-refusal"
+            } else {
+                "target-replacement-refusal"
+            },
+            &intent,
+        );
+        assert_eq!(refusal["status"], "conflict", "{refusal}");
+        assert_eq!(refusal["data"]["outcome"], "not-dispatched");
+    }
+}
+#[test]
+fn actual_prepared_forget_refuses_ambiguous_unsupported_and_busy_without_mutation() {
+    for shape in ["absent", "tombstone", "conflict", "opaque", "numeric"] {
+        let f = Fixture::new();
+        let mut fact = f.fact();
+        if shape == "numeric" {
+            fact.observed_ms = 9_007_199_254_740_992;
+        }
+        assert_eq!(
+            f.run(
+                "put",
+                &json!({"operation":Uuid::new_v4(),"expected":[],"fact":fact})
+            )["status"],
+            "ok"
+        );
+        let head = f.run("inspect", &serde_json::to_value(&fact.key).unwrap())["data"][0].clone();
+        if shape == "tombstone" {
+            assert_eq!(f.run("forget",&json!({"operation":Uuid::new_v4(),"key":fact.key,"expected":[head["revision_id"]]}))["status"],"ok");
+        }
+        if shape == "conflict" || shape == "opaque" {
+            let store = Store::open(f.paths()).unwrap();
+            let original: storage::Envelope = serde_json::from_value(head).unwrap();
+            inspection_fork(
+                &store,
+                &original,
+                if shape == "opaque" {
+                    json!({"unsupported":true})
+                } else {
+                    original.payload.clone()
+                },
+                false,
+            );
+            if shape == "conflict" {
+                inspection_fork(&store, &original, original.payload.clone(), false);
+            }
+            drop(store);
+        }
+        let mut key = fact.key.clone();
+        if shape == "absent" {
+            key.fact = Uuid::new_v4();
+        }
+        let report = f.stdin_prepared(
+            "prepare-forget",
+            &format!("shape-{shape}"),
+            &serde_json::to_vec(
+                &json!({"prepared_version":1,"operation":Uuid::new_v4(),"key":key}),
+            )
+            .unwrap(),
+        );
+        assert_eq!(report["status"], "unsupported", "{shape}: {report}");
+        assert_eq!(report["incomplete"], false);
+        assert!(report["data"].is_null());
+    }
+    let f = Fixture::new();
+    let fact = f.fact();
+    assert_eq!(
+        f.run(
+            "put",
+            &json!({"operation":Uuid::new_v4(),"expected":[],"fact":fact})
+        )["status"],
+        "ok"
+    );
+    let intent = prepare_forget(&f, &fact, "busy-prepare");
+    let store = Store::open(f.paths()).unwrap();
+    let report = original_intent_call(&f, "forget", "busy-confirm", &intent);
+    assert_eq!(report["status"], "busy");
+    assert_eq!(report["incomplete"], false);
+    assert_eq!(report["data"]["outcome"], "not-dispatched");
+    let report = original_intent_call(&f, "forget-receipt", "busy-receipt", &intent);
+    assert_eq!(report["data"]["outcome"], "unresolved");
+    drop(store);
+    assert_eq!(
+        f.run("inspect", &serde_json::to_value(&fact.key).unwrap())["data"][0]["kind"],
+        "value"
+    );
+}
+#[test]
+fn actual_prepared_forget_ambiguous_local_receipt_is_unresolved_without_republication() {
+    let f = Fixture::new();
+    let fact = f.fact();
+    assert_eq!(
+        f.run(
+            "put",
+            &json!({"operation":Uuid::new_v4(),"expected":[],"fact":fact})
+        )["status"],
+        "ok"
+    );
+    let intent = prepare_forget(&f, &fact, "ambiguity-prepare");
+    let ack = original_intent_call(&f, "forget", "ambiguity-confirm", &intent);
+    assert_eq!(ack["status"], "ok");
+    let original = Uuid::parse_str(ack["data"]["transaction"].as_str().unwrap()).unwrap();
+    let store = Store::open(f.paths()).unwrap();
+    let mut duplicate = store
+        .manifests()
+        .unwrap()
+        .into_iter()
+        .find(|m| m.transaction_id == original)
+        .unwrap();
+    duplicate.transaction_id = Uuid::new_v4();
+    store.import(duplicate, BTreeMap::new()).unwrap();
+    let before = store.manifests().unwrap();
+    drop(store);
+    let receipt = original_intent_call(&f, "forget-receipt", "ambiguous-local-receipt", &intent);
+    assert_eq!(receipt["status"], "unavailable");
+    assert_eq!(receipt["data"]["outcome"], "unresolved");
+    let repeated = original_intent_call(&f, "forget", "ambiguous-confirm-refusal", &intent);
+    assert_eq!(repeated["data"]["outcome"], "not-dispatched");
+    let store = Store::open(f.paths()).unwrap();
+    assert_eq!(store.manifests().unwrap(), before);
+}
+#[test]
+fn recorded_prepared_corpus_preserves_original_bytes_and_logical_acknowledgements() {
+    let corpus: Value = serde_json::from_str(include_str!(
+        "fixtures/prepared-forget-77e92306-corpus.json"
+    ))
+    .unwrap();
+    let manifest_raw = corpus["manifest_utf8"].as_str().unwrap();
+    assert_eq!(
+        storage::digest(manifest_raw.as_bytes()),
+        corpus["manifest_sha256"]
+    );
+    let manifest: Value = serde_json::from_str(manifest_raw).unwrap();
+    let reports = manifest["reports"].as_array().unwrap();
+    let pairs = corpus["pairs"].as_array().unwrap();
+    assert_eq!(reports.len(), 39);
+    assert_eq!(pairs.len(), 39);
+    let mut seen = BTreeSet::new();
+    let mut acknowledgements = BTreeMap::new();
+    let mut greek_previews = 0;
+    for item in reports {
+        let name = item["name"].as_str().unwrap();
+        assert!(seen.insert(name));
+        let pair = pairs.iter().find(|p| p["name"] == name).unwrap();
+        let request = pair["request_utf8"].as_str().unwrap();
+        let stdout = pair["stdout_utf8"].as_str().unwrap();
+        assert!(stdout.ends_with('\n'));
+        assert_eq!(storage::digest(request.as_bytes()), item["request_sha256"]);
+        assert_eq!(storage::digest(stdout.as_bytes()), item["stdout_sha256"]);
+        let request: Value = serde_json::from_str(request).unwrap();
+        let report: Value = serde_json::from_str(stdout).unwrap();
+        assert_eq!(report["report_version"], 1);
+        assert_eq!(report["operation"], item["operation"]);
+        assert_eq!(report["status"], item["status"]);
+        assert_eq!(report["incomplete"], item["incomplete"]);
+        if report["status"] != "ok" {
+            continue;
+        }
+        if report["operation"] == "prepare-forget" {
+            let envelope: storage::Envelope =
+                serde_json::from_value(report["data"]["preview"].clone()).unwrap();
+            envelope.validate().unwrap();
+            let fact: Fact = serde_json::from_value(envelope.payload.clone()).unwrap();
+            fact.validate().unwrap();
+            assert_eq!(fact.key.record_id().unwrap(), envelope.record_id);
+            let intent = &report["data"]["intent"];
+            assert_eq!(intent["operation"], request["operation"]);
+            assert_eq!(intent["key"], request["key"]);
+            assert_eq!(
+                intent["expected"][0]["revision"],
+                json!(envelope.revision_id)
+            );
+            assert_eq!(
+                intent["expected"][0]["sha256"],
+                storage::digest(&serde_json::to_vec(&envelope).unwrap())
+            );
+            if fact.value.contains('\u{03b1}') && fact.value.contains('\u{03b2}') {
+                greek_previews += 1;
+            }
+        } else {
+            assert_eq!(report["data"]["outcome"], "acknowledged");
+            assert_eq!(report["data"]["operation"], request["intent"]["operation"]);
+            let operation = Uuid::parse_str(report["data"]["operation"].as_str().unwrap()).unwrap();
+            let transaction =
+                Uuid::parse_str(report["data"]["transaction"].as_str().unwrap()).unwrap();
+            assert!(!operation.is_nil() && !transaction.is_nil());
+            if let Some(prior) = acknowledgements.insert(operation, transaction) {
+                assert_eq!(prior, transaction);
+            }
+        }
+    }
+    assert_eq!(greek_previews, 9);
 }

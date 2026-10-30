@@ -46,6 +46,7 @@ impl LLMEngine for ReplacingModel {
 struct BoundaryReplacement {
     memory: Arc<memory::selected::SelectedMemory>,
     replacement: std::sync::Mutex<Option<memory::Mutation>>,
+    forge_query: bool,
 }
 impl Provider for BoundaryReplacement {
     fn put(&self, value: memory::Mutation) -> Result<Uuid> {
@@ -58,7 +59,11 @@ impl Provider for BoundaryReplacement {
         self.memory.inspect(key)
     }
     fn query(&self, query: &memory::Query) -> Result<memory::QueryResult> {
-        self.memory.query(query)
+        let mut view = self.memory.query(query)?;
+        if self.forge_query {
+            view.context.facts[0].fact.value = "forged selected answer context".into();
+        }
+        Ok(view)
     }
     fn with_current(
         &self,
@@ -74,7 +79,7 @@ impl Provider for BoundaryReplacement {
 
 #[test]
 fn selected_reader_revalidates_after_model_and_at_actual_journal_boundary_without_native_output() {
-    for mode in 0..3 {
+    for mode in 0..4 {
         let (state, workflow) = setup();
         let fixture = SimulatorLedger::new();
         let ledger = fixture.open().unwrap();
@@ -152,10 +157,11 @@ fn selected_reader_revalidates_after_model_and_at_actual_journal_boundary_withou
                 }) as Box<dyn FnOnce()>
             }),
         };
-        let provider: Arc<dyn Provider> = if mode == 1 {
+        let provider: Arc<dyn Provider> = if mode == 1 || mode == 3 {
             Arc::new(BoundaryReplacement {
                 memory: memory.clone(),
-                replacement: std::sync::Mutex::new(Some(mutation)),
+                replacement: std::sync::Mutex::new((mode == 1).then_some(mutation)),
+                forge_query: mode == 3,
             })
         } else {
             memory.clone()
@@ -165,7 +171,11 @@ fn selected_reader_revalidates_after_model_and_at_actual_journal_boundary_withou
         reader.set_subject_memory(Some(provider));
         let result = reader.run_iteration();
         assert_eq!(result.is_ok(), mode == 2);
-        assert_eq!(calls.borrow().len(), 3);
+        assert_eq!(calls.borrow().len(), if mode == 3 { 2 } else { 3 });
+        if mode == 3 {
+            assert!(format!("{:#}", result.unwrap_err())
+                .contains("selected memory result payload changed"));
+        }
         let envelopes = store
             .snapshot_heads_matching(&[Namespace::Conversation], 4096, |_| true)
             .unwrap();
@@ -236,6 +246,118 @@ fn setup() -> (Shared, Workflow) {
     let state = Rc::new(RefCell::new(State::new(&scenario, &root).unwrap()));
     let workflow = Workflow::with_device(Box::new(SimDevice(state.clone())), false);
     (state, workflow)
+}
+
+#[test]
+fn reader_personalization_is_once_after_verification_with_optional_memory() {
+    let text = "Use short explanations.\r\nPreserve units: µ and α.";
+    for (enabled, value, memory_mode, agrees) in [
+        (true, text, 0, true),
+        (true, text, 1, true),
+        (true, text, 2, true),
+        (false, text, 0, true),
+        (true, "", 0, true),
+        (true, text, 0, false),
+    ] {
+        let (state, workflow) = setup();
+        let fixture = SimulatorLedger::new();
+        let ledger = fixture.open().unwrap();
+        let store = ledger.store().clone();
+        let calls = Rc::new(RefCell::new(vec![]));
+        let model = Model {
+            current: Request::default(), calls: calls.clone(), cancel: None,
+            replies: VecDeque::from([
+                "QUESTION: G unc.?\nQUESTION_BOX: 130,35,200,50\nSELECTION_CENTER: 385,230\n---\nANSWER: Original answer.".into(),
+                if agrees { "TRANSCRIPTION: G unc.?".into() } else { "TRANSCRIPTION: different question?".into() },
+                "ANSWER: Personalized gravity answer.".into(),
+            ]),
+        };
+        let mut reader = Orchestrator::new(workflow, model, ledger);
+        reader.set_trigger_enabled(false);
+        let mut saved_preference = crate::config::Personalization {
+            enabled,
+            text: value.into(),
+            ..Default::default()
+        };
+        reader.set_personalization(saved_preference.snapshot().unwrap());
+        // A later saved value cannot mutate the already selected startup value.
+        saved_preference.text = "A later edit must not appear in this request.".into();
+        saved_preference.enabled = false;
+        assert!(saved_preference
+            .snapshot()
+            .unwrap()
+            .effective_text()
+            .is_none());
+        if memory_mode > 0 {
+            let profile = Uuid::new_v4();
+            let memory = Arc::new(memory::LocalMemory::new_local(store.clone(), profile).unwrap());
+            if memory_mode == 2 {
+                remember(
+                    &memory,
+                    profile,
+                    "G unc. uses SI gravity units",
+                    Uuid::new_v4(),
+                );
+            }
+            reader.set_subject_memory(Some(memory));
+        }
+        reader.run_iteration().unwrap();
+        let calls = calls.borrow();
+        let personalized = enabled && !value.is_empty() && agrees;
+        assert_eq!(calls.len(), if personalized { 3 } else { 2 });
+        assert!(calls[..2].iter().all(|call| call
+            .text
+            .iter()
+            .all(|part| !part.contains("PERSONALIZATION"))));
+        if personalized {
+            let expected = format!("PERSONALIZATION: {}", serde_json::to_string(value).unwrap());
+            assert_eq!(
+                calls[2]
+                    .text
+                    .iter()
+                    .filter(|part| **part == expected)
+                    .count(),
+                1
+            );
+            assert!(calls[2]
+                .text
+                .iter()
+                .any(|part| part == "CURRENT_REQUEST: \"G unc.?\""));
+            assert_eq!(calls[2].images, calls[0].images);
+            assert_eq!(
+                calls[2]
+                    .text
+                    .iter()
+                    .any(|part| part.starts_with("ASSOCIATIVE_MEMORY: ")),
+                memory_mode == 2
+            );
+        }
+        let turns: Vec<crate::conversation::Turn> = store
+            .snapshot_heads_matching(&[Namespace::Conversation], 4096, |_| true)
+            .unwrap()
+            .into_iter()
+            .filter_map(|entry| serde_json::from_value::<Record>(entry.payload).ok())
+            .filter_map(|record| match record {
+                Record::Turn(turn) => Some(turn),
+                _ => None,
+            })
+            .collect();
+        let users: Vec<_> = turns
+            .iter()
+            .filter(|turn| turn.role == Role::User)
+            .collect();
+        assert_eq!(users.len(), 1);
+        assert!(users.iter().all(|turn| turn
+            .text
+            .as_deref()
+            .is_none_or(|question| question == "G unc.?")));
+        assert!(turns
+            .iter()
+            .all(|turn| turn.text.as_ref().is_none_or(|body| !body.contains(text))));
+        if !agrees {
+            assert!(state.borrow().pages.iter().all(|page| page.text.is_empty()));
+        }
+    }
 }
 fn remember(provider: &memory::LocalMemory, profile: Uuid, value: &str, key: Uuid) {
     provider
@@ -410,7 +532,7 @@ fn reader_withheld_only_abstention_provider_failure_and_cancel_never_publish_pro
         } else {
             crate::conversation::Outcome::Failed
         };
-        assert!(envelopes.iter().any(|e| matches!(serde_json::from_value::<Record>(e.payload.clone()), Ok(Record::Turn(t)) if t.role == Role::User && t.text.as_deref() == Some("G unc.?") && t.outcome == expected_outcome)));
+        assert!(envelopes.iter().any(|e| matches!(serde_json::from_value::<Record>(e.payload.clone()), Ok(Record::Turn(t)) if t.role == Role::User && t.text.as_deref() == Some("G unc.?") && t.outcome == expected_outcome)), "failure/cancellation case {mode} retained the wrong terminal turn");
         drop(inspect);
     }
 }

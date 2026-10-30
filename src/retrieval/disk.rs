@@ -1,5 +1,5 @@
 //! Disposable local normalized inputs, never durable evidence or source authority.
-use super::{Index, IndexKey, NormalizedDocument};
+use super::{Index, IndexKey, NormalizedDocument, Provider, Retrieved};
 use crate::storage::{files, Store, Uuid, FORMAT};
 use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -226,4 +226,49 @@ impl<'a> DiskCache<'a> {
         files::sync_dir(&self.root)?;
         Ok(true)
     }
+}
+
+/// Each query observes one validated owned Index, not a cache-currentness lease.
+impl Provider for DiskCache<'_> {
+    fn query(
+        &self,
+        expected: &IndexKey,
+        question: &str,
+        max_passages: usize,
+        max_bytes: usize,
+        neighbors: bool,
+    ) -> Result<Retrieved> {
+        let index = self.load(expected)?.context("Cached source unavailable")?;
+        index.query(expected, question, max_passages, max_bytes, neighbors)
+    }
+}
+
+/// Cleanup admission validates material without asserting independently selected freshness.
+#[cfg(target_os = "linux")]
+pub(crate) fn validate_cleanup_entry(bytes: &[u8], document: Uuid) -> Result<()> {
+    ensure!(
+        bytes.len() as u64 <= ENTRY_BYTES,
+        "Cache entry exceeds bound"
+    );
+    let raw = crate::config::inspection::strict_json(bytes)?;
+    ensure!(raw.is_object(), "Cache wrapper must be an object");
+    ensure!(
+        raw.get("key").is_some_and(|v| v.is_object())
+            && raw.get("document").is_some_and(|v| v.is_object()),
+        "Cache fields must be objects"
+    );
+    ensure!(
+        raw.pointer("/document/units")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|units| units.iter().all(|u| u.is_object())),
+        "Cache units must be objects"
+    );
+    let entry: Entry = serde_json::from_value(raw)?;
+    ensure!(
+        entry.format == 1 && entry.key.document == document,
+        "Invalid cache wrapper"
+    );
+    let index = Index::build(entry.document)?;
+    ensure!(index.key() == &entry.key, "Invalid derived cache material");
+    Ok(())
 }

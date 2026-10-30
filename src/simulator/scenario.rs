@@ -10,6 +10,8 @@ pub struct Scenario {
     pub mode: String,
     #[serde(default)]
     pub llm: ModelConfig,
+    #[serde(default)]
+    pub personalization: crate::config::Personalization,
     pub pages: Vec<PageSpec>,
     #[serde(default)]
     pub active_page: usize,
@@ -204,6 +206,7 @@ pub struct Expected {
 
 impl Scenario {
     pub fn validate(&self) -> Result<()> {
+        self.personalization.validate()?;
         if let ModelConfig::Live {
             model,
             max_calls,
@@ -229,7 +232,7 @@ impl Scenario {
         }
         ensure!(
             self.mode == "reader",
-            "Unsupported simulator mode {:?}; Writer/combined require REM-23",
+            "Unsupported Reader scenario mode {:?}; use the Writer host schema for supplied-text Writer; combined/native routing is unsupported",
             self.mode
         );
         ensure!(!self.name.trim().is_empty(), "Scenario name is empty");

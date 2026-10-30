@@ -51,6 +51,16 @@ pub struct SyncModeToken {
     actor: Uuid,
     sha256: String,
 }
+impl SyncModeToken {
+    /// Decode an operator's original conditional precondition, never a live lease.
+    pub(crate) fn from_maintenance_request(actor: Uuid, sha256: String) -> Result<Self> {
+        ensure!(
+            !actor.is_nil() && valid_digest(&sha256),
+            "invalid mode precondition"
+        );
+        Ok(Self { actor, sha256 })
+    }
+}
 #[derive(Clone)]
 pub struct SyncModeSnapshot {
     pub device: Option<Uuid>,
@@ -97,7 +107,7 @@ fn fresh_identity(state: &ModeState) -> Uuid {
 fn path(store: &Store) -> PathBuf {
     store.paths.data.join("sync/mode.json")
 }
-fn validate_choice(choice: &SyncModeChoice) -> Result<()> {
+pub(crate) fn validate_choice(choice: &SyncModeChoice) -> Result<()> {
     match choice {
         SyncModeChoice::LocalOnly => (),
         SyncModeChoice::IsolatedBackup { binding_sha256 } => {
@@ -196,6 +206,15 @@ pub(crate) fn load(store: &Store) -> Result<Option<ModeState>> {
         previous = Some(&receipt.mode);
     }
     Ok(Some(state))
+}
+
+/// Read-only distinction for ordinary successor consumers. Mode-handle counts
+/// also include valid ordinary leases and cannot identify a sync publisher.
+pub(crate) fn ordinary_local(store: &Store) -> Result<bool> {
+    Ok(matches!(
+        snapshot(store, &load(store)?)?.mode,
+        None | Some(SyncMode::LocalOnly)
+    ))
 }
 fn snapshot(store: &Store, state: &Option<ModeState>) -> Result<SyncModeSnapshot> {
     let current = state.as_ref().and_then(|s| s.transitions.last());
@@ -301,6 +320,12 @@ impl Store {
             .inner
             .lock()
             .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        let root = self.generation(inner.generation);
+        ensure!(
+            feedback_generation::version(&root)? != notebook_generation::VERSION
+                && !root.join(notebook_generation::MARKER).exists(),
+            "notebook storage does not support sync mode transitions"
+        );
         let original = load(self)?;
         let fingerprint = digest(&serde_json::to_vec(&(
             self.actor_id,
