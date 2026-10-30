@@ -105,8 +105,9 @@ jobs:
         with:
           node-version: 24.21.0
         if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
         with:
+          toolchain: stable
           components: rustfmt, clippy
         if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
       - uses: ./.github/actions/release-tools

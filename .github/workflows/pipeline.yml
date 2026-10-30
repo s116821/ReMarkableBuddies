@@ -43,8 +43,9 @@ jobs:
           eligibility=()
           if test "$MAIN_RELEASE" = true; then eligibility+=(--require-semantic-source); fi
           python cicd/release/freeze.py candidate --tag "$tag" --sha "$SOURCE_SHA" "${eligibility[@]}"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
         with:
+          toolchain: stable
           targets: armv7-unknown-linux-gnueabihf,aarch64-unknown-linux-gnu
       - name: Install pinned cross
         run: cargo install cross --git https://github.com/cross-rs/cross --rev 8c1a8aa4b661711f4b7b6ac07c2e8929ce2f7d27 --locked

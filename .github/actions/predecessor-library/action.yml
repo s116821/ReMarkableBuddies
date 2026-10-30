@@ -34,7 +34,7 @@ runs:
         path: .predecessor-qualification-source
         fetch-depth: 0
         persist-credentials: false
-    - uses: dtolnay/rust-toolchain@stable
+    - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
       with:
         toolchain: 1.99.1
     - name: Verify exact old source and inject the sole reviewed example
