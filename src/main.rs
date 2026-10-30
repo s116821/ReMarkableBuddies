@@ -13,6 +13,81 @@ use std::time::Duration;
 #[command(author, version = env!("READER_BUDDY_VERSION"))]
 #[command(about = "ReMarkable Reader Buddy - AI-powered reading assistant for reMarkable tablets")]
 pub struct Args {
+    /// Fixed installed stock recovery; never starts ordinary application services
+    #[arg(long, exclusive = true)]
+    resident_stock_recovery: bool,
+    /// Explicit offline confirmed handwriting records; strict bounded JSON stdin
+    #[arg(long, exclusive = true)]
+    handwriting: bool,
+    /// Deliberate saved research policy; no runtime/provider activation
+    #[arg(long, value_enum, conflicts_with_all = ["inspect_conversations","conversation_operation","conversation_input","inspect_source_cache","source_cache_operation","source_cache_input","credential_reference_operation","credential_reference_input","model_credential_operation","model_credential_input","memory_settings_operation","memory_settings_input","ordinary_export_operation","ordinary_export_input","model_settings_operation","model_settings_input","restore_operation","restore_input","basic_settings_operation","basic_settings_input","configuration_operation","simulate","inspect_owned_data","api_key","model","base_url","trigger_corner","log_level","debug_dump","memory_operation","memory_input","sync_mode_operation","sync_mode_input","archive_operation","archive_input","personalization_operation","export_note"])]
+    research_settings_operation: Option<config::research_settings::Operation>,
+    #[arg(long, requires = "research_settings_operation", conflicts_with_all = ["inspect_conversations","conversation_operation","conversation_input","inspect_source_cache","source_cache_operation","source_cache_input","credential_reference_operation","credential_reference_input","model_credential_operation","model_credential_input","memory_settings_operation","memory_settings_input","ordinary_export_operation","ordinary_export_input","model_settings_operation","model_settings_input","restore_operation","restore_input","basic_settings_operation","basic_settings_input","configuration_operation","simulate","inspect_owned_data","api_key","model","base_url","trigger_corner","log_level","debug_dump","memory_operation","memory_input","sync_mode_operation","sync_mode_input","archive_operation","archive_input","personalization_operation","export_note"])]
+    research_settings_input: Option<std::path::PathBuf>,
+
+    /// Linux-only ordinary root candidates; requires a fresh separate cleanup preview
+    #[arg(long,conflicts_with_all=["conversation_operation","conversation_input","inspect_source_cache","source_cache_operation","source_cache_input","simulate","inspect_owned_data","api_key","model","base_url","trigger_corner","log_level","debug_dump","memory_operation","memory_input","sync_mode_operation","sync_mode_input","archive_operation","archive_input","personalization_operation","export_note","configuration_operation","basic_settings_operation","basic_settings_input","restore_operation","restore_input","model_settings_operation","model_settings_input","ordinary_export_operation","ordinary_export_input","memory_settings_operation","memory_settings_input","model_credential_operation","model_credential_input","credential_reference_operation","credential_reference_input"])]
+    inspect_conversations: bool,
+    /// Deliberate Linux-only logical deletion of one ordinary historical conversation
+    #[arg(long,value_enum,requires="conversation_input",conflicts_with_all=["inspect_source_cache","source_cache_operation","source_cache_input","simulate","inspect_owned_data","api_key","model","base_url","trigger_corner","log_level","debug_dump","memory_operation","memory_input","sync_mode_operation","sync_mode_input","archive_operation","archive_input","personalization_operation","export_note","configuration_operation","basic_settings_operation","basic_settings_input","restore_operation","restore_input","model_settings_operation","model_settings_input","ordinary_export_operation","ordinary_export_input","memory_settings_operation","memory_settings_input","model_credential_operation","model_credential_input","credential_reference_operation","credential_reference_input"])]
+    conversation_operation: Option<remarkable_reader_buddy::conversation_maintenance::Operation>,
+    /// Exact-dash strict JSON only; no arbitrary input or deletion paths
+    #[arg(long, value_name = "INPUT", requires = "conversation_operation")]
+    conversation_input: Option<std::path::PathBuf>,
+
+    /// Linux-only metadata candidates; no payload reads or cleanup authority
+    #[arg(long, conflicts_with_all=["source_cache_operation","source_cache_input","simulate","inspect_owned_data","api_key","model","base_url","trigger_corner","log_level","debug_dump","memory_operation","memory_input","sync_mode_operation","sync_mode_input","archive_operation","archive_input","personalization_operation","export_note","configuration_operation","basic_settings_operation","basic_settings_input","restore_operation","restore_input","model_settings_operation","model_settings_input","ordinary_export_operation","ordinary_export_input","memory_settings_operation","memory_settings_input","model_credential_operation","model_credential_input","credential_reference_operation","credential_reference_input"])]
+    inspect_source_cache: bool,
+    /// Linux-only prepared deletion of one owned derived source-cache slot
+    #[arg(long, value_enum, requires="source_cache_input", conflicts_with_all=["simulate","inspect_owned_data","api_key","model","base_url","trigger_corner","log_level","debug_dump","memory_operation","memory_input","sync_mode_operation","sync_mode_input","archive_operation","archive_input","personalization_operation","export_note","configuration_operation","basic_settings_operation","basic_settings_input","restore_operation","restore_input","model_settings_operation","model_settings_input","ordinary_export_operation","ordinary_export_input","memory_settings_operation","memory_settings_input","model_credential_operation","model_credential_input","credential_reference_operation","credential_reference_input"])]
+    source_cache_operation: Option<remarkable_reader_buddy::source_cache_maintenance::Operation>,
+    #[arg(long, value_name = "INPUT", requires = "source_cache_operation")]
+    source_cache_input: Option<std::path::PathBuf>,
+    /// Private saved credential reference only; no credential-file or runtime activation
+    #[arg(long,value_enum,conflicts_with_all=["simulate","inspect_owned_data","api_key","model","base_url","trigger_corner","log_level","debug_dump","memory_operation","memory_input","sync_mode_operation","sync_mode_input","archive_operation","archive_input","personalization_operation","export_note","configuration_operation","basic_settings_operation","basic_settings_input","restore_operation","restore_input","model_settings_operation","model_settings_input","ordinary_export_operation","ordinary_export_input","memory_settings_operation","memory_settings_input","model_credential_operation","model_credential_input"])]
+    credential_reference_operation: Option<config::credential_reference::Operation>,
+    #[arg(
+        long,
+        value_name = "INPUT",
+        requires = "credential_reference_operation"
+    )]
+    credential_reference_input: Option<std::path::PathBuf>,
+    /// Protected declared credential only; confidential transport, no provider activation
+    #[arg(long,value_enum,conflicts_with_all=["simulate","inspect_owned_data","api_key","model","base_url","trigger_corner","log_level","debug_dump","memory_operation","memory_input","sync_mode_operation","sync_mode_input","archive_operation","archive_input","personalization_operation","export_note","configuration_operation","basic_settings_operation","basic_settings_input","restore_operation","restore_input","model_settings_operation","model_settings_input","ordinary_export_operation","ordinary_export_input","memory_settings_operation","memory_settings_input"])]
+    model_credential_operation: Option<config::model_credential::Operation>,
+    #[arg(long, value_name = "INPUT", requires = "model_credential_operation")]
+    model_credential_input: Option<std::path::PathBuf>,
+    /// Saved memory declarations only; no profile creation or runtime activation
+    #[arg(long,value_enum,conflicts_with_all=["simulate","inspect_owned_data","api_key","model","base_url","trigger_corner","log_level","debug_dump","memory_operation","memory_input","sync_mode_operation","sync_mode_input","archive_operation","archive_input","personalization_operation","export_note","configuration_operation","basic_settings_operation","basic_settings_input","restore_operation","restore_input","model_settings_operation","model_settings_input","ordinary_export_operation","ordinary_export_input"])]
+    memory_settings_operation: Option<config::memory_settings::Operation>,
+    #[arg(long, value_name = "INPUT", requires = "memory_settings_operation")]
+    memory_settings_input: Option<std::path::PathBuf>,
+    /// Original-bound ordinary format1 export; no runtime or selected activation
+    #[arg(long,value_enum,requires="ordinary_export_input",conflicts_with_all=["simulate","inspect_owned_data","api_key","model","base_url","trigger_corner","log_level","debug_dump","memory_operation","memory_input","sync_mode_operation","sync_mode_input","archive_operation","archive_input","personalization_operation","export_note","configuration_operation","basic_settings_operation","basic_settings_input","restore_operation","restore_input","model_settings_operation","model_settings_input"])]
+    ordinary_export_operation:
+        Option<remarkable_reader_buddy::ordinary_export_maintenance::Operation>,
+    #[arg(long, value_name = "INPUT", requires = "ordinary_export_operation")]
+    ordinary_export_input: Option<std::path::PathBuf>,
+    /// Private saved model/endpoint editing; never provider/runtime activation
+    #[arg(long, value_enum, conflicts_with_all = ["simulate", "inspect_owned_data", "api_key", "model", "base_url", "trigger_corner", "log_level", "debug_dump", "memory_operation", "memory_input", "sync_mode_operation", "sync_mode_input", "archive_operation", "archive_input", "personalization_operation", "export_note", "configuration_operation", "basic_settings_operation", "basic_settings_input", "restore_operation", "restore_input"])]
+    model_settings_operation: Option<config::model_settings::Operation>,
+    #[arg(long, value_name = "INPUT", requires = "model_settings_operation")]
+    model_settings_input: Option<std::path::PathBuf>,
+    /// Conditional ordinary owned restore; never selected/device/runtime activation
+    #[arg(long, value_enum, requires = "restore_input", conflicts_with_all = ["simulate", "inspect_owned_data", "api_key", "model", "base_url", "trigger_corner", "log_level", "debug_dump", "memory_operation", "memory_input", "sync_mode_operation", "sync_mode_input", "archive_operation", "archive_input", "personalization_operation", "export_note", "configuration_operation", "basic_settings_operation", "basic_settings_input"])]
+    restore_operation: Option<remarkable_reader_buddy::restore_maintenance::Operation>,
+    /// Exact-dash bounded JSON stdin; no file fallback
+    #[arg(long, value_name = "INPUT", requires = "restore_operation")]
+    restore_input: Option<std::path::PathBuf>,
+    /// Deliberate three-field saved settings maintenance; never runtime activation
+    #[arg(long, value_enum, conflicts_with_all = ["simulate", "inspect_owned_data", "api_key", "model", "base_url", "trigger_corner", "log_level", "debug_dump", "memory_operation", "memory_input", "sync_mode_operation", "sync_mode_input", "archive_operation", "archive_input", "personalization_operation", "export_note", "configuration_operation"])]
+    basic_settings_operation: Option<config::basic::Operation>,
+    /// Exact-dash bounded JSON stdin for prepare/apply/status; never a file fallback
+    #[arg(long, value_name = "INPUT", requires = "basic_settings_operation")]
+    basic_settings_input: Option<std::path::PathBuf>,
+    /// Inspect saved configuration declarations without runtime or Store startup
+    #[arg(long, value_enum, conflicts_with_all = ["simulate", "inspect_owned_data", "api_key", "model", "base_url", "trigger_corner", "log_level", "debug_dump", "memory_operation", "memory_input", "sync_mode_operation", "sync_mode_input", "archive_operation", "archive_input", "personalization_operation", "export_note"])]
+    configuration_operation: Option<config::inspection::Operation>,
     /// Run a bounded local scenario (offline unless explicitly live)
     #[arg(long, value_name = "SCENARIO", conflicts_with_all = ["api_key", "model", "base_url", "trigger_corner", "debug_dump"])]
     simulate: Option<std::path::PathBuf>,
@@ -43,12 +118,32 @@ pub struct Args {
     /// Bounded JSON input for an explicit memory operation
     #[arg(long, value_name = "FILE", requires = "memory_operation")]
     memory_input: Option<std::path::PathBuf>,
+    /// Explicit local storage-mode maintenance; no sync or runtime activation
+    #[arg(long, value_enum, conflicts_with_all = ["simulate", "api_key", "model", "base_url", "trigger_corner", "debug_dump", "log_level", "inspect_owned_data", "export_note", "personalization_operation", "memory_operation", "memory_input"])]
+    sync_mode_operation: Option<remarkable_reader_buddy::mode_maintenance::Operation>,
+    /// Bounded choice JSON from an absolute file or exact-dash stdin
+    #[arg(
+        long,
+        value_name = "FILE",
+        requires = "sync_mode_operation",
+        required_if_eq("sync_mode_operation", "choose")
+    )]
+    sync_mode_input: Option<std::path::PathBuf>,
+    /// Explicit offline archive inspection or selected-history export
+    #[arg(long, value_enum, requires = "archive_input", conflicts_with_all = ["simulate", "api_key", "model", "base_url", "trigger_corner", "debug_dump", "log_level", "inspect_owned_data", "export_note", "personalization_operation", "memory_operation", "memory_input", "sync_mode_operation", "sync_mode_input"])]
+    archive_operation: Option<remarkable_reader_buddy::archive_maintenance::Operation>,
+    /// Strict bounded path JSON from an absolute file or exact-dash stdin
+    #[arg(long, value_name = "FILE", requires = "archive_operation")]
+    archive_input: Option<std::path::PathBuf>,
     /// Fixed local personalization maintenance; mutation JSON comes from bounded stdin
     #[arg(long, value_enum, conflicts_with_all=["simulate","api_key","model","base_url","trigger_corner","debug_dump","log_level","export_note"])]
     personalization_operation: Option<config::personalization::Operation>,
     /// Export prepared Markdown or reconcile a prior export; bounded JSON stdin
     #[arg(long, conflicts_with_all=["simulate","api_key","model","base_url","trigger_corner","debug_dump","log_level","personalization_operation"])]
     export_note: bool,
+    /// Generate/refine an unrendered Writer draft or prepare export; bounded JSON stdin
+    #[arg(long, conflicts_with_all=["research_settings_operation","research_settings_input","inspect_conversations","conversation_operation","conversation_input","inspect_source_cache","source_cache_operation","source_cache_input","credential_reference_operation","credential_reference_input","model_credential_operation","model_credential_input","memory_settings_operation","memory_settings_input","ordinary_export_operation","ordinary_export_input","model_settings_operation","model_settings_input","restore_operation","restore_input","basic_settings_operation","basic_settings_input","configuration_operation","simulate","inspect_owned_data","api_key","model","base_url","trigger_corner","log_level","debug_dump","memory_operation","memory_input","sync_mode_operation","sync_mode_input","archive_operation","archive_input","personalization_operation","export_note"])]
+    writer_note: bool,
 }
 
 fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_logger::Builder {
@@ -69,16 +164,274 @@ fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_lo
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    if args.resident_stock_recovery {
+        return stock_recovery();
+    }
+    if args.handwriting {
+        let report = remarkable_reader_buddy::handwriting::command::run(
+            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+            &mut std::io::stdin().lock(),
+        );
+        report
+            .write_to(&mut std::io::stdout().lock())
+            .map_err(|_| anyhow::anyhow!("output-failure"))?;
+        return Ok(());
+    }
+    if args.writer_note {
+        let report = remarkable_reader_buddy::writer::command::dispatch(
+            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+            &mut std::io::stdin().lock(),
+        );
+        serde_json::to_writer(std::io::stdout().lock(), &report)?;
+        println!();
+        return Ok(());
+    }
+    if let Some(operation) = args.research_settings_operation {
+        let report = if operation == config::research_settings::Operation::Inspect {
+            if args.research_settings_input.is_some() {
+                config::research_settings::invalid_input(operation)
+            } else {
+                config::research_settings::inspect(
+                    std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+                )
+            }
+        } else if args
+            .research_settings_input
+            .as_ref()
+            .is_some_and(|input| input.as_os_str() == std::ffi::OsStr::new("-"))
+        {
+            config::research_settings::run_stdin(
+                operation,
+                std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+                &mut std::io::stdin().lock(),
+            )
+        } else {
+            config::research_settings::unsupported_input(operation)
+        };
+        report.write_to(&mut std::io::stdout().lock())?;
+        return Ok(());
+    }
+
+    if args.inspect_conversations {
+        return remarkable_reader_buddy::conversation_maintenance::inspect_inventory(
+            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+        )
+        .write_to(&mut std::io::stdout().lock());
+    }
+    if let Some(operation) = args.conversation_operation {
+        return remarkable_reader_buddy::conversation_maintenance::run(
+            operation,
+            args.conversation_input.as_deref().expect("required input"),
+            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+            &mut std::io::stdin().lock(),
+        )
+        .write_to(&mut std::io::stdout().lock());
+    }
+    if args.inspect_source_cache {
+        return remarkable_reader_buddy::source_cache_inventory::run(
+            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+        )
+        .write_to(&mut std::io::stdout().lock());
+    }
+    if let Some(operation) = args.source_cache_operation {
+        return remarkable_reader_buddy::source_cache_maintenance::run(
+            operation,
+            args.source_cache_input.as_deref().expect("required input"),
+            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+            &mut std::io::stdin().lock(),
+        )
+        .write_to(&mut std::io::stdout().lock());
+    }
+    if let Some(operation) = args.credential_reference_operation {
+        let report = if operation == config::credential_reference::Operation::Inspect {
+            if args.credential_reference_input.is_some() {
+                config::credential_reference::invalid_input(operation)
+            } else {
+                config::credential_reference::inspect(
+                    std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+                )
+            }
+        } else if args
+            .credential_reference_input
+            .as_ref()
+            .is_some_and(|input| input.as_os_str() == std::ffi::OsStr::new("-"))
+        {
+            config::credential_reference::run_stdin(
+                operation,
+                std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+                &mut std::io::stdin().lock(),
+            )
+        } else {
+            config::credential_reference::unsupported_input(operation)
+        };
+        report.write_to(&mut std::io::stdout().lock())?;
+        return Ok(());
+    }
+    if let Some(operation) = args.model_credential_operation {
+        let report = if operation == config::model_credential::Operation::Inspect {
+            if args.model_credential_input.is_some() {
+                config::model_credential::invalid_input(operation)
+            } else {
+                config::model_credential::inspect(
+                    std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+                )
+            }
+        } else if args.model_credential_input.as_deref() == Some(std::path::Path::new("-")) {
+            config::model_credential::run_stdin(
+                operation,
+                std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+                &mut std::io::stdin().lock(),
+            )
+        } else {
+            config::model_credential::unsupported_input(operation)
+        };
+        report.write_to(&mut std::io::stdout().lock())?;
+        return Ok(());
+    }
+    if let Some(operation) = args.memory_settings_operation {
+        let report = if operation == config::memory_settings::Operation::Inspect {
+            if args.memory_settings_input.is_some() {
+                config::memory_settings::invalid_input(operation)
+            } else {
+                config::memory_settings::inspect(
+                    std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+                )
+            }
+        } else if args
+            .memory_settings_input
+            .as_ref()
+            .is_some_and(|input| input.as_os_str() == std::ffi::OsStr::new("-"))
+        {
+            config::memory_settings::run_stdin(
+                operation,
+                std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+                &mut std::io::stdin().lock(),
+            )
+        } else {
+            config::memory_settings::unsupported_input(operation)
+        };
+        report.write_to(&mut std::io::stdout().lock())?;
+        return Ok(());
+    }
+    if let Some(operation) = args.ordinary_export_operation {
+        let report = remarkable_reader_buddy::ordinary_export_maintenance::run(
+            operation,
+            args.ordinary_export_input
+                .as_deref()
+                .expect("required export input"),
+            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+            &mut std::io::stdin().lock(),
+        );
+        report.write_to(&mut std::io::stdout().lock())?;
+        return Ok(());
+    }
+    if let Some(operation) = args.model_settings_operation {
+        let report = if operation == config::model_settings::Operation::Inspect {
+            if args.model_settings_input.is_some() {
+                config::model_settings::invalid_input(operation)
+            } else {
+                config::model_settings::inspect(
+                    std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+                )
+            }
+        } else if args
+            .model_settings_input
+            .as_ref()
+            .is_some_and(|input| input.as_os_str() == std::ffi::OsStr::new("-"))
+        {
+            config::model_settings::run_stdin(
+                operation,
+                std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+                &mut std::io::stdin().lock(),
+            )
+        } else {
+            config::model_settings::unsupported_input(operation)
+        };
+        report.write_to(&mut std::io::stdout().lock())?;
+        return Ok(());
+    }
+    if let Some(operation) = args.restore_operation {
+        let report = remarkable_reader_buddy::restore_maintenance::run(
+            operation,
+            args.restore_input
+                .as_deref()
+                .expect("required restore input"),
+            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+            &mut std::io::stdin().lock(),
+        );
+        report.write_to(&mut std::io::stdout().lock())?;
+        return Ok(());
+    }
+    if let Some(operation) = args.basic_settings_operation {
+        let report = if operation == config::basic::Operation::Inspect {
+            if args.basic_settings_input.is_some() {
+                config::basic::invalid_input(operation)
+            } else {
+                config::basic::inspect(
+                    std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+                )
+            }
+        } else if args
+            .basic_settings_input
+            .as_ref()
+            .is_some_and(|input| input.as_os_str() == std::ffi::OsStr::new("-"))
+        {
+            config::basic::run_stdin(
+                operation,
+                std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+                &mut std::io::stdin().lock(),
+            )
+        } else {
+            config::basic::unsupported_input(operation)
+        };
+        report.write_to(&mut std::io::stdout().lock())?;
+        return Ok(());
+    }
+    if let Some(operation) = args.configuration_operation {
+        let report = config::inspection::run(
+            operation,
+            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+        );
+        report.write_to(&mut std::io::stdout().lock())?;
+        return Ok(());
+    }
+    if let Some(operation) = args.archive_operation {
+        let report = remarkable_reader_buddy::archive_maintenance::run(
+            operation,
+            args.archive_input
+                .as_deref()
+                .expect("required archive input"),
+            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+            &mut std::io::stdin().lock(),
+        );
+        report.write_to(&mut std::io::stdout().lock())?;
+        return Ok(());
+    }
+    if let Some(operation) = args.sync_mode_operation {
+        let report = remarkable_reader_buddy::mode_maintenance::run(
+            operation,
+            args.sync_mode_input.as_deref(),
+            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+            &mut std::io::stdin().lock(),
+        );
+        report.write_to(&mut std::io::stdout().lock())?;
+        return Ok(());
+    }
     if let Some(operation) = args.memory_operation {
         let input = args
             .memory_input
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("memory input absent"))?;
-        let report = remarkable_reader_buddy::memory::maintenance::run(
-            operation,
-            input,
-            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
-        );
+        let config_path = std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into);
+        let report = if input.as_os_str() == std::ffi::OsStr::new("-") {
+            remarkable_reader_buddy::memory::maintenance::run_stdin(
+                operation,
+                &mut std::io::stdin().lock(),
+                config_path,
+            )
+        } else {
+            remarkable_reader_buddy::memory::maintenance::run(operation, input, config_path)
+        };
         report.write_to(&mut std::io::stdout().lock())?;
         return Ok(());
     }
@@ -108,13 +461,22 @@ fn main() -> Result<()> {
         report.write_to(&mut std::io::stdout().lock())?;
         return Ok(());
     }
+    #[cfg(target_os = "linux")]
+    remarkable_reader_buddy::workflow::resident_supervisor::recovery::refuse_occupied_activation()?;
+    #[cfg(target_os = "linux")]
+    let service_health = if args.simulate.is_none() {
+        remarkable_reader_buddy::workflow::resident_supervisor::health::ServiceHealth::from_environment()?
+    } else {
+        None
+    };
     dotenv().ok();
     if let Some(path) = args.simulate {
         logging(args.log_level, std::env::var("RUST_LOG").ok().as_deref()).init();
-        remarkable_reader_buddy::simulator::run_file(&path)?;
+        remarkable_reader_buddy::simulator::run_any_file(&path)?;
         return Ok(());
     }
     let config = Config::load(std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into))?;
+    remarkable_reader_buddy::memory::context::admit_ordinary(&config.memory)?;
     let effective = config::resolve(
         &config,
         Overrides {
@@ -136,6 +498,8 @@ fn main() -> Result<()> {
         .init();
     info!("=== ReMarkable Reader Buddy Starting ===");
     let store = Arc::new(Store::open(config.paths.clone())?);
+    let _ordinary_runtime_lifetime =
+        remarkable_reader_buddy::mode_maintenance::admit_ordinary(&store, config.sync.enabled)?;
     store.snapshot_config(&config)?;
     files::atomic_json(
         &store.paths.data.join("effective-config.json"),
@@ -148,22 +512,65 @@ fn main() -> Result<()> {
         effective.key.into_string(),
         effective.base_url,
     );
+    let reader_memory = if config.memory.enabled {
+        Some(Arc::new(
+            remarkable_reader_buddy::memory::LocalMemory::new_local(
+                store.clone(),
+                config
+                    .memory
+                    .profile
+                    .ok_or_else(|| anyhow::anyhow!("memory profile absent"))?,
+            )?,
+        ))
+    } else {
+        None
+    };
+    let personalization = config.personalization_snapshot()?;
     let workflow = Workflow::new(false, effective.trigger_corner, effective.debug_dump)?;
     sleep(Duration::from_millis(1000));
+    let _sync_worker = Worker::google(store.clone(), config.sync)?;
+    #[cfg(target_os = "linux")]
+    let workflow = {
+        let mut workflow = workflow;
+        if let Some(health) = service_health {
+            workflow.enable_service_health(health)?;
+        }
+        workflow
+    };
     let mut orchestrator = Orchestrator::new(
         workflow,
         llm,
         remarkable_reader_buddy::conversation::Ledger::new(store.clone()),
     );
-    if config.memory.enabled {
-        orchestrator.set_subject_memory(Some(remarkable_reader_buddy::memory::configured(
-            store.clone(),
-            &config.memory,
-        )?));
-    }
-    let _sync_worker = Worker::google(store.clone(), config.sync)?;
+    orchestrator.set_personalization(personalization);
+    orchestrator.set_subject_memory(
+        reader_memory.map(|memory| memory as Arc<dyn remarkable_reader_buddy::memory::Provider>),
+    );
     info!("Initialization complete; starting main loop");
     orchestrator.run_loop()
+}
+
+fn stock_recovery() -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        use remarkable_reader_buddy::workflow::resident_supervisor::recovery::{
+            self, RecoveryOutcome,
+        };
+        match recovery::run_installed()? {
+            RecoveryOutcome::NoRecordedActivation => {
+                println!("no-recorded-activation; stock was not inspected or changed");
+            }
+            RecoveryOutcome::Restored(stock) => {
+                println!(
+                    "stock-restored pid={} invocation={} start_requested={}",
+                    stock.process.pid, stock.invocation, stock.start_requested
+                );
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    anyhow::bail!("installed stock recovery is supported only on Linux")
 }
 
 #[cfg(test)]
@@ -171,7 +578,200 @@ mod tests {
     use super::*;
     use clap::CommandFactory;
     use log::{Level, LevelFilter, Log, Metadata};
+    #[test]
+    fn handwriting_is_exclusive_before_any_runtime() {
+        assert!(Args::try_parse_from(["reader-buddy", "--handwriting"]).is_ok());
+        for extra in [
+            vec!["--resident-stock-recovery"],
+            vec!["--writer-note"],
+            vec!["--model", "unused"],
+            vec!["--inspect-owned-data"],
+            vec!["--research-settings-operation", "inspect"],
+        ] {
+            let mut argv = vec!["reader-buddy", "--handwriting"];
+            argv.extend(extra);
+            assert!(Args::try_parse_from(argv).is_err());
+        }
+    }
 
+    #[test]
+    fn stock_recovery_is_exclusive_before_all_other_dispatch() {
+        assert!(
+            Args::try_parse_from(["reader-buddy", "--resident-stock-recovery"])
+                .unwrap()
+                .resident_stock_recovery
+        );
+        for extra in [
+            vec!["--handwriting"],
+            vec!["--writer-note"],
+            vec!["--simulate", "scenario.json"],
+            vec!["--inspect-owned-data"],
+            vec!["--configuration-operation", "inspect"],
+            vec!["--model-credential-operation", "inspect"],
+            vec!["--api-key", "fixture-key"],
+            vec!["--model", "fixture-model"],
+            vec!["--base-url", "http://127.0.0.1:1"],
+            vec!["--trigger-corner", "UR"],
+            vec!["--debug-dump"],
+            vec!["--log-level", "trace"],
+            vec!["--export-note"],
+        ] {
+            assert!(Args::try_parse_from(
+                ["reader-buddy"].into_iter().chain(extra.iter().copied())
+            )
+            .is_ok());
+            let error = Args::try_parse_from(
+                ["reader-buddy", "--resident-stock-recovery"]
+                    .into_iter()
+                    .chain(extra.iter().copied()),
+            )
+            .err()
+            .expect("exclusive recovery");
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+        }
+        assert!(Args::try_parse_from([
+            "reader-buddy",
+            "--resident-stock-recovery",
+            "--unit",
+            "other.service"
+        ])
+        .is_err());
+        assert!(Args::try_parse_from([
+            "reader-buddy",
+            "--resident-stock-recovery",
+            "--lease-directory",
+            "/tmp/other"
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn writer_rejects_valid_current_modes_before_any_runtime() {
+        for extra in [
+            vec!["--model-credential-operation", "inspect"],
+            vec!["--credential-reference-operation", "inspect"],
+            vec!["--model-settings-operation", "inspect"],
+            vec!["--memory-settings-operation", "inspect"],
+            vec!["--research-settings-operation", "inspect"],
+            vec!["--basic-settings-operation", "inspect"],
+            vec!["--configuration-operation", "inspect"],
+            vec![
+                "--conversation-operation",
+                "prepare",
+                "--conversation-input",
+                "PRIVATE_INPUT_SENTINEL",
+            ],
+            vec![
+                "--source-cache-operation",
+                "prepare",
+                "--source-cache-input",
+                "PRIVATE_INPUT_SENTINEL",
+            ],
+            vec![
+                "--memory-operation",
+                "query",
+                "--memory-input",
+                "PRIVATE_INPUT_SENTINEL",
+            ],
+            vec![
+                "--archive-operation",
+                "inspect",
+                "--archive-input",
+                "PRIVATE_INPUT_SENTINEL",
+            ],
+            vec!["--sync-mode-operation", "inspect"],
+            vec!["--inspect-source-cache"],
+            vec!["--inspect-conversations"],
+            vec!["--inspect-owned-data"],
+        ] {
+            assert!(
+                Args::try_parse_from(["reader-buddy"].into_iter().chain(extra.iter().copied()))
+                    .is_ok(),
+                "fixture must be a valid other mode"
+            );
+            let error = Args::try_parse_from(
+                ["reader-buddy", "--writer-note"]
+                    .into_iter()
+                    .chain(extra.iter().copied()),
+            )
+            .err()
+            .expect("execution modes conflict");
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+            assert!(!error.to_string().contains("PRIVATE_INPUT_SENTINEL"));
+        }
+    }
+
+    #[test]
+    fn source_cache_requires_input_and_rejects_other_execution_modes() {
+        for args in [
+            vec!["reader-buddy", "--source-cache-operation", "inspect"],
+            vec!["reader-buddy", "--source-cache-input", "-"],
+        ] {
+            assert!(Args::try_parse_from(args).is_err());
+        }
+        for extra in [
+            vec!["--api-key", "private-fixture-sentinel"],
+            vec!["--model", "private-fixture-sentinel"],
+            vec!["--simulate", "private-fixture-sentinel"],
+            vec!["--inspect-owned-data"],
+            vec!["--export-note"],
+            vec!["--writer-note"],
+            vec!["--credential-reference-operation", "inspect"],
+            vec!["--memory-settings-operation", "inspect"],
+        ] {
+            let mut args = vec![
+                "reader-buddy",
+                "--source-cache-operation",
+                "inspect",
+                "--source-cache-input",
+                "-",
+            ];
+            args.extend(extra);
+            let error = Args::try_parse_from(args)
+                .err()
+                .expect("execution modes conflict");
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+            assert!(!error.to_string().contains("private-fixture-sentinel"));
+        }
+        assert!(Args::try_parse_from([
+            "reader-buddy",
+            "--source-cache-operation",
+            "inspect",
+            "--source-cache-input",
+            "-"
+        ])
+        .is_ok());
+    }
+    #[test]
+    fn conversation_is_explicit_and_conflicts_before_startup() {
+        assert!(
+            Args::try_parse_from(["reader-buddy", "--conversation-operation", "prepare"]).is_err()
+        );
+        for extra in [
+            vec!["--api-key", "synthetic-key"],
+            vec!["--model", "synthetic-model"],
+            vec!["--simulate", "synthetic-path"],
+            vec!["--inspect-source-cache"],
+        ] {
+            let mut argv = vec![
+                "reader-buddy",
+                "--conversation-operation",
+                "prepare",
+                "--conversation-input",
+                "-",
+            ];
+            argv.extend(extra);
+            assert!(Args::try_parse_from(argv).is_err());
+        }
+        assert!(Args::try_parse_from([
+            "reader-buddy",
+            "--conversation-operation",
+            "prepare",
+            "--conversation-input",
+            "-"
+        ])
+        .is_ok());
+    }
     #[test]
     fn exact_requested_interface_and_defaults() {
         let mut names: Vec<_> = Args::command()
@@ -183,26 +783,76 @@ mod tests {
             names,
             [
                 "api-key",
+                "archive-input",
+                "archive-operation",
                 "base-url",
+                "basic-settings-input",
+                "basic-settings-operation",
+                "configuration-operation",
+                "conversation-input",
+                "conversation-operation",
+                "credential-reference-input",
+                "credential-reference-operation",
                 "debug-dump",
                 "export-note",
+                "handwriting",
+                "inspect-conversations",
                 "inspect-owned-data",
+                "inspect-source-cache",
                 "log-level",
                 "memory-input",
                 "memory-operation",
+                "memory-settings-input",
+                "memory-settings-operation",
                 "model",
+                "model-credential-input",
+                "model-credential-operation",
+                "model-settings-input",
+                "model-settings-operation",
+                "ordinary-export-input",
+                "ordinary-export-operation",
                 "personalization-operation",
+                "research-settings-input",
+                "research-settings-operation",
+                "resident-stock-recovery",
+                "restore-input",
+                "restore-operation",
                 "simulate",
-                "trigger-corner"
+                "source-cache-input",
+                "source-cache-operation",
+                "sync-mode-input",
+                "sync-mode-operation",
+                "trigger-corner",
+                "writer-note"
             ]
         );
         let args = Args::try_parse_from(["reader-buddy"]).unwrap();
+        assert!(!args.resident_stock_recovery);
+        assert!(!args.handwriting);
+        assert!(!args.inspect_conversations);
+        assert!(args.conversation_operation.is_none());
+        assert!(args.conversation_input.is_none());
+        assert!(!args.inspect_source_cache);
+        assert!(args.source_cache_operation.is_none());
+        assert!(args.source_cache_input.is_none());
+        assert!(args.restore_operation.is_none());
+        assert!(args.restore_input.is_none());
+        assert!(args.basic_settings_operation.is_none());
+        assert!(args.basic_settings_input.is_none());
+        assert!(args.configuration_operation.is_none());
+        assert!(args.research_settings_operation.is_none());
+        assert!(args.research_settings_input.is_none());
         assert!(args.model.is_none());
         assert!(args.trigger_corner.is_none());
         assert!(!args.debug_dump);
-        assert!(args.memory_operation.is_none() && args.memory_input.is_none());
         assert!(!args.inspect_owned_data);
         assert!(!args.export_note);
+        assert!(!args.writer_note);
+        assert!(
+            Args::try_parse_from(["reader-buddy", "--writer-note"])
+                .unwrap()
+                .writer_note
+        );
         assert!(
             Args::try_parse_from(["reader-buddy", "--export-note"])
                 .unwrap()
@@ -220,6 +870,88 @@ mod tests {
             assert!(
                 Args::try_parse_from(["reader-buddy", flag]).is_err(),
                 "{flag}"
+            );
+        }
+    }
+
+    #[test]
+    fn conversation_inventory_conflicts_with_every_existing_argument() {
+        let command = Args::command();
+        for argument in command.get_arguments() {
+            let Some(long) = argument.get_long() else {
+                continue;
+            };
+            if long == "inspect-conversations" {
+                continue;
+            }
+            let mut argv = vec![
+                "reader-buddy".to_owned(),
+                "--inspect-conversations".into(),
+                format!("--{long}"),
+            ];
+            if argument.get_action().takes_values() {
+                let value = argument
+                    .get_value_parser()
+                    .possible_values()
+                    .and_then(|mut values| values.next())
+                    .map(|v| v.get_name().to_owned())
+                    .unwrap_or_else(|| {
+                        if long == "log-level" {
+                            "info".into()
+                        } else {
+                            "synthetic-inventory-conflict".into()
+                        }
+                    });
+                argv.push(value);
+            }
+            let error = Args::try_parse_from(argv)
+                .err()
+                .expect("inventory must reject ignored arguments");
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::ArgumentConflict,
+                "{long}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn research_input_rejects_every_unrelated_argument_before_startup() {
+        for argument in Args::command().get_arguments() {
+            let Some(long) = argument.get_long() else {
+                continue;
+            };
+            if long.starts_with("research-settings-") {
+                continue;
+            }
+            let mut argv = vec![
+                "reader-buddy".to_owned(),
+                "--research-settings-input".into(),
+                "-".into(),
+                format!("--{long}"),
+            ];
+            if argument.get_action().takes_values() {
+                let value = argument
+                    .get_value_parser()
+                    .possible_values()
+                    .and_then(|mut values| values.next())
+                    .map(|v| v.get_name().to_owned())
+                    .unwrap_or_else(|| {
+                        if long == "log-level" {
+                            "info".into()
+                        } else {
+                            "synthetic-conflict".into()
+                        }
+                    });
+                argv.push(value);
+            }
+            let error = Args::try_parse_from(argv)
+                .err()
+                .expect("research input must reject unrelated arguments");
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::ArgumentConflict,
+                "{long}: {error}"
             );
         }
     }
@@ -271,6 +1003,7 @@ mod tests {
                 vec!["--log-level", "trace"],
                 vec!["--simulate", "scenario.json"],
                 vec!["--export-note"],
+                vec!["--writer-note"],
             ] {
                 assert!(Args::try_parse_from(
                     ["reader-buddy", "--personalization-operation", operation]

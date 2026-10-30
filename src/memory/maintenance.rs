@@ -1,4 +1,5 @@
 //! One-shot, bounded local maintenance. No provider, sync worker or device initialization.
+mod prepared;
 use super::{Forget, Key, Mutation, Query, Status};
 use crate::{
     config::Config,
@@ -7,6 +8,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File},
+    io::Read,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -18,6 +20,8 @@ pub const MAX_RESPONSE: usize = MAX_METADATA + 64 * 1024;
 pub enum Operation {
     Inspect,
     Query,
+    PrepareForget,
+    ForgetReceipt,
     Put,
     Forget,
     InitializeAggregate,
@@ -45,6 +49,43 @@ pub struct Report {
     pub data: Option<serde_json::Value>,
     #[serde(skip)]
     pending: Option<Pending>,
+    #[serde(skip)]
+    mode_guard: Option<ModeGuard>,
+    #[serde(skip)]
+    provider_guard: Option<Arc<dyn super::Provider>>,
+    #[serde(skip)]
+    prepared: Option<prepared::Pending>,
+}
+struct ModeGuard {
+    _ordinary: Option<storage::sync::mode::OrdinaryModeLease>,
+    _shared: Option<storage::sync::mode::SyncModeLease>,
+}
+impl ModeGuard {
+    fn acquire(store: &Arc<Store>, config: &Config) -> anyhow::Result<Self> {
+        anyhow::ensure!(!config.sync.enabled, "stop legacy sync before host memory");
+        let current = store.sync_mode_snapshot()?;
+        Self::acquire_token(store, config, &current.token)
+    }
+    fn acquire_token(
+        store: &Arc<Store>,
+        config: &Config,
+        token: &storage::sync::mode::SyncModeToken,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(!config.sync.enabled, "stop legacy sync before host memory");
+        if let Some(identity) = &config.memory.selection {
+            let lease = store.sync_mode_lease(token)?;
+            lease.require_shared_scope(&identity.scope()?)?;
+            Ok(Self {
+                _ordinary: None,
+                _shared: Some(lease),
+            })
+        } else {
+            Ok(Self {
+                _ordinary: Some(store.ordinary_mode_lease(token)?),
+                _shared: None,
+            })
+        }
+    }
 }
 struct Pending {
     provider: Arc<dyn super::Provider>,
@@ -64,6 +105,9 @@ impl Report {
             incomplete: false,
             data: None,
             pending: None,
+            mode_guard: None,
+            provider_guard: None,
+            prepared: None,
         }
     }
     /// Formatting only; selected current handoff requires `write_to`.
@@ -81,6 +125,9 @@ impl Report {
         Ok(bytes)
     }
     pub fn write_to(&self, writer: &mut impl std::io::Write) -> anyhow::Result<()> {
+        if let Some(prepared) = &self.prepared {
+            return prepared.write(self, writer);
+        }
         let encoded = self.encoded()?;
         let Some(pending) = &self.pending else {
             return Ok(writer.write_all(&encoded)?);
@@ -121,6 +168,33 @@ enum Input {
     InitializeSelection(super::selected::InitializeSelection),
     RegisterSelection(super::selected::RegisterSelection),
 }
+
+// New stdin wire only. Preserve the existing file Key decoder's compatibility.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InspectKeyWire {
+    profile: Uuid,
+    scope: InspectScopeWire,
+    fact: Uuid,
+}
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+enum InspectScopeWire {
+    Global {},
+    Document { document: Uuid },
+}
+impl From<InspectKeyWire> for Key {
+    fn from(wire: InspectKeyWire) -> Self {
+        Self {
+            profile: wire.profile,
+            scope: match wire.scope {
+                InspectScopeWire::Global {} => super::Scope::Global,
+                InspectScopeWire::Document { document } => super::Scope::Document { document },
+            },
+            fact: wire.fact,
+        }
+    }
+}
 impl Input {
     fn read(
         operation: Operation,
@@ -129,6 +203,9 @@ impl Input {
         selection: Option<&super::catalog::Identity>,
     ) -> anyhow::Result<Self> {
         let input = match operation {
+            Operation::PrepareForget | Operation::ForgetReceipt => {
+                anyhow::bail!("prepared operation requires stdin")
+            }
             Operation::Inspect => Self::Inspect(files::json(path, MAX_RECORD as u64)?),
             Operation::Query => Self::Query(files::json(path, MAX_RECORD as u64)?),
             Operation::Put => Self::Put(files::json(path, MAX_RECORD as u64)?),
@@ -143,7 +220,37 @@ impl Input {
                 Self::RegisterSelection(files::json(path, MAX_RECORD as u64)?)
             }
         };
-        match &input {
+        input.validated(profile, selection)
+    }
+    fn read_stdin(
+        operation: Operation,
+        input: &mut impl Read,
+        profile: Uuid,
+        selection: Option<&super::catalog::Identity>,
+    ) -> anyhow::Result<Self> {
+        let mut bytes = Vec::new();
+        input
+            .take((MAX_RECORD + 1) as u64)
+            .read_to_end(&mut bytes)?;
+        anyhow::ensure!(
+            bytes.len() <= MAX_RECORD,
+            "memory query input exceeds bound"
+        );
+        let input = match operation {
+            Operation::Query => Self::Query(serde_json::from_slice(&bytes)?),
+            Operation::Inspect => {
+                Self::Inspect(serde_json::from_slice::<InspectKeyWire>(&bytes)?.into())
+            }
+            _ => anyhow::bail!("unsupported memory stdin operation"),
+        };
+        input.validated(profile, selection)
+    }
+    fn validated(
+        self,
+        profile: Uuid,
+        selection: Option<&super::catalog::Identity>,
+    ) -> anyhow::Result<Self> {
+        match &self {
             Self::Inspect(key) => {
                 key.validate()?;
                 anyhow::ensure!(key.profile == profile, "foreign profile");
@@ -173,7 +280,7 @@ impl Input {
                 selection.ok_or_else(|| anyhow::anyhow!("selected configuration absent"))?,
             )?,
         }
-        Ok(input)
+        Ok(self)
     }
 }
 fn valid_operation(
@@ -273,6 +380,42 @@ fn preflight(config: &Config, allow_initialization: bool) -> Result<(), ReportSt
 }
 
 pub fn run(operation: Operation, input_path: &Path, config_path: Option<PathBuf>) -> Report {
+    if matches!(
+        operation,
+        Operation::PrepareForget | Operation::ForgetReceipt
+    ) {
+        return Report::new(operation, ReportStatus::Unsupported);
+    }
+    run_with_input(operation, config_path, |profile, selection| {
+        Input::read(operation, input_path, profile, selection)
+    })
+}
+
+/// Bounded stdin transport. The caller supplies EOF and owns its I/O deadline.
+pub fn run_stdin(
+    operation: Operation,
+    input: &mut impl Read,
+    config_path: Option<PathBuf>,
+) -> Report {
+    if matches!(
+        operation,
+        Operation::PrepareForget | Operation::Forget | Operation::ForgetReceipt
+    ) {
+        return prepared::run(operation, input, config_path);
+    }
+    if !matches!(operation, Operation::Query | Operation::Inspect) {
+        return Report::new(operation, ReportStatus::Unsupported);
+    }
+    run_with_input(operation, config_path, |profile, selection| {
+        Input::read_stdin(operation, input, profile, selection)
+    })
+}
+
+fn run_with_input(
+    operation: Operation,
+    config_path: Option<PathBuf>,
+    read_input: impl FnOnce(Uuid, Option<&super::catalog::Identity>) -> anyhow::Result<Input>,
+) -> Report {
     let Some(config_path) = config_path else {
         return Report::new(operation, ReportStatus::Unavailable);
     };
@@ -283,6 +426,9 @@ pub fn run(operation: Operation, input_path: &Path, config_path: Option<PathBuf>
     let Some(profile) = config.memory.profile else {
         return Report::new(operation, ReportStatus::Unavailable);
     };
+    if config.sync.enabled {
+        return Report::new(operation, ReportStatus::Unsupported);
+    }
     let setup = matches!(
         operation,
         Operation::InitializeAggregate
@@ -292,12 +438,7 @@ pub fn run(operation: Operation, input_path: &Path, config_path: Option<PathBuf>
     if setup && config.memory.selection.is_none() {
         return Report::new(operation, ReportStatus::Unsupported);
     }
-    let input = match Input::read(
-        operation,
-        input_path,
-        profile,
-        config.memory.selection.as_ref(),
-    ) {
+    let input = match read_input(profile, config.memory.selection.as_ref()) {
         Ok(input) => input,
         Err(_) => return Report::new(operation, ReportStatus::InvalidInput),
     };
@@ -317,6 +458,12 @@ pub fn run(operation: Operation, input_path: &Path, config_path: Option<PathBuf>
 }
 
 fn execute(operation: Operation, input: Input, config: &Config, store: Arc<Store>) -> Report {
+    // Mode authority precedes all domain constructors and operations. The report
+    // owns this lifetime through the actual consuming writer, including errors.
+    let mode_guard = match ModeGuard::acquire(&store, config) {
+        Ok(guard) => guard,
+        Err(_) => return Report::new(operation, ReportStatus::Unsupported),
+    };
     let selected = config
         .memory
         .selection
@@ -332,6 +479,8 @@ fn execute(operation: Operation, input: Input, config: &Config, store: Arc<Store
         Err(_) => return Report::new(operation, ReportStatus::Unsupported),
     };
     let mut report = Report::new(operation, ReportStatus::Ok);
+    report.mode_guard = Some(mode_guard);
+    report.provider_guard = Some(memory.clone());
     let mut pending_view = None;
     let result = match input {
         Input::Inspect(key) => memory.inspect_for_handoff(&key).and_then(|view| {
@@ -407,6 +556,268 @@ fn store_open_status(error: &anyhow::Error) -> ReportStatus {
 mod tests {
     use super::*;
     #[test]
+    fn inspect_stdin_is_strict_at_both_levels_then_reuses_key_validation() {
+        let profile = Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap();
+        let fact = Uuid::parse_str("22222222-2222-4222-8222-222222222222").unwrap();
+        let global = serde_json::json!({"profile":profile,"scope":{"kind":"global"},"fact":fact});
+        let read =
+            |bytes: &[u8]| Input::read_stdin(Operation::Inspect, &mut &bytes[..], profile, None);
+        let Input::Inspect(key) = read(&serde_json::to_vec(&global).unwrap()).unwrap() else {
+            panic!("wrong inspection input")
+        };
+        assert_eq!(
+            key.record_id().unwrap().to_string(),
+            "aa0b8ad5-2bb5-5515-84d6-668fb768d199"
+        );
+        let mut document = global.clone();
+        document["scope"] = serde_json::json!({"kind":"document","document":Uuid::new_v4()});
+        assert!(read(&serde_json::to_vec(&document).unwrap()).is_ok());
+        for value in [
+            serde_json::json!({"profile":profile,"scope":{"kind":"global","unknown":1},"fact":fact}),
+            serde_json::json!({"profile":profile,"scope":{"kind":"document","document":Uuid::new_v4(),"unknown":1},"fact":fact}),
+            serde_json::json!({"profile":profile,"scope":{"kind":"document","document":Uuid::nil()},"fact":fact}),
+            serde_json::json!({"profile":profile,"scope":{"kind":"unknown"},"fact":fact}),
+            serde_json::json!({"profile":Uuid::new_v4(),"scope":{"kind":"global"},"fact":fact}),
+            serde_json::json!({"profile":Uuid::nil(),"scope":{"kind":"global"},"fact":fact}),
+            serde_json::json!({"profile":profile,"scope":{"kind":"global"},"fact":Uuid::nil()}),
+            serde_json::json!({"profile":profile,"scope":{"kind":"global"},"fact":fact,"unknown":1}),
+        ] {
+            assert!(read(&serde_json::to_vec(&value).unwrap()).is_err());
+        }
+        for raw in [
+            format!(
+                r#"{{"profile":"{profile}","profile":"{profile}","scope":{{"kind":"global"}},"fact":"{fact}"}}"#
+            ),
+            format!(
+                r#"{{"profile":"{profile}","scope":{{"kind":"global","kind":"global"}},"fact":"{fact}"}}"#
+            ),
+            format!(
+                r#"{{"profile":"{profile}","scope":{{"kind":"document","document":"{fact}","document":"{fact}"}},"fact":"{fact}"}}"#
+            ),
+            format!(
+                r#"{{"profile":"{profile}","scope":{{"kind":"global"}},"fact":"{fact}","fact":"{fact}"}}"#
+            ),
+        ] {
+            assert!(read(raw.as_bytes()).is_err(), "duplicate accepted");
+        }
+        // Retain the existing public/file Key decoder behavior, not just valid parity.
+        let legacy = serde_json::json!({"profile":profile,"scope":{"kind":"global","unknown":1},"fact":fact});
+        assert!(serde_json::from_value::<Key>(legacy).is_ok());
+    }
+    #[test]
+    fn report_holds_ordinary_mode_through_actual_output_then_releases() {
+        use storage::sync::mode::SyncModeChoice;
+        let root = std::env::temp_dir().join(format!("memory-mode-output-{}", Uuid::new_v4()));
+        let config = Config {
+            paths: storage::StorePaths {
+                data: root.join("data"),
+                cache: root.join("cache"),
+                credentials: root.join("credentials"),
+            },
+            memory: super::super::Configuration {
+                profile: Some(Uuid::new_v4()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let store = Arc::new(Store::open(config.paths.clone()).unwrap());
+        let mut report = execute(
+            Operation::Query,
+            Input::Query(Query::new("gravity".into(), 1)),
+            &config,
+            store.clone(),
+        );
+        assert_eq!(report.status, ReportStatus::Ok);
+        // Isolate mode lifetime from the independent legacy-data provider lease.
+        drop(report.provider_guard.take());
+        struct DuringWrite {
+            store: Arc<Store>,
+            calls: usize,
+        }
+        impl std::io::Write for DuringWrite {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.calls += 1;
+                assert!(self
+                    .store
+                    .set_sync_mode(
+                        &self.store.sync_mode_snapshot().unwrap().token,
+                        Uuid::new_v4(),
+                        SyncModeChoice::LocalOnly
+                    )
+                    .is_err());
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut writer = DuringWrite {
+            store: store.clone(),
+            calls: 0,
+        };
+        report.write_to(&mut writer).unwrap();
+        assert_eq!(writer.calls, 1);
+        drop(report);
+        store
+            .set_sync_mode(
+                &store.sync_mode_snapshot().unwrap().token,
+                Uuid::new_v4(),
+                SyncModeChoice::LocalOnly,
+            )
+            .unwrap();
+        drop(writer);
+        drop(store);
+        assert_eq!(root.parent(), Some(std::env::temp_dir().as_path()));
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn mode_refusal_precedes_domain_mutation() {
+        use storage::sync::mode::SyncModeChoice;
+        let root = std::env::temp_dir().join(format!("memory-mode-refusal-{}", Uuid::new_v4()));
+        let profile = Uuid::new_v4();
+        let mut config = Config {
+            paths: storage::StorePaths {
+                data: root.join("data"),
+                cache: root.join("cache"),
+                credentials: root.join("credentials"),
+            },
+            memory: super::super::Configuration {
+                profile: Some(profile),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let store = Arc::new(Store::open(config.paths.clone()).unwrap());
+        let binding = storage::digest(b"isolated");
+        store
+            .set_sync_mode(
+                &store.sync_mode_snapshot().unwrap().token,
+                Uuid::new_v4(),
+                SyncModeChoice::IsolatedBackup {
+                    binding_sha256: binding.clone(),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            execute(
+                Operation::Query,
+                Input::Query(Query::new("gravity".into(), 1)),
+                &config,
+                store.clone()
+            )
+            .status,
+            ReportStatus::Unsupported
+        );
+        config.memory.selection = Some(super::super::catalog::Identity {
+            group: Uuid::new_v4(),
+            profile,
+            binding_sha256: binding.clone(),
+        });
+        assert_eq!(
+            execute(
+                Operation::Query,
+                Input::Query(Query::new("gravity".into(), 1)),
+                &config,
+                store.clone()
+            )
+            .status,
+            ReportStatus::Unsupported
+        );
+        store
+            .set_sync_mode(
+                &store.sync_mode_snapshot().unwrap().token,
+                Uuid::new_v4(),
+                SyncModeChoice::SharedGroup {
+                    group: Uuid::new_v4(),
+                    binding_sha256: binding,
+                    root_id: "foreign-fixture".into(),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            execute(
+                Operation::Query,
+                Input::Query(Query::new("gravity".into(), 1)),
+                &config,
+                store.clone()
+            )
+            .status,
+            ReportStatus::Unsupported
+        );
+        let before = store.manifests().unwrap();
+        assert_eq!(
+            execute(
+                Operation::InitializeSelection,
+                Input::InitializeSelection(super::super::selected::InitializeSelection {
+                    operation: Uuid::new_v4(),
+                    accepted_base_sha256: storage::digest(b"valid refused initialization"),
+                    registrations: vec![],
+                }),
+                &config,
+                store.clone()
+            )
+            .status,
+            ReportStatus::Unsupported
+        );
+        assert_eq!(store.manifests().unwrap().len(), before.len());
+        drop(store);
+        assert_eq!(root.parent(), Some(std::env::temp_dir().as_path()));
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn stdin_read_error_and_mutation_refusal_do_not_admit_store() {
+        struct MustNotRead;
+        impl Read for MustNotRead {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                panic!("unsupported stdin operation read input")
+            }
+        }
+        for operation in [
+            Operation::Put,
+            Operation::InitializeAggregate,
+            Operation::InitializeSelection,
+            Operation::RegisterSelection,
+        ] {
+            assert_eq!(
+                run_stdin(operation, &mut MustNotRead, None).status,
+                ReportStatus::Unsupported
+            );
+        }
+        struct FailedRead;
+        impl Read for FailedRead {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("PRIVATE_STDIN_READ_ERROR"))
+            }
+        }
+        let root = std::env::temp_dir().join(format!("memory-stdin-error-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let paths = storage::StorePaths {
+            data: root.join("data"),
+            cache: root.join("cache"),
+            credentials: root.join("credentials"),
+        };
+        let config = Config {
+            paths: paths.clone(),
+            memory: super::super::Configuration {
+                profile: Some(Uuid::new_v4()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let config_path = root.join("config.json");
+        std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+        for operation in [Operation::Query, Operation::Inspect] {
+            let report = run_stdin(operation, &mut FailedRead, Some(config_path.clone()));
+            assert_eq!(report.status, ReportStatus::InvalidInput);
+            assert!(!String::from_utf8(report.encoded().unwrap())
+                .unwrap()
+                .contains("PRIVATE_STDIN_READ_ERROR"));
+        }
+        assert!(!paths.data.exists() && !paths.cache.exists() && !paths.credentials.exists());
+        assert_eq!(root.parent(), Some(std::env::temp_dir().as_path()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn current_query_inspection_and_empty_report_are_guarded_at_the_actual_writer() {
         use crate::memory::{self, Provider};
         struct PrefixFailure(Vec<u8>, usize);
@@ -427,7 +838,7 @@ mod tests {
                 Ok(())
             }
         }
-        for mode in 0..5 {
+        for mode in 0..8 {
             let root = std::env::temp_dir().join(format!("memory-handoff-{}", Uuid::new_v4()));
             let paths = storage::StorePaths {
                 data: root.join("data"),
@@ -441,6 +852,17 @@ mod tests {
                 profile,
                 binding_sha256: storage::digest(b"local fixture"),
             };
+            store
+                .set_sync_mode(
+                    &store.sync_mode_snapshot().unwrap().token,
+                    Uuid::new_v4(),
+                    storage::sync::mode::SyncModeChoice::SharedGroup {
+                        group: identity.group,
+                        binding_sha256: identity.binding_sha256.clone(),
+                        root_id: "host-memory-fixture".into(),
+                    },
+                )
+                .unwrap();
             let memory =
                 memory::selected::SelectedMemory::new(store.clone(), identity.clone()).unwrap();
             let fact = memory::Fact {
@@ -493,8 +915,19 @@ mod tests {
                 },
                 ..Config::default()
             };
-            let (operation, input) = if mode == 1 {
-                (Operation::Inspect, Input::Inspect(fact.key.clone()))
+            let (operation, input) = if mode == 1 || mode >= 5 {
+                let input = if mode >= 5 {
+                    Input::read_stdin(
+                        Operation::Inspect,
+                        &mut serde_json::to_vec(&fact.key).unwrap().as_slice(),
+                        profile,
+                        config.memory.selection.as_ref(),
+                    )
+                    .unwrap()
+                } else {
+                    Input::Inspect(fact.key.clone())
+                };
+                (Operation::Inspect, input)
             } else {
                 (
                     Operation::Query,
@@ -503,6 +936,13 @@ mod tests {
             };
             let mut report = execute(operation, input, &config, store.clone());
             assert!(report.pending.is_some());
+            assert!(store
+                .set_sync_mode(
+                    &store.sync_mode_snapshot().unwrap().token,
+                    Uuid::new_v4(),
+                    storage::sync::mode::SyncModeChoice::LocalOnly
+                )
+                .is_err());
             if mode == 2 {
                 memory
                     .register_selection(memory::selected::RegisterSelection {
@@ -510,9 +950,9 @@ mod tests {
                         registration,
                     })
                     .unwrap();
-            } else if mode == 3 {
+            } else if mode == 3 || mode == 7 {
                 report.data = Some(serde_json::json!({"forged":"private-forged-value"}));
-            } else if mode != 4 {
+            } else if mode != 4 && mode != 5 {
                 let expected = memory
                     .inspect(&fact.key)
                     .unwrap()
@@ -530,7 +970,7 @@ mod tests {
                     .unwrap();
             }
             let mut output = Vec::new();
-            if mode == 4 {
+            if mode == 4 || mode == 5 {
                 let expected = report.encoded().unwrap();
                 let mut writer = PrefixFailure(Vec::new(), 0);
                 assert!(report.write_to(&mut writer).is_err());
@@ -544,6 +984,15 @@ mod tests {
                 assert!(!String::from_utf8(output).unwrap().contains("private-"));
             }
             drop(report);
+            // Both successful refusal output and a partial I/O error release the
+            // mode lifetime only when the report is dropped by its caller.
+            store
+                .set_sync_mode(
+                    &store.sync_mode_snapshot().unwrap().token,
+                    Uuid::new_v4(),
+                    storage::sync::mode::SyncModeChoice::LocalOnly,
+                )
+                .unwrap();
             drop(memory);
             drop(store);
             assert!(root.starts_with(std::env::temp_dir()));

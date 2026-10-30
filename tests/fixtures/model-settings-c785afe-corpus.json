@@ -1,0 +1,544 @@
+{
+  "fixture_version": 1,
+  "source_commit": "c785afe044fcd00d386ce9030cb06916245ba2c4",
+  "executable_sha256": "2a624cfd80b87a945e3b0a8a7560100a0d0c92c3d4d62c386959ac57113b8fa6",
+  "scope": "Actual Windows host CLI against task-owned synthetic Stores. No provider/tablet/runtime or transport-loss test.",
+  "records": [
+    {
+      "name": "inspect-original",
+      "command": [
+        "--model-settings-operation",
+        "inspect"
+      ],
+      "stdin_base64": null,
+      "stdin_sha256": null,
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"schema_version\":1,\"base_sha256\":\"597edc139049f4e81a03a4a7770a06526458458a9798f655b5907823f3c214ad\",\"config_path_sha256\":\"1f73434b4f00a92df53a0d76b5ebe94e4d2448cad4ee70ac7169775620b0c4b9\",\"current\":{\"base_url\":{\"origin\":\"declared\",\"present\":true},\"model\":{\"origin\":\"declared-null\",\"present\":false}}}}\n",
+      "stdout_sha256": "c52c25928ea07e02648cc08c1e5769ffa97646daa7dc3a4445501a348c7a98bd",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "597edc139049f4e81a03a4a7770a06526458458a9798f655b5907823f3c214ad",
+      "config_after_sha256": "597edc139049f4e81a03a4a7770a06526458458a9798f655b5907823f3c214ad"
+    },
+    {
+      "name": "prepare-two-fields",
+      "command": [
+        "--model-settings-operation",
+        "prepare",
+        "--model-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtb2RlbF9zZXR0aW5nc192ZXJzaW9uIjoxLCJvcGVyYXRpb24iOiI1NWVmZTM0Ny04OTJmLTQ0ZDktYTJmNC03NTdhZDU0NTkwNTAiLCJiYXNlX3NoYTI1NiI6IjU5N2VkYzEzOTA0OWY0ZTgxYTAzYTRhNzc3MGEwNjUyNjQ1ODQ1OGE5Nzk4ZjY1NWI1OTA3ODIzZjNjMjE0YWQiLCJjb25maWdfcGF0aF9zaGEyNTYiOiIxZjczNDM0YjRmMDBhOTJkZjUzYTBkNzZiNWViZTk0ZTRkMjQ0OGNhZDRlZTcwYWM3MTY5Nzc1NjIwYjBjNGI5IiwiY2hhbmdlcyI6eyJtb2RlbCI6eyJhY3Rpb24iOiJzZXQiLCJ2YWx1ZSI6IiBQUklWQVRFX01PREVMXHJcbiDmqKHlnosgzrEgIn0sImJhc2VfdXJsIjp7ImFjdGlvbiI6InNldCIsInZhbHVlIjoiaHR0cHM6Ly9QUklWQVRFX1VTRVI6UFJJVkFURV9QQVNTV09SREBpbnZhbGlkL3YxP3E9UFJJVkFURV9RVUVSWSNQUklWQVRFX0ZSQUdNRU5UXHJcbiBcdCJ9fX0=",
+      "stdin_sha256": "b4d0e8fca9cf868a49d990ee93774380f64d9dc5e4d14480b4b7bb2253fc5989",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"ok\",\"outcome\":\"prepared\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"before\":{\"base_url\":{\"origin\":\"declared\",\"present\":true},\"model\":{\"origin\":\"declared-null\",\"present\":false}},\"after\":{\"base_url\":{\"origin\":\"declared\",\"present\":true},\"model\":{\"origin\":\"declared\",\"present\":true}},\"intent\":{\"model_settings_version\":1,\"operation\":\"55efe347-892f-44d9-a2f4-757ad5459050\",\"base_sha256\":\"597edc139049f4e81a03a4a7770a06526458458a9798f655b5907823f3c214ad\",\"target_sha256\":\"f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682\",\"config_path_sha256\":\"1f73434b4f00a92df53a0d76b5ebe94e4d2448cad4ee70ac7169775620b0c4b9\",\"changes_sha256\":\"9dc23987078c871758e75caf2243e98ef135ec03799a0a7df79a34552ff40433\"}}}\n",
+      "stdout_sha256": "400168201bb5fdf9a2dc929fcebbcfbf0ab35294bc8bd061bc3dd9e82e57b78b",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "597edc139049f4e81a03a4a7770a06526458458a9798f655b5907823f3c214ad",
+      "config_after_sha256": "597edc139049f4e81a03a4a7770a06526458458a9798f655b5907823f3c214ad"
+    },
+    {
+      "name": "status-before-apply",
+      "command": [
+        "--model-settings-operation",
+        "status",
+        "--model-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibW9kZWxfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiNTVlZmUzNDctODkyZi00NGQ5LWEyZjQtNzU3YWQ1NDU5MDUwIiwiYmFzZV9zaGEyNTYiOiI1OTdlZGMxMzkwNDlmNGU4MWEwM2E0YTc3NzBhMDY1MjY0NTg0NThhOTc5OGY2NTViNTkwNzgyM2YzYzIxNGFkIiwidGFyZ2V0X3NoYTI1NiI6ImYwZDg1NjIyYjI3MjNkZjA5ZGJiOWFlOTIxYTkwYzM5NWNmMjNmNDY0N2IxZGJjYzQ0MjUzYzM3M2NhZWE2ODIiLCJjb25maWdfcGF0aF9zaGEyNTYiOiIxZjczNDM0YjRmMDBhOTJkZjUzYTBkNzZiNWViZTk0ZTRkMjQ0OGNhZDRlZTcwYWM3MTY5Nzc1NjIwYjBjNGI5IiwiY2hhbmdlc19zaGEyNTYiOiI5ZGMyMzk4NzA3OGM4NzE3NThlNzVjYWYyMjQzZTk4ZWYxMzVlYzAzNzk5YTBhN2RmNzlhMzQ1NTJmZjQwNDMzIn19",
+      "stdin_sha256": "fd93bd7a1253dbbe80d9596e1bb7255df03a202bd6986c851f08a16df8994e5c",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"status\",\"status\":\"ok\",\"outcome\":\"unresolved\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "5acdf15d758fc98bb9afa2de9f7691103b32522841bd31e83068274ce0944352",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "597edc139049f4e81a03a4a7770a06526458458a9798f655b5907823f3c214ad",
+      "config_after_sha256": "597edc139049f4e81a03a4a7770a06526458458a9798f655b5907823f3c214ad"
+    },
+    {
+      "name": "apply-wrong-path",
+      "command": [
+        "--model-settings-operation",
+        "apply",
+        "--model-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibW9kZWxfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiNTVlZmUzNDctODkyZi00NGQ5LWEyZjQtNzU3YWQ1NDU5MDUwIiwiYmFzZV9zaGEyNTYiOiI1OTdlZGMxMzkwNDlmNGU4MWEwM2E0YTc3NzBhMDY1MjY0NTg0NThhOTc5OGY2NTViNTkwNzgyM2YzYzIxNGFkIiwidGFyZ2V0X3NoYTI1NiI6ImYwZDg1NjIyYjI3MjNkZjA5ZGJiOWFlOTIxYTkwYzM5NWNmMjNmNDY0N2IxZGJjYzQ0MjUzYzM3M2NhZWE2ODIiLCJjb25maWdfcGF0aF9zaGEyNTYiOiIwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwIiwiY2hhbmdlc19zaGEyNTYiOiI5ZGMyMzk4NzA3OGM4NzE3NThlNzVjYWYyMjQzZTk4ZWYxMzVlYzAzNzk5YTBhN2RmNzlhMzQ1NTJmZjQwNDMzIn0sImNoYW5nZXMiOnsibW9kZWwiOnsiYWN0aW9uIjoic2V0IiwidmFsdWUiOiIgUFJJVkFURV9NT0RFTFxyXG4g5qih5Z6LIM6xICJ9LCJiYXNlX3VybCI6eyJhY3Rpb24iOiJzZXQiLCJ2YWx1ZSI6Imh0dHBzOi8vUFJJVkFURV9VU0VSOlBSSVZBVEVfUEFTU1dPUkRAaW52YWxpZC92MT9xPVBSSVZBVEVfUVVFUlkjUFJJVkFURV9GUkFHTUVOVFxyXG4gXHQifX19",
+      "stdin_sha256": "9cd30d829f71d469677864b73f0cb2ab5b3d21e0aec17eca862b98931c19273e",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"conflict\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "f63c557f2b0f378ab3181a82e272ad0171ac0683d6401ccad78a4eaca997a7ab",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "597edc139049f4e81a03a4a7770a06526458458a9798f655b5907823f3c214ad",
+      "config_after_sha256": "597edc139049f4e81a03a4a7770a06526458458a9798f655b5907823f3c214ad"
+    },
+    {
+      "name": "apply-wrong-base",
+      "command": [
+        "--model-settings-operation",
+        "apply",
+        "--model-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibW9kZWxfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiNTVlZmUzNDctODkyZi00NGQ5LWEyZjQtNzU3YWQ1NDU5MDUwIiwiYmFzZV9zaGEyNTYiOiIwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwIiwidGFyZ2V0X3NoYTI1NiI6ImYwZDg1NjIyYjI3MjNkZjA5ZGJiOWFlOTIxYTkwYzM5NWNmMjNmNDY0N2IxZGJjYzQ0MjUzYzM3M2NhZWE2ODIiLCJjb25maWdfcGF0aF9zaGEyNTYiOiIxZjczNDM0YjRmMDBhOTJkZjUzYTBkNzZiNWViZTk0ZTRkMjQ0OGNhZDRlZTcwYWM3MTY5Nzc1NjIwYjBjNGI5IiwiY2hhbmdlc19zaGEyNTYiOiI5ZGMyMzk4NzA3OGM4NzE3NThlNzVjYWYyMjQzZTk4ZWYxMzVlYzAzNzk5YTBhN2RmNzlhMzQ1NTJmZjQwNDMzIn0sImNoYW5nZXMiOnsibW9kZWwiOnsiYWN0aW9uIjoic2V0IiwidmFsdWUiOiIgUFJJVkFURV9NT0RFTFxyXG4g5qih5Z6LIM6xICJ9LCJiYXNlX3VybCI6eyJhY3Rpb24iOiJzZXQiLCJ2YWx1ZSI6Imh0dHBzOi8vUFJJVkFURV9VU0VSOlBSSVZBVEVfUEFTU1dPUkRAaW52YWxpZC92MT9xPVBSSVZBVEVfUVVFUlkjUFJJVkFURV9GUkFHTUVOVFxyXG4gXHQifX19",
+      "stdin_sha256": "f3257a25c56c34e466274ebc29b9c1d4f1452b7879a343f5ee3d0c720a81b1c2",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"conflict\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "f63c557f2b0f378ab3181a82e272ad0171ac0683d6401ccad78a4eaca997a7ab",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "597edc139049f4e81a03a4a7770a06526458458a9798f655b5907823f3c214ad",
+      "config_after_sha256": "597edc139049f4e81a03a4a7770a06526458458a9798f655b5907823f3c214ad"
+    },
+    {
+      "name": "apply-wrong-target",
+      "command": [
+        "--model-settings-operation",
+        "apply",
+        "--model-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibW9kZWxfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiNTVlZmUzNDctODkyZi00NGQ5LWEyZjQtNzU3YWQ1NDU5MDUwIiwiYmFzZV9zaGEyNTYiOiI1OTdlZGMxMzkwNDlmNGU4MWEwM2E0YTc3NzBhMDY1MjY0NTg0NThhOTc5OGY2NTViNTkwNzgyM2YzYzIxNGFkIiwidGFyZ2V0X3NoYTI1NiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJjb25maWdfcGF0aF9zaGEyNTYiOiIxZjczNDM0YjRmMDBhOTJkZjUzYTBkNzZiNWViZTk0ZTRkMjQ0OGNhZDRlZTcwYWM3MTY5Nzc1NjIwYjBjNGI5IiwiY2hhbmdlc19zaGEyNTYiOiI5ZGMyMzk4NzA3OGM4NzE3NThlNzVjYWYyMjQzZTk4ZWYxMzVlYzAzNzk5YTBhN2RmNzlhMzQ1NTJmZjQwNDMzIn0sImNoYW5nZXMiOnsibW9kZWwiOnsiYWN0aW9uIjoic2V0IiwidmFsdWUiOiIgUFJJVkFURV9NT0RFTFxyXG4g5qih5Z6LIM6xICJ9LCJiYXNlX3VybCI6eyJhY3Rpb24iOiJzZXQiLCJ2YWx1ZSI6Imh0dHBzOi8vUFJJVkFURV9VU0VSOlBSSVZBVEVfUEFTU1dPUkRAaW52YWxpZC92MT9xPVBSSVZBVEVfUVVFUlkjUFJJVkFURV9GUkFHTUVOVFxyXG4gXHQifX19",
+      "stdin_sha256": "cff9de04586a10c393ca92f0e4065b4102492a5d36aa24f8a4dc68bb067509db",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "5160ee218c635824c6271a2c9984dc7c0729aee94d04cee79e2cb357de2ae39d",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "597edc139049f4e81a03a4a7770a06526458458a9798f655b5907823f3c214ad",
+      "config_after_sha256": "597edc139049f4e81a03a4a7770a06526458458a9798f655b5907823f3c214ad"
+    },
+    {
+      "name": "apply-wrong-patch",
+      "command": [
+        "--model-settings-operation",
+        "apply",
+        "--model-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibW9kZWxfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiNTVlZmUzNDctODkyZi00NGQ5LWEyZjQtNzU3YWQ1NDU5MDUwIiwiYmFzZV9zaGEyNTYiOiI1OTdlZGMxMzkwNDlmNGU4MWEwM2E0YTc3NzBhMDY1MjY0NTg0NThhOTc5OGY2NTViNTkwNzgyM2YzYzIxNGFkIiwidGFyZ2V0X3NoYTI1NiI6ImYwZDg1NjIyYjI3MjNkZjA5ZGJiOWFlOTIxYTkwYzM5NWNmMjNmNDY0N2IxZGJjYzQ0MjUzYzM3M2NhZWE2ODIiLCJjb25maWdfcGF0aF9zaGEyNTYiOiIxZjczNDM0YjRmMDBhOTJkZjUzYTBkNzZiNWViZTk0ZTRkMjQ0OGNhZDRlZTcwYWM3MTY5Nzc1NjIwYjBjNGI5IiwiY2hhbmdlc19zaGEyNTYiOiIwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwIn0sImNoYW5nZXMiOnsibW9kZWwiOnsiYWN0aW9uIjoic2V0IiwidmFsdWUiOiIgUFJJVkFURV9NT0RFTFxyXG4g5qih5Z6LIM6xICJ9LCJiYXNlX3VybCI6eyJhY3Rpb24iOiJzZXQiLCJ2YWx1ZSI6Imh0dHBzOi8vUFJJVkFURV9VU0VSOlBSSVZBVEVfUEFTU1dPUkRAaW52YWxpZC92MT9xPVBSSVZBVEVfUVVFUlkjUFJJVkFURV9GUkFHTUVOVFxyXG4gXHQifX19",
+      "stdin_sha256": "b9658e7edfc12b00d304f1b2f77cfd241f9f2da1e6c7a29b9d900fcb6686f2c9",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "5160ee218c635824c6271a2c9984dc7c0729aee94d04cee79e2cb357de2ae39d",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "597edc139049f4e81a03a4a7770a06526458458a9798f655b5907823f3c214ad",
+      "config_after_sha256": "597edc139049f4e81a03a4a7770a06526458458a9798f655b5907823f3c214ad"
+    },
+    {
+      "name": "apply-changed-patch",
+      "command": [
+        "--model-settings-operation",
+        "apply",
+        "--model-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibW9kZWxfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiNTVlZmUzNDctODkyZi00NGQ5LWEyZjQtNzU3YWQ1NDU5MDUwIiwiYmFzZV9zaGEyNTYiOiI1OTdlZGMxMzkwNDlmNGU4MWEwM2E0YTc3NzBhMDY1MjY0NTg0NThhOTc5OGY2NTViNTkwNzgyM2YzYzIxNGFkIiwidGFyZ2V0X3NoYTI1NiI6ImYwZDg1NjIyYjI3MjNkZjA5ZGJiOWFlOTIxYTkwYzM5NWNmMjNmNDY0N2IxZGJjYzQ0MjUzYzM3M2NhZWE2ODIiLCJjb25maWdfcGF0aF9zaGEyNTYiOiIxZjczNDM0YjRmMDBhOTJkZjUzYTBkNzZiNWViZTk0ZTRkMjQ0OGNhZDRlZTcwYWM3MTY5Nzc1NjIwYjBjNGI5IiwiY2hhbmdlc19zaGEyNTYiOiI5ZGMyMzk4NzA3OGM4NzE3NThlNzVjYWYyMjQzZTk4ZWYxMzVlYzAzNzk5YTBhN2RmNzlhMzQ1NTJmZjQwNDMzIn0sImNoYW5nZXMiOnsibW9kZWwiOnsiYWN0aW9uIjoic2V0IiwidmFsdWUiOiJQUklWQVRFX0NIQU5HRURfUEFUQ0gifSwiYmFzZV91cmwiOnsiYWN0aW9uIjoic2V0IiwidmFsdWUiOiJodHRwczovL1BSSVZBVEVfVVNFUjpQUklWQVRFX1BBU1NXT1JEQGludmFsaWQvdjE/cT1QUklWQVRFX1FVRVJZI1BSSVZBVEVfRlJBR01FTlRcclxuIFx0In19fQ==",
+      "stdin_sha256": "3265d4b7c5390fc5fb0a83c214daa7c7e72722e27d2277ac3e530a3fd8ad2d36",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "5160ee218c635824c6271a2c9984dc7c0729aee94d04cee79e2cb357de2ae39d",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "597edc139049f4e81a03a4a7770a06526458458a9798f655b5907823f3c214ad",
+      "config_after_sha256": "597edc139049f4e81a03a4a7770a06526458458a9798f655b5907823f3c214ad"
+    },
+    {
+      "name": "apply-owner-busy",
+      "command": [
+        "--model-settings-operation",
+        "apply",
+        "--model-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibW9kZWxfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiNTVlZmUzNDctODkyZi00NGQ5LWEyZjQtNzU3YWQ1NDU5MDUwIiwiYmFzZV9zaGEyNTYiOiI1OTdlZGMxMzkwNDlmNGU4MWEwM2E0YTc3NzBhMDY1MjY0NTg0NThhOTc5OGY2NTViNTkwNzgyM2YzYzIxNGFkIiwidGFyZ2V0X3NoYTI1NiI6ImYwZDg1NjIyYjI3MjNkZjA5ZGJiOWFlOTIxYTkwYzM5NWNmMjNmNDY0N2IxZGJjYzQ0MjUzYzM3M2NhZWE2ODIiLCJjb25maWdfcGF0aF9zaGEyNTYiOiIxZjczNDM0YjRmMDBhOTJkZjUzYTBkNzZiNWViZTk0ZTRkMjQ0OGNhZDRlZTcwYWM3MTY5Nzc1NjIwYjBjNGI5IiwiY2hhbmdlc19zaGEyNTYiOiI5ZGMyMzk4NzA3OGM4NzE3NThlNzVjYWYyMjQzZTk4ZWYxMzVlYzAzNzk5YTBhN2RmNzlhMzQ1NTJmZjQwNDMzIn0sImNoYW5nZXMiOnsibW9kZWwiOnsiYWN0aW9uIjoic2V0IiwidmFsdWUiOiIgUFJJVkFURV9NT0RFTFxyXG4g5qih5Z6LIM6xICJ9LCJiYXNlX3VybCI6eyJhY3Rpb24iOiJzZXQiLCJ2YWx1ZSI6Imh0dHBzOi8vUFJJVkFURV9VU0VSOlBSSVZBVEVfUEFTU1dPUkRAaW52YWxpZC92MT9xPVBSSVZBVEVfUVVFUlkjUFJJVkFURV9GUkFHTUVOVFxyXG4gXHQifX19",
+      "stdin_sha256": "11af7c46b4f09d2583df7c5dca7e32c4fc8374bd7ac4bd95df3b92284f69c703",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"busy\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "c374bd070b4d82d4eab71625bfe8a9e6c4a9665a29339202d820c5099c71df57",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "597edc139049f4e81a03a4a7770a06526458458a9798f655b5907823f3c214ad",
+      "config_after_sha256": "597edc139049f4e81a03a4a7770a06526458458a9798f655b5907823f3c214ad"
+    },
+    {
+      "name": "apply-verified",
+      "command": [
+        "--model-settings-operation",
+        "apply",
+        "--model-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibW9kZWxfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiNTVlZmUzNDctODkyZi00NGQ5LWEyZjQtNzU3YWQ1NDU5MDUwIiwiYmFzZV9zaGEyNTYiOiI1OTdlZGMxMzkwNDlmNGU4MWEwM2E0YTc3NzBhMDY1MjY0NTg0NThhOTc5OGY2NTViNTkwNzgyM2YzYzIxNGFkIiwidGFyZ2V0X3NoYTI1NiI6ImYwZDg1NjIyYjI3MjNkZjA5ZGJiOWFlOTIxYTkwYzM5NWNmMjNmNDY0N2IxZGJjYzQ0MjUzYzM3M2NhZWE2ODIiLCJjb25maWdfcGF0aF9zaGEyNTYiOiIxZjczNDM0YjRmMDBhOTJkZjUzYTBkNzZiNWViZTk0ZTRkMjQ0OGNhZDRlZTcwYWM3MTY5Nzc1NjIwYjBjNGI5IiwiY2hhbmdlc19zaGEyNTYiOiI5ZGMyMzk4NzA3OGM4NzE3NThlNzVjYWYyMjQzZTk4ZWYxMzVlYzAzNzk5YTBhN2RmNzlhMzQ1NTJmZjQwNDMzIn0sImNoYW5nZXMiOnsibW9kZWwiOnsiYWN0aW9uIjoic2V0IiwidmFsdWUiOiIgUFJJVkFURV9NT0RFTFxyXG4g5qih5Z6LIM6xICJ9LCJiYXNlX3VybCI6eyJhY3Rpb24iOiJzZXQiLCJ2YWx1ZSI6Imh0dHBzOi8vUFJJVkFURV9VU0VSOlBSSVZBVEVfUEFTU1dPUkRAaW52YWxpZC92MT9xPVBSSVZBVEVfUVVFUlkjUFJJVkFURV9GUkFHTUVOVFxyXG4gXHQifX19",
+      "stdin_sha256": "11af7c46b4f09d2583df7c5dca7e32c4fc8374bd7ac4bd95df3b92284f69c703",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"ok\",\"outcome\":\"verified\",\"disk_readback_verified\":true,\"runtime_activation\":\"restart-required\",\"data\":{\"target_sha256\":\"f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682\",\"current\":{\"base_url\":{\"origin\":\"declared\",\"present\":true},\"model\":{\"origin\":\"declared\",\"present\":true}}}}\n",
+      "stdout_sha256": "adce3f52c63910cdb635ef067e9c324efba52ba61dddcb9ff525295cd6378ba3",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "597edc139049f4e81a03a4a7770a06526458458a9798f655b5907823f3c214ad",
+      "config_after_sha256": "f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682"
+    },
+    {
+      "name": "status-after-verified-apply",
+      "command": [
+        "--model-settings-operation",
+        "status",
+        "--model-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibW9kZWxfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiNTVlZmUzNDctODkyZi00NGQ5LWEyZjQtNzU3YWQ1NDU5MDUwIiwiYmFzZV9zaGEyNTYiOiI1OTdlZGMxMzkwNDlmNGU4MWEwM2E0YTc3NzBhMDY1MjY0NTg0NThhOTc5OGY2NTViNTkwNzgyM2YzYzIxNGFkIiwidGFyZ2V0X3NoYTI1NiI6ImYwZDg1NjIyYjI3MjNkZjA5ZGJiOWFlOTIxYTkwYzM5NWNmMjNmNDY0N2IxZGJjYzQ0MjUzYzM3M2NhZWE2ODIiLCJjb25maWdfcGF0aF9zaGEyNTYiOiIxZjczNDM0YjRmMDBhOTJkZjUzYTBkNzZiNWViZTk0ZTRkMjQ0OGNhZDRlZTcwYWM3MTY5Nzc1NjIwYjBjNGI5IiwiY2hhbmdlc19zaGEyNTYiOiI5ZGMyMzk4NzA3OGM4NzE3NThlNzVjYWYyMjQzZTk4ZWYxMzVlYzAzNzk5YTBhN2RmNzlhMzQ1NTJmZjQwNDMzIn19",
+      "stdin_sha256": "fd93bd7a1253dbbe80d9596e1bb7255df03a202bd6986c851f08a16df8994e5c",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"status\",\"status\":\"ok\",\"outcome\":\"desired-file-observed\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"observed_sha256\":\"f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682\",\"current\":{\"base_url\":{\"origin\":\"declared\",\"present\":true},\"model\":{\"origin\":\"declared\",\"present\":true}}}}\n",
+      "stdout_sha256": "630684d9d09511a20d8ab10b790c47ac4cb0503c1fdcad92cbd5fd1286492799",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682",
+      "config_after_sha256": "f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682"
+    },
+    {
+      "name": "apply-spent-base",
+      "command": [
+        "--model-settings-operation",
+        "apply",
+        "--model-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibW9kZWxfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiNTVlZmUzNDctODkyZi00NGQ5LWEyZjQtNzU3YWQ1NDU5MDUwIiwiYmFzZV9zaGEyNTYiOiI1OTdlZGMxMzkwNDlmNGU4MWEwM2E0YTc3NzBhMDY1MjY0NTg0NThhOTc5OGY2NTViNTkwNzgyM2YzYzIxNGFkIiwidGFyZ2V0X3NoYTI1NiI6ImYwZDg1NjIyYjI3MjNkZjA5ZGJiOWFlOTIxYTkwYzM5NWNmMjNmNDY0N2IxZGJjYzQ0MjUzYzM3M2NhZWE2ODIiLCJjb25maWdfcGF0aF9zaGEyNTYiOiIxZjczNDM0YjRmMDBhOTJkZjUzYTBkNzZiNWViZTk0ZTRkMjQ0OGNhZDRlZTcwYWM3MTY5Nzc1NjIwYjBjNGI5IiwiY2hhbmdlc19zaGEyNTYiOiI5ZGMyMzk4NzA3OGM4NzE3NThlNzVjYWYyMjQzZTk4ZWYxMzVlYzAzNzk5YTBhN2RmNzlhMzQ1NTJmZjQwNDMzIn0sImNoYW5nZXMiOnsibW9kZWwiOnsiYWN0aW9uIjoic2V0IiwidmFsdWUiOiIgUFJJVkFURV9NT0RFTFxyXG4g5qih5Z6LIM6xICJ9LCJiYXNlX3VybCI6eyJhY3Rpb24iOiJzZXQiLCJ2YWx1ZSI6Imh0dHBzOi8vUFJJVkFURV9VU0VSOlBSSVZBVEVfUEFTU1dPUkRAaW52YWxpZC92MT9xPVBSSVZBVEVfUVVFUlkjUFJJVkFURV9GUkFHTUVOVFxyXG4gXHQifX19",
+      "stdin_sha256": "11af7c46b4f09d2583df7c5dca7e32c4fc8374bd7ac4bd95df3b92284f69c703",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"conflict\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "f63c557f2b0f378ab3181a82e272ad0171ac0683d6401ccad78a4eaca997a7ab",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682",
+      "config_after_sha256": "f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682"
+    },
+    {
+      "name": "inspect-after-save",
+      "command": [
+        "--model-settings-operation",
+        "inspect"
+      ],
+      "stdin_base64": null,
+      "stdin_sha256": null,
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"schema_version\":1,\"base_sha256\":\"f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682\",\"config_path_sha256\":\"1f73434b4f00a92df53a0d76b5ebe94e4d2448cad4ee70ac7169775620b0c4b9\",\"current\":{\"base_url\":{\"origin\":\"declared\",\"present\":true},\"model\":{\"origin\":\"declared\",\"present\":true}}}}\n",
+      "stdout_sha256": "3eca2b8d74824e63fa64cacec23f3af55763dbc2cd7e3b99f12c9aa266c68e62",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682",
+      "config_after_sha256": "f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682"
+    },
+    {
+      "name": "prepare-exact-noop",
+      "command": [
+        "--model-settings-operation",
+        "prepare",
+        "--model-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtb2RlbF9zZXR0aW5nc192ZXJzaW9uIjoxLCJvcGVyYXRpb24iOiI3YmMzYzQ1YS1mN2ZjLTQ0ZjItYWYxYS1kMjBiYWQ5YTNiODYiLCJiYXNlX3NoYTI1NiI6ImYwZDg1NjIyYjI3MjNkZjA5ZGJiOWFlOTIxYTkwYzM5NWNmMjNmNDY0N2IxZGJjYzQ0MjUzYzM3M2NhZWE2ODIiLCJjb25maWdfcGF0aF9zaGEyNTYiOiIxZjczNDM0YjRmMDBhOTJkZjUzYTBkNzZiNWViZTk0ZTRkMjQ0OGNhZDRlZTcwYWM3MTY5Nzc1NjIwYjBjNGI5IiwiY2hhbmdlcyI6eyJtb2RlbCI6eyJhY3Rpb24iOiJzZXQiLCJ2YWx1ZSI6IiBQUklWQVRFX01PREVMXHJcbiDmqKHlnosgzrEgIn0sImJhc2VfdXJsIjp7ImFjdGlvbiI6InNldCIsInZhbHVlIjoiaHR0cHM6Ly9QUklWQVRFX1VTRVI6UFJJVkFURV9QQVNTV09SREBpbnZhbGlkL3YxP3E9UFJJVkFURV9RVUVSWSNQUklWQVRFX0ZSQUdNRU5UXHJcbiBcdCJ9fX0=",
+      "stdin_sha256": "3a29e1e58d285bb5a4749c51bb66b89fb36d6d7aa35ab63cc0f2c3b86d06fead",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"ok\",\"outcome\":\"no-change\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"current\":{\"base_url\":{\"origin\":\"declared\",\"present\":true},\"model\":{\"origin\":\"declared\",\"present\":true}},\"base_sha256\":\"f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682\",\"changes_sha256\":\"9dc23987078c871758e75caf2243e98ef135ec03799a0a7df79a34552ff40433\"}}\n",
+      "stdout_sha256": "97b3261c1e42f35e737c42b267c25be6c843bfcc78c4809224103e09d72e1aea",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682",
+      "config_after_sha256": "f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682"
+    },
+    {
+      "name": "prepare-empty",
+      "command": [
+        "--model-settings-operation",
+        "prepare",
+        "--model-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtb2RlbF9zZXR0aW5nc192ZXJzaW9uIjoxLCJvcGVyYXRpb24iOiIzZTRlMDc4OC04YzM3LTRkYWYtYjBjYS1iMGFhOTk4NjM5YjUiLCJiYXNlX3NoYTI1NiI6ImYwZDg1NjIyYjI3MjNkZjA5ZGJiOWFlOTIxYTkwYzM5NWNmMjNmNDY0N2IxZGJjYzQ0MjUzYzM3M2NhZWE2ODIiLCJjb25maWdfcGF0aF9zaGEyNTYiOiIxZjczNDM0YjRmMDBhOTJkZjUzYTBkNzZiNWViZTk0ZTRkMjQ0OGNhZDRlZTcwYWM3MTY5Nzc1NjIwYjBjNGI5IiwiY2hhbmdlcyI6e319",
+      "stdin_sha256": "58d8bf08000860028d26bc2276ba93c544694f399269c92557e3f491b145e9c2",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "dcada7fb674c564d3fa0e6bd129084ac20b5f3b1501715e5eaa1db0f61c5db9b",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682",
+      "config_after_sha256": "f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682"
+    },
+    {
+      "name": "prepare-unknown",
+      "command": [
+        "--model-settings-operation",
+        "prepare",
+        "--model-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtb2RlbF9zZXR0aW5nc192ZXJzaW9uIjoxLCJvcGVyYXRpb24iOiJjMzVlMmZlOS05MzNmLTRkNGUtODQyNC0yMWU3NGE4NDRiMmQiLCJiYXNlX3NoYTI1NiI6ImYwZDg1NjIyYjI3MjNkZjA5ZGJiOWFlOTIxYTkwYzM5NWNmMjNmNDY0N2IxZGJjYzQ0MjUzYzM3M2NhZWE2ODIiLCJjb25maWdfcGF0aF9zaGEyNTYiOiIxZjczNDM0YjRmMDBhOTJkZjUzYTBkNzZiNWViZTk0ZTRkMjQ0OGNhZDRlZTcwYWM3MTY5Nzc1NjIwYjBjNGI5IiwiY2hhbmdlcyI6eyJkZWJ1Z19kdW1wIjp7ImFjdGlvbiI6ImNsZWFyIn19fQ==",
+      "stdin_sha256": "8893e7793f4b7a19c1a386942cf18a3df499d430ab0ea05e2511bd7f7481a692",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "dcada7fb674c564d3fa0e6bd129084ac20b5f3b1501715e5eaa1db0f61c5db9b",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682",
+      "config_after_sha256": "f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682"
+    },
+    {
+      "name": "prepare-set-null",
+      "command": [
+        "--model-settings-operation",
+        "prepare",
+        "--model-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtb2RlbF9zZXR0aW5nc192ZXJzaW9uIjoxLCJvcGVyYXRpb24iOiI5ODBmZjY0My1kNTM1LTQ2OTEtOTBkNC1jZGQxY2Y0NjJhNGYiLCJiYXNlX3NoYTI1NiI6ImYwZDg1NjIyYjI3MjNkZjA5ZGJiOWFlOTIxYTkwYzM5NWNmMjNmNDY0N2IxZGJjYzQ0MjUzYzM3M2NhZWE2ODIiLCJjb25maWdfcGF0aF9zaGEyNTYiOiIxZjczNDM0YjRmMDBhOTJkZjUzYTBkNzZiNWViZTk0ZTRkMjQ0OGNhZDRlZTcwYWM3MTY5Nzc1NjIwYjBjNGI5IiwiY2hhbmdlcyI6eyJtb2RlbCI6eyJhY3Rpb24iOiJzZXQiLCJ2YWx1ZSI6bnVsbH19fQ==",
+      "stdin_sha256": "22648b658c45d40bf09eabef7fe38eb334d5e2777734a275ebd2a52cc33f1f4b",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "dcada7fb674c564d3fa0e6bd129084ac20b5f3b1501715e5eaa1db0f61c5db9b",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682",
+      "config_after_sha256": "f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682"
+    },
+    {
+      "name": "prepare-blank",
+      "command": [
+        "--model-settings-operation",
+        "prepare",
+        "--model-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtb2RlbF9zZXR0aW5nc192ZXJzaW9uIjoxLCJvcGVyYXRpb24iOiJkZmNjNjExNC1hNDQyLTQwNTktYjdkNC00MDA5MmQ3ZDE4OWUiLCJiYXNlX3NoYTI1NiI6ImYwZDg1NjIyYjI3MjNkZjA5ZGJiOWFlOTIxYTkwYzM5NWNmMjNmNDY0N2IxZGJjYzQ0MjUzYzM3M2NhZWE2ODIiLCJjb25maWdfcGF0aF9zaGEyNTYiOiIxZjczNDM0YjRmMDBhOTJkZjUzYTBkNzZiNWViZTk0ZTRkMjQ0OGNhZDRlZTcwYWM3MTY5Nzc1NjIwYjBjNGI5IiwiY2hhbmdlcyI6eyJtb2RlbCI6eyJhY3Rpb24iOiJzZXQiLCJ2YWx1ZSI6IiBcclxuICJ9fX0=",
+      "stdin_sha256": "d631f99ffad8b86561e7a2588a54922cf33e8883411593b2cf8efed1e4562ee4",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "dcada7fb674c564d3fa0e6bd129084ac20b5f3b1501715e5eaa1db0f61c5db9b",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682",
+      "config_after_sha256": "f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682"
+    },
+    {
+      "name": "prepare-utf8-overcap",
+      "command": [
+        "--model-settings-operation",
+        "prepare",
+        "--model-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtb2RlbF9zZXR0aW5nc192ZXJzaW9uIjoxLCJvcGVyYXRpb24iOiIwMTFmMDM1NS02NThiLTQzYjAtOTIwYy0wYmFkNzgzMjRmNDgiLCJiYXNlX3NoYTI1NiI6ImYwZDg1NjIyYjI3MjNkZjA5ZGJiOWFlOTIxYTkwYzM5NWNmMjNmNDY0N2IxZGJjYzQ0MjUzYzM3M2NhZWE2ODIiLCJjb25maWdfcGF0aF9zaGEyNTYiOiIxZjczNDM0YjRmMDBhOTJkZjUzYTBkNzZiNWViZTk0ZTRkMjQ0OGNhZDRlZTcwYWM3MTY5Nzc1NjIwYjBjNGI5IiwiY2hhbmdlcyI6eyJtb2RlbCI6eyJhY3Rpb24iOiJzZXQiLCJ2YWx1ZSI6Is6xzrHOsc6xzrHOsc6xzrHOsc6xzrHOsc6xzrHOsc6xzrHOsc6xzrHOsc6xzrHOsc6xzrHOsc6xzrHOsc6xzrHOsc6xzrHOsc6xzrHOsc6xzrHOsc6xzrHOsc6xzrHOsc6xzrHOsc6xzrHOsc6xzrHOsc6xzrHOsc6xzrHOsc6xzrHOsc6xzrHOsc6xzrHOsc6xzrHOsc6xzrHOsc6xzrHOsc6xzrHOsc6xzrHOsc6xzrHOsc6xzrHOsc6xzrHOsc6xzrHOsc6xzrHOsc6xzrHOsc6xzrHOsc6xzrHOsc6xzrHOsc6xzrHOsc6xzrHOsc6xzrHOsc6xzrHOsc6xzrHOsSJ9fX0=",
+      "stdin_sha256": "fdecbdff3ee2b40a89fb8c8bb4fff9e22b8297147fc7008bbe3f25db5c58ac2a",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "dcada7fb674c564d3fa0e6bd129084ac20b5f3b1501715e5eaa1db0f61c5db9b",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682",
+      "config_after_sha256": "f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682"
+    },
+    {
+      "name": "prepare-clear-extra",
+      "command": [
+        "--model-settings-operation",
+        "prepare",
+        "--model-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtb2RlbF9zZXR0aW5nc192ZXJzaW9uIjoxLCJvcGVyYXRpb24iOiI1MDM1MTQ1OS1iODZkLTQzOTMtYjNiMS0yMTY0MTcwODdjYTIiLCJiYXNlX3NoYTI1NiI6ImYwZDg1NjIyYjI3MjNkZjA5ZGJiOWFlOTIxYTkwYzM5NWNmMjNmNDY0N2IxZGJjYzQ0MjUzYzM3M2NhZWE2ODIiLCJjb25maWdfcGF0aF9zaGEyNTYiOiIxZjczNDM0YjRmMDBhOTJkZjUzYTBkNzZiNWViZTk0ZTRkMjQ0OGNhZDRlZTcwYWM3MTY5Nzc1NjIwYjBjNGI5IiwiY2hhbmdlcyI6eyJtb2RlbCI6eyJhY3Rpb24iOiJjbGVhciIsImV4dHJhIjp0cnVlfX19",
+      "stdin_sha256": "6417718104ccbed491f7b120986ce64d5b7cb7ddc71a7fb037f354a4e9210dfd",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "dcada7fb674c564d3fa0e6bd129084ac20b5f3b1501715e5eaa1db0f61c5db9b",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682",
+      "config_after_sha256": "f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682"
+    },
+    {
+      "name": "prepare-change-array",
+      "command": [
+        "--model-settings-operation",
+        "prepare",
+        "--model-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtb2RlbF9zZXR0aW5nc192ZXJzaW9uIjoxLCJvcGVyYXRpb24iOiI5OTVjYjI0Ni1lYjk3LTRhNTQtYTk2YS1hNjViM2U2NjM2MGEiLCJiYXNlX3NoYTI1NiI6ImYwZDg1NjIyYjI3MjNkZjA5ZGJiOWFlOTIxYTkwYzM5NWNmMjNmNDY0N2IxZGJjYzQ0MjUzYzM3M2NhZWE2ODIiLCJjb25maWdfcGF0aF9zaGEyNTYiOiIxZjczNDM0YjRmMDBhOTJkZjUzYTBkNzZiNWViZTk0ZTRkMjQ0OGNhZDRlZTcwYWM3MTY5Nzc1NjIwYjBjNGI5IiwiY2hhbmdlcyI6eyJtb2RlbCI6WyJjbGVhciJdfX0=",
+      "stdin_sha256": "4a062cc1ec6d7026b1d6bed0fbeb572db867e59a8ee006f453f36b4fb17ff6e1",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "dcada7fb674c564d3fa0e6bd129084ac20b5f3b1501715e5eaa1db0f61c5db9b",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682",
+      "config_after_sha256": "f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682"
+    },
+    {
+      "name": "prepare-root-array",
+      "command": [
+        "--model-settings-operation",
+        "prepare",
+        "--model-settings-input",
+        "-"
+      ],
+      "stdin_base64": "W10=",
+      "stdin_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "dcada7fb674c564d3fa0e6bd129084ac20b5f3b1501715e5eaa1db0f61c5db9b",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682",
+      "config_after_sha256": "f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682"
+    },
+    {
+      "name": "prepare-duplicate-version",
+      "command": [
+        "--model-settings-operation",
+        "prepare",
+        "--model-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtb2RlbF9zZXR0aW5nc192ZXJzaW9uIjoxLCJvcGVyYXRpb24iOiI5NWZiZmZjOS0wY2Q2LTQyNTktOWU5YS1kMjA1ZWU2Y2E0MGYiLCJiYXNlX3NoYTI1NiI6ImYwZDg1NjIyYjI3MjNkZjA5ZGJiOWFlOTIxYTkwYzM5NWNmMjNmNDY0N2IxZGJjYzQ0MjUzYzM3M2NhZWE2ODIiLCJjb25maWdfcGF0aF9zaGEyNTYiOiIxZjczNDM0YjRmMDBhOTJkZjUzYTBkNzZiNWViZTk0ZTRkMjQ0OGNhZDRlZTcwYWM3MTY5Nzc1NjIwYjBjNGI5IiwiY2hhbmdlcyI6eyJtb2RlbCI6eyJhY3Rpb24iOiJjbGVhciJ9LCJiYXNlX3VybCI6eyJhY3Rpb24iOiJjbGVhciJ9fSwibW9kZWxfc2V0dGluZ3NfdmVyc2lvbiI6MX0=",
+      "stdin_sha256": "a97628fbdbacb34fa7a4b087a2856c0b6a8549a05c08eb17cd1153e1daf9b243",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "dcada7fb674c564d3fa0e6bd129084ac20b5f3b1501715e5eaa1db0f61c5db9b",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682",
+      "config_after_sha256": "f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682"
+    },
+    {
+      "name": "prepare-invalid-utf8",
+      "command": [
+        "--model-settings-operation",
+        "prepare",
+        "--model-settings-input",
+        "-"
+      ],
+      "stdin_base64": "/w==",
+      "stdin_sha256": "a8100ae6aa1940d0b663bb31cd466142ebbdbd5187131b92d93818987832eb89",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "dcada7fb674c564d3fa0e6bd129084ac20b5f3b1501715e5eaa1db0f61c5db9b",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682",
+      "config_after_sha256": "f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682"
+    },
+    {
+      "name": "prepare-exact-cap",
+      "command": [
+        "--model-settings-operation",
+        "prepare",
+        "--model-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtb2RlbF9zZXR0aW5nc192ZXJzaW9uIjoxLCJvcGVyYXRpb24iOiI5NWZiZmZjOS0wY2Q2LTQyNTktOWU5YS1kMjA1ZWU2Y2E0MGYiLCJiYXNlX3NoYTI1NiI6ImYwZDg1NjIyYjI3MjNkZjA5ZGJiOWFlOTIxYTkwYzM5NWNmMjNmNDY0N2IxZGJjYzQ0MjUzYzM3M2NhZWE2ODIiLCJjb25maWdfcGF0aF9zaGEyNTYiOiIxZjczNDM0YjRmMDBhOTJkZjUzYTBkNzZiNWViZTk0ZTRkMjQ0OGNhZDRlZTcwYWM3MTY5Nzc1NjIwYjBjNGI5IiwiY2hhbmdlcyI6eyJtb2RlbCI6eyJhY3Rpb24iOiJjbGVhciJ9LCJiYXNlX3VybCI6eyJhY3Rpb24iOiJjbGVhciJ9fX0gICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIA==",
+      "stdin_sha256": "c6db57fad2674edd2e2380bdfae8feb932c5478b088859bf27656cb40f92ed09",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"ok\",\"outcome\":\"prepared\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"before\":{\"base_url\":{\"origin\":\"declared\",\"present\":true},\"model\":{\"origin\":\"declared\",\"present\":true}},\"after\":{\"base_url\":{\"origin\":\"default\",\"present\":false},\"model\":{\"origin\":\"default\",\"present\":false}},\"intent\":{\"model_settings_version\":1,\"operation\":\"95fbffc9-0cd6-4259-9e9a-d205ee6ca40f\",\"base_sha256\":\"f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682\",\"target_sha256\":\"1b6993b03981c1cbf9976b0fc0d772be53236dacfd4e9a1c546f30e641cdbffa\",\"config_path_sha256\":\"1f73434b4f00a92df53a0d76b5ebe94e4d2448cad4ee70ac7169775620b0c4b9\",\"changes_sha256\":\"69d77b98f5ed5fce039db4e8124013277e797d704f10d60e44d263d3e25cda30\"}}}\n",
+      "stdout_sha256": "8a8227ba3c5430995290647f3dc6b89198a2c6aff6bf29bf2e7217fe8ffca55e",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682",
+      "config_after_sha256": "f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682"
+    },
+    {
+      "name": "prepare-over-cap",
+      "command": [
+        "--model-settings-operation",
+        "prepare",
+        "--model-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtb2RlbF9zZXR0aW5nc192ZXJzaW9uIjoxLCJvcGVyYXRpb24iOiI5NWZiZmZjOS0wY2Q2LTQyNTktOWU5YS1kMjA1ZWU2Y2E0MGYiLCJiYXNlX3NoYTI1NiI6ImYwZDg1NjIyYjI3MjNkZjA5ZGJiOWFlOTIxYTkwYzM5NWNmMjNmNDY0N2IxZGJjYzQ0MjUzYzM3M2NhZWE2ODIiLCJjb25maWdfcGF0aF9zaGEyNTYiOiIxZjczNDM0YjRmMDBhOTJkZjUzYTBkNzZiNWViZTk0ZTRkMjQ0OGNhZDRlZTcwYWM3MTY5Nzc1NjIwYjBjNGI5IiwiY2hhbmdlcyI6eyJtb2RlbCI6eyJhY3Rpb24iOiJjbGVhciJ9LCJiYXNlX3VybCI6eyJhY3Rpb24iOiJjbGVhciJ9fX0gICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICA=",
+      "stdin_sha256": "e7cc22985af2bc06823746dd2bd68a373e5d7a7f8034ed88b0f3f8f0648a24c7",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"invalid-input\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "dcada7fb674c564d3fa0e6bd129084ac20b5f3b1501715e5eaa1db0f61c5db9b",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682",
+      "config_after_sha256": "f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682"
+    },
+    {
+      "name": "prepare-clear",
+      "command": [
+        "--model-settings-operation",
+        "prepare",
+        "--model-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtb2RlbF9zZXR0aW5nc192ZXJzaW9uIjoxLCJvcGVyYXRpb24iOiI5NWZiZmZjOS0wY2Q2LTQyNTktOWU5YS1kMjA1ZWU2Y2E0MGYiLCJiYXNlX3NoYTI1NiI6ImYwZDg1NjIyYjI3MjNkZjA5ZGJiOWFlOTIxYTkwYzM5NWNmMjNmNDY0N2IxZGJjYzQ0MjUzYzM3M2NhZWE2ODIiLCJjb25maWdfcGF0aF9zaGEyNTYiOiIxZjczNDM0YjRmMDBhOTJkZjUzYTBkNzZiNWViZTk0ZTRkMjQ0OGNhZDRlZTcwYWM3MTY5Nzc1NjIwYjBjNGI5IiwiY2hhbmdlcyI6eyJtb2RlbCI6eyJhY3Rpb24iOiJjbGVhciJ9LCJiYXNlX3VybCI6eyJhY3Rpb24iOiJjbGVhciJ9fX0=",
+      "stdin_sha256": "c398328f045a01a37a87fed8d0f3ed72c36f1eb753ec16228f17bf7f3bd77aa9",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"ok\",\"outcome\":\"prepared\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"before\":{\"base_url\":{\"origin\":\"declared\",\"present\":true},\"model\":{\"origin\":\"declared\",\"present\":true}},\"after\":{\"base_url\":{\"origin\":\"default\",\"present\":false},\"model\":{\"origin\":\"default\",\"present\":false}},\"intent\":{\"model_settings_version\":1,\"operation\":\"95fbffc9-0cd6-4259-9e9a-d205ee6ca40f\",\"base_sha256\":\"f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682\",\"target_sha256\":\"1b6993b03981c1cbf9976b0fc0d772be53236dacfd4e9a1c546f30e641cdbffa\",\"config_path_sha256\":\"1f73434b4f00a92df53a0d76b5ebe94e4d2448cad4ee70ac7169775620b0c4b9\",\"changes_sha256\":\"69d77b98f5ed5fce039db4e8124013277e797d704f10d60e44d263d3e25cda30\"}}}\n",
+      "stdout_sha256": "8a8227ba3c5430995290647f3dc6b89198a2c6aff6bf29bf2e7217fe8ffca55e",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682",
+      "config_after_sha256": "f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682"
+    },
+    {
+      "name": "apply-clear",
+      "command": [
+        "--model-settings-operation",
+        "apply",
+        "--model-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibW9kZWxfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiOTVmYmZmYzktMGNkNi00MjU5LTllOWEtZDIwNWVlNmNhNDBmIiwiYmFzZV9zaGEyNTYiOiJmMGQ4NTYyMmIyNzIzZGYwOWRiYjlhZTkyMWE5MGMzOTVjZjIzZjQ2NDdiMWRiY2M0NDI1M2MzNzNjYWVhNjgyIiwidGFyZ2V0X3NoYTI1NiI6IjFiNjk5M2IwMzk4MWMxY2JmOTk3NmIwZmMwZDc3MmJlNTMyMzZkYWNmZDRlOWExYzU0NmYzMGU2NDFjZGJmZmEiLCJjb25maWdfcGF0aF9zaGEyNTYiOiIxZjczNDM0YjRmMDBhOTJkZjUzYTBkNzZiNWViZTk0ZTRkMjQ0OGNhZDRlZTcwYWM3MTY5Nzc1NjIwYjBjNGI5IiwiY2hhbmdlc19zaGEyNTYiOiI2OWQ3N2I5OGY1ZWQ1ZmNlMDM5ZGI0ZTgxMjQwMTMyNzdlNzk3ZDcwNGYxMGQ2MGU0NGQyNjNkM2UyNWNkYTMwIn0sImNoYW5nZXMiOnsibW9kZWwiOnsiYWN0aW9uIjoiY2xlYXIifSwiYmFzZV91cmwiOnsiYWN0aW9uIjoiY2xlYXIifX19",
+      "stdin_sha256": "beb39d3463da458e64fef90e7f376b1f525bc091b32ffabef4eddeda1ab1bb9b",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"ok\",\"outcome\":\"verified\",\"disk_readback_verified\":true,\"runtime_activation\":\"restart-required\",\"data\":{\"target_sha256\":\"1b6993b03981c1cbf9976b0fc0d772be53236dacfd4e9a1c546f30e641cdbffa\",\"current\":{\"base_url\":{\"origin\":\"default\",\"present\":false},\"model\":{\"origin\":\"default\",\"present\":false}}}}\n",
+      "stdout_sha256": "92326d9c48a6d2195269a700408467297e691841c292cd8946afa46d246d7c1b",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "f0d85622b2723df09dbb9ae921a90c395cf23f4647b1dbcc44253c373caea682",
+      "config_after_sha256": "1b6993b03981c1cbf9976b0fc0d772be53236dacfd4e9a1c546f30e641cdbffa"
+    },
+    {
+      "name": "inspect-cleared",
+      "command": [
+        "--model-settings-operation",
+        "inspect"
+      ],
+      "stdin_base64": null,
+      "stdin_sha256": null,
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"schema_version\":1,\"base_sha256\":\"1b6993b03981c1cbf9976b0fc0d772be53236dacfd4e9a1c546f30e641cdbffa\",\"config_path_sha256\":\"1f73434b4f00a92df53a0d76b5ebe94e4d2448cad4ee70ac7169775620b0c4b9\",\"current\":{\"base_url\":{\"origin\":\"default\",\"present\":false},\"model\":{\"origin\":\"default\",\"present\":false}}}}\n",
+      "stdout_sha256": "d707a13d67d7a80222560dd5fdcc9a0da8b859c8bffd6e8522f4aac94cd759d2",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "1b6993b03981c1cbf9976b0fc0d772be53236dacfd4e9a1c546f30e641cdbffa",
+      "config_after_sha256": "1b6993b03981c1cbf9976b0fc0d772be53236dacfd4e9a1c546f30e641cdbffa"
+    },
+    {
+      "name": "inspect-uninitialized",
+      "command": [
+        "--model-settings-operation",
+        "inspect"
+      ],
+      "stdin_base64": null,
+      "stdin_sha256": null,
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"inspect\",\"status\":\"ok\",\"outcome\":\"read-only\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"schema_version\":1,\"base_sha256\":\"f2df058d196d48d6010c3ec1b19cd1be4459f1670bdbfc8eb43a02f1e708e736\",\"config_path_sha256\":\"64842124846ddca87cb7ba50d829716b38aef59852d664c354917b75a6a58ba2\",\"current\":{\"base_url\":{\"origin\":\"declared\",\"present\":true},\"model\":{\"origin\":\"declared-null\",\"present\":false}}}}\n",
+      "stdout_sha256": "360766fc33cd2360f0d27b0b23c1e4850826177c3a10d9d1ee4caac05dc9b28f",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "f2df058d196d48d6010c3ec1b19cd1be4459f1670bdbfc8eb43a02f1e708e736",
+      "config_after_sha256": "f2df058d196d48d6010c3ec1b19cd1be4459f1670bdbfc8eb43a02f1e708e736"
+    },
+    {
+      "name": "prepare-uninitialized",
+      "command": [
+        "--model-settings-operation",
+        "prepare",
+        "--model-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJtb2RlbF9zZXR0aW5nc192ZXJzaW9uIjoxLCJvcGVyYXRpb24iOiI3Y2RhOTQ3Ny05YjUyLTQ0YzAtYjlmYi1hOTgxZDVlY2FmMmYiLCJiYXNlX3NoYTI1NiI6ImYyZGYwNThkMTk2ZDQ4ZDYwMTBjM2VjMWIxOWNkMWJlNDQ1OWYxNjcwYmRiZmM4ZWI0M2EwMmYxZTcwOGU3MzYiLCJjb25maWdfcGF0aF9zaGEyNTYiOiI2NDg0MjEyNDg0NmRkY2E4N2NiN2JhNTBkODI5NzE2YjM4YWVmNTk4NTJkNjY0YzM1NDkxN2I3NWE2YTU4YmEyIiwiY2hhbmdlcyI6eyJtb2RlbCI6eyJhY3Rpb24iOiJzZXQiLCJ2YWx1ZSI6IiBQUklWQVRFX01PREVMXHJcbiDmqKHlnosgzrEgIn0sImJhc2VfdXJsIjp7ImFjdGlvbiI6InNldCIsInZhbHVlIjoiaHR0cHM6Ly9QUklWQVRFX1VTRVI6UFJJVkFURV9QQVNTV09SREBpbnZhbGlkL3YxP3E9UFJJVkFURV9RVUVSWSNQUklWQVRFX0ZSQUdNRU5UXHJcbiBcdCJ9fX0=",
+      "stdin_sha256": "7059b6bd60cf4f6eef86d940fb11122c1b24a139b5c1f1d5b3299c019a5c74e0",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"prepare\",\"status\":\"ok\",\"outcome\":\"prepared\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":{\"before\":{\"base_url\":{\"origin\":\"declared\",\"present\":true},\"model\":{\"origin\":\"declared-null\",\"present\":false}},\"after\":{\"base_url\":{\"origin\":\"declared\",\"present\":true},\"model\":{\"origin\":\"declared\",\"present\":true}},\"intent\":{\"model_settings_version\":1,\"operation\":\"7cda9477-9b52-44c0-b9fb-a981d5ecaf2f\",\"base_sha256\":\"f2df058d196d48d6010c3ec1b19cd1be4459f1670bdbfc8eb43a02f1e708e736\",\"target_sha256\":\"298f25559085210f01c4f79200cad035af364fb99eda960abdd90b4cca1e19fa\",\"config_path_sha256\":\"64842124846ddca87cb7ba50d829716b38aef59852d664c354917b75a6a58ba2\",\"changes_sha256\":\"9dc23987078c871758e75caf2243e98ef135ec03799a0a7df79a34552ff40433\"}}}\n",
+      "stdout_sha256": "ca621017af5977427e93a0e2fb7f2cf1fa4de1f17a0d8ccf6b883a14b53652e9",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "f2df058d196d48d6010c3ec1b19cd1be4459f1670bdbfc8eb43a02f1e708e736",
+      "config_after_sha256": "f2df058d196d48d6010c3ec1b19cd1be4459f1670bdbfc8eb43a02f1e708e736"
+    },
+    {
+      "name": "apply-uninitialized",
+      "command": [
+        "--model-settings-operation",
+        "apply",
+        "--model-settings-input",
+        "-"
+      ],
+      "stdin_base64": "eyJpbnRlbnQiOnsibW9kZWxfc2V0dGluZ3NfdmVyc2lvbiI6MSwib3BlcmF0aW9uIjoiN2NkYTk0NzctOWI1Mi00NGMwLWI5ZmItYTk4MWQ1ZWNhZjJmIiwiYmFzZV9zaGEyNTYiOiJmMmRmMDU4ZDE5NmQ0OGQ2MDEwYzNlYzFiMTljZDFiZTQ0NTlmMTY3MGJkYmZjOGViNDNhMDJmMWU3MDhlNzM2IiwidGFyZ2V0X3NoYTI1NiI6IjI5OGYyNTU1OTA4NTIxMGYwMWM0Zjc5MjAwY2FkMDM1YWYzNjRmYjk5ZWRhOTYwYWJkZDkwYjRjY2ExZTE5ZmEiLCJjb25maWdfcGF0aF9zaGEyNTYiOiI2NDg0MjEyNDg0NmRkY2E4N2NiN2JhNTBkODI5NzE2YjM4YWVmNTk4NTJkNjY0YzM1NDkxN2I3NWE2YTU4YmEyIiwiY2hhbmdlc19zaGEyNTYiOiI5ZGMyMzk4NzA3OGM4NzE3NThlNzVjYWYyMjQzZTk4ZWYxMzVlYzAzNzk5YTBhN2RmNzlhMzQ1NTJmZjQwNDMzIn0sImNoYW5nZXMiOnsibW9kZWwiOnsiYWN0aW9uIjoic2V0IiwidmFsdWUiOiIgUFJJVkFURV9NT0RFTFxyXG4g5qih5Z6LIM6xICJ9LCJiYXNlX3VybCI6eyJhY3Rpb24iOiJzZXQiLCJ2YWx1ZSI6Imh0dHBzOi8vUFJJVkFURV9VU0VSOlBSSVZBVEVfUEFTU1dPUkRAaW52YWxpZC92MT9xPVBSSVZBVEVfUVVFUlkjUFJJVkFURV9GUkFHTUVOVFxyXG4gXHQifX19",
+      "stdin_sha256": "b8b24149088289d66843d6860b30e7be4063d3342375b3ad8a5fa9221fe88f4d",
+      "stdout_utf8": "{\"report_version\":1,\"operation\":\"apply\",\"status\":\"unavailable\",\"outcome\":\"not-dispatched\",\"disk_readback_verified\":false,\"runtime_activation\":\"unverified\",\"data\":null}\n",
+      "stdout_sha256": "08375596d3dce4ce15580b6769359f37de1e1623ad34ea191154d508ca2911e4",
+      "exit_code": 0,
+      "stderr_utf8": "",
+      "config_before_sha256": "f2df058d196d48d6010c3ec1b19cd1be4459f1670bdbfc8eb43a02f1e708e736",
+      "config_after_sha256": "f2df058d196d48d6010c3ec1b19cd1be4459f1670bdbfc8eb43a02f1e708e736"
+    }
+  ]
+}

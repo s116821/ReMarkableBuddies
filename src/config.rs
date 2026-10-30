@@ -1,5 +1,13 @@
 //! Nonsecret file settings. Credentials are selected through protected references.
+pub mod basic;
+pub mod credential_reference;
+pub mod inspection;
+pub mod memory_settings;
+pub mod model_credential;
+pub mod model_settings;
 pub mod personalization;
+pub mod research_settings;
+use crate::conversation::receiving::memory::research::ResearchPolicy;
 use crate::{
     llm::openai::DEFAULT_MODEL,
     storage::{files, Namespace, StorePaths, Uuid, MAX_MEDIA, MAX_RECORD},
@@ -45,6 +53,10 @@ impl SyncPolicy {
             (5..=3600).contains(&self.poll_seconds) && (1..=128).contains(&self.batch_items),
             "invalid sync work limits"
         );
+        ensure!(
+            !self.namespaces.contains(&Namespace::UnassociatedFeedback),
+            "unassociated feedback live sync unsupported"
+        );
         ensure!(self.max_media_bytes <= MAX_MEDIA, "invalid media limit");
         ensure!(
             self.collection.is_none_or(|c| !c.is_nil()),
@@ -72,6 +84,12 @@ pub struct Config {
     pub sync: SyncPolicy,
     pub memory: crate::memory::Configuration,
     pub personalization: Personalization,
+    #[serde(
+        default,
+        deserialize_with = "research_settings::present_policy",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub research_policy: Option<Option<ResearchPolicy>>,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -87,6 +105,7 @@ impl Default for Config {
             sync: SyncPolicy::default(),
             memory: crate::memory::Configuration::default(),
             personalization: Personalization::default(),
+            research_policy: None,
         }
     }
 }
@@ -117,14 +136,11 @@ impl Config {
         self.sync.validate()?;
         self.memory.validate()?;
         ensure!(
-            !(self.memory.selection.is_some() && self.sync.enabled),
-            "selected memory requires the separately qualified selected sync worker"
-        );
-        ensure!(
-            !(self.memory.enabled
-                && self.sync.enabled
-                && self.sync.namespaces.contains(&Namespace::SubjectMemory)),
-            "selected memory sync requires its qualified membership adapter"
+            !(self.sync.enabled
+                && (self.memory.selection.is_some()
+                    || (self.memory.enabled
+                        && self.sync.namespaces.contains(&Namespace::SubjectMemory)))),
+            "host memory requires separately qualified selected sync"
         );
         self.personalization.validate()?;
         if let Some(model) = &self.model {
@@ -163,6 +179,11 @@ impl Config {
     /// Snapshot a verified preference without changing request/history or authority.
     pub fn personalization_snapshot(&self) -> Result<PersonalizationSnapshot> {
         self.personalization.snapshot()
+    }
+
+    /// Pure saved declaration/default capture; no file or runtime lookup.
+    pub fn research_policy_snapshot(&self) -> Result<research_settings::ResearchPolicySnapshot> {
+        research_settings::ResearchPolicySnapshot::capture(self)
     }
 }
 

@@ -205,6 +205,21 @@ pub struct ImageUse {
     pub target: Option<[f64; 2]>,
     pub captured_ms: u64,
 }
+/// Historical acquisition shape, never current-device qualification.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum BindingAcquisition {
+    #[default]
+    Inserted,
+    ExistingCurrent,
+    ExistingAdjacent,
+}
+impl BindingAcquisition {
+    pub(crate) fn is_inserted(&self) -> bool {
+        *self == Self::Inserted
+    }
+}
+pub const EXISTING_BINDING_SCHEMA: u32 = 2;
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct BindingReceipt {
@@ -222,6 +237,10 @@ pub struct BindingReceipt {
     pub observed_ms: u64,
     /// Domain fixtures are synthetic; SDK native qualification is a separate gate.
     pub evidence_origin: String,
+    /// Omission preserves the exact schema-1 insertion serialization/fingerprint.
+    /// Nondefault forms require a schema-2 Binding envelope and unchanged order.
+    #[serde(default, skip_serializing_if = "BindingAcquisition::is_inserted")]
+    pub acquisition: BindingAcquisition,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -278,9 +297,14 @@ pub struct Receipt {
 )]
 pub enum Record {
     Root(Root),
+    RequestEvidence(Box<super::evidence::RequestEvidence>),
     Turn(Turn),
     Source(ImageUse),
     Capture(Box<CaptureEvidence>),
+    NormalizedText(Box<super::NormalizedTextSource>),
+    ArchivedNormalizedSource(Box<super::ArchivedNormalizedSource>),
+    NotebookPlan(Box<super::notebook::NotebookPlan>),
+    NotebookStage(Box<super::notebook::NotebookStage>),
     LegacyCapture(LegacyCapture),
     DevelopmentCapture(Box<super::development::DevelopmentCaptureHistory>),
     OutcomeFact(OutcomeFact),
@@ -312,7 +336,8 @@ pub struct WriteResult {
     pub current_root: Vec<crate::storage::Envelope>,
     pub current_binding: Vec<crate::storage::Envelope>,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContextBudget {
     pub max_text_bytes: usize,
     pub max_turns: usize,
@@ -324,12 +349,15 @@ pub struct ContextView {
     pub turns: Vec<Turn>,
     pub sources: Vec<ImageUse>,
     pub captures: Vec<CaptureEvidence>,
+    pub normalized_text: Vec<super::NormalizedTextSource>,
+    pub archived_sources: Vec<super::ArchivedNormalizedSource>,
     pub legacy_captures: Vec<LegacyCapture>,
     pub development_captures: Vec<super::development::DevelopmentCaptureHistory>,
     pub missing_media: Vec<Media>,
     pub selection: Option<TurnRange>,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct TurnRange {
     pub start: u64,
     pub end_exclusive: u64,

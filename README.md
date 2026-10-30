@@ -1,5 +1,8 @@
 # ReMarkableBuddies
 
+See [application documentation](docs/README.md) for development, technical, release
+and fixture guides.
+
 The [public ecosystem hub](https://github.com/s116821/RemarkableBuddiesDocs) owns
 all OpenSpec specs, active changes, archives, config and workflow skills.
 Start with its [contributor guide](https://github.com/s116821/RemarkableBuddiesDocs/blob/main/CONTRIBUTING.md)
@@ -692,7 +695,7 @@ and external-writer/platform immutability are separate qualifications.
 
 Ordinary local builds report development/unavailable metadata; controlled CI
 candidates embed their frozen future version but are not published releases.
-See [release tools, evidence limits and recovery](release/README.md) and the linked
+See [release tools, evidence limits and recovery](docs/release-workflow.md) and the linked
 central Docs contract for pins, local controls and coordinated delivery.
 
 ## Contributing
@@ -724,6 +727,8 @@ See LICENSE file for details.
 - **[Technical Documentation](docs/TECHNICAL.md)** - Architecture, implementation details, and TODOs
 - **[Workflow Diagrams](docs/WORKFLOW_DIAGRAM.md)** - Visual CI/CD and app workflow diagrams
 - **[Prepared note export](docs/reference/prepared-note-export.md)** - Explicit Mem export, stable correlation, re-export and reconciliation
+- **[Writer drafts](docs/reference/writer-drafts.md)** - Generate/refine unrendered drafts from supplied text and deliberately prepare export content
+- **[Maintenance guides](docs/maintenance.md)** - Saved configuration, memory, archives, caches and conversation maintenance
 
 ## Acknowledgments
 
