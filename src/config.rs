@@ -9,6 +9,7 @@ pub mod personalization;
 pub mod product;
 pub mod product_settings;
 pub mod research_settings;
+pub mod schema;
 use crate::conversation::receiving::memory::research::ResearchPolicy;
 use crate::{
     llm::openai::DEFAULT_MODEL,

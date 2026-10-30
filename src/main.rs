@@ -13,6 +13,9 @@ use std::time::Duration;
 #[command(author, version = env!("READER_BUDDY_VERSION"))]
 #[command(about = "ReMarkable Reader Buddy - AI-powered reading assistant for reMarkable tablets")]
 pub struct Args {
+    /// Emit the embedded canonical-object schema without reading saved configuration
+    #[arg(long, exclusive = true)]
+    configuration_schema: bool,
     /// Fixed installed stock recovery; never starts ordinary application services
     #[arg(long, exclusive = true)]
     resident_stock_recovery: bool,
@@ -169,6 +172,9 @@ fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_lo
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    if args.configuration_schema {
+        return config::schema::write_to(&mut std::io::stdout().lock());
+    }
     if args.resident_stock_recovery {
         return stock_recovery();
     }
@@ -826,6 +832,7 @@ mod tests {
                 "basic-settings-input",
                 "basic-settings-operation",
                 "configuration-operation",
+                "configuration-schema",
                 "conversation-input",
                 "conversation-operation",
                 "credential-reference-input",
@@ -951,6 +958,48 @@ mod tests {
                 clap::error::ErrorKind::ArgumentConflict,
                 "{long}: {error}"
             );
+        }
+    }
+
+    #[test]
+    fn schema_discovery_is_exclusive_with_every_other_argument() {
+        for argument in Args::command().get_arguments() {
+            let Some(long) = argument.get_long() else {
+                continue;
+            };
+            if long == "configuration-schema" {
+                continue;
+            }
+            let mut argv = vec![
+                "reader-buddy".to_owned(),
+                "--configuration-schema".into(),
+                format!("--{long}"),
+            ];
+            if argument.get_action().takes_values() {
+                argv.push(
+                    argument
+                        .get_value_parser()
+                        .possible_values()
+                        .and_then(|mut values| values.next())
+                        .map(|v| v.get_name().to_owned())
+                        .unwrap_or_else(|| {
+                            if long == "log-level" {
+                                "info".into()
+                            } else {
+                                "PRIVATE_SCHEMA_INPUT".into()
+                            }
+                        }),
+                );
+            }
+            let error = Args::try_parse_from(argv)
+                .err()
+                .expect("schema discovery must be exclusive");
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::ArgumentConflict,
+                "{long}: {error}"
+            );
+            assert!(!error.to_string().contains("PRIVATE_SCHEMA_INPUT"));
         }
     }
 

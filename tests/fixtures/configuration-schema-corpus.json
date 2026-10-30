@@ -1,0 +1,286 @@
+{
+  "corpus_version": 1,
+  "scope": "Structural engine validates parsed JSON; typed inspector validates original bytes and semantic values. No runtime admission claim.",
+  "cases": [
+    {
+      "name": "defaults",
+      "raw_utf8": "{}",
+      "schema_valid": true,
+      "typed_valid": true,
+      "basis": "structural"
+    },
+    {
+      "name": "nullable-legacy",
+      "raw_utf8": "{\"model\":null,\"debug_dump\":null,\"model_credential\":null}",
+      "schema_valid": true,
+      "typed_valid": true,
+      "basis": "structural"
+    },
+    {
+      "name": "product-null",
+      "raw_utf8": "{\"product_settings\":null}",
+      "schema_valid": true,
+      "typed_valid": true,
+      "basis": "structural"
+    },
+    {
+      "name": "product-empty",
+      "raw_utf8": "{\"product_settings\":{}}",
+      "schema_valid": true,
+      "typed_valid": true,
+      "basis": "structural"
+    },
+    {
+      "name": "product-version-only",
+      "raw_utf8": "{\"product_settings\":{\"schema_version\":1}}",
+      "schema_valid": true,
+      "typed_valid": true,
+      "basis": "structural"
+    },
+    {
+      "name": "product-partial",
+      "raw_utf8": "{\"product_settings\":{\"writer_enabled\":false}}",
+      "schema_valid": true,
+      "typed_valid": true,
+      "basis": "structural"
+    },
+    {
+      "name": "product-backend",
+      "raw_utf8": "{\"product_settings\":{\"export_destination\":\"disabled\"}}",
+      "schema_valid": true,
+      "typed_valid": true,
+      "basis": "structural"
+    },
+    {
+      "name": "product-future",
+      "raw_utf8": "{\"product_settings\":{\"schema_version\":2}}",
+      "schema_valid": false,
+      "typed_valid": false,
+      "basis": "structural"
+    },
+    {
+      "name": "product-null-leaf",
+      "raw_utf8": "{\"product_settings\":{\"reader_enabled\":null}}",
+      "schema_valid": false,
+      "typed_valid": false,
+      "basis": "structural"
+    },
+    {
+      "name": "product-unknown",
+      "raw_utf8": "{\"product_settings\":{\"key\":true}}",
+      "schema_valid": false,
+      "typed_valid": false,
+      "basis": "structural"
+    },
+    {
+      "name": "product-wrong-type",
+      "raw_utf8": "{\"product_settings\":{\"writer_enabled\":\"false\"}}",
+      "schema_valid": false,
+      "typed_valid": false,
+      "basis": "structural"
+    },
+    {
+      "name": "product-positional",
+      "raw_utf8": "{\"product_settings\":[]}",
+      "schema_valid": false,
+      "typed_valid": false,
+      "basis": "structural"
+    },
+    {
+      "name": "root-array",
+      "raw_utf8": "[]",
+      "schema_valid": false,
+      "typed_valid": false,
+      "basis": "strict canonical object; legacy loader still permits positional array"
+    },
+    {
+      "name": "unknown-root",
+      "raw_utf8": "{\"unknown\":true}",
+      "schema_valid": false,
+      "typed_valid": false,
+      "basis": "structural"
+    },
+    {
+      "name": "incomplete-paths",
+      "raw_utf8": "{\"paths\":{\"data\":\"/synthetic\"}}",
+      "schema_valid": false,
+      "typed_valid": false,
+      "basis": "structural"
+    },
+    {
+      "name": "relative-path-structure",
+      "raw_utf8": "{\"paths\":{\"data\":\"relative\",\"cache\":\"another\",\"credentials\":\"third\"}}",
+      "schema_valid": true,
+      "typed_valid": true,
+      "basis": "filesystem/root admission is separate from typed-values inspector"
+    },
+    {
+      "name": "memory-null",
+      "raw_utf8": "{\"memory\":null}",
+      "schema_valid": false,
+      "typed_valid": false,
+      "basis": "structural"
+    },
+    {
+      "name": "memory-unknown",
+      "raw_utf8": "{\"memory\":{\"extra\":false}}",
+      "schema_valid": false,
+      "typed_valid": false,
+      "basis": "structural"
+    },
+    {
+      "name": "memory-array",
+      "raw_utf8": "{\"memory\":[]}",
+      "schema_valid": false,
+      "typed_valid": false,
+      "basis": "structural"
+    },
+    {
+      "name": "memory-no-profile",
+      "raw_utf8": "{\"memory\":{\"enabled\":true}}",
+      "schema_valid": true,
+      "typed_valid": false,
+      "basis": "typed cross-field rule"
+    },
+    {
+      "name": "uuid-uppercase",
+      "raw_utf8": "{\"memory\":{\"profile\":\"A138B641-A4AA-4AC3-B1D1-091BA27F1470\"}}",
+      "schema_valid": true,
+      "typed_valid": true,
+      "basis": "structural"
+    },
+    {
+      "name": "uuid-compact",
+      "raw_utf8": "{\"memory\":{\"profile\":\"A138B641A4AA4AC3B1D1091BA27F1470\"}}",
+      "schema_valid": true,
+      "typed_valid": true,
+      "basis": "structural"
+    },
+    {
+      "name": "uuid-urn",
+      "raw_utf8": "{\"memory\":{\"profile\":\"urn:uuid:A138B641-A4AA-4AC3-B1D1-091BA27F1470\"}}",
+      "schema_valid": true,
+      "typed_valid": true,
+      "basis": "structural"
+    },
+    {
+      "name": "uuid-braced",
+      "raw_utf8": "{\"memory\":{\"profile\":\"{A138B641-A4AA-4AC3-B1D1-091BA27F1470}\"}}",
+      "schema_valid": true,
+      "typed_valid": true,
+      "basis": "structural"
+    },
+    {
+      "name": "catalog-partial",
+      "raw_utf8": "{\"memory\":{\"selection\":{\"profile\":\"A138B641-A4AA-4AC3-B1D1-091BA27F1470\"}}}",
+      "schema_valid": false,
+      "typed_valid": false,
+      "basis": "structural"
+    },
+    {
+      "name": "sync-defaults",
+      "raw_utf8": "{\"sync\":{}}",
+      "schema_valid": true,
+      "typed_valid": true,
+      "basis": "structural"
+    },
+    {
+      "name": "sync-range",
+      "raw_utf8": "{\"sync\":{\"poll_seconds\":4}}",
+      "schema_valid": false,
+      "typed_valid": false,
+      "basis": "structural"
+    },
+    {
+      "name": "sync-create-no-collection",
+      "raw_utf8": "{\"sync\":{\"create_new\":true}}",
+      "schema_valid": true,
+      "typed_valid": false,
+      "basis": "typed cross-field rule"
+    },
+    {
+      "name": "sync-feedback",
+      "raw_utf8": "{\"sync\":{\"namespaces\":[\"unassociated-feedback\"]}}",
+      "schema_valid": false,
+      "typed_valid": false,
+      "basis": "structural"
+    },
+    {
+      "name": "personalization-defaults",
+      "raw_utf8": "{\"personalization\":{}}",
+      "schema_valid": true,
+      "typed_valid": true,
+      "basis": "structural"
+    },
+    {
+      "name": "personalization-nul",
+      "raw_utf8": "{\"personalization\":{\"text\":\"a\\u0000b\"}}",
+      "schema_valid": false,
+      "typed_valid": false,
+      "basis": "structural"
+    },
+    {
+      "name": "research-required",
+      "raw_utf8": "{\"research_policy\":\"required\"}",
+      "schema_valid": true,
+      "typed_valid": true,
+      "basis": "structural"
+    },
+    {
+      "name": "research-disabled",
+      "raw_utf8": "{\"research_policy\":\"disabled\"}",
+      "schema_valid": true,
+      "typed_valid": true,
+      "basis": "structural"
+    },
+    {
+      "name": "research-None",
+      "raw_utf8": "{\"research_policy\":null}",
+      "schema_valid": true,
+      "typed_valid": true,
+      "basis": "structural"
+    },
+    {
+      "name": "research-unknown",
+      "raw_utf8": "{\"research_policy\":\"other\"}",
+      "schema_valid": false,
+      "typed_valid": false,
+      "basis": "structural"
+    },
+    {
+      "name": "credential-invalid-character",
+      "raw_utf8": "{\"model_credential\":\"name\\n\"}",
+      "schema_valid": false,
+      "typed_valid": false,
+      "basis": "structural"
+    },
+    {
+      "name": "model-whitespace",
+      "raw_utf8": "{\"model\":\"  \"}",
+      "schema_valid": true,
+      "typed_valid": false,
+      "basis": "typed trimmed nonempty rule"
+    },
+    {
+      "name": "model-multibyte",
+      "raw_utf8": "{\"model\":\"\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\"}",
+      "schema_valid": true,
+      "typed_valid": false,
+      "basis": "code points versus UTF8 bytes"
+    },
+    {
+      "name": "float-token",
+      "raw_utf8": "{\"product_settings\":{\"schema_version\":1.0}}",
+      "schema_valid": true,
+      "typed_valid": false,
+      "basis": "JSON Schema numeric equality versus lexical Rust token"
+    },
+    {
+      "name": "duplicate-member",
+      "raw_utf8": "{\"product_settings\":{\"writer_enabled\":true,\"writer_enabled\":false}}",
+      "schema_valid": true,
+      "typed_valid": false,
+      "basis": "duplicate JSON keys require original-byte parser"
+    }
+  ]
+}
