@@ -13,6 +13,9 @@ use std::time::Duration;
 #[command(author, version = env!("READER_BUDDY_VERSION"))]
 #[command(about = "ReMarkable Reader Buddy - AI-powered reading assistant for reMarkable tablets")]
 pub struct Args {
+    /// Existing-only generation-inclusive accounting; no runtime activation
+    #[arg(long, exclusive = true)]
+    inspect_owned_data_v3: bool,
     /// Emit the embedded canonical-object schema without reading saved configuration
     #[arg(long, exclusive = true)]
     configuration_schema: bool,
@@ -471,6 +474,14 @@ fn main() -> Result<()> {
         report.write_to(&mut std::io::stdout().lock())?;
         return Ok(());
     }
+    if args.inspect_owned_data_v3 {
+        let report = match Config::load(std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into)) {
+            Ok(config) => remarkable_reader_buddy::storage::inspection_v3::inspect_owned_data(&config.paths),
+            Err(_) => remarkable_reader_buddy::storage::inspection_v3::Inspection::configuration_unavailable(),
+        };
+        report.write_to(&mut std::io::stdout().lock())?;
+        return Ok(());
+    }
     if args.inspect_owned_data {
         let report = match Config::load(std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into)) {
             Ok(config) => remarkable_reader_buddy::storage::inspection::inspect_owned_data(&config.paths),
@@ -842,6 +853,7 @@ mod tests {
                 "handwriting",
                 "inspect-conversations",
                 "inspect-owned-data",
+                "inspect-owned-data-v3",
                 "inspect-source-cache",
                 "log-level",
                 "memory-input",
@@ -963,43 +975,45 @@ mod tests {
 
     #[test]
     fn schema_discovery_is_exclusive_with_every_other_argument() {
-        for argument in Args::command().get_arguments() {
-            let Some(long) = argument.get_long() else {
-                continue;
-            };
-            if long == "configuration-schema" {
-                continue;
-            }
-            let mut argv = vec![
-                "reader-buddy".to_owned(),
-                "--configuration-schema".into(),
-                format!("--{long}"),
-            ];
-            if argument.get_action().takes_values() {
-                argv.push(
-                    argument
-                        .get_value_parser()
-                        .possible_values()
-                        .and_then(|mut values| values.next())
-                        .map(|v| v.get_name().to_owned())
-                        .unwrap_or_else(|| {
-                            if long == "log-level" {
-                                "info".into()
-                            } else {
-                                "PRIVATE_SCHEMA_INPUT".into()
-                            }
-                        }),
+        for selector in ["configuration-schema", "inspect-owned-data-v3"] {
+            for argument in Args::command().get_arguments() {
+                let Some(long) = argument.get_long() else {
+                    continue;
+                };
+                if long == selector {
+                    continue;
+                }
+                let mut argv = vec![
+                    "reader-buddy".to_owned(),
+                    format!("--{selector}"),
+                    format!("--{long}"),
+                ];
+                if argument.get_action().takes_values() {
+                    argv.push(
+                        argument
+                            .get_value_parser()
+                            .possible_values()
+                            .and_then(|mut values| values.next())
+                            .map(|v| v.get_name().to_owned())
+                            .unwrap_or_else(|| {
+                                if long == "log-level" {
+                                    "info".into()
+                                } else {
+                                    "PRIVATE_SCHEMA_INPUT".into()
+                                }
+                            }),
+                    );
+                }
+                let error = Args::try_parse_from(argv)
+                    .err()
+                    .expect("schema discovery must be exclusive");
+                assert_eq!(
+                    error.kind(),
+                    clap::error::ErrorKind::ArgumentConflict,
+                    "{long}: {error}"
                 );
+                assert!(!error.to_string().contains("PRIVATE_SCHEMA_INPUT"));
             }
-            let error = Args::try_parse_from(argv)
-                .err()
-                .expect("schema discovery must be exclusive");
-            assert_eq!(
-                error.kind(),
-                clap::error::ErrorKind::ArgumentConflict,
-                "{long}: {error}"
-            );
-            assert!(!error.to_string().contains("PRIVATE_SCHEMA_INPUT"));
         }
     }
 
