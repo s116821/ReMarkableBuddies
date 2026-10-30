@@ -19,6 +19,202 @@ struct Model {
     cancel: Option<Shared>,
 }
 
+struct ReplacingModel {
+    inner: Model,
+    replace: Option<Box<dyn FnOnce()>>,
+}
+impl LLMEngine for ReplacingModel {
+    fn add_text_content(&mut self, text: &str) {
+        self.inner.add_text_content(text);
+    }
+    fn add_image_content(&mut self, image: &str) {
+        self.inner.add_image_content(image);
+    }
+    fn clear_content(&mut self) {
+        self.inner.clear_content();
+    }
+    fn execute(&mut self) -> Result<String> {
+        if self.inner.calls.borrow().len() == 2 {
+            if let Some(replace) = self.replace.take() {
+                replace();
+            }
+        }
+        self.inner.execute()
+    }
+}
+
+struct BoundaryReplacement {
+    memory: Arc<memory::selected::SelectedMemory>,
+    replacement: std::sync::Mutex<Option<memory::Mutation>>,
+    forge_query: bool,
+}
+impl Provider for BoundaryReplacement {
+    fn put(&self, value: memory::Mutation) -> Result<Uuid> {
+        self.memory.put(value)
+    }
+    fn forget(&self, value: memory::Forget) -> Result<Uuid> {
+        self.memory.forget(value)
+    }
+    fn inspect(&self, key: &memory::Key) -> Result<Vec<crate::storage::Envelope>> {
+        self.memory.inspect(key)
+    }
+    fn query(&self, query: &memory::Query) -> Result<memory::QueryResult> {
+        let mut view = self.memory.query(query)?;
+        if self.forge_query {
+            view.context.facts[0].fact.value = "forged selected answer context".into();
+        }
+        Ok(view)
+    }
+    fn with_current(
+        &self,
+        view: &memory::QueryResult,
+        consume: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        if let Some(replacement) = self.replacement.lock().unwrap().take() {
+            self.memory.put(replacement)?;
+        }
+        self.memory.with_current(view, consume)
+    }
+}
+
+#[test]
+fn selected_reader_revalidates_after_model_and_at_actual_journal_boundary_without_native_output() {
+    for mode in 0..4 {
+        let (state, workflow) = setup();
+        let fixture = SimulatorLedger::new();
+        let ledger = fixture.open().unwrap();
+        let store = ledger.store().clone();
+        let profile = Uuid::new_v4();
+        let identity = memory::catalog::Identity {
+            group: Uuid::new_v4(),
+            profile,
+            binding_sha256: crate::storage::digest(
+                b"synthetic local binding, not native/cloud authority",
+            ),
+        };
+        let memory =
+            Arc::new(memory::selected::SelectedMemory::new(store.clone(), identity).unwrap());
+        let fact = memory::Fact {
+            key: memory::Key {
+                profile,
+                scope: memory::Scope::Global,
+                fact: Uuid::new_v4(),
+            },
+            claim: "gravity convention".into(),
+            value: "G unc. uses SI gravity units".into(),
+            subject: "gravity".into(),
+            tags: vec!["unc".into()],
+            provenance: memory::Provenance {
+                basis: memory::Basis::UserConfirmed,
+                description: "Explicit host fixture".into(),
+                conversation: None,
+                turn: None,
+                source: None,
+            },
+            confidence_basis_points: 9000,
+            observed_ms: 1,
+            expires_ms: None,
+        };
+        let created = memory
+            .initialize_aggregate(memory::selected::InitializeAggregate {
+                operation: Uuid::new_v4(),
+                accepted_base_sha256: crate::storage::digest(b"aggregate"),
+                fact: fact.clone(),
+            })
+            .unwrap();
+        memory
+            .initialize_selection(memory::selected::InitializeSelection {
+                operation: Uuid::new_v4(),
+                accepted_base_sha256: crate::storage::digest(b"catalog"),
+                registrations: vec![created.registration.unwrap()],
+            })
+            .unwrap();
+        let expected = memory
+            .inspect(&fact.key)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.revision_id)
+            .collect();
+        let mut changed = fact.clone();
+        changed.value = "G unc. uses a corrected convention".into();
+        let mutation = memory::Mutation {
+            operation: Uuid::new_v4(),
+            expected,
+            fact: changed,
+        };
+        let calls = Rc::new(RefCell::new(vec![]));
+        let inner = Model {current:Request::default(),calls:calls.clone(),replies:VecDeque::from([
+            "QUESTION: G unc.?\nQUESTION_BOX: 130,35,200,50\nSELECTION_CENTER: 385,230\n---\nANSWER: Original proposal.".into(),
+            "TRANSCRIPTION: G unc.?".into(),"ANSWER: Enriched gravity answer.".into(),
+        ]),cancel:None};
+        let replace_memory = memory.clone();
+        let replacement = mutation.clone();
+        let model = ReplacingModel {
+            inner,
+            replace: (mode == 0).then(|| {
+                Box::new(move || {
+                    replace_memory.put(replacement).unwrap();
+                }) as Box<dyn FnOnce()>
+            }),
+        };
+        let provider: Arc<dyn Provider> = if mode == 1 || mode == 3 {
+            Arc::new(BoundaryReplacement {
+                memory: memory.clone(),
+                replacement: std::sync::Mutex::new((mode == 1).then_some(mutation)),
+                forge_query: mode == 3,
+            })
+        } else {
+            memory.clone()
+        };
+        let mut reader = Orchestrator::new(workflow, model, ledger);
+        reader.set_trigger_enabled(false);
+        reader.set_subject_memory(Some(provider));
+        let result = reader.run_iteration();
+        assert_eq!(result.is_ok(), mode == 2);
+        assert_eq!(calls.borrow().len(), if mode == 3 { 2 } else { 3 });
+        if mode == 3 {
+            assert!(format!("{:#}", result.unwrap_err())
+                .contains("selected memory result payload changed"));
+        }
+        let envelopes = store
+            .snapshot_heads_matching(&[Namespace::Conversation], 4096, |_| true)
+            .unwrap();
+        let turns: Vec<_> = envelopes
+            .iter()
+            .filter_map(|e| serde_json::from_value::<Record>(e.payload.clone()).ok())
+            .filter_map(|r| {
+                if let Record::Turn(t) = r {
+                    Some(t)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(turns
+            .iter()
+            .any(|t| t.role == Role::User && t.text.as_deref() == Some("G unc.?")));
+        if mode != 2 {
+            assert!(turns.iter().all(|t| t.role != Role::Assistant));
+            assert!(
+                turns
+                    .iter()
+                    .any(|t| t.role == Role::User
+                        && t.outcome == crate::conversation::Outcome::Failed)
+            );
+        } else {
+            assert!(turns
+                .iter()
+                .any(|t| t.role == Role::Assistant
+                    && t.outcome == crate::conversation::Outcome::Failed));
+        }
+        let state = state.borrow();
+        assert!(state.pages.iter().all(|page| page.text.is_empty()));
+        assert!(!state
+            .events
+            .iter()
+            .any(|event| matches!(event.action.as_str(), "text" | "next")));
+    }
+}
 impl LLMEngine for Model {
     fn add_text_content(&mut self, text: &str) {
         self.current.text.push(text.into());
