@@ -7,7 +7,7 @@ use crate::{
     storage::{
         digest, files,
         selection::{SelectedReadBudget, SelectionScope, SelectionToken},
-        sync::mode::{SyncMode, SyncModeLease},
+        sync::mode::{OrdinaryModeLease, SyncMode, SyncModeLease, SyncModeSnapshot},
         Store, Uuid, MAX_ITEMS, MAX_METADATA, MAX_RECORD,
     },
     Workflow,
@@ -194,21 +194,28 @@ impl StartupDecision {
     }
 }
 fn ordinary_mode(store: &Store, config: &Config) -> std::result::Result<(), Status> {
+    ordinary_mode_snapshot(store, config).map(|_| ())
+}
+fn ordinary_mode_snapshot(
+    store: &Store,
+    config: &Config,
+) -> std::result::Result<SyncModeSnapshot, Status> {
     let mode = store
         .sync_mode_snapshot()
         .map_err(|_| Status::Unavailable)?;
-    match mode.mode {
-        None => Ok(()),
-        Some(SyncMode::LocalOnly) if !config.sync.enabled => Ok(()),
+    match &mode.mode {
+        None => Ok(mode),
+        Some(SyncMode::LocalOnly) if !config.sync.enabled => Ok(mode),
         _ => Err(Status::Unsupported),
     }
 }
 /// Consume the startup-admitted Store once. Fresh ordinary roots are created
-/// only after credential validation; a raced nonlocal choice still refuses here.
+/// only after credential validation. Keep the returned mode guard alive through
+/// every ordinary consumer; the Arc alone does not pin the admitted mode.
 pub fn ordinary_store(
     config: &Config,
     admitted: Option<Arc<Store>>,
-) -> std::result::Result<Arc<Store>, Box<Report>> {
+) -> std::result::Result<(Arc<Store>, OrdinaryModeLease), Box<Report>> {
     let store = match admitted {
         Some(store) => store,
         None => {
@@ -227,8 +234,13 @@ pub fn ordinary_store(
             })?)
         }
     };
-    ordinary_mode(&store, config).map_err(|status| Box::new(Report::new("startup", status)))?;
-    Ok(store)
+    let mode = ordinary_mode_snapshot(&store, config)
+        .map_err(|status| Box::new(Report::new("startup", status)))?;
+    // Do not refresh a stale token into a different mode after admission.
+    let lease = store
+        .ordinary_mode_lease(&mode.token)
+        .map_err(|_| Box::new(Report::new("startup", Status::Unavailable)))?;
+    Ok((store, lease))
 }
 fn selected_mode(
     store: &Arc<Store>,
@@ -669,14 +681,73 @@ mod tests {
             panic!("local-only should admit ordinary data")
         };
         let saved = admitted.clone();
-        let reused = ordinary_store(&config, Some(admitted)).ok().unwrap();
+        let (reused, ordinary_guard) = ordinary_store(&config, Some(admitted)).ok().unwrap();
         assert!(Arc::ptr_eq(&saved, &reused), "no second Store open");
         let mut contradictory = config.clone();
         contradictory.sync.enabled = true;
         assert!(ordinary_store(&contradictory, Some(reused.clone())).is_err());
+        drop(ordinary_guard);
         drop(reused);
         drop(saved);
         drop(fixture);
+    }
+    #[test]
+    fn ordinary_startup_retains_mode_fence_through_real_local_consumers() {
+        use crate::storage::sync::mode::SyncModeChoice;
+        for explicit_local in [false, true] {
+            let fixture = Fixture(
+                std::env::temp_dir().join(format!("reader-ordinary-mode-{}", Uuid::new_v4())),
+            );
+            let store = Arc::new(
+                Store::open(StorePaths {
+                    data: fixture.0.join("data"),
+                    cache: fixture.0.join("cache"),
+                    credentials: fixture.0.join("credentials"),
+                })
+                .unwrap(),
+            );
+            if explicit_local {
+                store
+                    .set_sync_mode(
+                        &store.sync_mode_snapshot().unwrap().token,
+                        Uuid::new_v4(),
+                        SyncModeChoice::LocalOnly,
+                    )
+                    .unwrap();
+            }
+            let config = Config {
+                paths: store.paths.clone(),
+                ..Config::default()
+            };
+            drop(store);
+            let StartupDecision::Ordinary(admitted) = startup(&config) else {
+                panic!("ordinary startup should admit this local mode")
+            };
+            let (store, guard) = ordinary_store(&config, admitted).ok().unwrap();
+            let peer = store.clone();
+            let before = peer.sync_mode_snapshot().unwrap();
+            let conversation = Uuid::new_v4();
+            let ledger = Ledger::new(store);
+            ledger.create(conversation, Uuid::new_v4(), 1).unwrap();
+            let choice = SyncModeChoice::SharedGroup {
+                group: Uuid::new_v4(),
+                binding_sha256: digest(b"ordinary lifetime test binding"),
+                root_id: "owned-mode-root".into(),
+            };
+            assert!(peer
+                .set_sync_mode(&before.token, Uuid::new_v4(), choice.clone())
+                .is_err());
+            assert!(peer.sync_mode_snapshot().unwrap().token == before.token);
+            drop(ledger);
+            assert!(
+                peer.set_sync_mode(&before.token, Uuid::new_v4(), choice.clone())
+                    .is_err(),
+                "the returned guard, not a Ledger clone, pins mode"
+            );
+            drop(guard);
+            peer.set_sync_mode(&before.token, Uuid::new_v4(), choice)
+                .unwrap();
+        }
     }
     #[test]
     fn deferred_fresh_creation_accepts_empty_auxiliary_roots_and_rechecks_changed_state() {
@@ -707,7 +778,7 @@ mod tests {
                 assert!(ordinary_store(&config, admitted).is_err());
                 assert!(!config.paths.data.exists());
             } else {
-                let store = ordinary_store(&config, admitted).ok().unwrap();
+                let (store, _ordinary_guard) = ordinary_store(&config, admitted).ok().unwrap();
                 assert_eq!(store.paths.data, config.paths.data);
                 assert!(store.sync_mode_snapshot().unwrap().mode.is_none());
             }
