@@ -152,6 +152,111 @@ mod linux_controls {
         assert_eq!(v["retained_generation_formats"], serde_json::json!([4]));
         assert_eq!(f.snapshot(), before);
     }
+    fn initialize_selected_metadata(store: &Store, root: &Path) {
+        use storage::{
+            digest,
+            selection::{self, SelectionChange, SelectionScope},
+            Envelope, Kind, Namespace, Scope,
+        };
+        let generation = store.inner.lock().unwrap().generation;
+        selection::prepare_generation(root, store.actor_id, generation).unwrap();
+        let record = Envelope {
+            envelope_version: 1,
+            namespace: Namespace::SubjectMemory,
+            domain_schema_version: 1,
+            record_id: Uuid::new_v4(),
+            revision_id: Uuid::new_v4(),
+            parents: Default::default(),
+            operation_id: Uuid::new_v4(),
+            actor_id: store.actor_id,
+            kind: Kind::Value,
+            payload: serde_json::json!({"fixture":"selected-metadata"}),
+            media_descriptors: vec![],
+        };
+        let (mut selected, objects) =
+            Store::ordinary_transaction(vec![record], BTreeMap::new()).unwrap();
+        selected.scope = Scope::SelectedRecords;
+        store
+            .initialize_selected(
+                &SelectionScope {
+                    group: Uuid::new_v4(),
+                    key_sha256: digest(b"fixture-key"),
+                    binding_sha256: digest(b"fixture-binding"),
+                },
+                SelectionChange {
+                    operation: Uuid::new_v4(),
+                    accepted_base_sha256: digest(b"fixture-base"),
+                    selected,
+                    retained: vec![],
+                },
+                objects,
+            )
+            .unwrap();
+    }
+    #[test]
+    fn new_v3_observes_current_two_and_three_with_real_selected_feedback_composition() {
+        use crate::{conversation::AttemptReason, unassociated_feedback::Feedback};
+        for feedback_feature in [false, true] {
+            let f = Fixture::new();
+            if feedback_feature {
+                let feedback = Feedback::prepare(f.paths()).unwrap();
+                feedback
+                    .retain(Uuid::new_v4(), 1, AttemptReason::Canceled, false)
+                    .unwrap();
+                drop(feedback);
+                let standalone = f.report();
+                assert_eq!(standalone["status"], "complete");
+                assert_eq!(standalone["current_generation_format"], 3);
+            }
+            let store = Store::open(f.paths()).unwrap();
+            initialize_selected_metadata(&store, &f.generation());
+            drop(store);
+            let before = f.snapshot();
+            let v = f.report();
+            assert_eq!(f.snapshot(), before);
+            assert_eq!(v["status"], "complete");
+            assert_eq!(
+                v["current_generation_format"],
+                if feedback_feature { 3 } else { 2 }
+            );
+            // The selected pointer and its accepted history reference the same
+            // immutable metadata object: it is one observed record, not two.
+            assert_eq!(
+                v["observed_domains"]["subject-memory"]["observed_record_files"],
+                "1"
+            );
+            assert!(v["issues"].as_object().unwrap().is_empty());
+            assert_eq!(v["complete_apparent_bytes"], v["observed_apparent_bytes"]);
+            if feedback_feature {
+                assert_eq!(
+                    v["observed_domains"]["unassociated-feedback"]["observed_record_files"],
+                    "1"
+                );
+            }
+        }
+    }
+    #[test]
+    fn new_v3_observes_the_supported_empty_selected_and_feedback_features_inside_four() {
+        let f = Fixture::new();
+        drop(crate::unassociated_feedback::Feedback::prepare(f.paths()).unwrap());
+        let store = Store::open(f.paths()).unwrap();
+        let generation = store.inner.lock().unwrap().generation;
+        storage::selection::prepare_generation(&f.generation(), store.actor_id, generation)
+            .unwrap();
+        drop(store);
+        drop(Store::prepare_notebook(f.paths()).unwrap());
+        let before = f.snapshot();
+        let v = f.report();
+        assert_eq!(f.snapshot(), before);
+        assert_eq!(v["status"], "complete");
+        assert_eq!(v["current_generation_format"], 4);
+        assert_eq!(v["observed_notebook_records"].as_object().unwrap().len(), 3);
+        // Existing adoption supports an empty bound selection feature; this
+        // does not claim support for activating selected notebook history.
+        assert!(f.generation().join("selection-feature.json").is_file());
+        assert!(f.generation().join("feedback-feature.json").is_file());
+        assert!(v["issues"].as_object().unwrap().is_empty());
+    }
     fn inject_tombstone(f: &Fixture, namespace: storage::Namespace) {
         use storage::{Envelope, Kind};
         let identity: Value =
