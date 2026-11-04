@@ -171,7 +171,7 @@ pub(crate) fn run_owned<E: LLMEngine>(
                 NotebookStageKind::Reduce,
                 0,
                 &parts,
-                &payloads.reducer_images,
+                &payloads.reducer_images.attachments,
             )?
             else {
                 return Ok(None);

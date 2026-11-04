@@ -38,7 +38,7 @@ pub struct FrozenNotebookPayloads {
     maps: Vec<Vec<String>>,
     base: Value,
     preference: Option<String>,
-    pub(super) reducer_images: Vec<String>,
+    pub(super) reducer_images: crate::conversation::receiving::images::Images,
 }
 impl FrozenNotebookPayloads {
     pub fn plan(&self) -> &NotebookPlan {
@@ -49,14 +49,14 @@ impl FrozenNotebookPayloads {
         archive: &ArchivedNormalizedSource,
         context: PayloadContext<'_>,
     ) -> Result<Self> {
-        Self::new_with_images(source, archive, context, Vec::new())
+        Self::new_with_images(source, archive, context, Default::default())
     }
 
     pub(super) fn new_with_images(
         source: &ValidatedNotebook,
         archive: &ArchivedNormalizedSource,
         context: PayloadContext<'_>,
-        reducer_images: Vec<String>,
+        reducer_images: crate::conversation::receiving::images::Images,
     ) -> Result<Self> {
         archive.validate_bytes(source.canonical_bytes())?;
         ensure!(
@@ -201,9 +201,11 @@ impl FrozenNotebookPayloads {
     fn reducer_parts_unchecked(&self, outputs: &[NotebookMapOutput]) -> Result<Vec<String>> {
         let mut payload = self.base.clone();
         payload["ordered_map_results"] = serde_json::to_value(outputs)?;
-        if !self.reducer_images.is_empty() {
+        if !self.reducer_images.attachments.is_empty() {
+            payload["historical_images"] = serde_json::to_value(&self.reducer_images.associations)?;
             payload["historical_png_base64_sha256"] = json!(self
                 .reducer_images
+                .attachments
                 .iter()
                 .map(|encoded| digest(encoded.as_bytes()))
                 .collect::<Vec<_>>());

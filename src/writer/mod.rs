@@ -423,11 +423,13 @@ pub(crate) fn run_owned<E: LLMEngine>(
         let images = if control.historical_images {
             crate::conversation::receiving::images::resolve(ledger, &history)?
         } else {
-            Vec::new()
+            crate::conversation::receiving::images::Images::default()
         };
-        let payload = serde_json::to_string(
-            &serde_json::json!({"history":history.turns,"request":text,"explicit_guidance":source.guidance,"source_provenance":{"document":source.document.document,"source_sha256":source.document.source_sha256,"extractor_revision":source.document.extractor_revision,"normalized_sha256":digest(&serde_json::to_vec(&source.document.units)?),"selection":source.selection,"coverage":"all selected supplied units; original notebook completeness unverified"},"source_units":source.selected(),"selected_draft":prior.as_ref().and_then(|t|t.text.as_deref())}),
-        )?;
+        let mut payload = serde_json::json!({"history":history.turns,"request":text,"explicit_guidance":source.guidance,"source_provenance":{"document":source.document.document,"source_sha256":source.document.source_sha256,"extractor_revision":source.document.extractor_revision,"normalized_sha256":digest(&serde_json::to_vec(&source.document.units)?),"selection":source.selection,"coverage":"all selected supplied units; original notebook completeness unverified"},"source_units":source.selected(),"selected_draft":prior.as_ref().and_then(|t|t.text.as_deref())});
+        if control.historical_images {
+            payload["historical_images"] = serde_json::to_value(&images.associations)?;
+        }
+        let payload = serde_json::to_string(&payload)?;
         ensure!(
             payload.len() <= 96 * 1024,
             "encoded Writer input exceeds bound"
@@ -506,7 +508,7 @@ pub(crate) fn run_owned<E: LLMEngine>(
             ));
         }
         content.0.add_text_content(&payload);
-        for image in &images {
+        for image in &images.attachments {
             content.0.add_image_content(image);
         }
         content.0.execute_with_progress(&mut progress)

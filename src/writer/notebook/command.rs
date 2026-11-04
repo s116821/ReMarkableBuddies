@@ -477,7 +477,7 @@ fn prepare_inner(
         );
         crate::conversation::receiving::images::resolve(ledger, &context)?
     } else {
-        Vec::new()
+        Default::default()
     };
     let payloads = FrozenNotebookPayloads::new_with_images(
         &source,

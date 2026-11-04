@@ -155,16 +155,17 @@ pub(crate) fn follow_up(
     preference: &crate::config::PersonalizationSnapshot,
     progress: &mut dyn FnMut() -> Result<()>,
 ) -> Result<String> {
+    let images = super::images::resolve(ledger, context)?;
     let payload = super::encoded(
         &serde_json::json!({
             "request":request,
             "history":context.turns,
             "normalized_text":context.normalized_text,
             "archived_sources":context.archived_sources,
+            "historical_images":images.associations,
         }),
         96 * 1024,
     )?;
-    let images = super::images::resolve(ledger, context)?;
     progress()?;
     let owned = Content(engine);
     owned.0.clear_content();
@@ -175,7 +176,7 @@ pub(crate) fn follow_up(
         ));
     }
     owned.0.add_text_content(&payload);
-    for image in images {
+    for image in images.attachments {
         owned.0.add_image_content(&image);
     }
     let mut progress_failed = false;

@@ -70,7 +70,7 @@ fn seed_image(
     conversation: Uuid,
     source: &SourceObservation,
     tone: u8,
-) -> Result<String> {
+) -> Result<(Uuid, String)> {
     let mut png = Cursor::new(Vec::new());
     image::DynamicImage::ImageLuma8(image::GrayImage::from_pixel(2, 2, image::Luma([tone])))
         .write_to(&mut png, image::ImageFormat::Png)?;
@@ -110,7 +110,7 @@ fn seed_image(
             width: 2,
             height: 2,
             purpose: "overview".into(),
-            ordinal: 0,
+            ordinal: u32::from(tone),
             parent: None,
             parent_dimensions: None,
             crop: None,
@@ -119,7 +119,27 @@ fn seed_image(
             captured_ms: 1,
         }],
     )?;
-    Ok(STANDARD.encode(png))
+    Ok((id, STANDARD.encode(png)))
+}
+
+fn seed_shared_images(
+    ledger: &Ledger,
+    conversation: Uuid,
+    source: &SourceObservation,
+) -> Result<(Vec<String>, Value)> {
+    let mut attachments = Vec::new();
+    let mut associations = Vec::new();
+    for (tone, attachment_index) in [(0, 0), (1, 1), (0, 0)] {
+        let (id, encoded) = seed_image(ledger, conversation, source, tone)?;
+        associations.push(
+            json!({"source":id,"ordinal":tone,"dimensions":[2,2],"attachment_index":attachment_index,
+            "sha256":digest(&STANDARD.decode(&encoded)?)}),
+        );
+        if attachment_index == attachments.len() {
+            attachments.push(encoded);
+        }
+    }
+    Ok((attachments, json!(associations)))
 }
 
 fn fixture_source(document: Uuid) -> SourceObservation {
@@ -154,7 +174,7 @@ pub(super) fn run(scenario: Scenario) -> Result<Value> {
     ledger.create(conversation, Uuid::new_v4(), 1)?;
     let source = fixture_source(scenario.document.document);
     let mut observe = || Ok(source.clone());
-    let image = seed_image(&ledger, conversation, &source, 0)?;
+    let (attachments, associations) = seed_shared_images(&ledger, conversation, &source)?;
     let config: Config = serde_json::from_value(
         json!({"personalization":{"enabled":true,"text":scenario.preference}}),
     )?;
@@ -311,17 +331,20 @@ pub(super) fn run(scenario: Scenario) -> Result<Value> {
         engine.seen.len() == 3 && destination.writes() == 1,
         "unexpected operation count"
     );
-    let mut expected = vec!["Earlier image question?".to_owned()];
+    let mut expected = vec!["Earlier image question?".to_owned(); 3];
     for (index, ((text, images), request)) in engine.seen.iter().zip(&scenario.requests).enumerate()
     {
         ensure!(
             text.len() == 3
                 && text[1].ends_with(&config.personalization.text)
-                && images == &[image.clone()],
+                && images == &attachments,
             "receiving parts changed"
         );
         let payload: Value = serde_json::from_str(&text[2])?;
-        ensure!(payload["request"] == *request, "request changed");
+        ensure!(
+            payload["request"] == *request && payload["historical_images"] == associations,
+            "request or image associations changed"
+        );
         let history: Vec<Turn> = serde_json::from_value(payload["history"].clone())?;
         ensure!(
             history
@@ -352,7 +375,7 @@ pub(super) fn run(scenario: Scenario) -> Result<Value> {
         .collect();
     ensure!(
         users
-            == std::iter::once("Earlier image question?".to_owned())
+            == std::iter::repeat_n("Earlier image question?".to_owned(), 3)
                 .chain(scenario.requests.iter().cloned())
                 .collect::<Vec<_>>(),
         "visible requests changed"
@@ -503,7 +526,7 @@ fn run_notebook(scenario: &Scenario) -> Result<usize> {
     ledger.create(conversation, Uuid::new_v4(), 1)?;
     let source = fixture_source(scenario.document.document);
     let mut observe = || Ok(source.clone());
-    let image = seed_image(&ledger, conversation, &source, 0)?;
+    let (attachments, associations) = seed_shared_images(&ledger, conversation, &source)?;
     let config = Config::default();
     let mut dispatch = Dispatch::local(&config, &ledger)?;
     let admitted = scope(&ledger, conversation, &source)?;
@@ -540,7 +563,7 @@ fn run_notebook(scenario: &Scenario) -> Result<usize> {
         report.failure
     );
     ensure!(
-        model.seen[0].1.is_empty() && model.seen[1].1 == [image.clone()],
+        model.seen[0].1.is_empty() && model.seen[1].1 == attachments,
         "notebook stage attachments changed"
     );
     let reduce: Value = serde_json::from_str(
@@ -552,7 +575,12 @@ fn run_notebook(scenario: &Scenario) -> Result<usize> {
     ensure!(
         reduce["request"] == scenario.requests[1]
             && reduce["history"][0]["text"] == "Earlier image question?"
-            && reduce["historical_png_base64_sha256"] == json!([digest(image.as_bytes())]),
+            && reduce["historical_images"] == associations
+            && reduce["historical_png_base64_sha256"]
+                == json!(attachments
+                    .iter()
+                    .map(|image| digest(image.as_bytes()))
+                    .collect::<Vec<_>>()),
         "reducer receiving context changed"
     );
     let visible = scope(&ledger, conversation, &source)?;
@@ -604,7 +632,9 @@ fn run_notebook(scenario: &Scenario) -> Result<usize> {
             .ok_or_else(|| anyhow::anyhow!("Reader payload absent"))?,
     )?;
     ensure!(
-        reader["history"][2]["text"] == response && model.seen[2].1 == [image],
+        reader["history"][4]["text"] == response
+            && reader["historical_images"] == associations
+            && model.seen[2].1 == attachments,
         "notebook handback changed"
     );
     let refinement = scope(&ledger, conversation, &source)?;
@@ -647,7 +677,7 @@ fn unavailable_or_over_budget_history_never_reaches_the_reader_model() -> Result
         ledger.create(conversation, Uuid::new_v4(), 1)?;
         let source = fixture_source(Uuid::new_v4());
         for tone in 0..if missing { 1 } else { 13 } {
-            let image = seed_image(&ledger, conversation, &source, tone)?;
+            let (_, image) = seed_image(&ledger, conversation, &source, tone)?;
             if missing {
                 let data = &ledger.store().paths.data;
                 let generation: Uuid =
