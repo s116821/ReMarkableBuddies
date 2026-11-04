@@ -86,7 +86,8 @@ def parse_build(raw):
  return value
 
 def dependencies(value):
- return [f'remarkable-os={RM2_FIRMWARE}','rm2'] if value['build']['profile']==RM2_PROFILE else []
+ # Vellum's firmware package uses an APK revision, unlike the firmware tag.
+ return [f'remarkable-os={RM2_FIRMWARE}-r0','rm2'] if value['build']['profile']==RM2_PROFILE else []
 
 def tags(value,pkgrel):
  validate_build(value);require(integer(pkgrel,0,65535),'pkgrel')

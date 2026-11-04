@@ -46,7 +46,8 @@ class Serialization(unittest.TestCase):
   data['build']['argv']+=['--features',RM2_FEATURE]
   data['binary']['path']=RM2_BINARY
   self.assertEqual(parse_build(canonical(data)),data)
-  self.assertEqual(dependencies(data),['remarkable-os=3.28.0.172','rm2'])
+  self.assertEqual(dependencies(data),['remarkable-os=3.28.0.172-r0','rm2'])
+  self.assertIn('remarkable-buddies:firmware=3.28.0.172',tags(data,0))
   self.assertIn('remarkable-buddies:sdk-bundle-sha256='+RM2_BUNDLE_SHA,tags(data,0))
   for section,key,wrong in [
     ('sdk','sha','1'*40),('cargo','features',[]),('build','argv',['cross','build']),
