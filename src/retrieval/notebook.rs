@@ -667,6 +667,10 @@ fn normalize_inner(
                     response_sha256: digest(returned.as_bytes()),
                     spans,
                 };
+                ensure!(
+                    serde_json::to_vec(&result)?.len() <= options.max_result_bytes,
+                    "notebook result exceeds bound"
+                );
                 progress(Progress::BeforeReturn)
                     .map_err(|_| anyhow::anyhow!("notebook progress refused"))?;
                 return Ok(Normalized::Partial(Box::new(result)));

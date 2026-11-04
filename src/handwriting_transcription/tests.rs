@@ -424,12 +424,167 @@ fn partial_reply_refuses_bad_variants_and_preserves_the_exact_utf8_page_limit() 
         let report = run(&local, &request, &mut engine);
         assert_eq!(report.status, expected);
     }
+    for (count, status) in [
+        (1, Status::Refused),
+        (64, Status::Partial),
+        (65, Status::Refused),
+    ] {
+        let spans: Vec<_> = (0..count)
+            .map(|index| {
+                if index % 2 == 0 {
+                    json!({"kind":"known","text":"x"})
+                } else {
+                    json!({"kind":"uncertain"})
+                }
+            })
+            .collect();
+        engine.reply = json!({"pages":[{"page":7,"status":"partial","spans":spans}]}).to_string();
+        let report = run(&local, &request, &mut engine);
+        assert_eq!(report.status, status, "{count} spans");
+        assert_eq!(report.provider_attempt, Attempt::Called);
+        if status == Status::Partial {
+            assert_eq!(report.partial().unwrap().spans.len(), count);
+        } else {
+            assert_eq!(report.failure, Some(Failure::InvalidResponse));
+            assert!(report.partial().is_none() && report.result.is_none());
+        }
+    }
     engine.reply = json!({"pages":[{"page":7,"status":"partial",
         "spans":[{"kind":"known","text":"hello"},{"kind":"uncertain"}]}]})
     .to_string();
     let legacy = run(&local, &self::request(Value::Null), &mut engine);
     assert_eq!(legacy.failure, Some(Failure::InvalidResponse));
     assert!(output(&legacy).get("partial").is_none());
+}
+
+#[test]
+fn actual_selected_v2_complete_blank_and_unreadable_use_the_same_captured_identity() {
+    let local = Local::new();
+    let correction = Uuid::new_v4();
+    let target = png();
+    let (record, revision) = local.confirm(correction, &target, "original", "corrected");
+    let input = partial_request(context(correction, revision));
+    let before = tree_bytes(&local.root);
+    let expected_example = json!({
+        "correction":correction,"record":record,"revision":revision,"sample_sha256":digest(&target)
+    });
+    let mut engine = Engine::new();
+    let mut first_payload = None;
+    for (index, (reply, text, status)) in [
+        ("transcribed", "visible", Status::Normalized),
+        ("blank", "", Status::Normalized),
+        ("unreadable", "", Status::Unreadable),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        engine.reply = json!({"pages":[{"page":7,"status":reply,"text":text}]}).to_string();
+        let report = run(&local, &input, &mut engine);
+        assert_eq!(engine.calls, index + 1);
+        assert_eq!(report.status, status);
+        assert_eq!(report.failure, None);
+        assert_eq!(report.provider_attempt, Attempt::Called);
+        assert_eq!(
+            report.target_sha256.as_deref(),
+            Some(digest(&target).as_str())
+        );
+        assert!(report.write_to(&mut std::io::sink()).unwrap());
+        let wire = output(&report);
+        assert_eq!(wire["transcription_version"], 2);
+        assert_eq!(
+            wire["context"],
+            json!({"profile":profile(),"examples":[expected_example]})
+        );
+        assert_eq!(wire.get("partial"), Some(&Value::Null));
+        assert_eq!(wire["confirmed"], false);
+        let payload = serde_json::to_vec(&engine.captured).unwrap();
+        assert_eq!(
+            payload.as_slice(),
+            first_payload
+                .get_or_insert_with(|| payload.clone())
+                .as_slice()
+        );
+        if status == Status::Normalized {
+            let normalized = report.result.as_ref().unwrap();
+            let identity = &normalized
+                .profile
+                .confirmed_context
+                .as_ref()
+                .unwrap()
+                .examples[0];
+            assert_eq!(identity.revision, revision);
+            assert_eq!(identity.record, record);
+            assert_eq!(normalized.profile.protocol, 3);
+            assert_eq!(
+                normalized.profile.prompt_revision,
+                "transcribe-partial-confirmed-examples-v2"
+            );
+            assert_eq!(
+                normalized.document.extractor_revision,
+                format!(
+                    "notebook-ocr-partial-v2:{}",
+                    digest(&serde_json::to_vec(&normalized.profile).unwrap())
+                )
+            );
+            assert_eq!(
+                normalized.document.source_sha256,
+                fixture()["source_sha256"]
+            );
+            assert_eq!(normalized.prompt_sha256, digest(&payload));
+            assert_eq!(normalized.response_sha256, digest(engine.reply.as_bytes()));
+            assert_eq!(normalized.document.units[0].text, text);
+            assert_eq!(
+                normalized.blank_pages,
+                if reply == "blank" { vec![7] } else { vec![] }
+            );
+        } else {
+            assert!(report.result.is_none());
+            assert!(wire["result"].is_null());
+        }
+        assert!(Store::open(local.config.paths.clone()).is_err());
+        drop(report);
+        assert_eq!(tree_bytes(&local.root), before);
+    }
+}
+
+#[test]
+fn selected_partial_cancellation_clears_both_results_and_keeps_custody() {
+    let local = Local::new();
+    let correction = Uuid::new_v4();
+    let (_, revision) = local.confirm(correction, &png(), "original", "corrected");
+    let input = serde_json::to_vec(&partial_request(context(correction, revision))).unwrap();
+    let before = tree_bytes(&local.root);
+    // Prepared::execute forwards BeforeDispatch, the default engine's
+    // EngineProgress, AfterResponse, then the partial path's BeforeReturn.
+    for (cancel_at, attempt, calls) in [(1, Attempt::NotCalled, 0), (4, Attempt::Called, 1)] {
+        let mut prepared = Prepared::admit(&input, &mut || Ok(()));
+        prepared.capture(&local.config, &mut || Ok(()));
+        assert!(prepared.report.context.is_some());
+        let mut engine = Engine::new();
+        engine.reply = json!({"pages":[{"page":7,"status":"partial",
+            "spans":[{"kind":"known","text":"visible"},{"kind":"uncertain"}]}]})
+        .to_string();
+        let mut checkpoints = 0;
+        let report = prepared.execute("model", &mut engine, &mut || {
+            checkpoints += 1;
+            anyhow::ensure!(checkpoints != cancel_at, "cancel at protocol checkpoint");
+            Ok(())
+        });
+        assert_eq!(checkpoints, cancel_at);
+        assert_eq!(engine.calls, calls);
+        assert_eq!(report.status, Status::Canceled);
+        assert_eq!(report.failure, Some(Failure::Canceled));
+        assert_eq!(report.provider_attempt, attempt);
+        assert!(report.partial().is_none() && report.result.is_none());
+        assert!(!report.write_to(&mut std::io::sink()).unwrap());
+        let wire = output(&report);
+        assert_eq!(wire["context"]["examples"][0]["revision"], json!(revision));
+        assert_eq!(wire.get("partial"), Some(&Value::Null));
+        assert_eq!(wire.get("result"), Some(&Value::Null));
+        assert!(Store::open(local.config.paths.clone()).is_err());
+        drop(report);
+        assert_eq!(tree_bytes(&local.root), before);
+    }
 }
 
 #[test]
