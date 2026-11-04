@@ -8,6 +8,8 @@ use std::time::Duration;
 enum ReadOnlyTransport {
     Unavailable,
     Development(Option<Box<remarkable_open_sdk::development_capture::ReadOnlyDevelopmentCapture>>),
+    #[cfg(target_os = "linux")]
+    Resident(std::collections::VecDeque<crate::device::request_input::ReleasedReaderInput>),
 }
 
 pub(in crate::workflow) struct RefusingBackend {
@@ -17,6 +19,14 @@ impl RefusingBackend {
     pub(in crate::workflow) fn new() -> Self {
         Self {
             transport: ReadOnlyTransport::Unavailable,
+        }
+    }
+    #[cfg(target_os = "linux")]
+    pub(in crate::workflow) fn with_resident_releases(
+        releases: Vec<crate::device::request_input::ReleasedReaderInput>,
+    ) -> Self {
+        Self {
+            transport: ReadOnlyTransport::Resident(releases.into()),
         }
     }
     pub(in crate::workflow) fn with_capture(
@@ -34,6 +44,8 @@ impl DeviceBackend for RefusingBackend {
                 crate::device::backend::AcquisitionKind::Development
             }
             ReadOnlyTransport::Unavailable => crate::device::backend::AcquisitionKind::Unsupported,
+            #[cfg(target_os = "linux")]
+            ReadOnlyTransport::Resident(_) => crate::device::backend::AcquisitionKind::Unsupported,
         }
     }
     fn capture_development(
@@ -45,6 +57,10 @@ impl DeviceBackend for RefusingBackend {
                 .map(|capture| *capture)
                 .ok_or_else(|| anyhow::anyhow!("Owned development capture consumed")),
             ReadOnlyTransport::Unavailable => anyhow::bail!("Development acquisition unsupported"),
+            #[cfg(target_os = "linux")]
+            ReadOnlyTransport::Resident(_) => {
+                anyhow::bail!("Resident capture cannot become development")
+            }
         }
     }
     fn capture(&mut self) -> Result<Frame> {
@@ -61,6 +77,19 @@ impl DeviceBackend for RefusingBackend {
             "Selected operation requires context dispatch"
         );
         Ok(())
+    }
+    #[cfg(target_os = "linux")]
+    fn wait_for_resident_reader(
+        &mut self,
+        progress: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<crate::device::request_input::ReleasedReaderInput> {
+        progress()?;
+        let ReadOnlyTransport::Resident(releases) = &mut self.transport else {
+            anyhow::bail!("No released resident gesture")
+        };
+        releases
+            .pop_front()
+            .ok_or_else(|| anyhow::anyhow!("No next genuine gesture"))
     }
     fn wait_for_trigger(&mut self) -> Result<()> {
         anyhow::bail!("Selected trigger unsupported")

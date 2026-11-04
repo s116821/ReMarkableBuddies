@@ -10,6 +10,10 @@ pub mod resident_request;
 #[cfg(target_os = "linux")]
 pub mod resident_runtime;
 #[cfg(target_os = "linux")]
+mod resident_source;
+#[cfg(target_os = "linux")]
+pub mod resident_output;
+#[cfg(target_os = "linux")]
 pub mod resident_supervisor;
 pub mod sdk_acquisition;
 pub mod sdk_buddy_decision;
@@ -42,6 +46,7 @@ pub enum AcquiredEvidence {
     Legacy { images: Vec<Vec<u8>> },
     Sdk(Box<remarkable_open_sdk::capture::CapturedBatch>),
     Development(Box<remarkable_open_sdk::development_capture::ReadOnlyDevelopmentCapture>),
+    ResidentHistorical(Box<crate::conversation::ResidentSourceCapture>),
 }
 
 // Image comparison mask constants - skip UI elements that can change between screenshots
@@ -73,6 +78,8 @@ pub struct Workflow {
     input_failed: bool,
     #[cfg(target_os = "linux")]
     service_health: Option<resident_supervisor::health::ServiceHealth>,
+    #[cfg(target_os = "linux")]
+    resident_source: Option<resident_source::ResidentSourceOwner>,
     history: history::History,
 }
 
@@ -101,6 +108,8 @@ impl Workflow {
             input_failed: false,
             #[cfg(target_os = "linux")]
             service_health: None,
+            #[cfg(target_os = "linux")]
+            resident_source: None,
             history: history::History::default(),
         }
     }
@@ -171,7 +180,62 @@ impl Workflow {
         Ok(())
     }
 
+    /// Explicit startup selection only; this performs no activation or input.
+    #[cfg(target_os = "linux")]
+    pub fn configure_resident_source(
+        &mut self,
+        selection: resident_supervisor::recovery::activation::InstalledReaderSelection,
+        store: std::sync::Arc<crate::storage::Store>,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.service_health.is_some() && self.resident_source.is_none(),
+            "Resident source requires the supervised health owner and one selection"
+        );
+        self.resident_source = Some(resident_source::ResidentSourceOwner::new(selection, store));
+        Ok(())
+    }
+
+    #[cfg(all(target_os="linux",feature="development-resident-bootstrap",feature="development-input-diagnostics"))]
+    pub fn configure_installed_resident_output(&mut self) -> Result<()> {
+        use anyhow::Context;
+
+        let owner = self.resident_source.as_mut().context("resident source selection absent")?;
+        if let Some(pin) = owner.installed_output()? {
+            let health = self.service_health.as_mut().context("resident health owner absent")?;
+            let corner = self.device.configure_installed_resident_output(pin)?;
+            owner.activate_at_startup(corner, health)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(all(target_os="linux",feature="development-resident-bootstrap",feature="development-input-diagnostics"))]
+    pub fn configure_development_resident_output(&mut self, plan: &std::path::Path) -> Result<()> {
+        use anyhow::Context;
+
+        let owner = self
+            .resident_source
+            .as_mut()
+            .context("development output requires retained supervised source selection")?;
+        let health = self
+            .service_health
+            .as_mut()
+            .context("development output requires the supervised health owner")?;
+        owner.require_development_output(plan)?;
+        if let Some(corner) = self.device.configure_development_resident_output(plan)? {
+            owner.activate_at_startup(corner, health)?;
+        }
+        Ok(())
+    }
+
     pub(super) fn runtime_failed(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        if self
+            .resident_source
+            .as_ref()
+            .is_some_and(|owner| owner.fatal())
+        {
+            return true;
+        }
         #[cfg(target_os = "linux")]
         if self
             .service_health
@@ -188,11 +252,62 @@ impl Workflow {
     }
 
     /// Read-only request checks replace source-page progress drawing.
+    #[cfg(target_os = "linux")]
+    pub(super) fn selected_resident_conversation(
+        &mut self,
+        acquired: &AcquiredEvidence,
+    ) -> Result<Option<resident_output::SelectedConversationRequest>> {
+        if self.resident_source.as_ref().is_some_and(|owner| owner.blank_start_requested()) {
+            return Ok(Some(resident_output::SelectedConversationRequest::BlankStart(None)));
+        }
+        #[cfg(all(feature = "development-resident-bootstrap", feature = "development-input-diagnostics"))]
+        if let (Some(owner), AcquiredEvidence::ResidentHistorical(capture)) = (&self.resident_source, acquired) {
+            if let Some(request) = owner.take_installed_writer(capture)? {
+                return Ok(Some(request));
+            }
+        }
+        #[cfg(not(all(feature = "development-resident-bootstrap", feature = "development-input-diagnostics")))]
+        let _ = acquired;
+        let Some(backend) = self.device.resident_output_backend() else {
+            return Ok(None);
+        };
+        backend.selected_conversation_request()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn validate_resident_new_page_text(&mut self, text: &str) -> Result<()> {
+        self.device.resident_output_backend()
+            .ok_or_else(|| anyhow::anyhow!("resident output backend unavailable"))?
+            .validate_new_page_text(text)
+    }
+
+    #[cfg(target_os = "linux")]
+    /// Selected resident output uses retained Session plus an explicit qualified
+    /// native backend; it never downgrades to the ordinary legacy renderer.
+    pub(super) fn render_resident_answer(&mut self, ledger: &crate::conversation::Ledger,
+        conversation: crate::storage::Uuid, text: &str,
+        association: Option<&crate::conversation::HistoricalPageAssociation>,
+        before_effect: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<resident_output::ResidentOutputOutcome> {
+        let Some(owner) = self.resident_source.as_mut() else {
+            return Ok(resident_output::ResidentOutputOutcome::Unavailable);
+        };
+        let Some(backend) = self.device.resident_output_backend() else {
+            return Ok(resident_output::ResidentOutputOutcome::Unavailable);
+        };
+        owner.render_answer(self.service_health.as_mut().expect("resident health owner"),
+            backend, ledger, conversation, text, association, before_effect)
+    }
+
     pub fn check_request_progress(&mut self) -> Result<()> {
         anyhow::ensure!(
             !self.runtime_failed(),
             "Runtime health or input lost; further activity stopped"
         );
+        #[cfg(target_os = "linux")]
+        if let Some(owner) = &mut self.resident_source {
+            return owner.progress(self.service_health.as_mut().expect("selected health owner"));
+        }
         if let Err(error) = self.device.check_request_guard() {
             self.input_failed = true;
             return Err(error);
@@ -205,6 +320,10 @@ impl Workflow {
     }
 
     pub fn finish_request(&mut self) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        if let Some(owner) = &mut self.resident_source {
+            return owner.finish(self.service_health.as_mut().expect("selected health owner"));
+        }
         self.check_request_progress()?;
         if let Err(error) = self.device.finish_request_guard() {
             self.input_failed = true;
@@ -214,6 +333,14 @@ impl Workflow {
     }
 
     pub fn input_failed(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        if self
+            .resident_source
+            .as_ref()
+            .is_some_and(|owner| owner.canceled())
+        {
+            return true;
+        }
         self.input_failed
     }
 
@@ -248,6 +375,12 @@ impl Workflow {
         use crate::device::backend::AcquisitionKind;
         use base64::{engine::general_purpose::STANDARD, Engine};
         self.check_request_progress()?;
+        #[cfg(target_os = "linux")]
+        if let Some(owner) = &mut self.resident_source {
+            return Ok(AcquiredEvidence::ResidentHistorical(Box::new(
+                owner.acquire(self.service_health.as_mut().expect("selected health owner"))?,
+            )));
+        }
         match self.device.acquisition_kind() {
             AcquisitionKind::Unsupported => anyhow::bail!("Reader acquisition unsupported"),
             AcquisitionKind::LegacyUnqualified => {
@@ -297,12 +430,23 @@ impl Workflow {
         }
     }
 
+    pub(super) fn deliver_reader_acquisition(&mut self) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        if let Some(owner) = &mut self.resident_source {
+            return owner.deliver(self.service_health.as_mut().expect("selected health owner"));
+        }
+        self.check_request_progress()
+    }
     pub fn current_image_base64(&self) -> String {
         self.frame.base64()
     }
 
     /// Wait for user to trigger the workflow (touch in corner)
     pub fn wait_for_trigger(&mut self) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        if self.resident_source.is_some() {
+            return self.wait_for_reader();
+        }
         info!("Waiting for trigger...");
         anyhow::ensure!(
             !self.runtime_failed(),
@@ -350,6 +494,41 @@ impl Workflow {
     }
 
     fn wait_for_reader_until(&mut self, deadline: Option<std::time::Instant>) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        if self.resident_source.is_some() {
+            anyhow::ensure!(
+                deadline.is_none(),
+                "Bounded legacy observation cannot select resident source"
+            );
+            self.invalidate_history();
+            loop {
+                anyhow::ensure!(!self.runtime_failed(), "Resident source health failed");
+                let health = self.service_health.as_mut().expect("selected health owner");
+                let owner = self.resident_source.as_mut().unwrap();
+                let released = match self
+                    .device
+                    .wait_for_resident_reader(&mut || owner.progress(health))
+                {
+                    Ok(released) => released,
+                    Err(error) => {
+                        owner.fail_idle(health);
+                        return Err(error);
+                    }
+                };
+                let result = owner.begin(released, health);
+                match result {
+                    Ok(()) => return Ok(()),
+                    Err(error) if owner.fatal() => return Err(error),
+                    Err(error) => {
+                        log::info!("Resident source handoff ended without acquisition: {error:#}");
+                        let _ = owner.finish(health);
+                        if owner.fatal() {
+                            return Err(error);
+                        }
+                    }
+                }
+            }
+        }
         use crate::device::interaction::Interaction;
         loop {
             let timeout =

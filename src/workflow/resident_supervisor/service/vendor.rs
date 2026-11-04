@@ -60,6 +60,56 @@ impl OriginalCompanion {
         Ok(record)
     }
 
+    /// Cheap fixed platform/pin/group check, no service/broker commands.
+    pub fn pulse_stopped(&self) -> Result<()> {
+        self.pins_current()?;
+        ensure!(
+            self.original.group().observe()? != GroupObservation::Populated,
+            "original companion group returned"
+        );
+        Ok(())
+    }
+    pub fn pins_current(&self) -> Result<()> {
+        ensure!(
+            firmware_version(&text(Path::new("/etc/os-release"), 16 * 1024)?)? == "3.28.0.172"
+                && text(Path::new("/proc/sys/kernel/osrelease"), 1024)?.trim()
+                    == "5.4.70-v1.6.3-rm11x",
+            "unqualified vendor firmware/kernel"
+        );
+        for pin in &self.pins {
+            pin.current()?;
+        }
+        Ok(())
+    }
+    pub fn validate_batch(&self, batch: &ServiceBatch) -> Result<()> {
+        self.pins_current()?;
+        for unit in ["xochitl.service", UNIT] {
+            let expected = policy(unit);
+            check_policy(
+                &batch.policy_bytes(unit, expected.keys().copied())?,
+                &expected,
+            )?;
+        }
+        self.pins_current()
+    }
+    pub fn stopped_batches(
+        &self,
+        first: &ServiceBatch,
+        group: GroupObservation,
+        last: &ServiceBatch,
+        deadline: Instant,
+    ) -> Result<bool> {
+        self.validate_batch(first)?;
+        self.validate_batch(last)?;
+        Ok(self
+            .original
+            .stopped_samples(first.get(UNIT)?, group, last.get(UNIT)?, deadline)?
+            .is_some())
+    }
+    pub fn stopped_group(&self) -> Result<GroupObservation> {
+        self.original.group().observe()
+    }
+
     pub fn policy(&self, deadline: Instant) -> Result<()> {
         before(deadline)?;
         ensure!(
@@ -222,7 +272,7 @@ fn digest(hex: &str) -> [u8; 32] {
 
 // Independent fixed schema: do not change serialized ServiceBaseline v1 when
 // adding loaded-policy checks. Watchdog runtime/reset semantics stay there.
-fn policy(unit: &str) -> BTreeMap<&'static str, &'static str> {
+pub(super) fn policy(unit: &str) -> BTreeMap<&'static str, &'static str> {
     let mut fields = BTreeMap::from([
         ("NeedDaemonReload", "no"),
         ("Type", "simple"),
@@ -263,7 +313,7 @@ fn policy(unit: &str) -> BTreeMap<&'static str, &'static str> {
     fields
 }
 
-fn check_policy(bytes: &[u8], expected: &BTreeMap<&str, &str>) -> Result<()> {
+pub(super) fn check_policy(bytes: &[u8], expected: &BTreeMap<&str, &str>) -> Result<()> {
     ensure!(bytes.len() <= LIMIT, "vendor policy exceeds bound");
     let text = std::str::from_utf8(bytes)?;
     ensure!(

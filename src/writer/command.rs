@@ -104,12 +104,26 @@ pub fn run(config_path: Option<PathBuf>, input: &mut impl Read) -> Report {
 pub enum CommandReport {
     Legacy(Report),
     Flow(crate::writer_flow::Report),
+    #[cfg(all(target_os = "linux", feature = "development-resident-bootstrap", feature = "development-input-diagnostics"))]
+    Resident(ResidentReport),
 }
+
+#[cfg(all(target_os = "linux", feature = "development-resident-bootstrap", feature = "development-input-diagnostics"))]
+#[derive(Serialize)]
+pub struct ResidentReport {
+    status: &'static str,
+    conversation: Uuid,
+    operation: Uuid,
+    failure: Option<&'static str>,
+}
+
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum CommandRequest {
     Legacy(Request),
     Flow(crate::writer_flow::Request),
+    #[cfg(all(target_os = "linux", feature = "development-resident-bootstrap", feature = "development-input-diagnostics"))]
+    Resident(crate::workflow::resident_supervisor::writer_request::Submission),
 }
 /// Parse bounded stdin once; each strict variant rejects duplicates and unknown fields.
 pub fn dispatch(config_path: Option<PathBuf>, input: &mut impl Read) -> CommandReport {
@@ -138,6 +152,18 @@ pub fn dispatch(config_path: Option<PathBuf>, input: &mut impl Read) -> CommandR
             CommandReport::Legacy(run(config_path, &mut &bytes[..]))
         }
         Ok(CommandRequest::Flow(request)) => CommandReport::Flow(run_flow(config_path, request)),
+        #[cfg(all(target_os = "linux", feature = "development-resident-bootstrap", feature = "development-input-diagnostics"))]
+        Ok(CommandRequest::Resident(submission)) => {
+            let conversation = submission.refinement().conversation();
+            let operation = submission.refinement().operation();
+            let result = crate::workflow::resident_supervisor::writer_request::submit(submission);
+            CommandReport::Resident(ResidentReport {
+                status: if result.is_ok() { "queued" } else { "refused" },
+                conversation,
+                operation,
+                failure: result.err().map(|_| "tablet-request-unavailable"),
+            })
+        }
         Err(_) => CommandReport::Legacy(run(config_path, &mut &bytes[..])),
     }
 }

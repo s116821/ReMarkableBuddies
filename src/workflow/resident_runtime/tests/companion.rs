@@ -57,7 +57,7 @@ impl Fixture {
             |command| {
                 command.env_remove("LD_PRELOAD");
             },
-            |_| Ok(()),
+            |_, _| Ok(()),
         )
     }
 }
@@ -400,3 +400,51 @@ fn dispatched_effect_uncertainty_survives_companion_death_and_refused_reconnect(
     assert!(report.reaped, "{report:?}");
     assert_eq!(report.lost, error.lost);
 }
+
+impl Fixture {
+    pub(crate) fn start_source_companion_with_store(
+        &self,
+        store: Arc<Store>,
+        timeout: Duration,
+    ) -> std::result::Result<ResidentRuntime, StartupFailure> {
+        self.start_source_companion_mode(store, timeout, "reconnect-source-handoff")
+    }
+    pub(super) fn start_count_companion_with_store(
+        &self,
+        store: Arc<Store>,
+        timeout: Duration,
+    ) -> std::result::Result<ResidentRuntime, StartupFailure> {
+        self.start_source_companion_mode(store, timeout, "reconnect-source-handoff-count-probe")
+    }
+    fn start_source_companion_mode(
+        &self,
+        store: Arc<Store>,
+        timeout: Duration,
+        reader_mode: &str,
+    ) -> std::result::Result<ResidentRuntime, StartupFailure> {
+        let mut input = self.launch();
+        input.companion = Some(self.companion_profile("ready"));
+        input.arguments = vec![
+            "-S".into(),
+            "-c".into(),
+            include_str!("../../../../tests/fixtures/resident_runtime_child.py").into(),
+            reader_mode.into(),
+            "--system".into(),
+            "two words".into(),
+            "".into(),
+            "$(not-a-command); *".into(),
+            "\u{03bb}".into(),
+        ];
+        ResidentRuntime::launch_checked(
+            store,
+            input,
+            Instant::now() + timeout,
+            |command| {
+                command.env_remove("LD_PRELOAD");
+            },
+            |_, _| Ok(()),
+        )
+    }
+}
+#[path = "admission.rs"]
+mod admission;

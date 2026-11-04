@@ -13,6 +13,11 @@ use std::time::Duration;
 #[command(author, version = env!("READER_BUDDY_VERSION"))]
 #[command(about = "ReMarkable Reader Buddy - AI-powered reading assistant for reMarkable tablets")]
 pub struct Args {
+    /// Explicit one-shot disposable native Reader output; development build only.
+    #[cfg(all(target_os="linux",feature="development-resident-bootstrap",feature="development-input-diagnostics"))]
+    #[arg(long)]
+    development_resident_output_plan: Option<std::path::PathBuf>,
+
     /// Fixed installed stock recovery; never starts ordinary application services
     #[arg(long, exclusive = true)]
     resident_stock_recovery: bool,
@@ -526,6 +531,10 @@ fn main() -> Result<()> {
         None
     };
     let personalization = config.personalization_snapshot()?;
+    #[cfg(target_os = "linux")]
+    let resident_selection = remarkable_reader_buddy::workflow::resident_supervisor::recovery::activation::InstalledReaderSelection::load(
+        std::time::Instant::now() + Duration::from_secs(10),
+    )?;
     let workflow = Workflow::new(false, effective.trigger_corner, effective.debug_dump)?;
     sleep(Duration::from_millis(1000));
     let _sync_worker = Worker::google(store.clone(), config.sync)?;
@@ -534,6 +543,18 @@ fn main() -> Result<()> {
         let mut workflow = workflow;
         if let Some(health) = service_health {
             workflow.enable_service_health(health)?;
+        }
+        #[cfg(all(feature="development-resident-bootstrap",feature="development-input-diagnostics"))]
+        anyhow::ensure!(args.development_resident_output_plan.is_none() || resident_selection.is_some(),"development output requires approved installed resident source profile");
+        if let Some(selection) = resident_selection {
+            workflow.configure_resident_source(selection, store.clone())?;
+            #[cfg(all(feature="development-resident-bootstrap",feature="development-input-diagnostics"))]
+            if let Some(plan)=args.development_resident_output_plan.as_deref() {
+                workflow.configure_development_resident_output(plan)?;
+            } else {
+                workflow.configure_installed_resident_output()?;
+            }
+
         }
         workflow
     };

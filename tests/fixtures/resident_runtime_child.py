@@ -87,11 +87,17 @@ def send(payload):
 connections = set()
 handshakes = set()
 count = 0
+# Explicit owned source-handoff model, never native current-page authority.
+source_page = uuid.uuid4().bytes
+source_facts = uuid.uuid4().bytes + source_page + struct.pack(">H", 1) + source_page
 while True:
     peer, _ = listener.accept()
     # The companion-startup fixture must outlive its five-second readiness
     # deadline; an idle fixture exit must not masquerade as absent-broker refusal.
-    peer.settimeout(10 if mode.startswith("reconnect-companion-") else 3)
+    # Only the command-count probe deliberately spends up to its fixed 90s
+    # request budget in pre-request admission; normal fixture timing is intact.
+    peer.settimeout(95 if mode == "reconnect-source-handoff-count-probe" else
+                    10 if mode.startswith("reconnect-companion-") else 3)
     credentials = peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
     assert struct.unpack("3i", credentials)[:2] == (os.getppid(), os.geteuid())
     try:
@@ -125,11 +131,16 @@ while True:
                 with (root / "commands").open("ab") as commands:
                     commands.write(request[202:204])
             digest = hashlib.sha256(struct.pack(">I", len(request)) + request).digest()
+            if mode.startswith("reconnect-source-handoff") and request[202:204] == b"\x02\x00":
+                send(request[:202] + b"\x03" + digest + b"\x00" + source_facts)
+                continue
             if request[202:204] in (b"\x02\x05", b"\x02\x06"):
                 # Independent owned PNG encoder, not a native Reader model.
                 visual = request[203] == 6
                 facts = request[204:]
                 assert not visual or not facts
+                if mode.startswith("reconnect-source-handoff"):
+                    assert facts == source_facts
                 (root / "capture-received").touch()
                 if mode in ("reconnect-capture-cancel", "reconnect-capture-timeout") and count == 1:
                     assert peer.recv(1) == b""
@@ -145,7 +156,7 @@ while True:
                        + chunk(b"IEND", b""))
                 assert len(png) > 65536
                 image_hash = hashlib.sha256(png).digest()
-                if mode == "reconnect-capture-corrupt":
+                if mode in ("reconnect-capture-corrupt", "reconnect-source-handoff-corrupt"):
                     png = png[:-1] + bytes([png[-1] ^ 1])
                 if mode == "reconnect-capture-source" and not visual:
                     facts = bytes([facts[0] ^ 1]) + facts[1:]

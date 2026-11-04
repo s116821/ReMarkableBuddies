@@ -126,8 +126,10 @@ impl Binding {
         self.candidate(context)?;
         ensure!(self.observer.pid == observer, "setup observer mismatch");
         ensure!(
-            ProcessIdentity::read(observer)? == self.observer
-                && ProcessIdentity::read(self.runtime.pid)? == self.runtime,
+            ProcessIdentity::read(observer).context("setup observer identity unavailable")? == self.observer
+                && ProcessIdentity::read(self.runtime.pid)
+                    .context("setup Reader identity unavailable; inspect retained observer outcome before cleanup")?
+                    == self.runtime,
             "setup process changed"
         );
         // Both processes must remain inside this exact PID1-owned actor group.
@@ -167,7 +169,96 @@ pub struct ObserverSetup {
     pub mailbox: Mailbox,
     candidate: Pinned,
     vendor: Option<std::sync::Arc<vendor::OriginalCompanion>>,
+    services: std::sync::Arc<ObserverServices>,
 }
+pub struct ObserverServices {
+    baselines: Vec<ServiceBaseline>,
+    vendor: Option<std::sync::Arc<vendor::OriginalCompanion>>,
+}
+fn observer_inactive(snapshot: &Snapshot) -> Result<()> {
+    for (key, expected) in [
+        ("LoadState", "loaded"),
+        ("ActiveState", "inactive"),
+        ("SubState", "dead"),
+        ("MainPID", "0"),
+        ("ControlPID", "0"),
+        ("Job", ""),
+    ] {
+        ensure!(
+            snapshot.property(key) == Some(expected),
+            "observer original service is not inactive/dead: {key}"
+        );
+    }
+    Ok(())
+}
+impl ObserverServices {
+    pub fn pulse(&self) -> Result<()> {
+        for baseline in &self.baselines {
+            ensure!(
+                baseline.group().observe()? != GroupObservation::Populated,
+                "original service group returned"
+            );
+        }
+        if let Some(vendor) = &self.vendor {
+            vendor.pulse_stopped()?;
+        }
+        Ok(())
+    }
+    pub fn boundary(&self, deadline: Instant, pulse: &mut dyn FnMut() -> Result<()>) -> Result<()> {
+        self.pulse()?;
+        let mut units = self
+            .baselines
+            .iter()
+            .map(|b| b.group().unit())
+            .collect::<Vec<_>>();
+        if self.vendor.is_some() {
+            units.push("rm-sync.service");
+        }
+        let mut checked = || {
+            self.pulse()?;
+            pulse()?;
+            check(deadline)
+        };
+        let first = observe_many(&units, deadline, &mut checked)?;
+        let groups = self
+            .baselines
+            .iter()
+            .map(|b| b.group().observe())
+            .collect::<Result<Vec<_>>>()?;
+        let vendor_group = self
+            .vendor
+            .as_ref()
+            .map(|v| v.stopped_group())
+            .transpose()?;
+        let last = observe_many(&units, deadline, &mut checked)?;
+        for (baseline, group) in self.baselines.iter().zip(groups) {
+            for sample in [&first, &last] {
+                let snapshot = sample.get(baseline.group().unit())?;
+                observer_inactive(snapshot)?;
+            }
+            ensure!(
+                baseline
+                    .stopped_samples(
+                        first.get(baseline.group().unit())?,
+                        group,
+                        last.get(baseline.group().unit())?,
+                        deadline
+                    )?
+                    .is_some(),
+                "original service is not stopped"
+            );
+        }
+        if let Some(vendor) = &self.vendor {
+            ensure!(
+                vendor.stopped_batches(&first, vendor_group.unwrap(), &last, deadline)?,
+                "original companion is not stopped"
+            );
+        }
+        self.pulse()?;
+        check(deadline)
+    }
+}
+
 impl ObserverSetup {
     pub fn load(name: &str, deadline: Instant) -> Result<Option<Self>> {
         nonce(name)?;
@@ -194,6 +285,13 @@ impl ObserverSetup {
                 vendor::OriginalCompanion::load(record, deadline).map(std::sync::Arc::new)
             })
             .transpose()?;
+        let services = std::sync::Arc::new(ObserverServices {
+            baselines: [&candidate.stock, &candidate.buddy]
+                .into_iter()
+                .map(|s| ServiceBaseline::decode(s.baseline.as_bytes()))
+                .collect::<Result<Vec<_>>>()?,
+            vendor: vendor.clone(),
+        });
         let plan = candidate.capture.context("missing capture plan")?;
         plan.facts()?;
         verify_process(
@@ -218,7 +316,11 @@ impl ObserverSetup {
             mailbox,
             candidate: pin,
             vendor,
+            services,
         }))
+    }
+    pub fn services(&self) -> std::sync::Arc<ObserverServices> {
+        self.services.clone()
     }
     pub fn vendor(&self) -> Option<std::sync::Arc<vendor::OriginalCompanion>> {
         self.vendor.clone()
@@ -353,6 +455,35 @@ impl Mailbox {
         self.consumed.push(name.into());
         Ok(Some(value))
     }
+    pub fn wait_admitted(
+        &mut self,
+        name: &str,
+        binding: &Binding,
+        deadline: Instant,
+        admission: &mut dyn FnMut(bool) -> Result<()>,
+    ) -> Result<()> {
+        self.wait_admitted_with_pace(name, binding, deadline, admission, &mut std::thread::sleep)
+    }
+    fn wait_admitted_with_pace(
+        &mut self,
+        name: &str,
+        binding: &Binding,
+        deadline: Instant,
+        admission: &mut dyn FnMut(bool) -> Result<()>,
+        pace: &mut dyn FnMut(Duration),
+    ) -> Result<()> {
+        loop {
+            check(deadline)?;
+            admission(false)?;
+            if let Some(value) = self.receive(name, deadline)? {
+                ensure!(&value == binding, "setup binding changed");
+                admission(true)?;
+                self.current()?;
+                return check(deadline);
+            }
+            pace(POLL.min(deadline.saturating_duration_since(Instant::now())));
+        }
+    }
     pub fn wait(
         &mut self,
         name: &str,
@@ -445,6 +576,46 @@ pub fn actor_visual<I: InputGuard>(
     actor_selected(mailbox, binding, input, acquire, deadline, progress, true)
 }
 
+pub fn actor_selected_admitted<I: InputGuard>(
+    mailbox: &mut Mailbox,
+    binding: &Binding,
+    input: &mut Option<I>,
+    acquire: impl FnOnce() -> Result<I>,
+    deadline: Instant,
+    admission: &mut dyn FnMut(bool) -> Result<()>,
+    visual: bool,
+) -> Result<()> {
+    check(deadline)?;
+    admission(true)?;
+    mailbox.absent(&[
+        "actor-ended",
+        "ready",
+        "complete",
+        "observer-admitted",
+        "actor-admitted",
+    ])?;
+    quiet(input)?;
+    drop(input.take());
+    mailbox.publish("actor-ended", binding, deadline)?;
+    mailbox.wait_admitted("complete", binding, deadline, admission)?;
+    if visual {
+        mailbox.require_visual_pair(binding, deadline)?;
+        admission(true)?;
+        check(deadline)?;
+    }
+    *input = Some(acquire()?);
+    quiet(input)?;
+    mailbox.wait_admitted("observer-admitted", binding, deadline, &mut |full| {
+        admission(full)?;
+        quiet(input)
+    })?;
+    quiet(input)?;
+    // This final acknowledgement releases the observer to capture/shutdown.
+    // Do not require a live resident again after publishing it: a fast capture
+    // may already have completed and reaped that child normally.
+    mailbox.publish("actor-admitted", binding, deadline)
+}
+
 pub fn actor_selected<I: InputGuard>(
     mailbox: &mut Mailbox,
     binding: &Binding,
@@ -507,3 +678,24 @@ pub fn capture_after_setup(
 
 #[cfg(test)]
 mod tests;
+
+/// Closed admitted source capture, retaining the exact source and original bound.
+pub fn capture_after_setup_admitted(
+    runtime: &mut crate::workflow::resident_runtime::ResidentRuntime,
+    expected: remarkable_open_sdk::native_adapter::ReaderFacts,
+    operation: remarkable_open_sdk::OperationId,
+    deadline: Instant,
+    admission: &mut dyn crate::workflow::resident_runtime::ReadOnlyAdmission,
+) -> Result<remarkable_open_sdk::native_adapter::HistoricalCapture> {
+    let reconnect_deadline = deadline.min(Instant::now() + Duration::from_secs(30));
+    runtime.reconnect_read_only(reconnect_deadline, admission)?;
+    match runtime.request_read_only_capture(
+        operation,
+        crate::workflow::resident_runtime::ReadOnlyRequest::CaptureSource(expected),
+        deadline,
+        admission,
+    )? {
+        remarkable_open_sdk::native_adapter::Reply::Captured(image) => Ok(image),
+        other => anyhow::bail!("source capture refused: {other:?}"),
+    }
+}

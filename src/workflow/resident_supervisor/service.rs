@@ -12,6 +12,8 @@ use std::{
 };
 
 pub mod baseline;
+mod batch;
+pub use batch::{observe_many, ServiceBatch};
 #[cfg(feature = "development-resident-bootstrap")]
 pub mod bootstrap;
 pub mod companion;

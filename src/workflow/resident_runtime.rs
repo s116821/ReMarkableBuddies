@@ -1,6 +1,9 @@
 //! Explicit Linux child ownership for the resident SDK. Not installed activation.
 //! The caller still owns approved profile selection, stock-service takeover and
 //! independent stock recovery. Protocol Ready confers no Reader/write capability.
+mod read_only;
+pub use read_only::{ReadOnlyAdmission, ReadOnlyRequest};
+
 use super::resident_client::{self, ConnectionFailure, ResidentConnection};
 use super::resident_request::{self, integrity};
 use crate::storage::Store;
@@ -144,7 +147,7 @@ impl ResidentRuntime {
         deadline: Instant,
         decorate: impl FnOnce(&mut Command),
     ) -> std::result::Result<Self, StartupFailure> {
-        Self::launch_checked(store, input, deadline, decorate, |_| Ok(()))
+        Self::launch_checked(store, input, deadline, decorate, |_, _| Ok(()))
     }
     /// Installed admission is repeated after potentially lengthy artifact
     /// preparation, before any child exists, then through socket/Ready waits.
@@ -153,21 +156,51 @@ impl ResidentRuntime {
         store: Arc<Store>,
         input: Launch,
         deadline: Instant,
-        admit: impl FnMut(Instant) -> Result<()>,
+        mut admit: impl FnMut(Instant) -> Result<()>,
     ) -> std::result::Result<Self, StartupFailure> {
-        Self::launch_checked(store, input, deadline, |_| {}, admit)
+        Self::launch_checked(
+            store,
+            input,
+            deadline,
+            |_| {},
+            |deadline, _| admit(deadline),
+        )
+    }
+    pub fn launch_read_only_admitted(
+        store: Arc<Store>,
+        input: Launch,
+        deadline: Instant,
+        admission: &mut dyn ReadOnlyAdmission,
+    ) -> std::result::Result<Self, StartupFailure> {
+        Self::launch_checked(
+            store,
+            input,
+            deadline,
+            |_| {},
+            |deadline, full| {
+                if full {
+                    admission.boundary(deadline)
+                } else {
+                    admission.pulse(deadline)
+                }
+            },
+        )
     }
     fn launch_checked(
         store: Arc<Store>,
         input: Launch,
         deadline: Instant,
         decorate: impl FnOnce(&mut Command),
-        mut admit: impl FnMut(Instant) -> Result<()>,
+        mut admit: impl FnMut(Instant, bool) -> Result<()>,
     ) -> std::result::Result<Self, StartupFailure> {
         let path = input.directory.clone();
         let prepare = || -> Result<Prepared> {
             // Invalid retained effects must refuse before starting another process.
             resident_client::attempts(&store)?;
+            #[cfg(feature = "development-native-close")]
+            resident_client::ordinary_close::require_unused(&store)?;
+            #[cfg(feature = "development-native-close")]
+            resident_client::ordinary_reopen::require_unused(&store)?;
             Prepared::new(input, deadline)
         };
         let mut prepared = prepare().map_err(|error| StartupFailure {
@@ -175,11 +208,19 @@ impl ResidentRuntime {
             error,
             shutdown: None,
         })?;
+        // A just-forked owned child can still publish its inherited executable
+        // through procfs before the selected Reader exec becomes visible.
+        let parent_executable = fs::metadata("/proc/self/exe").map_err(|error| StartupFailure {
+            directory: path.clone(),
+            error: error.into(),
+            shutdown: None,
+        })?;
+        let inherited_inode = (parent_executable.dev(), parent_executable.ino());
         decorate(&mut prepared.command); // Only tests customize the private fixture launch.
         let spawned = (|| -> Result<Child> {
             prepared.current(false)?;
             before(deadline)?;
-            admit(deadline)?;
+            admit(deadline, true)?;
             prepared.current(false)?;
             before(deadline)?;
             prepared.command.spawn().context("spawn resident child")
@@ -200,10 +241,16 @@ impl ResidentRuntime {
             let pid = runtime.child.as_ref().unwrap().id();
             runtime.prepared.identity.pid = pid;
             runtime.prepared.identity.start_ticks = process_start(pid)?;
-            check_child(&mut runtime.child, &runtime.prepared)?;
+            wait_reader_exec(
+                &mut runtime.child,
+                &mut runtime.prepared,
+                inherited_inode,
+                deadline,
+                &mut || admit(deadline, false),
+            )?;
             if let Some(companion) = &mut runtime.prepared.companion {
                 before(deadline)?;
-                admit(deadline)?;
+                admit(deadline, true)?;
                 before(deadline)?;
                 companion.spawn(deadline)?;
             }
@@ -225,14 +272,16 @@ impl ResidentRuntime {
         &mut self,
         store: Arc<Store>,
         deadline: Instant,
-        admit: &mut dyn FnMut(Instant) -> Result<()>,
+        admit: &mut dyn FnMut(Instant, bool) -> Result<()>,
     ) -> Result<()> {
         let pid = self.child.as_ref().expect("owned child").id();
-        self.prepared.identity.pid = pid;
-        self.prepared.identity.start_ticks = process_start(pid)?;
+        ensure!(
+            self.prepared.identity.pid == pid && self.prepared.identity.start_ticks != 0,
+            "resident launch identity was not pinned"
+        );
         loop {
             before(deadline)?;
-            admit(deadline)?;
+            admit(deadline, false)?;
             before(deadline)?;
             ensure!(
                 self.child.as_mut().unwrap().try_wait()?.is_none(),
@@ -262,19 +311,20 @@ impl ResidentRuntime {
             OperationId(nonce()),
             deadline,
             &mut || {
-                admit(deadline)?;
+                admit(deadline, false)?;
                 self.prepared.current(false)?;
                 self.check_child()?;
                 before(deadline)
             },
         )?;
         self.connection = Some(connection);
-        admit(deadline)?;
+        admit(deadline, true)?;
         self.prepared.current(true)?;
         self.check_child()?;
         // Both processes already exist. Complete SDK handshake before waiting on
         // companion readiness, avoiding a dependency cycle through reader main.
-        self.wait_companion(deadline, admit)?;
+        self.wait_companion(deadline, &mut |deadline| admit(deadline, false))?;
+        admit(deadline, true)?;
         before(deadline)
     }
     fn check_child(&mut self) -> Result<()> {
@@ -725,6 +775,43 @@ impl Prepared {
 fn before(deadline: Instant) -> Result<()> {
     resident_request::before(deadline, "resident startup deadline expired")
 }
+/// Only launch may wait through the exact inherited parent executable. After
+/// selected exec is observed, every ordinary child check remains fail-closed.
+fn wait_reader_exec(
+    child: &mut Option<Child>,
+    prepared: &mut Prepared,
+    inherited_inode: (u64, u64),
+    deadline: Instant,
+    progress: &mut dyn FnMut() -> Result<()>,
+) -> Result<()> {
+    let expected = &prepared.artifacts[1].metadata;
+    let expected_inode = (expected.dev(), expected.ino());
+    loop {
+        before(deadline)?;
+        progress()?;
+        before(deadline)?;
+        prepared.current(false)?;
+        let owned = child.as_mut().context("owned launch child absent")?;
+        ensure!(owned.try_wait()?.is_none(), "resident exited before selected exec");
+        ensure!(
+            owned.id() == prepared.identity.pid
+                && process_start(owned.id())? == prepared.identity.start_ticks,
+            "resident incarnation changed before selected exec"
+        );
+        let actual = fs::metadata(format!("/proc/{}/exe", owned.id()))?;
+        let actual_inode = (actual.dev(), actual.ino());
+        if actual_inode == expected_inode {
+            check_child(child, prepared)?;
+            return before(deadline);
+        }
+        ensure!(
+            actual_inode == inherited_inode,
+            "resident unexpected executable before selected exec: {actual_inode:?}"
+        );
+        thread::sleep(POLL.min(deadline.saturating_duration_since(Instant::now())));
+    }
+}
+
 fn check_child(child: &mut Option<Child>, prepared: &Prepared) -> Result<()> {
     let child = child.as_mut().context("resident already shut down")?;
     ensure!(child.try_wait()?.is_none(), "resident child exited");
@@ -1072,4 +1159,28 @@ fn boot_ms() -> Result<u64> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
+
+impl ResidentRuntime {
+    /// Closed journaled insertion dispatcher. A separately admitted output
+    /// backend is required by the caller; no general connection closure escapes.
+    pub(crate) fn insert_admitted(&mut self, conversation: crate::storage::Uuid,
+        operation: remarkable_open_sdk::OperationId,
+        insertion: remarkable_open_sdk::native_adapter::InsertAfter,
+        deadline: std::time::Instant, admission: &mut dyn ReadOnlyAdmission)
+        -> anyhow::Result<remarkable_open_sdk::native_adapter::Reply> {
+        self.read_only_boundary(deadline, admission)?;
+        let result = self.with_connection(deadline, &mut || admission.pulse(deadline),
+            |connection, pulse| connection.insert_after_with_progress(
+                conversation, operation, insertion, deadline, pulse).map_err(anyhow::Error::new));
+        // A dispatched effect's existing journal owns its original uncertainty.
+        // Failure never retries; a closing boundary failure cannot erase dispatch.
+        let closing = self.read_only_boundary(deadline, admission);
+        match (result, closing) {
+            (Err(primary), Err(closing)) => Err(primary.context(format!("closing insertion admission: {closing:#}"))),
+            (Err(primary), _) => Err(primary),
+            (Ok(_), Err(closing)) => Err(closing),
+            (Ok(reply), Ok(())) => Ok(reply),
+        }
+    }
+}

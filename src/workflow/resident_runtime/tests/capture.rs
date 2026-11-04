@@ -389,3 +389,120 @@ fn diagnosed_visual_api_records_reconnect_and_failure_before_owned_shutdown() {
         fs::remove_dir_all(root).unwrap();
     }
 }
+
+#[cfg(feature = "development-resident-bootstrap")]
+#[test]
+#[ignore = "protected root filesystem; run in owned Linux root container"]
+fn api_preparation_expiry_and_invoked_failure_are_durably_distinct_before_cleanup() {
+    use crate::workflow::resident_supervisor::service::bootstrap::setup::{
+        visual::{Diagnostics, Stage},
+        Binding,
+    };
+    struct EvidenceAdmission<'a> {
+        diagnostics: &'a mut Diagnostics,
+        expire: bool,
+        received: bool,
+    }
+    impl ReadOnlyAdmission for EvidenceAdmission<'_> {
+        fn pulse(&mut self, deadline: Instant) -> Result<()> {
+            before(deadline)?;
+            ensure!(
+                !self.received,
+                "closing pulse lost owned identity after SDK reply"
+            );
+            Ok(())
+        }
+        fn boundary(&mut self, deadline: Instant) -> Result<()> {
+            before(deadline)
+        }
+        fn before_api(&mut self, deadline: Instant) -> Result<()> {
+            if self.expire {
+                thread::sleep(
+                    deadline.saturating_duration_since(Instant::now()) + Duration::from_millis(2),
+                );
+            }
+            self.diagnostics.api_enter(Stage::Before, deadline)
+        }
+        fn reply_observed(&mut self) {
+            self.received = true;
+        }
+        fn after_api(
+            &mut self,
+            deadline: Instant,
+            invoked: bool,
+            result: &Result<Reply>,
+        ) -> Result<()> {
+            self.diagnostics
+                .api_result(Stage::Before, deadline, invoked, result)
+        }
+    }
+    for expire in [false, true] {
+        let fixture = Fixture::new();
+        let mut runtime = fixture
+            .start("reconnect-source-handoff", Duration::from_secs(5))
+            .unwrap();
+        let dir = PathBuf::from(format!(
+            "/root/api-evidence-{}",
+            crate::storage::Uuid::new_v4()
+        ));
+        DirBuilder::new().mode(0o700).create(&dir).unwrap();
+        let binding = Binding::new(
+            "0123456789abcdef0123456789abcdef",
+            &"11".repeat(32),
+            runtime.identity(),
+        )
+        .unwrap();
+        let mut diagnostics = Diagnostics::new(&dir, &binding).unwrap();
+        struct Quiet;
+        impl ReadOnlyAdmission for Quiet {
+            fn pulse(&mut self, deadline: Instant) -> Result<()> {
+                before(deadline)
+            }
+            fn boundary(&mut self, deadline: Instant) -> Result<()> {
+                before(deadline)
+            }
+        }
+        let Reply::Observed(expected) = runtime
+            .request_read_only(
+                OperationId(nonce()),
+                ReadOnlyRequest::Observe,
+                Instant::now() + Duration::from_secs(2),
+                &mut Quiet,
+            )
+            .unwrap()
+        else {
+            panic!("expected actual owned observe reply")
+        };
+        let deadline = Instant::now() + Duration::from_millis(if expire { 50 } else { 2000 });
+        let result = runtime.request_read_only(
+            OperationId(nonce()),
+            ReadOnlyRequest::CaptureSource(expected),
+            deadline,
+            &mut EvidenceAdmission {
+                diagnostics: &mut diagnostics,
+                expire,
+                received: false,
+            },
+        );
+        assert!(result.is_err());
+        let entered: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join("visual-diagnostic-000.json")).unwrap())
+                .unwrap();
+        let closing: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join("visual-diagnostic-001.json")).unwrap())
+                .unwrap();
+        assert_eq!(entered["phase"], "capture-api-preparation");
+        assert_eq!(closing["phase"], "capture-api");
+        assert_eq!(closing["outcome"], "error");
+        assert_eq!(closing["api_invoked"], !expire);
+        diagnostics.shutdown(Instant::now() + Duration::from_secs(2), || {
+            assert!(dir.join("visual-diagnostic-001.json").exists());
+            assert!(
+                runtime
+                    .shutdown(Instant::now() + Duration::from_secs(2))
+                    .reaped
+            );
+        });
+        fs::remove_dir_all(&dir).unwrap();
+    }
+}

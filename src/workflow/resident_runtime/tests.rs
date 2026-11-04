@@ -7,9 +7,9 @@ mod companion;
 mod requests;
 mod shutdown;
 
-struct Fixture(PathBuf);
+pub(crate) struct Fixture(PathBuf);
 impl Fixture {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let path = std::env::temp_dir().join(format!("rsdk-{}", StoreUuid::new_v4().simple()));
         DirBuilder::new().mode(0o700).create(&path).unwrap();
         for name in ["profile", "adapter"] {
@@ -60,6 +60,23 @@ impl Fixture {
         timeout: Duration,
         admit: impl FnMut(Instant) -> Result<()>,
     ) -> std::result::Result<ResidentRuntime, StartupFailure> {
+        self.start_admitted_with_store(self.store(), mode, timeout, admit)
+    }
+    pub(crate) fn start_with_store(
+        &self,
+        store: Arc<Store>,
+        mode: &str,
+        timeout: Duration,
+    ) -> std::result::Result<ResidentRuntime, StartupFailure> {
+        self.start_admitted_with_store(store, mode, timeout, |_| Ok(()))
+    }
+    fn start_admitted_with_store(
+        &self,
+        store: Arc<Store>,
+        mode: &str,
+        timeout: Duration,
+        mut admit: impl FnMut(Instant) -> Result<()>,
+    ) -> std::result::Result<ResidentRuntime, StartupFailure> {
         let mut input = self.launch();
         input.arguments = [
             "-S",
@@ -75,14 +92,14 @@ impl Fixture {
         .map(str::to_owned)
         .to_vec();
         ResidentRuntime::launch_checked(
-            self.store(),
+            store,
             input,
             Instant::now() + timeout,
             |command| {
                 // Owned protocol fixture, explicitly no actual LD_PRELOAD/native code.
                 command.env_remove("LD_PRELOAD");
             },
-            admit,
+            |deadline, _| admit(deadline),
         )
     }
     fn preserved_and_reaped(&self, mode: &str, failure: StartupFailure) {

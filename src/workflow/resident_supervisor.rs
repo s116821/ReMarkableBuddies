@@ -20,6 +20,8 @@ const LEASE_NAME: &str = "activation.json";
 pub mod health;
 pub mod recovery;
 pub mod service;
+#[cfg(all(feature = "development-resident-bootstrap", feature = "development-input-diagnostics"))]
+pub(crate) mod writer_request;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -561,6 +563,33 @@ impl Lease {
     pub fn record(&self) -> &LeaseRecord {
         &self.record
     }
+
+    /// Preserve the exact active record at a terminal name after recovery.
+    /// The recovery owner must verify the service postconditions first.
+    fn archive_recovered(&self) -> Result<()> {
+        self.current()?;
+        let active = CString::new(LEASE_NAME)?;
+        let terminal = CString::new(format!("recovered-{}.json", self.record.activation()))?;
+        let directory = self.directory.as_raw_fd();
+        // One move within the pinned directory. An existing archive is never
+        // replaced and a failed move leaves the active name occupied.
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                directory,
+                active.as_ptr(),
+                directory,
+                terminal.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if result != 0 {
+            return Err(std::io::Error::last_os_error()).context("archive recovered activation");
+        }
+        self.directory.sync_all()?;
+        Ok(())
+    }
+
     pub fn current(&self) -> Result<()> {
         ensure!(
             same_file(&self.file_metadata, &self.file.metadata()?)

@@ -11,6 +11,11 @@ use remarkable_open_sdk::native_adapter::{
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+#[cfg(feature = "development-native-close")]
+pub(crate) mod ordinary_close;
+#[cfg(feature = "development-native-close")]
+pub(crate) mod ordinary_reopen;
+
 const JOURNAL_FILE: &str = "native-insertion-attempts-v1.json";
 const MAX_JOURNAL: usize = 8 * 1024 * 1024;
 const MAX_ATTEMPTS: usize = 1024;
@@ -216,6 +221,14 @@ impl HistoricalAttempt {
     fn known_no_effect(&self) -> bool {
         self.known_not_dispatched || matches!(self.reply, Some(Reply::Rejected(_)))
     }
+    #[cfg(target_os = "linux")]
+    pub(super) fn possible_insertion(&self) -> Option<&remarkable_open_sdk::native_adapter::InsertAfter> {
+        match &self.request.frame().message {
+            Message::Request(Command::InsertAfter(insertion)) if !self.known_no_effect() => Some(insertion),
+            _ => None,
+        }
+    }
+
     fn permits_followup(&self, next: &Frame) -> bool {
         if self.known_no_effect() {
             return true;
@@ -562,6 +575,86 @@ mod linux {
                 )
                 .map_err(|error| self.transport_failure(error).into())
         }
+        #[cfg(feature = "development-native-close")]
+        pub fn observe_closed_with_progress(
+            &mut self, operation: OperationId, deadline: Instant, progress: &mut dyn FnMut() -> Result<()>,
+        ) -> Result<Reply> {
+            self.client.execute_with_progress(operation, Command::ObserveClosed, deadline, |_, _| Ok(()), &mut || progress().map_err(progress_error))
+                .map_err(|error| self.transport_failure(error).into())
+        }
+        /// A separate close journal is reserved/unknown durably before any byte.
+        /// Close dispatch and closed observation are historical, never a save fence.
+        #[cfg(feature = "development-native-close")]
+        pub fn close_ordinary_with_progress(
+            &mut self, conversation: Uuid, operation: OperationId, expected: ReaderFacts,
+            deadline: Instant, progress: &mut dyn FnMut() -> Result<()>,
+        ) -> Result<Reply> {
+            ensure!(self.retention_loss.is_none(), "close refused after unresolved transport retention");
+            ordinary_close::require_unused(&self.store)?;
+            ensure!(attempts(&self.store)?.is_empty(), "development close requires no prior insertion/selection attempt in this packet");
+            let mut original = None;
+            let result = self.client.execute_with_progress(operation, Command::CloseOrdinary(expected), deadline,
+                |frame, hash| {
+                    ordinary_close::reserve(&self.store, conversation, frame, hash).map_err(std::io::Error::other)?;
+                    original = Some(frame.clone());
+                    Ok(())
+                }, &mut || progress().map_err(progress_error));
+            match result {
+                Ok(reply) => {
+                    let request = original.context("SDK replied before close journal reservation")?;
+                    let response = Frame { message: Message::Response { request_sha256: request.fingerprint().unwrap(), reply: reply.clone() }, ..request.clone() };
+                    if let Err(error) = ordinary_close::finish(&self.store, &request, Some(&response), false) {
+                        self.client.close();
+                        self.retention_loss = Some(LostRequest::Indeterminate { operation, request_sha256: request.fingerprint().unwrap() });
+                        return Err(error.context("close reply retention failed; original close remains uncertain"));
+                    }
+                    Ok(reply)
+                }
+                Err(error) => {
+                    if error.lost == LostRequest::NoPendingMutation {
+                        if let Some(request) = &original { ordinary_close::finish(&self.store, request, None, true)?; }
+                    }
+                    Err(self.transport_failure(error).into())
+                }
+            }
+        }
+        /// A separate fixture reopen journal is reserved/unknown durably before any byte.
+        /// Close dispatch and closed observation are historical, never a save fence.
+        #[cfg(feature = "development-native-close")]
+        pub fn reopen_fixture_with_progress(
+            &mut self, conversation: Uuid, operation: OperationId, expected: ReaderFacts,
+            deadline: Instant, progress: &mut dyn FnMut() -> Result<()>,
+        ) -> Result<Reply> {
+            ensure!(self.retention_loss.is_none(), "fixture reopen refused after unresolved transport retention");
+            ordinary_close::require_dispatched(&self.store)?;
+            ordinary_reopen::require_unused(&self.store)?;
+            ensure!(attempts(&self.store)?.is_empty(), "development fixture reopen requires no prior insertion/selection attempt in this packet");
+            let mut original = None;
+            let result = self.client.execute_with_progress(operation, Command::ReopenFixture(expected), deadline,
+                |frame, hash| {
+                    ordinary_reopen::reserve(&self.store, conversation, frame, hash).map_err(std::io::Error::other)?;
+                    original = Some(frame.clone());
+                    Ok(())
+                }, &mut || progress().map_err(progress_error));
+            match result {
+                Ok(reply) => {
+                    let request = original.context("SDK replied before fixture reopen journal reservation")?;
+                    let response = Frame { message: Message::Response { request_sha256: request.fingerprint().unwrap(), reply: reply.clone() }, ..request.clone() };
+                    if let Err(error) = ordinary_reopen::finish(&self.store, &request, Some(&response), false) {
+                        self.client.close();
+                        self.retention_loss = Some(LostRequest::Indeterminate { operation, request_sha256: request.fingerprint().unwrap() });
+                        return Err(error.context("fixture reopen reply retention failed; original fixture reopen remains uncertain"));
+                    }
+                    Ok(reply)
+                }
+                Err(error) => {
+                    if error.lost == LostRequest::NoPendingMutation {
+                        if let Some(request) = &original { ordinary_reopen::finish(&self.store, request, None, true)?; }
+                    }
+                    Err(self.transport_failure(error).into())
+                }
+            }
+        }
         /// Capture preserves expected source and the caller's original admission.
         /// The SDK validates the bounded image and both source samples. This
         /// read-only request neither journals nor reconciles an earlier effect.
@@ -656,6 +749,10 @@ mod linux {
             deadline: Instant,
             progress: &mut dyn FnMut() -> Result<()>,
         ) -> std::result::Result<Reply, EffectFailure> {
+            #[cfg(feature = "development-native-close")]
+            if let Err(error) = ordinary_close::require_unused(&self.store) {
+                return Err(EffectFailure { operation, lost: LostRequest::NoPendingMutation, detail: format!("effect refused after consumed close: {error:#}"), cause: EffectCause::Unresolved });
+            }
             if let Some(lost) = &self.retention_loss {
                 return Err(EffectFailure {
                     operation,

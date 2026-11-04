@@ -1,10 +1,8 @@
 # Generate and refine an unrendered Writer draft
 
 `reader-buddy --writer-note` reads one JSON object from stdin, at most 256 KiB.
-It consumes explicitly supplied normalized text; it does not extract handwriting,
-capture drawings, start device input, render a page or send a Mem note. The
-selected conversation must already exist in the owned Store. Installed
-Reader/Writer module admission and native interaction remain separate work.
+The draft-only commands consume explicitly supplied normalized text. The
+selected conversation must already exist in the owned Store.
 
 Use the existing `REMARKABLE_BUDDIES_CONFIG` file and protected model credential
 reference or `OPENAI_API_KEY`. Endpoint selection follows ordinary configuration
@@ -166,3 +164,33 @@ requires explicit known-ID reconciliation, never automatic resend. Writer/export
 owners span the joined invocation and contend with standalone calls. Existing
 model/export cooperative budgets remain 95/45 seconds with transport bounds;
 these are not a hard outer deadline on synchronous Store work.
+
+## Place a refinement on the installed tablet
+
+On an installation with the pinned resident native output profile, submit
+one `refine-on-tablet` request to the same local stdin command. Supply the
+document and page IDs for the open source and the current generated draft
+for that document. This example uses invented identities.
+
+```json
+{
+  "command": "refine-on-tablet",
+  "document": "10000000-0000-4000-8000-000000000002",
+  "page": "10000000-0000-4000-8000-000000000003",
+  "refinement": {
+    "command": "refine",
+    "conversation": "10000000-0000-4000-8000-000000000001",
+    "draft": "10000000-0000-4000-8000-000000000004",
+    "operation": "10000000-0000-4000-8000-000000000005",
+    "request": "Make the note shorter."
+  }
+}
+```
+
+A `queued` response means the running service has one pending request for
+that page. Hold and release the normal Reader corner on the named page
+within two minutes. Buddy checks the current draft, runs the refinement and
+places the result in the compatible bound page or a newly inserted adjacent
+page. The queue consumes the request before generation and clears it on
+service recovery. The response reports queue admission only. The saved
+draft and the tablet page record the later outcomes.

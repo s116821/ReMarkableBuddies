@@ -182,8 +182,8 @@ fn main() -> Result<()> {
                 .parse()?;
             let stagger: u64 = args.get(4).map(|s| s.parse()).transpose()?.unwrap_or(0);
             anyhow::ensure!(
-                matches!(contacts, 2 | 4) && millis <= 5000 && stagger <= 500,
-                "expected 2/4 contacts, at most 5000ms hold and 500ms stagger"
+                matches!(contacts, 2..=4) && millis <= 5000 && stagger <= 500,
+                "expected 2 to 4 contacts, at most 5000ms hold and 500ms stagger"
             );
             let mut device = Device::open("/dev/input/event2")?;
             let abs = |code, value| InputEvent::new(EventType::ABSOLUTE.0, code, value);

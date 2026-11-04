@@ -633,3 +633,94 @@ fn diagnostic_success_retention_cannot_deliver_after_original_expiry() {
     assert!(stopped);
     assert!(!root.join("setup.ready.json.complete").exists());
 }
+
+#[test]
+#[ignore = "protected root filesystem; run in the owned Linux root container"]
+fn actual_mailbox_absent_polls_never_run_full_boundary_and_changed_boundary_refuses_ack() {
+    for polls in [1, 1000] {
+        for changed in [false, true] {
+            let root = root();
+            let binding = binding();
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let mut mailbox = Mailbox::open(&root).unwrap();
+            let mut pulses = 0;
+            let mut boundaries = 0;
+            let mut paced = 0;
+            let result = mailbox.wait_admitted_with_pace(
+                "actor-ended",
+                &binding,
+                deadline,
+                &mut |full| {
+                    if full {
+                        boundaries += 1;
+                        ensure!(!changed, "changed service at received marker");
+                    } else {
+                        pulses += 1;
+                        assert_eq!(boundaries, 0, "absent marker queried full admission");
+                        if pulses == polls {
+                            Mailbox::open(&root)?.publish("actor-ended", &binding, deadline)?;
+                        }
+                    }
+                    check(deadline)
+                },
+                &mut |_| {
+                    paced += 1;
+                },
+            );
+            assert_eq!(pulses, polls);
+            assert_eq!(paced, polls - 1);
+            assert_eq!(boundaries, 1);
+            assert_eq!(result.is_err(), changed);
+            assert!(!root.join("setup.ready.json.complete").exists());
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+}
+
+#[test]
+fn observer_batch_keeps_strict_inactive_dead_policy_instead_of_failed_terminal() {
+    let mut fields = STATE
+        .iter()
+        .chain(POLICY)
+        .map(|k| ((*k).to_owned(), String::new()))
+        .collect::<BTreeMap<_, _>>();
+    for key in [
+        "MainPID",
+        "ControlPID",
+        "ExecMainPID",
+        "ExecMainStartTimestampMonotonic",
+    ] {
+        fields.insert(key.into(), "0".into());
+    }
+    for (key, value) in [
+        ("Id", "xochitl.service"),
+        ("LoadState", "loaded"),
+        ("ActiveState", "inactive"),
+        ("SubState", "dead"),
+    ] {
+        fields.insert(key.into(), value.into());
+    }
+    let sample = |fields: &BTreeMap<String, String>| {
+        Snapshot::parse(
+            fields
+                .iter()
+                .map(|(k, v)| format!("{k}={v}\n"))
+                .collect::<String>()
+                .as_bytes(),
+            "xochitl.service",
+        )
+        .unwrap()
+    };
+    observer_inactive(&sample(&fields)).unwrap();
+    for (key, value) in [
+        ("ActiveState", "failed"),
+        ("SubState", "failed"),
+        ("MainPID", "42"),
+        ("ControlPID", "42"),
+        ("Job", "9 /job/9"),
+    ] {
+        let mut changed = fields.clone();
+        changed.insert(key.into(), value.into());
+        assert!(observer_inactive(&sample(&changed)).is_err(), "{key}");
+    }
+}

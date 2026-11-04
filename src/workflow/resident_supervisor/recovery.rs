@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs::{self, File, Metadata},
-    io::Read,
+    io::{Read, Seek},
     os::unix::fs::MetadataExt,
     path::{Component, Path, PathBuf},
     thread,
@@ -22,6 +22,7 @@ pub mod activation;
 
 pub const LEASE_DIRECTORY: &str = "/run/reader-buddy-resident";
 const PROFILE: &str = "/home/root/.local/lib/reader-buddy/resident-recovery.json";
+pub(crate) const DEVELOPMENT_OUTPUT_PLAN: &str = "/home/root/.local/lib/reader-buddy/development-output/plan.json";
 const APP: &str = "/home/root/.local/lib/reader-buddy/reader-buddy";
 const BUDDY: &str = "reader-buddy.service";
 const HELPER: &str = "reader-buddy-stock-recovery.service";
@@ -39,6 +40,11 @@ const RECOVERY_SECONDS: u64 = 120;
 // The only permitted missing directory is the fixed final component below the
 // protected /run parent. Missing/replaced/untrusted ancestors never mean absent.
 fn installed_directory_identity() -> Result<Option<super::Identity>> {
+    installed_directory_identity_at(Path::new(LEASE_DIRECTORY))
+}
+fn installed_directory_identity_at(path:&Path) -> Result<Option<super::Identity>> {
+    ensure!(path.parent()==Some(Path::new("/run")),"runtime parent mismatch");
+    let leaf=path.file_name().and_then(|v|v.to_str()).context("runtime leaf")?;
     let parent = trusted_file(Path::new("/run"))?;
     let identity = super::Identity::of(&parent.metadata()?);
     ensure!(
@@ -46,7 +52,7 @@ fn installed_directory_identity() -> Result<Option<super::Identity>> {
         "untrusted runtime directory"
     );
     let observe = || -> Result<Option<super::Identity>> {
-        match open_at(&parent, "reader-buddy-resident", true, false) {
+        match open_at(&parent, leaf, true, false) {
             Ok(directory) => {
                 let metadata = directory.metadata()?;
                 ensure!(
@@ -78,6 +84,20 @@ pub fn refuse_occupied_activation() -> Result<()> {
             "installed lease directory changed"
         );
     }
+    #[cfg(all(feature="development-resident-bootstrap",feature="development-input-diagnostics"))]
+    match fs::symlink_metadata(PROFILE) {
+        Ok(_) => {
+            let mut file=Pinned::open(Path::new(PROFILE))?;
+            let end=Instant::now()+Duration::from_secs(10);
+            let profile=parse_profile(&file.bytes(32*1024,end)?)?;
+            if profile.version==4 {
+                let directory=profile.runtime_directory()?;
+                if installed_directory_identity_at(&directory)?.is_some(){require_unoccupied(&directory)?;}
+            }
+        }
+        Err(error) if error.kind()==std::io::ErrorKind::NotFound => {},
+        Err(error) => return Err(error.into()),
+    }
     Ok(())
 }
 
@@ -95,6 +115,9 @@ pub(super) fn require_unoccupied(path: &Path) -> Result<()> {
 /// The installer creates it once per boot; service stop must never remove it.
 /// A failed publication leaves the directory occupied and cannot authorize stop.
 pub fn publish_installed(record: LeaseRecord) -> Result<Lease> {
+    publish_installed_at(record,Path::new(LEASE_DIRECTORY))
+}
+fn publish_installed_at(record:LeaseRecord,directory:&Path)->Result<Lease> {
     ensure!(
         unsafe { libc::geteuid() } == 0,
         "installed activation requires root"
@@ -105,15 +128,28 @@ pub fn publish_installed(record: LeaseRecord) -> Result<Lease> {
     );
     // Profile admission/stock/service bracketing must precede this call. Publishing
     // alone still grants neither stock-stop nor native-launch authority.
-    Lease::publish(Path::new(LEASE_DIRECTORY), record)
+    Lease::publish(directory, record)
 }
 
 #[derive(Deserialize)]
+#[cfg_attr(test, derive(serde::Serialize))]
+#[serde(deny_unknown_fields)]
+struct DevelopmentOutputInstallation {
+    path:String,
+    sha256:[u8;32],
+    nonce:String,
+}
+#[derive(Deserialize)]
+#[cfg_attr(test, derive(serde::Serialize))]
 #[serde(deny_unknown_fields)]
 struct Profile {
     version: u32,
     #[serde(default)]
     companion: Option<String>,
+    #[serde(default)]
+    source_mode: Option<String>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    development_output:Option<DevelopmentOutputInstallation>,
     firmware: String,
     kernel: String,
     native_profile_sha256: [u8; 32],
@@ -130,6 +166,13 @@ struct Profile {
     helper_policy: BTreeMap<String, String>,
     #[serde(deserialize_with = "policy_fields")]
     stock_policy: BTreeMap<String, String>,
+}
+
+fn parse_profile(bytes: &[u8]) -> Result<Profile> {
+    ensure!(bytes.len() <= 32 * 1024, "installed profile size bound");
+    let profile: Profile = serde_json::from_slice(bytes)?;
+    profile.validate_definition()?;
+    Ok(profile)
 }
 
 fn policy_fields<'de, D: serde::Deserializer<'de>>(
@@ -197,6 +240,9 @@ impl Pinned {
         Ok(())
     }
     pub(super) fn bytes(&mut self, limit: u64, deadline: Instant) -> Result<Vec<u8>> {
+        // A verified pin has already hashed this descriptor to EOF. Reading the
+        // same immutable artifact must start at its beginning, not that cursor.
+        self.file.rewind()?;
         let bytes = bounded_bytes(&mut self.file, limit, deadline)?;
         ensure!(
             bytes.len() as u64 == self.metadata.len(),
@@ -292,8 +338,7 @@ impl Installation {
         let mut file = Pinned::open(Path::new(PROFILE))?;
         let bytes = file.bytes(32 * 1024, deadline)?;
         let digest = sha256(&bytes);
-        let profile: Profile = serde_json::from_slice(&bytes)?;
-        profile.validate_definition()?;
+        let profile = parse_profile(&bytes)?;
         ensure!(
             firmware_version(&text(Path::new("/etc/os-release"), 16 * 1024)?)? == profile.firmware
                 && text(Path::new("/proc/sys/kernel/osrelease"), 256)?.trim() == profile.kernel,
@@ -309,6 +354,9 @@ impl Installation {
             (STOCK_DROPIN, profile.stock_dropin_sha256),
         ] {
             artifacts.push(Pinned::verified(path, hash, deadline)?);
+        }
+        if let Some(plan)=&profile.development_output {
+            artifacts.push(Pinned::verified(&plan.path,plan.sha256,deadline)?);
         }
         let installation = Self {
             profile,
@@ -416,7 +464,53 @@ impl Installed {
     }
 }
 
+fn hex_digest(text:&str)->[u8;32] {
+    let mut out=[0;32];for (i,pair) in text.as_bytes().chunks_exact(2).enumerate() {
+        let nibble=|b:u8|if b<=b'9'{b-b'0'}else{b-b'a'+10};out[i]=(nibble(pair[0])<<4)|nibble(pair[1]);
+    }out
+}
 impl Profile {
+    fn installed_output_definition(&self) -> bool {
+        #[cfg(all(feature = "development-resident-bootstrap", feature = "development-input-diagnostics"))]
+        {
+            use crate::workflow::resident_output::development::{ADAPTER, PROFILE};
+            self.version == 5
+                && self.source_mode.as_deref() == Some("resident-installed-output-v1")
+                && self.companion.as_deref() == Some(service::vendor::PROFILE_ID)
+                && self.development_output.is_none()
+                && self.native_profile_sha256 == hex_digest(PROFILE)
+                && self.adapter_sha256 == hex_digest(ADAPTER)
+        }
+        #[cfg(not(all(feature = "development-resident-bootstrap", feature = "development-input-diagnostics")))]
+        false
+    }
+
+    fn development_definition(&self)->bool {
+        #[cfg(all(feature="development-resident-bootstrap",feature="development-input-diagnostics"))]
+        if self.version==4 && self.source_mode.as_deref()==Some("resident-development-output-v1") && self.companion.as_deref()==Some(service::vendor::PROFILE_ID) {
+            if let Some(plan)=&self.development_output {
+                use crate::workflow::resident_output::development::{REPEAT_ADAPTER, REPEAT_PROFILE};
+                let repeat = self.native_profile_sha256 == hex_digest(REPEAT_PROFILE)
+                    && self.adapter_sha256 == hex_digest(REPEAT_ADAPTER);
+                return plan.path==DEVELOPMENT_OUTPUT_PLAN && plan.sha256!=[0;32] && uuid::Uuid::parse_str(&plan.nonce).is_ok_and(|id|!id.is_nil()&&id.to_string()==plan.nonce)
+                    && (repeat || (self.native_profile_sha256==hex_digest("91ba3d8c200f8bfa3898ef7410595bf4ddff62f25fba3106c7f4ed442938eb5b")
+                    && self.adapter_sha256==hex_digest("fe52512fd08f26bc727357106a7e9e5e0bdacdd0f93c8b3a6ba1e0ee63b843fc")));
+            }
+        }
+        false
+    }
+    fn runtime_directory(&self)->Result<PathBuf> {
+        if self.version==4 {
+            ensure!(self.development_definition(),"unsupported development installation");
+            let nonce=&self.development_output.as_ref().unwrap().nonce;
+            return Ok(PathBuf::from(format!("/run/rb-dev-{}",nonce.replace('-',""))));
+        }
+        Ok(PathBuf::from(LEASE_DIRECTORY))
+    }
+    fn app_argv(&self)->Vec<&str> {
+        if self.development_definition() {vec![APP,"--development-resident-output-plan",DEVELOPMENT_OUTPUT_PLAN]} else {vec![APP]}
+    }
+
     fn validate(&self, record: &LeaseRecord) -> Result<()> {
         self.validate_definition()?;
         record.validate()?;
@@ -445,9 +539,15 @@ impl Profile {
             ensure!(digest != [0; 32], "missing installed artifact digest");
         }
         ensure!(
-            ((self.version == 1 && self.companion.is_none())
+            ((self.version == 1 && self.companion.is_none() && self.source_mode.is_none())
                 || (self.version == 2
-                    && self.companion.as_deref() == Some(service::vendor::PROFILE_ID)))
+                    && self.source_mode.is_none()
+                    && self.companion.as_deref() == Some(service::vendor::PROFILE_ID))
+                || (self.version == 3
+                    && self.source_mode.as_deref() == Some("resident-source-v1")
+                    && self.companion.as_deref() == Some(service::vendor::PROFILE_ID))
+                || self.development_definition() || self.installed_output_definition())
+                && (self.version==4 || self.development_output.is_none())
                 && self.firmware == "3.28.0.172"
                 && self.kernel == "5.4.70-v1.6.3-rm11x",
             "unsupported recovery profile"
@@ -779,10 +879,17 @@ pub fn run_installed() -> Result<RecoveryOutcome> {
         "stock recovery requires root"
     );
     let deadline = Instant::now() + Duration::from_secs(RECOVERY_SECONDS);
-    let identity = installed_directory_identity()?.context("installed lease directory absent")?;
-    let lease = Lease::reopen_if_present(Path::new(LEASE_DIRECTORY))?;
+    let directory=PathBuf::from(LEASE_DIRECTORY);
+    #[cfg(all(feature="development-resident-bootstrap",feature="development-input-diagnostics"))]
+    let directory=match fs::symlink_metadata(PROFILE) {
+        Ok(_) => {let mut file=Pinned::open(Path::new(PROFILE))?;parse_profile(&file.bytes(32*1024,Instant::now()+Duration::from_secs(10))?)?.runtime_directory()?},
+        Err(error) if error.kind()==std::io::ErrorKind::NotFound => directory,
+        Err(error) => return Err(error.into()),
+    };
+    let identity = installed_directory_identity_at(&directory)?.context("installed lease directory absent")?;
+    let lease = Lease::reopen_if_present(&directory)?;
     ensure!(
-        installed_directory_identity()? == Some(identity),
+        installed_directory_identity_at(&directory)? == Some(identity),
         "installed lease directory changed"
     );
     let Some(lease) = lease else {
@@ -790,15 +897,29 @@ pub fn run_installed() -> Result<RecoveryOutcome> {
         return Ok(RecoveryOutcome::NoRecordedActivation);
     };
     let installed = Installed::load(&lease, deadline)?;
-    restore(
-        &mut Native {
-            installed,
-            lease,
-            restored_companion: None,
-        },
-        deadline,
-    )
-    .map(RecoveryOutcome::Restored)
+    let mut backend = Native {
+        installed,
+        lease,
+        restored_companion: None,
+    };
+    let restored = restore(&mut backend, deadline)?;
+    if backend.installed.profile.installed_output_definition() {
+        backend.admit(deadline)?;
+        let stock = backend.stock(deadline)?;
+        ensure!(
+            stock_state(&stock)? == StockState::Ready
+                && stock.invocation() == restored.invocation
+                && ProcessIdentity::read(stock.main_pid())? == restored.process,
+            "stock changed before activation retirement"
+        );
+        backend.companion_current(deadline)?;
+        check_deadline(deadline)?;
+        #[cfg(all(feature = "development-resident-bootstrap", feature = "development-input-diagnostics"))]
+        super::writer_request::discard(&backend.lease)?;
+        backend.lease.archive_recovered()?;
+        log::info!("Archived recovered activation {}", backend.lease.record().activation());
+    }
+    Ok(RecoveryOutcome::Restored(restored))
 }
 
 // Private test seam runs the same sequencing; callers cannot inject a command,

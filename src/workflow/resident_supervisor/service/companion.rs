@@ -257,4 +257,78 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.to_string(), "transport failed");
     }
+    #[test]
+    fn broker_query_count_is_independent_of_internal_pipe_pulses() {
+        for polls in [1, 1000] {
+            let mut replies = samples();
+            let mut queries = 0;
+            let mut pulses = 0;
+            let owner = owner_with(
+                Instant::now() + Duration::from_secs(2),
+                &mut || {
+                    pulses += 1;
+                    Ok(())
+                },
+                |_, _, _, pulse| {
+                    queries += 1;
+                    for _ in 0..polls {
+                        pulse()?;
+                    }
+                    Ok(replies.pop_front().unwrap())
+                },
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(owner.pid, 1234);
+            assert_eq!(queries, 6);
+            assert_eq!(pulses, 12 + 6 * polls);
+        }
+    }
+}
+
+// Explicit host-only probe: same owner parser and real bounded subprocess runner.
+#[cfg(test)]
+thread_local! { static PROBE: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((1, 0)) }; }
+#[cfg(test)]
+pub(crate) fn fixture_probe(polls: usize) {
+    PROBE.with(|v| v.set((polls, 0)));
+}
+#[cfg(test)]
+pub(crate) fn fixture_queries() -> usize {
+    PROBE.with(|v| v.get().1)
+}
+#[cfg(test)]
+pub(crate) fn fixture_observe_owner(
+    path: &std::path::Path,
+    deadline: Instant,
+    progress: &mut dyn FnMut() -> Result<()>,
+) -> Result<Option<BrokerOwner>> {
+    owner_with(
+        deadline,
+        progress,
+        |method, argument, deadline, progress| {
+            let polls = PROBE.with(|v| {
+                let (polls, count) = v.get();
+                v.set((polls, count + 1));
+                polls
+            });
+            for _ in 0..polls {
+                progress()?;
+            }
+            let pid = std::fs::read_to_string(path)?;
+            let reply = match method {
+                "NameHasOwner" => "b true\n".to_owned(),
+                "GetId" => "s \"00000000000000000000000000000000\"\n".to_owned(),
+                "GetNameOwner" => "s \":1.42\"\n".to_owned(),
+                "GetConnectionUnixProcessID" => {
+                    ensure!(argument == Some(":1.42"), "PID query must use unique owner");
+                    format!("u {}\n", pid.trim())
+                }
+                _ => anyhow::bail!("unexpected broker method"),
+            };
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", "printf '%s' \"$1\"", "broker-probe", &reply]);
+            run_with_progress(command, deadline, progress)
+        },
+    )
 }

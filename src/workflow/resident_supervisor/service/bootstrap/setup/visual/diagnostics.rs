@@ -13,6 +13,7 @@ pub enum Phase {
     Capture,
     Reconnect,
     CaptureApi,
+    CaptureApiPreparation,
     Publication,
     CaptureResult,
     Shutdown,
@@ -47,6 +48,17 @@ impl Diagnostics {
         deadline: Instant,
         detail: Option<String>,
     ) -> Result<()> {
+        self.record_invocation(stage, phase, outcome, deadline, detail, None)
+    }
+    fn record_invocation(
+        &mut self,
+        stage: Option<Stage>,
+        phase: Phase,
+        outcome: &str,
+        deadline: Instant,
+        detail: Option<String>,
+        api_invoked: Option<bool>,
+    ) -> Result<()> {
         ensure!(self.sequence < MAX_EVENTS, "visual diagnostic event bound");
         let metadata = private_root(&self.root)?.metadata()?;
         ensure!(
@@ -60,7 +72,7 @@ impl Diagnostics {
             "stage": stage, "phase": phase, "outcome": outcome,
             "elapsed_ms": now.saturating_duration_since(self.start).as_millis(),
             "remaining_ms": deadline.saturating_duration_since(now).as_millis(),
-            "detail": detail, "native_authority": false,
+            "detail": detail, "api_invoked": api_invoked, "native_authority": false,
         }))?;
         ensure!(bytes.len() <= 4096, "visual diagnostic record bound");
         write_new(
@@ -114,6 +126,36 @@ impl Diagnostics {
             (Err(error), Ok(())) => Err(error),
             (Ok(_), Err(error)) => Err(error),
         }
+    }
+    pub fn api_enter(&mut self, stage: Stage, deadline: Instant) -> Result<()> {
+        self.record(
+            Some(stage),
+            Phase::CaptureApiPreparation,
+            "entered",
+            deadline,
+            Some("Preparation only; absent closing record does not prove API invocation".into()),
+        )?;
+        check(deadline)
+    }
+    pub fn api_result(
+        &mut self,
+        stage: Stage,
+        deadline: Instant,
+        invoked: bool,
+        result: &Result<remarkable_open_sdk::native_adapter::Reply>,
+    ) -> Result<()> {
+        self.record_invocation(
+            Some(stage),
+            Phase::CaptureApi,
+            if result.is_ok() { "returned" } else { "error" },
+            deadline,
+            result.as_ref().err().map(|e| format!("{e:#}")),
+            Some(invoked),
+        )?;
+        if result.is_ok() {
+            check(deadline)?;
+        }
+        Ok(())
     }
     /// Diagnostic refusal must never bypass owned-child cleanup or renew its bound.
     pub fn shutdown<T: std::fmt::Debug>(

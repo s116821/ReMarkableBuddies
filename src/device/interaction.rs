@@ -18,6 +18,7 @@ pub struct Contact {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Interaction {
     Reader,
+    BlankStart,
     Undo,
     Redo,
     Invalidated,
@@ -36,13 +37,20 @@ struct Session {
 pub struct ContactReducer {
     corner: TriggerCorner,
     session: Option<Session>,
+    blank_start: bool,
 }
 impl ContactReducer {
     pub fn new(corner: TriggerCorner) -> Self {
         Self {
             corner,
             session: None,
+            blank_start: false,
         }
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn enable_blank_start(&mut self) {
+        self.blank_start = true;
     }
 
     pub fn cancel(&mut self) -> Interaction {
@@ -153,6 +161,7 @@ impl ContactReducer {
         {
             session.qualified = match contacts.len() {
                 2 => Some(Interaction::Redo),
+                3 if self.blank_start => Some(Interaction::BlankStart),
                 4 => Some(Interaction::Undo),
                 _ => None,
             };
@@ -161,6 +170,7 @@ impl ContactReducer {
             && (session.blocked
                 || (session.qualified.is_none()
                     && !matches!(contacts.len(), 2 | 4)
+                    && !(self.blank_start && contacts.len() == 3)
                     && elapsed >= FORMATION))
         {
             session.invalidated = true;
@@ -199,6 +209,32 @@ mod tests {
             assert!(reducer.frame(&[], ms(5000)).is_empty());
             assert!(reducer.frame(&points, ms(6000)).is_empty());
             assert_eq!(reducer.frame(&[], ms(6100)), vec![Interaction::Invalidated]);
+        }
+    }
+
+    #[test]
+    fn installed_blank_start_requires_a_distinct_complete_release() {
+        let points = contacts(3);
+        let mut ordinary = ContactReducer::new(TriggerCorner::LowerLeft);
+        ordinary.frame(&points, ms(0));
+        assert_eq!(ordinary.frame(&points, ms(2000)), vec![Interaction::Invalidated]);
+        assert!(ordinary.frame(&[], ms(2400)).is_empty());
+
+        let mut installed = ContactReducer::new(TriggerCorner::LowerLeft);
+        installed.enable_blank_start();
+        for (index, (count, action)) in [
+            (2, Interaction::Redo),
+            (3, Interaction::BlankStart),
+            (4, Interaction::Undo),
+            (3, Interaction::BlankStart),
+        ].into_iter().enumerate() {
+            let start = index as u64 * 3000;
+            let points = contacts(count);
+            assert!(installed.frame(&points, ms(start)).is_empty());
+            assert!(installed.frame(&points, ms(start + 2000)).is_empty());
+            assert!(installed.frame(&points[..1], ms(start + 2100)).is_empty());
+            assert_eq!(installed.frame(&[], ms(start + 2200)), vec![action]);
+            assert!(installed.frame(&[], ms(start + 2300)).is_empty());
         }
     }
     #[test]

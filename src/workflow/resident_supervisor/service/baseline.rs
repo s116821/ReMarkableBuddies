@@ -82,6 +82,22 @@ impl ServiceBaseline {
         Ok(result)
     }
 
+    pub fn stopped_samples(
+        &self,
+        first: &Snapshot,
+        group: GroupObservation,
+        last: &Snapshot,
+        deadline: Instant,
+    ) -> Result<Option<RecoveryObservation>> {
+        self.validate()?;
+        stopped_bracket_checked(&self.original, first, group, last, || {
+            crate::workflow::resident_request::before(
+                deadline,
+                "source service bracket deadline expired",
+            )
+        })
+    }
+
     pub fn encode(&self) -> Result<Vec<u8>> {
         self.validate()?;
         let record = Record {
@@ -156,9 +172,18 @@ fn stopped_bracket(
     last: &Snapshot,
     deadline: Instant,
 ) -> Result<Option<RecoveryObservation>> {
+    stopped_bracket_checked(original, first, group, last, || before(deadline))
+}
+fn stopped_bracket_checked(
+    original: &Snapshot,
+    first: &Snapshot,
+    group: GroupObservation,
+    last: &Snapshot,
+    check: impl FnOnce() -> Result<()>,
+) -> Result<Option<RecoveryObservation>> {
     let a = stopped_snapshot(first, original, group)?;
     let b = stopped_snapshot(last, original, group)?;
-    before(deadline)?;
+    check()?;
     Ok(match (a, b) {
         (Some(a), Some(b)) if a == b && first.same_observation(last) => Some(RecoveryObservation {
             identity: a,
@@ -227,10 +252,19 @@ pub(in crate::workflow::resident_supervisor) fn stopped_snapshot(
             || (retained && active == Some("failed") && sub == Some("failed")),
         "unexpected service terminal state"
     );
+    // PID1 may clear ControlGroup while the pinned original group is still
+    // populated, or after it becomes empty but before deletion. Both are
+    // pending teardown, never evidence that the service has stopped. Identity,
+    // policy and terminal state were checked above; retain the original deadline.
+    if s.control_group().is_empty()
+        && matches!(group,GroupObservation::EmptyOriginal|GroupObservation::Populated) {
+        return Ok(None);
+    }
     ensure!(
         s.control_group() == original.control_group()
             || (s.control_group().is_empty() && group == GroupObservation::OriginalAbsent),
-        "service group changed"
+        "service group changed: actual={:?} original={:?} observation={group:?}",
+        s.control_group(), original.control_group()
     );
     ensure!(
         retained || group == GroupObservation::OriginalAbsent,

@@ -35,6 +35,18 @@ pub struct Image {
 /// guard is checked through IO; captures may not renew their absolute deadline.
 pub trait Transport {
     fn progress(&mut self, deadline: Instant) -> Result<()>;
+    fn boundary(&mut self, deadline: Instant) -> Result<()> {
+        self.progress(deadline)
+    }
+    fn boundary_guarded(
+        &mut self,
+        deadline: Instant,
+        guard: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        guard()?;
+        self.boundary(deadline)?;
+        guard()
+    }
     fn capture(
         &mut self,
         stage: Stage,
@@ -220,6 +232,34 @@ impl Mailbox {
     }
 }
 
+fn boundary(
+    transport: &mut impl Transport,
+    guard: &mut dyn FnMut() -> Result<()>,
+    deadline: Instant,
+) -> Result<()> {
+    check(deadline)?;
+    guard()?;
+    transport.boundary_guarded(deadline, guard)?;
+    guard()?;
+    check(deadline)
+}
+fn wait_for_phase(
+    mailbox: &mut Mailbox,
+    phase: &str,
+    binding: &Binding,
+    deadline: Instant,
+    transport: &mut impl Transport,
+    guard: &mut dyn FnMut() -> Result<()>,
+) -> Result<()> {
+    mailbox.wait_admitted(phase, binding, deadline, &mut |full| {
+        if full {
+            boundary(transport, guard, deadline)
+        } else {
+            progress(transport, guard, deadline)
+        }
+    })
+}
+
 fn progress(
     transport: &mut impl Transport,
     guard: &mut dyn FnMut() -> Result<()>,
@@ -240,7 +280,9 @@ fn capture(
     deadline: Instant,
     diagnostics: &mut Diagnostics,
 ) -> Result<()> {
-    let capture_deadline = deadline.min(Instant::now() + Duration::from_secs(10));
+    // This remains the original setup bound. Reconnect and API allocate their
+    // own bounded phases below; neither may renew this outer deadline.
+    let capture_deadline = deadline;
     diagnostics.step(
         Some(stage),
         Phase::CaptureProgress,
@@ -259,16 +301,17 @@ fn capture(
             trace,
         )
     })?;
+    let publication_deadline = deadline.min(Instant::now() + Duration::from_secs(10));
     diagnostics.step(
         Some(stage),
         Phase::CaptureProgress,
-        capture_deadline,
-        |_| progress(transport, guard, capture_deadline),
+        publication_deadline,
+        |_| progress(transport, guard, publication_deadline),
     )?;
     let root = mailbox.root.clone();
-    diagnostics.step(Some(stage), Phase::Publication, capture_deadline, |_| {
-        mailbox.publish_visual(stage, binding, image, capture_deadline, &mut || {
-            progress(transport, guard, capture_deadline)?;
+    diagnostics.step(Some(stage), Phase::Publication, publication_deadline, |_| {
+        mailbox.publish_visual(stage, binding, image, publication_deadline, &mut || {
+            boundary(transport, guard, publication_deadline)?;
             let mailbox = Mailbox::open(&root)?;
             mailbox.absent(&["complete", "observer-admitted", "actor-admitted"])?;
             if stage == Stage::Before {
@@ -317,14 +360,13 @@ fn observer_diagnosed<I: InputGuard>(
     diagnostics.step(None, Phase::SetupProgress, deadline, |_| {
         progress(transport, guard, deadline)
     })?;
+    boundary(transport, guard, deadline)?;
     mailbox.empty()?;
     quiet(input)?;
     drop(input.take());
     mailbox.publish("observer-ended", binding, deadline)?;
     diagnostics.step(None, Phase::ActorEnded, deadline, |_| {
-        mailbox.wait("actor-ended", binding, deadline, &mut || {
-            progress(transport, guard, deadline)
-        })
+        wait_for_phase(mailbox, "actor-ended", binding, deadline, transport, guard)
     })?;
     mailbox.absent(&[
         "ready",
@@ -346,7 +388,7 @@ fn observer_diagnosed<I: InputGuard>(
     )?;
     let root = mailbox.root.clone();
     mailbox.publish_admitted("ready", binding, deadline, &mut || {
-        progress(transport, guard, deadline)?;
+        boundary(transport, guard, deadline)?;
         Mailbox::open(&root)?.absent(&[
             "complete",
             "observer-admitted",
@@ -355,9 +397,14 @@ fn observer_diagnosed<I: InputGuard>(
             "visual-after",
         ])
     })?;
-    mailbox.wait("visual-after-request", binding, deadline, &mut || {
-        progress(transport, guard, deadline)
-    })?;
+    wait_for_phase(
+        mailbox,
+        "visual-after-request",
+        binding,
+        deadline,
+        transport,
+        guard,
+    )?;
     mailbox.absent(&[
         "complete",
         "observer-admitted",
@@ -373,21 +420,26 @@ fn observer_diagnosed<I: InputGuard>(
         deadline,
         diagnostics,
     )?;
-    mailbox.wait("complete", binding, deadline, &mut || {
-        progress(transport, guard, deadline)
-    })?;
+    wait_for_phase(mailbox, "complete", binding, deadline, transport, guard)?;
     mailbox.require_visual_pair(binding, deadline)?;
     progress(transport, guard, deadline)?;
     *input = Some(acquire()?);
     quiet(input)?;
     mailbox.publish_admitted("observer-admitted", binding, deadline, &mut || {
-        progress(transport, guard, deadline)?;
+        boundary(transport, guard, deadline)?;
         quiet(input)
     })?;
-    mailbox.wait("actor-admitted", binding, deadline, &mut || {
-        progress(transport, guard, deadline)?;
-        quiet(input)
-    })?;
+    wait_for_phase(
+        mailbox,
+        "actor-admitted",
+        binding,
+        deadline,
+        transport,
+        &mut || {
+            guard()?;
+            quiet(input)
+        },
+    )?;
     quiet(input)
 }
 
@@ -436,14 +488,86 @@ impl ObserverSetup {
 
 /// One explicit same-child reconnect and one read-only image request. The
 /// caller supplies candidate/service admission; the Runtime adds child checks.
+struct ProgressAdmission<'a> {
+    progress: &'a mut dyn FnMut() -> Result<()>,
+}
+impl crate::workflow::resident_runtime::ReadOnlyAdmission for ProgressAdmission<'_> {
+    fn pulse(&mut self, deadline: Instant) -> Result<()> {
+        check(deadline)?;
+        (self.progress)()?;
+        check(deadline)
+    }
+    fn boundary(&mut self, deadline: Instant) -> Result<()> {
+        self.pulse(deadline)
+    }
+}
+struct TracedAdmission<'a> {
+    inner: &'a mut dyn crate::workflow::resident_runtime::ReadOnlyAdmission,
+    diagnostics: &'a mut Diagnostics,
+    stage: Stage,
+}
+impl crate::workflow::resident_runtime::ReadOnlyAdmission for TracedAdmission<'_> {
+    fn pulse(&mut self, deadline: Instant) -> Result<()> {
+        self.inner.pulse(deadline)
+    }
+    fn boundary(&mut self, deadline: Instant) -> Result<()> {
+        self.inner.boundary(deadline)
+    }
+    fn boundary_with_pulse(
+        &mut self,
+        deadline: Instant,
+        runtime_pulse: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        self.inner.boundary_with_pulse(deadline, runtime_pulse)
+    }
+    fn before_api(&mut self, deadline: Instant) -> Result<()> {
+        self.diagnostics.api_enter(self.stage, deadline)
+    }
+    fn after_api(
+        &mut self,
+        deadline: Instant,
+        invoked: bool,
+        result: &Result<remarkable_open_sdk::native_adapter::Reply>,
+    ) -> Result<()> {
+        self.diagnostics
+            .api_result(self.stage, deadline, invoked, result)
+    }
+}
 pub fn capture_on_runtime(
     runtime: &mut crate::workflow::resident_runtime::ResidentRuntime,
     deadline: Instant,
     progress: &mut dyn FnMut() -> Result<()>,
 ) -> Result<Image> {
-    capture_on_runtime_traced(runtime, deadline, progress, &mut |_, _, action| action())
+    capture_on_runtime_admitted(runtime, deadline, &mut ProgressAdmission { progress })
 }
-
+pub fn capture_on_runtime_admitted(
+    runtime: &mut crate::workflow::resident_runtime::ResidentRuntime,
+    deadline: Instant,
+    admission: &mut dyn crate::workflow::resident_runtime::ReadOnlyAdmission,
+) -> Result<Image> {
+    let reconnect_deadline = deadline.min(Instant::now() + Duration::from_secs(30));
+    runtime.reconnect_read_only(reconnect_deadline, admission)?;
+    capture_read_only(runtime, deadline, admission)
+}
+fn capture_read_only(
+    runtime: &mut crate::workflow::resident_runtime::ResidentRuntime,
+    deadline: Instant,
+    admission: &mut dyn crate::workflow::resident_runtime::ReadOnlyAdmission,
+) -> Result<Image> {
+    let operation =
+        OperationId(Uuid::parse(&uuid::Uuid::new_v4().to_string()).expect("fresh UUID"));
+    match runtime.request_read_only_capture(
+        operation,
+        crate::workflow::resident_runtime::ReadOnlyRequest::CaptureVisual,
+        deadline,
+        admission,
+    )? {
+        remarkable_open_sdk::native_adapter::Reply::VisualCaptured(image) => {
+            Ok(Image { operation, image })
+        }
+        other => anyhow::bail!("visual capture refused: {other:?}"),
+    }
+}
 pub fn capture_on_runtime_diagnosed(
     runtime: &mut crate::workflow::resident_runtime::ResidentRuntime,
     stage: Stage,
@@ -451,42 +575,34 @@ pub fn capture_on_runtime_diagnosed(
     progress: &mut dyn FnMut() -> Result<()>,
     diagnostics: &mut Diagnostics,
 ) -> Result<Image> {
-    capture_on_runtime_traced(
+    capture_on_runtime_diagnosed_admitted(
         runtime,
+        stage,
         deadline,
-        progress,
-        &mut |phase, deadline, action| diagnostics.step(Some(stage), phase, deadline, |_| action()),
+        &mut ProgressAdmission { progress },
+        diagnostics,
     )
 }
-
-#[allow(clippy::type_complexity)]
-fn capture_on_runtime_traced(
+pub fn capture_on_runtime_diagnosed_admitted(
     runtime: &mut crate::workflow::resident_runtime::ResidentRuntime,
+    stage: Stage,
     deadline: Instant,
-    progress: &mut dyn FnMut() -> Result<()>,
-    trace: &mut dyn FnMut(Phase, Instant, &mut dyn FnMut() -> Result<()>) -> Result<()>,
+    admission: &mut dyn crate::workflow::resident_runtime::ReadOnlyAdmission,
+    diagnostics: &mut Diagnostics,
 ) -> Result<Image> {
-    let operation =
-        OperationId(Uuid::parse(&uuid::Uuid::new_v4().to_string()).expect("fresh UUID"));
-    trace(Phase::Reconnect, deadline, &mut || {
-        runtime.reconnect(deadline, progress)
+    let reconnect_deadline = deadline.min(Instant::now() + Duration::from_secs(30));
+    diagnostics.step(Some(stage), Phase::Reconnect, reconnect_deadline, |_| {
+        runtime.reconnect_read_only(reconnect_deadline, admission)
     })?;
-    let reply = runtime.with_connection(deadline, progress, |connection, progress| {
-        let mut reply = None;
-        // Entry is immediately before the SDK API call, after Runtime companion
-        // admission. It still does NOT prove a socket write or native dispatch.
-        trace(Phase::CaptureApi, deadline, &mut || {
-            reply = Some(connection.capture_visual_with_progress(operation, deadline, progress)?);
-            Ok(())
-        })?;
-        reply.context("visual capture API returned no reply")
-    })?;
-    match reply {
-        remarkable_open_sdk::native_adapter::Reply::VisualCaptured(image) => {
-            Ok(Image { operation, image })
-        }
-        other => anyhow::bail!("visual capture refused: {other:?}"),
-    }
+    capture_read_only(
+        runtime,
+        deadline,
+        &mut TracedAdmission {
+            inner: admission,
+            diagnostics,
+            stage,
+        },
+    )
 }
 
 #[cfg(test)]

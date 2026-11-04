@@ -143,7 +143,7 @@ impl std::fmt::Display for Canceled {
 }
 impl std::error::Error for Canceled {}
 
-fn admission(
+pub(super) fn admission(
     deadline: Instant,
     input: &mut dyn FnMut() -> Result<InputProgress>,
     authority: &mut dyn FnMut() -> Result<()>,
@@ -166,6 +166,18 @@ fn admission(
         return Err(Canceled.into());
     }
     before(deadline, "resident request deadline expired")
+}
+
+/// Full read-only authority failure remains fatal; typed input/deadline causes
+/// survive nested service-query pulses without being relabeled as refusal.
+pub(super) fn authority_error(error: anyhow::Error) -> anyhow::Error {
+    if error.chain().any(|cause| {
+        cause.is::<Canceled>() || cause.is::<DeadlineExpired>() || cause.is::<IntegrityFailure>()
+    }) {
+        error
+    } else {
+        integrity(error)
+    }
 }
 
 fn transport_kind(cause: &Failure) -> FailureKind {
@@ -224,7 +236,7 @@ pub(super) fn is_request_retirement(error: &anyhow::Error) -> bool {
         FailureKind::Canceled | FailureKind::Deadline
     )
 }
-fn finish<T>(
+pub(super) fn finish<T>(
     runtime: &mut ResidentRuntime,
     result: Result<T>,
 ) -> std::result::Result<T, RequestFailure> {

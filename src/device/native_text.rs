@@ -348,6 +348,17 @@ fn root(mut reader: Reader<'_>) -> Result<NativeText> {
 }
 
 pub fn read(bytes: &[u8]) -> Result<NativeText> {
+    parse_page(bytes)?.context("No native text root")
+}
+
+/// Positive evidence of the observed RMv6 no-text scene format.
+/// This describes saved bytes only.
+#[cfg(all(target_os = "linux", feature = "development-resident-bootstrap", feature = "development-input-diagnostics"))]
+pub(crate) fn recognizes_ink_only(bytes: &[u8]) -> Result<bool> {
+    Ok(parse_page(bytes)?.is_none())
+}
+
+fn parse_page(bytes: &[u8]) -> Result<Option<NativeText>> {
     ensure!(
         bytes.len() <= MAX_FILE,
         "Native file exceeds diagnostic limit"
@@ -361,6 +372,7 @@ pub fn read(bytes: &[u8]) -> Result<NativeText> {
     let mut scene_records = Vec::new();
     let mut page_counts = None;
     let mut count = 0;
+    let mut known_ink_scene = true;
     while !reader.0.is_empty() {
         count += 1;
         ensure!(count <= MAX_ITEMS, "Native block limit exceeded");
@@ -370,6 +382,10 @@ pub fn read(bytes: &[u8]) -> Result<NativeText> {
         let version = reader.byte()?;
         let kind = reader.byte()?;
         ensure!(minimum <= version, "Invalid native block version");
+        known_ink_scene &= matches!(
+            (kind, minimum, version),
+            (0 | 1 | 3 | 4 | 9, 1, 1) | (2, 1, 2) | (5, 2, 2) | (10 | 13, 0, 1)
+        );
         let data = reader.take(n)?;
         if kind == 7 {
             ensure!(
@@ -402,7 +418,10 @@ pub fn read(bytes: &[u8]) -> Result<NativeText> {
             scene_records.push(record);
         }
     }
-    let mut text = text.context("No native text root")?;
+    let Some(mut text) = text else {
+        ensure!(known_ink_scene && page_counts == Some((0, 0)), "Unknown native no-text scene");
+        return Ok(None);
+    };
     if let Some((characters, lines)) = page_counts {
         ensure!(
             characters as usize == text.text().chars().count() + 1
@@ -411,7 +430,7 @@ pub fn read(bytes: &[u8]) -> Result<NativeText> {
         );
     }
     text.scene_records = scene_records;
-    Ok(text)
+    Ok(Some(text))
 }
 
 #[cfg(test)]

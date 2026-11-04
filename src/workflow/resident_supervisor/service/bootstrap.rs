@@ -28,6 +28,7 @@ const BUDDY: &str = "/home/root/.local/lib/reader-buddy/reader-buddy";
 const BUDDY_ARGV0: &str = "/opt/bin/reader-buddy";
 const MAX_RECORD: u64 = 256 * 1024;
 
+pub mod effect;
 pub mod opening;
 pub mod setup;
 
@@ -556,6 +557,97 @@ impl Context {
             &self.candidate.buddy
         }
     }
+    fn pulse(&self, deadline: Instant) -> Result<()> {
+        check(deadline)?;
+        if let Some(identity) = self.root_identity {
+            let meta = private_root(&self.root)?.metadata()?;
+            ensure!(
+                (meta.dev(), meta.ino()) == identity,
+                "control root replaced"
+            );
+        }
+        for pin in &self.pins {
+            pin.current()?;
+        }
+        if let Some(vendor) = &self.vendor {
+            vendor.pins_current()?;
+        }
+        ensure!(
+            self.candidate.boot == fs::read_to_string("/proc/sys/kernel/random/boot_id")?.trim(),
+            "boot changed"
+        );
+        if let Some(group) = &self.own {
+            group.current_caller()?;
+        }
+        check(deadline)
+    }
+    fn stopped_pulse(&self, baselines: &[ServiceBaseline], deadline: Instant) -> Result<()> {
+        self.pulse(deadline)?;
+        for baseline in baselines {
+            ensure!(
+                baseline.group().observe()? != GroupObservation::Populated,
+                "original service group returned"
+            );
+        }
+        if let Some(vendor) = &self.vendor {
+            vendor.pulse_stopped()?;
+        }
+        check(deadline)
+    }
+    fn stopped_boundary(&self, baselines: &[ServiceBaseline], deadline: Instant) -> Result<()> {
+        self.stopped_pulse(baselines, deadline)?;
+        let mut units = baselines
+            .iter()
+            .map(|b| b.group().unit().to_owned())
+            .collect::<Vec<_>>();
+        if let Some(group) = &self.own {
+            units.push(group.unit().to_owned());
+        }
+        // Native actor baselines already include the original vendor companion.
+        // Share its observation; keep both baseline and vendor-policy checks below.
+        if self.vendor.is_some() && !units.iter().any(|unit| unit == "rm-sync.service") {
+            units.push("rm-sync.service".to_owned());
+        }
+        let names = units.iter().map(String::as_str).collect::<Vec<_>>();
+        let mut pulse = || self.stopped_pulse(baselines, deadline);
+        let first = observe_many(&names, deadline, &mut pulse)?;
+        let groups = baselines
+            .iter()
+            .map(|b| b.group().observe())
+            .collect::<Result<Vec<_>>>()?;
+        let vendor_group = self
+            .vendor
+            .as_ref()
+            .map(|v| v.stopped_group())
+            .transpose()?;
+        let last = observe_many(&names, deadline, &mut pulse)?;
+        for (baseline, group) in baselines.iter().zip(groups) {
+            ensure!(
+                baseline
+                    .stopped_samples(
+                        first.get(baseline.group().unit())?,
+                        group,
+                        last.get(baseline.group().unit())?,
+                        deadline
+                    )?
+                    .is_some(),
+                "original service no longer stopped"
+            );
+        }
+        if let (Some(group), Some(snapshot)) = (&self.own, &self.own_snapshot) {
+            ensure!(
+                first.get(group.unit())? == snapshot && last.get(group.unit())? == snapshot,
+                "controller service changed"
+            );
+        }
+        if let Some(vendor) = &self.vendor {
+            ensure!(
+                vendor.stopped_batches(&first, vendor_group.unwrap(), &last, deadline)?,
+                "original companion returned"
+            );
+        }
+        self.stopped_pulse(baselines, deadline)
+    }
     fn current(&self, deadline: Instant) -> Result<()> {
         check(deadline)?;
         if let Some(identity) = self.root_identity {
@@ -613,8 +705,20 @@ impl Context {
         let base = source_root(self.candidate.kind, &self.nonce);
         let current = inventory(&base, deadline)?;
         let samples = opening::Samples::read(plan, &base, &self.root, label, &current, deadline)?;
-        opening::verify_inventory(plan, &self.candidate.source, &current)?;
-        samples.verify(policy, plan)?;
+        let effect_selection = effect::Selection::load(self, deadline)?;
+        let inserted_target = effect_selection.as_ref().and_then(effect::Selection::insertion_target);
+        if let Some(target) = inserted_target.filter(|target| current.iter().any(|entry| entry.path == format!("{}/{target}.rm", plan.document))) {
+            samples.verify_insertion(policy, plan, target, &base, &self.candidate.source, &current, deadline)?;
+        } else if let Some((target, rm_bytes, thumbnail_bytes)) = effect_selection.as_ref().and_then(effect::Selection::reuse_pen_baseline).filter(|(target, _, _)| {
+            let paths = [format!("{}/{target}.rm", plan.document), format!("{}.thumbnails/{target}.png", plan.document)];
+            paths.iter().any(|path| self.candidate.source.iter().find(|entry| &entry.path == path) != current.iter().find(|entry| &entry.path == path))
+        }) {
+            effect_selection.as_ref().unwrap().verify_before_storage(self, deadline)?;
+            samples.verify_reuse_pen(policy, plan, target, rm_bytes, thumbnail_bytes, &base, &self.candidate.source, &current, deadline)?;
+        } else {
+            opening::verify_inventory(plan, &self.candidate.source, &current)?;
+            samples.verify(policy, plan)?;
+        }
         mailbox.current()?;
         self.current(deadline)
     }
@@ -1054,31 +1158,29 @@ fn actor(mut context: Context, deadline: Instant) -> Result<()> {
     };
     let mut child = command.spawn()?;
     if let Some(mailbox) = &mut capture_mailbox {
-        let setup_deadline = deadline.min(Instant::now() + Duration::from_secs(120));
+        let setup_deadline = deadline.min(Instant::now() + Duration::from_secs(180));
         let binding = loop {
-            context.current(setup_deadline)?;
+            context.stopped_pulse(&baselines, setup_deadline)?;
             quiet(&mut input)?;
-            for baseline in &baselines {
-                stopped(baseline, setup_deadline)?;
-            }
             ensure!(child.try_wait()?.is_none(), "observer exited before setup");
             if let Some(binding) = mailbox.receive("observer-ended", setup_deadline)? {
+                context.stopped_boundary(&baselines, setup_deadline)?;
                 binding.current(&context, child.id())?;
                 break binding;
             }
             pace(setup_deadline);
         };
-        setup::actor_selected(
+        setup::actor_selected_admitted(
             mailbox,
             &binding,
             &mut input,
             || RequestInput::new(TriggerCorner::LowerLeft, None),
             setup_deadline,
-            &mut || {
-                context.current(setup_deadline)?;
+            &mut |full| {
+                context.stopped_pulse(&baselines, setup_deadline)?;
                 binding.current(&context, child.id())?;
-                for baseline in &baselines {
-                    stopped(baseline, setup_deadline)?;
+                if full {
+                    context.stopped_boundary(&baselines, setup_deadline)?;
                 }
                 Ok(())
             },
@@ -1133,11 +1235,18 @@ fn actor(mut context: Context, deadline: Instant) -> Result<()> {
         }
     }
 
+    // A separately bound development sidecar may declare exactly one own
+    // gesture. Ordinary capture keeps its original continuous quiet guard.
+    let mut effect_handoff = effect::ActorHandoff::load(&context, deadline)?;
     // PID1's control-group termination remains responsible for descendants after
     // any controller error, including failure before the child identity is saved.
     loop {
         context.current(deadline)?;
-        quiet(&mut input)?;
+        if let Some(handoff) = &mut effect_handoff {
+            handoff.poll(&context, child.id(), &mut input, deadline)?;
+        } else {
+            quiet(&mut input)?;
+        }
         if let Some(mailbox) = &capture_mailbox {
             mailbox.current()?;
         }

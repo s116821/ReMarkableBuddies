@@ -47,6 +47,7 @@ path = "src/lib.rs"
 [features]
 development-input-diagnostics = []
 development-resident-bootstrap = []
+development-native-close = ["development-resident-bootstrap", "remarkable-open-sdk/development-native-close"]
 
 [[example]]
 name = "resident_bootstrap_control"

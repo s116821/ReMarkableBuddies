@@ -528,6 +528,8 @@ pub(super) fn profile(record: &LeaseRecord) -> Profile {
     Profile {
         version: 1,
         companion: None,
+        source_mode: None,
+        development_output: None,
         firmware: "3.28.0.172".into(),
         kernel: "5.4.70-v1.6.3-rm11x".into(),
         native_profile_sha256: record.profile_sha256,
@@ -882,4 +884,47 @@ fn profile_requires_supported_watchdog_and_both_service_timeout_budgets() {
     let mut p = profile(&record);
     p.buddy_policy.insert("WatchdogUSec".into(), "1min".into());
     assert!(p.validate(&record).is_err());
+}
+
+#[test]
+fn installed_source_startup_parser_is_explicit_strict_and_digest_bound() {
+    use super::activation::InstalledReaderSelection;
+    let fixture = crate::workflow::resident_supervisor::tests::Fixture::new();
+    for version in [1, 2, 3] {
+        let mut profile = profile(&fixture.record());
+        profile.version = version;
+        profile.companion = (version >= 2).then(|| service::vendor::PROFILE_ID.to_owned());
+        profile.source_mode = (version == 3).then(|| "resident-source-v1".to_owned());
+        let bytes = serde_json::to_vec(&profile).unwrap();
+        let declared = InstalledReaderSelection::declared(&bytes).unwrap();
+        assert_eq!(declared.is_some(), version == 3);
+        if let Some(selection) = declared {
+            selection.require_digest(sha256(&bytes)).unwrap();
+            let mut changed = bytes.clone();
+            changed.push(b' ');
+            assert!(selection.require_digest(sha256(&changed)).is_err());
+        }
+        for fault in ["mode", "version", "field", "truncated", "legacy-mode"] {
+            let mut value = serde_json::to_value(&profile).unwrap();
+            match fault {
+                "mode" => value["source_mode"] = serde_json::json!("invented"),
+                "version" => value["version"] = serde_json::json!(99),
+                "field" => value["qualified"] = serde_json::json!(true),
+                "legacy-mode" => {
+                    value["version"] = serde_json::json!(1);
+                    value["source_mode"] = serde_json::json!("resident-source-v1");
+                }
+                "truncated" => {}
+                _ => unreachable!(),
+            }
+            let mut bytes = serde_json::to_vec(&value).unwrap();
+            if fault == "truncated" {
+                bytes.pop();
+            }
+            assert!(
+                InstalledReaderSelection::declared(&bytes).is_err(),
+                "{version}/{fault}"
+            );
+        }
+    }
 }

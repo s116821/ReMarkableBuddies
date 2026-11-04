@@ -57,6 +57,8 @@ pub(super) struct Companion {
     group: group::Binding,
     #[cfg(test)]
     broker_file: Option<PathBuf>,
+    #[cfg(test)]
+    broker_commands: bool,
 }
 impl Companion {
     #[cfg(test)]
@@ -136,6 +138,8 @@ impl Companion {
             group: group::Binding::capture()?,
             #[cfg(test)]
             broker_file: profile.broker_file,
+            #[cfg(test)]
+            broker_commands: false,
         };
         prepared.hash_current(deadline)?;
         Ok(prepared)
@@ -255,6 +259,8 @@ impl Companion {
     ) -> Result<bool> {
         #[cfg(test)]
         let fixture = self.broker_file.clone();
+        #[cfg(test)]
+        let command_probe = self.broker_commands;
         let mut checked = || {
             before(deadline)?;
             progress()?;
@@ -267,14 +273,18 @@ impl Companion {
         #[cfg(test)]
         let observed = if let Some(path) = fixture {
             checked()?;
-            match fs::read_to_string(path) {
-                Ok(value) => Some(BrokerOwner {
-                    broker_id: "0".repeat(32),
-                    unique_name: ":1.42".into(),
-                    pid: value.trim().parse()?,
-                }),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                Err(error) => return Err(error.into()),
+            if command_probe {
+                broker::fixture_observe_owner(&path, deadline, &mut checked)?
+            } else {
+                match fs::read_to_string(path) {
+                    Ok(value) => Some(BrokerOwner {
+                        broker_id: "0".repeat(32),
+                        unique_name: ":1.42".into(),
+                        pid: value.trim().parse()?,
+                    }),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(error) => return Err(error.into()),
+                }
             }
         } else {
             broker::observe_owner(deadline, &mut checked)?
@@ -315,5 +325,19 @@ impl Drop for Companion {
                 log::error!("Companion recovery required: {report:?}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+impl ResidentRuntime {
+    pub(crate) fn fixture_companion_pid(&self) -> Option<u32> {
+        self.prepared.companion.as_ref().map(Companion::pid)
+    }
+    pub(crate) fn fixture_broker_commands(&mut self) {
+        self.prepared
+            .companion
+            .as_mut()
+            .expect("owned companion")
+            .broker_commands = true;
     }
 }
