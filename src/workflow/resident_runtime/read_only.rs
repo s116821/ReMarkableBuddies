@@ -140,7 +140,9 @@ impl ResidentRuntime {
                         connection.observe_with_progress(operation, deadline, &mut pulse)
                     }
                     #[cfg(feature = "development-native-close")]
-                    ReadOnlyRequest::ObserveClosed => connection.observe_closed_with_progress(operation, deadline, &mut pulse),
+                    ReadOnlyRequest::ObserveClosed => {
+                        connection.observe_closed_with_progress(operation, deadline, &mut pulse)
+                    }
                     ReadOnlyRequest::CaptureSource(expected) => connection
                         .capture_source_with_progress(operation, expected, deadline, &mut pulse),
                     #[cfg(feature = "development-resident-bootstrap")]

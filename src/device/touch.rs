@@ -107,8 +107,14 @@ pub struct Touch {
 
 #[cfg(not(target_os = "linux"))]
 pub struct Touch {
-    _device_model: DeviceModel,
+    device_model: DeviceModel,
     _trigger_corner: TriggerCorner,
+}
+
+impl Touch {
+    pub(crate) fn model(&self) -> DeviceModel {
+        self.device_model
+    }
 }
 
 /// Development-only emission boundary. Implementations must qualify and perform
@@ -502,7 +508,7 @@ impl Touch {
         info!("Touch using device model: {}", device_model.name());
 
         Self {
-            _device_model: device_model,
+            device_model,
             _trigger_corner: trigger_corner,
         }
     }

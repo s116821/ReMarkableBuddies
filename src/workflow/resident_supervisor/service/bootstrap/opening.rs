@@ -185,94 +185,262 @@ impl Samples {
         current: &[SourceEntry],
         deadline: Instant,
     ) -> Result<()> {
-        let added = [format!("{}/{target}.rm", plan.document), format!("{}.thumbnails/{target}.png", plan.document)];
-        ensure!(!plan.order.iter().any(|id| id == target) && plan.order.len() <= 16, "invalid insertion preservation target");
-        ensure!(current.len() == original.len() + 2, "insertion must add exactly two target files");
-        let old: BTreeMap<_, _> = original.iter().map(|entry| (entry.path.as_str(), entry)).collect();
-        let now: BTreeMap<_, _> = current.iter().map(|entry| (entry.path.as_str(), entry)).collect();
-        ensure!(old.len() == original.len() && now.len() == current.len(), "duplicate inventory path");
+        let added = [
+            format!("{}/{target}.rm", plan.document),
+            format!("{}.thumbnails/{target}.png", plan.document),
+        ];
+        ensure!(
+            !plan.order.iter().any(|id| id == target) && plan.order.len() <= 16,
+            "invalid insertion preservation target"
+        );
+        ensure!(
+            current.len() == original.len() + 2,
+            "insertion must add exactly two target files"
+        );
+        let old: BTreeMap<_, _> = original
+            .iter()
+            .map(|entry| (entry.path.as_str(), entry))
+            .collect();
+        let now: BTreeMap<_, _> = current
+            .iter()
+            .map(|entry| (entry.path.as_str(), entry))
+            .collect();
+        ensure!(
+            old.len() == original.len() && now.len() == current.len(),
+            "duplicate inventory path"
+        );
         let mutable = [FileKind::Content.path(plan), FileKind::Metadata.path(plan)];
         for (path, entry) in &old {
             let actual = now.get(path).context("original source path removed")?;
             if mutable.iter().any(|value| value.as_str() == *path) {
-                ensure!(entry.sha256.is_some() && actual.sha256.is_some(), "document JSON type changed");
-            } else { ensure!(*entry == *actual, "protected original bytes changed: {path}"); }
+                ensure!(
+                    entry.sha256.is_some() && actual.sha256.is_some(),
+                    "document JSON type changed"
+                );
+            } else {
+                ensure!(
+                    *entry == *actual,
+                    "protected original bytes changed: {path}"
+                );
+            }
         }
-        ensure!(now.keys().filter(|path| !old.contains_key(**path)).all(|path| added.iter().any(|value| value.as_str() == *path)), "unexpected inserted path");
+        ensure!(
+            now.keys()
+                .filter(|path| !old.contains_key(**path))
+                .all(|path| added.iter().any(|value| value.as_str() == *path)),
+            "unexpected inserted path"
+        );
         let mut added_bytes = 0i128;
         let mut added_pins = Vec::new();
         for path in &added {
-            let entry = now.get(path.as_str()).context("declared inserted file absent")?;
+            let entry = now
+                .get(path.as_str())
+                .context("declared inserted file absent")?;
             let (pin, bytes) = read_pin(&source.join(path), deadline)?;
-            ensure!(entry.sha256.as_deref() == Some(sha(&bytes).as_str()), "inserted bytes changed after inventory");
+            ensure!(
+                entry.sha256.as_deref() == Some(sha(&bytes).as_str()),
+                "inserted bytes changed after inventory"
+            );
             added_bytes += bytes.len() as i128;
             added_pins.push(pin);
         }
-        let content_bytes = &self.0.iter().find(|(kind, _, _)| matches!(kind, FileKind::Content)).context("missing content sample")?.2;
-        let metadata_bytes = &self.0.iter().find(|(kind, _, _)| matches!(kind, FileKind::Metadata)).context("missing metadata sample")?.2;
+        let content_bytes = &self
+            .0
+            .iter()
+            .find(|(kind, _, _)| matches!(kind, FileKind::Content))
+            .context("missing content sample")?
+            .2;
+        let metadata_bytes = &self
+            .0
+            .iter()
+            .find(|(kind, _, _)| matches!(kind, FileKind::Metadata))
+            .context("missing metadata sample")?
+            .2;
         let before_content = parse(policy.content.as_bytes())?;
         let after_content = parse(content_bytes)?;
         let before_metadata = parse(policy.metadata.as_bytes())?;
         let after_metadata = parse(metadata_bytes)?;
-        let position = plan.order.iter().position(|page| page == &plan.page).context("source page absent")?;
+        let position = plan
+            .order
+            .iter()
+            .position(|page| page == &plan.page)
+            .context("source page absent")?;
         let mut order = plan.order.clone();
         order.insert(position + 1, target.into());
-        let pages = after_content.pointer("/cPages/pages").and_then(Value::as_array).context("missing inserted page array")?;
-        ensure!(pages.iter().map(|page| page.get("id").and_then(Value::as_str)).eq(order.iter().map(|id| Some(id.as_str()))) && after_content.get("pageCount").and_then(Value::as_u64) == Some(order.len() as u64), "inserted order/count differs");
-        let raw_old: Box<serde_json::value::RawValue> = serde_json::from_slice(policy.content.as_bytes())?;
+        let pages = after_content
+            .pointer("/cPages/pages")
+            .and_then(Value::as_array)
+            .context("missing inserted page array")?;
+        ensure!(
+            pages
+                .iter()
+                .map(|page| page.get("id").and_then(Value::as_str))
+                .eq(order.iter().map(|id| Some(id.as_str())))
+                && after_content.get("pageCount").and_then(Value::as_u64)
+                    == Some(order.len() as u64),
+            "inserted order/count differs"
+        );
+        let raw_old: Box<serde_json::value::RawValue> =
+            serde_json::from_slice(policy.content.as_bytes())?;
         let raw_new: Box<serde_json::value::RawValue> = serde_json::from_slice(content_bytes)?;
         let exact_old = exact(&raw_old, 0)?;
         let exact_new = exact(&raw_new, 0)?;
         fn exact_pages(value: &ExactJson) -> Result<&Vec<ExactJson>> {
-            let ExactJson::Object(root) = value else { anyhow::bail!("invalid document object") };
-            let Some(ExactJson::Object(cpages)) = root.get("cPages") else { anyhow::bail!("invalid cPages") };
-            let Some(ExactJson::Array(pages)) = cpages.get("pages") else { anyhow::bail!("invalid pages") };
+            let ExactJson::Object(root) = value else {
+                anyhow::bail!("invalid document object")
+            };
+            let Some(ExactJson::Object(cpages)) = root.get("cPages") else {
+                anyhow::bail!("invalid cPages")
+            };
+            let Some(ExactJson::Array(pages)) = cpages.get("pages") else {
+                anyhow::bail!("invalid pages")
+            };
             Ok(pages)
         }
-        ensure!(exact_pages(&exact_new)?.iter().enumerate().filter(|(index, _)| *index != position + 1).map(|(_, page)| page).eq(exact_pages(&exact_old)?.iter()), "an original page object changed");
-        let page = pages[position + 1].as_object().context("invalid inserted page")?;
-        ensure!(page.len() == 3 && page.contains_key("id") && page.contains_key("idx") && page.contains_key("modifed"), "unexpected inserted page fields");
+        ensure!(
+            exact_pages(&exact_new)?
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != position + 1)
+                .map(|(_, page)| page)
+                .eq(exact_pages(&exact_old)?.iter()),
+            "an original page object changed"
+        );
+        let page = pages[position + 1]
+            .as_object()
+            .context("invalid inserted page")?;
+        ensure!(
+            page.len() == 3
+                && page.contains_key("id")
+                && page.contains_key("idx")
+                && page.contains_key("modifed"),
+            "unexpected inserted page fields"
+        );
         let idx = page["idx"].as_object().context("invalid inserted index")?;
-        ensure!(idx.len() == 2 && idx.get("timestamp").and_then(Value::as_str) == Some("1:2"), "unexpected inserted index timestamp/fields");
-        let value = idx.get("value").and_then(Value::as_str).context("invalid inserted index value")?;
-        ensure!(!value.is_empty() && value.len() <= 64 && value.bytes().all(|byte| byte.is_ascii_lowercase()), "invalid inserted fractional index");
-        let old_pages = before_content.pointer("/cPages/pages").and_then(Value::as_array).context("missing original pages")?;
+        ensure!(
+            idx.len() == 2 && idx.get("timestamp").and_then(Value::as_str) == Some("1:2"),
+            "unexpected inserted index timestamp/fields"
+        );
+        let value = idx
+            .get("value")
+            .and_then(Value::as_str)
+            .context("invalid inserted index value")?;
+        ensure!(
+            !value.is_empty()
+                && value.len() <= 64
+                && value.bytes().all(|byte| byte.is_ascii_lowercase()),
+            "invalid inserted fractional index"
+        );
+        let old_pages = before_content
+            .pointer("/cPages/pages")
+            .and_then(Value::as_array)
+            .context("missing original pages")?;
         let left = string(&old_pages[position], "/idx/value")?;
-        ensure!(left < value && (position + 1 == old_pages.len() || value < string(&old_pages[position + 1], "/idx/value")?), "inserted index is not between original neighbours");
+        ensure!(
+            left < value
+                && (position + 1 == old_pages.len()
+                    || value < string(&old_pages[position + 1], "/idx/value")?),
+            "inserted index is not between original neighbours"
+        );
         let old_modified = decimal(string(&before_metadata, "/lastModified")?)?;
-        let modified = decimal(page["modifed"].as_str().context("invalid inserted modified timestamp")?)?;
+        let modified = decimal(
+            page["modifed"]
+                .as_str()
+                .context("invalid inserted modified timestamp")?,
+        )?;
         let new_modified = decimal(string(&after_metadata, "/lastModified")?)?;
-        let wall = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis();
-        ensure!(modified >= old_modified && new_modified >= old_modified && u128::from(modified) <= wall && u128::from(new_modified) <= wall, "insertion timestamps outside original/current bounds");
+        let wall = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_millis();
+        ensure!(
+            modified >= old_modified
+                && new_modified >= old_modified
+                && u128::from(modified) <= wall
+                && u128::from(new_modified) <= wall,
+            "insertion timestamps outside original/current bounds"
+        );
         let old_size = decimal(string(&before_content, "/sizeInBytes")?)?;
         let new_size = decimal(string(&after_content, "/sizeInBytes")?)?;
-        let byte_delta = added_bytes + content_bytes.len() as i128 - policy.content.len() as i128 + metadata_bytes.len() as i128 - policy.metadata.len() as i128;
-        ensure!(byte_delta >= 0 && i128::from(new_size) - i128::from(old_size) == byte_delta, "sizeInBytes delta must equal exact added-file plus document JSON byte growth");
-        let old_stamp = string(&before_content, "/cPages/lastOpened/timestamp")?.split_once(':').context("invalid old register timestamp")?;
-        let new_stamp = string(&after_content, "/cPages/lastOpened/timestamp")?.split_once(':').context("invalid new register timestamp")?;
+        let byte_delta = added_bytes + content_bytes.len() as i128 - policy.content.len() as i128
+            + metadata_bytes.len() as i128
+            - policy.metadata.len() as i128;
+        ensure!(
+            byte_delta >= 0 && i128::from(new_size) - i128::from(old_size) == byte_delta,
+            "sizeInBytes delta must equal exact added-file plus document JSON byte growth"
+        );
+        let old_stamp = string(&before_content, "/cPages/lastOpened/timestamp")?
+            .split_once(':')
+            .context("invalid old register timestamp")?;
+        let new_stamp = string(&after_content, "/cPages/lastOpened/timestamp")?
+            .split_once(':')
+            .context("invalid new register timestamp")?;
         let old_page = string(&before_content, "/cPages/lastOpened/value")?;
         let new_page = string(&after_content, "/cPages/lastOpened/value")?;
-        ensure!((new_page == old_page || new_page == plan.page || new_page == target) && decimal(old_stamp.0)? == decimal(new_stamp.0)? && decimal(new_stamp.1)? >= decimal(old_stamp.1)? && (new_page == old_page || decimal(new_stamp.1)? > decimal(old_stamp.1)?), "invalid inserted opening register");
-        let opened_index = after_metadata.get("lastOpenedPage").and_then(Value::as_u64).context("invalid inserted remembered index")?;
+        ensure!(
+            (new_page == old_page || new_page == plan.page || new_page == target)
+                && decimal(old_stamp.0)? == decimal(new_stamp.0)?
+                && decimal(new_stamp.1)? >= decimal(old_stamp.1)?
+                && (new_page == old_page || decimal(new_stamp.1)? > decimal(old_stamp.1)?),
+            "invalid inserted opening register"
+        );
+        let opened_index = after_metadata
+            .get("lastOpenedPage")
+            .and_then(Value::as_u64)
+            .context("invalid inserted remembered index")?;
         let old_opened = decimal(string(&before_metadata, "/lastOpened")?)?;
         let new_opened = decimal(string(&after_metadata, "/lastOpened")?)?;
-        let old_index = before_metadata.get("lastOpenedPage").and_then(Value::as_u64).context("invalid original remembered index")?;
-        ensure!(opened_index < order.len() as u64 && order[opened_index as usize].as_str() == new_page && new_opened >= old_opened && (opened_index == old_index || new_opened > old_opened), "invalid inserted remembered page/time");
+        let old_index = before_metadata
+            .get("lastOpenedPage")
+            .and_then(Value::as_u64)
+            .context("invalid original remembered index")?;
+        ensure!(
+            opened_index < order.len() as u64
+                && order[opened_index as usize].as_str() == new_page
+                && new_opened >= old_opened
+                && (opened_index == old_index || new_opened > old_opened),
+            "invalid inserted remembered page/time"
+        );
         fn mask(mut value: ExactJson, paths: &[&[&str]]) -> Result<ExactJson> {
             for path in paths {
                 let mut field = &mut value;
                 for key in *path {
-                    let ExactJson::Object(fields) = field else { anyhow::bail!("invalid development delta path") };
-                    field = fields.get_mut(*key).context("missing development delta field")?;
+                    let ExactJson::Object(fields) = field else {
+                        anyhow::bail!("invalid development delta path")
+                    };
+                    field = fields
+                        .get_mut(*key)
+                        .context("missing development delta field")?;
                 }
                 *field = ExactJson::Null;
             }
             Ok(value)
         }
-        ensure!(mask(protected(policy.content.as_bytes(), FileKind::Content)?, &[&["cPages", "pages"], &["pageCount"], &["sizeInBytes"]])? == mask(protected(content_bytes, FileKind::Content)?, &[&["cPages", "pages"], &["pageCount"], &["sizeInBytes"]])?, "protected content changed beyond exact insertion delta");
-        ensure!(mask(protected(policy.metadata.as_bytes(), FileKind::Metadata)?, &[&["lastModified"]])? == mask(protected(metadata_bytes, FileKind::Metadata)?, &[&["lastModified"]])?, "protected metadata changed beyond exact insertion delta");
-        for (_, pin, _) in &self.0 { pin.current()?; }
-        for pin in &added_pins { pin.current()?; }
+        ensure!(
+            mask(
+                protected(policy.content.as_bytes(), FileKind::Content)?,
+                &[&["cPages", "pages"], &["pageCount"], &["sizeInBytes"]]
+            )? == mask(
+                protected(content_bytes, FileKind::Content)?,
+                &[&["cPages", "pages"], &["pageCount"], &["sizeInBytes"]]
+            )?,
+            "protected content changed beyond exact insertion delta"
+        );
+        ensure!(
+            mask(
+                protected(policy.metadata.as_bytes(), FileKind::Metadata)?,
+                &[&["lastModified"]]
+            )? == mask(
+                protected(metadata_bytes, FileKind::Metadata)?,
+                &[&["lastModified"]]
+            )?,
+            "protected metadata changed beyond exact insertion delta"
+        );
+        for (_, pin, _) in &self.0 {
+            pin.current()?;
+        }
+        for pin in &added_pins {
+            pin.current()?;
+        }
         check(deadline)
     }
 }
@@ -282,71 +450,201 @@ impl Samples {
 impl Samples {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn verify_reuse_pen(
-        &self, policy: &OpeningMetadata, plan: &CapturePlan, target: &str,
-        old_rm_bytes: u64, old_thumbnail_bytes: u64, source: &Path,
-        original: &[SourceEntry], current: &[SourceEntry], deadline: Instant,
+        &self,
+        policy: &OpeningMetadata,
+        plan: &CapturePlan,
+        target: &str,
+        old_rm_bytes: u64,
+        old_thumbnail_bytes: u64,
+        source: &Path,
+        original: &[SourceEntry],
+        current: &[SourceEntry],
+        deadline: Instant,
     ) -> Result<()> {
-        ensure!(target == plan.page && original.len() == current.len(), "reuse must preserve current target and complete inventory");
-        let paths = [format!("{}/{target}.rm", plan.document), format!("{}.thumbnails/{target}.png", plan.document)];
-        let mutable = [FileKind::Content.path(plan), FileKind::Metadata.path(plan), paths[0].clone(), paths[1].clone()];
+        ensure!(
+            target == plan.page && original.len() == current.len(),
+            "reuse must preserve current target and complete inventory"
+        );
+        let paths = [
+            format!("{}/{target}.rm", plan.document),
+            format!("{}.thumbnails/{target}.png", plan.document),
+        ];
+        let mutable = [
+            FileKind::Content.path(plan),
+            FileKind::Metadata.path(plan),
+            paths[0].clone(),
+            paths[1].clone(),
+        ];
         for (old, new) in original.iter().zip(current) {
             ensure!(old.path == new.path, "reuse changed inventory paths");
-            if mutable.contains(&old.path) { ensure!(old.sha256.is_some() && new.sha256.is_some(), "reuse changed target file type"); }
-            else { ensure!(old == new, "reuse changed protected source: {}", old.path); }
+            if mutable.contains(&old.path) {
+                ensure!(
+                    old.sha256.is_some() && new.sha256.is_some(),
+                    "reuse changed target file type"
+                );
+            } else {
+                ensure!(old == new, "reuse changed protected source: {}", old.path);
+            }
         }
         let mut sizes = Vec::new();
         let mut pins = Vec::new();
         for path in &paths {
             let (pin, bytes) = read_pin(&source.join(path), deadline)?;
-            ensure!(current.iter().any(|entry| entry.path == *path && entry.sha256.as_deref() == Some(sha(&bytes).as_str())), "reused target changed after inventory");
+            ensure!(
+                current.iter().any(|entry| entry.path == *path
+                    && entry.sha256.as_deref() == Some(sha(&bytes).as_str())),
+                "reused target changed after inventory"
+            );
             sizes.push(bytes.len() as i128);
             pins.push(pin);
         }
-        ensure!(sizes[0] > i128::from(old_rm_bytes) && original.iter().find(|entry| entry.path == paths[0]).context("original reused target absent")?.sha256 != current.iter().find(|entry| entry.path == paths[0]).context("current reused target absent")?.sha256, "reuse pen must change/grow native target stroke data");
-        let content = &self.0.iter().find(|(kind, _, _)| matches!(kind, FileKind::Content)).context("missing reuse content")?.2;
-        let metadata = &self.0.iter().find(|(kind, _, _)| matches!(kind, FileKind::Metadata)).context("missing reuse metadata")?.2;
+        ensure!(
+            sizes[0] > i128::from(old_rm_bytes)
+                && original
+                    .iter()
+                    .find(|entry| entry.path == paths[0])
+                    .context("original reused target absent")?
+                    .sha256
+                    != current
+                        .iter()
+                        .find(|entry| entry.path == paths[0])
+                        .context("current reused target absent")?
+                        .sha256,
+            "reuse pen must change/grow native target stroke data"
+        );
+        let content = &self
+            .0
+            .iter()
+            .find(|(kind, _, _)| matches!(kind, FileKind::Content))
+            .context("missing reuse content")?
+            .2;
+        let metadata = &self
+            .0
+            .iter()
+            .find(|(kind, _, _)| matches!(kind, FileKind::Metadata))
+            .context("missing reuse metadata")?
+            .2;
         let old_content = parse(policy.content.as_bytes())?;
         let new_content = parse(content)?;
         let old_meta = parse(policy.metadata.as_bytes())?;
         let new_meta = parse(metadata)?;
-        let index = plan.order.iter().position(|page| page == target).context("reused target outside original order")?;
+        let index = plan
+            .order
+            .iter()
+            .position(|page| page == target)
+            .context("reused target outside original order")?;
         let modified_path = format!("/cPages/pages/{index}/modifed");
         let old_modified = decimal(string(&old_content, &modified_path)?)?;
         let new_modified = decimal(string(&new_content, &modified_path)?)?;
         let old_meta_modified = decimal(string(&old_meta, "/lastModified")?)?;
         let new_meta_modified = decimal(string(&new_meta, "/lastModified")?)?;
-        let wall = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis();
-        ensure!(new_modified >= old_modified && new_meta_modified >= old_meta_modified && u128::from(new_modified) <= wall && u128::from(new_meta_modified) <= wall, "reuse modification timestamps outside declared bounds");
-        let delta = sizes[0] - i128::from(old_rm_bytes) + sizes[1] - i128::from(old_thumbnail_bytes) + content.len() as i128 - policy.content.len() as i128 + metadata.len() as i128 - policy.metadata.len() as i128;
+        let wall = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_millis();
+        ensure!(
+            new_modified >= old_modified
+                && new_meta_modified >= old_meta_modified
+                && u128::from(new_modified) <= wall
+                && u128::from(new_meta_modified) <= wall,
+            "reuse modification timestamps outside declared bounds"
+        );
+        let delta = sizes[0] - i128::from(old_rm_bytes) + sizes[1]
+            - i128::from(old_thumbnail_bytes)
+            + content.len() as i128
+            - policy.content.len() as i128
+            + metadata.len() as i128
+            - policy.metadata.len() as i128;
         ensure!(delta > 0 && i128::from(decimal(string(&new_content, "/sizeInBytes")?)?) - i128::from(decimal(string(&old_content, "/sizeInBytes")?)?) == delta, "reuse sizeInBytes must account exactly for target files and document JSON byte changes");
-        let old_stamp = string(&old_content, "/cPages/lastOpened/timestamp")?.split_once(':').context("invalid reuse baseline stamp")?;
-        let new_stamp = string(&new_content, "/cPages/lastOpened/timestamp")?.split_once(':').context("invalid reuse current stamp")?;
+        let old_stamp = string(&old_content, "/cPages/lastOpened/timestamp")?
+            .split_once(':')
+            .context("invalid reuse baseline stamp")?;
+        let new_stamp = string(&new_content, "/cPages/lastOpened/timestamp")?
+            .split_once(':')
+            .context("invalid reuse current stamp")?;
         let old_page = string(&old_content, "/cPages/lastOpened/value")?;
         let new_page = string(&new_content, "/cPages/lastOpened/value")?;
-        ensure!((new_page == old_page || new_page == target) && decimal(old_stamp.0)? == decimal(new_stamp.0)? && decimal(new_stamp.1)? >= decimal(old_stamp.1)? && (new_page == old_page || decimal(new_stamp.1)? > decimal(old_stamp.1)?), "reuse opening register changed unexpectedly");
-        let old_index = old_meta.get("lastOpenedPage").and_then(Value::as_u64).context("invalid old reuse index")?;
-        let new_index = new_meta.get("lastOpenedPage").and_then(Value::as_u64).context("invalid new reuse index")?;
+        ensure!(
+            (new_page == old_page || new_page == target)
+                && decimal(old_stamp.0)? == decimal(new_stamp.0)?
+                && decimal(new_stamp.1)? >= decimal(old_stamp.1)?
+                && (new_page == old_page || decimal(new_stamp.1)? > decimal(old_stamp.1)?),
+            "reuse opening register changed unexpectedly"
+        );
+        let old_index = old_meta
+            .get("lastOpenedPage")
+            .and_then(Value::as_u64)
+            .context("invalid old reuse index")?;
+        let new_index = new_meta
+            .get("lastOpenedPage")
+            .and_then(Value::as_u64)
+            .context("invalid new reuse index")?;
         let old_opened = decimal(string(&old_meta, "/lastOpened")?)?;
         let new_opened = decimal(string(&new_meta, "/lastOpened")?)?;
-        ensure!(new_index < plan.order.len() as u64 && plan.order[new_index as usize].as_str() == new_page && new_opened >= old_opened && (old_index == new_index || new_opened > old_opened), "reuse remembered page/time changed unexpectedly");
+        ensure!(
+            new_index < plan.order.len() as u64
+                && plan.order[new_index as usize].as_str() == new_page
+                && new_opened >= old_opened
+                && (old_index == new_index || new_opened > old_opened),
+            "reuse remembered page/time changed unexpectedly"
+        );
         fn mask(mut value: ExactJson, kind: FileKind, index: usize) -> Result<ExactJson> {
-            let ExactJson::Object(root) = &mut value else { anyhow::bail!("invalid reuse document") };
+            let ExactJson::Object(root) = &mut value else {
+                anyhow::bail!("invalid reuse document")
+            };
             match kind {
-                FileKind::Metadata => { *root.get_mut("lastModified").context("missing lastModified")? = ExactJson::Null; }
+                FileKind::Metadata => {
+                    *root
+                        .get_mut("lastModified")
+                        .context("missing lastModified")? = ExactJson::Null;
+                }
                 FileKind::Content => {
                     *root.get_mut("sizeInBytes").context("missing sizeInBytes")? = ExactJson::Null;
-                    let Some(ExactJson::Object(cpages)) = root.get_mut("cPages") else { anyhow::bail!("invalid reused cPages") };
-                    let Some(ExactJson::Array(pages)) = cpages.get_mut("pages") else { anyhow::bail!("invalid reused pages") };
-                    let Some(ExactJson::Object(page)) = pages.get_mut(index) else { anyhow::bail!("invalid reused page") };
-                    *page.get_mut("modifed").context("missing reused modified timestamp")? = ExactJson::Null;
+                    let Some(ExactJson::Object(cpages)) = root.get_mut("cPages") else {
+                        anyhow::bail!("invalid reused cPages")
+                    };
+                    let Some(ExactJson::Array(pages)) = cpages.get_mut("pages") else {
+                        anyhow::bail!("invalid reused pages")
+                    };
+                    let Some(ExactJson::Object(page)) = pages.get_mut(index) else {
+                        anyhow::bail!("invalid reused page")
+                    };
+                    *page
+                        .get_mut("modifed")
+                        .context("missing reused modified timestamp")? = ExactJson::Null;
                 }
             }
             Ok(value)
         }
-        ensure!(mask(protected(policy.content.as_bytes(), FileKind::Content)?, FileKind::Content, index)? == mask(protected(content, FileKind::Content)?, FileKind::Content, index)?, "reuse changed original page/order/mapping or protected content");
-        ensure!(mask(protected(policy.metadata.as_bytes(), FileKind::Metadata)?, FileKind::Metadata, index)? == mask(protected(metadata, FileKind::Metadata)?, FileKind::Metadata, index)?, "reuse changed protected metadata");
-        for (_, pin, _) in &self.0 { pin.current()?; }
-        for pin in pins { pin.current()?; }
+        ensure!(
+            mask(
+                protected(policy.content.as_bytes(), FileKind::Content)?,
+                FileKind::Content,
+                index
+            )? == mask(
+                protected(content, FileKind::Content)?,
+                FileKind::Content,
+                index
+            )?,
+            "reuse changed original page/order/mapping or protected content"
+        );
+        ensure!(
+            mask(
+                protected(policy.metadata.as_bytes(), FileKind::Metadata)?,
+                FileKind::Metadata,
+                index
+            )? == mask(
+                protected(metadata, FileKind::Metadata)?,
+                FileKind::Metadata,
+                index
+            )?,
+            "reuse changed protected metadata"
+        );
+        for (_, pin, _) in &self.0 {
+            pin.current()?;
+        }
+        for pin in pins {
+            pin.current()?;
+        }
         check(deadline)
     }
 }

@@ -35,7 +35,7 @@ quick-xml = "=0.42.0"
 percent-encoding = "=2.3.2"
 lopdf = { version = "=0.46.0", default-features = false }
 
-remarkable-open-sdk = { git = "https://github.com/s116821/ReMarkableOpenSDK", rev = "7f4a5193f49247a61b3963467196669859b25e67", default-features = false, features = ["native-adapter", "development-capture"] }
+remarkable-open-sdk = { git = "https://github.com/s116821/ReMarkableOpenSDK", rev = "b3a66e3bd8d9d3b7fc21e3c736ce196afd77ab19", default-features = false, features = ["native-adapter", "development-capture"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.13"
@@ -61,7 +61,7 @@ path = "docs/examples/resident_bootstrap_observer.rs"
 required-features = ["development-resident-bootstrap"]
 
 [dev-dependencies]
-remarkable-open-sdk = { git = "https://github.com/s116821/ReMarkableOpenSDK", rev = "7f4a5193f49247a61b3963467196669859b25e67", default-features = false, features = ["mock", "development-capture"] }
+remarkable-open-sdk = { git = "https://github.com/s116821/ReMarkableOpenSDK", rev = "b3a66e3bd8d9d3b7fc21e3c736ce196afd77ab19", default-features = false, features = ["mock", "development-capture"] }
 # Explicit native-evidence example only; not linked into the installed runtime.
 sha2 = "0.10"
 

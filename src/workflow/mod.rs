@@ -6,13 +6,13 @@ pub mod orchestrator;
 mod reader_attempt;
 pub mod resident_client;
 #[cfg(target_os = "linux")]
+pub mod resident_output;
+#[cfg(target_os = "linux")]
 pub mod resident_request;
 #[cfg(target_os = "linux")]
 pub mod resident_runtime;
 #[cfg(target_os = "linux")]
 mod resident_source;
-#[cfg(target_os = "linux")]
-pub mod resident_output;
 #[cfg(target_os = "linux")]
 pub mod resident_supervisor;
 pub mod sdk_acquisition;
@@ -20,6 +20,8 @@ pub mod sdk_buddy_decision;
 pub mod selected_buddy;
 #[cfg(test)]
 pub(crate) use reader_attempt::assert_attachment_behavior;
+#[cfg(test)]
+pub(crate) use reader_attempt::assert_selected_retry_control;
 pub(crate) mod selected_backend;
 pub mod symbol_pool;
 pub mod xochitl_integration;
@@ -69,7 +71,6 @@ const BLANK_PAGE_SAMPLE_RATE: u32 = 2;
 pub struct Workflow {
     device: Box<dyn DeviceBackend>,
     selected: Option<selected_backend::SelectedBackendFacade>,
-    #[cfg(test)]
     development_non_output: bool,
     frame: Frame,
     debug_dump: bool,
@@ -84,6 +85,18 @@ pub struct Workflow {
 }
 
 impl Workflow {
+    /// Explicit executable selected mode. Unsupported transport never opens a
+    /// RealDevice or converts historical membership into live effect authority.
+    pub(crate) fn selected_runtime(
+        admission: std::sync::Arc<crate::conversation::SelectedAdmission>,
+        debug_dump: bool,
+    ) -> Self {
+        let facade = selected_backend::SelectedBackendFacade::new(
+            admission,
+            Box::new(selected_backend::RefusingBackend::new()),
+        );
+        Self::with_selected(facade, debug_dump)
+    }
     pub fn new(
         no_draw: bool,
         trigger_corner: crate::device::touch::TriggerCorner,
@@ -99,7 +112,6 @@ impl Workflow {
         Self {
             device,
             selected: None,
-            #[cfg(test)]
             development_non_output: false,
             frame: Frame::default(),
             debug_dump,
@@ -114,7 +126,6 @@ impl Workflow {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn with_selected(
         facade: selected_backend::SelectedBackendFacade,
         debug_dump: bool,
@@ -144,6 +155,14 @@ impl Workflow {
     }
     pub(crate) fn is_selected(&self) -> bool {
         self.selected.is_some()
+    }
+    pub(super) fn selected_admission(
+        &self,
+    ) -> Result<std::sync::Arc<crate::conversation::SelectedAdmission>> {
+        self.selected
+            .as_ref()
+            .map(|selected| selected.admission())
+            .ok_or_else(|| anyhow::anyhow!("selected Workflow absent"))
     }
     #[cfg(test)]
     pub(crate) fn dispatch_reader(
@@ -195,20 +214,34 @@ impl Workflow {
         Ok(())
     }
 
-    #[cfg(all(target_os="linux",feature="development-resident-bootstrap",feature="development-input-diagnostics"))]
+    #[cfg(all(
+        target_os = "linux",
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
     pub fn configure_installed_resident_output(&mut self) -> Result<()> {
         use anyhow::Context;
 
-        let owner = self.resident_source.as_mut().context("resident source selection absent")?;
+        let owner = self
+            .resident_source
+            .as_mut()
+            .context("resident source selection absent")?;
         if let Some(pin) = owner.installed_output()? {
-            let health = self.service_health.as_mut().context("resident health owner absent")?;
+            let health = self
+                .service_health
+                .as_mut()
+                .context("resident health owner absent")?;
             let corner = self.device.configure_installed_resident_output(pin)?;
             owner.activate_at_startup(corner, health)?;
         }
         Ok(())
     }
 
-    #[cfg(all(target_os="linux",feature="development-resident-bootstrap",feature="development-input-diagnostics"))]
+    #[cfg(all(
+        target_os = "linux",
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
     pub fn configure_development_resident_output(&mut self, plan: &std::path::Path) -> Result<()> {
         use anyhow::Context;
 
@@ -257,16 +290,30 @@ impl Workflow {
         &mut self,
         acquired: &AcquiredEvidence,
     ) -> Result<Option<resident_output::SelectedConversationRequest>> {
-        if self.resident_source.as_ref().is_some_and(|owner| owner.blank_start_requested()) {
-            return Ok(Some(resident_output::SelectedConversationRequest::BlankStart(None)));
+        if self
+            .resident_source
+            .as_ref()
+            .is_some_and(|owner| owner.blank_start_requested())
+        {
+            return Ok(Some(
+                resident_output::SelectedConversationRequest::BlankStart(None),
+            ));
         }
-        #[cfg(all(feature = "development-resident-bootstrap", feature = "development-input-diagnostics"))]
-        if let (Some(owner), AcquiredEvidence::ResidentHistorical(capture)) = (&self.resident_source, acquired) {
+        #[cfg(all(
+            feature = "development-resident-bootstrap",
+            feature = "development-input-diagnostics"
+        ))]
+        if let (Some(owner), AcquiredEvidence::ResidentHistorical(capture)) =
+            (&self.resident_source, acquired)
+        {
             if let Some(request) = owner.take_installed_writer(capture)? {
                 return Ok(Some(request));
             }
         }
-        #[cfg(not(all(feature = "development-resident-bootstrap", feature = "development-input-diagnostics")))]
+        #[cfg(not(all(
+            feature = "development-resident-bootstrap",
+            feature = "development-input-diagnostics"
+        )))]
         let _ = acquired;
         let Some(backend) = self.device.resident_output_backend() else {
             return Ok(None);
@@ -276,7 +323,8 @@ impl Workflow {
 
     #[cfg(target_os = "linux")]
     pub(super) fn validate_resident_new_page_text(&mut self, text: &str) -> Result<()> {
-        self.device.resident_output_backend()
+        self.device
+            .resident_output_backend()
             .ok_or_else(|| anyhow::anyhow!("resident output backend unavailable"))?
             .validate_new_page_text(text)
     }
@@ -284,8 +332,11 @@ impl Workflow {
     #[cfg(target_os = "linux")]
     /// Selected resident output uses retained Session plus an explicit qualified
     /// native backend; it never downgrades to the ordinary legacy renderer.
-    pub(super) fn render_resident_answer(&mut self, ledger: &crate::conversation::Ledger,
-        conversation: crate::storage::Uuid, text: &str,
+    pub(super) fn render_resident_answer(
+        &mut self,
+        ledger: &crate::conversation::Ledger,
+        conversation: crate::storage::Uuid,
+        text: &str,
         association: Option<&crate::conversation::HistoricalPageAssociation>,
         before_effect: &mut dyn FnMut() -> Result<()>,
     ) -> Result<resident_output::ResidentOutputOutcome> {
@@ -295,8 +346,15 @@ impl Workflow {
         let Some(backend) = self.device.resident_output_backend() else {
             return Ok(resident_output::ResidentOutputOutcome::Unavailable);
         };
-        owner.render_answer(self.service_health.as_mut().expect("resident health owner"),
-            backend, ledger, conversation, text, association, before_effect)
+        owner.render_answer(
+            self.service_health.as_mut().expect("resident health owner"),
+            backend,
+            ledger,
+            conversation,
+            text,
+            association,
+            before_effect,
+        )
     }
 
     pub fn check_request_progress(&mut self) -> Result<()> {
@@ -370,6 +428,11 @@ impl Workflow {
     pub fn detail_images_base64(&self) -> Result<Vec<String>> {
         self.device.detail_images()
     }
+    /// Pure transport availability for startup; no request guard or acquisition.
+    pub(crate) fn reader_acquisition_kind(&self) -> crate::device::backend::AcquisitionKind {
+        self.device.acquisition_kind()
+    }
+
     /// Select first, acquire once, freeze all actual provider bytes under the guard.
     pub fn acquire_reader_evidence(&mut self) -> Result<AcquiredEvidence> {
         use crate::device::backend::AcquisitionKind;
@@ -381,7 +444,7 @@ impl Workflow {
                 owner.acquire(self.service_health.as_mut().expect("selected health owner"))?,
             )));
         }
-        match self.device.acquisition_kind() {
+        match self.reader_acquisition_kind() {
             AcquisitionKind::Unsupported => anyhow::bail!("Reader acquisition unsupported"),
             AcquisitionKind::LegacyUnqualified => {
                 let (_, png) = self.capture_screenshot_with_data()?;

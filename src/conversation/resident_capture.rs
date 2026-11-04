@@ -104,7 +104,11 @@ impl ResidentSourceCapture {
         self.correspondence.expected.document
     }
 
-    #[cfg(all(target_os = "linux", feature = "development-resident-bootstrap", feature = "development-input-diagnostics"))]
+    #[cfg(all(
+        target_os = "linux",
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
     pub(crate) fn page(&self) -> Uuid {
         self.correspondence.expected.page
     }
@@ -279,7 +283,10 @@ impl Ledger {
         capture: &ResidentSourceCapture,
     ) -> Result<Option<super::HistoricalPageAssociation>> {
         let facts = &capture.correspondence.expected;
-        let index = facts.order.iter().position(|page| *page == facts.page)
+        let index = facts
+            .order
+            .iter()
+            .position(|page| *page == facts.page)
             .context("resident source absent from order")?;
         self.complete_store()?;
         for &page in facts.order.iter().skip(index).take(2) {
@@ -288,7 +295,10 @@ impl Ledger {
             if heads.is_empty() {
                 continue;
             }
-            ensure!(heads.len() == 1, "resident answer binding has conflicting heads");
+            ensure!(
+                heads.len() == 1,
+                "resident answer binding has conflicting heads"
+            );
             let envelope = &heads[0];
             if envelope.kind != Kind::Value {
                 return Ok(None);
@@ -297,9 +307,10 @@ impl Ledger {
                 bail!("resident page binding variant mismatch");
             };
             let receipt = &binding.receipt;
-            if !matches!(receipt.evidence_origin.as_str(),
-                "development-native-guarded-v1" | "installed-native-guarded-v1")
-                || receipt.adapter_fingerprint != capture.correspondence.adapter_sha256
+            if !matches!(
+                receipt.evidence_origin.as_str(),
+                "development-native-guarded-v1" | "installed-native-guarded-v1"
+            ) || receipt.adapter_fingerprint != capture.correspondence.adapter_sha256
                 || receipt.source.capability_revision != capture.correspondence.profile_sha256
                 || receipt.observed_order != facts.order
                 || (page != facts.page && receipt.source.page != facts.page)
@@ -393,13 +404,15 @@ impl Ledger {
         }
         let (root_head, mut root) = self.live_root(turn.conversation, Some(&expected_root))?;
         if let Some(binding_id) = root.binding {
-            let association = self.resident_answer_association(capture)?
+            let association = self
+                .resident_answer_association(capture)?
                 .context("resident request no longer matches its bound answer page")?;
             let receipt = association.receipt();
             ensure!(
                 receipt.conversation == turn.conversation
                     && association.root_revision() == root_head.revision_id
-                    && binding_id == Self::binding_id(receipt.observed_document, receipt.observed_page),
+                    && binding_id
+                        == Self::binding_id(receipt.observed_document, receipt.observed_page),
                 "resident answer association changed before preparing request"
             );
         }

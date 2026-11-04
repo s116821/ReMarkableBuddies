@@ -217,7 +217,10 @@ mod tests {
         let points = contacts(3);
         let mut ordinary = ContactReducer::new(TriggerCorner::LowerLeft);
         ordinary.frame(&points, ms(0));
-        assert_eq!(ordinary.frame(&points, ms(2000)), vec![Interaction::Invalidated]);
+        assert_eq!(
+            ordinary.frame(&points, ms(2000)),
+            vec![Interaction::Invalidated]
+        );
         assert!(ordinary.frame(&[], ms(2400)).is_empty());
 
         let mut installed = ContactReducer::new(TriggerCorner::LowerLeft);
@@ -227,7 +230,10 @@ mod tests {
             (3, Interaction::BlankStart),
             (4, Interaction::Undo),
             (3, Interaction::BlankStart),
-        ].into_iter().enumerate() {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let start = index as u64 * 3000;
             let points = contacts(count);
             assert!(installed.frame(&points, ms(start)).is_empty());

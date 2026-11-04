@@ -22,7 +22,8 @@ pub mod activation;
 
 pub const LEASE_DIRECTORY: &str = "/run/reader-buddy-resident";
 const PROFILE: &str = "/home/root/.local/lib/reader-buddy/resident-recovery.json";
-pub(crate) const DEVELOPMENT_OUTPUT_PLAN: &str = "/home/root/.local/lib/reader-buddy/development-output/plan.json";
+pub(crate) const DEVELOPMENT_OUTPUT_PLAN: &str =
+    "/home/root/.local/lib/reader-buddy/development-output/plan.json";
 const APP: &str = "/home/root/.local/lib/reader-buddy/reader-buddy";
 const BUDDY: &str = "reader-buddy.service";
 const HELPER: &str = "reader-buddy-stock-recovery.service";
@@ -42,9 +43,15 @@ const RECOVERY_SECONDS: u64 = 120;
 fn installed_directory_identity() -> Result<Option<super::Identity>> {
     installed_directory_identity_at(Path::new(LEASE_DIRECTORY))
 }
-fn installed_directory_identity_at(path:&Path) -> Result<Option<super::Identity>> {
-    ensure!(path.parent()==Some(Path::new("/run")),"runtime parent mismatch");
-    let leaf=path.file_name().and_then(|v|v.to_str()).context("runtime leaf")?;
+fn installed_directory_identity_at(path: &Path) -> Result<Option<super::Identity>> {
+    ensure!(
+        path.parent() == Some(Path::new("/run")),
+        "runtime parent mismatch"
+    );
+    let leaf = path
+        .file_name()
+        .and_then(|v| v.to_str())
+        .context("runtime leaf")?;
     let parent = trusted_file(Path::new("/run"))?;
     let identity = super::Identity::of(&parent.metadata()?);
     ensure!(
@@ -84,18 +91,23 @@ pub fn refuse_occupied_activation() -> Result<()> {
             "installed lease directory changed"
         );
     }
-    #[cfg(all(feature="development-resident-bootstrap",feature="development-input-diagnostics"))]
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
     match fs::symlink_metadata(PROFILE) {
         Ok(_) => {
-            let mut file=Pinned::open(Path::new(PROFILE))?;
-            let end=Instant::now()+Duration::from_secs(10);
-            let profile=parse_profile(&file.bytes(32*1024,end)?)?;
-            if profile.version==4 {
-                let directory=profile.runtime_directory()?;
-                if installed_directory_identity_at(&directory)?.is_some(){require_unoccupied(&directory)?;}
+            let mut file = Pinned::open(Path::new(PROFILE))?;
+            let end = Instant::now() + Duration::from_secs(10);
+            let profile = parse_profile(&file.bytes(32 * 1024, end)?)?;
+            if profile.version == 4 {
+                let directory = profile.runtime_directory()?;
+                if installed_directory_identity_at(&directory)?.is_some() {
+                    require_unoccupied(&directory)?;
+                }
             }
         }
-        Err(error) if error.kind()==std::io::ErrorKind::NotFound => {},
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
     Ok(())
@@ -115,9 +127,9 @@ pub(super) fn require_unoccupied(path: &Path) -> Result<()> {
 /// The installer creates it once per boot; service stop must never remove it.
 /// A failed publication leaves the directory occupied and cannot authorize stop.
 pub fn publish_installed(record: LeaseRecord) -> Result<Lease> {
-    publish_installed_at(record,Path::new(LEASE_DIRECTORY))
+    publish_installed_at(record, Path::new(LEASE_DIRECTORY))
 }
-fn publish_installed_at(record:LeaseRecord,directory:&Path)->Result<Lease> {
+fn publish_installed_at(record: LeaseRecord, directory: &Path) -> Result<Lease> {
     ensure!(
         unsafe { libc::geteuid() } == 0,
         "installed activation requires root"
@@ -135,9 +147,9 @@ fn publish_installed_at(record:LeaseRecord,directory:&Path)->Result<Lease> {
 #[cfg_attr(test, derive(serde::Serialize))]
 #[serde(deny_unknown_fields)]
 struct DevelopmentOutputInstallation {
-    path:String,
-    sha256:[u8;32],
-    nonce:String,
+    path: String,
+    sha256: [u8; 32],
+    nonce: String,
 }
 #[derive(Deserialize)]
 #[cfg_attr(test, derive(serde::Serialize))]
@@ -148,8 +160,8 @@ struct Profile {
     companion: Option<String>,
     #[serde(default)]
     source_mode: Option<String>,
-    #[serde(default,skip_serializing_if="Option::is_none")]
-    development_output:Option<DevelopmentOutputInstallation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    development_output: Option<DevelopmentOutputInstallation>,
     firmware: String,
     kernel: String,
     native_profile_sha256: [u8; 32],
@@ -355,8 +367,8 @@ impl Installation {
         ] {
             artifacts.push(Pinned::verified(path, hash, deadline)?);
         }
-        if let Some(plan)=&profile.development_output {
-            artifacts.push(Pinned::verified(&plan.path,plan.sha256,deadline)?);
+        if let Some(plan) = &profile.development_output {
+            artifacts.push(Pinned::verified(&plan.path, plan.sha256, deadline)?);
         }
         let installation = Self {
             profile,
@@ -464,14 +476,20 @@ impl Installed {
     }
 }
 
-fn hex_digest(text:&str)->[u8;32] {
-    let mut out=[0;32];for (i,pair) in text.as_bytes().chunks_exact(2).enumerate() {
-        let nibble=|b:u8|if b<=b'9'{b-b'0'}else{b-b'a'+10};out[i]=(nibble(pair[0])<<4)|nibble(pair[1]);
-    }out
+fn hex_digest(text: &str) -> [u8; 32] {
+    let mut out = [0; 32];
+    for (i, pair) in text.as_bytes().chunks_exact(2).enumerate() {
+        let nibble = |b: u8| if b <= b'9' { b - b'0' } else { b - b'a' + 10 };
+        out[i] = (nibble(pair[0]) << 4) | nibble(pair[1]);
+    }
+    out
 }
 impl Profile {
     fn installed_output_definition(&self) -> bool {
-        #[cfg(all(feature = "development-resident-bootstrap", feature = "development-input-diagnostics"))]
+        #[cfg(all(
+            feature = "development-resident-bootstrap",
+            feature = "development-input-diagnostics"
+        ))]
         {
             use crate::workflow::resident_output::development::{ADAPTER, PROFILE};
             self.version == 5
@@ -481,15 +499,26 @@ impl Profile {
                 && self.native_profile_sha256 == hex_digest(PROFILE)
                 && self.adapter_sha256 == hex_digest(ADAPTER)
         }
-        #[cfg(not(all(feature = "development-resident-bootstrap", feature = "development-input-diagnostics")))]
+        #[cfg(not(all(
+            feature = "development-resident-bootstrap",
+            feature = "development-input-diagnostics"
+        )))]
         false
     }
 
-    fn development_definition(&self)->bool {
-        #[cfg(all(feature="development-resident-bootstrap",feature="development-input-diagnostics"))]
-        if self.version==4 && self.source_mode.as_deref()==Some("resident-development-output-v1") && self.companion.as_deref()==Some(service::vendor::PROFILE_ID) {
-            if let Some(plan)=&self.development_output {
-                use crate::workflow::resident_output::development::{REPEAT_ADAPTER, REPEAT_PROFILE};
+    fn development_definition(&self) -> bool {
+        #[cfg(all(
+            feature = "development-resident-bootstrap",
+            feature = "development-input-diagnostics"
+        ))]
+        if self.version == 4
+            && self.source_mode.as_deref() == Some("resident-development-output-v1")
+            && self.companion.as_deref() == Some(service::vendor::PROFILE_ID)
+        {
+            if let Some(plan) = &self.development_output {
+                use crate::workflow::resident_output::development::{
+                    REPEAT_ADAPTER, REPEAT_PROFILE,
+                };
                 let repeat = self.native_profile_sha256 == hex_digest(REPEAT_PROFILE)
                     && self.adapter_sha256 == hex_digest(REPEAT_ADAPTER);
                 return plan.path==DEVELOPMENT_OUTPUT_PLAN && plan.sha256!=[0;32] && uuid::Uuid::parse_str(&plan.nonce).is_ok_and(|id|!id.is_nil()&&id.to_string()==plan.nonce)
@@ -499,16 +528,30 @@ impl Profile {
         }
         false
     }
-    fn runtime_directory(&self)->Result<PathBuf> {
-        if self.version==4 {
-            ensure!(self.development_definition(),"unsupported development installation");
-            let nonce=&self.development_output.as_ref().unwrap().nonce;
-            return Ok(PathBuf::from(format!("/run/rb-dev-{}",nonce.replace('-',""))));
+    fn runtime_directory(&self) -> Result<PathBuf> {
+        if self.version == 4 {
+            ensure!(
+                self.development_definition(),
+                "unsupported development installation"
+            );
+            let nonce = &self.development_output.as_ref().unwrap().nonce;
+            return Ok(PathBuf::from(format!(
+                "/run/rb-dev-{}",
+                nonce.replace('-', "")
+            )));
         }
         Ok(PathBuf::from(LEASE_DIRECTORY))
     }
-    fn app_argv(&self)->Vec<&str> {
-        if self.development_definition() {vec![APP,"--development-resident-output-plan",DEVELOPMENT_OUTPUT_PLAN]} else {vec![APP]}
+    fn app_argv(&self) -> Vec<&str> {
+        if self.development_definition() {
+            vec![
+                APP,
+                "--development-resident-output-plan",
+                DEVELOPMENT_OUTPUT_PLAN,
+            ]
+        } else {
+            vec![APP]
+        }
     }
 
     fn validate(&self, record: &LeaseRecord) -> Result<()> {
@@ -546,8 +589,9 @@ impl Profile {
                 || (self.version == 3
                     && self.source_mode.as_deref() == Some("resident-source-v1")
                     && self.companion.as_deref() == Some(service::vendor::PROFILE_ID))
-                || self.development_definition() || self.installed_output_definition())
-                && (self.version==4 || self.development_output.is_none())
+                || self.development_definition()
+                || self.installed_output_definition())
+                && (self.version == 4 || self.development_output.is_none())
                 && self.firmware == "3.28.0.172"
                 && self.kernel == "5.4.70-v1.6.3-rm11x",
             "unsupported recovery profile"
@@ -879,14 +923,22 @@ pub fn run_installed() -> Result<RecoveryOutcome> {
         "stock recovery requires root"
     );
     let deadline = Instant::now() + Duration::from_secs(RECOVERY_SECONDS);
-    let directory=PathBuf::from(LEASE_DIRECTORY);
-    #[cfg(all(feature="development-resident-bootstrap",feature="development-input-diagnostics"))]
-    let directory=match fs::symlink_metadata(PROFILE) {
-        Ok(_) => {let mut file=Pinned::open(Path::new(PROFILE))?;parse_profile(&file.bytes(32*1024,Instant::now()+Duration::from_secs(10))?)?.runtime_directory()?},
-        Err(error) if error.kind()==std::io::ErrorKind::NotFound => directory,
+    let directory = PathBuf::from(LEASE_DIRECTORY);
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    let directory = match fs::symlink_metadata(PROFILE) {
+        Ok(_) => {
+            let mut file = Pinned::open(Path::new(PROFILE))?;
+            parse_profile(&file.bytes(32 * 1024, Instant::now() + Duration::from_secs(10))?)?
+                .runtime_directory()?
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => directory,
         Err(error) => return Err(error.into()),
     };
-    let identity = installed_directory_identity_at(&directory)?.context("installed lease directory absent")?;
+    let identity =
+        installed_directory_identity_at(&directory)?.context("installed lease directory absent")?;
     let lease = Lease::reopen_if_present(&directory)?;
     ensure!(
         installed_directory_identity_at(&directory)? == Some(identity),
@@ -914,10 +966,16 @@ pub fn run_installed() -> Result<RecoveryOutcome> {
         );
         backend.companion_current(deadline)?;
         check_deadline(deadline)?;
-        #[cfg(all(feature = "development-resident-bootstrap", feature = "development-input-diagnostics"))]
+        #[cfg(all(
+            feature = "development-resident-bootstrap",
+            feature = "development-input-diagnostics"
+        ))]
         super::writer_request::discard(&backend.lease)?;
         backend.lease.archive_recovered()?;
-        log::info!("Archived recovered activation {}", backend.lease.record().activation());
+        log::info!(
+            "Archived recovered activation {}",
+            backend.lease.record().activation()
+        );
     }
     Ok(RecoveryOutcome::Restored(restored))
 }

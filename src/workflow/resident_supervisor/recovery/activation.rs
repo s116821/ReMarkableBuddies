@@ -27,11 +27,17 @@ const ACTIVATION: Duration = Duration::from_secs(60);
 /// This value does not advertise native capability; no approved profile is shipped.
 pub struct InstalledReaderSelection {
     digest: [u8; 32],
-    #[cfg(all(feature = "development-resident-bootstrap", feature = "development-input-diagnostics"))]
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
     installed_output: bool,
 }
 
-#[cfg(all(feature = "development-resident-bootstrap", feature = "development-input-diagnostics"))]
+#[cfg(all(
+    feature = "development-resident-bootstrap",
+    feature = "development-input-diagnostics"
+))]
 pub struct InstalledOutput {
     profile: Pinned,
     digest: [u8; 32],
@@ -40,7 +46,10 @@ pub struct InstalledOutput {
     executable: [u8; 32],
 }
 
-#[cfg(all(feature = "development-resident-bootstrap", feature = "development-input-diagnostics"))]
+#[cfg(all(
+    feature = "development-resident-bootstrap",
+    feature = "development-input-diagnostics"
+))]
 impl InstalledOutput {
     pub(crate) fn current(&self) -> Result<()> {
         self.profile.current()
@@ -57,7 +66,10 @@ impl InstalledOutput {
     }
 }
 impl InstalledReaderSelection {
-    #[cfg(all(feature = "development-resident-bootstrap", feature = "development-input-diagnostics"))]
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
     pub(crate) fn has_installed_output(&self) -> bool {
         self.installed_output
     }
@@ -86,7 +98,10 @@ impl InstalledReaderSelection {
         let profile = parse_profile(bytes)?;
         Ok(profile.source_mode.as_ref().map(|_| Self {
             digest: sha256(bytes),
-            #[cfg(all(feature = "development-resident-bootstrap", feature = "development-input-diagnostics"))]
+            #[cfg(all(
+                feature = "development-resident-bootstrap",
+                feature = "development-input-diagnostics"
+            ))]
             installed_output: profile.installed_output_definition(),
         }))
     }
@@ -101,7 +116,8 @@ impl InstalledReaderSelection {
         ensure!(
             ((installation.profile.version == 3
                 && installation.profile.source_mode.as_deref() == Some("resident-source-v1"))
-                || installation.profile.development_definition() || installation.profile.installed_output_definition()),
+                || installation.profile.development_definition()
+                || installation.profile.installed_output_definition()),
             "Installed resident source mode unsupported"
         );
         Pinned::verified(
@@ -112,14 +128,20 @@ impl InstalledReaderSelection {
         Pinned::verified(ADAPTER, installation.profile.adapter_sha256, deadline)?;
         check_deadline(deadline)
     }
-    #[cfg(all(feature = "development-resident-bootstrap", feature = "development-input-diagnostics"))]
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
     pub(crate) fn output(&self, deadline: Instant) -> Result<Option<InstalledOutput>> {
         if !self.installed_output {
             return Ok(None);
         }
         let installation = Installation::load(deadline)?;
         self.require_digest(installation.digest)?;
-        ensure!(installation.profile.installed_output_definition(), "installed output selection changed");
+        ensure!(
+            installation.profile.installed_output_definition(),
+            "installed output selection changed"
+        );
         Self::validate_native(&installation, deadline)?;
         let profile = Pinned::verified(PROFILE, self.digest, deadline)?;
         Ok(Some(InstalledOutput {
@@ -130,15 +152,27 @@ impl InstalledReaderSelection {
             executable: installation.profile.stock_executable_sha256,
         }))
     }
-    #[cfg(all(feature="development-resident-bootstrap",feature="development-input-diagnostics"))]
-    pub(crate) fn require_development_output(&self,path:&Path,deadline:Instant)->Result<()> {
-        let installation=Installation::load(deadline)?;self.require_digest(installation.digest)?;
-        ensure!(installation.profile.development_definition() && path==Path::new(DEVELOPMENT_OUTPUT_PLAN),"explicit development output profile/argv required");
-        let plan=installation.profile.development_output.as_ref().unwrap();
-        let mut pinned=Pinned::verified(&plan.path,plan.sha256,deadline)?;
-        let raw=pinned.bytes(16*1024,deadline)?;let value:serde_json::Value=serde_json::from_slice(&raw)?;
-        ensure!(value["nonce"].as_str()==Some(plan.nonce.as_str()),"development plan/profile nonce mismatch");
-        Self::validate_native(&installation,deadline)
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    pub(crate) fn require_development_output(&self, path: &Path, deadline: Instant) -> Result<()> {
+        let installation = Installation::load(deadline)?;
+        self.require_digest(installation.digest)?;
+        ensure!(
+            installation.profile.development_definition()
+                && path == Path::new(DEVELOPMENT_OUTPUT_PLAN),
+            "explicit development output profile/argv required"
+        );
+        let plan = installation.profile.development_output.as_ref().unwrap();
+        let mut pinned = Pinned::verified(&plan.path, plan.sha256, deadline)?;
+        let raw = pinned.bytes(16 * 1024, deadline)?;
+        let value: serde_json::Value = serde_json::from_slice(&raw)?;
+        ensure!(
+            value["nonce"].as_str() == Some(plan.nonce.as_str()),
+            "development plan/profile nonce mismatch"
+        );
+        Self::validate_native(&installation, deadline)
     }
     pub(crate) fn current(&self, deadline: Instant) -> Result<()> {
         let installation = Installation::load(deadline)?;
@@ -149,7 +183,10 @@ impl InstalledReaderSelection {
     pub(crate) fn fixture() -> Self {
         Self {
             digest: [17; 32],
-            #[cfg(all(feature = "development-resident-bootstrap", feature = "development-input-diagnostics"))]
+            #[cfg(all(
+                feature = "development-resident-bootstrap",
+                feature = "development-input-diagnostics"
+            ))]
             installed_output: false,
         }
     }
@@ -175,7 +212,10 @@ struct Pending {
 }
 
 impl Session {
-    #[cfg(all(feature = "development-resident-bootstrap", feature = "development-input-diagnostics"))]
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
     pub(crate) fn take_writer_request(
         &self,
         document: crate::storage::Uuid,
@@ -239,8 +279,9 @@ impl Session {
         progress()?;
         health.progress()?; // Requires the original READY main-thread owner.
         let mut installation = Installation::load(deadline)?;
-        let runtime_directory=installation.profile.runtime_directory()?;
-        let identity=installed_directory_identity_at(&runtime_directory)?.context("installed lease directory absent")?;
+        let runtime_directory = installation.profile.runtime_directory()?;
+        let identity = installed_directory_identity_at(&runtime_directory)?
+            .context("installed lease directory absent")?;
         require_unoccupied(&runtime_directory)?;
         if let Some(selected) = selection {
             selected.require_digest(installation.digest)?;
@@ -330,7 +371,7 @@ impl Session {
         );
         // Publication may fail after creating partial occupied state. Arm BEFORE it.
         let exit = health.exit_on_drop()?;
-        let lease = publish_installed_at(record,&runtime_directory)?;
+        let lease = publish_installed_at(record, &runtime_directory)?;
         let pending = Pending {
             exit,
             installation,
@@ -364,7 +405,10 @@ impl Session {
         }
         pending.current(health, progress, deadline)?;
         ensure!(pending.stock_stopped(deadline)?, "stock no longer stopped");
-        let directory = pending.installation.profile.runtime_directory()?
+        let directory = pending
+            .installation
+            .profile
+            .runtime_directory()?
             .join(format!("session-{}", pending.lease.record().activation()));
         let profile = &pending.installation.profile;
         let launch = Launch {
@@ -391,7 +435,10 @@ impl Session {
                 ("HOME".into(), "/home/root".into()),
                 ("USER".into(), "root".into()),
                 ("LOGNAME".into(), "root".into()),
-                ("PATH".into(), "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin".into()),
+                (
+                    "PATH".into(),
+                    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin".into(),
+                ),
                 ("LANG".into(), "en_US.UTF-8".into()),
             ]),
             arguments: vec!["--system".into()],
@@ -496,14 +543,28 @@ impl Session {
             .finish_request(resident_request::finish(&mut self.runtime, result))
     }
 
-    pub(crate) fn source_insert(&mut self, health: &mut ServiceHealth, input: &mut RequestInput,
-        conversation: crate::storage::Uuid, operation: OperationId,
-        insertion: remarkable_open_sdk::native_adapter::InsertAfter, deadline: Instant)
-        -> std::result::Result<Reply, RequestFailure> {
+    pub(crate) fn source_insert(
+        &mut self,
+        health: &mut ServiceHealth,
+        input: &mut RequestInput,
+        conversation: crate::storage::Uuid,
+        operation: OperationId,
+        insertion: remarkable_open_sdk::native_adapter::InsertAfter,
+        deadline: Instant,
+    ) -> std::result::Result<Reply, RequestFailure> {
         let identity = self.runtime.identity().clone();
-        let mut guard = SourceAdmission { pending: &self.pending, identity, health, input };
-        let result = self.runtime.insert_admitted(conversation, operation, insertion, deadline, &mut guard);
-        self.pending.exit.finish_request(resident_request::finish(&mut self.runtime, result))
+        let mut guard = SourceAdmission {
+            pending: &self.pending,
+            identity,
+            health,
+            input,
+        };
+        let result =
+            self.runtime
+                .insert_admitted(conversation, operation, insertion, deadline, &mut guard);
+        self.pending
+            .exit
+            .finish_request(resident_request::finish(&mut self.runtime, result))
     }
 
     pub(crate) fn source_identity(&self) -> RuntimeIdentity {

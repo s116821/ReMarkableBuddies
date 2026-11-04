@@ -353,7 +353,11 @@ pub fn read(bytes: &[u8]) -> Result<NativeText> {
 
 /// Positive evidence of the observed RMv6 no-text scene format.
 /// This describes saved bytes only.
-#[cfg(all(target_os = "linux", feature = "development-resident-bootstrap", feature = "development-input-diagnostics"))]
+#[cfg(all(
+    target_os = "linux",
+    feature = "development-resident-bootstrap",
+    feature = "development-input-diagnostics"
+))]
 pub(crate) fn recognizes_ink_only(bytes: &[u8]) -> Result<bool> {
     Ok(parse_page(bytes)?.is_none())
 }
@@ -419,7 +423,10 @@ fn parse_page(bytes: &[u8]) -> Result<Option<NativeText>> {
         }
     }
     let Some(mut text) = text else {
-        ensure!(known_ink_scene && page_counts == Some((0, 0)), "Unknown native no-text scene");
+        ensure!(
+            known_ink_scene && page_counts == Some((0, 0)),
+            "Unknown native no-text scene"
+        );
         return Ok(None);
     };
     if let Some((characters, lines)) = page_counts {

@@ -46,7 +46,10 @@ trait SourceSession {
         deadline: Instant,
     ) -> std::result::Result<(), RequestFailure>;
     fn identity(&self) -> RuntimeIdentity;
-    #[cfg(all(feature = "development-resident-bootstrap", feature = "development-input-diagnostics"))]
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
     fn take_writer_request(
         &self,
         _document: crate::storage::Uuid,
@@ -68,13 +71,20 @@ trait SourceSession {
         request: Request,
         deadline: Instant,
     ) -> std::result::Result<Reply, RequestFailure>;
-    fn insert(&mut self, _health: &mut ServiceHealth, _input: &mut RequestInput,
-        _conversation: crate::storage::Uuid, _operation: OperationId,
-        _insertion: remarkable_open_sdk::native_adapter::InsertAfter, _deadline: Instant)
-        -> std::result::Result<Reply, RequestFailure> {
-        Err(RequestFailure { kind: FailureKind::Refused,
+    fn insert(
+        &mut self,
+        _health: &mut ServiceHealth,
+        _input: &mut RequestInput,
+        _conversation: crate::storage::Uuid,
+        _operation: OperationId,
+        _insertion: remarkable_open_sdk::native_adapter::InsertAfter,
+        _deadline: Instant,
+    ) -> std::result::Result<Reply, RequestFailure> {
+        Err(RequestFailure {
+            kind: FailureKind::Refused,
             lost: remarkable_open_sdk::native_adapter::LostRequest::NoPendingMutation,
-            error: anyhow::anyhow!("resident insertion backend unavailable") })
+            error: anyhow::anyhow!("resident insertion backend unavailable"),
+        })
     }
     fn finish(&mut self);
     #[cfg(test)]
@@ -97,7 +107,10 @@ impl SourceSession for Session {
     fn identity(&self) -> RuntimeIdentity {
         self.source_identity()
     }
-    #[cfg(all(feature = "development-resident-bootstrap", feature = "development-input-diagnostics"))]
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
     fn take_writer_request(
         &self,
         document: crate::storage::Uuid,
@@ -123,10 +136,15 @@ impl SourceSession for Session {
     ) -> std::result::Result<Reply, RequestFailure> {
         Session::source_request(self, health, input, operation, request, deadline)
     }
-    fn insert(&mut self, health: &mut ServiceHealth, input: &mut RequestInput,
-        conversation: crate::storage::Uuid, operation: OperationId,
-        insertion: remarkable_open_sdk::native_adapter::InsertAfter, deadline: Instant)
-        -> std::result::Result<Reply, RequestFailure> {
+    fn insert(
+        &mut self,
+        health: &mut ServiceHealth,
+        input: &mut RequestInput,
+        conversation: crate::storage::Uuid,
+        operation: OperationId,
+        insertion: remarkable_open_sdk::native_adapter::InsertAfter,
+        deadline: Instant,
+    ) -> std::result::Result<Reply, RequestFailure> {
         self.source_insert(health, input, conversation, operation, insertion, deadline)
     }
     fn finish(&mut self) {
@@ -176,7 +194,10 @@ pub(super) struct ResidentSourceOwner {
     canceled: bool,
     fatal: bool,
     captured_source: Option<remarkable_open_sdk::native_adapter::ReaderFacts>,
-    #[cfg(all(feature="development-resident-bootstrap",feature="development-input-diagnostics"))]
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
     development_diagnostics: Option<std::path::PathBuf>,
 }
 impl ResidentSourceOwner {
@@ -193,25 +214,43 @@ impl ResidentSourceOwner {
             canceled: false,
             fatal: false,
             captured_source: None,
-            #[cfg(all(feature="development-resident-bootstrap",feature="development-input-diagnostics"))]
+            #[cfg(all(
+                feature = "development-resident-bootstrap",
+                feature = "development-input-diagnostics"
+            ))]
             development_diagnostics: None,
         }
     }
-    #[cfg(all(feature="development-resident-bootstrap",feature="development-input-diagnostics"))]
-    pub(super) fn require_development_output(&mut self,path:&std::path::Path)->Result<()> {
-        self.selection.require_development_output(path,Instant::now()+Duration::from_secs(10))?;
-        self.development_diagnostics=Some(path.parent().context("development plan parent")?.to_path_buf());
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    pub(super) fn require_development_output(&mut self, path: &std::path::Path) -> Result<()> {
+        self.selection
+            .require_development_output(path, Instant::now() + Duration::from_secs(10))?;
+        self.development_diagnostics = Some(
+            path.parent()
+                .context("development plan parent")?
+                .to_path_buf(),
+        );
         Ok(())
     }
 
-    #[cfg(all(feature = "development-resident-bootstrap", feature = "development-input-diagnostics"))]
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
     pub(super) fn installed_output(
         &self,
     ) -> Result<Option<super::resident_supervisor::recovery::activation::InstalledOutput>> {
-        self.selection.output(Instant::now() + Duration::from_secs(10))
+        self.selection
+            .output(Instant::now() + Duration::from_secs(10))
     }
 
-    #[cfg(all(feature = "development-resident-bootstrap", feature = "development-input-diagnostics"))]
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
     pub(super) fn activate_at_startup(
         &mut self,
         corner: crate::device::touch::TriggerCorner,
@@ -251,7 +290,10 @@ impl ResidentSourceOwner {
         self.gesture == Some(ResidentGesture::BlankStart)
     }
 
-    #[cfg(all(feature = "development-resident-bootstrap", feature = "development-input-diagnostics"))]
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
     pub(super) fn take_installed_writer(
         &self,
         capture: &ResidentSourceCapture,
@@ -259,12 +301,18 @@ impl ResidentSourceOwner {
         if self.gesture != Some(ResidentGesture::Reader) || !self.selection.has_installed_output() {
             return Ok(None);
         }
-        let session = self.session.as_ref().context("resident Writer session absent")?;
-        Ok(session.take_writer_request(capture.document(), capture.page())?
-            .map(|request| super::resident_output::SelectedConversationRequest::WriterRefinement {
-            request,
-            require_current_draft: true,
-        }))
+        let session = self
+            .session
+            .as_ref()
+            .context("resident Writer session absent")?;
+        Ok(session
+            .take_writer_request(capture.document(), capture.page())?
+            .map(
+                |request| super::resident_output::SelectedConversationRequest::WriterRefinement {
+                    request,
+                    require_current_draft: true,
+                },
+            ))
     }
     pub(super) fn begin(
         &mut self,
@@ -369,17 +417,35 @@ impl ResidentSourceOwner {
         let facts = match observed {
             Ok(Reply::Observed(facts)) => facts,
             Ok(other) => {
-                #[cfg(all(feature="development-resident-bootstrap",feature="development-input-diagnostics"))]
-                if let Some(directory)=&self.development_diagnostics {
+                #[cfg(all(
+                    feature = "development-resident-bootstrap",
+                    feature = "development-input-diagnostics"
+                ))]
+                if let Some(directory) = &self.development_diagnostics {
                     // Explicit installed development profile only. A visual sample
                     // permits fixture setup inspection, never page authority.
-                    let visual=session.request(health,input,operation(),Request::CaptureVisual,deadline.min(Instant::now()+Duration::from_secs(10)));
-                    if let Ok(Reply::VisualCaptured(image))=visual {
-                        use std::{io::Write,os::unix::fs::OpenOptionsExt};
-                        let path=directory.join(format!("setup-{}.png",uuid::Uuid::new_v4()));
-                        let mut file=std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)?;
-                        file.write_all(image.png())?;file.sync_all()?;
-                        log::info!("Development setup image: {} sha256={}",path.display(),crate::storage::digest(image.png()));
+                    let visual = session.request(
+                        health,
+                        input,
+                        operation(),
+                        Request::CaptureVisual,
+                        deadline.min(Instant::now() + Duration::from_secs(10)),
+                    );
+                    if let Ok(Reply::VisualCaptured(image)) = visual {
+                        use std::{io::Write, os::unix::fs::OpenOptionsExt};
+                        let path = directory.join(format!("setup-{}.png", uuid::Uuid::new_v4()));
+                        let mut file = std::fs::OpenOptions::new()
+                            .write(true)
+                            .create_new(true)
+                            .mode(0o600)
+                            .open(&path)?;
+                        file.write_all(image.png())?;
+                        file.sync_all()?;
+                        log::info!(
+                            "Development setup image: {} sha256={}",
+                            path.display(),
+                            crate::storage::digest(image.png())
+                        );
                     }
                 }
                 session.finish();
@@ -457,7 +523,6 @@ impl ResidentSourceOwner {
     }
 }
 
-
 fn unsettled_output_insertion(
     ledger: &crate::conversation::Ledger,
     facts: &remarkable_open_sdk::native_adapter::ReaderFacts,
@@ -468,14 +533,21 @@ fn unsettled_output_insertion(
     let page = facts.page();
     let document = StoredUuid::from_bytes(*page.document.as_bytes());
     for attempt in super::resident_client::attempts(ledger.store())? {
-        let Some(insertion) = attempt.possible_insertion() else { continue };
+        let Some(insertion) = attempt.possible_insertion() else {
+            continue;
+        };
         let source = insertion.source.page();
-        if source.document != page.document || (source.page != page.page && insertion.target != page.page) {
+        if source.document != page.document
+            || (source.page != page.page && insertion.target != page.page)
+        {
             continue;
         }
         // A request can select a new conversation after an interrupted binding.
         // The historical target must already be bound and still next to its source.
-        let adjacent = facts.order().windows(2).any(|pair| pair == [source.page, insertion.target]);
+        let adjacent = facts
+            .order()
+            .windows(2)
+            .any(|pair| pair == [source.page, insertion.target]);
         if !adjacent || !matches!(attempt.reply, Some(Reply::InsertionObserved { .. })) {
             return Ok(Some(insertion.target));
         }
@@ -492,113 +564,209 @@ fn unsettled_output_insertion(
 }
 
 impl ResidentSourceOwner {
-    fn output_observe(&mut self, health: &mut ServiceHealth, end: Instant)
-        -> Result<remarkable_open_sdk::native_adapter::ReaderFacts> {
+    fn output_observe(
+        &mut self,
+        health: &mut ServiceHealth,
+        end: Instant,
+    ) -> Result<remarkable_open_sdk::native_adapter::ReaderFacts> {
         admitted_progress(end, || self.progress(health))?;
-        let result = self.session.as_mut().context("resident output Session absent")?.request(
-            health, self.input.as_mut().context("resident output guard absent")?, operation(),
-            Request::Observe, end.min(Instant::now()+Duration::from_secs(10)));
+        let result = self
+            .session
+            .as_mut()
+            .context("resident output Session absent")?
+            .request(
+                health,
+                self.input
+                    .as_mut()
+                    .context("resident output guard absent")?,
+                operation(),
+                Request::Observe,
+                end.min(Instant::now() + Duration::from_secs(10)),
+            );
         match result {
-            Ok(Reply::Observed(facts)) => { admitted_progress(end, || self.progress(health))?; Ok(facts) }
+            Ok(Reply::Observed(facts)) => {
+                admitted_progress(end, || self.progress(health))?;
+                Ok(facts)
+            }
             Ok(reply) => anyhow::bail!("resident output observation refused: {reply:?}"),
-            Err(error) => self.failure(health,error),
+            Err(error) => self.failure(health, error),
         }
     }
-    fn output_capture(&mut self, health: &mut ServiceHealth,
-        expected: &remarkable_open_sdk::native_adapter::ReaderFacts, end: Instant)
-        -> Result<remarkable_open_sdk::native_adapter::HistoricalCapture> {
-        let result=self.session.as_mut().context("resident output Session absent")?.request(
-            health,self.input.as_mut().context("resident output guard absent")?,operation(),
-            Request::CaptureSource(expected.clone()),end.min(Instant::now()+Duration::from_secs(10)));
-        let image=match result {
+    fn output_capture(
+        &mut self,
+        health: &mut ServiceHealth,
+        expected: &remarkable_open_sdk::native_adapter::ReaderFacts,
+        end: Instant,
+    ) -> Result<remarkable_open_sdk::native_adapter::HistoricalCapture> {
+        let result = self
+            .session
+            .as_mut()
+            .context("resident output Session absent")?
+            .request(
+                health,
+                self.input
+                    .as_mut()
+                    .context("resident output guard absent")?,
+                operation(),
+                Request::CaptureSource(expected.clone()),
+                end.min(Instant::now() + Duration::from_secs(10)),
+            );
+        let image = match result {
             Ok(Reply::Captured(image)) => image,
             Ok(other) => anyhow::bail!("resident target capture refused: {other:?}"),
-            Err(error) => return self.failure(health,error),
+            Err(error) => return self.failure(health, error),
         };
-        ensure!(image.before()==expected && image.after()==expected,"target capture changed source/order");
-        admitted_progress(end,||self.progress(health))?;
+        ensure!(
+            image.before() == expected && image.after() == expected,
+            "target capture changed source/order"
+        );
+        admitted_progress(end, || self.progress(health))?;
         Ok(image)
     }
-    fn output_role(&mut self, health: &mut ServiceHealth,
+    fn output_role(
+        &mut self,
+        health: &mut ServiceHealth,
         backend: &mut dyn super::resident_output::ResidentOutputBackend,
-        ledger: &crate::conversation::Ledger, conversation: crate::storage::Uuid,
-        expected: &remarkable_open_sdk::native_adapter::ReaderFacts, blank_start_source: bool, end: Instant,
-        before_effect: &mut dyn FnMut() -> Result<()>)
-        -> Result<super::resident_output::PageUse> {
-        let runtime=self.session.as_ref().unwrap().identity();
-        let image=self.output_capture(health,expected,end)?;
-        let mut role=backend.classify(ledger,conversation,&runtime,expected,&image,blank_start_source,end,
-            &mut || admitted_progress(end,||self.progress(health)))?;
-        if role==super::resident_output::PageUse::LegacyBuddy {
-            admitted_progress(end,||self.progress(health))?;
+        ledger: &crate::conversation::Ledger,
+        conversation: crate::storage::Uuid,
+        expected: &remarkable_open_sdk::native_adapter::ReaderFacts,
+        blank_start_source: bool,
+        end: Instant,
+        before_effect: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<super::resident_output::PageUse> {
+        let runtime = self.session.as_ref().unwrap().identity();
+        let image = self.output_capture(health, expected, end)?;
+        let mut role = backend.classify(
+            ledger,
+            conversation,
+            &runtime,
+            expected,
+            &image,
+            blank_start_source,
+            end,
+            &mut || admitted_progress(end, || self.progress(health)),
+        )?;
+        if role == super::resident_output::PageUse::LegacyBuddy {
+            admitted_progress(end, || self.progress(health))?;
             before_effect()?;
-            admitted_progress(end,||self.progress(health))?;
-            if !backend.adopt(ledger,conversation,&runtime,expected,end)? {
+            admitted_progress(end, || self.progress(health))?;
+            if !backend.adopt(ledger, conversation, &runtime, expected, end)? {
                 return Ok(super::resident_output::PageUse::Unresolved);
             }
-            admitted_progress(end,||self.progress(health))?;
-            let fresh=self.output_observe(health,end)?;
-            super::resident_output::exact(&fresh,expected)?;
-            let image=self.output_capture(health,expected,end)?;
-            role=backend.classify(ledger,conversation,&runtime,expected,&image,blank_start_source,end,
-                &mut || admitted_progress(end,||self.progress(health)))?;
-            ensure!(role==super::resident_output::PageUse::RelevantBuddy,"adoption did not produce qualified relevance");
+            admitted_progress(end, || self.progress(health))?;
+            let fresh = self.output_observe(health, end)?;
+            super::resident_output::exact(&fresh, expected)?;
+            let image = self.output_capture(health, expected, end)?;
+            role = backend.classify(
+                ledger,
+                conversation,
+                &runtime,
+                expected,
+                &image,
+                blank_start_source,
+                end,
+                &mut || admitted_progress(end, || self.progress(health)),
+            )?;
+            ensure!(
+                role == super::resident_output::PageUse::RelevantBuddy,
+                "adoption did not produce qualified relevance"
+            );
         }
         Ok(role)
     }
-    fn output_navigate(&mut self, health: &mut ServiceHealth,
+    fn output_navigate(
+        &mut self,
+        health: &mut ServiceHealth,
         backend: &mut dyn super::resident_output::ResidentOutputBackend,
-        direction: remarkable_open_sdk::navigation::LogicalDirection, end: Instant,
-        before_effect: &mut dyn FnMut() -> Result<()>)
-        -> Result<()> {
-        admitted_progress(end,||self.progress(health))?;
+        direction: remarkable_open_sdk::navigation::LogicalDirection,
+        end: Instant,
+        before_effect: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        admitted_progress(end, || self.progress(health))?;
         before_effect()?;
-        admitted_progress(end,||self.progress(health))?;
-        let runtime=self.session.as_ref().unwrap().identity();
-        let old=self.input.take().context("resident navigation guard absent")?;
-        let result=backend.navigate(old,direction,&runtime,end,
-            &mut || admitted_progress(end,||self.progress(health)));
+        admitted_progress(end, || self.progress(health))?;
+        let runtime = self.session.as_ref().unwrap().identity();
+        let old = self
+            .input
+            .take()
+            .context("resident navigation guard absent")?;
+        let result = backend.navigate(old, direction, &runtime, end, &mut || {
+            admitted_progress(end, || self.progress(health))
+        });
         match result {
-            Ok(input) => self.input=Some(input),
-            Err(error) => { self.fatal=true; health.poison(); return Err(error); }
+            Ok(input) => self.input = Some(input),
+            Err(error) => {
+                self.fatal = true;
+                health.poison();
+                return Err(error);
+            }
         }
-        admitted_progress(end,||self.progress(health))
+        admitted_progress(end, || self.progress(health))
     }
-    pub(super) fn render_answer(&mut self, health: &mut ServiceHealth,
+    pub(super) fn render_answer(
+        &mut self,
+        health: &mut ServiceHealth,
         backend: &mut dyn super::resident_output::ResidentOutputBackend,
-        ledger: &crate::conversation::Ledger, conversation: crate::storage::Uuid, text: &str,
+        ledger: &crate::conversation::Ledger,
+        conversation: crate::storage::Uuid,
+        text: &str,
         association: Option<&crate::conversation::HistoricalPageAssociation>,
-        before_effect: &mut dyn FnMut() -> Result<()>)
-        -> Result<super::resident_output::ResidentOutputOutcome> {
-        use super::resident_output::{exact,PageUse,ResidentOutputOutcome as Outcome};
-        use remarkable_open_sdk::{native_adapter::{InsertAfter,ReaderFacts}, navigation::LogicalDirection, PageKey};
+        before_effect: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<super::resident_output::ResidentOutputOutcome> {
+        use super::resident_output::{exact, PageUse, ResidentOutputOutcome as Outcome};
+        use remarkable_open_sdk::{
+            native_adapter::{InsertAfter, ReaderFacts},
+            navigation::LogicalDirection,
+            PageKey,
+        };
         // One original output deadline. Provider work cannot refresh this window;
         // later stages only clamp it, and synchronous work is checked on return.
-        let end=Instant::now()+Duration::from_secs(90);
+        let end = Instant::now() + Duration::from_secs(90);
         self.selection.current(end)?;
-        admitted_progress(end,||self.progress(health))?;
-        let original=self.captured_source.clone().context("no resident source for output")?;
-        let runtime=self.session.as_ref().context("resident output Session absent")?.identity();
+        admitted_progress(end, || self.progress(health))?;
+        let original = self
+            .captured_source
+            .clone()
+            .context("no resident source for output")?;
+        let runtime = self
+            .session
+            .as_ref()
+            .context("resident output Session absent")?
+            .identity();
         backend.admit(&runtime, association, end)?;
         #[cfg(feature = "development-resident-bootstrap")]
-        if let Some(keyboard)=backend.owned_keyboard()? {
-            self.input.as_mut().context("resident output guard absent")?.bind_owned_keyboard(&keyboard)?;
+        if let Some(keyboard) = backend.owned_keyboard()? {
+            self.input
+                .as_mut()
+                .context("resident output guard absent")?
+                .bind_owned_keyboard(&keyboard)?;
         }
 
-        admitted_progress(end,||self.progress(health))?;
+        admitted_progress(end, || self.progress(health))?;
         if self.reconnect {
-            let reconnect_end=end.min(Instant::now()+Duration::from_secs(30));
-            let result=self.session.as_mut().unwrap().reconnect(health,self.input.as_mut().context("resident output guard absent")?,reconnect_end);
-            if let Err(error)=result { return self.failure(health,error); }
-            self.reconnect=false;
+            let reconnect_end = end.min(Instant::now() + Duration::from_secs(30));
+            let result = self.session.as_mut().unwrap().reconnect(
+                health,
+                self.input
+                    .as_mut()
+                    .context("resident output guard absent")?,
+                reconnect_end,
+            );
+            if let Err(error) = result {
+                return self.failure(health, error);
+            }
+            self.reconnect = false;
         }
-        let fresh=self.output_observe(health,end)?; exact(&fresh,&original)?;
+        let fresh = self.output_observe(health, end)?;
+        exact(&fresh, &original)?;
         if let Some(target) = unsettled_output_insertion(ledger, &fresh)? {
             log::info!("Resident output requires reconciliation for historical insertion {target}");
             return Ok(Outcome::Unresolved);
         }
         let association_current = || -> Result<bool> {
-            let Some(expected) = association else { return Ok(true); };
+            let Some(expected) = association else {
+                return Ok(true);
+            };
             let receipt = expected.receipt();
             Ok(matches!(
                 ledger.inspect_page_association(conversation, receipt.observed_document, receipt.observed_page)?,
@@ -610,19 +778,51 @@ impl ResidentSourceOwner {
             return Ok(Outcome::Unresolved);
         }
         let blank_start_source = self.blank_start_requested();
-        let current=self.output_role(health,backend,ledger,conversation,&original,blank_start_source,end,before_effect)?;
-        let mut newly_created=false;
-        let target=if current==PageUse::RelevantBuddy {
+        let current = self.output_role(
+            health,
+            backend,
+            ledger,
+            conversation,
+            &original,
+            blank_start_source,
+            end,
+            before_effect,
+        )?;
+        let mut newly_created = false;
+        let target = if current == PageUse::RelevantBuddy {
             original.clone() // current-first reuse: do not inspect a successor
         } else {
-            if current!=PageUse::ConfirmedNonBuddy { return Ok(Outcome::Unresolved); }
-            let source_index=original.order().iter().position(|id|*id==original.page().page).unwrap();
-            let mut reuse=None;
-            if let Some(next)=original.order().get(source_index+1).copied() {
-                self.output_navigate(health,backend,LogicalDirection::Next,end,before_effect)?;
-                let expected=ReaderFacts::new(PageKey{document:original.page().document,page:next},original.order().to_vec()).map_err(|error|anyhow::anyhow!("target facts: {error:?}"))?;
-                let observed=self.output_observe(health,end)?; exact(&observed,&expected)?;
-                let role = self.output_role(health,backend,ledger,conversation,&expected,false,end,before_effect)?;
+            if current != PageUse::ConfirmedNonBuddy {
+                return Ok(Outcome::Unresolved);
+            }
+            let source_index = original
+                .order()
+                .iter()
+                .position(|id| *id == original.page().page)
+                .unwrap();
+            let mut reuse = None;
+            if let Some(next) = original.order().get(source_index + 1).copied() {
+                self.output_navigate(health, backend, LogicalDirection::Next, end, before_effect)?;
+                let expected = ReaderFacts::new(
+                    PageKey {
+                        document: original.page().document,
+                        page: next,
+                    },
+                    original.order().to_vec(),
+                )
+                .map_err(|error| anyhow::anyhow!("target facts: {error:?}"))?;
+                let observed = self.output_observe(health, end)?;
+                exact(&observed, &expected)?;
+                let role = self.output_role(
+                    health,
+                    backend,
+                    ledger,
+                    conversation,
+                    &expected,
+                    false,
+                    end,
+                    before_effect,
+                )?;
                 if role == PageUse::RelevantBuddy {
                     reuse = Some(expected);
                 } else {
@@ -630,44 +830,89 @@ impl ResidentSourceOwner {
                     // Restore the original only from the exact observed neighbor.
                     let observed = self.output_observe(health, end)?;
                     exact(&observed, &expected)?;
-                    self.output_navigate(health, backend, LogicalDirection::Previous, end, before_effect)?;
+                    self.output_navigate(
+                        health,
+                        backend,
+                        LogicalDirection::Previous,
+                        end,
+                        before_effect,
+                    )?;
                     let observed = self.output_observe(health, end)?;
                     exact(&observed, &original)?;
                     if role != PageUse::ConfirmedNonBuddy || association.is_some() {
-                        log::info!("Resident output refused after restoring source {}", original.page().page);
+                        log::info!(
+                            "Resident output refused after restoring source {}",
+                            original.page().page
+                        );
                         return Ok(Outcome::Unresolved);
                     }
                 }
             }
-            if let Some(existing)=reuse { existing } else {
-                if association.is_some() { return Ok(Outcome::Unresolved); }
-                ensure!(original.order().len()<=16,"native insertion order bound");
-                let observed=self.output_observe(health,end)?; exact(&observed,&original)?;
-                let target=Uuid::parse(&uuid::Uuid::new_v4().to_string()).expect("OS UUID");
-                let insertion=InsertAfter{source:original.clone(),target};
-                let after_order=insertion.expected_after_order();
+            if let Some(existing) = reuse {
+                existing
+            } else {
+                if association.is_some() {
+                    return Ok(Outcome::Unresolved);
+                }
+                ensure!(original.order().len() <= 16, "native insertion order bound");
+                let observed = self.output_observe(health, end)?;
+                exact(&observed, &original)?;
+                let target = Uuid::parse(&uuid::Uuid::new_v4().to_string()).expect("OS UUID");
+                let insertion = InsertAfter {
+                    source: original.clone(),
+                    target,
+                };
+                let after_order = insertion.expected_after_order();
                 // Existing resident_client persists canonical intent and uncertainty
                 // before dispatch; a refusal/error never dispatches a replacement.
                 before_effect()?;
-                let result=self.session.as_mut().unwrap().insert(health,self.input.as_mut().unwrap(),
-                    conversation,operation(),insertion,end.min(Instant::now()+Duration::from_secs(30)));
+                let result = self.session.as_mut().unwrap().insert(
+                    health,
+                    self.input.as_mut().unwrap(),
+                    conversation,
+                    operation(),
+                    insertion,
+                    end.min(Instant::now() + Duration::from_secs(30)),
+                );
                 match result {
-                    Ok(Reply::InsertionObserved{target:actual,after_order:order}) => {
+                    Ok(Reply::InsertionObserved {
+                        target: actual,
+                        after_order: order,
+                    }) => {
                         ensure!(actual==PageKey{document:original.page().document,page:target} && order==after_order,
                             "insertion result does not match original source/allocated target/order");
                         log::info!("Resident insertion observed on {target}");
                     }
-                    Ok(other) => anyhow::bail!("resident insertion unresolved; no retry: {other:?}"),
-                    Err(error) => return self.failure(health,error),
+                    Ok(other) => {
+                        anyhow::bail!("resident insertion unresolved; no retry: {other:?}")
+                    }
+                    Err(error) => return self.failure(health, error),
                 }
-                newly_created=true;
-                let expected=ReaderFacts::new(PageKey{document:original.page().document,page:target},after_order.clone()).map_err(|error|anyhow::anyhow!("inserted target facts: {error:?}"))?;
-                let observed=self.output_observe(health,end)?;
-                if observed!=expected {
-                    let source_after=ReaderFacts::new(original.page(),after_order).map_err(|error|anyhow::anyhow!("source facts after insertion: {error:?}"))?;
-                    exact(&observed,&source_after)?;
-                    self.output_navigate(health,backend,LogicalDirection::Next,end,before_effect)?;
-                    let observed=self.output_observe(health,end)?; exact(&observed,&expected)?;
+                newly_created = true;
+                let expected = ReaderFacts::new(
+                    PageKey {
+                        document: original.page().document,
+                        page: target,
+                    },
+                    after_order.clone(),
+                )
+                .map_err(|error| anyhow::anyhow!("inserted target facts: {error:?}"))?;
+                let observed = self.output_observe(health, end)?;
+                if observed != expected {
+                    let source_after =
+                        ReaderFacts::new(original.page(), after_order).map_err(|error| {
+                            anyhow::anyhow!("source facts after insertion: {error:?}")
+                        })?;
+                    exact(&observed, &source_after)?;
+                    self.output_navigate(
+                        health,
+                        backend,
+                        LogicalDirection::Next,
+                        end,
+                        before_effect,
+                    )?;
+                    let observed = self.output_observe(health, end)?;
+                    exact(&observed, &expected)?;
                 }
                 expected
             }
@@ -684,31 +929,58 @@ impl ResidentSourceOwner {
         }
         // Fresh full service/broker admission plus a second exact Observe before
         // requesting a live render lease. Historical Insert/PNG are not that lease.
-        let delivery=self.session.as_mut().unwrap().delivery(health,self.input.as_mut().unwrap(),end);
-        if let Err(error)=delivery { return self.failure(health,error); }
-        let observed=self.output_observe(health,end)?; exact(&observed,&target)?;
+        let delivery =
+            self.session
+                .as_mut()
+                .unwrap()
+                .delivery(health, self.input.as_mut().unwrap(), end);
+        if let Err(error) = delivery {
+            return self.failure(health, error);
+        }
+        let observed = self.output_observe(health, end)?;
+        exact(&observed, &target)?;
         before_effect()?;
-        admitted_progress(end,||self.progress(health))?;
-        let mut renderer=backend.renderer(ledger,conversation,&runtime,&target,newly_created,end,
-            &mut || admitted_progress(end,||self.progress(health)))?;
-        admitted_progress(end,||self.progress(health))?;
+        admitted_progress(end, || self.progress(health))?;
+        let mut renderer = backend.renderer(
+            ledger,
+            conversation,
+            &runtime,
+            &target,
+            newly_created,
+            end,
+            &mut || admitted_progress(end, || self.progress(health)),
+        )?;
+        admitted_progress(end, || self.progress(health))?;
         // Non-cloneable scoped lease borrows the REAL retained owner and guard.
         // Every lower effect takes full admission + fresh native Observe before
         // contact and checks owned input/runtime/deadline throughout and after.
-        let final_admission=self.session.as_mut().unwrap().delivery(health,self.input.as_mut().context("target input absent")?,end);
-        if let Err(error)=final_admission {return self.failure(health,error);}
-        let final_target=self.output_observe(health,end)?;
-        exact(&final_target,&target)?;
-        admitted_progress(end,||self.progress(health))?;
-        let mut lease=DevelopmentTargetLease{owner:self,health,target,runtime,end,steps:0};
-        renderer.render(text,&mut lease)?;
+        let final_admission = self.session.as_mut().unwrap().delivery(
+            health,
+            self.input.as_mut().context("target input absent")?,
+            end,
+        );
+        if let Err(error) = final_admission {
+            return self.failure(health, error);
+        }
+        let final_target = self.output_observe(health, end)?;
+        exact(&final_target, &target)?;
+        admitted_progress(end, || self.progress(health))?;
+        let mut lease = DevelopmentTargetLease {
+            owner: self,
+            health,
+            target,
+            runtime,
+            end,
+            steps: 0,
+        };
+        renderer.render(text, &mut lease)?;
         lease.current()?;
-        let rendered_target=lease.target.clone();
-        let rendered_runtime=lease.runtime.clone();
+        let rendered_target = lease.target.clone();
+        let rendered_runtime = lease.runtime.clone();
         drop(lease);
         drop(renderer);
-        let rendered=self.output_capture(health,&rendered_target,end)?;
-        backend.record_rendered(&rendered_runtime,&rendered_target,&rendered)?;
+        let rendered = self.output_capture(health, &rendered_target, end)?;
+        backend.record_rendered(&rendered_runtime, &rendered_target, &rendered)?;
         log::info!("Resident answer submitted; persistence remains unverified");
         Ok(Outcome::SubmittedUnverified)
     }
@@ -727,27 +999,46 @@ pub struct DevelopmentTargetLease<'a> {
 }
 impl DevelopmentTargetLease<'_> {
     pub fn current(&mut self) -> Result<()> {
-        ensure!(self.owner.session.as_ref().context("target Session absent")?.identity()==self.runtime,"target runtime changed");
-        admitted_progress(self.end,||self.owner.progress(self.health))
+        ensure!(
+            self.owner
+                .session
+                .as_ref()
+                .context("target Session absent")?
+                .identity()
+                == self.runtime,
+            "target runtime changed"
+        );
+        admitted_progress(self.end, || self.owner.progress(self.health))
     }
     /// At most512 semantic lower effects in ONE original90s operation; a failed
     /// step remains consumed and no replacement/retry token can be issued.
-    pub fn step(&mut self, action: impl FnOnce(&mut dyn FnMut()->Result<()>) -> Result<()>) -> Result<()> {
-        ensure!(self.steps<512,"development render step bound");
+    pub fn step(
+        &mut self,
+        action: impl FnOnce(&mut dyn FnMut() -> Result<()>) -> Result<()>,
+    ) -> Result<()> {
+        ensure!(self.steps < 512, "development render step bound");
         self.current()?;
-        let result=self.owner.session.as_mut().unwrap().delivery(self.health,self.owner.input.as_mut().context("target input absent")?,self.end);
-        if let Err(error)=result { return self.owner.failure(self.health,error); }
-        let observed=self.owner.output_observe(self.health,self.end)?;
-        super::resident_output::exact(&observed,&self.target)?;
+        let result = self.owner.session.as_mut().unwrap().delivery(
+            self.health,
+            self.owner.input.as_mut().context("target input absent")?,
+            self.end,
+        );
+        if let Err(error) = result {
+            return self.owner.failure(self.health, error);
+        }
+        let observed = self.owner.output_observe(self.health, self.end)?;
+        super::resident_output::exact(&observed, &self.target)?;
         self.current()?;
-        self.steps+=1;
-        let result=action(&mut || self.current());
-        let closing=self.current();
-        match (result,closing) {
-            (Err(primary),Err(closing)) => Err(primary.context(format!("target closing check: {closing:#}"))),
-            (Err(primary),_) => Err(primary),
-            (Ok(()),Err(closing)) => Err(closing),
-            (Ok(()),Ok(())) => Ok(()),
+        self.steps += 1;
+        let result = action(&mut || self.current());
+        let closing = self.current();
+        match (result, closing) {
+            (Err(primary), Err(closing)) => {
+                Err(primary.context(format!("target closing check: {closing:#}")))
+            }
+            (Err(primary), _) => Err(primary),
+            (Ok(()), Err(closing)) => Err(closing),
+            (Ok(()), Ok(())) => Ok(()),
         }
     }
 }

@@ -310,7 +310,18 @@ fn regular(path: &Path) -> bool {
     files::safe_path(path).is_ok() && fs::symlink_metadata(path).is_ok_and(|m| m.is_file())
 }
 /// Pure state/path and nonblocking lock admission before normal Store startup.
-fn preflight(config: &Config, allow_initialization: bool) -> Result<(), ReportStatus> {
+pub(crate) fn preflight(config: &Config, allow_initialization: bool) -> Result<(), ReportStatus> {
+    preflight_state(config, allow_initialization).map(|_| ())
+}
+#[derive(Clone, Copy)]
+pub(crate) enum StoreReadiness {
+    Fresh,
+    Existing,
+}
+pub(crate) fn preflight_state(
+    config: &Config,
+    allow_initialization: bool,
+) -> Result<StoreReadiness, ReportStatus> {
     config
         .paths
         .validate()
@@ -331,7 +342,7 @@ fn preflight(config: &Config, allow_initialization: bool) -> Result<(), ReportSt
     };
     if fresh {
         return if allow_initialization {
-            Ok(())
+            Ok(StoreReadiness::Fresh)
         } else {
             Err(ReportStatus::Unavailable)
         };
@@ -372,7 +383,7 @@ fn preflight(config: &Config, allow_initialization: bool) -> Result<(), ReportSt
         .map_err(|_| ReportStatus::Unsupported)?;
     let handle = File::open(lock).map_err(|_| ReportStatus::Unavailable)?;
     match handle.try_lock() {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(StoreReadiness::Existing),
         Err(std::fs::TryLockError::WouldBlock) => Err(ReportStatus::Busy),
         Err(std::fs::TryLockError::Error(_)) => Err(ReportStatus::Unsupported),
     }
@@ -544,7 +555,7 @@ fn execute(operation: Operation, input: Input, config: &Config, store: Arc<Store
 }
 
 // Called only for the trusted Store::open stage, never parser/user errors.
-fn store_open_status(error: &anyhow::Error) -> ReportStatus {
+pub(crate) fn store_open_status(error: &anyhow::Error) -> ReportStatus {
     if error.to_string() == "store is owned by another process" {
         ReportStatus::Busy
     } else {

@@ -257,14 +257,19 @@ pub(in crate::workflow::resident_supervisor) fn stopped_snapshot(
     // pending teardown, never evidence that the service has stopped. Identity,
     // policy and terminal state were checked above; retain the original deadline.
     if s.control_group().is_empty()
-        && matches!(group,GroupObservation::EmptyOriginal|GroupObservation::Populated) {
+        && matches!(
+            group,
+            GroupObservation::EmptyOriginal | GroupObservation::Populated
+        )
+    {
         return Ok(None);
     }
     ensure!(
         s.control_group() == original.control_group()
             || (s.control_group().is_empty() && group == GroupObservation::OriginalAbsent),
         "service group changed: actual={:?} original={:?} observation={group:?}",
-        s.control_group(), original.control_group()
+        s.control_group(),
+        original.control_group()
     );
     ensure!(
         retained || group == GroupObservation::OriginalAbsent,

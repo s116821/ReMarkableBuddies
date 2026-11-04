@@ -792,7 +792,10 @@ fn wait_reader_exec(
         before(deadline)?;
         prepared.current(false)?;
         let owned = child.as_mut().context("owned launch child absent")?;
-        ensure!(owned.try_wait()?.is_none(), "resident exited before selected exec");
+        ensure!(
+            owned.try_wait()?.is_none(),
+            "resident exited before selected exec"
+        );
         ensure!(
             owned.id() == prepared.identity.pid
                 && process_start(owned.id())? == prepared.identity.start_ticks,
@@ -1164,20 +1167,31 @@ pub(crate) mod tests;
 impl ResidentRuntime {
     /// Closed journaled insertion dispatcher. A separately admitted output
     /// backend is required by the caller; no general connection closure escapes.
-    pub(crate) fn insert_admitted(&mut self, conversation: crate::storage::Uuid,
+    pub(crate) fn insert_admitted(
+        &mut self,
+        conversation: crate::storage::Uuid,
         operation: remarkable_open_sdk::OperationId,
         insertion: remarkable_open_sdk::native_adapter::InsertAfter,
-        deadline: std::time::Instant, admission: &mut dyn ReadOnlyAdmission)
-        -> anyhow::Result<remarkable_open_sdk::native_adapter::Reply> {
+        deadline: std::time::Instant,
+        admission: &mut dyn ReadOnlyAdmission,
+    ) -> anyhow::Result<remarkable_open_sdk::native_adapter::Reply> {
         self.read_only_boundary(deadline, admission)?;
-        let result = self.with_connection(deadline, &mut || admission.pulse(deadline),
-            |connection, pulse| connection.insert_after_with_progress(
-                conversation, operation, insertion, deadline, pulse).map_err(anyhow::Error::new));
+        let result = self.with_connection(
+            deadline,
+            &mut || admission.pulse(deadline),
+            |connection, pulse| {
+                connection
+                    .insert_after_with_progress(conversation, operation, insertion, deadline, pulse)
+                    .map_err(anyhow::Error::new)
+            },
+        );
         // A dispatched effect's existing journal owns its original uncertainty.
         // Failure never retries; a closing boundary failure cannot erase dispatch.
         let closing = self.read_only_boundary(deadline, admission);
         match (result, closing) {
-            (Err(primary), Err(closing)) => Err(primary.context(format!("closing insertion admission: {closing:#}"))),
+            (Err(primary), Err(closing)) => {
+                Err(primary.context(format!("closing insertion admission: {closing:#}")))
+            }
             (Err(primary), _) => Err(primary),
             (Ok(_), Err(closing)) => Err(closing),
             (Ok(reply), Ok(())) => Ok(reply),

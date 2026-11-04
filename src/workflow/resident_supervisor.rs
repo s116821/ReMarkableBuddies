@@ -20,7 +20,10 @@ const LEASE_NAME: &str = "activation.json";
 pub mod health;
 pub mod recovery;
 pub mod service;
-#[cfg(all(feature = "development-resident-bootstrap", feature = "development-input-diagnostics"))]
+#[cfg(all(
+    feature = "development-resident-bootstrap",
+    feature = "development-input-diagnostics"
+))]
 pub(crate) mod writer_request;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

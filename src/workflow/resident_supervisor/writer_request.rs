@@ -43,7 +43,10 @@ impl Submission {
 }
 
 fn boot_seconds() -> Result<u64> {
-    let mut time = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    let mut time = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     if unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut time) } != 0 {
         return Err(std::io::Error::last_os_error().into());
     }
@@ -69,19 +72,28 @@ fn read(lease: &Lease, name: &str) -> Result<Option<Pending>> {
     };
     let meta = file.metadata()?;
     ensure!(
-        meta.is_file() && meta.uid() == unsafe { libc::geteuid() }
-            && meta.nlink() == 1 && meta.mode() & 0o7777 == 0o600
+        meta.is_file()
+            && meta.uid() == unsafe { libc::geteuid() }
+            && meta.nlink() == 1
+            && meta.mode() & 0o7777 == 0o600
             && meta.len() <= LIMIT,
         "invalid Writer request slot"
     );
     let mut bytes = Vec::new();
     file.take(LIMIT + 1).read_to_end(&mut bytes)?;
-    ensure!(bytes.len() as u64 == meta.len(), "Writer request slot changed");
+    ensure!(
+        bytes.len() as u64 == meta.len(),
+        "Writer request slot changed"
+    );
     Ok(Some(serde_json::from_slice(&bytes)?))
 }
 
 pub(crate) fn submit(submission: Submission) -> Result<()> {
-    let Submission::RefineOnTablet { document, page, refinement } = &submission;
+    let Submission::RefineOnTablet {
+        document,
+        page,
+        refinement,
+    } = &submission;
     ensure!(!document.is_nil() && !page.is_nil(), "empty Writer source");
     let Request::Refine { .. } = refinement else {
         anyhow::bail!("explicit Writer refinement required");
@@ -94,33 +106,44 @@ pub(crate) fn submit(submission: Submission) -> Result<()> {
         .context("installed Writer output is unavailable")?;
     let lease = Lease::reopen(Path::new(recovery::LEASE_DIRECTORY))?;
     lock(&lease)?;
-    ensure!(pin.digest() == lease.record.recovery_profile_sha256, "Writer activation pin changed");
+    ensure!(
+        pin.digest() == lease.record.recovery_profile_sha256,
+        "Writer activation pin changed"
+    );
     lease.record.group.current_process()?;
     let name = name(&lease);
     let now = boot_seconds()?;
-    ensure!(read(&lease, &name)?.is_none_or(|request| request.expires <= now),
-        "a Writer refinement is already awaiting its page");
-    files::atomic_json(&lease.path.join(name), &Pending {
-        submission,
-        expires: now + LIFETIME_SECS,
-    })?;
+    ensure!(
+        read(&lease, &name)?.is_none_or(|request| request.expires <= now),
+        "a Writer refinement is already awaiting its page"
+    );
+    files::atomic_json(
+        &lease.path.join(name),
+        &Pending {
+            submission,
+            expires: now + LIFETIME_SECS,
+        },
+    )?;
     lease.current()
 }
 
-pub(crate) fn take(
-    activation: uuid::Uuid,
-    document: Uuid,
-    page: Uuid,
-) -> Result<Option<Request>> {
+pub(crate) fn take(activation: uuid::Uuid, document: Uuid, page: Uuid) -> Result<Option<Request>> {
     let lease = Lease::reopen(Path::new(recovery::LEASE_DIRECTORY))?;
-    ensure!(lease.record().activation() == activation, "Writer activation changed");
+    ensure!(
+        lease.record().activation() == activation,
+        "Writer activation changed"
+    );
     lease.record.group.current_caller()?;
     lock(&lease)?;
     let name = name(&lease);
-    let Some(pending) = read(&lease, &name)? else { return Ok(None) };
+    let Some(pending) = read(&lease, &name)? else {
+        return Ok(None);
+    };
     let expired = boot_seconds()? >= pending.expires;
     let Submission::RefineOnTablet {
-        document: expected_document, page: expected_page, refinement,
+        document: expected_document,
+        page: expected_page,
+        refinement,
     } = pending.submission;
     if !expired && (document != expected_document || page != expected_page) {
         return Ok(None);
@@ -145,6 +168,9 @@ pub(super) fn discard(lease: &Lease) -> Result<()> {
     // Reopen so this short-lived lock is released before activation archival.
     let locked = Lease::reopen(&lease.path)?;
     lock(&locked)?;
-    ensure!(locked.record().activation() == lease.record().activation(), "Writer cleanup activation changed");
+    ensure!(
+        locked.record().activation() == lease.record().activation(),
+        "Writer cleanup activation changed"
+    );
     discard_locked(&locked, &name(&locked))
 }

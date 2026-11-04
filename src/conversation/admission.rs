@@ -29,6 +29,29 @@ pub struct SelectedAdmission {
     gate: Arc<Mutex<()>>,
 }
 impl SelectedAdmission {
+    pub(crate) fn uses_store(&self, store: &Arc<Store>) -> bool {
+        Arc::ptr_eq(&self.store, store)
+    }
+    /// Retain actual shared mode; compatibility supplies no local lifetime guard.
+    pub(crate) fn reader_mode_lease(
+        &self,
+    ) -> Result<Option<crate::storage::sync::mode::SyncModeLease>> {
+        use crate::storage::sync::mode::SyncMode;
+        let snapshot = self.store.sync_mode_snapshot()?;
+        match snapshot.mode {
+            None => Ok(None),
+            Some(SyncMode::SharedGroup {
+                group,
+                ref binding_sha256,
+                ..
+            }) if group == self.scope.group && binding_sha256 == &self.scope.binding_sha256 => {
+                let lease = self.store.sync_mode_lease(&snapshot.token)?;
+                lease.require_shared_scope(&self.scope)?;
+                Ok(Some(lease))
+            }
+            _ => anyhow::bail!("selected Reader mode unsupported"),
+        }
+    }
     /// Acquire one ordered domain set. Caller revalidates its charged snapshots
     /// inside the callback and must not reacquire any participating admission.
     pub(crate) fn with_gates<T>(

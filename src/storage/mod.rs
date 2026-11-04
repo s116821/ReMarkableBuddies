@@ -6,6 +6,7 @@ pub mod drive;
 pub(crate) mod feedback_generation;
 pub mod files;
 pub mod inspection;
+pub mod inspection_v3;
 #[cfg(all(test, unix))]
 mod lease_tests;
 pub mod maintenance;

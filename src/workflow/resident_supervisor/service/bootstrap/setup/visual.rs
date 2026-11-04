@@ -309,17 +309,22 @@ fn capture(
         |_| progress(transport, guard, publication_deadline),
     )?;
     let root = mailbox.root.clone();
-    diagnostics.step(Some(stage), Phase::Publication, publication_deadline, |_| {
-        mailbox.publish_visual(stage, binding, image, publication_deadline, &mut || {
-            boundary(transport, guard, publication_deadline)?;
-            let mailbox = Mailbox::open(&root)?;
-            mailbox.absent(&["complete", "observer-admitted", "actor-admitted"])?;
-            if stage == Stage::Before {
-                mailbox.absent(&["ready", "visual-after-request", "visual-after"])?;
-            }
-            Ok(())
-        })
-    })
+    diagnostics.step(
+        Some(stage),
+        Phase::Publication,
+        publication_deadline,
+        |_| {
+            mailbox.publish_visual(stage, binding, image, publication_deadline, &mut || {
+                boundary(transport, guard, publication_deadline)?;
+                let mailbox = Mailbox::open(&root)?;
+                mailbox.absent(&["complete", "observer-admitted", "actor-admitted"])?;
+                if stage == Stage::Before {
+                    mailbox.absent(&["ready", "visual-after-request", "visual-after"])?;
+                }
+                Ok(())
+            })
+        },
+    )
 }
 
 /// The only two visual requests are separated by the developer's explicit

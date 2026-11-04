@@ -31,6 +31,9 @@ pub fn run(config_path: Option<PathBuf>, input: &mut impl Read) -> Report {
         identity = Some((request.conversation(), request.operation()));
         request.preflight()?;
         let config = Config::load(config_path).map_err(|_| Failure::Storage)?;
+        if !config.admits_writer(false) {
+            return Err(Failure::Unsupported);
+        }
         let preference = config
             .personalization_snapshot()
             .map_err(|_| Failure::Storage)?;
@@ -104,12 +107,20 @@ pub fn run(config_path: Option<PathBuf>, input: &mut impl Read) -> Report {
 pub enum CommandReport {
     Legacy(Report),
     Flow(crate::writer_flow::Report),
-    #[cfg(all(target_os = "linux", feature = "development-resident-bootstrap", feature = "development-input-diagnostics"))]
+    #[cfg(all(
+        target_os = "linux",
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
     Resident(ResidentReport),
     Notebook(Box<notebook::command::Report>),
 }
 
-#[cfg(all(target_os = "linux", feature = "development-resident-bootstrap", feature = "development-input-diagnostics"))]
+#[cfg(all(
+    target_os = "linux",
+    feature = "development-resident-bootstrap",
+    feature = "development-input-diagnostics"
+))]
 #[derive(Serialize)]
 pub struct ResidentReport {
     status: &'static str,
@@ -123,7 +134,11 @@ pub struct ResidentReport {
 enum CommandRequest {
     Legacy(Request),
     Flow(crate::writer_flow::Request),
-    #[cfg(all(target_os = "linux", feature = "development-resident-bootstrap", feature = "development-input-diagnostics"))]
+    #[cfg(all(
+        target_os = "linux",
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
     Resident(crate::workflow::resident_supervisor::writer_request::Submission),
     Notebook(Box<notebook::command::Request>),
 }
@@ -154,7 +169,11 @@ pub fn dispatch(config_path: Option<PathBuf>, input: &mut impl Read) -> CommandR
             CommandReport::Legacy(run(config_path, &mut &bytes[..]))
         }
         Ok(CommandRequest::Flow(request)) => CommandReport::Flow(run_flow(config_path, request)),
-        #[cfg(all(target_os = "linux", feature = "development-resident-bootstrap", feature = "development-input-diagnostics"))]
+        #[cfg(all(
+            target_os = "linux",
+            feature = "development-resident-bootstrap",
+            feature = "development-input-diagnostics"
+        ))]
         Ok(CommandRequest::Resident(submission)) => {
             let conversation = submission.refinement().conversation();
             let operation = submission.refinement().operation();
@@ -183,6 +202,11 @@ fn run_flow(
     let result = (|| -> std::result::Result<_, FlowFailure> {
         request.preflight().map_err(|_| FlowFailure::InvalidInput)?;
         let config = Config::load(config_path).map_err(|_| FlowFailure::Storage)?;
+        if !matches!(request, writer_flow::Request::ReconcileExport { .. })
+            && !config.admits_writer(true)
+        {
+            return Err(FlowFailure::Unsupported);
+        }
         let preference = config
             .personalization_snapshot()
             .map_err(|_| FlowFailure::Storage)?;

@@ -706,15 +706,55 @@ impl Context {
         let current = inventory(&base, deadline)?;
         let samples = opening::Samples::read(plan, &base, &self.root, label, &current, deadline)?;
         let effect_selection = effect::Selection::load(self, deadline)?;
-        let inserted_target = effect_selection.as_ref().and_then(effect::Selection::insertion_target);
-        if let Some(target) = inserted_target.filter(|target| current.iter().any(|entry| entry.path == format!("{}/{target}.rm", plan.document))) {
-            samples.verify_insertion(policy, plan, target, &base, &self.candidate.source, &current, deadline)?;
-        } else if let Some((target, rm_bytes, thumbnail_bytes)) = effect_selection.as_ref().and_then(effect::Selection::reuse_pen_baseline).filter(|(target, _, _)| {
-            let paths = [format!("{}/{target}.rm", plan.document), format!("{}.thumbnails/{target}.png", plan.document)];
-            paths.iter().any(|path| self.candidate.source.iter().find(|entry| &entry.path == path) != current.iter().find(|entry| &entry.path == path))
+        let inserted_target = effect_selection
+            .as_ref()
+            .and_then(effect::Selection::insertion_target);
+        if let Some(target) = inserted_target.filter(|target| {
+            current
+                .iter()
+                .any(|entry| entry.path == format!("{}/{target}.rm", plan.document))
         }) {
-            effect_selection.as_ref().unwrap().verify_before_storage(self, deadline)?;
-            samples.verify_reuse_pen(policy, plan, target, rm_bytes, thumbnail_bytes, &base, &self.candidate.source, &current, deadline)?;
+            samples.verify_insertion(
+                policy,
+                plan,
+                target,
+                &base,
+                &self.candidate.source,
+                &current,
+                deadline,
+            )?;
+        } else if let Some((target, rm_bytes, thumbnail_bytes)) = effect_selection
+            .as_ref()
+            .and_then(effect::Selection::reuse_pen_baseline)
+            .filter(|(target, _, _)| {
+                let paths = [
+                    format!("{}/{target}.rm", plan.document),
+                    format!("{}.thumbnails/{target}.png", plan.document),
+                ];
+                paths.iter().any(|path| {
+                    self.candidate
+                        .source
+                        .iter()
+                        .find(|entry| &entry.path == path)
+                        != current.iter().find(|entry| &entry.path == path)
+                })
+            })
+        {
+            effect_selection
+                .as_ref()
+                .unwrap()
+                .verify_before_storage(self, deadline)?;
+            samples.verify_reuse_pen(
+                policy,
+                plan,
+                target,
+                rm_bytes,
+                thumbnail_bytes,
+                &base,
+                &self.candidate.source,
+                &current,
+                deadline,
+            )?;
         } else {
             opening::verify_inventory(plan, &self.candidate.source, &current)?;
             samples.verify(policy, plan)?;

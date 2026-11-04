@@ -65,9 +65,11 @@ impl RequestInput {
             progress()?;
             let events = prior.poll()?;
             progress()?;
-            if let Some(event) = events.iter().copied().find(|event| {
-                matches!(event, Interaction::Reader | Interaction::BlankStart)
-            }) {
+            if let Some(event) = events
+                .iter()
+                .copied()
+                .find(|event| matches!(event, Interaction::Reader | Interaction::BlankStart))
+            {
                 let released_at = Instant::now();
                 ensure!(
                     events == [event] && prior.quiescent(),
@@ -121,11 +123,14 @@ impl RequestInput {
     #[cfg(feature = "development-resident-bootstrap")]
     pub(crate) fn bind_owned_keyboard(&mut self, path: &Path) -> Result<()> {
         self.require_quiet()?;
-        let mut next=InputObserver::new(self.corner.clone(),Some(path))?;
+        let mut next = InputObserver::new(self.corner.clone(), Some(path))?;
         self.require_quiet()?;
-        ensure!(next.poll()?.is_empty() && next.quiescent(),"input changed during owned keyboard handoff");
-        self.observer=next;
-        self.owned_sysfs=Some(path.to_path_buf());
+        ensure!(
+            next.poll()?.is_empty() && next.quiescent(),
+            "input changed during owned keyboard handoff"
+        );
+        self.observer = next;
+        self.owned_sysfs = Some(path.to_path_buf());
         Ok(())
     }
 

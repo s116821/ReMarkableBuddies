@@ -10,7 +10,9 @@ use super::{
     screenshot::Screenshot,
     touch::{Touch, TriggerCorner},
 };
-use crate::workflow::xochitl_integration::{NavigationDirection, XochitlIntegration};
+use crate::workflow::xochitl_integration::NavigationDirection;
+#[cfg(target_os = "linux")]
+use crate::workflow::xochitl_integration::XochitlIntegration;
 
 #[derive(Clone, Default)]
 pub struct Frame {
@@ -32,14 +34,22 @@ pub enum AcquisitionKind {
 }
 
 pub trait DeviceBackend {
-    #[cfg(all(target_os = "linux", feature = "development-resident-bootstrap", feature = "development-input-diagnostics"))]
+    #[cfg(all(
+        target_os = "linux",
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
     fn configure_installed_resident_output(
         &mut self,
         _pin: crate::workflow::resident_supervisor::recovery::activation::InstalledOutput,
     ) -> Result<TriggerCorner> {
         anyhow::bail!("installed native output backend unavailable")
     }
-    #[cfg(all(target_os="linux",feature="development-resident-bootstrap",feature="development-input-diagnostics"))]
+    #[cfg(all(
+        target_os = "linux",
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
     fn configure_development_resident_output(
         &mut self,
         _plan: &std::path::Path,
@@ -50,7 +60,9 @@ pub trait DeviceBackend {
     /// Historical resident capture does not enable native output. A qualified
     /// adapter must explicitly override this and own every returned render lease.
     #[cfg(target_os = "linux")]
-    fn resident_output_backend(&mut self) -> Option<&mut dyn crate::workflow::resident_output::ResidentOutputBackend> {
+    fn resident_output_backend(
+        &mut self,
+    ) -> Option<&mut dyn crate::workflow::resident_output::ResidentOutputBackend> {
         None
     }
 
@@ -160,7 +172,11 @@ pub enum NavigationCompletion {
 }
 
 pub struct RealDevice {
-    #[cfg(all(target_os="linux",feature="development-resident-bootstrap",feature="development-input-diagnostics"))]
+    #[cfg(all(
+        target_os = "linux",
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
     development_output: Option<crate::workflow::resident_output::development::NativeOutputBackend>,
 
     #[cfg(target_os = "linux")]
@@ -214,11 +230,15 @@ impl super::navigation_completion::NavigationIo for NativeNavigation<'_> {
             image,
         })
     }
-    fn swipe(&mut self, direction: NavigationDirection) -> Result<()> {
+    fn swipe(
+        &mut self,
+        direction: NavigationDirection,
+        orientation: remarkable_open_sdk::navigation::gesture::Orientation,
+    ) -> Result<()> {
         // The successor observer and source capture have already overlapped
         // the retained request. Only the deliberate physical gesture is unobserved.
         self.device.finish_request_guard()?;
-        XochitlIntegration::swipe(&mut self.device.touch, direction)
+        XochitlIntegration::swipe_with_orientation(&mut self.device.touch, direction, orientation)
     }
     fn now(&self) -> Duration {
         self.device.clock.elapsed()
@@ -669,7 +689,11 @@ impl RealDevice {
         Ok(Self {
             #[cfg(target_os = "linux")]
             resident_corner: corner.clone(),
-            #[cfg(all(target_os="linux",feature="development-resident-bootstrap",feature="development-input-diagnostics"))]
+            #[cfg(all(
+                target_os = "linux",
+                feature = "development-resident-bootstrap",
+                feature = "development-input-diagnostics"
+            ))]
             development_output: None,
 
             #[cfg(target_os = "linux")]
@@ -698,25 +722,40 @@ impl RealDevice {
 }
 
 impl DeviceBackend for RealDevice {
-    #[cfg(all(target_os = "linux", feature = "development-resident-bootstrap", feature = "development-input-diagnostics"))]
+    #[cfg(all(
+        target_os = "linux",
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
     fn configure_installed_resident_output(
         &mut self,
         pin: crate::workflow::resident_supervisor::recovery::activation::InstalledOutput,
     ) -> Result<TriggerCorner> {
-        anyhow::ensure!(self.development_output.is_none(), "native output already selected");
+        anyhow::ensure!(
+            self.development_output.is_none(),
+            "native output already selected"
+        );
         self.development_output = Some(
             crate::workflow::resident_output::development::NativeOutputBackend::installed(
-                pin, self.resident_corner.clone(),
+                pin,
+                self.resident_corner.clone(),
             )?,
         );
         Ok(self.resident_corner.clone())
     }
-    #[cfg(all(target_os="linux",feature="development-resident-bootstrap",feature="development-input-diagnostics"))]
+    #[cfg(all(
+        target_os = "linux",
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
     fn configure_development_resident_output(
         &mut self,
         plan: &std::path::Path,
     ) -> Result<Option<TriggerCorner>> {
-        anyhow::ensure!(self.development_output.is_none(), "development output already selected");
+        anyhow::ensure!(
+            self.development_output.is_none(),
+            "development output already selected"
+        );
         let backend = crate::workflow::resident_output::development::NativeOutputBackend::load(
             plan,
             self.resident_corner.clone(),
@@ -725,10 +764,17 @@ impl DeviceBackend for RealDevice {
         self.development_output = Some(backend);
         Ok(startup_corner)
     }
-    #[cfg(target_os="linux")]
-    fn resident_output_backend(&mut self) -> Option<&mut dyn crate::workflow::resident_output::ResidentOutputBackend> {
-        #[cfg(all(feature="development-resident-bootstrap",feature="development-input-diagnostics"))]
-        if let Some(backend)=self.development_output.as_mut() {return Some(backend);}
+    #[cfg(target_os = "linux")]
+    fn resident_output_backend(
+        &mut self,
+    ) -> Option<&mut dyn crate::workflow::resident_output::ResidentOutputBackend> {
+        #[cfg(all(
+            feature = "development-resident-bootstrap",
+            feature = "development-input-diagnostics"
+        ))]
+        if let Some(backend) = self.development_output.as_mut() {
+            return Some(backend);
+        }
         None
     }
 
@@ -833,11 +879,19 @@ impl DeviceBackend for RealDevice {
         );
         self.history.discard();
         let blank_start = {
-            #[cfg(all(feature = "development-resident-bootstrap", feature = "development-input-diagnostics"))]
+            #[cfg(all(
+                feature = "development-resident-bootstrap",
+                feature = "development-input-diagnostics"
+            ))]
             {
-                self.development_output.as_ref().is_some_and(|backend| backend.accepts_blank_start())
+                self.development_output
+                    .as_ref()
+                    .is_some_and(|backend| backend.accepts_blank_start())
             }
-            #[cfg(not(all(feature = "development-resident-bootstrap", feature = "development-input-diagnostics")))]
+            #[cfg(not(all(
+                feature = "development-resident-bootstrap",
+                feature = "development-input-diagnostics"
+            )))]
             {
                 false
             }
@@ -876,6 +930,8 @@ impl DeviceBackend for RealDevice {
         self.status_wait_cancellation.record(result)
     }
     fn navigate(&mut self, direction: NavigationDirection) -> Result<NavigationCompletion> {
+        #[cfg(not(target_os = "linux"))]
+        let _ = direction;
         self.check_request_guard()?;
         let _timing = crate::measurement::Span::new("device.navigation");
         #[cfg(target_os = "linux")]
@@ -894,9 +950,9 @@ impl DeviceBackend for RealDevice {
             }
             return result;
         }
-        self.finish_request_guard()?;
-        XochitlIntegration::navigate_to_page(&mut self.touch, direction)?;
-        Ok(NavigationCompletion::Legacy)
+        Err(anyhow::anyhow!(
+            "Navigation requires a supported current document orientation and source layout"
+        ))
     }
     fn render_text(&mut self, text: &str) -> Result<()> {
         self.check_request_guard()?;

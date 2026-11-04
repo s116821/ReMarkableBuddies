@@ -257,15 +257,30 @@ impl Keyboard {
 
     #[cfg(feature = "development-resident-bootstrap")]
     pub(crate) fn supports_text(&self, text: &str) -> bool {
-        self.device.is_some() && text.chars().all(|ch|self.key_map.contains_key(&ch))
+        self.device.is_some() && text.chars().all(|ch| self.key_map.contains_key(&ch))
     }
     /// Release only keys on this actual owned virtual descriptor, even on failure.
     #[cfg(feature = "development-resident-bootstrap")]
     pub(crate) fn release_all(&mut self) -> Result<()> {
-        let mut keys=self.key_map.values().map(|(key,_)|key.code()).collect::<std::collections::BTreeSet<_>>();
-        for key in [EvdevKey::KEY_LEFTCTRL,EvdevKey::KEY_LEFTSHIFT,EvdevKey::KEY_LEFTALT] {keys.insert(key.code());}
-        let events=keys.into_iter().map(|code|InputEvent::new(EvdevEventType::KEY.0,code,0)).collect::<Vec<_>>();
-        if let Some(device)=&mut self.device {device.emit(&events)?;}
+        let mut keys = self
+            .key_map
+            .values()
+            .map(|(key, _)| key.code())
+            .collect::<std::collections::BTreeSet<_>>();
+        for key in [
+            EvdevKey::KEY_LEFTCTRL,
+            EvdevKey::KEY_LEFTSHIFT,
+            EvdevKey::KEY_LEFTALT,
+        ] {
+            keys.insert(key.code());
+        }
+        let events = keys
+            .into_iter()
+            .map(|code| InputEvent::new(EvdevEventType::KEY.0, code, 0))
+            .collect::<Vec<_>>();
+        if let Some(device) = &mut self.device {
+            device.emit(&events)?;
+        }
         Ok(())
     }
 

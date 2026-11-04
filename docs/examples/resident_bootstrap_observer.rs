@@ -3,7 +3,7 @@
 //! proof, an independent runtime bound and stock recovery before invoking this.
 //! Ordinary builds remain observation-only. Explicit compiled development packets may
 //! issue one journaled Insert OR Select; independent controller/recovery remains mandatory.
-use anyhow::{Result, ensure};
+use anyhow::{ensure, Result};
 
 fn nonce(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> Result<String> {
     let arguments: Vec<_> = arguments.into_iter().collect();
@@ -40,9 +40,9 @@ mod storage_probe;
 mod native {
     use super::*;
     use anyhow::Context;
-    use remarkable_open_sdk::{OperationId, native_adapter::HistoricalCapture};
+    use remarkable_open_sdk::{native_adapter::HistoricalCapture, OperationId};
     use remarkable_reader_buddy::workflow::resident_supervisor::service::bootstrap::setup::{
-        Binding, ObserverSetup, capture_after_setup_admitted, visual,
+        capture_after_setup_admitted, visual, Binding, ObserverSetup,
     };
     use remarkable_reader_buddy::{
         device::{
@@ -384,7 +384,15 @@ mod native {
                         plan.current()?;
                         services.pulse()?;
                         runtime.pulse()?;
-                        ensure!(retained_input.borrow_mut().as_mut().context("missing handoff input guard")?.poll()? == InputProgress::Quiet, "input canceled before actor handoff");
+                        ensure!(
+                            retained_input
+                                .borrow_mut()
+                                .as_mut()
+                                .context("missing handoff input guard")?
+                                .poll()?
+                                == InputProgress::Quiet,
+                            "input canceled before actor handoff"
+                        );
                         Ok(())
                     })?;
                     // Actor acknowledged its own quiet guard release before any
@@ -407,11 +415,22 @@ mod native {
                         plan.current()?;
                         services.pulse()?;
                         runtime.pulse()?;
-                        ensure!(retained_input.borrow_mut().as_mut().context("missing released input guard")?.poll()? == InputProgress::Quiet, "input canceled after own gesture");
+                        ensure!(
+                            retained_input
+                                .borrow_mut()
+                                .as_mut()
+                                .context("missing released input guard")?
+                                .poll()?
+                                == InputProgress::Quiet,
+                            "input canceled after own gesture"
+                        );
                         Ok(())
                     });
                     match (dispatched, admitted) {
-                        (Err(error), Err(admission)) => Err(error.context(format!("actor input readmission failed: {admission:#}"))),
+                        (Err(error), Err(admission)) => {
+                            Err(error
+                                .context(format!("actor input readmission failed: {admission:#}")))
+                        }
                         (Err(error), _) | (_, Err(error)) => Err(error),
                         (Ok(()), Ok(())) => Ok(()),
                     }
@@ -447,18 +466,32 @@ mod native {
                         plan.current()?;
                         services.pulse()?;
                         runtime.pulse()?;
-                        ensure!(retained_input.borrow_mut().as_mut().context("missing handoff input guard")?.poll()? == InputProgress::Quiet, "input canceled before actor handoff");
+                        ensure!(
+                            retained_input
+                                .borrow_mut()
+                                .as_mut()
+                                .context("missing handoff input guard")?
+                                .poll()?
+                                == InputProgress::Quiet,
+                            "input canceled before actor handoff"
+                        );
                         Ok(())
                     })?;
                     // Actor acknowledged its own quiet guard release before any
                     // contact. Never label the bounded own gesture window quiet.
                     drop(retained_input.borrow_mut().take());
-                    let dispatched = super::diagnostic_pen_line::line_once(deadline, &mut || {
-                        setup.current()?;
-                        plan.current()?;
-                        services.pulse()?;
-                        runtime.pulse()
-                    }, &mut |phase, value| super::effect_probe::retain_pen_events(root, plan, phase, value));
+                    let dispatched = super::diagnostic_pen_line::line_once(
+                        deadline,
+                        &mut || {
+                            setup.current()?;
+                            plan.current()?;
+                            services.pulse()?;
+                            runtime.pulse()
+                        },
+                        &mut |phase, value| {
+                            super::effect_probe::retain_pen_events(root, plan, phase, value)
+                        },
+                    );
                     let mut fresh = RequestInput::new(TriggerCorner::LowerLeft, None)?;
                     ensure!(
                         fresh.poll()? == InputProgress::Quiet,
@@ -470,11 +503,22 @@ mod native {
                         plan.current()?;
                         services.pulse()?;
                         runtime.pulse()?;
-                        ensure!(retained_input.borrow_mut().as_mut().context("missing released input guard")?.poll()? == InputProgress::Quiet, "input canceled after own gesture");
+                        ensure!(
+                            retained_input
+                                .borrow_mut()
+                                .as_mut()
+                                .context("missing released input guard")?
+                                .poll()?
+                                == InputProgress::Quiet,
+                            "input canceled after own gesture"
+                        );
                         Ok(())
                     });
                     match (dispatched, admitted) {
-                        (Err(error), Err(admission)) => Err(error.context(format!("actor input readmission failed: {admission:#}"))),
+                        (Err(error), Err(admission)) => {
+                            Err(error
+                                .context(format!("actor input readmission failed: {admission:#}")))
+                        }
                         (Err(error), _) | (_, Err(error)) => Err(error),
                         (Ok(()), Ok(())) => Ok(()),
                     }
