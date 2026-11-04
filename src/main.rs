@@ -579,11 +579,17 @@ fn main() -> Result<()> {
         return Ok(());
     }
     let config = Config::load(std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into))?;
+    use remarkable_reader_buddy::workflow::conversation_dispatch::{Dispatch, RuntimeRoute};
+    let route = RuntimeRoute::for_config(&config);
+    anyhow::ensure!(
+        route.admits_startup(&config),
+        "Reader is disabled in saved settings and no Writer route is available"
+    );
     anyhow::ensure!(
         config.reader_enabled(),
-        "Reader is disabled in saved settings"
+        "Reader is disabled in saved settings and native Writer input is unavailable"
     );
-    if config.reader.selection.is_none() {
+    if config.reader_enabled() && config.reader.selection.is_none() {
         remarkable_reader_buddy::memory::context::admit_ordinary(&config.memory)?;
     }
     let admitted_store = match remarkable_reader_buddy::reader_runtime::startup(&config) {
@@ -623,8 +629,17 @@ fn main() -> Result<()> {
     info!("=== ReMarkable Reader Buddy Starting ===");
     let store = remarkable_reader_buddy::reader_runtime::ordinary_store(&config, admitted_store)
         .map_err(|report| report.into_ordinary_startup_error())?;
-    let _ordinary_runtime_lifetime =
-        remarkable_reader_buddy::mode_maintenance::admit_ordinary(&store, config.sync.enabled)?;
+    let ledger = remarkable_reader_buddy::conversation::Ledger::new(store.clone());
+    let (dispatch, _ordinary_runtime_lifetime) = match route {
+        RuntimeRoute::OrdinaryLocal => (Some(Dispatch::local(&config, &ledger)?), None),
+        RuntimeRoute::ExistingReader => (
+            None,
+            Some(remarkable_reader_buddy::mode_maintenance::admit_ordinary(
+                &store,
+                config.sync.enabled,
+            )?),
+        ),
+    };
     store.snapshot_config(&config)?;
     files::atomic_json(
         &store.paths.data.join("effective-config.json"),
@@ -637,7 +652,7 @@ fn main() -> Result<()> {
         effective.key.into_string(),
         effective.base_url,
     );
-    let reader_memory = if config.memory.enabled {
+    let reader_memory = if config.reader_enabled() && config.memory.enabled {
         Some(Arc::new(
             remarkable_reader_buddy::memory::LocalMemory::new_local(
                 store.clone(),
@@ -653,7 +668,10 @@ fn main() -> Result<()> {
     let personalization = config.personalization_snapshot()?;
     let workflow = Workflow::new(false, effective.trigger_corner, effective.debug_dump)?;
     sleep(Duration::from_millis(1000));
-    let _sync_worker = Worker::google(store.clone(), config.sync)?;
+    let _sync_worker = match route {
+        RuntimeRoute::ExistingReader => Worker::google(store.clone(), config.sync.clone())?,
+        RuntimeRoute::OrdinaryLocal => None,
+    };
     #[cfg(target_os = "linux")]
     let workflow = {
         let mut workflow = workflow;
@@ -662,15 +680,14 @@ fn main() -> Result<()> {
         }
         workflow
     };
-    let mut orchestrator = Orchestrator::new(
-        workflow,
-        llm,
-        remarkable_reader_buddy::conversation::Ledger::new(store.clone()),
-    );
+    let mut orchestrator = Orchestrator::new(workflow, llm, ledger);
     orchestrator.set_personalization(personalization);
     orchestrator.set_subject_memory(reader_memory);
     info!("Initialization complete; starting main loop");
-    orchestrator.run_loop()
+    match dispatch {
+        None => orchestrator.run_loop(),
+        Some(dispatch) => orchestrator.run_local_loop(dispatch),
+    }
 }
 
 fn stock_recovery() -> Result<()> {

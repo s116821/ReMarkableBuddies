@@ -18,6 +18,7 @@ pub mod selected_buddy;
 pub(crate) use reader_attempt::assert_attachment_behavior;
 #[cfg(test)]
 pub(crate) use reader_attempt::assert_selected_retry_control;
+pub mod conversation_dispatch;
 pub(crate) mod selected_backend;
 pub mod symbol_pool;
 pub mod xochitl_integration;
@@ -374,48 +375,60 @@ impl Workflow {
     }
 
     fn wait_for_reader_until(&mut self, deadline: Option<std::time::Instant>) -> Result<()> {
+        while !self.wait_for_idle_batch(deadline, |_| true)? {}
+        Ok(())
+    }
+
+    pub(super) fn wait_for_idle_batch(
+        &mut self,
+        deadline: Option<std::time::Instant>,
+        admit_reader: impl FnOnce(&[crate::device::interaction::Interaction]) -> bool,
+    ) -> Result<bool> {
         use crate::device::interaction::Interaction;
-        loop {
-            let timeout =
-                deadline.map(|limit| limit.saturating_duration_since(std::time::Instant::now()));
-            anyhow::ensure!(
-                !self.runtime_failed(),
-                "Prior runtime failure blocks idle input"
-            );
-            #[cfg(target_os = "linux")]
-            let health = &mut self.service_health;
-            let events = self
-                .device
-                .wait_for_interactions_with_progress(timeout, &mut || {
-                    #[cfg(target_os = "linux")]
-                    if let Some(health) = health.as_mut() {
-                        health.progress()?;
-                    }
-                    Ok(())
-                })?;
-            let invalidated = events.contains(&Interaction::Invalidated);
-            if invalidated {
-                self.invalidate_history();
+        let timeout =
+            deadline.map(|limit| limit.saturating_duration_since(std::time::Instant::now()));
+        anyhow::ensure!(
+            !self.runtime_failed(),
+            "Prior runtime failure blocks idle input"
+        );
+        #[cfg(target_os = "linux")]
+        let health = &mut self.service_health;
+        let events = self
+            .device
+            .wait_for_interactions_with_progress(timeout, &mut || {
+                #[cfg(target_os = "linux")]
+                if let Some(health) = health.as_mut() {
+                    health.progress()?;
+                }
+                Ok(())
+            })?;
+        let invalidated = events.contains(&Interaction::Invalidated);
+        if invalidated {
+            self.invalidate_history();
+        }
+        if events.contains(&Interaction::Reader) {
+            self.invalidate_history();
+            let admitted = admit_reader(&events);
+            if admitted {
+                self.prepare_reader_trigger()?;
             }
-            if events.contains(&Interaction::Reader) {
-                self.invalidate_history();
-                return self.prepare_reader_trigger();
-            }
-            if !invalidated {
-                for event in events {
-                    let action = match event {
-                        Interaction::Undo => history::Action::Undo,
-                        Interaction::Redo => history::Action::Redo,
-                        _ => continue,
-                    };
-                    match self.history_action(action) {
-                        Ok(true) => info!("Q&A history {:?}: {:?}", action, self.history.state()),
-                        Ok(false) => debug!("Q&A history {:?}: unavailable or redundant", action),
-                        Err(error) => log::warn!("Q&A history stopped: {error}"),
-                    }
+            return Ok(admitted);
+        }
+        if !invalidated {
+            for event in events {
+                let action = match event {
+                    Interaction::Undo => history::Action::Undo,
+                    Interaction::Redo => history::Action::Redo,
+                    _ => continue,
+                };
+                match self.history_action(action) {
+                    Ok(true) => info!("Q&A history {:?}: {:?}", action, self.history.state()),
+                    Ok(false) => debug!("Q&A history {:?}: unavailable or redundant", action),
+                    Err(error) => log::warn!("Q&A history stopped: {error}"),
                 }
             }
         }
+        Ok(false)
     }
 
     /// Take a screenshot and return the base64-encoded image

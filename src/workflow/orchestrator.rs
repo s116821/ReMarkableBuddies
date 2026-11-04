@@ -758,6 +758,21 @@ impl<M: LLMEngine> Orchestrator<M> {
 
     /// Run the main loop
     pub fn run_loop(&mut self) -> Result<()> {
+        self.run_loop_with_dispatch(None)
+    }
+
+    pub fn run_local_loop(
+        &mut self,
+        dispatch: super::conversation_dispatch::Dispatch<'_>,
+    ) -> Result<()> {
+        dispatch.require_ledger(&self.ledger)?;
+        self.run_loop_with_dispatch(Some(dispatch))
+    }
+
+    fn run_loop_with_dispatch(
+        &mut self,
+        dispatch: Option<super::conversation_dispatch::Dispatch<'_>>,
+    ) -> Result<()> {
         info!("Starting Reader Buddy main loop");
 
         loop {
@@ -765,7 +780,16 @@ impl<M: LLMEngine> Orchestrator<M> {
             if self.trigger_enabled {
                 // History remains owned until another Reader trigger or an
                 // invalidating input. Do not begin an iteration while idle.
-                self.workflow.wait_for_reader()?;
+                if let Some(dispatch) = &dispatch {
+                    if !self
+                        .workflow
+                        .wait_for_idle_batch(None, |events| dispatch.reader_trigger(events))?
+                    {
+                        continue;
+                    }
+                } else {
+                    self.workflow.wait_for_reader()?;
+                }
             }
             match self.run_iteration_with_trigger(false) {
                 Ok(_) => info!("Iteration completed successfully"),

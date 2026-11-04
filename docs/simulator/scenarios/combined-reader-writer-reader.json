@@ -1,0 +1,27 @@
+{
+  "mode": "combined",
+  "requests": [
+    "  Is x  = 7? ",
+    "Make a note.\nKeep  spacing.",
+    "Can you explain it again?"
+  ],
+  "replies": [
+    "Yes, x is 7.",
+    "# Study\n\nx = 7 (page 1).",
+    "The page shows x = 7."
+  ],
+  "preference": "Keep the physical units.",
+  "document": {
+    "document": "10000000-0000-4000-8000-000000000003",
+    "format": "notebook",
+    "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "extractor_revision": "fixture-v1",
+    "units": [
+      {
+        "page": 1,
+        "section": null,
+        "text": "x = 7"
+      }
+    ]
+  }
+}

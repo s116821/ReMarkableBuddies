@@ -278,7 +278,7 @@ fn selected(ledger: &Ledger, conversation: Uuid, id: Uuid) -> Result<(Turn, Norm
         .context("draft source absent")?;
     Ok((draft, source))
 }
-fn history(ledger: &Ledger, conversation: Uuid) -> Result<Vec<Turn>> {
+fn history(ledger: &Ledger, conversation: Uuid) -> Result<crate::conversation::ContextView> {
     // Use the existing context contract. Counting UTF8 bytes is a conservative
     // caller budget for this bounded text consumer, not provider tokenization proof.
     let view = ledger.context(
@@ -299,7 +299,7 @@ fn history(ledger: &Ledger, conversation: Uuid) -> Result<Vec<Turn>> {
         view.missing_media.is_empty(),
         "historical media unavailable"
     );
-    Ok(view.turns)
+    Ok(view)
 }
 
 /// The production OpenAI engine polls progress and owns/join-cancels its I/O.
@@ -311,6 +311,17 @@ pub fn run<E: LLMEngine>(
     request: &Request,
     personalization: &PersonalizationSnapshot,
     canceled: &mut dyn FnMut() -> bool,
+) -> Report {
+    run_receiving(ledger, engine, request, personalization, canceled, None)
+}
+
+pub(crate) fn run_receiving<E: LLMEngine>(
+    ledger: &Ledger,
+    engine: &mut E,
+    request: &Request,
+    personalization: &PersonalizationSnapshot,
+    canceled: &mut dyn FnMut() -> bool,
+    unified_root: Option<crate::conversation::ExpectedHeads>,
 ) -> Report {
     if let Err(failure) = request.preflight() {
         return Report::refused(request, failure);
@@ -327,7 +338,8 @@ pub fn run<E: LLMEngine>(
         canceled,
         OwnedRun {
             owner: &owner,
-            expected_root: None,
+            historical_images: unified_root.is_some(),
+            expected_root: unified_root,
             produced: &mut produced,
         },
     )
@@ -335,6 +347,7 @@ pub fn run<E: LLMEngine>(
 pub(crate) struct OwnedRun<'a, 'store> {
     pub(crate) owner: &'a Owner<'store>,
     pub(crate) expected_root: Option<crate::conversation::ExpectedHeads>,
+    pub(crate) historical_images: bool,
     pub(crate) produced: &'a mut Option<crate::conversation::WriterSelection>,
 }
 pub(crate) fn run_owned<E: LLMEngine>(
@@ -406,16 +419,21 @@ pub(crate) fn run_owned<E: LLMEngine>(
             _ => unreachable!(),
         };
         let history = history(ledger, conversation)?;
+        let images = if control.historical_images {
+            crate::conversation::receiving::images::resolve(ledger, &history)?
+        } else {
+            Vec::new()
+        };
         let payload = serde_json::to_string(
-            &serde_json::json!({"history":history,"request":text,"explicit_guidance":source.guidance,"source_provenance":{"document":source.document.document,"source_sha256":source.document.source_sha256,"extractor_revision":source.document.extractor_revision,"normalized_sha256":digest(&serde_json::to_vec(&source.document.units)?),"selection":source.selection,"coverage":"all selected supplied units; original notebook completeness unverified"},"source_units":source.selected(),"selected_draft":prior.as_ref().and_then(|t|t.text.as_deref())}),
+            &serde_json::json!({"history":history.turns,"request":text,"explicit_guidance":source.guidance,"source_provenance":{"document":source.document.document,"source_sha256":source.document.source_sha256,"extractor_revision":source.document.extractor_revision,"normalized_sha256":digest(&serde_json::to_vec(&source.document.units)?),"selection":source.selection,"coverage":"all selected supplied units; original notebook completeness unverified"},"source_units":source.selected(),"selected_draft":prior.as_ref().and_then(|t|t.text.as_deref())}),
         )?;
         ensure!(
             payload.len() <= 96 * 1024,
             "encoded Writer input exceeds bound"
         );
-        Ok((text, source, prior, payload, expected))
+        Ok((text, source, prior, payload, expected, images))
     })();
-    let (text, source, prior, payload, expected) = match assembled {
+    let (text, source, prior, payload, expected, images) = match assembled {
         Ok(value) => value,
         Err(error) => {
             return Report::refused(
@@ -487,6 +505,9 @@ pub(crate) fn run_owned<E: LLMEngine>(
             ));
         }
         content.0.add_text_content(&payload);
+        for image in &images {
+            content.0.add_image_content(image);
+        }
         content.0.execute_with_progress(&mut progress)
     };
     let _ = progress();

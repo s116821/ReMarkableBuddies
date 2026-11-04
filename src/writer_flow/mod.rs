@@ -355,6 +355,7 @@ pub(crate) fn run_with_events<E: LLMEngine>(
             writer::OwnedRun {
                 owner: &writer_owner,
                 expected_root: Some(grant.root.clone()),
+                historical_images: false,
                 produced: &mut produced,
             },
         );
