@@ -17,3 +17,18 @@ The caller invocation UUID is correlation only. Repeating it explicitly makes an
 Arbitrary library engines are cooperative. The configured OpenAI-compatible transport has its existing progress-aware owned cancellation/join path; the CLI polls its owned signal future on its existing thread at those progress points without adding a wrapper worker. No claim of forced interruption of arbitrary engines follows. An unrecoverable worker failure emits a sanitized process error without inventing a dispatch receipt.
 
 The versioned central [proposed contract](https://github.com/s116821/ReMarkableBuddiesDocs/tree/docs/rem-26-explicit-handwriting-transcription/openspec/changes/transcribe-with-confirmed-handwriting-context) fixes exact report/normalization/profile recipes. Existing default notebook normalization is preserved; revision-only context changes alter extractor identity while unchanged prompt bytes keep the same digest. Synthetic tests establish these mechanisms only. Representative model evidence, future Reader/Writer hooks, efficacy and native/sync acceptance remain separate gates.
+
+## Opt-in partial transcription
+
+To allow a page with both legible and uncertain text, set
+`"transcription_version":2` and add `"policy":"partial-transcription"`. Requests
+using version 1 continue to abstain on the whole page when any visible text is
+uncertain.
+
+A v2 report always includes a nullable `partial` field. When status is
+`partial`, `result` is null and `partial.spans` contains ordered
+`{"kind":"known","text":"..."}` and `{"kind":"uncertain"}` entries. Preserve those
+markers when presenting the report. Exit zero indicates operation completion.
+Check `status` to distinguish partial, normalized, and unreadable outcomes.
+Partial text remains unconfirmed and is outside the normalized source, export,
+and confirmation paths.

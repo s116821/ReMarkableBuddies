@@ -4,7 +4,10 @@ use crate::{
     config::Config,
     handwriting::{self, ConfirmedContext, ContextFailure, ExampleSelection, LocalCorrections},
     llm::LLMEngine,
-    retrieval::notebook::{self, AdmittedTarget, NormalizeFailure, Normalized, NotebookText},
+    retrieval::notebook::{
+        self, AdmittedTarget, NormalizeFailure, Normalized, NotebookText, PartialTranscription,
+        TranscriptionPolicy,
+    },
     storage::{Store, Uuid},
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -40,6 +43,7 @@ pub enum Failure {
 #[serde(rename_all = "kebab-case")]
 pub enum Status {
     Normalized,
+    Partial,
     Unreadable,
     Refused,
     Canceled,
@@ -98,6 +102,9 @@ pub struct Report {
     pub target_sha256: Option<String>,
     pub context: Option<CapturedContext>,
     pub result: Option<NotebookText>,
+    // Outer None omits the v1 field. Some(None) serializes the required v2 null.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    partial: Option<Option<Box<PartialTranscription>>>,
     pub confirmed: bool,
     #[serde(skip)]
     _owner: Option<ConfirmedContext>,
@@ -115,6 +122,7 @@ impl Report {
             target_sha256: None,
             context: None,
             result: None,
+            partial: None,
             confirmed: false,
             _owner: None,
             _refused_owner: None,
@@ -123,14 +131,23 @@ impl Report {
     fn fail(&mut self, f: Failure) {
         self.failure = Some(f);
         self.result = None;
+        if let Some(partial) = &mut self.partial {
+            *partial = None;
+        }
         self.status = match f {
             Failure::Canceled => Status::Canceled,
             Failure::StorageUnavailable | Failure::ProviderFailed => Status::Failed,
             _ => Status::Refused,
         };
     }
+    pub fn partial(&self) -> Option<&PartialTranscription> {
+        self.partial.as_ref().and_then(Option::as_deref)
+    }
     pub fn succeeded(&self) -> bool {
-        matches!(self.status, Status::Normalized | Status::Unreadable)
+        matches!(
+            self.status,
+            Status::Normalized | Status::Unreadable | Status::Partial
+        )
     }
     /// Ownership spans serialization, actual write/flush, errors, and caller drop.
     /// The bool describes the actual emitted status, including bounded fallback.
@@ -144,6 +161,9 @@ impl Report {
             value["status"] = serde_json::json!("refused");
             value["failure"] = serde_json::json!("output-limit");
             value["result"] = serde_json::Value::Null;
+            if self.partial.is_some() {
+                value["partial"] = serde_json::Value::Null;
+            }
             success = false;
             bytes =
                 serde_json::to_vec(&value).map_err(|_| std::io::Error::other("output-failure"))?;
@@ -173,16 +193,34 @@ impl Prepared {
             if bytes.len() > MAX_INPUT {
                 return Err(Failure::InputLimit);
             }
-            let strict =
+            let mut strict =
                 crate::config::inspection::strict_json(bytes).map_err(|_| Failure::InvalidInput)?;
+            let v2 = strict
+                .get("transcription_version")
+                .and_then(serde_json::Value::as_u64)
+                == Some(2);
+            if v2 {
+                let policy = strict
+                    .as_object_mut()
+                    .and_then(|object| object.remove("policy"));
+                if policy.as_ref().and_then(serde_json::Value::as_str)
+                    != Some("partial-transcription")
+                {
+                    return Err(Failure::InvalidInput);
+                }
+            }
             let request: Request =
                 serde_json::from_value(strict).map_err(|_| Failure::InvalidInput)?;
             if request.page == 0 {
                 return Err(Failure::InvalidInput);
             }
             this.report.invocation = Some(request.invocation);
-            if request.transcription_version != 1 {
+            if !v2 && request.transcription_version != 1 {
                 return Err(Failure::InvalidVersion);
+            }
+            if v2 {
+                this.report.transcription_version = 2;
+                this.report.partial = Some(None);
             }
             if request.target_png.len() > (8 * 1024 * 1024usize).div_ceil(3) * 4 {
                 return Err(Failure::InvalidImage);
@@ -310,6 +348,11 @@ impl Prepared {
             self.target.as_ref().expect("admitted target"),
             model_profile,
             self.report._owner.as_ref(),
+            if request.transcription_version == 2 {
+                TranscriptionPolicy::Partial
+            } else {
+                TranscriptionPolicy::WholePage
+            },
             engine,
             &mut |_| progress(),
         );
@@ -322,6 +365,10 @@ impl Prepared {
             Ok(Normalized::Page(page)) => {
                 self.report.status = Status::Normalized;
                 self.report.result = Some(*page);
+            }
+            Ok(Normalized::Partial(partial)) => {
+                self.report.status = Status::Partial;
+                self.report.partial = Some(Some(partial));
             }
             Ok(Normalized::Unreadable) => self.report.status = Status::Unreadable,
             Err(f) => self.report.fail(match f {

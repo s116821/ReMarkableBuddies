@@ -111,6 +111,76 @@ pub struct NotebookText {
     pub prompt_bytes: usize,
     pub response_sha256: String,
 }
+#[derive(Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum PartialSpan {
+    Known { text: String },
+    Uncertain {},
+}
+
+#[derive(Serialize)]
+pub struct PartialTranscription {
+    pub document: Uuid,
+    pub page: u32,
+    pub source_sha256: String,
+    pub profile: Profile,
+    pub extractor_revision: String,
+    pub authority: &'static str,
+    pub prompt_sha256: String,
+    pub prompt_bytes: usize,
+    pub response_sha256: String,
+    pub spans: Vec<PartialSpan>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PartialPolicyResponse {
+    pages: [PartialPolicyPage; 1],
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "status", rename_all = "kebab-case", deny_unknown_fields)]
+enum PartialPolicyPage {
+    Transcribed { page: u32, text: String },
+    Blank { page: u32, text: String },
+    Unreadable { page: u32, text: String },
+    Partial { page: u32, spans: Vec<PartialSpan> },
+}
+
+fn valid_partial_spans(spans: &[PartialSpan], max_bytes: usize) -> bool {
+    if !(2..=64).contains(&spans.len()) {
+        return false;
+    }
+    let mut known_bytes = 0;
+    let mut has_uncertain = false;
+    let mut previous_uncertain = false;
+    for span in spans {
+        match span {
+            PartialSpan::Known { text } => {
+                if text.trim().is_empty() || !valid_text_controls(text) {
+                    return false;
+                }
+                known_bytes += text.len();
+                previous_uncertain = false;
+            }
+            PartialSpan::Uncertain {} => {
+                if previous_uncertain {
+                    return false;
+                }
+                has_uncertain = true;
+                previous_uncertain = true;
+            }
+        }
+    }
+    has_uncertain && (1..=max_bytes).contains(&known_bytes)
+}
+
+fn valid_text_controls(text: &str) -> bool {
+    !text
+        .chars()
+        .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+}
+
 struct Content<'a>(&'a mut dyn LLMEngine);
 impl Drop for Content<'_> {
     fn drop(&mut self) {
@@ -349,6 +419,12 @@ struct Trace {
 pub(crate) enum Normalized {
     Page(Box<NotebookText>),
     Unreadable,
+    Partial(Box<PartialTranscription>),
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TranscriptionPolicy {
+    WholePage,
+    Partial,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NormalizeFailure {
@@ -364,6 +440,7 @@ pub(crate) fn normalize_admitted(
     target: &AdmittedTarget,
     model_profile: &str,
     context: Option<&crate::handwriting::ConfirmedContext>,
+    policy: TranscriptionPolicy,
     engine: &mut dyn LLMEngine,
     progress: &mut dyn FnMut(Progress) -> Result<()>,
 ) -> (std::result::Result<Normalized, NormalizeFailure>, bool) {
@@ -387,6 +464,7 @@ pub(crate) fn normalize_admitted(
         },
         Some(target),
         context,
+        policy,
         &mut trace,
     );
     let outcome = if canceled {
@@ -394,14 +472,12 @@ pub(crate) fn normalize_admitted(
     } else if trace.unreadable {
         Ok(Normalized::Unreadable)
     } else {
-        result
-            .map(|page| Normalized::Page(Box::new(page)))
-            .map_err(|_| match trace.phase {
-                Phase::Admission => NormalizeFailure::InvalidInput,
-                Phase::Prompt => NormalizeFailure::PromptLimit,
-                Phase::Provider => NormalizeFailure::ProviderFailed,
-                Phase::Response => NormalizeFailure::InvalidResponse,
-            })
+        result.map_err(|_| match trace.phase {
+            Phase::Admission => NormalizeFailure::InvalidInput,
+            Phase::Prompt => NormalizeFailure::PromptLimit,
+            Phase::Provider => NormalizeFailure::ProviderFailed,
+            Phase::Response => NormalizeFailure::InvalidResponse,
+        })
     };
     (outcome, trace.called)
 }
@@ -414,7 +490,7 @@ pub fn normalize(
     options: Options,
     progress: &mut dyn FnMut(Progress) -> Result<()>,
 ) -> Result<NotebookText> {
-    normalize_inner(
+    let outcome = normalize_inner(
         document,
         pages,
         model_profile,
@@ -423,8 +499,13 @@ pub fn normalize(
         progress,
         None,
         None,
+        TranscriptionPolicy::WholePage,
         &mut Trace::default(),
-    )
+    )?;
+    let Normalized::Page(page) = outcome else {
+        anyhow::bail!("invalid notebook outcome");
+    };
+    Ok(*page)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -437,8 +518,9 @@ fn normalize_inner(
     progress: &mut dyn FnMut(Progress) -> Result<()>,
     prepared: Option<&AdmittedTarget>,
     context: Option<&crate::handwriting::ConfirmedContext>,
+    policy: TranscriptionPolicy,
     trace: &mut Trace,
-) -> Result<NotebookText> {
+) -> Result<Normalized> {
     let owned = Content(engine);
     owned.0.clear_content();
     options.validate()?;
@@ -454,32 +536,48 @@ fn normalize_inner(
         None => admit_pages(pages, options, progress)?,
     };
     trace.phase = Phase::Prompt;
+    let partial = policy == TranscriptionPolicy::Partial;
+    let (protocol, prompt_revision, extractor_prefix) = match (policy, context.is_some()) {
+        (TranscriptionPolicy::Partial, true) => (
+            3,
+            "transcribe-partial-confirmed-examples-v2",
+            "notebook-ocr-partial-v2:",
+        ),
+        (TranscriptionPolicy::Partial, false) => {
+            (3, "transcribe-partial-v2", "notebook-ocr-partial-v2:")
+        }
+        (TranscriptionPolicy::WholePage, true) => (
+            2,
+            "transcribe-confirmed-examples-v1",
+            "notebook-ocr-confirmed-v1:",
+        ),
+        (TranscriptionPolicy::WholePage, false) => (1, "transcribe-visible-v1", PROFILE_REVISION),
+    };
     let profile = Profile {
-        protocol: if context.is_some() { 2 } else { 1 },
-        prompt_revision: if context.is_some() {
-            "transcribe-confirmed-examples-v1"
-        } else {
-            "transcribe-visible-v1"
-        },
+        protocol,
+        prompt_revision,
         caller_model_profile: model_profile.into(),
         confirmed_context: context.map(|c| c.identity().clone()),
     };
     let revision = format!(
-        "{}{}",
-        if context.is_some() {
-            "notebook-ocr-confirmed-v1:"
-        } else {
-            PROFILE_REVISION
-        },
+        "{extractor_prefix}{}",
         digest(&serde_json::to_vec(&profile)?)
     );
-    let manifest =
-        json!({"protocol":1,"pages":pages.iter().map(|p|p.page).collect::<Vec<_>>()}).to_string();
-    let mut parts = vec![json!({"type":"text","text":INSTRUCTIONS})];
+    let manifest_protocol = if partial { 2 } else { 1 };
+    let manifest = json!({"protocol":manifest_protocol,"pages":pages.iter().map(|p|p.page).collect::<Vec<_>>()}).to_string();
+    let instructions = if partial {
+        include_str!("../handwriting_transcription/prompt-partial-v2.txt")
+    } else {
+        INSTRUCTIONS
+    };
+    let mut parts = vec![json!({"type":"text","text":instructions})];
     if let Some(context) = context {
-        parts.push(
-            json!({"type":"text","text":include_str!("../handwriting/context-instructions.txt")}),
-        );
+        let addendum = if partial {
+            include_str!("../handwriting_transcription/context-instructions-partial-v2.txt")
+        } else {
+            include_str!("../handwriting/context-instructions.txt")
+        };
+        parts.push(json!({"type":"text","text":addendum}));
         for (i, e) in context.examples.iter().enumerate() {
             let descriptor = json!({"kind":"confirmed-example", "index":i+1,
                 "original_text":e.original_text,"corrected_text":e.corrected_text})
@@ -542,23 +640,56 @@ fn normalize_inner(
     );
     let value: Value = strict_json(returned.as_bytes())
         .map_err(|_| anyhow::anyhow!("invalid notebook transcription"))?;
-    let response: Response = serde_json::from_value(value)
-        .map_err(|_| anyhow::anyhow!("invalid notebook transcription"))?;
+    let transcriptions = if partial {
+        let response: PartialPolicyResponse = serde_json::from_value(value)
+            .map_err(|_| anyhow::anyhow!("invalid notebook transcription"))?;
+        let [page] = response.pages;
+        let (page, status, text) = match page {
+            PartialPolicyPage::Transcribed { page, text } => (page, Status::Transcribed, text),
+            PartialPolicyPage::Blank { page, text } => (page, Status::Blank, text),
+            PartialPolicyPage::Unreadable { page, text } => (page, Status::Unreadable, text),
+            PartialPolicyPage::Partial { page, spans } => {
+                ensure!(
+                    pages.len() == 1
+                        && page == pages[0].page
+                        && valid_partial_spans(&spans, options.max_page_text_bytes),
+                    "invalid notebook transcription"
+                );
+                let result = PartialTranscription {
+                    document,
+                    page,
+                    source_sha256,
+                    profile,
+                    extractor_revision: revision,
+                    authority: "unverified-historical-page-image-partial-ocr",
+                    prompt_sha256,
+                    prompt_bytes,
+                    response_sha256: digest(returned.as_bytes()),
+                    spans,
+                };
+                progress(Progress::BeforeReturn)
+                    .map_err(|_| anyhow::anyhow!("notebook progress refused"))?;
+                return Ok(Normalized::Partial(Box::new(result)));
+            }
+        };
+        vec![Transcription { page, status, text }]
+    } else {
+        let response: Response = serde_json::from_value(value)
+            .map_err(|_| anyhow::anyhow!("invalid notebook transcription"))?;
+        response.pages
+    };
     ensure!(
-        response.pages.len() == pages.len(),
+        transcriptions.len() == pages.len(),
         "invalid notebook transcription"
     );
     let mut units = Vec::new();
     let mut blank_pages = Vec::new();
     let mut text_bytes = 0usize;
-    for (p, t) in pages.iter().zip(response.pages) {
+    for (p, t) in pages.iter().zip(transcriptions) {
         ensure!(
             p.page == t.page
                 && t.text.len() <= options.max_page_text_bytes
-                && !t
-                    .text
-                    .chars()
-                    .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t')),
+                && valid_text_controls(&t.text),
             "invalid notebook transcription"
         );
         match t.status {
@@ -615,5 +746,5 @@ fn normalize_inner(
         "notebook result exceeds bound"
     );
     progress(Progress::BeforeReturn).map_err(|_| anyhow::anyhow!("notebook progress refused"))?;
-    Ok(result)
+    Ok(Normalized::Page(Box::new(result)))
 }

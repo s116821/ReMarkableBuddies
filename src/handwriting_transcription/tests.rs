@@ -69,6 +69,18 @@ fn fixture() -> Value {
     ))
     .unwrap()
 }
+fn partial_vectors() -> Value {
+    serde_json::from_str(include_str!(
+        "../../tests/fixtures/partial-v2-identity-vectors.json"
+    ))
+    .unwrap()
+}
+fn partial_request(context: Value) -> Value {
+    let mut value = request(context);
+    value["transcription_version"] = json!(2);
+    value["policy"] = json!("partial-transcription");
+    value
+}
 fn profile() -> Uuid {
     Uuid::parse_str("00000000-0000-4000-8000-000000000010").unwrap()
 }
@@ -181,6 +193,7 @@ fn default_normalizer_and_admitted_no_context_keep_frozen_payload_and_identity()
 fn six_literal_vectors_exercise_production_context_payload_and_profile_recipes() {
     let local = Local::new();
     let vector = fixture();
+    let partial = partial_vectors();
     for case in vector["cases"].as_array().unwrap() {
         let target = notebook::admit_target(7, png(), &mut |_| Ok(())).unwrap();
         let examples = case["selected"].as_array().unwrap();
@@ -229,6 +242,7 @@ fn six_literal_vectors_exercise_production_context_payload_and_profile_recipes()
             &target,
             "model-é/v1",
             captured.as_ref(),
+            TranscriptionPolicy::WholePage,
             &mut engine,
             &mut |_| Ok(()),
         );
@@ -256,6 +270,42 @@ fn six_literal_vectors_exercise_production_context_payload_and_profile_recipes()
         assert_eq!(result.document.source_sha256, vector["source_sha256"]);
         assert_eq!(result.document.units.len(), 1);
         assert_eq!(result.document.units[0].page, Some(7));
+        let expected = partial["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|candidate| candidate["name"] == case["name"])
+            .unwrap();
+        engine.reply = json!({"pages":[{"page":7,"status":"partial",
+            "spans":[{"kind":"known","text":"café "},{"kind":"uncertain"},{"kind":"known","text":" x²"}]}]}).to_string();
+        let (outcome, called) = notebook::normalize_admitted(
+            Uuid::new_v4(),
+            &target,
+            "model-é/v1",
+            captured.as_ref(),
+            TranscriptionPolicy::Partial,
+            &mut engine,
+            &mut |_| Ok(()),
+        );
+        assert!(called);
+        let Normalized::Partial(result) = outcome.unwrap() else {
+            panic!("expected partial");
+        };
+        assert_eq!(
+            serde_json::to_string(&engine.captured).unwrap(),
+            expected["payload_json"]
+        );
+        assert_eq!(
+            serde_json::to_string(&result.profile).unwrap(),
+            expected["profile_json"]
+        );
+        assert_eq!(result.extractor_revision, expected["extractor_revision"]);
+        assert_eq!(result.prompt_sha256, expected["prompt_sha256"]);
+        assert_eq!(
+            result.prompt_bytes as u64,
+            expected["prompt_bytes"].as_u64().unwrap()
+        );
+        assert_eq!(result.source_sha256, vector["source_sha256"]);
     }
 }
 #[test]
@@ -297,6 +347,133 @@ fn real_current_capture_is_owned_through_provider_report_write_failure_and_drop(
     let store = Arc::new(Store::open(local.config.paths.clone()).unwrap());
     assert!(store.legacy_publisher_lease().is_ok());
 }
+#[test]
+fn partial_request_and_report_bytes_match_the_reviewed_vectors() {
+    let local = Local::new();
+    let vectors = partial_vectors();
+    let mut engine = Engine::new();
+    for row in vectors["admission"].as_array().unwrap() {
+        let report = run_with_engine(
+            &local.config,
+            row["request_json"].as_str().unwrap().as_bytes(),
+            "model-é/v1",
+            &mut engine,
+            &mut || Ok(()),
+        );
+        let mut wire = Vec::new();
+        assert!(!report.write_to(&mut wire).unwrap());
+        assert_eq!(
+            wire,
+            row["report_json"].as_str().unwrap().as_bytes(),
+            "{}",
+            row["name"]
+        );
+    }
+    assert_eq!(engine.calls, 0);
+    assert!(!local.config.paths.data.exists());
+    for row in vectors["reports"].as_array().unwrap() {
+        let Some(response) = row["response_json"]
+            .as_str()
+            .filter(|_| row["case"] == "none")
+        else {
+            continue;
+        };
+        let input = if row["version"] == 2 {
+            "v2_request_json"
+        } else {
+            "v1_request_json"
+        };
+        engine.reply = response.into();
+        let report = run_with_engine(
+            &local.config,
+            vectors[input].as_str().unwrap().as_bytes(),
+            "model-é/v1",
+            &mut engine,
+            &mut || Ok(()),
+        );
+        let mut wire = Vec::new();
+        assert!(report.write_to(&mut wire).unwrap());
+        assert_eq!(
+            wire,
+            row["report_json"].as_str().unwrap().as_bytes(),
+            "{}",
+            row["status"]
+        );
+    }
+    assert_eq!(engine.calls, 6);
+    assert!(!local.config.paths.data.exists());
+}
+
+#[test]
+fn partial_reply_refuses_bad_variants_and_preserves_the_exact_utf8_page_limit() {
+    let local = Local::new();
+    let request = partial_request(Value::Null);
+    let vectors = partial_vectors();
+    let mut engine = Engine::new();
+    for (name, wire) in vectors["invalid_v2_response_json"].as_object().unwrap() {
+        engine.reply = wire.as_str().unwrap().into();
+        let report = run(&local, &request, &mut engine);
+        assert_eq!(report.failure, Some(Failure::InvalidResponse), "{name}");
+        assert_eq!(report.provider_attempt, Attempt::Called);
+        assert!(output(&report)["partial"].is_null());
+    }
+    for (characters, expected) in [(2048, Status::Partial), (2049, Status::Refused)] {
+        engine.reply = json!({"pages":[{"page":7,"status":"partial",
+            "spans":[{"kind":"known","text":"é".repeat(characters)},{"kind":"uncertain"}]}]})
+        .to_string();
+        let report = run(&local, &request, &mut engine);
+        assert_eq!(report.status, expected);
+    }
+    engine.reply = json!({"pages":[{"page":7,"status":"partial",
+        "spans":[{"kind":"known","text":"hello"},{"kind":"uncertain"}]}]})
+    .to_string();
+    let legacy = run(&local, &self::request(Value::Null), &mut engine);
+    assert_eq!(legacy.failure, Some(Failure::InvalidResponse));
+    assert!(output(&legacy).get("partial").is_none());
+}
+
+#[test]
+fn actual_selected_partial_keeps_ownership_and_clears_both_slots_on_overflow() {
+    let local = Local::new();
+    let correction = Uuid::new_v4();
+    let (_, revision) = local.confirm(correction, &png(), "original", "corrected");
+    let before = tree_bytes(&local.root);
+    let mut engine = Engine::new();
+    engine.reply = json!({"pages":[{"page":7,"status":"partial",
+        "spans":[{"kind":"known","text":"visible"},{"kind":"uncertain"}]}]})
+    .to_string();
+    let mut report = run(
+        &local,
+        &partial_request(context(correction, revision)),
+        &mut engine,
+    );
+    assert_eq!(report.status, Status::Partial);
+    assert_eq!(engine.calls, 1);
+    assert!(Store::open(local.config.paths.clone()).is_err());
+    assert!(report.write_to(&mut std::io::sink()).unwrap());
+    let wire = output(&report);
+    assert_eq!(wire["partial"]["profile"]["protocol"], 3);
+    assert_eq!(wire["context"]["examples"][0]["revision"], json!(revision));
+    assert!(wire["result"].is_null());
+    assert_eq!(wire["confirmed"], false);
+    assert!(
+        serde_json::from_value::<crate::retrieval::NormalizedDocument>(wire["partial"].clone())
+            .is_err()
+    );
+    assert!(handwriting::parse(&mut Cursor::new(serde_json::to_vec(&wire).unwrap())).is_err());
+    report.partial.as_mut().unwrap().as_mut().unwrap().spans = vec![notebook::PartialSpan::Known {
+        text: "x".repeat(40000),
+    }];
+    let wire = output(&report);
+    assert_eq!(wire["failure"], "output-limit");
+    assert_eq!(wire["provider_attempt"], "called");
+    assert!(wire["result"].is_null() && wire["partial"].is_null());
+    assert!(Store::open(local.config.paths.clone()).is_err());
+    drop(report);
+    assert_eq!(tree_bytes(&local.root), before);
+    assert!(Store::open(local.config.paths.clone()).is_ok());
+}
+
 #[test]
 fn missing_stale_duplicate_profile_and_unsupported_mode_never_call_or_publish_partial_context() {
     let local = Local::new();
@@ -467,6 +644,7 @@ fn noncooperative_default_engine_finishes_but_post_return_cancellation_suppresse
     use std::sync::atomic::{AtomicBool, Ordering};
     struct Ignores {
         done: Arc<AtomicBool>,
+        reply: String,
     }
     impl LLMEngine for Ignores {
         fn add_text_content(&mut self, _: &str) {}
@@ -474,28 +652,42 @@ fn noncooperative_default_engine_finishes_but_post_return_cancellation_suppresse
         fn clear_content(&mut self) {}
         fn execute(&mut self) -> anyhow::Result<String> {
             self.done.store(true, Ordering::Release);
-            Ok(good_reply())
+            Ok(self.reply.clone())
         }
     }
     let local = Local::new();
-    let done = Arc::new(AtomicBool::new(false));
-    let mut engine = Ignores { done: done.clone() };
-    let report = run_with_engine(
-        &local.config,
-        &serde_json::to_vec(&request(Value::Null)).unwrap(),
-        "model",
-        &mut engine,
-        &mut || {
-            if done.load(Ordering::Acquire) {
-                anyhow::bail!("canceled");
-            }
-            Ok(())
-        },
-    );
-    assert!(done.load(Ordering::Acquire));
-    assert_eq!(report.failure, Some(Failure::Canceled));
-    assert_eq!(report.provider_attempt, Attempt::Called);
-    assert!(report.result.is_none());
+    for (input, reply) in [
+        (request(Value::Null), good_reply()),
+        (
+            partial_request(Value::Null),
+            json!({"pages":[{"page":7,"status":"partial",
+            "spans":[{"kind":"known","text":"visible"},{"kind":"uncertain"}]}]})
+            .to_string(),
+        ),
+    ] {
+        let done = Arc::new(AtomicBool::new(false));
+        let mut engine = Ignores {
+            done: done.clone(),
+            reply,
+        };
+        let report = run_with_engine(
+            &local.config,
+            &serde_json::to_vec(&input).unwrap(),
+            "model",
+            &mut engine,
+            &mut || {
+                if done.load(Ordering::Acquire) {
+                    anyhow::bail!("canceled");
+                }
+                Ok(())
+            },
+        );
+        assert!(done.load(Ordering::Acquire));
+        assert_eq!(report.failure, Some(Failure::Canceled));
+        assert_eq!(report.provider_attempt, Attempt::Called);
+        assert!(report.result.is_none());
+        assert!(report.partial().is_none());
+    }
     let mut engine = Engine::new();
     let report = run_with_engine(
         &local.config,

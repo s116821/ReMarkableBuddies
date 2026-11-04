@@ -24,12 +24,24 @@ fn actual_cli_refuses_strict_input_and_credentials_before_store_provider_or_cont
     let fixture: Value =
         serde_json::from_str(include_str!("fixtures/handwriting-transcription-v1.json")).unwrap();
     let valid = json!({"transcription_version":1,"invocation":Uuid::new_v4(),"document":Uuid::new_v4(),"page":7,"target_png":fixture["target_png"],"context":null});
-    for (input, failure) in [
-        (b"{PRIVATE_INPUT_CANARY}".to_vec(), "invalid-input"),
+    let mut v2 = valid.clone();
+    v2["transcription_version"] = json!(2);
+    v2["policy"] = json!("partial-transcription");
+    let mut malformed = v2.clone();
+    malformed["policy"] = json!(null);
+    for (input, failure, version) in [
+        (b"{PRIVATE_INPUT_CANARY}".to_vec(), "invalid-input", 1),
         (
             serde_json::to_vec(&valid).unwrap(),
             "credentials-unavailable",
+            1,
         ),
+        (
+            serde_json::to_vec(&v2).unwrap(),
+            "credentials-unavailable",
+            2,
+        ),
+        (serde_json::to_vec(&malformed).unwrap(), "invalid-input", 1),
     ] {
         let mut child = Command::new(env!("CARGO_BIN_EXE_reader-buddy"))
             .arg("--handwriting-transcription")
@@ -46,6 +58,12 @@ fn actual_cli_refuses_strict_input_and_credentials_before_store_provider_or_cont
         assert!(!result.status.success());
         let report: Value = serde_json::from_slice(&result.stdout).unwrap();
         assert_eq!(report["failure"], failure);
+        assert_eq!(report["transcription_version"], version);
+        if version == 2 {
+            assert_eq!(report.get("partial"), Some(&Value::Null));
+        } else {
+            assert!(report.get("partial").is_none());
+        }
         assert_eq!(report["provider_attempt"], "not-called");
         assert_eq!(report["confirmed"], false);
         assert!(report["result"].is_null());
