@@ -10,8 +10,10 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
+    ffi::CString,
     fs::{self, File, Metadata},
     io::{Read, Seek},
+    os::fd::AsRawFd,
     os::unix::fs::MetadataExt,
     path::{Component, Path, PathBuf},
     thread,
@@ -988,6 +990,47 @@ pub enum RecoveryOutcome {
     Restored(RestoredStock),
 }
 
+fn reclaim_recovered_copies(lease: &Lease, deadline: Instant) -> Result<()> {
+    let leaf = format!("session-{}", lease.record().activation());
+    let directory = match open_at(&lease.directory, &leaf, true, false) {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let metadata = directory.metadata()?;
+    ensure!(
+        metadata.uid() == 0 && metadata.mode() & 0o7777 == 0o700,
+        "untrusted recovered session directory"
+    );
+    for (name, digest) in [
+        ("reader", lease.record().stock.executable_sha256),
+        ("adapter.so", lease.record().adapter_sha256),
+    ] {
+        let mut file = match open_at(&directory, name, false, false) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let before = file.metadata()?;
+        ensure!(
+            before.is_file() && before.uid() == 0 && before.mode() & 0o22 == 0 && before.nlink() == 1,
+            "untrusted recovered session copy"
+        );
+        ensure!(
+            hash_reader(&mut file, MAX_BYTES, deadline)? == digest
+                && metadata_equal(&before, &open_at(&directory, name, false, false)?.metadata()?)
+                && super::Identity::of(&metadata)
+                    == super::Identity::of(&open_at(&lease.directory, &leaf, true, false)?.metadata()?),
+            "recovered session copy changed"
+        );
+        let name = CString::new(name)?;
+        if unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+            return Err(std::io::Error::last_os_error()).context("reclaim recovered session copy");
+        }
+    }
+    Ok(())
+}
+
 /// Fixed installed operation. No provider/config/Store startup and no arbitrary
 /// unit/path overrides. Errors retain the activation record and any queued job.
 pub fn run_installed() -> Result<RecoveryOutcome> {
@@ -1044,6 +1087,9 @@ pub fn run_installed() -> Result<RecoveryOutcome> {
             "Archived recovered activation {}",
             backend.lease.record().activation()
         );
+        if let Err(error) = reclaim_recovered_copies(&backend.lease, deadline) {
+            log::warn!("Could not reclaim recovered session copies: {error:#}");
+        }
     }
     Ok(RecoveryOutcome::Restored(restored))
 }
