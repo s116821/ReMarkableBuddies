@@ -370,7 +370,10 @@ mod tests {
     fn transient_capture_breaks_the_destination_pair_without_replaying_swipe() {
         let failures: [fn() -> anyhow::Error; 2] = [
             || anyhow::Error::new(CaptureMappingsChanged),
-            || anyhow::Error::new(VanishedDiscoveryCandidate),
+            || {
+                anyhow::Error::from(std::io::Error::from_raw_os_error(5))
+                    .context(VanishedDiscoveryCandidate)
+            },
         ];
         for error in failures {
             let mut io = Scripted::new(vec![frame(false), frame(true)]);
@@ -381,8 +384,8 @@ mod tests {
             ));
             assert_eq!(io.swipes, 1);
             assert_eq!(io.reads, 5);
+            assert_eq!(io.finished_owner, Some(metadata(true).owner));
         }
-        assert_eq!(io.finished_owner, Some(metadata(true).owner));
     }
 
     #[test]
