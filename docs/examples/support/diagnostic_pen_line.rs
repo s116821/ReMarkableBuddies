@@ -43,7 +43,9 @@ fn drain(file: &mut File, raw: &mut Vec<u8>) -> Result<()> {
     }
 }
 fn decode(raw: &[u8]) -> Vec<[i32; 3]> {
-    raw.chunks_exact(16)
+    raw.as_chunks::<16>()
+        .0
+        .iter()
         .map(|record| {
             [
                 i32::from(u16::from_le_bytes(record[8..10].try_into().unwrap())),

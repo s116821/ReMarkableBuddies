@@ -295,6 +295,7 @@ fn retain(root: &Path, leaf: &str, value: serde_json::Value) -> Result<()> {
 }
 static EFFECT_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     runtime: &mut ResidentRuntime,
     store: &Store,
