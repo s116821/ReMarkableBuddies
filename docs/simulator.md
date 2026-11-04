@@ -46,6 +46,14 @@ Each scenario writes `page-0.png`, `page-1.png`, etc. and `report.json` beneath 
 configured output directory (bundled scenarios use `target/simulator/<name>`).
 The report contains exact text, newly emitted X counts, unchanged-page results,
 active page, virtual elapsed milliseconds, model-call counts and ordered actions.
+
+The `blank-answer` and `occupied-return` scenarios cover the manual Reader route.
+The resident transport fixture
+`low_space_indeterminate_reply_remains_unresolved_after_unchanged_observation`
+models the RM2 low-space run separately. A native indeterminate reply stays in
+the insertion journal after a read-only observation finds the original page
+order. The client refuses a replacement insertion. The fixture scripts the reply
+and page observation and leaves vendor disk-space policy to the tablet.
 Expected-result mismatches exit nonzero **after** saving results. Expected injected
 failures can pass when the recorded behavior matches the assertions.
 

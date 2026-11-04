@@ -1065,6 +1065,17 @@ mod sockets {
     }
     #[test]
     fn lost_native_reply_reopens_only_for_original_target_reconciliation() {
+        indeterminate_insertion_reopens_only_for_reconciliation(false);
+    }
+
+    #[test]
+    fn low_space_indeterminate_reply_remains_unresolved_after_unchanged_observation() {
+        // On RM2, the vendor refused Add Page for low disk space. The SDK
+        // received Indeterminate and the saved PDF still had its original order.
+        indeterminate_insertion_reopens_only_for_reconciliation(true);
+    }
+
+    fn indeterminate_insertion_reopens_only_for_reconciliation(explicit_reply: bool) {
         let f = Fixture::new();
         let store = f.open();
         let conversation = Uuid::new_v4();
@@ -1077,6 +1088,9 @@ mod sockets {
                 original.message,
                 Message::Request(Command::InsertAfter(_))
             ));
+            if explicit_reply {
+                send(&mut first, &response(&original, Reply::Indeterminate));
+            }
             drop(first);
             let mut next = accept(&listener);
             let reconciliation = read(&mut next);
@@ -1113,12 +1127,15 @@ mod sockets {
             source: facts(),
             target: id(13),
         };
-        let failure = connection
-            .insert_after(conversation, OperationId(id(51)), insertion.clone(), end())
-            .unwrap_err();
-        assert!(
-            matches!(failure.lost,LostRequest::Indeterminate{operation,..} if operation==OperationId(id(51)))
-        );
+        let outcome =
+            connection.insert_after(conversation, OperationId(id(51)), insertion.clone(), end());
+        if explicit_reply {
+            assert_eq!(outcome.unwrap(), Reply::Indeterminate);
+        } else {
+            assert!(
+                matches!(outcome.unwrap_err().lost, LostRequest::Indeterminate { operation, .. } if operation == OperationId(id(51)))
+            );
+        }
         drop(connection);
         drop(store);
         let store = f.open();
@@ -1152,7 +1169,10 @@ mod sockets {
             )
             .is_err());
         assert_eq!(attempts(&store).unwrap().len(), 1);
-        assert!(attempts(&store).unwrap()[0].reply.is_none());
+        assert_eq!(
+            attempts(&store).unwrap()[0].reply,
+            explicit_reply.then_some(Reply::Indeterminate)
+        );
         peer.join().unwrap();
     }
 
