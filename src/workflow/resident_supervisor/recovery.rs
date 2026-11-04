@@ -1013,14 +1013,22 @@ fn reclaim_recovered_copies(lease: &Lease, deadline: Instant) -> Result<()> {
         };
         let before = file.metadata()?;
         ensure!(
-            before.is_file() && before.uid() == 0 && before.mode() & 0o22 == 0 && before.nlink() == 1,
+            before.is_file()
+                && before.uid() == 0
+                && before.mode() & 0o22 == 0
+                && before.nlink() == 1,
             "untrusted recovered session copy"
         );
         ensure!(
             hash_reader(&mut file, MAX_BYTES, deadline)? == digest
-                && metadata_equal(&before, &open_at(&directory, name, false, false)?.metadata()?)
+                && metadata_equal(
+                    &before,
+                    &open_at(&directory, name, false, false)?.metadata()?
+                )
                 && super::Identity::of(&metadata)
-                    == super::Identity::of(&open_at(&lease.directory, &leaf, true, false)?.metadata()?),
+                    == super::Identity::of(
+                        &open_at(&lease.directory, &leaf, true, false)?.metadata()?
+                    ),
             "recovered session copy changed"
         );
         let name = CString::new(name)?;
