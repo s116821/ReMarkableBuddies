@@ -1087,5 +1087,7 @@ fn actual_os_contention_is_typed_busy_and_existing_unknown_context_does_not_publ
     assert_eq!(report.failure, Some(Failure::ContextUnavailable));
     assert_eq!(engine.calls, 0);
     assert!(report.context.is_none());
+    assert!(Store::open(local.config.paths.clone()).is_err());
+    drop(report);
     assert_eq!(before, tree_bytes(&local.root));
 }
