@@ -366,6 +366,18 @@ fn prepared_answer_survives_close_and_reopen() {
         events,
         [("document_saved_and_closed", 1), ("document_reopened", 1)]
     );
+    assert_eq!(run.report.pages[0].saved_modified_at_ms, None);
+    let saved_at = run.report.pages[1].saved_modified_at_ms.unwrap();
+
+    scenario.iterations[0]
+        .actions
+        .extend([HistoryAction::Close, HistoryAction::Reopen { page: 1 }]);
+    let reopened = execute(&scenario, &root()).unwrap();
+    assert_eq!(reopened.report.pages[0].saved_modified_at_ms, None);
+    assert_eq!(
+        reopened.report.pages[1].saved_modified_at_ms,
+        Some(saved_at)
+    );
 }
 
 scenario_test!(

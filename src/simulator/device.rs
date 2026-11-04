@@ -87,6 +87,11 @@ pub struct Event {
     pub detail: String,
 }
 
+pub(super) struct SavedPage {
+    pixels_sha256: String,
+    pub modified_at_ms: Option<u64>,
+}
+
 pub struct State {
     #[cfg(test)]
     pub acquisition_kind: crate::device::backend::AcquisitionKind,
@@ -103,6 +108,7 @@ pub struct State {
     pub idle_events: VecDeque<Vec<crate::device::interaction::Interaction>>,
     pub pages: Vec<Page>,
     pub initial: Vec<RgbaImage>,
+    pub(super) saved_pages: Option<Vec<SavedPage>>,
     pub active: usize,
     pub clock: u64,
     pub events: Vec<Event>,
@@ -240,6 +246,7 @@ impl State {
             idle_events: VecDeque::new(),
             pages,
             initial,
+            saved_pages: None,
             active: scenario.active_page,
             request_pin: None,
             request_lost: false,
@@ -262,6 +269,28 @@ impl State {
             deletion: None,
         })
     }
+    pub(super) fn save_visible_pages(&mut self) {
+        use crate::storage::digest;
+
+        let saved_pages = self.saved_pages.get_or_insert_with(|| {
+            self.initial
+                .iter()
+                .map(|image| SavedPage {
+                    pixels_sha256: digest(image.as_raw()),
+                    modified_at_ms: None,
+                })
+                .collect()
+        });
+        for (page, saved) in self.pages.iter().zip(saved_pages) {
+            let pixels_sha256 = digest(page.image().as_raw());
+            if saved.pixels_sha256 != pixels_sha256 {
+                let next_tick = saved.modified_at_ms.unwrap_or(0).saturating_add(1);
+                saved.modified_at_ms = Some(self.clock.max(next_tick));
+                saved.pixels_sha256 = pixels_sha256;
+            }
+        }
+    }
+
     pub fn event(&mut self, action: &str, detail: impl Into<String>) {
         self.events.push(Event {
             at_ms: self.clock,

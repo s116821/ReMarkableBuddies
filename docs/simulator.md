@@ -55,8 +55,12 @@ in the same iteration with no intervening input. The simulator keeps page
 content and order, clears the capture cache and the reopened page's menu, and
 invalidates undo ownership. The prepared-answer reopen check uses the same
 page count and verifies that the source image stays unchanged. This model
-covers the observed clean Close/reopen boundary. It does not simulate an
-interrupted vendor save or assert native persistence.
+reports `saved_modified_at_ms` only for pages whose modeled pixels changed at
+save. This is virtual time. Reopening or saving again without a content change
+keeps the previous value and the page index. This models the target-only
+modification time observed when Writer reused a bound page on RM2. The model
+still covers only a clean save. Interrupted vendor saves and native persistence
+require device evidence.
 
 The keyboard trace marks the simulated keyboard as `owned` when Buddy
 selects body mode or types. The `keyboard_identity_changed` fault applies

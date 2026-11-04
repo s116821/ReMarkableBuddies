@@ -153,6 +153,8 @@ pub struct PageResult {
     pub failure_codes: Vec<String>,
     pub indicator_visible: bool,
     pub unchanged: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub saved_modified_at_ms: Option<u64>,
     pub png: String,
 }
 #[derive(Serialize)]
@@ -245,6 +247,10 @@ fn execute_with_model<M: LLMEngine>(
             failure_codes: page.failure_codes(),
             indicator_visible: page.indicator_visible,
             unchanged: images[index] == state.initial[index],
+            saved_modified_at_ms: state
+                .saved_pages
+                .as_ref()
+                .and_then(|pages| pages[index].modified_at_ms),
             png: format!("page-{index}.png"),
         })
         .collect();
@@ -443,6 +449,7 @@ fn history_actions<M: LLMEngine>(
             HistoryAction::Close => {
                 orchestrator.invalidate_history();
                 let mut state = state.borrow_mut();
+                state.save_visible_pages();
                 closed_pages = Some(std::mem::take(&mut state.pages));
                 state.last = Default::default();
                 state.persisted = None;
