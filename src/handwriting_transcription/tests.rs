@@ -1058,8 +1058,10 @@ fn missing_empty_and_incomplete_existing_roots_are_refused_without_any_initializ
 #[test]
 fn actual_os_contention_is_typed_busy_and_existing_unknown_context_does_not_publish_or_clean() {
     let local = Local::new();
-    let store = Arc::new(Store::open(local.config.paths.clone()).unwrap());
+    drop(Store::open(local.config.paths.clone()).unwrap());
+    // Windows locks the store file against reads while the owner is alive.
     let before = tree_bytes(&local.root);
+    let store = Store::open(local.config.paths.clone()).unwrap();
     let mut engine = Engine::new();
     let input = request(context(Uuid::new_v4(), Uuid::new_v4()));
     let report = run(&local, &input, &mut engine);
@@ -1067,9 +1069,9 @@ fn actual_os_contention_is_typed_busy_and_existing_unknown_context_does_not_publ
     assert_eq!(report.provider_attempt, Attempt::NotCalled);
     assert!(report.context.is_none());
     assert_eq!(engine.calls, 0);
-    assert_eq!(before, tree_bytes(&local.root));
     drop(report);
     drop(store);
+    assert_eq!(before, tree_bytes(&local.root));
     std::fs::write(
         local.config.paths.data.join(".stage-preserve"),
         b"synthetic retained stage",
