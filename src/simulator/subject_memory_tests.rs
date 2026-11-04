@@ -1,4 +1,6 @@
 //! Synthetic device/provider checks through the real Reader; no recognition or native claim.
+mod qualification;
+
 use super::*;
 use crate::{
     conversation::{Ledger, Record, Role},
