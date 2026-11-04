@@ -187,6 +187,9 @@ impl<'a> Dispatch<'a> {
             .zip(report.draft)
             .map(|(selection, id)| PendingOutput {
                 id,
+                revision: ExpectedHeads(std::collections::BTreeSet::from([
+                    selection.draft_revision()
+                ])),
                 mode: Mode::Writer,
                 conversation: admitted.conversation,
                 root: selection.root,
@@ -296,6 +299,7 @@ impl<'a> Dispatch<'a> {
         )?;
         Ok(PendingOutput {
             id: draft.id,
+            revision: ledger.expected(Namespace::Conversation, draft.id)?,
             mode: Mode::Reader,
             conversation: draft.conversation,
             root: ExpectedHeads(
@@ -341,6 +345,9 @@ impl<'a> Dispatch<'a> {
         });
         let output = result.finalized.map(|finalized| PendingOutput {
             id: finalized.draft().record_id,
+            revision: ExpectedHeads(std::collections::BTreeSet::from([finalized
+                .draft()
+                .revision_id])),
             mode: Mode::Writer,
             conversation: admitted.conversation,
             root: ExpectedHeads(std::collections::BTreeSet::from([finalized
@@ -391,9 +398,17 @@ impl<'a> Dispatch<'a> {
             "output evidence does not match the admitted draft"
         );
         let expected_turn = ledger.expected(Namespace::Conversation, draft.id)?;
+        ensure!(
+            expected_turn.0.len() == 1 && expected_turn == draft.revision,
+            "draft revision changed"
+        );
         turn.outcome = Outcome::Completed;
         turn.completion = Some(evidence);
         admitted.check(ledger, observe)?;
+        ensure!(
+            ledger.expected(Namespace::Conversation, draft.id)? == expected_turn,
+            "draft revision changed"
+        );
         if draft.mode == Mode::Writer {
             // Draft selection for refine/export continues to refer to Generated.
             // Record the verified visible response separately in its exchange.
@@ -414,6 +429,7 @@ impl<'a> Dispatch<'a> {
 
 pub(crate) struct PendingOutput {
     id: Uuid,
+    revision: ExpectedHeads,
     mode: Mode,
     conversation: Uuid,
     root: ExpectedHeads,
