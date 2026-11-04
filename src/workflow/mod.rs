@@ -1,4 +1,5 @@
 pub(crate) mod erase_plan;
+pub mod exchange_history;
 pub mod history;
 pub mod indicator;
 mod navigation;

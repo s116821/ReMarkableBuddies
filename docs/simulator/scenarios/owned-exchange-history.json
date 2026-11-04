@@ -1,0 +1,25 @@
+{
+  "mode": "exchange-history",
+  "composer": "Keep this unsent draft.",
+  "cases": [
+    "repeat",
+    "composer",
+    "unrelated",
+    "edited-exchange",
+    "header",
+    "status",
+    "seal",
+    "departure",
+    "session",
+    "foreign-page",
+    "replaced",
+    "restore",
+    "stale-receipt",
+    "incomplete",
+    "unknown",
+    "wrong-operation",
+    "changed-readback",
+    "refused",
+    "cancel"
+  ]
+}
