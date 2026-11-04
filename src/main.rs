@@ -62,6 +62,9 @@ pub struct Args {
     /// Existing-only generation-inclusive accounting; no runtime activation
     #[arg(long, exclusive = true)]
     inspect_owned_data_v3: bool,
+    /// Count validated historical local selected-outbox records
+    #[arg(long, exclusive = true)]
+    inspect_selected_outbox: bool,
     /// Emit the embedded canonical-object schema without reading saved configuration
     #[arg(long, exclusive = true)]
     configuration_schema: bool,
@@ -221,6 +224,12 @@ fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_lo
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    if args.inspect_selected_outbox {
+        return remarkable_reader_buddy::outbox_status::run(
+            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+        )
+        .write_to(&mut std::io::stdout().lock());
+    }
     if args.configuration_schema {
         return config::schema::write_to(&mut std::io::stdout().lock());
     }
@@ -953,6 +962,7 @@ mod tests {
                 "inspect-conversations",
                 "inspect-owned-data",
                 "inspect-owned-data-v3",
+                "inspect-selected-outbox",
                 "inspect-source-cache",
                 "log-level",
                 "memory-input",
@@ -1074,7 +1084,11 @@ mod tests {
 
     #[test]
     fn schema_discovery_is_exclusive_with_every_other_argument() {
-        for selector in ["configuration-schema", "inspect-owned-data-v3"] {
+        for selector in [
+            "configuration-schema",
+            "inspect-owned-data-v3",
+            "inspect-selected-outbox",
+        ] {
             for argument in Args::command().get_arguments() {
                 let Some(long) = argument.get_long() else {
                     continue;
