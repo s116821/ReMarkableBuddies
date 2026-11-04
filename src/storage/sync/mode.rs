@@ -133,10 +133,49 @@ pub(crate) fn load(store: &Store) -> Result<Option<ModeState>> {
     if !path.exists() {
         return Ok(None);
     }
-    let state: ModeState = files::json(&path, MAX_METADATA as u64)?;
+    load_at(&path, store.actor_id, None)
+}
+
+pub(crate) fn ordinary_local_existing(
+    paths: &crate::storage::StorePaths,
+    actor: Uuid,
+    budget: &mut crate::storage::selection::SelectedReadBudget,
+) -> Result<bool> {
+    let path = paths.data.join("sync/mode.json");
+    files::safe_path(&path)?;
+    match std::fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(error.into()),
+        Ok(metadata) => {
+            ensure!(metadata.is_file(), "unsupported sync mode path");
+            let mode = load_at(&path, actor, Some(budget))?;
+            Ok(matches!(
+                mode.as_ref()
+                    .and_then(|state| state.transitions.last())
+                    .map(|r| &r.mode),
+                None | Some(SyncMode::LocalOnly)
+            ))
+        }
+    }
+}
+
+fn load_at(
+    path: &std::path::Path,
+    actor: Uuid,
+    budget: Option<&mut crate::storage::selection::SelectedReadBudget>,
+) -> Result<Option<ModeState>> {
+    let state: ModeState = if let Some(budget) = budget {
+        serde_json::from_slice(&files::read_with_budget(
+            path,
+            MAX_METADATA as u64,
+            Some(budget),
+        )?)?
+    } else {
+        files::json(path, MAX_METADATA as u64)?
+    };
     ensure!(
         state.format == FORMAT
-            && state.actor == store.actor_id
+            && state.actor == actor
             && !state.device.is_nil()
             && state.device != state.actor
             && !state.transitions.is_empty()

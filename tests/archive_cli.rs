@@ -441,3 +441,262 @@ fn fifo_input_archive_marker_and_store_lock_refuse_without_blocking() {
         "invalid-input"
     );
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn notebook_archive_cli_exports_product_generated_records_and_inspects_detached() {
+    let f = Fixture::new();
+    let maintained =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/simulator/scenarios");
+    let mut scenario: Value = serde_json::from_slice(
+        &fs::read(maintained.join("writer-notebook-create-replay.json")).unwrap(),
+    )
+    .unwrap();
+    scenario["output"] = json!("output");
+    scenario["retain_store_fixture"] = json!(true);
+    fs::copy(
+        maintained.join("writer-notebook-source.json"),
+        f.root.join("writer-notebook-source.json"),
+    )
+    .unwrap();
+    let input = f.root.join("scenario.json");
+    fs::write(&input, serde_json::to_vec(&scenario).unwrap()).unwrap();
+    let mut simulate = command(&f);
+    simulate.arg("--simulate").arg(&input);
+    let out = output(simulate, None);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let scenario_report: Value =
+        serde_json::from_slice(&fs::read(f.root.join("output/report.json")).unwrap()).unwrap();
+    assert_eq!(scenario_report["model_calls"], 3);
+    assert_eq!(scenario_report["store_fixture_saved"], true);
+
+    // The simulator deliberately exports data only. Explicit fixture preparation
+    // validates/rebinds that data before any archive command is exercised.
+    let paths = buddy::storage::StorePaths {
+        data: f.root.join("output/store-fixture/data"),
+        ..f.paths()
+    };
+    let config = f.root.join("config.json");
+    let store = Store::prepare_notebook(paths.clone()).unwrap();
+    let manifests = store.manifests().unwrap();
+    let conversation = serde_json::from_value(scenario["conversation"].clone()).unwrap();
+    let ledger = buddy::conversation::Ledger::new(std::sync::Arc::new(store));
+    let records = ledger.inspect(conversation, false).unwrap();
+    assert!(records
+        .iter()
+        .any(|r| matches!(r, buddy::conversation::Record::ArchivedNormalizedSource(_))));
+    assert!(records
+        .iter()
+        .any(|r| matches!(r, buddy::conversation::Record::NotebookPlan(_))));
+    assert_eq!(
+        records
+            .iter()
+            .filter(|r| matches!(r, buddy::conversation::Record::NotebookStage(_)))
+            .count(),
+        3
+    );
+    drop(ledger);
+    fs::write(
+        &config,
+        serde_json::to_vec(&json!({"paths":paths})).unwrap(),
+    )
+    .unwrap();
+    let current = fs::read(paths.data.join("CURRENT")).unwrap();
+    let generation: String = serde_json::from_slice(&current).unwrap();
+    let source = paths.data.join("generations").join(&generation);
+    let read_inventory = |directory: &Path| {
+        fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| {
+                let path = entry.unwrap().path();
+                (
+                    path.file_name().unwrap().to_owned(),
+                    fs::read(path).unwrap(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let objects = read_inventory(&source.join("objects"));
+    let commits = read_inventory(&source.join("commits"));
+    let archive = f.root.join("notebook-archive");
+    let exported = run(&f, "export-notebook", &archive);
+    assert_eq!(exported["status"], "ok");
+    let summary = &exported["data"]["inspection"];
+    assert_eq!(summary["format"], 4);
+    assert_eq!(summary["complete_media"], true);
+    assert_eq!(summary["selected_scopes"], 0);
+    assert_eq!(summary["selection_receipts"], 0);
+    assert_eq!(summary["manifests"], manifests.len());
+    let marker = fs::read(archive.join("backup.json")).unwrap();
+    let backup: Value = serde_json::from_slice(&marker).unwrap();
+    assert_eq!(backup["origin_generation"], generation);
+    let identity: Value =
+        serde_json::from_slice(&fs::read(paths.data.join("identity.json")).unwrap()).unwrap();
+    assert_eq!(backup["origin_actor"], identity["actor"]);
+    assert_eq!(
+        backup["manifests"],
+        serde_json::to_value(manifests).unwrap()
+    );
+    let archived = read_inventory(&archive.join("objects"));
+    for (name, bytes) in &archived {
+        assert_eq!(objects.get(name), Some(bytes));
+    }
+    assert_eq!(
+        archived.len(),
+        summary["objects"].as_u64().unwrap() as usize
+    );
+    assert_eq!(
+        run(&f, "export-notebook", &archive)["status"],
+        "invalid-input"
+    );
+    assert_eq!(fs::read(archive.join("backup.json")).unwrap(), marker);
+    fs::write(config, b"{poison config").unwrap();
+    let detached = run(&f, "inspect-notebook", &archive);
+    assert_eq!(detached["status"], "ok");
+    assert_eq!(detached["data"], exported["data"]);
+    assert_eq!(run(&f, "inspect", &archive)["status"], "unsupported");
+    fs::write(archive.join("objects/undeclared"), b"extra").unwrap();
+    assert_eq!(
+        run(&f, "inspect-notebook", &archive)["status"],
+        "unsupported"
+    );
+    fs::remove_file(archive.join("objects/undeclared")).unwrap();
+    let (name, bytes) = archived.into_iter().next().unwrap();
+    let object = archive.join("objects").join(name);
+    fs::remove_file(&object).unwrap();
+    assert_eq!(
+        run(&f, "inspect-notebook", &archive)["status"],
+        "unsupported"
+    );
+    let mut damaged = bytes;
+    damaged[0] ^= 1;
+    fs::write(object, damaged).unwrap();
+    assert_eq!(
+        run(&f, "inspect-notebook", &archive)["status"],
+        "unsupported"
+    );
+    assert_eq!(fs::read(paths.data.join("CURRENT")).unwrap(), current);
+    assert_eq!(read_inventory(&source.join("objects")), objects);
+    assert_eq!(read_inventory(&source.join("commits")), commits);
+}
+
+#[test]
+fn notebook_archive_cli_refuses_busy_wrong_format_and_incomplete_admission() {
+    let f = Fixture::new();
+    let path = f.root.join("destination");
+    assert_eq!(run(&f, "export-notebook", &path)["status"], "unavailable");
+    assert!(!f.paths().data.exists());
+    let legacy = Store::open(f.paths()).unwrap();
+    assert_eq!(run(&f, "export-notebook", &path)["status"], "busy");
+    let legacy_archive = f.root.join("legacy");
+    legacy.export(&legacy_archive).unwrap();
+    use buddy::storage::{sync::mode::SyncModeChoice, Uuid};
+    let mode = f.paths().data.join("sync/mode.json");
+    legacy
+        .set_sync_mode(
+            &legacy.sync_mode_snapshot().unwrap().token,
+            Uuid::new_v4(),
+            SyncModeChoice::IsolatedBackup {
+                binding_sha256: buddy::storage::digest(b"archive fixture"),
+            },
+        )
+        .unwrap();
+    let nonlocal_mode = fs::read(&mode).unwrap();
+    legacy
+        .set_sync_mode(
+            &legacy.sync_mode_snapshot().unwrap().token,
+            Uuid::new_v4(),
+            SyncModeChoice::LocalOnly,
+        )
+        .unwrap();
+    let local_mode = fs::read(&mode).unwrap();
+    drop(legacy);
+    assert_eq!(run(&f, "export-notebook", &path)["status"], "unsupported");
+    assert_eq!(
+        run(&f, "inspect-notebook", &legacy_archive)["status"],
+        "unsupported"
+    );
+    let notebook = Store::prepare_notebook(f.paths()).unwrap();
+    let current: String =
+        serde_json::from_slice(&fs::read(f.paths().data.join("CURRENT")).unwrap()).unwrap();
+    drop(notebook);
+    let root = f.paths().data.join("generations").join(current);
+    let capabilities = f.paths().data.join("capabilities.json");
+    let original = fs::read(&capabilities).unwrap();
+    fs::remove_file(&capabilities).unwrap();
+    assert_eq!(run(&f, "export-notebook", &path)["status"], "unsupported");
+    fs::write(&capabilities, original).unwrap();
+    fs::write(&mode, b"{").unwrap();
+    assert_eq!(run(&f, "export-notebook", &path)["status"], "unsupported");
+    fs::write(&mode, nonlocal_mode).unwrap();
+    assert_eq!(run(&f, "export-notebook", &path)["status"], "unsupported");
+    fs::write(&mode, local_mode).unwrap();
+    let history = root.join("selection-history");
+    fs::create_dir(&history).unwrap();
+    fs::write(history.join("retained"), b"negative fixture").unwrap();
+    assert_eq!(run(&f, "export-notebook", &path)["status"], "unsupported");
+    fs::remove_file(history.join("retained")).unwrap();
+    let local_archive = f.root.join("local-only");
+    let exported = run(&f, "export-notebook", &local_archive);
+    assert_eq!(exported["status"], "ok");
+    let inspected = run(&f, "inspect-notebook", &local_archive);
+    assert_eq!(inspected["status"], "ok");
+    assert_eq!(inspected["data"], exported["data"]);
+    fs::write(root.join("format.json"), b"1").unwrap();
+    assert_eq!(run(&f, "export-notebook", &path)["status"], "unsupported");
+    assert!(!path.exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn notebook_archive_cli_refuses_case_aliases_without_changing_owned_paths() {
+    fn snapshot(root: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Option<Vec<u8>>> {
+        let mut result = std::collections::BTreeMap::new();
+        for entry in fs::read_dir(root).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                result.extend(snapshot(&path));
+                result.insert(path, None);
+            } else {
+                result.insert(path.clone(), Some(fs::read(path).unwrap()));
+            }
+        }
+        result
+    }
+
+    let f = Fixture::new();
+    let paths = f.paths();
+    drop(Store::prepare_notebook(paths.clone()).unwrap());
+    let before = snapshot(&paths.data);
+    let alias = f.root.join("DATA");
+    assert_ne!(alias, paths.data);
+    assert_eq!(
+        fs::read(alias.join("CURRENT")).unwrap(),
+        fs::read(paths.data.join("CURRENT")).unwrap()
+    );
+    let destination = alias.join("new-archive");
+    assert_eq!(
+        run(&f, "export-notebook", &destination)["status"],
+        "invalid-input"
+    );
+    assert!(!destination.exists());
+
+    let mut aliased = paths.clone();
+    aliased.cache = alias.join("cache");
+    fs::write(
+        f.root.join("config.json"),
+        serde_json::to_vec(&json!({"paths":aliased})).unwrap(),
+    )
+    .unwrap();
+    let destination = f.root.join("external-archive");
+    assert_eq!(
+        run(&f, "export-notebook", &destination)["status"],
+        "invalid-input"
+    );
+    assert!(!destination.exists());
+    assert_eq!(snapshot(&paths.data), before);
+}
