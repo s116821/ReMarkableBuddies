@@ -868,17 +868,17 @@ fn same_identity(a: &fs::Metadata, b: &fs::Metadata) -> bool {
             && a.modified().ok() == b.modified().ok()
     }
 }
-fn canonical_roots_disjoint(paths: &StorePaths) -> bool {
-    fn canonical(path: &Path) -> Option<PathBuf> {
-        if path.exists() {
-            return path.canonicalize().ok();
-        }
-        let parent = canonical(path.parent()?)?;
-        Some(parent.join(path.file_name()?))
+pub(crate) fn canonical_with_missing_tail(path: &Path) -> Option<PathBuf> {
+    if path.exists() {
+        return path.canonicalize().ok();
     }
+    let parent = canonical_with_missing_tail(path.parent()?)?;
+    Some(parent.join(path.file_name()?))
+}
+fn canonical_roots_disjoint(paths: &StorePaths) -> bool {
     let roots: Option<Vec<_>> = [&paths.data, &paths.cache, &paths.credentials]
         .into_iter()
-        .map(|path| canonical(path))
+        .map(|path| canonical_with_missing_tail(path))
         .collect();
     let Some(roots) = roots else {
         return false;
