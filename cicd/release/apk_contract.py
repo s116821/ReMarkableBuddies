@@ -10,6 +10,13 @@ SDK_REPOSITORY='https://github.com/s116821/ReMarkableOpenSDK'
 TAG=re.compile(r'v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z')
 HEX40=re.compile(r'[0-9a-f]{40}\Z');HEX64=re.compile(r'[0-9a-f]{64}\Z')
 PREFIX='remarkable-buddies:'
+RM2_FEATURE='installed-resident-output'
+RM2_PROFILE='rm2-resident-test-key'
+RM2_FIRMWARE='3.28.0.172'
+RM2_SDK_SHA='c87e5628f35af5647c1d2da3331ad5e07a55f0f8'
+RM2_BUNDLE_SHA='f9c4b44b9baf281bc47c74470ddd8d098853e79383e9323e5ff02ef2846fb477'
+RM2_BINARY='home/root/.local/lib/remarkable-buddies/reader-buddy'
+ORDINARY_BINARY='usr/bin/reader-buddy'
 
 class Refusal(ValueError): pass
 
@@ -49,9 +56,16 @@ def validate_build(value):
  build=value['build'];exact(build,['argv','environment','profile','source_build_helper_sha256'])
  exact(build['environment'],['RUSTFLAGS','CFLAGS','CXXFLAGS','CPPFLAGS','LDFLAGS'])
  require(all(isinstance(v,str) and len(v)<=1024 and all(32<=ord(c)<127 for c in v) for v in build['environment'].values()),'environment')
- require(isinstance(build['argv'],list) and len(build['argv'])<=64 and all(ascii_text(a,256) for a in build['argv']) and digest(build['source_build_helper_sha256']) and build['profile']==('legacy-no-sdk' if sdk is None else 'unqualified-development'),'build/profile')
+ require(isinstance(build['argv'],list) and len(build['argv'])<=64 and all(ascii_text(a,256) for a in build['argv']) and digest(build['source_build_helper_sha256']),'build command')
+ resident=build['profile']==RM2_PROFILE
+ require(resident==(RM2_FEATURE in cargo['features']),'resident Cargo feature/profile')
+ if resident:
+  require(arch=='armv7' and sdk is not None and sdk['sha']==RM2_SDK_SHA,'resident SDK/target')
+  require(build['argv'][-2:]==['--features',RM2_FEATURE],'resident build feature argument')
+ else:
+  require(build['profile']==('legacy-no-sdk' if sdk is None else 'unqualified-development'),'build/profile')
  binary=value['binary'];exact(binary,['path','sha256','bytes','mode'])
- require(binary['path']=='usr/bin/reader-buddy' and digest(binary['sha256']) and integer(binary['bytes'],1,134217728) and type(binary['mode']) is int and binary['mode']==493,'binary')
+ require(binary['path']==(RM2_BINARY if resident else ORDINARY_BINARY) and digest(binary['sha256']) and integer(binary['bytes'],1,134217728) and type(binary['mode']) is int and binary['mode']==493,'binary')
  return value
 
 def canonical(value):
@@ -71,6 +85,9 @@ def parse_build(raw):
  require(canonical(value)==raw,'canonical build JSON bytes')
  return value
 
+def dependencies(value):
+ return [f'remarkable-os={RM2_FIRMWARE}','rm2'] if value['build']['profile']==RM2_PROFILE else []
+
 def tags(value,pkgrel):
  validate_build(value);require(integer(pkgrel,0,65535),'pkgrel')
  source,target,sdk=value['source'],value['target'],value['sdk']
@@ -78,6 +95,8 @@ def tags(value,pkgrel):
  if sdk is not None:
   fields.update({'sdk-repo':sdk['repository'],'sdk-sha':sdk['sha']})
   if sdk['ref_kind']=='tagged-git': fields['sdk-tag']=sdk['tag']
+ if value['build']['profile']==RM2_PROFILE:
+  fields.update({'device':'rm2','firmware':RM2_FIRMWARE,'sdk-bundle-sha256':RM2_BUNDLE_SHA})
  values=[PREFIX+k+'='+v for k,v in sorted(fields.items())]
  require(len(values)<=18 and sum(len(v) for v in values)<=4096 and all(len(v)<=256 and re.fullmatch(r'[a-zA-Z0-9._+,:/\[\]=\-]+',v) for v in values),'signed tag bounds/encoding')
  return values

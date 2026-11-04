@@ -1,6 +1,8 @@
 """Synthetic parser controls, never executable/source-build qualification."""
 import copy,json,unittest
-from apk_contract import canonical,parse_build,tags,verify_tags,Refusal,REPOSITORY
+from apk_contract import (RM2_BINARY,RM2_BUNDLE_SHA,RM2_FEATURE,RM2_PROFILE,RM2_SDK_SHA,
+                          SDK_REPOSITORY,canonical,dependencies,parse_build,tags,verify_tags,
+                          Refusal,REPOSITORY)
 
 def specimen():
  return dict(schema=1,evidence='developer-source-build',eligibility='not-qualified',
@@ -34,5 +36,23 @@ class Serialization(unittest.TestCase):
   data['sdk'].update(ref_kind='tagged-git',tag='v1.0.0');self.assertEqual(len(tags(data,0)),15)
   data['sdk']['tag']=None
   with self.assertRaises(Refusal):canonical(data)
+
+ def test_resident_requires_the_approved_target_feature_and_bundle_identity(self):
+  data=specimen()
+  data['sdk']=dict(ref_kind='commit-pinned',repository=SDK_REPOSITORY,
+                   sha=RM2_SDK_SHA,tag=None,manifest_sha256='a'*64)
+  data['cargo']['features']=[RM2_FEATURE]
+  data['build']['profile']=RM2_PROFILE
+  data['build']['argv']+=['--features',RM2_FEATURE]
+  data['binary']['path']=RM2_BINARY
+  self.assertEqual(parse_build(canonical(data)),data)
+  self.assertEqual(dependencies(data),['remarkable-os=3.28.0.172','rm2'])
+  self.assertIn('remarkable-buddies:sdk-bundle-sha256='+RM2_BUNDLE_SHA,tags(data,0))
+  for section,key,wrong in [
+    ('sdk','sha','1'*40),('cargo','features',[]),('build','argv',['cross','build']),
+    ('binary','path','usr/bin/reader-buddy'),
+  ]:
+   changed=copy.deepcopy(data);changed[section][key]=wrong
+   with self.subTest(section=section,key=key),self.assertRaises(Refusal):canonical(changed)
 
 if __name__=='__main__':unittest.main()

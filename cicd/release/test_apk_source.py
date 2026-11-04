@@ -216,7 +216,8 @@ class FreshBuildAdmission(unittest.TestCase):
      if fault=='runtime-replacement':binary.write_bytes(b'changed after runtime')
      return 'reader-buddy 1.2.3',dict(actual_container_argv=[[],['docker','run','observed-runtime'],[]])
     identities=[compiler,changed if fault=='compiler-switch' else compiler]
-    def cargo_call(repo,target,sdk_tag,observations):
+    def cargo_call(repo,target,sdk_tag,observations,rm2_resident):
+     self.assertFalse(rm2_resident)
      observations.append(dict(workspace_root=str(source),packages=[],workspace_members=[]))
      return cargo
     host=dict(source=source_id,conversion={'autocrlf':'false'})

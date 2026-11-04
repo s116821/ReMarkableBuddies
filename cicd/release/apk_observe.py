@@ -1,10 +1,11 @@
 """Separate public-key-only observation after the generation container ends."""
 import argparse,json,shutil,tempfile
 from pathlib import Path
-from apk_contract import HEX64,parse_build,require
+from apk_contract import HEX64,dependencies,parse_build,require
 from apk_generate import inventory,bounded_file,TOOL_SHA
 from apk_index import compare,parse_dump
 from apk_source_build import run,sha
+from apk_payload import prepare,selected_bundle
 
 def observe(expected_spki):
  require(isinstance(expected_spki,str) and HEX64.fullmatch(expected_spki),'externally supplied fixture SPKI pin required')
@@ -33,9 +34,9 @@ def observe(expected_spki):
    package=artifacts/f'remarkable-buddies-{version}.{arch}.apk'
    invoke(common+['verify',str(package)])
    dump=parse_dump(invoke(common+['adbdump','--format','json',str(package)],metadata=True).encode())
-   expected=control['packages'][arch]['payload']
-   inventory(dump,expected,build['source']['epoch'])
-   require(expected['usr/bin/reader-buddy']==dict(bytes=build['binary']['bytes'],sha256=build['binary']['sha256']),'verified payload/source-build identity')
+   expected,layout=prepare(inputs/arch,build,selected_bundle(inputs,build),root/('expected-'+arch))
+   require(expected==control['packages'][arch]['payload'],'generation differs from frozen payload inputs')
+   inventory(dump,expected,build['source']['epoch'],layout,dependencies(build))
    licenses[arch]=manifest['source_license'];sizes[arch]=package.stat().st_size
   index=artifacts/'buddy-index.adb';invoke(common+['verify',str(index)])
   raw=invoke(common+['adbdump','--format','json',str(index)],metadata=True).encode()
