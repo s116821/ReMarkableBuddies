@@ -71,10 +71,7 @@ fn seed_image(
     source: &SourceObservation,
     tone: u8,
 ) -> Result<(Uuid, String)> {
-    let mut png = Cursor::new(Vec::new());
-    image::DynamicImage::ImageLuma8(image::GrayImage::from_pixel(2, 2, image::Luma([tone])))
-        .write_to(&mut png, image::ImageFormat::Png)?;
-    let png = png.into_inner();
+    let png = fixture_png(tone)?;
     let image = Media {
         sha256: digest(&png),
         bytes: png.len() as u64,
@@ -122,24 +119,84 @@ fn seed_image(
     Ok((id, STANDARD.encode(png)))
 }
 
+fn fixture_png(tone: u8) -> Result<Vec<u8>> {
+    let mut png = Cursor::new(Vec::new());
+    image::DynamicImage::ImageLuma8(image::GrayImage::from_pixel(2, 2, image::Luma([tone])))
+        .write_to(&mut png, image::ImageFormat::Png)?;
+    Ok(png.into_inner())
+}
+
 fn seed_shared_images(
     ledger: &Ledger,
     conversation: Uuid,
     source: &SourceObservation,
 ) -> Result<(Vec<String>, Value)> {
-    let mut attachments = Vec::new();
-    let mut associations = Vec::new();
-    for (tone, attachment_index) in [(0, 0), (1, 1), (0, 0)] {
-        let (id, encoded) = seed_image(ledger, conversation, source, tone)?;
-        associations.push(
-            json!({"source":id,"ordinal":tone,"dimensions":[2,2],"attachment_index":attachment_index,
-            "sha256":digest(&STANDARD.decode(&encoded)?)}),
-        );
-        if attachment_index == attachments.len() {
-            attachments.push(encoded);
-        }
-    }
-    Ok((attachments, json!(associations)))
+    use crate::conversation::{LegacyImage, LegacyImageInput, LegacyImageRole};
+    let mut turn = Turn {
+        id: Uuid::new_v4(),
+        conversation,
+        exchange: Uuid::new_v4(),
+        sequence: 0,
+        role: Role::User,
+        mode: Mode::Reader,
+        outcome: Outcome::Prepared,
+        text: None,
+        sources: vec![],
+        correction_of: None,
+        created_ms: 1,
+        updated_ms: 1,
+        completion: None,
+    };
+    let capture = Uuid::new_v4();
+    let pngs = [fixture_png(0)?, fixture_png(1)?];
+    let hashes = pngs.each_ref().map(|bytes| digest(bytes));
+    let images = pngs
+        .iter()
+        .enumerate()
+        .map(|(index, bytes)| LegacyImageInput {
+            descriptor: LegacyImage {
+                media: Media {
+                    sha256: hashes[index].clone(),
+                    bytes: bytes.len() as u64,
+                    media_type: "image/png".into(),
+                },
+                dimensions: [2, 2],
+                role: if index == 0 {
+                    LegacyImageRole::Overview
+                } else {
+                    LegacyImageRole::Detail
+                },
+                provider_ordinal: Some(index as u32),
+            },
+            bytes: bytes.clone(),
+        })
+        .collect();
+    ledger.prepare_legacy(
+        Uuid::new_v4(),
+        ledger.expected(Namespace::Conversation, conversation)?,
+        turn.clone(),
+        capture,
+        None,
+        images,
+    )?;
+    turn.outcome = Outcome::Interpreted;
+    turn.text = Some("Earlier image question?".into());
+    turn.sources = vec![capture];
+    ledger.advance(
+        Uuid::new_v4(),
+        ledger.expected(Namespace::Conversation, conversation)?,
+        ledger.expected(Namespace::Conversation, turn.id)?,
+        turn,
+    )?;
+    let (shared, _) = seed_image(ledger, conversation, source, 0)?;
+    Ok((
+        pngs.iter().map(|bytes| STANDARD.encode(bytes)).collect(),
+        json!([
+            {"source":capture,"ordinal":0,"dimensions":[2,2],"attachment_index":0,"sha256":hashes[0]},
+            {"source":capture,"ordinal":1,"dimensions":[2,2],"attachment_index":1,"sha256":hashes[1]},
+            {"source":shared,"ordinal":0,"dimensions":[2,2],"attachment_index":0,"sha256":hashes[0]},
+        ]),
+    ))
 }
 
 fn fixture_source(document: Uuid) -> SourceObservation {
@@ -331,7 +388,7 @@ pub(super) fn run(scenario: Scenario) -> Result<Value> {
         engine.seen.len() == 3 && destination.writes() == 1,
         "unexpected operation count"
     );
-    let mut expected = vec!["Earlier image question?".to_owned(); 3];
+    let mut expected = vec!["Earlier image question?".to_owned(); 2];
     for (index, ((text, images), request)) in engine.seen.iter().zip(&scenario.requests).enumerate()
     {
         ensure!(
@@ -375,7 +432,7 @@ pub(super) fn run(scenario: Scenario) -> Result<Value> {
         .collect();
     ensure!(
         users
-            == std::iter::repeat_n("Earlier image question?".to_owned(), 3)
+            == std::iter::repeat_n("Earlier image question?".to_owned(), 2)
                 .chain(scenario.requests.iter().cloned())
                 .collect::<Vec<_>>(),
         "visible requests changed"
@@ -672,7 +729,7 @@ fn run_notebook(scenario: &Scenario) -> Result<usize> {
             .ok_or_else(|| anyhow::anyhow!("Reader payload absent"))?,
     )?;
     ensure!(
-        reader["history"][4]["text"] == response
+        reader["history"][3]["text"] == response
             && reader["historical_images"] == associations
             && model.seen[2].1 == attachments,
         "notebook handback changed"
