@@ -34,7 +34,7 @@ pub struct SelectedAttempt {
     pub mode_epoch: Option<Uuid>,
 }
 impl SelectedAttempt {
-    fn fingerprint(&self) -> Result<String> {
+    pub(super) fn fingerprint(&self) -> Result<String> {
         match self.mode_epoch {
             Some(epoch) => Ok(digest(&serde_json::to_vec(&(
                 self.actor,
@@ -81,37 +81,60 @@ impl SelectedAttempt {
 fn directory(store: &Store) -> PathBuf {
     store.paths.data.join("sync/selected-outbox")
 }
-fn inventory(store: &Store) -> Result<BTreeMap<Uuid, SelectedAttempt>> {
-    let directory = directory(store);
-    files::safe_path(&directory)?;
-    let mut entries = BTreeMap::new();
-    if !directory.exists() {
-        return Ok(entries);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InventoryRefusal {
+    Unavailable,
+    Corrupt,
+    Unsupported,
+}
+
+impl std::fmt::Display for InventoryRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Unavailable => "selected outbox unavailable",
+            Self::Corrupt => "selected outbox metadata invalid",
+            Self::Unsupported => "selected outbox layout or bounds unsupported",
+        })
     }
-    let mut total = 0u64;
-    for entry in fs::read_dir(&directory)? {
-        ensure!(
-            entries.len() < MAX_ITEMS,
-            "selected outbox inventory exceeds bound"
-        );
-        let path = entry?.path();
-        let bytes = files::read(&path, MAX_METADATA as u64)?;
-        total = total
-            .checked_add(bytes.len() as u64)
-            .context("selected outbox size overflow")?;
-        ensure!(
-            total <= MAX_METADATA as u64,
-            "selected outbox metadata exceeds bound"
-        );
-        let attempt: SelectedAttempt = serde_json::from_slice(&bytes)
-            .map_err(|_| anyhow::anyhow!("unsupported selected intent metadata"))?;
-        attempt.validate(store.actor_id)?;
-        ensure!(
-            path.file_name().and_then(|p| p.to_str())
-                == Some(&format!("{}.json", attempt.request.operation))
-                && entries.insert(attempt.request.operation, attempt).is_none(),
-            "selected intent filename/identity mismatch"
-        );
+}
+
+fn classify_inventory_io(error: anyhow::Error) -> anyhow::Error {
+    let refusal = if error.downcast_ref::<std::io::Error>().is_some() {
+        InventoryRefusal::Unavailable
+    } else {
+        InventoryRefusal::Unsupported
+    };
+    error.context(refusal)
+}
+
+fn inventory(store: &Store) -> Result<BTreeMap<Uuid, SelectedAttempt>> {
+    use InventoryRefusal::{Corrupt, Unavailable, Unsupported};
+
+    let directory = directory(store);
+    files::safe_path(&directory).map_err(classify_inventory_io)?;
+    let mut entries = BTreeMap::new();
+    match fs::symlink_metadata(&directory) {
+        Ok(metadata) if metadata.is_dir() => (),
+        Ok(_) => return Err(anyhow::anyhow!(Unsupported)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(entries),
+        Err(error) => return Err(anyhow::Error::new(error).context(Unavailable)),
+    }
+    let mut remaining = MAX_METADATA;
+    for entry in fs::read_dir(&directory).context(Unavailable)? {
+        if entries.len() >= MAX_ITEMS {
+            return Err(anyhow::anyhow!(Unsupported));
+        }
+        let path = entry.context(Unavailable)?.path();
+        let bytes = files::read(&path, remaining as u64).map_err(classify_inventory_io)?;
+        remaining -= bytes.len();
+        let attempt: SelectedAttempt = serde_json::from_slice(&bytes).context(Corrupt)?;
+        attempt.validate(store.actor_id).context(Corrupt)?;
+        if path.file_name().and_then(|p| p.to_str())
+            != Some(&format!("{}.json", attempt.request.operation))
+            || entries.insert(attempt.request.operation, attempt).is_some()
+        {
+            return Err(anyhow::anyhow!(Corrupt));
+        }
     }
     Ok(entries)
 }
