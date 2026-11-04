@@ -8,20 +8,24 @@ Its output is at most65,536 bytes. An older executable can refuse the unknown fl
 do not substitute its historical storage schema or infer support from an app tag.
 
 The document uses JSON Schema 2020-12 and the independent identity
-`urn:remarkable-buddies:configuration-object-schema:v1`. This is a document revision,
+`urn:remarkable-buddies:configuration-object-schema:v2`. This is a document revision,
 not a new runtime configuration or storage version. Runtime `config_schema_version`
 remains1. Legacy storage contracts 1/2/3 and their capabilities remain unchanged.
 No separate installed schema file, running query service or schema engine is needed.
 
-The root object has thirteen supported properties: config_schema_version, model,
+The root object has fourteen supported properties: config_schema_version, model,
 base_url, trigger_corner, log_level, debug_dump, model_credential, paths, sync,
-memory, personalization, research_policy and product_settings. Unknown properties
+memory, reader, personalization, research_policy and product_settings. Unknown properties
 refuse. Whole objects may be omitted where Config supplies defaults; a present
 paths object still requires data, cache and credentials. Ordinary optional values
-and research/product parents accept null, while paths/sync/memory/personalization
+and research/product parents accept null, while paths/sync/memory/reader/personalization
 parents do not. Product settings accept null/empty/version-only/partial parents,
 with true/true/mem effective defaults and non-null declared leaves. Defaults are
 annotations only: consumers must not insert them as new saved choices.
+
+The Reader object accepts an omitted or null selection. A declared selection
+requires group, key_sha256 and binding_sha256. Selected startup validates the
+scope and rejects legacy sync before credentials or device setup.
 
 This schema describes the canonical object form supported by saved inspection.
 The legacy loader's permissive Serde positional-array spellings are unchanged and
@@ -42,7 +46,7 @@ loader behavior is unchanged. Schema success is not complete configuration admis
   separate. This command neither reads secrets nor verifies or changes live state.
 
 For development, `scripts/check_configuration_schema.mjs` replays the actual CLI
-document through an existing Ajv Draft 2020-12 module and the shared 41-case corpus:
+document through an existing Ajv Draft 2020-12 module and the shared 52-case corpus:
 pass `--validator /existing/ajv/dist/2020.js --binary /built/reader-buddy` to Node.
 It validates the meta-schema, checks expected structural outcomes and proves that
 defaults do not mutate inputs. Rust separately checks original corpus bytes through
