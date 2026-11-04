@@ -54,7 +54,8 @@ pub struct Args {
     #[cfg(all(
         target_os = "linux",
         feature = "development-resident-bootstrap",
-        feature = "development-input-diagnostics"
+        feature = "development-input-diagnostics",
+        not(feature = "installed-resident-output")
     ))]
     #[arg(long, exclusive = true)]
     development_resident_output_plan: Option<std::path::PathBuf>,
@@ -675,7 +676,8 @@ fn main() -> Result<()> {
         }
         #[cfg(all(
             feature = "development-resident-bootstrap",
-            feature = "development-input-diagnostics"
+            feature = "development-input-diagnostics",
+            not(feature = "installed-resident-output")
         ))]
         anyhow::ensure!(
             args.development_resident_output_plan.is_none() || resident_selection.is_some(),
@@ -685,13 +687,16 @@ fn main() -> Result<()> {
             workflow.configure_resident_source(selection, store.clone())?;
             #[cfg(all(
                 feature = "development-resident-bootstrap",
-                feature = "development-input-diagnostics"
+                feature = "development-input-diagnostics",
+                not(feature = "installed-resident-output")
             ))]
             if let Some(plan) = args.development_resident_output_plan.as_deref() {
                 workflow.configure_development_resident_output(plan)?;
             } else {
                 workflow.configure_installed_resident_output()?;
             }
+            #[cfg(feature = "installed-resident-output")]
+            workflow.configure_installed_resident_output()?;
         }
         workflow
     };
@@ -954,7 +959,8 @@ mod tests {
                 #[cfg(all(
                     target_os = "linux",
                     feature = "development-resident-bootstrap",
-                    feature = "development-input-diagnostics"
+                    feature = "development-input-diagnostics",
+                    not(feature = "installed-resident-output")
                 ))]
                 "development-resident-output-plan",
                 "export-note",

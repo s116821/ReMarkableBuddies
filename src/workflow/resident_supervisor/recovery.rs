@@ -491,23 +491,22 @@ impl Profile {
             feature = "development-input-diagnostics"
         ))]
         {
+            #[cfg(not(feature = "installed-resident-output"))]
             use crate::workflow::resident_output::development::{
                 ADAPTER, PROFILE, REPEAT_ADAPTER, REPEAT_PROFILE,
             };
-            const INSTALLED_READER_INSERT: (&str, &str) = (
+            let matches_adapter = |profile, adapter| {
+                self.native_profile_sha256 == hex_digest(profile)
+                    && self.adapter_sha256 == hex_digest(adapter)
+            };
+            let approved_adapter = matches_adapter(
                 "f49f297717cc09cf21fad47e52d47a4faad0c84f4fed4f98ca69ddb41b96b146",
                 "8fc60498eb404f5a833d4b4ec4c99b76080f146012c76eb1ea7cb55d44b2b62c",
             );
-            let approved_adapter = [
-                (PROFILE, ADAPTER),
-                (REPEAT_PROFILE, REPEAT_ADAPTER),
-                INSTALLED_READER_INSERT,
-            ]
-            .iter()
-            .any(|(profile, adapter)| {
-                self.native_profile_sha256 == hex_digest(profile)
-                    && self.adapter_sha256 == hex_digest(adapter)
-            });
+            #[cfg(not(feature = "installed-resident-output"))]
+            let approved_adapter = approved_adapter
+                || matches_adapter(PROFILE, ADAPTER)
+                || matches_adapter(REPEAT_PROFILE, REPEAT_ADAPTER);
             self.version == 5
                 && self.source_mode.as_deref() == Some("resident-installed-output-v1")
                 && self.companion.as_deref() == Some(service::vendor::PROFILE_ID)
@@ -524,7 +523,8 @@ impl Profile {
     fn development_definition(&self) -> bool {
         #[cfg(all(
             feature = "development-resident-bootstrap",
-            feature = "development-input-diagnostics"
+            feature = "development-input-diagnostics",
+            not(feature = "installed-resident-output")
         ))]
         if self.version == 4
             && self.source_mode.as_deref() == Some("resident-development-output-v1")
