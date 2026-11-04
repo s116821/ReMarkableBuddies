@@ -437,6 +437,15 @@ impl NativeOutputBackend {
         if image.dimensions() != (1404, 1872) {
             return Ok(false);
         }
+        // Cover both observed heading positions independently of the toolbar/footer.
+        let clear = |top, bottom| {
+            (top..bottom).all(|y| {
+                (200..1240).all(|x| {
+                    let [r, g, b, a] = image.get_pixel(x, y).0;
+                    a == 255 && r >= 245 && g >= 245 && b >= 245
+                })
+            })
+        };
         let ordinary = match content["fileType"].as_str() {
             Some("notebook")
                 if self
@@ -447,15 +456,6 @@ impl NativeOutputBackend {
                 if page["template"]["value"] != "Blank" || page.get("redir").is_some() {
                     return Ok(false);
                 }
-                // Cover both observed heading positions independently of the toolbar/footer.
-                let clear = |top, bottom| {
-                    (top..bottom).all(|y| {
-                        (200..1240).all(|x| {
-                            let [r, g, b, a] = image.get_pixel(x, y).0;
-                            a == 255 && r >= 245 && g >= 245 && b >= 245
-                        })
-                    })
-                };
                 let allow_missing_ink = blank_start_source && clear(110, 1720);
                 clear(110, 330) && Self::stable_ink_only(facts, allow_missing_ink)?
             }
@@ -468,9 +468,6 @@ impl NativeOutputBackend {
                 let original_count = content["cPages"]["original"]["value"]
                     .as_u64()
                     .context("original PDF page count absent")?;
-                let Some(redirect) = page["redir"]["value"].as_u64() else {
-                    return Ok(false);
-                };
                 let mut redirects = std::collections::HashSet::new();
                 for candidate in pages
                     .iter()
@@ -483,11 +480,24 @@ impl NativeOutputBackend {
                         return Ok(false);
                     }
                 }
+                let allow_missing_ink = match page.get("redir") {
+                    Some(_) => true,
+                    // Stock Add note page produces an unredirected, untemplated
+                    // record. Require both saved ink and visible body marks.
+                    None if self.plan.is_none()
+                        && page.get("template").is_none()
+                        && !redirects.is_empty()
+                        && clear(110, 330)
+                        && !clear(330, 1720) =>
+                    {
+                        false
+                    }
+                    None => return Ok(false),
+                };
                 let path = root.join(format!("{}.pdf", facts.page().document));
                 let pdf = Self::read_native_file(&path, 16 * 1024 * 1024)?;
-                redirects.contains(&redirect)
-                    && pdf.starts_with(b"%PDF-")
-                    && Self::stable_ink_only(facts, true)?
+                pdf.starts_with(b"%PDF-")
+                    && Self::stable_ink_only(facts, allow_missing_ink)?
                     && pdf == Self::read_native_file(&path, 16 * 1024 * 1024)?
             }
             _ => false,
