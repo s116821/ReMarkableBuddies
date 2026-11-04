@@ -1,0 +1,301 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:remarkable-buddies:configuration-object-schema:v1",
+  "title": "Canonical saved configuration object declarations",
+  "description": "Structural description of canonical object declarations for runtime config_schema_version 1. This schema document has an independent identity. Defaults are annotations, never instructions to insert declarations. Legacy permissive Serde positional arrays are outside this canonical form; the loader is unchanged. Schema success is not complete parser, semantic, filesystem, credential or runtime admission.",
+  "$comment": "One JSON document within the saved 1 MiB byte bound is required. Duplicate members, lexical integer tokens (1.0 is not an integer token for the Rust parser), UTF8 byte lengths, trimmed nonempty values, UUID parsing/nil/identity checks, cross-field memory/sync rules, safe roots/permissions/ownership, credentials and runtime activation remain existing typed/parser checks. JSON Schema maxLength counts Unicode code points, not UTF8 bytes. No format annotation grants path or credential authority.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "config_schema_version": {
+      "const": 1,
+      "default": 1,
+      "description": "Runtime configuration version; independent of this schema document identity. Plain integer token required by existing parser."
+    },
+    "model": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Existing trimmed nonempty and UTF8 byte bounds remain authoritative."
+    },
+    "base_url": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Nonsecret declaration; this is not an endpoint validity/provider connectivity claim."
+    },
+    "trigger_corner": {
+      "enum": [
+        "UR",
+        "UL",
+        "LR",
+        "LL",
+        null
+      ],
+      "default": null
+    },
+    "log_level": {
+      "enum": [
+        "off",
+        "error",
+        "warn",
+        "info",
+        "debug",
+        "trace",
+        null
+      ],
+      "default": null
+    },
+    "debug_dump": {
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "default": null
+    },
+    "model_credential": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^[A-Za-z0-9_-]+$",
+          "not": {
+            "pattern": "[^A-Za-z0-9_-]"
+          }
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Protected credential reference name only; no credential bytes or authority."
+    },
+    "paths": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "type": "string"
+        },
+        "cache": {
+          "type": "string"
+        },
+        "credentials": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "data",
+        "cache",
+        "credentials"
+      ],
+      "description": "Missing whole paths uses platform defaults; a present object requires all three strings. Absolute/nonoverlapping/owned/symlink-safe roots require filesystem validation."
+    },
+    "sync": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "namespaces": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "conversation",
+              "source",
+              "export-association",
+              "subject-memory",
+              "handwriting"
+            ]
+          },
+          "default": []
+        },
+        "media": {
+          "type": "boolean",
+          "default": false
+        },
+        "max_media_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 268435456,
+          "default": 33554432
+        },
+        "poll_seconds": {
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 3600,
+          "default": 60
+        },
+        "batch_items": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128,
+          "default": 32
+        },
+        "collection": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/uuid"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "create_new": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "description": "Missing members use existing SyncPolicy defaults. Collection, selected-memory and namespace relationships remain typed semantic checks."
+    },
+    "memory": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "profile": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/uuid"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "selection": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/catalog"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "description": "Profile required when enabled; selected profile matching and selected/sync eligibility remain typed semantic checks."
+    },
+    "personalization": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": 1,
+          "default": 1
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 16384,
+          "not": {
+            "pattern": "\u0000"
+          },
+          "default": ""
+        }
+      },
+      "description": "Existing text limit is16384 UTF8 bytes, not code points; this structural maxLength is necessary but insufficient for multibyte input."
+    },
+    "research_policy": {
+      "enum": [
+        "required",
+        "disabled",
+        null
+      ],
+      "description": "Absent/null means effective required. Absent versus explicitly null declarations are preserved by typed edits; no default is inserted."
+    },
+    "product_settings": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "schema_version": {
+              "const": 1,
+              "default": 1
+            },
+            "reader_enabled": {
+              "type": "boolean",
+              "default": true
+            },
+            "writer_enabled": {
+              "type": "boolean",
+              "default": true
+            },
+            "export_destination": {
+              "enum": [
+                "mem",
+                "disabled"
+              ],
+              "default": "mem"
+            }
+          },
+          "description": "Absent/null/empty/version-only/partial object is valid. Present leaves cannot be null. Effective defaults are not newly saved declarations; backend preference is not account/destination configuration."
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Absent and explicit null parent remain distinct declarations even though both use effective defaults."
+    }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "description": "Existing UUID parsing and nonnil/identity checks remain required. Accepted saved spellings include canonical/uppercase, compact, urn:uuid and braced forms; this schema does not impose a narrower format annotation."
+    },
+    "catalog": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "group": {
+          "$ref": "#/$defs/uuid"
+        },
+        "profile": {
+          "$ref": "#/$defs/uuid"
+        },
+        "binding_sha256": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "required": [
+        "group",
+        "profile",
+        "binding_sha256"
+      ]
+    }
+  }
+}

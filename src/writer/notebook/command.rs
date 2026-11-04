@@ -537,6 +537,9 @@ pub fn run(config_path: Option<PathBuf>, request: Request) -> Report {
             .preflight()
             .map_err(|_| runner::Failure::InvalidInput)?;
         let config = Config::load(config_path).map_err(|_| runner::Failure::Storage)?;
+        if !config.admits_writer(request.joined().is_some()) {
+            return Err(runner::Failure::Unsupported);
+        }
         let preference = config
             .personalization_snapshot()
             .map_err(|_| runner::Failure::Storage)?;
