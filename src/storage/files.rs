@@ -181,7 +181,9 @@ pub fn safe_path(path: &Path) -> Result<()> {
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
-            Err(_) => anyhow::bail!("cannot validate owned path"),
+            Err(error) => {
+                return Err(anyhow::Error::new(error).context("cannot validate owned path"))
+            }
         }
     }
     for forbidden in [
