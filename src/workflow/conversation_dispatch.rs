@@ -34,7 +34,7 @@ impl RuntimeRoute {
 pub struct Dispatch<'a> {
     config: &'a Config,
     store: Arc<crate::storage::Store>,
-    _local: crate::mode_maintenance::OrdinaryLifetime,
+    _local: crate::mode_maintenance::LocalDispatchLifetime,
     blank_events: std::collections::BTreeSet<Uuid>,
 }
 
@@ -48,7 +48,7 @@ impl<'a> Dispatch<'a> {
         Ok(Self {
             config,
             store: ledger.store().clone(),
-            _local: crate::mode_maintenance::admit_ordinary(ledger.store(), false)?,
+            _local: crate::mode_maintenance::admit_local_dispatch(ledger.store())?,
             blank_events: Default::default(),
         })
     }
@@ -155,7 +155,7 @@ impl<'a> Dispatch<'a> {
         request: &writer::Request,
         admitted: &RequestScope,
         observe: &mut dyn FnMut() -> Result<SourceObservation>,
-    ) -> Result<writer::Report> {
+    ) -> Result<(writer::Report, Option<PendingOutput>)> {
         self.require_ledger(ledger)?;
         ensure!(self.admits(Mode::Writer, false), "Writer disabled");
         ensure!(
@@ -175,14 +175,24 @@ impl<'a> Dispatch<'a> {
         }
         admitted.check(ledger, observe)?;
         let preference = self.config.personalization_snapshot()?;
-        Ok(writer::run_receiving(
+        let (report, selection) = writer::run_receiving(
             ledger,
             engine,
             request,
             &preference,
             &mut || !observe().is_ok_and(|current| current == admitted.source),
             Some(admitted.root.clone()),
-        ))
+        );
+        let output = selection
+            .zip(report.draft)
+            .map(|(selection, id)| PendingOutput {
+                id,
+                mode: Mode::Writer,
+                conversation: admitted.conversation,
+                root: selection.root,
+                source: admitted.source.clone(),
+            });
+        Ok((report, output))
     }
 
     pub(crate) fn reader(
@@ -193,7 +203,7 @@ impl<'a> Dispatch<'a> {
         history_range: Option<TurnRange>,
         admitted: &RequestScope,
         observe: &mut dyn FnMut() -> Result<SourceObservation>,
-    ) -> Result<ReaderDraft> {
+    ) -> Result<PendingOutput> {
         self.require_ledger(ledger)?;
         ensure!(self.admits(Mode::Reader, false), "Reader disabled");
         ensure!(
@@ -284,8 +294,9 @@ impl<'a> Dispatch<'a> {
             draft.clone(),
             vec![],
         )?;
-        Ok(ReaderDraft {
+        Ok(PendingOutput {
             id: draft.id,
+            mode: Mode::Reader,
             conversation: draft.conversation,
             root: ExpectedHeads(
                 saved
@@ -298,23 +309,68 @@ impl<'a> Dispatch<'a> {
         })
     }
 
+    pub(crate) fn notebook<E: LLMEngine>(
+        &mut self,
+        ledger: &Ledger,
+        engine: &mut E,
+        request: &writer::notebook::command::Request,
+        frozen: Option<writer::notebook::ValidatedNotebook>,
+        admitted: &RequestScope,
+        observe: &mut dyn FnMut() -> Result<SourceObservation>,
+    ) -> Result<(writer::notebook::runner::Report, Option<PendingOutput>)> {
+        use writer::notebook::{command, runner};
+        self.require_ledger(ledger)?;
+        ensure!(self.admits(Mode::Writer, false), "Writer disabled");
+        ensure!(
+            request.conversation() == admitted.conversation
+                && request.operation() == admitted.operation,
+            "notebook request identity changed"
+        );
+        admitted.check(ledger, observe)?;
+        let input = command::prepare_receiving(
+            ledger,
+            request,
+            &self.config.personalization_snapshot()?,
+            frozen,
+            &admitted.root,
+            admitted.source.document,
+        )?;
+        admitted.check(ledger, observe)?;
+        let result = runner::run(ledger, engine, input, &mut || {
+            !observe().is_ok_and(|current| current == admitted.source)
+        });
+        let output = result.finalized.map(|finalized| PendingOutput {
+            id: finalized.draft().record_id,
+            mode: Mode::Writer,
+            conversation: admitted.conversation,
+            root: ExpectedHeads(std::collections::BTreeSet::from([finalized
+                .root()
+                .revision_id])),
+            source: admitted.source.clone(),
+        });
+        Ok((result.report, output))
+    }
+
     /// Record the page owner's verified result. This path never emits native
     /// input or treats the draft itself as render authority.
-    pub(crate) fn record_reader_output(
+    pub(crate) fn record_output(
         &mut self,
         ledger: &Ledger,
         admitted: &RequestScope,
-        draft: ReaderDraft,
+        draft: &PendingOutput,
         evidence: crate::conversation::CompletionEvidence,
         observe: &mut dyn FnMut() -> Result<SourceObservation>,
     ) -> Result<()> {
         self.require_ledger(ledger)?;
-        ensure!(self.admits(Mode::Reader, false), "Reader disabled");
+        ensure!(
+            self.admits(draft.mode.clone(), false),
+            "receiving buddy disabled"
+        );
         ensure!(
             draft.conversation == admitted.conversation
                 && draft.root == admitted.root
                 && draft.source == admitted.source,
-            "Reader draft ownership changed"
+            "draft ownership changed"
         );
         admitted.check(ledger, observe)?;
         let mut turn = ledger
@@ -324,32 +380,41 @@ impl<'a> Dispatch<'a> {
                 crate::conversation::Record::Turn(turn) if turn.id == draft.id => Some(turn),
                 _ => None,
             })
-            .ok_or_else(|| anyhow::anyhow!("Reader draft unavailable"))?;
+            .ok_or_else(|| anyhow::anyhow!("draft unavailable"))?;
         ensure!(
-            turn.mode == Mode::Reader
+            turn.mode == draft.mode
                 && turn.role == Role::Assistant
                 && turn.outcome == Outcome::Generated
                 && turn.text.as_deref() == Some(evidence.exact_text.as_str())
                 && evidence.native_operation == admitted.operation
                 && evidence.observation == admitted.source,
-            "Reader output evidence does not match the admitted draft"
+            "output evidence does not match the admitted draft"
         );
         let expected_turn = ledger.expected(Namespace::Conversation, draft.id)?;
         turn.outcome = Outcome::Completed;
         turn.completion = Some(evidence);
         admitted.check(ledger, observe)?;
-        ledger.advance(
-            admitted.operation,
-            admitted.root.clone(),
-            expected_turn,
-            turn,
-        )?;
+        if draft.mode == Mode::Writer {
+            // Draft selection for refine/export continues to refer to Generated.
+            // Record the verified visible response separately in its exchange.
+            turn.id = writer::stage(draft.id, "visible-output");
+            turn.sequence = 0;
+            ledger.append(admitted.operation, admitted.root.clone(), turn, vec![])?;
+        } else {
+            ledger.advance(
+                admitted.operation,
+                admitted.root.clone(),
+                expected_turn,
+                turn,
+            )?;
+        }
         Ok(())
     }
 }
 
-pub(crate) struct ReaderDraft {
+pub(crate) struct PendingOutput {
     id: Uuid,
+    mode: Mode,
     conversation: Uuid,
     root: ExpectedHeads,
     source: SourceObservation,

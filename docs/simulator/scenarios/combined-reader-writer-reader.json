@@ -1,5 +1,6 @@
 {
   "mode": "combined",
+  "notebook": true,
   "requests": [
     "  Is x  = 7? ",
     "Make a note.\nKeep  spacing.",

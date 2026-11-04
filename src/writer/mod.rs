@@ -312,7 +312,7 @@ pub fn run<E: LLMEngine>(
     personalization: &PersonalizationSnapshot,
     canceled: &mut dyn FnMut() -> bool,
 ) -> Report {
-    run_receiving(ledger, engine, request, personalization, canceled, None)
+    run_receiving(ledger, engine, request, personalization, canceled, None).0
 }
 
 pub(crate) fn run_receiving<E: LLMEngine>(
@@ -322,15 +322,15 @@ pub(crate) fn run_receiving<E: LLMEngine>(
     personalization: &PersonalizationSnapshot,
     canceled: &mut dyn FnMut() -> bool,
     unified_root: Option<crate::conversation::ExpectedHeads>,
-) -> Report {
+) -> (Report, Option<crate::conversation::WriterSelection>) {
     if let Err(failure) = request.preflight() {
-        return Report::refused(request, failure);
+        return (Report::refused(request, failure), None);
     }
     let Some(owner) = Owner::acquire(ledger.store()) else {
-        return Report::new(request, Status::Busy);
+        return (Report::new(request, Status::Busy), None);
     };
     let mut produced = None;
-    run_owned(
+    let report = run_owned(
         ledger,
         engine,
         request,
@@ -342,7 +342,8 @@ pub(crate) fn run_receiving<E: LLMEngine>(
             expected_root: unified_root,
             produced: &mut produced,
         },
-    )
+    );
+    (report, produced)
 }
 pub(crate) struct OwnedRun<'a, 'store> {
     pub(crate) owner: &'a Owner<'store>,

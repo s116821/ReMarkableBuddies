@@ -17,6 +17,8 @@ use std::{collections::VecDeque, io::Cursor};
 #[serde(deny_unknown_fields)]
 pub(super) struct Scenario {
     mode: String,
+    #[serde(default)]
+    notebook: bool,
     requests: [String; 3],
     replies: [String; 3],
     preference: String,
@@ -63,9 +65,15 @@ fn scope(ledger: &Ledger, conversation: Uuid, source: &SourceObservation) -> Res
     })
 }
 
-fn seed_image(ledger: &Ledger, conversation: Uuid, source: &SourceObservation) -> Result<String> {
+fn seed_image(
+    ledger: &Ledger,
+    conversation: Uuid,
+    source: &SourceObservation,
+    tone: u8,
+) -> Result<String> {
     let mut png = Cursor::new(Vec::new());
-    image::DynamicImage::new_luma8(2, 2).write_to(&mut png, image::ImageFormat::Png)?;
+    image::DynamicImage::ImageLuma8(image::GrayImage::from_pixel(2, 2, image::Luma([tone])))
+        .write_to(&mut png, image::ImageFormat::Png)?;
     let png = png.into_inner();
     let image = Media {
         sha256: digest(&png),
@@ -114,6 +122,19 @@ fn seed_image(ledger: &Ledger, conversation: Uuid, source: &SourceObservation) -
     Ok(STANDARD.encode(png))
 }
 
+fn fixture_source(document: Uuid) -> SourceObservation {
+    SourceObservation {
+        document,
+        page: Uuid::new_v4(),
+        session: "simulated-session".into(),
+        visit: "simulated-visit".into(),
+        content_revision: Some("simulated-content".into()),
+        order_revision: None,
+        capability_revision: "simulated-v1".into(),
+        evidence_procedure: "combined-fixture".into(),
+    }
+}
+
 pub(super) fn run(scenario: Scenario) -> Result<Value> {
     ensure!(scenario.mode == "combined", "invalid combined mode");
     ensure!(
@@ -123,22 +144,17 @@ pub(super) fn run(scenario: Scenario) -> Result<Value> {
             .all(|request| !request.trim().is_empty() && request.len() <= 4096),
         "invalid scripted requests"
     );
+    let notebook_model_calls = scenario
+        .notebook
+        .then(|| run_notebook(&scenario))
+        .transpose()?;
     let fixture = SimulatorLedger::new();
     let ledger = fixture.open()?;
     let conversation = Uuid::new_v4();
     ledger.create(conversation, Uuid::new_v4(), 1)?;
-    let source = SourceObservation {
-        document: scenario.document.document,
-        page: Uuid::new_v4(),
-        session: "simulated-session".into(),
-        visit: "simulated-visit".into(),
-        content_revision: Some("simulated-content".into()),
-        order_revision: None,
-        capability_revision: "simulated-v1".into(),
-        evidence_procedure: "combined-fixture".into(),
-    };
+    let source = fixture_source(scenario.document.document);
     let mut observe = || Ok(source.clone());
-    let image = seed_image(&ledger, conversation, &source)?;
+    let image = seed_image(&ledger, conversation, &source, 0)?;
     let config: Config = serde_json::from_value(
         json!({"personalization":{"enabled":true,"text":scenario.preference}}),
     )?;
@@ -151,6 +167,7 @@ pub(super) fn run(scenario: Scenario) -> Result<Value> {
         "idle interaction arbitration changed"
     );
     let first_reply = scenario.replies[0].clone();
+    let writer_reply = scenario.replies[1].clone();
     let mut engine = Model {
         replies: scenario.replies.into(),
         ..Model::default()
@@ -192,10 +209,10 @@ pub(super) fn run(scenario: Scenario) -> Result<Value> {
         &mut observe,
     )?;
     let output = scope(&ledger, conversation, &source)?;
-    dispatch.record_reader_output(
+    dispatch.record_output(
         &ledger,
         &output,
-        reader_draft,
+        &reader_draft,
         crate::conversation::CompletionEvidence {
             native_operation: output.operation,
             exact_text: first_reply.clone(),
@@ -226,11 +243,45 @@ pub(super) fn run(scenario: Scenario) -> Result<Value> {
         selection: crate::conversation::TextScope::SuppliedNotebook,
         guidance: None,
     };
-    let draft = dispatch.writer(&ledger, &mut engine, &generation, &current, &mut observe)?;
+    let (draft, output) =
+        dispatch.writer(&ledger, &mut engine, &generation, &current, &mut observe)?;
     ensure!(
         draft.status == writer::Status::Generated,
         "combined Writer failed: {:?}",
         draft.failure
+    );
+    let output = output.ok_or_else(|| anyhow::anyhow!("missing Writer output witness"))?;
+    let visible = scope(&ledger, conversation, &source)?;
+    let receipt = crate::conversation::CompletionEvidence {
+        native_operation: visible.operation,
+        exact_text: writer_reply.clone(),
+        observation: source.clone(),
+        procedure: "combined-simulator-writer-readback".into(),
+    };
+    let mut wrong = receipt.clone();
+    wrong.exact_text.push('!');
+    let mut departed = source.clone();
+    departed.visit = "different-visit".into();
+    ensure!(
+        dispatch
+            .record_output(&ledger, &visible, &output, wrong, &mut observe)
+            .is_err(),
+        "mismatched Writer output recorded"
+    );
+    ensure!(
+        dispatch
+            .record_output(&ledger, &visible, &output, receipt.clone(), &mut || Ok(
+                departed.clone()
+            ))
+            .is_err(),
+        "late Writer output recorded"
+    );
+    dispatch.record_output(&ledger, &visible, &output, receipt.clone(), &mut observe)?;
+    ensure!(
+        dispatch
+            .record_output(&ledger, &visible, &output, receipt, &mut observe)
+            .is_err(),
+        "stale Writer output recorded"
     );
     let current = scope(&ledger, conversation, &source)?;
     let export = writer_flow::Request::ExportDraft {
@@ -283,6 +334,8 @@ pub(super) fn run(scenario: Scenario) -> Result<Value> {
         expected.push(request.clone());
         if index == 0 {
             expected.push(first_reply.clone());
+        } else if index == 1 {
+            expected.push(writer_reply.clone());
         }
     }
     ensure!(
@@ -420,7 +473,7 @@ pub(super) fn run(scenario: Scenario) -> Result<Value> {
     );
     ensure!(!ledger.inspect(conversation, false)?.iter().any(|record| matches!(record, Record::Turn(turn) if matches!(turn.text.as_deref(), Some("Late reply" | "Stale reply")))), "unowned output persisted");
     Ok(
-        json!({"mode":"combined","model_calls":engine.seen.len(),"destination_writes":destination.writes(),"blank_starts":opened}),
+        json!({"mode":"combined","model_calls":engine.seen.len(),"notebook_model_calls":notebook_model_calls,"destination_writes":destination.writes(),"blank_starts":opened}),
     )
 }
 
@@ -431,4 +484,197 @@ fn maintained_combined_fixture_runs() {
     ))
     .unwrap();
     run(scenario).unwrap();
+}
+
+fn run_notebook(scenario: &Scenario) -> Result<usize> {
+    use writer::notebook::{
+        command::{Generate, Refine, Request},
+        runner::Status,
+        ValidatedNotebook,
+    };
+    let fixture = SimulatorLedger::new();
+    let ordinary = fixture.open()?;
+    let paths = ordinary.store().paths.clone();
+    drop(ordinary);
+    let ledger = Ledger::new(std::sync::Arc::new(
+        crate::storage::Store::prepare_notebook(paths)?,
+    ));
+    let conversation = Uuid::new_v4();
+    ledger.create(conversation, Uuid::new_v4(), 1)?;
+    let source = fixture_source(scenario.document.document);
+    let mut observe = || Ok(source.clone());
+    let image = seed_image(&ledger, conversation, &source, 0)?;
+    let config = Config::default();
+    let mut dispatch = Dispatch::local(&config, &ledger)?;
+    let admitted = scope(&ledger, conversation, &source)?;
+    let raw = serde_json::to_vec(&scenario.document)?;
+    let sha256 = digest(&raw);
+    let frozen = ValidatedNotebook::from_bytes(&raw, &sha256)?;
+    let request = Request::GenerateNotebook(Box::new(Generate {
+        conversation,
+        operation: admitted.operation,
+        request: scenario.requests[1].clone(),
+        document_file: fixture.0.join("unused-owner-frozen-input.json"),
+        document_sha256: sha256,
+        selection: crate::conversation::TextScope::SuppliedNotebook,
+        guidance: None,
+        max_model_calls: 2,
+        history_range: None,
+    }));
+    let response = scenario.replies[1].clone();
+    let mut model = Model {
+        replies: ["x = 7".to_owned(), response.clone()].into(),
+        ..Model::default()
+    };
+    let (report, output) = dispatch.notebook(
+        &ledger,
+        &mut model,
+        &request,
+        Some(frozen.clone()),
+        &admitted,
+        &mut observe,
+    )?;
+    ensure!(
+        report.status == Status::Generated && model.seen.len() == 2,
+        "routed notebook failed: {:?}",
+        report.failure
+    );
+    ensure!(
+        model.seen[0].1.is_empty() && model.seen[1].1 == [image.clone()],
+        "notebook stage attachments changed"
+    );
+    let reduce: Value = serde_json::from_str(
+        model.seen[1]
+            .0
+            .last()
+            .ok_or_else(|| anyhow::anyhow!("reducer payload absent"))?,
+    )?;
+    ensure!(
+        reduce["request"] == scenario.requests[1]
+            && reduce["history"][0]["text"] == "Earlier image question?"
+            && reduce["historical_png_base64_sha256"] == json!([digest(image.as_bytes())]),
+        "reducer receiving context changed"
+    );
+    let visible = scope(&ledger, conversation, &source)?;
+    let draft = report
+        .draft
+        .ok_or_else(|| anyhow::anyhow!("notebook draft absent"))?;
+    dispatch.record_output(
+        &ledger,
+        &visible,
+        &output.ok_or_else(|| anyhow::anyhow!("notebook output witness absent"))?,
+        crate::conversation::CompletionEvidence {
+            native_operation: visible.operation,
+            exact_text: response.clone(),
+            observation: source.clone(),
+            procedure: "simulated-notebook-writer-readback".into(),
+        },
+        &mut observe,
+    )?;
+    let current = scope(&ledger, conversation, &source)?;
+    let mut repeated = scope(&ledger, conversation, &source)?;
+    repeated.operation = admitted.operation;
+    ensure!(
+        dispatch
+            .notebook(
+                &ledger,
+                &mut model,
+                &request,
+                Some(frozen),
+                &repeated,
+                &mut observe
+            )
+            .is_err(),
+        "routed notebook operation replayed"
+    );
+    model.replies.push_back(scenario.replies[2].clone());
+    dispatch.reader(
+        &ledger,
+        &mut model,
+        &scenario.requests[2],
+        None,
+        &current,
+        &mut observe,
+    )?;
+    ensure!(model.seen.len() == 3, "notebook route model count changed");
+    let reader: Value = serde_json::from_str(
+        model.seen[2]
+            .0
+            .last()
+            .ok_or_else(|| anyhow::anyhow!("Reader payload absent"))?,
+    )?;
+    ensure!(
+        reader["history"][2]["text"] == response && model.seen[2].1 == [image],
+        "notebook handback changed"
+    );
+    let refinement = scope(&ledger, conversation, &source)?;
+    let request = Request::RefineNotebook(Box::new(Refine {
+        conversation,
+        operation: refinement.operation,
+        request: "Keep the original units.".into(),
+        draft,
+        max_model_calls: 2,
+        history_range: None,
+    }));
+    let cancel = std::rc::Rc::new(std::cell::Cell::new(false));
+    let flag = cancel.clone();
+    let mut late = Model {
+        replies: ["Late map result".to_owned()].into(),
+        after_execute: Some(Box::new(move || {
+            flag.set(true);
+            Ok(())
+        })),
+        ..Model::default()
+    };
+    let (refused, output) =
+        dispatch.notebook(&ledger, &mut late, &request, None, &refinement, &mut || {
+            ensure!(!cancel.get(), "simulated notebook cancellation");
+            Ok(source.clone())
+        })?;
+    ensure!(
+        refused.status == Status::Canceled && output.is_none() && late.seen.len() == 1,
+        "canceled notebook refinement continued"
+    );
+    Ok(model.seen.len())
+}
+
+#[test]
+fn unavailable_or_over_budget_history_never_reaches_the_reader_model() -> Result<()> {
+    for missing in [true, false] {
+        let fixture = SimulatorLedger::new();
+        let ledger = fixture.open()?;
+        let conversation = Uuid::new_v4();
+        ledger.create(conversation, Uuid::new_v4(), 1)?;
+        let source = fixture_source(Uuid::new_v4());
+        for tone in 0..if missing { 1 } else { 13 } {
+            let image = seed_image(&ledger, conversation, &source, tone)?;
+            if missing {
+                let data = &ledger.store().paths.data;
+                let generation: Uuid =
+                    serde_json::from_slice(&std::fs::read(data.join("CURRENT"))?)?;
+                let object = data
+                    .join("generations")
+                    .join(generation.to_string())
+                    .join("objects")
+                    .join(digest(&STANDARD.decode(image)?));
+                std::fs::remove_file(object)?;
+            }
+        }
+        let config = Config::default();
+        let mut dispatch = Dispatch::local(&config, &ledger)?;
+        let admitted = scope(&ledger, conversation, &source)?;
+        let mut model = Model::default();
+        assert!(dispatch
+            .reader(
+                &ledger,
+                &mut model,
+                "Use the images",
+                None,
+                &admitted,
+                &mut || Ok(source.clone())
+            )
+            .is_err());
+        assert!(model.seen.is_empty());
+    }
+    Ok(())
 }
