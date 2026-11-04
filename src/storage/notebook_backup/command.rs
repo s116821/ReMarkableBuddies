@@ -48,6 +48,34 @@ fn empty_if_present(path: &Path) -> Result<()> {
     }
 }
 
+pub(crate) fn check_destination(paths: &StorePaths, destination: &Path) -> Result<()> {
+    use crate::{restore_maintenance::overlap, storage::inspection::canonical_with_missing_tail};
+
+    paths.validate()?;
+    files::safe_path(destination)?;
+    let parent = destination.parent().context("archive parent absent")?;
+    directory(parent)?;
+    let destination = parent
+        .canonicalize()?
+        .join(destination.file_name().context("archive name absent")?);
+    let canonical =
+        |path: &Path| canonical_with_missing_tail(path).context("owned root unavailable");
+    let roots = [
+        canonical(&paths.data)?,
+        canonical(&paths.cache)?,
+        canonical(&paths.credentials)?,
+    ];
+    for (index, root) in roots.iter().enumerate() {
+        for other in roots[index + 1..].iter().chain([&destination]) {
+            ensure!(
+                !overlap(root, other).map_err(|_| anyhow::anyhow!("path comparison failed"))?,
+                "notebook archive paths overlap"
+            );
+        }
+    }
+    Ok(())
+}
+
 pub(crate) struct ExportSource {
     custody: ExistingCustody,
     budget: selection::SelectedReadBudget,
@@ -122,9 +150,7 @@ impl ExportSource {
             backup,
             bytes,
         } = prepared;
-        let parent = destination.parent().context("archive parent absent")?;
-        directory(parent)?;
-        files::safe_path(destination)?;
+        check_destination(&self.custody.paths, destination)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;

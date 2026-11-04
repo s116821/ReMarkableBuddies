@@ -4,7 +4,7 @@ use crate::{
     storage::{
         files,
         maintenance::Refusal,
-        notebook_archive::{Detached, ExportSource, Witness},
+        notebook_archive::{check_destination, Detached, ExportSource, Witness},
         sync::mode::{OrdinaryModeLease, SyncMode, SyncModeLease},
         BackupInspection, Store,
     },
@@ -274,6 +274,9 @@ pub fn run(
         return Report::new(operation, Status::InvalidInput);
     }
     if operation == Operation::ExportNotebook {
+        if check_destination(&config.paths, &request.path).is_err() {
+            return Report::new(operation, Status::InvalidInput);
+        }
         return export_notebook(config, &request.path);
     }
     match Store::open_existing_for_archive(config.paths) {

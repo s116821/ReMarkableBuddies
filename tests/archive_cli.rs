@@ -650,3 +650,53 @@ fn notebook_archive_cli_refuses_busy_wrong_format_and_incomplete_admission() {
     assert_eq!(run(&f, "export-notebook", &path)["status"], "unsupported");
     assert!(!path.exists());
 }
+
+#[cfg(windows)]
+#[test]
+fn notebook_archive_cli_refuses_case_aliases_without_changing_owned_paths() {
+    fn snapshot(root: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Option<Vec<u8>>> {
+        let mut result = std::collections::BTreeMap::new();
+        for entry in fs::read_dir(root).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                result.extend(snapshot(&path));
+                result.insert(path, None);
+            } else {
+                result.insert(path.clone(), Some(fs::read(path).unwrap()));
+            }
+        }
+        result
+    }
+
+    let f = Fixture::new();
+    let paths = f.paths();
+    drop(Store::prepare_notebook(paths.clone()).unwrap());
+    let before = snapshot(&paths.data);
+    let alias = f.root.join("DATA");
+    assert_ne!(alias, paths.data);
+    assert_eq!(
+        fs::read(alias.join("CURRENT")).unwrap(),
+        fs::read(paths.data.join("CURRENT")).unwrap()
+    );
+    let destination = alias.join("new-archive");
+    assert_eq!(
+        run(&f, "export-notebook", &destination)["status"],
+        "invalid-input"
+    );
+    assert!(!destination.exists());
+
+    let mut aliased = paths.clone();
+    aliased.cache = alias.join("cache");
+    fs::write(
+        f.root.join("config.json"),
+        serde_json::to_vec(&json!({"paths":aliased})).unwrap(),
+    )
+    .unwrap();
+    let destination = f.root.join("external-archive");
+    assert_eq!(
+        run(&f, "export-notebook", &destination)["status"],
+        "invalid-input"
+    );
+    assert!(!destination.exists());
+    assert_eq!(snapshot(&paths.data), before);
+}
