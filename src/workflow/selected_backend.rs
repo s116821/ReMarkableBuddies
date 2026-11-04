@@ -53,6 +53,9 @@ impl SelectedBackendFacade {
     pub(crate) fn binding(&self) -> ReaderBackendBinding {
         self.binding.clone()
     }
+    pub(super) fn admission(&self) -> Arc<SelectedAdmission> {
+        self.admission.clone()
+    }
     /// Uses this facade's existing admission, without exposing its mutable backend.
     pub(super) fn inspect_buddy_binding(
         &self,
