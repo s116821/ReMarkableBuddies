@@ -198,6 +198,8 @@ fn actual_cli_refuses_competing_one_shot_selectors_without_dispatch() {
         vec!["--export-note"],
         vec!["--personalization-operation", "inspect"],
         memory.to_vec(),
+        vec!["--configuration-schema"],
+        vec!["--product-settings-operation", "inspect"],
     ] {
         for conversation_first in [false, true] {
             let flags = if conversation_first {

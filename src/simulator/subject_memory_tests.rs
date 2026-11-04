@@ -168,7 +168,7 @@ fn selected_reader_revalidates_after_model_and_at_actual_journal_boundary_withou
         };
         let mut reader = Orchestrator::new(workflow, model, ledger);
         reader.set_trigger_enabled(false);
-        reader.set_subject_memory(Some(provider));
+        reader.set_selected_subject_memory(provider);
         let result = reader.run_iteration();
         assert_eq!(result.is_ok(), mode == 2);
         assert_eq!(calls.borrow().len(), if mode == 3 { 2 } else { 3 });

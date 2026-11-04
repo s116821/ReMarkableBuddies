@@ -11,6 +11,22 @@ const workflow = name => parse(readFileSync(path.join(root, '.github/workflows',
 const expr = text => String.fromCharCode(36) + '{{ ' + text + ' }}';
 const manager = false;
 
+test('configuration schema replay reuses the locked engine and proven normal host binary', () => {
+  const checks = workflow('ci').jobs.checks.steps;
+  const step = checks.find(s => s.name === 'Validate embedded configuration schema using the existing host command');
+  assert(step);
+  assert.equal(step.env.CARGO_MESSAGES, expr('runner.temp') + '/current-cargo-test.jsonl');
+  assert.match(step.run, /from capture_producer import select_command/);
+  assert.match(step.run, /check_configuration_schema\.mjs --validator.*fixtures\/node_modules\/ajv\/dist\/2020\.js.*--binary "\$binary"/);
+  assert(!/cargo (build|test)|npm (install|ci)/.test(step.run));
+  assert(checks.indexOf(step) > checks.findIndex(s => /npm audit --prefix cicd\/release\/fixtures/.test(s.run ?? '')));
+  assert(checks.indexOf(step) > checks.findIndex(s => /cargo test --locked --all-features --message-format=json/.test(s.run ?? '')));
+  const pkg = JSON.parse(readFileSync(path.join(root, 'cicd/release/fixtures/package.json'), 'utf8'));
+  const lock = JSON.parse(readFileSync(path.join(root, 'cicd/release/fixtures/package-lock.json'), 'utf8'));
+  assert.equal(pkg.devDependencies.ajv, '8.20.0');
+  assert.equal(lock.packages['node_modules/ajv'].version, pkg.devDependencies.ajv);
+});
+
 test('native bootstrap diagnostics stay outside official release inventory', () => {
   const pipeline = workflow('pipeline');
   const build = pipeline.jobs.build;

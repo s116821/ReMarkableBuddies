@@ -600,6 +600,8 @@ fn selected_outbox_inventory_recovers_original_stale_and_withdrawn_custody() {
         fs::read(directory.join(format!("{}.json", b.operation))).unwrap(),
         before_b
     );
+    drop(store);
+    assert_report(f.paths(), "ok", Some((1, 1)));
 }
 
 #[test]
@@ -633,4 +635,183 @@ fn selected_outbox_inventory_refuses_whole_corrupt_journal_without_mutation() {
     assert_eq!(store.selected_attempt_inventory().unwrap().len(), 1);
     assert_eq!(selected(&store, current.token.scope()).token, current.token);
     assert_eq!(fs::read(&path).unwrap(), original);
+}
+
+fn assert_report(paths: StorePaths, status: &str, counts: Option<(usize, usize)>) {
+    let mut bytes = Vec::new();
+    crate::outbox_status::inspect(paths)
+        .write_to(&mut bytes)
+        .unwrap();
+    let counts = match counts {
+        Some((pending, withdrawn)) => format!(r#"{{"pending":{pending},"withdrawn":{withdrawn}}}"#),
+        None => "null".into(),
+    };
+    assert_eq!(
+        String::from_utf8(bytes).unwrap(),
+        format!(
+            "{{\"report_version\":1,\"operation\":\"inspect-selected-outbox\",\"status\":\"{status}\",\"counts\":{counts}}}\n"
+        )
+    );
+}
+
+#[test]
+fn selected_outbox_report_checks_actual_generations_before_journal_access() {
+    use crate::storage::{feedback_generation, notebook_generation};
+
+    let fixture = Fixture::new();
+    assert_report(fixture.paths(), "unavailable", None);
+    assert!(!fixture.paths().data.exists());
+    let store = fixture.store();
+    let root = store.generation(store.inner.lock().unwrap().generation);
+    assert_eq!(feedback_generation::version(&root).unwrap(), 1);
+    drop(store);
+    assert_report(fixture.paths(), "ok", Some((0, 0)));
+    let journal = fixture.paths().data.join("sync/selected-outbox");
+    fs::write(&journal, b"not a directory").unwrap();
+    assert_report(fixture.paths(), "unsupported", None);
+    assert_eq!(fs::read(&journal).unwrap(), b"not a directory");
+    fs::remove_file(&journal).unwrap();
+    fs::create_dir(&journal).unwrap();
+
+    let mut store = Store::open_for_feedback(fixture.paths()).unwrap();
+    feedback_generation::prepare(&mut store, |_| Ok(())).unwrap();
+    let generation = store.inner.lock().unwrap().generation;
+    let root = store.generation(generation);
+    assert_eq!(feedback_generation::version(&root).unwrap(), 3);
+    let actor = store.actor_id;
+    drop(store);
+    assert_report(fixture.paths(), "ok", Some((0, 0)));
+
+    let bad = journal.join("corrupt.json");
+    fs::write(&bad, b"{").unwrap();
+    assert_report(fixture.paths(), "corrupt", None);
+    let marker = root.join(notebook_generation::MARKER);
+    files::atomic_json(
+        &marker,
+        &json!({"format": 1, "actor": actor, "generation": generation}),
+    )
+    .unwrap();
+    assert_report(fixture.paths(), "unsupported", None);
+    assert_eq!(fs::read(&bad).unwrap(), b"{");
+    fs::remove_file(&marker).unwrap();
+
+    let store = Store::prepare_notebook(fixture.paths()).unwrap();
+    let root = store.generation(store.inner.lock().unwrap().generation);
+    assert_eq!(feedback_generation::version(&root).unwrap(), 4);
+    drop(store);
+    assert_report(fixture.paths(), "unsupported", None);
+    assert_eq!(fs::read(&bad).unwrap(), b"{");
+}
+
+#[test]
+fn selected_outbox_report_checks_exact_entry_and_aggregate_byte_limits() {
+    let fixture = Fixture::new();
+    let store = fixture.store();
+    let current = initialize(&store, &scope(), &[record(&store)]);
+    let mut entry = store
+        .prepare_selected_attempt(&current.token, request(&store))
+        .unwrap();
+    let root = store.generation(store.inner.lock().unwrap().generation);
+    assert_eq!(
+        crate::storage::feedback_generation::version(&root).unwrap(),
+        2
+    );
+    let journal = store.paths.data.join("sync/selected-outbox");
+    let original = journal.join(format!("{}.json", entry.request.operation));
+    let mut other = original.clone();
+    let mut total = fs::metadata(&original).unwrap().len() as usize;
+    for n in 1..=MAX_ITEMS {
+        entry.request.operation = Uuid::from_u128(n as u128);
+        entry.request_sha256 = entry.fingerprint().unwrap();
+        other = journal.join(format!("{}.json", entry.request.operation));
+        let bytes = serde_json::to_vec(&entry).unwrap();
+        fs::write(&other, &bytes).unwrap();
+        if n < MAX_ITEMS {
+            total += bytes.len();
+        }
+    }
+    drop(store);
+    assert!(total < MAX_METADATA);
+    assert_report(fixture.paths(), "unsupported", None);
+    fs::remove_file(other).unwrap();
+    assert_report(fixture.paths(), "ok", Some((MAX_ITEMS, 0)));
+
+    let mut padded = fs::read(&original).unwrap();
+    padded.resize(padded.len() + MAX_METADATA - total, b' ');
+    fs::write(&original, &padded).unwrap();
+    assert_report(fixture.paths(), "ok", Some((MAX_ITEMS, 0)));
+    padded.push(b' ');
+    fs::write(&original, &padded).unwrap();
+    assert_report(fixture.paths(), "unsupported", None);
+    assert_eq!(fs::read(original).unwrap(), padded);
+}
+
+#[test]
+fn selected_outbox_report_holds_lease_during_prefix_and_flush_failures() {
+    use crate::storage::maintenance::Refusal;
+    use std::io::{self, Write};
+
+    struct FailingOutput {
+        paths: StorePaths,
+        fail_on_flush: bool,
+        writes: usize,
+        flushes: usize,
+        bytes: Vec<u8>,
+    }
+    impl FailingOutput {
+        fn check_custody(&self) {
+            assert!(matches!(
+                Store::open_existing_for_outbox(self.paths.clone()),
+                Err(Refusal::Busy)
+            ));
+        }
+    }
+    impl Write for FailingOutput {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.check_custody();
+            self.writes += 1;
+            if self.fail_on_flush {
+                self.bytes.extend_from_slice(bytes);
+                Ok(bytes.len())
+            } else if self.writes == 1 {
+                self.bytes.extend_from_slice(&bytes[..8]);
+                Ok(8)
+            } else {
+                Err(io::ErrorKind::BrokenPipe.into())
+            }
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.check_custody();
+            self.flushes += 1;
+            Err(io::ErrorKind::BrokenPipe.into())
+        }
+    }
+
+    let fixture = Fixture::new();
+    drop(fixture.store());
+    for fail_on_flush in [false, true] {
+        let paths = fixture.paths();
+        let mut output = FailingOutput {
+            paths: paths.clone(),
+            fail_on_flush,
+            writes: 0,
+            flushes: 0,
+            bytes: Vec::new(),
+        };
+        assert!(crate::outbox_status::inspect(paths.clone())
+            .write_to(&mut output)
+            .is_err());
+        if fail_on_flush {
+            assert_eq!((output.writes, output.flushes), (1, 1));
+            assert_eq!(
+                output.bytes,
+                b"{\"report_version\":1,\"operation\":\"inspect-selected-outbox\",\"status\":\"ok\",\"counts\":{\"pending\":0,\"withdrawn\":0}}\n"
+            );
+        } else {
+            assert_eq!((output.writes, output.flushes), (2, 0));
+            assert_eq!(output.bytes, b"{\"report");
+        }
+        assert!(Store::open_existing_for_outbox(paths).is_ok());
+    }
 }

@@ -50,12 +50,26 @@ impl ConversationOperation {
 #[command(author, version = env!("READER_BUDDY_VERSION"))]
 #[command(about = "ReMarkable Reader Buddy - AI-powered reading assistant for reMarkable tablets")]
 pub struct Args {
+    /// Existing-only generation-inclusive accounting; no runtime activation
+    #[arg(long, exclusive = true)]
+    inspect_owned_data_v3: bool,
+    /// Count validated historical local selected-outbox records
+    #[arg(long, exclusive = true)]
+    inspect_selected_outbox: bool,
+    /// Emit the embedded canonical-object schema without reading saved configuration
+    #[arg(long, exclusive = true)]
+    configuration_schema: bool,
     /// Fixed installed stock recovery; never starts ordinary application services
     #[arg(long, exclusive = true)]
     resident_stock_recovery: bool,
     /// Explicit offline confirmed handwriting records; strict bounded JSON stdin
     #[arg(long, exclusive = true)]
     handwriting: bool,
+    /// Saved role and export-backend declarations; no runtime activation
+    #[arg(long, value_enum, conflicts_with_all = ["resident_stock_recovery", "handwriting", "research_settings_operation", "research_settings_input", "inspect_conversations", "conversation_operation", "conversation_input", "inspect_source_cache", "source_cache_operation", "source_cache_input", "credential_reference_operation", "credential_reference_input", "model_credential_operation", "model_credential_input", "memory_settings_operation", "memory_settings_input", "ordinary_export_operation", "ordinary_export_input", "model_settings_operation", "model_settings_input", "restore_operation", "restore_input", "basic_settings_operation", "basic_settings_input", "configuration_operation", "simulate", "inspect_owned_data", "api_key", "model", "base_url", "trigger_corner", "log_level", "debug_dump", "memory_operation", "memory_input", "sync_mode_operation", "sync_mode_input", "archive_operation", "archive_input", "personalization_operation", "export_note", "writer_note"])]
+    product_settings_operation: Option<config::product_settings::Operation>,
+    #[arg(long, value_name = "INPUT", requires = "product_settings_operation", conflicts_with_all = ["resident_stock_recovery", "handwriting", "research_settings_operation", "research_settings_input", "inspect_conversations", "conversation_operation", "conversation_input", "inspect_source_cache", "source_cache_operation", "source_cache_input", "credential_reference_operation", "credential_reference_input", "model_credential_operation", "model_credential_input", "memory_settings_operation", "memory_settings_input", "ordinary_export_operation", "ordinary_export_input", "model_settings_operation", "model_settings_input", "restore_operation", "restore_input", "basic_settings_operation", "basic_settings_input", "configuration_operation", "simulate", "inspect_owned_data", "api_key", "model", "base_url", "trigger_corner", "log_level", "debug_dump", "memory_operation", "memory_input", "sync_mode_operation", "sync_mode_input", "archive_operation", "archive_input", "personalization_operation", "export_note", "writer_note"])]
+    product_settings_input: Option<std::path::PathBuf>,
     /// Deliberate saved research policy; no runtime/provider activation
     #[arg(long, value_enum, conflicts_with_all = ["inspect_conversations","conversation_operation","conversation_input","inspect_source_cache","source_cache_operation","source_cache_input","credential_reference_operation","credential_reference_input","model_credential_operation","model_credential_input","memory_settings_operation","memory_settings_input","ordinary_export_operation","ordinary_export_input","model_settings_operation","model_settings_input","restore_operation","restore_input","basic_settings_operation","basic_settings_input","configuration_operation","simulate","inspect_owned_data","api_key","model","base_url","trigger_corner","log_level","debug_dump","memory_operation","memory_input","sync_mode_operation","sync_mode_input","archive_operation","archive_input","personalization_operation","export_note"])]
     research_settings_operation: Option<config::research_settings::Operation>,
@@ -201,6 +215,15 @@ fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_lo
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    if args.inspect_selected_outbox {
+        return remarkable_reader_buddy::outbox_status::run(
+            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+        )
+        .write_to(&mut std::io::stdout().lock());
+    }
+    if args.configuration_schema {
+        return config::schema::write_to(&mut std::io::stdout().lock());
+    }
     if args.resident_stock_recovery {
         return stock_recovery();
     }
@@ -409,6 +432,31 @@ fn main() -> Result<()> {
         report.write_to(&mut std::io::stdout().lock())?;
         return Ok(());
     }
+    if let Some(operation) = args.product_settings_operation {
+        let report = if operation == config::product_settings::Operation::Inspect {
+            if args.product_settings_input.is_some() {
+                config::product_settings::invalid_input(operation)
+            } else {
+                config::product_settings::inspect(
+                    std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+                )
+            }
+        } else if args
+            .product_settings_input
+            .as_ref()
+            .is_some_and(|input| input.as_os_str() == std::ffi::OsStr::new("-"))
+        {
+            config::product_settings::run_stdin(
+                operation,
+                std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+                &mut std::io::stdin().lock(),
+            )
+        } else {
+            config::product_settings::unsupported_input(operation)
+        };
+        report.write_to(&mut std::io::stdout().lock())?;
+        return Ok(());
+    }
     if let Some(operation) = args.basic_settings_operation {
         let report = if operation == config::basic::Operation::Inspect {
             if args.basic_settings_input.is_some() {
@@ -482,6 +530,14 @@ fn main() -> Result<()> {
         report.write_to(&mut std::io::stdout().lock())?;
         return Ok(());
     }
+    if args.inspect_owned_data_v3 {
+        let report = match Config::load(std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into)) {
+            Ok(config) => remarkable_reader_buddy::storage::inspection_v3::inspect_owned_data(&config.paths),
+            Err(_) => remarkable_reader_buddy::storage::inspection_v3::Inspection::configuration_unavailable(),
+        };
+        report.write_to(&mut std::io::stdout().lock())?;
+        return Ok(());
+    }
     if args.inspect_owned_data {
         let report = match Config::load(std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into)) {
             Ok(config) => remarkable_reader_buddy::storage::inspection::inspect_owned_data(&config.paths),
@@ -511,8 +567,8 @@ fn main() -> Result<()> {
     #[cfg(target_os = "linux")]
     remarkable_reader_buddy::workflow::resident_supervisor::recovery::refuse_occupied_activation()?;
     #[cfg(target_os = "linux")]
-    let service_health = if args.simulate.is_none() {
-        remarkable_reader_buddy::workflow::resident_supervisor::health::ServiceHealth::from_environment()?
+    let notification_environment = if args.simulate.is_none() {
+        Some(remarkable_reader_buddy::workflow::resident_supervisor::health::NotificationEnvironment::capture())
     } else {
         None
     };
@@ -523,6 +579,10 @@ fn main() -> Result<()> {
         return Ok(());
     }
     let config = Config::load(std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into))?;
+    anyhow::ensure!(
+        config.reader_enabled(),
+        "Reader is disabled in saved settings"
+    );
     if config.reader.selection.is_none() {
         remarkable_reader_buddy::memory::context::admit_ordinary(&config.memory)?;
     }
@@ -535,6 +595,11 @@ fn main() -> Result<()> {
             report.write_to(&mut std::io::stdout().lock())?;
             return Ok(());
         }
+    };
+    #[cfg(target_os = "linux")]
+    let service_health = match notification_environment {
+        Some(environment) => environment.connect()?,
+        None => None,
     };
     let effective = config::resolve(
         &config,
@@ -556,17 +621,8 @@ fn main() -> Result<()> {
         .filter_module("ureq_proto", log::LevelFilter::Off)
         .init();
     info!("=== ReMarkable Reader Buddy Starting ===");
-    let store =
-        match remarkable_reader_buddy::reader_runtime::ordinary_store(&config, admitted_store) {
-            Ok(store) => store,
-            Err(mut report) => {
-                if config.reader.selection.is_none() {
-                    return Err(report.into_ordinary_startup_error());
-                }
-                report.write_to(&mut std::io::stdout().lock())?;
-                return Ok(());
-            }
-        };
+    let store = remarkable_reader_buddy::reader_runtime::ordinary_store(&config, admitted_store)
+        .map_err(|report| report.into_ordinary_startup_error())?;
     let _ordinary_runtime_lifetime =
         remarkable_reader_buddy::mode_maintenance::admit_ordinary(&store, config.sync.enabled)?;
     store.snapshot_config(&config)?;
@@ -612,9 +668,7 @@ fn main() -> Result<()> {
         remarkable_reader_buddy::conversation::Ledger::new(store.clone()),
     );
     orchestrator.set_personalization(personalization);
-    orchestrator.set_subject_memory(
-        reader_memory.map(|memory| memory as Arc<dyn remarkable_reader_buddy::memory::Provider>),
-    );
+    orchestrator.set_subject_memory(reader_memory);
     info!("Initialization complete; starting main loop");
     orchestrator.run_loop()
 }
@@ -858,6 +912,7 @@ mod tests {
                 "basic-settings-input",
                 "basic-settings-operation",
                 "configuration-operation",
+                "configuration-schema",
                 "conversation-input",
                 "conversation-operation",
                 "credential-reference-input",
@@ -867,6 +922,8 @@ mod tests {
                 "handwriting",
                 "inspect-conversations",
                 "inspect-owned-data",
+                "inspect-owned-data-v3",
+                "inspect-selected-outbox",
                 "inspect-source-cache",
                 "log-level",
                 "memory-input",
@@ -881,6 +938,8 @@ mod tests {
                 "ordinary-export-input",
                 "ordinary-export-operation",
                 "personalization-operation",
+                "product-settings-input",
+                "product-settings-operation",
                 "research-settings-input",
                 "research-settings-operation",
                 "resident-stock-recovery",
@@ -981,6 +1040,54 @@ mod tests {
                 clap::error::ErrorKind::ArgumentConflict,
                 "{long}: {error}"
             );
+        }
+    }
+
+    #[test]
+    fn schema_discovery_is_exclusive_with_every_other_argument() {
+        for selector in [
+            "configuration-schema",
+            "inspect-owned-data-v3",
+            "inspect-selected-outbox",
+        ] {
+            for argument in Args::command().get_arguments() {
+                let Some(long) = argument.get_long() else {
+                    continue;
+                };
+                if long == selector {
+                    continue;
+                }
+                let mut argv = vec![
+                    "reader-buddy".to_owned(),
+                    format!("--{selector}"),
+                    format!("--{long}"),
+                ];
+                if argument.get_action().takes_values() {
+                    argv.push(
+                        argument
+                            .get_value_parser()
+                            .possible_values()
+                            .and_then(|mut values| values.next())
+                            .map(|v| v.get_name().to_owned())
+                            .unwrap_or_else(|| {
+                                if long == "log-level" {
+                                    "info".into()
+                                } else {
+                                    "PRIVATE_SCHEMA_INPUT".into()
+                                }
+                            }),
+                    );
+                }
+                let error = Args::try_parse_from(argv)
+                    .err()
+                    .expect("schema discovery must be exclusive");
+                assert_eq!(
+                    error.kind(),
+                    clap::error::ErrorKind::ArgumentConflict,
+                    "{long}: {error}"
+                );
+                assert!(!error.to_string().contains("PRIVATE_SCHEMA_INPUT"));
+            }
         }
     }
 

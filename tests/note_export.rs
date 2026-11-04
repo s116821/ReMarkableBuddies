@@ -972,11 +972,27 @@ async fn replaceable_metadata_destination_roundtrip_keeps_title_plain() {
 #[test]
 fn command_reports_missing_credential_without_starting_reader_or_echoing_content() {
     use std::process::{Command, Stdio};
+    // Valid explicit host configuration: nonsecret policy now precedes the token
+    // gate, so an unrelated invalid host default must not mask this assertion.
+    let local = LocalStore::new();
+    let paths = StorePaths {
+        data: local.0.join("data"),
+        cache: local.0.join("cache"),
+        credentials: local.0.join("credentials"),
+    };
+    let config = local.0.join("config.json");
+    std::fs::write(
+        &config,
+        serde_json::to_vec(&json!({"paths":paths})).unwrap(),
+    )
+    .unwrap();
     let secret_content = "private-command-note-sentinel";
     let mut note = prepared(Uuid::new_v4());
     note.markdown = secret_content.into();
     let mut child = Command::new(env!("CARGO_BIN_EXE_reader-buddy"))
         .arg("--export-note")
+        .current_dir(&local.0)
+        .env("REMARKABLE_BUDDIES_CONFIG", &config)
         .env_remove("MEM_API_KEY")
         .env_remove("OPENAI_API_KEY")
         .stdin(Stdio::piped())
@@ -1003,6 +1019,7 @@ fn command_reports_missing_credential_without_starting_reader_or_echoing_content
         output.stderr.is_empty(),
         "export command must not start Reader/provider logging"
     );
+    assert!(!paths.data.exists() && !paths.cache.exists() && !paths.credentials.exists());
 }
 
 #[tokio::test]

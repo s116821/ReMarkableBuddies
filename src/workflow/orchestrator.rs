@@ -116,12 +116,22 @@ impl<M: LLMEngine> Orchestrator<M> {
         self.personalization = snapshot;
     }
 
-    /// Optional receiving context; never used for recognition or automatic learning.
+    /// Ordinary local context only.
     pub fn set_subject_memory(
         &mut self,
-        memory: Option<std::sync::Arc<dyn crate::memory::Provider>>,
+        memory: Option<std::sync::Arc<crate::memory::LocalMemory>>,
     ) {
-        self.memory = memory;
+        self.memory =
+            memory.map(|provider| provider as std::sync::Arc<dyn crate::memory::Provider>);
+    }
+
+    /// Set a provider for guarded selected publication. Admission still checks
+    /// its exact receiving Store and selection before any model work.
+    pub fn set_selected_subject_memory(
+        &mut self,
+        memory: std::sync::Arc<dyn crate::memory::Provider>,
+    ) {
+        self.memory = Some(memory);
     }
 
     pub fn invalidate_history(&mut self) {
@@ -145,7 +155,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         let _timing = crate::measurement::Span::new("reader.iteration");
         self.workflow.begin_iteration()?;
         let result = self.run_iteration_inner(wait_for_trigger);
-        // A failed request guard must not be cleared by cleanup or another turn.
+        // A failed input guard or service health cannot be cleared by cleanup.
         if self.workflow.runtime_failed() {
             return result.and(Err(anyhow::anyhow!(
                 "Runtime health or input lost; further activity stopped"
@@ -279,17 +289,18 @@ impl<M: LLMEngine> Orchestrator<M> {
                     let enriched =
                         self.enrich_answer(attempt, &mut result, &verification, &personalization);
                     if let Err(error) = enriched {
-                        log::warn!("Subject memory answer was not completed");
+                        log::warn!("Contextual answer was not completed");
                         self.workflow.report_failure(Failure::Provider)?;
+                        let canceled = self.workflow.input_failed();
                         attempt.outcome(
                             &self.ledger,
                             false,
-                            if self.workflow.input_failed() {
+                            if canceled {
                                 Outcome::Canceled
                             } else {
                                 Outcome::Failed
                             },
-                            if self.workflow.input_failed() {
+                            if canceled {
                                 AttemptReason::Canceled
                             } else {
                                 AttemptReason::ProviderFailure
