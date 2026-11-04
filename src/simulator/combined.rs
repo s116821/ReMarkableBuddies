@@ -572,6 +572,46 @@ fn run_notebook(scenario: &Scenario) -> Result<usize> {
             .last()
             .ok_or_else(|| anyhow::anyhow!("reducer payload absent"))?,
     )?;
+    let map: Value = serde_json::from_str(
+        model.seen[0]
+            .0
+            .last()
+            .ok_or_else(|| anyhow::anyhow!("map payload absent"))?,
+    )?;
+    ensure!(
+        map.get("historical_images").is_none(),
+        "map received image associations"
+    );
+    use crate::conversation::notebook::{notebook_input_digest, NotebookStageKind, REDUCE_PROMPT};
+    let parts = &model.seen[1].0;
+    let input_digest = notebook_input_digest(REDUCE_PROMPT, parts)?;
+    ensure!(ledger.inspect(conversation, false)?.iter().any(|record| matches!(record,
+        Record::NotebookStage(stage) if stage.kind == NotebookStageKind::Reduce && stage.input_digest == input_digest
+    )), "reducer did not persist its exact input digest");
+    let mut reordered = reduce.clone();
+    reordered["historical_images"]
+        .as_array_mut()
+        .ok_or_else(|| anyhow::anyhow!("image associations absent"))?
+        .swap(0, 1);
+    let mut changed_parts = parts.clone();
+    *changed_parts
+        .last_mut()
+        .ok_or_else(|| anyhow::anyhow!("reducer payload absent"))? =
+        serde_json::to_string(&reordered)?;
+    ensure!(
+        notebook_input_digest(REDUCE_PROMPT, &changed_parts)? != input_digest,
+        "reducer digest did not bind association order"
+    );
+    let mut reassigned = reduce.clone();
+    reassigned["historical_images"][2]["attachment_index"] = json!(1);
+    *changed_parts
+        .last_mut()
+        .ok_or_else(|| anyhow::anyhow!("reducer payload absent"))? =
+        serde_json::to_string(&reassigned)?;
+    ensure!(
+        notebook_input_digest(REDUCE_PROMPT, &changed_parts)? != input_digest,
+        "reducer digest did not bind attachment assignment"
+    );
     ensure!(
         reduce["request"] == scenario.requests[1]
             && reduce["history"][0]["text"] == "Earlier image question?"
