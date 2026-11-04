@@ -4,6 +4,7 @@ use crate::{
     storage::{
         files,
         maintenance::Refusal,
+        notebook_archive::{check_destination, Detached, ExportSource, Witness},
         sync::mode::{OrdinaryModeLease, SyncMode, SyncModeLease},
         BackupInspection, Store,
     },
@@ -24,6 +25,8 @@ pub const MAX_OUTPUT: usize = 16_384;
 pub enum Operation {
     Inspect,
     ExportSelected,
+    InspectNotebook,
+    ExportNotebook,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -69,6 +72,20 @@ impl Custody {
     }
 }
 
+enum NotebookCustody {
+    Detached(Detached),
+    Export(Box<ExportSource>, Option<Witness>),
+}
+impl NotebookCustody {
+    fn verify(&mut self) -> Result<()> {
+        match self {
+            Self::Detached(detached) => detached.verify(),
+            Self::Export(source, Some(witness)) => source.verify(witness),
+            Self::Export(_, None) => Ok(()),
+        }
+    }
+}
+
 #[derive(Serialize)]
 pub struct Report {
     report_version: u32,
@@ -79,6 +96,8 @@ pub struct Report {
     data: Option<Data>,
     #[serde(skip)]
     _custody: Option<Custody>,
+    #[serde(skip)]
+    notebook: Option<NotebookCustody>,
 }
 impl Report {
     fn new(operation: Operation, status: Status) -> Self {
@@ -90,6 +109,7 @@ impl Report {
             activation_performed: false,
             data: None,
             _custody: None,
+            notebook: None,
         }
     }
     fn completed(operation: Operation, inspection: BackupInspection) -> Self {
@@ -99,11 +119,23 @@ impl Report {
         report
     }
     /// Owns source custody until this one consuming write completes or fails.
-    pub fn write_to(self, writer: &mut impl Write) -> Result<()> {
+    pub fn write_to(mut self, writer: &mut impl Write) -> Result<()> {
+        if let Some(custody) = &mut self.notebook {
+            custody.verify()?;
+        }
         let mut bytes = serde_json::to_vec(&self)?;
         bytes.push(b'\n');
         ensure!(bytes.len() <= MAX_OUTPUT, "archive report exceeds bound");
         writer.write_all(&bytes)?;
+        if matches!(
+            self.operation,
+            Operation::InspectNotebook | Operation::ExportNotebook
+        ) {
+            writer.flush()?;
+        }
+        if let Some(custody) = &mut self.notebook {
+            custody.verify()?;
+        }
         Ok(())
     }
 }
@@ -154,6 +186,53 @@ fn export(store: Arc<Store>, destination: &Path) -> Report {
     report
 }
 
+fn inspect_notebook(path: &Path) -> Report {
+    let operation = Operation::InspectNotebook;
+    match std::fs::symlink_metadata(path.join("backup.json")) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Report::new(operation, Status::Unavailable)
+        }
+        Ok(metadata) if metadata.is_file() => (),
+        _ => return Report::new(operation, Status::Unsupported),
+    }
+    match Detached::inspect(path) {
+        Ok((inspection, custody)) => {
+            let mut report = Report::completed(operation, inspection);
+            report.notebook = Some(NotebookCustody::Detached(custody));
+            report
+        }
+        Err(_) => Report::new(operation, Status::Unsupported),
+    }
+}
+
+fn status_for_refusal(refusal: Refusal) -> Status {
+    match refusal {
+        Refusal::Busy => Status::Busy,
+        Refusal::Unavailable => Status::Unavailable,
+        Refusal::Unsupported => Status::Unsupported,
+    }
+}
+
+fn export_notebook(config: Config, destination: &Path) -> Report {
+    let operation = Operation::ExportNotebook;
+    if config.reader.selection.is_some() || config.memory.selection.is_some() {
+        return Report::new(operation, Status::Unsupported);
+    }
+    let mut source = match ExportSource::open(config.paths) {
+        Ok(source) => source,
+        Err(refusal) => return Report::new(operation, status_for_refusal(refusal)),
+    };
+    let (mut report, witness) = match source.prepare() {
+        Ok(prepared) => match source.export(prepared, destination) {
+            Ok((inspection, witness)) => (Report::completed(operation, inspection), Some(witness)),
+            Err(_) => (Report::new(operation, Status::Failed), None),
+        },
+        Err(_) => (Report::new(operation, Status::Unsupported), None),
+    };
+    report.notebook = Some(NotebookCustody::Export(Box::new(source), witness));
+    report
+}
+
 pub fn run(
     operation: Operation,
     input: &Path,
@@ -164,15 +243,26 @@ pub fn run(
         Ok(value) => value,
         Err(_) => return Report::new(operation, Status::InvalidInput),
     };
-    if operation == Operation::Inspect {
-        return inspect(&request.path);
+    match operation {
+        Operation::Inspect => return inspect(&request.path),
+        Operation::InspectNotebook => return inspect_notebook(&request.path),
+        Operation::ExportSelected | Operation::ExportNotebook => (),
     }
     let config = match Config::load(config_path) {
         Ok(config) if !config.sync.enabled => config,
         _ => return Report::new(operation, Status::Unsupported),
     };
     // Destination refusal precedes Store admission and all export writes.
-    if request.path.exists()
+    let destination_exists = if operation == Operation::ExportNotebook {
+        match std::fs::symlink_metadata(&request.path) {
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(_) => return Report::new(operation, Status::Unavailable),
+        }
+    } else {
+        request.path.exists()
+    };
+    if destination_exists
         || [
             &config.paths.data,
             &config.paths.cache,
@@ -183,16 +273,15 @@ pub fn run(
     {
         return Report::new(operation, Status::InvalidInput);
     }
+    if operation == Operation::ExportNotebook {
+        if check_destination(&config.paths, &request.path).is_err() {
+            return Report::new(operation, Status::InvalidInput);
+        }
+        return export_notebook(config, &request.path);
+    }
     match Store::open_existing_for_archive(config.paths) {
         Ok(store) => export(Arc::new(store), &request.path),
-        Err(refusal) => Report::new(
-            operation,
-            match refusal {
-                Refusal::Busy => Status::Busy,
-                Refusal::Unavailable => Status::Unavailable,
-                Refusal::Unsupported => Status::Unsupported,
-            },
-        ),
+        Err(refusal) => Report::new(operation, status_for_refusal(refusal)),
     }
 }
 

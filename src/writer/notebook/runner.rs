@@ -797,5 +797,17 @@ mod tests {
                 .count(),
             2
         );
+        drop(result);
+        drop(model);
+        drop(ledger);
+        let mut source = crate::storage::notebook_archive::ExportSource::open(f.paths()).unwrap();
+        let prepared = source.prepare().unwrap();
+        let destination = f.paths().data.parent().unwrap().join("archive");
+        let (report, witness) = source.export(prepared, &destination).unwrap();
+        assert!(report.complete_media);
+        source.verify(&witness).unwrap();
+        let (detached, _) =
+            crate::storage::notebook_archive::Detached::inspect(&destination).unwrap();
+        assert_eq!(report, detached);
     }
 }
