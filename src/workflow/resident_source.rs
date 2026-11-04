@@ -623,6 +623,7 @@ impl ResidentSourceOwner {
         admitted_progress(end, || self.progress(health))?;
         Ok(image)
     }
+    #[allow(clippy::too_many_arguments)]
     fn output_role(
         &mut self,
         health: &mut ServiceHealth,
@@ -703,6 +704,7 @@ impl ResidentSourceOwner {
         }
         admitted_progress(end, || self.progress(health))
     }
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn render_answer(
         &mut self,
         health: &mut ServiceHealth,
@@ -1274,7 +1276,7 @@ mod tests {
             let index = self.calls.get();
             self.calls.set(index + 1);
             self.batches.borrow_mut().push(self.images.clone());
-            Ok(if index % 2 == 0 { "QUESTION: why?\nQUESTION_BOX: 130,35,200,50\nSELECTION_CENTER: 385,230\n---\nANSWER: Because the model fixture says so." }
+            Ok(if index.is_multiple_of(2) { "QUESTION: why?\nQUESTION_BOX: 130,35,200,50\nSELECTION_CENTER: 385,230\n---\nANSWER: Because the model fixture says so." }
                 else { "TRANSCRIPTION: why?" }.into())
         }
     }

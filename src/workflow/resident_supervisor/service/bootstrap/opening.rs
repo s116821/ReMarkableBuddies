@@ -175,6 +175,7 @@ impl OpeningMetadata {
 // Explicit development insertion only. Existing activity-only policy above is
 // unchanged; all old page objects and unrelated bytes remain exact.
 impl Samples {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn verify_insertion(
         &self,
         policy: &OpeningMetadata,

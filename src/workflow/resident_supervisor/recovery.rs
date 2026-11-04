@@ -478,7 +478,7 @@ impl Installed {
 
 fn hex_digest(text: &str) -> [u8; 32] {
     let mut out = [0; 32];
-    for (i, pair) in text.as_bytes().chunks_exact(2).enumerate() {
+    for (i, pair) in text.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let nibble = |b: u8| if b <= b'9' { b - b'0' } else { b - b'a' + 10 };
         out[i] = (nibble(pair[0]) << 4) | nibble(pair[1]);
     }
@@ -494,12 +494,20 @@ impl Profile {
             use crate::workflow::resident_output::development::{
                 ADAPTER, PROFILE, REPEAT_ADAPTER, REPEAT_PROFILE,
             };
-            let approved_adapter = [(PROFILE, ADAPTER), (REPEAT_PROFILE, REPEAT_ADAPTER)]
-                .iter()
-                .any(|(profile, adapter)| {
-                    self.native_profile_sha256 == hex_digest(profile)
-                        && self.adapter_sha256 == hex_digest(adapter)
-                });
+            const INSTALLED_READER_INSERT: (&str, &str) = (
+                "f49f297717cc09cf21fad47e52d47a4faad0c84f4fed4f98ca69ddb41b96b146",
+                "8fc60498eb404f5a833d4b4ec4c99b76080f146012c76eb1ea7cb55d44b2b62c",
+            );
+            let approved_adapter = [
+                (PROFILE, ADAPTER),
+                (REPEAT_PROFILE, REPEAT_ADAPTER),
+                INSTALLED_READER_INSERT,
+            ]
+            .iter()
+            .any(|(profile, adapter)| {
+                self.native_profile_sha256 == hex_digest(profile)
+                    && self.adapter_sha256 == hex_digest(adapter)
+            });
             self.version == 5
                 && self.source_mode.as_deref() == Some("resident-installed-output-v1")
                 && self.companion.as_deref() == Some(service::vendor::PROFILE_ID)

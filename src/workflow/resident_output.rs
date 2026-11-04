@@ -81,6 +81,7 @@ pub trait ResidentOutputBackend {
         Ok(None)
     }
     /// Read-only, complete recognition; missing binding/cache/blank is unresolved.
+    #[allow(clippy::too_many_arguments)]
     fn classify(
         &mut self,
         ledger: &Ledger,
@@ -117,6 +118,7 @@ pub trait ResidentOutputBackend {
     /// here and qualify that claim; never create a parallel target registry.
     /// Returns a non-cloneable live renderer lease after fresh current target /
     /// ownership/input/content qualification. Facts alone cannot satisfy this.
+    #[allow(clippy::too_many_arguments)]
     fn renderer(
         &mut self,
         ledger: &Ledger,

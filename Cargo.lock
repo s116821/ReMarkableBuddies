@@ -2782,7 +2782,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 [[package]]
 name = "remarkable-open-sdk"
 version = "0.0.0"
-source = "git+https://github.com/s116821/ReMarkableOpenSDK?rev=b3a66e3bd8d9d3b7fc21e3c736ce196afd77ab19#b3a66e3bd8d9d3b7fc21e3c736ce196afd77ab19"
+source = "git+https://github.com/s116821/ReMarkableOpenSDK?rev=c87e5628f35af5647c1d2da3331ad5e07a55f0f8#c87e5628f35af5647c1d2da3331ad5e07a55f0f8"
 dependencies = [
  "image",
  "nix 0.31.3",

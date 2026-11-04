@@ -126,7 +126,7 @@ impl PinnedPlan {
 }
 enum OutputPin {
     Fixture(PinnedPlan),
-    Installed(InstalledOutput),
+    Installed(Box<InstalledOutput>),
 }
 
 impl OutputPin {
@@ -167,7 +167,7 @@ impl NativeOutputBackend {
 
     pub(crate) fn installed(pin: InstalledOutput, corner: TriggerCorner) -> Result<Self> {
         pin.current()?;
-        Ok(Self::new(None, OutputPin::Installed(pin), corner))
+        Ok(Self::new(None, OutputPin::Installed(Box::new(pin)), corner))
     }
 
     fn new(plan: Option<Plan>, pin: OutputPin, corner: TriggerCorner) -> Self {
