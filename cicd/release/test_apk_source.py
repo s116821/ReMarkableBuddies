@@ -1,7 +1,7 @@
 """Real child-process refusal controls; no device or network access."""
-import pathlib,sys,time,unittest,tempfile,hashlib
+import os,pathlib,shutil,sys,time,unittest,tempfile,hashlib
 from apk_contract import Refusal
-from apk_source_build import run,source_license,LICENSE_BLOB,build,git_conversion,container_git_conversion,runtime,RUNTIMES,IMAGES
+from apk_source_build import run,source_license,LICENSE_BLOB,build,git_conversion,container_source_snapshot,source_snapshot,runtime,RUNTIMES,IMAGES,SOURCE_PROBE
 from apk_builder import copy_verified
 from unittest.mock import patch
 
@@ -57,14 +57,65 @@ class GitConversion(unittest.TestCase):
    with patch('apk_source_build.git',side_effect=['unknown','native']):
     with self.assertRaisesRegex(Refusal,'unsupported source Git'):git_conversion(root)
 
- def test_container_local_native_mismatch_and_ignored_eol(self):
-  for autocrlf in ('false','true','input'):
-   with self.subTest(autocrlf=autocrlf),patch('docker_owned.phase',return_value=autocrlf+'\nnative'):
-    expected=dict(autocrlf=autocrlf,eol='native',resolved_eol='crlf')
-    if autocrlf=='false':
-     with self.assertRaisesRegex(Refusal,'container Git conversion'):container_git_conversion(pathlib.Path('.'),'image','/source','/config',expected)
+ def test_readonly_container_mapping_and_raw_inventory(self):
+  oid='1'*40
+  host=dict(source=dict(sha='2'*40,tag='v1.2.3'),tag_oid='3'*40,working=[oid],committed=[oid],
+            conversion=dict(autocrlf='true',eol='native',resolved_eol='crlf'))
+  for output,committed,message in (
+   ('false\nnative\n'+oid,oid,None),
+   ('false\nnative\n'+oid,'4'*40,'exact committed raw source bytes'),
+   ('false\nnative\n'+'5'*40,oid,'raw source inventory mismatch'),
+  ):
+   with self.subTest(output=output,committed=committed),patch('docker_owned.phase',return_value=output) as phase:
+    host['committed']=[committed]
+    args=(pathlib.Path('source'),'image',('/mnt/c/source','1000:1000'),host)
+    if message:
+     with self.assertRaisesRegex(Refusal,message):container_source_snapshot(*args)
     else:
-     self.assertEqual(container_git_conversion(pathlib.Path('.'),'image','/source','/config',expected)['autocrlf'],autocrlf)
+     self.assertEqual(container_source_snapshot(*args),dict(autocrlf='false',eol='native',resolved_eol='lf'))
+    argv=phase.call_args.args[0]
+    for option,value in (('--user','1000:1000'),('--userns','host'),('--workdir','/mnt/c/source'),('--network','none'),('--pull','never')):
+     self.assertEqual(argv[argv.index(option)+1],value)
+    self.assertTrue(argv[argv.index('--mount')+1].endswith(',target=/mnt/c/source,readonly'))
+    self.assertNotIn('--env',argv)
+    self.assertNotIn('XDG_CONFIG_HOME',' '.join(argv))
+
+ def test_actual_git_raw_bytes_index_mode_and_dirty_status(self):
+  with tempfile.TemporaryDirectory() as directory:
+   repo=pathlib.Path(directory).resolve()
+   def git(*args,env=None):return run(['git',*args],repo,env=env)
+   git('init','--quiet')
+   git('remote','add','origin','https://github.com/s116821/ReMarkableBuddies')
+   attributes=repo/'.gitattributes';attributes.write_bytes(b'input.txt -text\n')
+   source=repo/'input.txt';source.write_bytes(b'original\n')
+   git('add','.');git('commit','--quiet','-m','fixture',env=dict(os.environ,GIT_AUTHOR_NAME='Fixture',
+      GIT_COMMITTER_NAME='Fixture',GIT_AUTHOR_EMAIL='fixture@example.com',GIT_COMMITTER_EMAIL='fixture@example.com'))
+   git('tag','v1.2.3')
+   config=(repo/'.git/config').read_bytes()
+   baseline=source_snapshot(repo,'v1.2.3')
+   self.assertEqual(baseline['working'],baseline['committed'])
+   shell=shutil.which('sh') if os.name!='nt' else pathlib.Path(shutil.which('git')).resolve().parents[1]/'bin/sh.exe'
+   if shell and pathlib.Path(shell).is_file():
+    user=run([str(shell),'-c','printf "%s:%s" "$(id -u)" "$(id -g)"'],repo)
+    probe=[str(shell),'-c',SOURCE_PROBE,'source-admission',user,repo.as_posix(),
+           baseline['source']['sha'],'v1.2.3',baseline['tag_oid']]
+    self.assertEqual(run(probe,repo).splitlines()[2:],baseline['working'])
+   else:
+    probe=None
+   source.write_bytes(b'original\r\n')
+   self.assertNotEqual(git('hash-object','--no-filters','input.txt'),git('rev-parse','HEAD:input.txt'))
+   if probe:
+    with self.assertRaisesRegex(Refusal,'actual build/tool command failed'):run(probe,repo)
+   with self.assertRaisesRegex(Refusal,'clean exact source'):source_snapshot(repo,'v1.2.3')
+   source.write_bytes(b'changed\n')
+   with self.assertRaisesRegex(Refusal,'clean exact source'):source_snapshot(repo,'v1.2.3')
+   source.write_bytes(b'original\n')
+   git('update-index','--assume-unchanged','input.txt')
+   with self.assertRaisesRegex(Refusal,'unsupported tracked source index state'):source_snapshot(repo,'v1.2.3')
+   git('update-index','--no-assume-unchanged','input.txt')
+   git('update-index','--chmod=+x','input.txt')
+   with self.assertRaisesRegex(Refusal,'clean exact source'):source_snapshot(repo,'v1.2.3')
+   self.assertEqual((repo/'.git/config').read_bytes(),config)
 
 class DirectRuntime(unittest.TestCase):
  def test_pinned_runtime_uses_selected_file_without_compiler(self):
@@ -157,7 +208,7 @@ class FreshBuildAdmission(unittest.TestCase):
  def test_runtime_replacement_or_compiler_switch_refuses(self):
   # Real file changes, with compiler/runner transport mocked. No source-build
   # result or real executable authority is inferred from this fixture.
-  for fault in ['runtime-replacement','compiler-switch','git-conversion-switch']:
+  for fault in ['runtime-replacement','compiler-switch','git-conversion-switch','container-refusal']:
    with self.subTest(fault=fault),tempfile.TemporaryDirectory() as directory:
     root=pathlib.Path(directory);source=root/'source';source.mkdir();(source/'.git').mkdir();target=root/'fresh-output'
     configuration=pathlib.Path(__file__).with_name('Cross.apk.toml')
@@ -177,8 +228,33 @@ class FreshBuildAdmission(unittest.TestCase):
      if fault=='runtime-replacement':binary.write_bytes(b'changed after runtime')
      return 'reader-buddy 1.2.3',dict(actual_container_argv=[[],['docker','run','observed-runtime'],[]])
     identities=[compiler,changed if fault=='compiler-switch' else compiler]
-    with patch('apk_source_build.shutil.which',return_value=str(fake_cross)),patch('apk_source_build.runtime',side_effect=runtime_call),patch('apk_source_build.source_identity',return_value=source_id),patch('apk_source_build.source_license',return_value='GPL-3.0'),patch('apk_source_build.cargo_configuration',return_value=[]),patch('apk_source_build.git_conversion',side_effect=[dict(autocrlf='false',eol='native',resolved_eol='lf'),dict(autocrlf='true' if fault=='git-conversion-switch' else 'false',eol='native',resolved_eol='lf')]),patch('apk_source_build.container_git_conversion',return_value=dict(autocrlf='false',eol='lf',resolved_eol='lf')),patch('apk_source_build.cargo_identity',return_value=cargo),patch('apk_source_build.git',return_value=''),patch('apk_compiler.identity',side_effect=identities),patch('docker_owned.cross_phase',side_effect=cross_call),patch('abi.qualify',return_value={'elf':{'interpreter':'/lib/ld-linux-armhf.so.3'}}):
-     message='executed binary file identity changed' if fault=='runtime-replacement' else 'source Git conversion semantics changed' if fault=='git-conversion-switch' else 'actual Cross compiler/image identity changed'
-     with self.assertRaisesRegex(Refusal,message):build(source,'v1.2.3','armv7-unknown-linux-gnueabihf',target,configuration)
+    def cargo_call(repo,target,sdk_tag,observations):
+     observations.append(dict(workspace_root=str(source),packages=[],workspace_members=[]))
+     return cargo
+    host=dict(source=source_id,conversion={'autocrlf':'false'})
+    after=dict(host,conversion={'autocrlf':'true'}) if fault=='git-conversion-switch' else host
+    def container_call(*args):
+     if fault=='container-refusal':raise Refusal('ordinary container Git ownership')
+     return {'autocrlf':'false'}
+    with patch('apk_source_build.shutil.which',return_value=str(fake_cross)), \
+         patch('apk_source_build.runtime',side_effect=runtime_call), \
+         patch('apk_source_build.source_snapshot',side_effect=[host,after]), \
+         patch('apk_source_build.source_license',return_value='GPL-3.0'), \
+         patch('apk_source_build.cargo_configuration',return_value=[]), \
+         patch('apk_source_build.cross_source_mapping',return_value=('/source','1000:1000')), \
+         patch('apk_source_build.container_source_snapshot',side_effect=container_call), \
+         patch('apk_source_build.cargo_identity',side_effect=cargo_call), \
+         patch('apk_compiler.identity',side_effect=identities) as compiler_probe, \
+         patch('docker_owned.cross_phase',side_effect=cross_call) as cross_build, \
+         patch('abi.qualify',return_value={'elf':{'interpreter':'/lib/ld-linux-armhf.so.3'}}):
+     messages={'runtime-replacement':'executed binary file identity changed',
+               'compiler-switch':'actual Cross compiler/image identity changed',
+               'git-conversion-switch':'source Git admission identity changed',
+               'container-refusal':'ordinary container Git ownership'}
+     with self.assertRaisesRegex(Refusal,messages[fault]):
+      build(source,'v1.2.3','armv7-unknown-linux-gnueabihf',target,configuration)
+     if fault=='container-refusal':
+      compiler_probe.assert_not_called();cross_build.assert_not_called()
+      self.assertFalse(target.exists())
 
 if __name__=='__main__': unittest.main()

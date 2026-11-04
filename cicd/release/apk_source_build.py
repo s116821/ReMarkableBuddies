@@ -108,16 +108,158 @@ def git_conversion(repo):
  eol=git(repo,'config','--default','native','--get','core.eol').lower()
  require(autocrlf in {'false','true','input'} and eol in {'lf','crlf','native'},'unsupported source Git conversion semantics')
  return dict(autocrlf=autocrlf,eol=eol,resolved_eol=('crlf' if os.name=='nt' else 'lf') if eol=='native' else eol)
-def container_git_conversion(repo,image,container_source,config_home,conversion):
+# Cross 49cd054: docker/local.rs, docker/engine.rs, docker/shared.rs,
+# file.rs and id.rs. The retained Windows executable has this exact identity.
+WINDOWS_CROSS_SHA='4dc72dab65cd33e444b9927a2b53c37a47cf94d451f93f70e3bd86ed46e3acb7'
+SOURCE_LIST_LIMIT=256*1024
+
+def plain_git(repo):
+ require(not any(key.startswith(('GIT_CONFIG','GIT_TEST_')) or key in {
+  'GIT_DIR','GIT_COMMON_DIR','GIT_WORK_TREE','GIT_INDEX_FILE','GIT_OBJECT_DIRECTORY',
+  'GIT_ALTERNATE_OBJECT_DIRECTORIES','GIT_NAMESPACE','GIT_REPLACE_REF_BASE',
+  'GIT_CEILING_DIRECTORIES','GIT_DISCOVERY_ACROSS_FILESYSTEM','GIT_ATTR_SOURCE','SUDO_UID',
+ } for key in os.environ),'inherited Git admission override')
+ require('safe.directory' not in git(repo,'config','--list','--name-only').splitlines(),'Git ownership exception configured')
+
+def source_git(repo,*args):
+ return run(['git','--no-optional-locks',*args],repo,stdout_limit=SOURCE_LIST_LIMIT,combined_limit=None)
+
+def source_snapshot(repo,tag):
+ info=(repo/'.git').lstat()
+ require(stat.S_ISDIR(info.st_mode) and not getattr(info,'st_file_attributes',0)&0x400,'standalone source Git directory')
+ plain_git(repo)
+ require(Path(source_git(repo,'rev-parse','--show-toplevel')).resolve()==repo,'actual source Git root')
+ require(Path(source_git(repo,'rev-parse','--absolute-git-dir')).resolve()==repo/'.git','actual source Git directory')
+ require(not source_git(repo,'for-each-ref','refs/replace/'),'source Git replacement refs')
+ source=source_identity(repo,tag)
+ entries=source_git(repo,'ls-tree','-r','--full-tree','HEAD').splitlines()
+ index=source_git(repo,'ls-files','-v').splitlines()
+ require(not source_git(repo,'diff','--cached','--name-only','HEAD','--'),'tracked source index differs from HEAD')
+ require(0<len(entries)<=2048 and len(index)==len(entries),'tracked source inventory bound')
+ working=[];committed=[];total=0;files=hashlib.sha256()
+ for entry,tracked in zip(entries,index):
+  match=re.fullmatch(r'(100644|100755) blob ([0-9a-f]{40})	([a-zA-Z0-9_./-]+)',entry)
+  require(match is not None,'unsupported tracked source type or path')
+  mode,oid,name=match.groups()
+  parts=name.split('/')
+  require(all(part not in {'','.','..'} and part.lower()!='.git' for part in parts),'unsupported tracked source path')
+  require(tracked=='H '+name,'unsupported tracked source index state')
+  path=repo
+  for part in parts[:-1]:
+   path=path/part
+   info=path.lstat()
+   require(stat.S_ISDIR(info.st_mode) and not getattr(info,'st_file_attributes',0)&0x400,'unsupported source directory')
+  path=path/parts[-1]
+  info=path.lstat()
+  require(stat.S_ISREG(info.st_mode) and not getattr(info,'st_file_attributes',0)&0x400,'unsupported source file')
+  if os.name!='nt':
+   require(bool(info.st_mode&stat.S_IXUSR)==(mode=='100755'),'tracked source mode mismatch')
+  total+=info.st_size
+  require(total<=128*1024*1024,'tracked source bytes bound')
+  identity=lambda info:(info.st_dev,info.st_ino,info.st_mode,info.st_size,info.st_mtime_ns)
+  with path.open('rb') as stream:
+   require(identity(os.fstat(stream.fileno()))==identity(info),'tracked source file replaced')
+   digest=hashlib.sha1(f'blob {info.st_size}\0'.encode(),usedforsecurity=False)
+   remaining=info.st_size
+   while remaining:
+    block=stream.read(min(65536,remaining))
+    require(block,'tracked source file truncated')
+    digest.update(block);remaining-=len(block)
+   require(not stream.read(1) and identity(os.fstat(stream.fileno()))==identity(info),'tracked source file changed')
+  require(identity(path.lstat())==identity(info),'tracked source path replaced')
+  files.update(repr((name,*identity(info))).encode()+b'\n')
+  working.append(digest.hexdigest())
+  committed.append(oid)
+ return dict(source=source,tag_oid=source_git(repo,'rev-parse','refs/tags/'+tag),
+             conversion=git_conversion(repo),working=working,committed=committed,file_identity=files.hexdigest())
+
+SOURCE_PROBE=r"""set -eu
+set -f
+test "$(id -u):$(id -g)" = "$1"
+test "$(stat -c %u .)" = "$(id -u)"
+test -d .git && test ! -L .git
+test "$(stat -c %u .git)" = "$(id -u)"
+config=$(git config --list --name-only)
+case "
+$config
+" in *'
+safe.directory
+'*) exit 1;; esac
+test "$(git rev-parse --show-toplevel)" = "$2"
+test "$(git rev-parse --absolute-git-dir)" = "$2/.git"
+test "$(git rev-parse --is-shallow-repository)" = false
+replacements=$(git for-each-ref refs/replace/)
+test -z "$replacements"
+test "$(git rev-parse HEAD)" = "$3"
+test "$(git rev-parse "refs/tags/$4^{commit}")" = "$3"
+test "$(git rev-parse "refs/tags/$4")" = "$5"
+status=$(git --no-optional-locks status --porcelain=v1 --untracked-files=normal)
+test -z "$status"
+staged=$(git --no-optional-locks diff --cached --name-only HEAD --)
+test -z "$staged"
+git config --default false --get core.autocrlf
+git config --default native --get core.eol
+entries=$(git ls-tree -r --full-tree HEAD)
+paths=$(printf '%s\n' "$entries" | (
+ while read -r mode type oid path; do
+  test "$type" = blob
+  case "$path" in ''|/*|*//*|*/|*[!a-zA-Z0-9_./-]*) exit 1;; esac
+  case "/$path/" in */./*|*/../*|*/.git/*) exit 1;; esac
+  test -f "$path" && test ! -L "$path" || exit 1
+  parent=$path
+  while [ "${parent%/*}" != "$parent" ]; do
+   parent=${parent%/*}
+   test -d "$parent" && test ! -L "$parent" || exit 1
+  done
+  permissions=$(stat -c %a -- "$path")
+  case "$mode:$permissions" in
+   100644:*[0246]??) ;;
+   100755:*[1357]??) ;;
+   *) exit 1;;
+  esac
+  printf '%s\n' "$path"
+ done
+))
+test "$(printf '%s\n' "$paths" | sed 's/^/H /')" = "$(git ls-files -v)"
+printf '%s\n' "$paths" | git hash-object --no-filters --stdin-paths
+"""
+
+def cross_source_mapping(repo,cross):
+ if os.name=='nt':
+  require(sha(cross)==WINDOWS_CROSS_SHA,'unreviewed Windows Cross source mapping')
+  require(re.match(r'^[A-Za-z]:/',repo.as_posix()) is not None,'unsupported Windows source mount')
+  mount='/mnt/'+repo.drive[0].lower()+repo.as_posix()[2:]
+  user='1000:1000'
+ else:
+  require(run([str(cross),'--version'],repo).startswith('cross 0.2.5 (49cd054 '),'unreviewed Cross source mapping')
+  mount=repo.as_posix()
+  user=f'{os.getuid()}:{os.getgid()}'
+ require(',' not in str(repo) and ',' not in mount,'unsupported source bind path')
+ endpoint=run(['docker','context','inspect','--format','{{.Endpoints.docker.Host}}'],repo,timeout=15)
+ require(endpoint.startswith('npipe:////./pipe/' if os.name=='nt' else 'unix:///'),'unsupported Cross Docker endpoint')
+ security=run(['docker','info','-f','{{.SecurityOptions}}'],repo,timeout=15)
+ require(security.startswith('[') and security.endswith(']') and
+         'name=rootless' not in security.lower(),'unsupported Cross Docker user mapping')
+ return mount,user
+
+def container_source_snapshot(repo,image,mapping,host):
  from docker_owned import phase
- # Same source path and temporary XDG config as the selected Cross invocation;
- # readonly probe must detect local/worktree settings overriding that config.
- raw=phase(['--rm','--network','none','--cap-drop','ALL','--read-only','--mount',f'type=bind,source={repo},target={container_source},readonly','--workdir',container_source,'--env','XDG_CONFIG_HOME='+config_home,'--entrypoint','/bin/sh',image,'-c','git config --default false --get core.autocrlf && git config --default native --get core.eol'],repo,run,timeout=30)
+ mount,user=mapping
+ source=host['source']
+ raw=phase(['--rm','--pull','never','--network','none','--cap-drop','ALL','--read-only',
+  '--platform','linux/amd64','--userns','host','--user',user,'--memory','256m','--pids-limit','32',
+  '--mount',f'type=bind,source={repo},target={mount},readonly','--workdir',mount,
+  image,'sh','-c',SOURCE_PROBE,'source-admission',user,mount,source['sha'],source['tag'],host['tag_oid']],
+  repo,run,timeout=60,stdout_limit=SOURCE_LIST_LIMIT,combined_limit=None)
  values=raw.splitlines()
- require(len(values)==2 and values[0].lower()==conversion['autocrlf'],'container Git conversion semantics mismatch')
- effective=values[1].lower();require(effective in {'native','lf','crlf'},'unsupported container Git eol')
- require(conversion['autocrlf']!='false' or ('lf' if effective=='native' else effective)==conversion['resolved_eol'],'container Git conversion semantics mismatch')
- return dict(autocrlf=values[0].lower(),eol=effective,resolved_eol='lf' if effective=='native' else effective)
+ require(len(values)==len(host['working'])+2 and values[2:]==host['working'],'container raw source inventory mismatch')
+ autocrlf,eol=(value.lower() for value in values[:2])
+ require(autocrlf in {'false','true','input'} and eol in {'lf','crlf','native'},'unsupported container Git conversion')
+ conversion=dict(autocrlf=autocrlf,eol=eol,resolved_eol='lf' if eol=='native' else eol)
+ require(conversion==host['conversion'] or host['working']==host['committed'],
+         'different Git conversion requires exact committed raw source bytes')
+ return conversion
+
 def sha(path):
  with path.open('rb') as source: return hashlib.file_digest(source,'sha256').hexdigest()
 
@@ -156,7 +298,7 @@ def source_identity(repo,tag):
  require(stable(tag),'stable existing tag required')
  require(git(repo,'remote','get-url','origin') in {REPOSITORY,REPOSITORY+'.git','git@github.com:s116821/ReMarkableBuddies.git','ssh://git@github.com/s116821/ReMarkableBuddies.git'},'canonical source repository origin')
  require(git(repo,'rev-parse','--is-shallow-repository')=='false','complete source')
- require(not git(repo,'status','--porcelain','--untracked-files=normal'),'clean exact source')
+ require(not git(repo,'--no-optional-locks','status','--porcelain','--untracked-files=normal'),'clean exact source')
  head=git(repo,'rev-parse','HEAD')
  require(git(repo,'rev-parse',f'refs/tags/{tag}^{{commit}}')==head,'tag/source mismatch')
  return dict(repository=REPOSITORY,tag=tag,sha=head,epoch=int(git(repo,'show','-s','--format=%ct',head)))
@@ -170,7 +312,7 @@ def clean_sdk_checkout(root,fragment):
   try: info=(root/'.cargo-ok').lstat()
   except FileNotFoundError:return None
   require(stat.S_ISREG(info.st_mode) and info.st_nlink==1 and info.st_size==0 and not getattr(info,'st_file_attributes',0)&0x400,'invalid SDK completion marker')
-  return (info.st_dev,info.st_ino,info.st_mode,info.st_nlink,info.st_size,info.st_mtime_ns,info.st_ctime_ns)
+  return (info.st_dev,info.st_ino,info.st_mode,info.st_nlink,info.st_size,info.st_mtime_ns)
  before=marker_identity()
  require(not git(root,'status','--porcelain=v1','--untracked-files=all','--','.',':(top,exclude,literal).cargo-ok'),'clean actual SDK checkout')
  require(marker_identity()==before,'SDK completion marker changed')
@@ -244,11 +386,21 @@ def build(repo,tag,target,target_dir,cross_configuration,sdk_tag=None):
  configuration_hash=sha(configuration);helper_hash=sha(Path(__file__))
  cross=Path(shutil.which('cross') or '')
  require(cross.is_file(),'actual cross executable')
- private_cargo=[];before_source=source_identity(repo,tag);license_id=source_license(repo)
- configurations=cargo_configuration(repo);conversion=git_conversion(repo);before_cargo=cargo_identity(repo,target,sdk_tag,private_cargo)
  require(all(not os.environ.get(k) for k in OVERRIDES),'unreviewed build override')
- require(not any(value and (key in UNRECORDED_OVERRIDES or key.startswith(('CARGO_PROFILE_','CROSS_')) or key=='DOCKER_OPTS' or key=='RUSTUP_TOOLCHAIN' or (key.startswith('CARGO_TARGET_') and key.endswith(('_RUSTFLAGS','_LINKER','_RUNNER')))) for key,value in os.environ.items()),'unrecorded compiler/linker/runner/toolchain override')
+ require(not any((key in UNRECORDED_OVERRIDES or key.startswith(('CARGO_PROFILE_','CROSS_')) or key in {'DOCKER_OPTS','DOCKER_HOST','DOCKER_CONTEXT'} or key=='RUSTUP_TOOLCHAIN' or (key.startswith('CARGO_TARGET_') and key.endswith(('_RUSTFLAGS','_LINKER','_RUNNER')))) for key in os.environ),'unrecorded compiler/linker/runner/toolchain override')
  require(not any(k.startswith('VERGEN_') for k in os.environ),'version override')
+ require(config==tomllib.loads(Path(__file__).with_name('Cross.apk.toml').read_text()),'reviewed Cross configuration required')
+ before_host=source_snapshot(repo,tag)
+ before_source=before_host['source']
+ mapping=cross_source_mapping(repo,cross)
+ before_conversion=container_source_snapshot(repo,image,mapping,before_host)
+ private_cargo=[];license_id=source_license(repo)
+ configurations=cargo_configuration(repo);before_cargo=cargo_identity(repo,target,sdk_tag,private_cargo)
+ metadata=private_cargo[0]
+ require(Path(metadata['workspace_root']).resolve()==repo,'actual Cross workspace root')
+ require('cross' not in (metadata.get('metadata') or {}) and all(
+  'cross' not in (package.get('metadata') or {}) for package in metadata['packages']
+  if package['id'] in metadata['workspace_members']),'unreviewed Cross workspace configuration')
  target_dir.mkdir(exist_ok=False)
  env=dict(os.environ,READER_BUDDY_RELEASE_TAG=tag,READER_BUDDY_RELEASE_SHA=before_source['sha'],CROSS_CONFIG=str(configuration),LD_BIND_NOW='1',SOURCE_DATE_EPOCH=str(before_source['epoch']))
  env.update({key:'' for key in OVERRIDES})
@@ -256,47 +408,39 @@ def build(repo,tag,target,target_dir,cross_configuration,sdk_tag=None):
  # Use exactly the observed stable Linux counterpart chosen by the pinned
  # Cross image platform. A source/compiler/container switch refuses below.
  argv=[str(cross),'+stable','build','--locked','--release','--target',target,'--target-dir',str(target_dir),'--bin','reader-buddy']
- container_source=repo.as_posix()
- if os.name=='nt':container_source='/mnt/'+container_source[0].lower()+container_source[2:]
- import tempfile
- with tempfile.TemporaryDirectory(prefix='apk-git-config-',dir=repo/'.git') as config_home:
-  config_home=Path(config_home);(config_home/'git').mkdir()
-  git(repo,'config','--file',str(config_home/'git/config'),'safe.directory',container_source)
-  git(repo,'config','--file',str(config_home/'git/config'),'core.autocrlf',conversion['autocrlf'])
-  git(repo,'config','--file',str(config_home/'git/config'),'core.eol',conversion['resolved_eol'])
-  env['XDG_CONFIG_HOME']=container_source+'/.git/'+config_home.name
-  before_conversion=container_git_conversion(repo,image,container_source,env['XDG_CONFIG_HOME'],conversion)
-  cross_phase(argv,repo,env,run,timeout=900,private_diagnostics=target_dir/'compiler-diagnostics')
-  binary=target_dir/target/'release/reader-buddy'
-  require(binary.is_file() and not binary.is_symlink(),'new build executable')
-  with binary.open('rb') as checked:
-   before=os.fstat(checked.fileno());require(1<=before.st_size<=134217728,'actual executable bound')
-   executed_hash=hashlib.file_digest(checked,'sha256').hexdigest();checked.seek(0)
-   output,runtime_evidence=runtime(binary,repo,target,image,target_dir/'runtime-diagnostics')
-   runtime_argv=runtime_evidence['actual_container_argv'][1]
-   require(output.split()[-1:]==[tag[1:]],'actual target runtime tag version')
-   after=os.fstat(checked.fileno());current=binary.stat()
-   identity=lambda info:(info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns)
-   require(identity(before)==identity(after)==identity(current),'executed binary file identity changed')
-   require(hashlib.file_digest(checked,'sha256').hexdigest()==executed_hash,'executed binary bytes changed')
-   checked.seek(0)
-   frozen_dir=target_dir/'verified-input';frozen_dir.mkdir(exist_ok=False);frozen=frozen_dir/'reader-buddy'
-   with frozen.open('xb') as destination:
-    remaining=before.st_size;copied=hashlib.sha256()
-    while remaining:
-     block=checked.read(min(65536,remaining));require(block,'short checked executable')
-     destination.write(block);copied.update(block);remaining-=len(block)
-   require(copied.hexdigest()==executed_hash and identity(os.fstat(checked.fileno()))==identity(before),'checked descriptor changed during freeze')
-  require(container_git_conversion(repo,image,container_source,env['XDG_CONFIG_HOME'],conversion)==before_conversion,'container Git conversion changed')
+ cross_phase(argv,repo,env,run,timeout=900,private_diagnostics=target_dir/'compiler-diagnostics')
+ binary=target_dir/target/'release/reader-buddy'
+ require(binary.is_file() and not binary.is_symlink(),'new build executable')
+ with binary.open('rb') as checked:
+  before=os.fstat(checked.fileno());require(1<=before.st_size<=134217728,'actual executable bound')
+  executed_hash=hashlib.file_digest(checked,'sha256').hexdigest();checked.seek(0)
+  output,runtime_evidence=runtime(binary,repo,target,image,target_dir/'runtime-diagnostics')
+  runtime_argv=runtime_evidence['actual_container_argv'][1]
+  require(output.split()[-1:]==[tag[1:]],'actual target runtime tag version')
+  after=os.fstat(checked.fileno());current=binary.stat()
+  identity=lambda info:(info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns)
+  require(identity(before)==identity(after)==identity(current),'executed binary file identity changed')
+  require(hashlib.file_digest(checked,'sha256').hexdigest()==executed_hash,'executed binary bytes changed')
+  after_host=source_snapshot(repo,tag)
+  require(after_host==before_host,'source Git admission identity changed')
+  require(cross_source_mapping(repo,cross)==mapping,'Cross source mapping changed')
+  require(container_source_snapshot(repo,image,mapping,after_host)==before_conversion,'container Git admission identity changed')
+  checked.seek(0)
+  frozen_dir=target_dir/'verified-input';frozen_dir.mkdir(exist_ok=False);frozen=frozen_dir/'reader-buddy'
+  with frozen.open('xb') as destination:
+   remaining=before.st_size;copied=hashlib.sha256()
+   while remaining:
+    block=checked.read(min(65536,remaining));require(block,'short checked executable')
+    destination.write(block);copied.update(block);remaining-=len(block)
+  require(copied.hexdigest()==executed_hash and identity(os.fstat(checked.fileno()))==identity(before),'checked descriptor changed during freeze')
  require(sha(frozen)==executed_hash,'frozen executable identity')
  cls,machine=elf_header(frozen);arch,abi,expected_cls,expected_machine=TARGETS[target]
  require((cls,machine)==(expected_cls,expected_machine),'target ELF correspondence')
  actual_elf=qualify(frozen,target,lambda command:run(command,repo,stdout_limit=65536,combined_limit=None))
  after_compiler=compiler_identity(repo,target,image,cross,run,sha)
  require(after_compiler==before_compiler,'actual Cross compiler/image identity changed')
- require(source_identity(repo,tag)==before_source and cargo_identity(repo,target,sdk_tag,private_cargo)==before_cargo,'build inputs changed')
+ require(cargo_identity(repo,target,sdk_tag,private_cargo)==before_cargo,'build inputs changed')
  require(cargo_configuration(repo)==configurations and source_license(repo)==license_id,'source configuration/license changed')
- require(git_conversion(repo)==conversion,'source Git conversion semantics changed')
  require(sha(configuration)==configuration_hash and sha(Path(__file__))==helper_hash,'build helper/configuration changed')
  fields=before_compiler['rustc_fields'];sdk=before_cargo['sdk']
  observed_image=next(value for value in before_compiler['image']['digests'] if value==image)
@@ -308,8 +452,12 @@ def build(repo,tag,target,target_dir,cross_configuration,sdk_tag=None):
   binary=dict(path='usr/bin/reader-buddy',sha256=executed_hash,bytes=before.st_size,mode=493))
  from apk_contract import canonical
  canonical(metadata)
- private_evidence=dict(source_root=str(repo),target_root=str(target_dir),configuration_path=str(configuration),cargo_configuration_digests=configurations,actual_build_argv=argv,actual_runtime_argv=runtime_argv,recorded_environment={key:env[key] for key in [*OVERRIDES,'READER_BUDDY_RELEASE_TAG','READER_BUDDY_RELEASE_SHA','CROSS_CONFIG','LD_BIND_NOW','SOURCE_DATE_EPOCH','XDG_CONFIG_HOME']},cargo_observations=private_cargo,compiler_before=before_compiler,compiler_after=after_compiler,executed_binary_identity=list(identity(before)),executed_binary_sha256=executed_hash,elf_observation=actual_elf,runtime_version_output=output,source_license=license_id,license_basis=dict(project_declaration=LICENSE_DECLARATION,committed_blob=LICENSE_BLOB,actual_file_sha256=sha(repo/'LICENSE'),existing_detected_identifier='GPL-3.0',classifier_is_owner_grant=False))
- private_evidence['git_conversion']=conversion
+ private_evidence=dict(source_root=str(repo),target_root=str(target_dir),configuration_path=str(configuration),cargo_configuration_digests=configurations,actual_build_argv=argv,actual_runtime_argv=runtime_argv,recorded_environment={key:env[key] for key in [*OVERRIDES,'READER_BUDDY_RELEASE_TAG','READER_BUDDY_RELEASE_SHA','CROSS_CONFIG','LD_BIND_NOW','SOURCE_DATE_EPOCH']},cargo_observations=private_cargo,compiler_before=before_compiler,compiler_after=after_compiler,executed_binary_identity=list(identity(before)),executed_binary_sha256=executed_hash,elf_observation=actual_elf,runtime_version_output=output,source_license=license_id,license_basis=dict(project_declaration=LICENSE_DECLARATION,committed_blob=LICENSE_BLOB,actual_file_sha256=sha(repo/'LICENSE'),existing_detected_identifier='GPL-3.0',classifier_is_owner_grant=False))
+ private_evidence['git_conversion']=before_host['conversion']
+ private_evidence['source_git_admission']=dict(tag_oid=before_host['tag_oid'],mount=mapping[0],user=mapping[1],
+  tracked_files=len(before_host['working']),file_identity_sha256=before_host['file_identity'],raw_committed_match=before_host['working']==before_host['committed'],
+  working_inventory_sha256=hashlib.sha256(''.join(before_host['working']).encode()).hexdigest(),
+  committed_inventory_sha256=hashlib.sha256(''.join(before_host['committed']).encode()).hexdigest())
  private_evidence['container_git_conversion']=before_conversion
  private_evidence['runtime_observations']=runtime_evidence
  return frozen,metadata,private_evidence
