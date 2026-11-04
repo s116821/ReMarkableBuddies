@@ -1,5 +1,5 @@
 """Real child-process refusal controls; no device or network access."""
-import os,pathlib,shutil,sys,time,unittest,tempfile,hashlib
+import json,os,pathlib,shutil,sys,time,unittest,tempfile,hashlib
 from apk_contract import Refusal
 from apk_source_build import run,source_license,LICENSE_BLOB,build,git_conversion,container_source_snapshot,source_snapshot,runtime,RUNTIMES,IMAGES,SOURCE_PROBE
 from apk_builder import copy_verified
@@ -80,6 +80,30 @@ class GitConversion(unittest.TestCase):
     self.assertNotIn('--env',argv)
     self.assertNotIn('XDG_CONFIG_HOME',' '.join(argv))
 
+ def test_diagnostic_receipt_preserves_early_refusal_and_filters_stderr(self):
+  with tempfile.TemporaryDirectory() as directory:
+   root=pathlib.Path(directory);repo=root/'source';repo.mkdir()
+   destination=root/'receipt.json'
+   host=dict(source=dict(sha='2'*40,tag='v1.2.3'),tag_oid='3'*40)
+   def phase(args,cwd,command,**options):
+    return command(['docker','run','--name','owned-probe',*args],cwd,**options)
+   def local_command(argv,cwd,**options):
+    code=("import sys; sys.stderr.write('private raw stderr\\n"
+          "buddy-source: stage ownership\\nbuddy-source: identity 1000:1000\\n"
+          "buddy-source: workspace 0:0:755\\nbuddy-source: manifest 0:0:777\\n"
+          "buddy-source: invalid path payload\\n'); sys.exit(1)")
+    return run([sys.executable,'-c',code],cwd,**options)
+   with patch('docker_owned.phase',side_effect=phase),patch('apk_source_build.run',side_effect=local_command):
+    with self.assertRaisesRegex(Refusal,'actual build/tool command failed'):
+     container_source_snapshot(repo,'image',('/source','1000:1000'),host,destination)
+   receipt=json.loads(destination.read_text())
+   self.assertEqual(receipt['transport'],'refused')
+   self.assertEqual(receipt['admission'],'refused')
+   self.assertEqual(receipt['argv'][:4],['docker','run','--name','owned-probe'])
+   self.assertEqual(receipt['events'],['buddy-source: stage ownership','buddy-source: identity 1000:1000',
+                    'buddy-source: workspace 0:0:755','buddy-source: manifest 0:0:777'])
+   self.assertNotIn('private raw stderr',destination.read_text())
+
  def test_actual_git_raw_bytes_index_mode_and_dirty_status(self):
   with tempfile.TemporaryDirectory() as directory:
    repo=pathlib.Path(directory).resolve()
@@ -100,6 +124,15 @@ class GitConversion(unittest.TestCase):
     probe=[str(shell),'-c',SOURCE_PROBE,'source-admission',user,repo.as_posix(),
            baseline['source']['sha'],'v1.2.3',baseline['tag_oid']]
     self.assertEqual(run(probe,repo).splitlines()[2:],baseline['working'])
+    probe[4]='0:0' if user!='0:0' else '1000:1000'
+    events=[]
+    with self.assertRaisesRegex(Refusal,'actual build/tool command failed'):
+     run(probe,repo,source_probe_lines=events)
+    self.assertIn('buddy-source: identity '+user,events)
+    self.assertTrue(any(line.startswith('buddy-source: workspace ') for line in events))
+    self.assertTrue(any(line.startswith('buddy-source: git-dir ') for line in events))
+    self.assertNotIn('buddy-source: stage git-config',events)
+    probe[4]=user
    else:
     probe=None
    source.write_bytes(b'original\r\n')

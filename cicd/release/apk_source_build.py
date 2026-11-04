@@ -50,7 +50,14 @@ def runtime(binary,repo,target,image,diagnostics):
  remaining()
  return output,evidence
 
-def run(argv,cwd,env=None,timeout=120,stdout_limit=16384,combined_limit=16384,return_streams=False,private_diagnostics=None):
+SOURCE_PROBE_EVENT=re.compile(
+ r'buddy-source: (?:stage (?:ownership|git-config|git-root-tag|git-status|'
+ r'tracked-modes|tracked-index|raw-inventory|complete)|identity [0-9]{1,10}:[0-9]{1,10}|'
+ r'(?:workspace|git-dir|manifest|git-index) (?:[0-9]{1,10}:[0-9]{1,10}:[0-7]{3,4}|unavailable)|'
+ r'mode-mismatch (?:100644|100755) [0-7]{3,4}|tracked-count [0-9]{1,4})'
+)
+
+def run(argv,cwd,env=None,timeout=120,stdout_limit=16384,combined_limit=16384,return_streams=False,private_diagnostics=None,source_probe_lines=None):
  if private_diagnostics is not None:
   private_diagnostics=Path(private_diagnostics)
   require(combined_limit in {8192,16384},'private compiler diagnostic bound')
@@ -96,6 +103,11 @@ def run(argv,cwd,env=None,timeout=120,stdout_limit=16384,combined_limit=16384,re
    finally:guard.close()
   finally:
    for reader in readers: reader.join(timeout=1)
+   if source_probe_lines is not None:
+    for line in buffers[1].decode('ascii',errors='replace').splitlines():
+     if SOURCE_PROBE_EVENT.fullmatch(line):
+      source_probe_lines.append(line)
+      if len(source_probe_lines)==16:break
    if private_diagnostics is not None:
     try:
      for name,value in zip(('stdout.bin','stderr.bin'),buffers):
@@ -175,16 +187,30 @@ def source_snapshot(repo,tag):
 
 SOURCE_PROBE=r"""set -eu
 set -f
-test "$(id -u):$(id -g)" = "$1"
+exec 3>&2 2>/dev/null
+observe_mode() {
+ value=$(stat -c '%u:%g:%a' -- "$2") || value=unavailable
+ printf 'buddy-source: %s %s\n' "$1" "$value" >&3
+}
+printf 'buddy-source: stage ownership\n' >&3
+identity="$(id -u):$(id -g)"
+printf 'buddy-source: identity %s\n' "$identity" >&3
+observe_mode workspace .
+observe_mode git-dir .git
+observe_mode manifest Cargo.toml
+observe_mode git-index .git/index
+test "$identity" = "$1"
 test "$(stat -c %u .)" = "$(id -u)"
 test -d .git && test ! -L .git
 test "$(stat -c %u .git)" = "$(id -u)"
+printf 'buddy-source: stage git-config\n' >&3
 config=$(git config --list --name-only)
 case "
 $config
 " in *'
 safe.directory
 '*) exit 1;; esac
+printf 'buddy-source: stage git-root-tag\n' >&3
 test "$(git rev-parse --show-toplevel)" = "$2"
 test "$(git rev-parse --absolute-git-dir)" = "$2/.git"
 test "$(git rev-parse --is-shallow-repository)" = false
@@ -193,12 +219,14 @@ test -z "$replacements"
 test "$(git rev-parse HEAD)" = "$3"
 test "$(git rev-parse "refs/tags/$4^{commit}")" = "$3"
 test "$(git rev-parse "refs/tags/$4")" = "$5"
+printf 'buddy-source: stage git-status\n' >&3
 status=$(git --no-optional-locks status --porcelain=v1 --untracked-files=normal)
 test -z "$status"
 staged=$(git --no-optional-locks diff --cached --name-only HEAD --)
 test -z "$staged"
 git config --default false --get core.autocrlf
 git config --default native --get core.eol
+printf 'buddy-source: stage tracked-modes\n' >&3
 entries=$(git ls-tree -r --full-tree HEAD)
 paths=$(printf '%s\n' "$entries" | (
  while read -r mode type oid path; do
@@ -215,13 +243,20 @@ paths=$(printf '%s\n' "$entries" | (
   case "$mode:$permissions" in
    100644:*[0246]??) ;;
    100755:*[1357]??) ;;
-   *) exit 1;;
+   *)
+    printf 'buddy-source: mode-mismatch %s %s\n' "$mode" "$permissions" >&3
+    exit 1;;
   esac
   printf '%s\n' "$path"
  done
 ))
+count=$(printf '%s\n' "$paths" | wc -l | tr -d ' ')
+printf 'buddy-source: tracked-count %s\n' "$count" >&3
+printf 'buddy-source: stage tracked-index\n' >&3
 test "$(printf '%s\n' "$paths" | sed 's/^/H /')" = "$(git ls-files -v)"
+printf 'buddy-source: stage raw-inventory\n' >&3
 printf '%s\n' "$paths" | git hash-object --no-filters --stdin-paths
+printf 'buddy-source: stage complete\n' >&3
 """
 
 def cross_source_mapping(repo,cross):
@@ -242,23 +277,48 @@ def cross_source_mapping(repo,cross):
          'name=rootless' not in security.lower(),'unsupported Cross Docker user mapping')
  return mount,user
 
-def container_source_snapshot(repo,image,mapping,host):
- from docker_owned import phase
+def container_source_argv(repo,image,mapping,host):
  mount,user=mapping
  source=host['source']
- raw=phase(['--rm','--pull','never','--network','none','--cap-drop','ALL','--read-only',
+ return ['--rm','--pull','never','--network','none','--cap-drop','ALL','--read-only',
   '--platform','linux/amd64','--userns','host','--user',user,'--memory','256m','--pids-limit','32',
   '--mount',f'type=bind,source={repo},target={mount},readonly','--workdir',mount,
-  image,'sh','-c',SOURCE_PROBE,'source-admission',user,mount,source['sha'],source['tag'],host['tag_oid']],
-  repo,run,timeout=60,stdout_limit=SOURCE_LIST_LIMIT,combined_limit=None)
- values=raw.splitlines()
- require(len(values)==len(host['working'])+2 and values[2:]==host['working'],'container raw source inventory mismatch')
- autocrlf,eol=(value.lower() for value in values[:2])
- require(autocrlf in {'false','true','input'} and eol in {'lf','crlf','native'},'unsupported container Git conversion')
- conversion=dict(autocrlf=autocrlf,eol=eol,resolved_eol='lf' if eol=='native' else eol)
- require(conversion==host['conversion'] or host['working']==host['committed'],
-         'different Git conversion requires exact committed raw source bytes')
- return conversion
+  image,'sh','-c',SOURCE_PROBE,'source-admission',user,mount,source['sha'],source['tag'],host['tag_oid']]
+
+def container_source_snapshot(repo,image,mapping,host,diagnostics=None):
+ from docker_owned import phase
+ arguments=container_source_argv(repo,image,mapping,host)
+ options=dict(timeout=60,stdout_limit=SOURCE_LIST_LIMIT,combined_limit=None)
+ def validate(raw):
+  values=raw.splitlines()
+  require(len(values)==len(host['working'])+2 and values[2:]==host['working'],'container raw source inventory mismatch')
+  autocrlf,eol=(value.lower() for value in values[:2])
+  require(autocrlf in {'false','true','input'} and eol in {'lf','crlf','native'},'unsupported container Git conversion')
+  conversion=dict(autocrlf=autocrlf,eol=eol,resolved_eol='lf' if eol=='native' else eol)
+  require(conversion==host['conversion'] or host['working']==host['committed'],
+          'different Git conversion requires exact committed raw source bytes')
+  return conversion
+ if diagnostics is None:
+  return validate(phase(arguments,repo,run,**options))
+ destination=Path(diagnostics).resolve()
+ require(not destination.is_relative_to(repo),'source probe receipt must be outside the source checkout')
+ evidence=dict(argv=None,events=[],transport='refused',admission='refused')
+ def observe(argv,*args,**kwargs):
+  if argv[:2]==['docker','run']:
+   evidence['argv']=list(argv)
+   kwargs['source_probe_lines']=evidence['events']
+  return run(argv,*args,**kwargs)
+ with destination.open('x',encoding='utf-8') as receipt:
+  try:
+   raw=phase(arguments,repo,observe,**options)
+   evidence['transport']='returned'
+   conversion=validate(raw)
+   evidence['admission']='accepted'
+   return conversion
+  finally:
+   record=json.dumps(evidence,sort_keys=True,separators=(',',':'))+'\n'
+   require(len(record.encode())<=8192,'source probe receipt bound')
+   receipt.write(record)
 
 def sha(path):
  with path.open('rb') as source: return hashlib.file_digest(source,'sha256').hexdigest()
@@ -312,7 +372,7 @@ def clean_sdk_checkout(root,fragment):
   try: info=(root/'.cargo-ok').lstat()
   except FileNotFoundError:return None
   require(stat.S_ISREG(info.st_mode) and info.st_nlink==1 and info.st_size==0 and not getattr(info,'st_file_attributes',0)&0x400,'invalid SDK completion marker')
-  return (info.st_dev,info.st_ino,info.st_mode,info.st_nlink,info.st_size,info.st_mtime_ns)
+  return (info.st_dev,info.st_ino,info.st_mode,info.st_nlink,info.st_size,info.st_mtime_ns,info.st_ctime_ns)
  before=marker_identity()
  require(not git(root,'status','--porcelain=v1','--untracked-files=all','--','.',':(top,exclude,literal).cargo-ok'),'clean actual SDK checkout')
  require(marker_identity()==before,'SDK completion marker changed')
