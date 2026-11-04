@@ -56,7 +56,7 @@ pub struct Args {
         feature = "development-resident-bootstrap",
         feature = "development-input-diagnostics"
     ))]
-    #[arg(long)]
+    #[arg(long, exclusive = true)]
     development_resident_output_plan: Option<std::path::PathBuf>,
 
     /// Existing-only generation-inclusive accounting; no runtime activation
@@ -942,6 +942,12 @@ mod tests {
                 "credential-reference-input",
                 "credential-reference-operation",
                 "debug-dump",
+                #[cfg(all(
+                    target_os = "linux",
+                    feature = "development-resident-bootstrap",
+                    feature = "development-input-diagnostics"
+                ))]
+                "development-resident-output-plan",
                 "export-note",
                 "handwriting",
                 "inspect-conversations",
