@@ -77,6 +77,25 @@ enum RenderOutcome {
 }
 
 impl<M: LLMEngine> Orchestrator<M> {
+    /// Continue an explicitly acknowledged selected input. This consumes current
+    /// stored data only; installed acquisition and native output remain separate.
+    pub fn run_selected_prepared(
+        &mut self,
+        token: crate::storage::selection::SelectionToken,
+        root: crate::conversation::IntentRecordRef,
+        user: crate::conversation::IntentRecordRef,
+        capture: crate::storage::Uuid,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.memory.is_none(),
+            "Selected prepared entry requires a reviewed combined subject-memory admission set"
+        );
+        let mut attempt =
+            Attempt::prepare_selected(&self.ledger, &self.workflow, token, root, user, capture)?;
+        self.workflow.begin_iteration()?;
+        attempt.check_selected()?;
+        self.run_prepared(&mut attempt)
+    }
     pub fn new(workflow: Workflow, llm: M, ledger: Ledger) -> Self {
         Self {
             workflow,
@@ -210,8 +229,12 @@ impl<M: LLMEngine> Orchestrator<M> {
         // - Detect outlined or highlighted region
         // - Extract question text
         // - Generate answer
-        let result =
-            self.analyze_and_answer(screenshot_base64, screenshot_png_data, &encoded[1..])?;
+        let result = self.analyze_and_answer(
+            attempt,
+            screenshot_base64,
+            screenshot_png_data,
+            &encoded[1..],
+        )?;
 
         match result {
             None => {
@@ -233,8 +256,10 @@ impl<M: LLMEngine> Orchestrator<M> {
                     .iter()
                     .map(|bytes| STANDARD.encode(bytes))
                     .collect();
-                if let Some(failure) = self.verify_question(&result, &verification)? {
-                    info!("Independent question reading disagreed or was uncertain; no answer written");
+                if let Some(failure) = self.verify_question(attempt, &result, &verification)? {
+                    info!(
+                        "Independent question reading disagreed or was uncertain; no answer written"
+                    );
                     self.workflow.report_failure(failure)?;
                     attempt.outcome(
                         &self.ledger,
@@ -253,7 +278,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                 attempt.interpret(&self.ledger, &result.question)?;
                 if self.memory.is_some() || personalization.effective_text().is_some() {
                     if let Err(error) =
-                        self.enrich_answer(&mut result, &verification, &personalization)
+                        self.enrich_answer(attempt, &mut result, &verification, &personalization)
                     {
                         log::warn!("Contextual answer was not completed");
                         self.workflow.report_failure(Failure::Provider)?;
@@ -275,10 +300,14 @@ impl<M: LLMEngine> Orchestrator<M> {
                         return Err(error);
                     }
                 }
+                attempt.check_selected()?;
                 attempt.generated(
                     &self.ledger,
                     Workflow::compose_qa(&result.question, &result.answer, result.selection_center),
                 )?;
+                if attempt.is_selected() {
+                    anyhow::bail!("Selected Generated draft acknowledged; qualified Pending/native output unavailable");
+                }
                 if !attempt.legacy_output {
                     attempt.outcome(
                         &self.ledger,
@@ -344,10 +373,12 @@ impl<M: LLMEngine> Orchestrator<M> {
     /// Returns None if no clear selection/question is found.
     fn analyze_and_answer(
         &mut self,
+        attempt: &Attempt,
         screenshot_base64: &str,
         screenshot_png_data: Vec<u8>,
         details: &[String],
     ) -> Result<Option<AnalysisResult>> {
+        attempt.check_selected()?;
         info!("Sending analysis + answer proposal");
 
         self.llm.clear_content();
@@ -359,7 +390,9 @@ impl<M: LLMEngine> Orchestrator<M> {
 
         let mut progress_failed = false;
         let response = match self.llm.execute_with_progress(&mut || {
-            let result = self.workflow.check_request_progress();
+            let result = attempt
+                .check_selected()
+                .and_then(|_| self.workflow.check_request_progress());
             progress_failed |= result.is_err();
             result
         }) {
@@ -373,6 +406,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         };
         self.workflow.check_request_progress()?;
         info!("Analysis response received ({} bytes)", response.len());
+        attempt.check_selected()?;
         Ok(Self::parse_analysis_response(
             &response,
             screenshot_png_data,
@@ -437,10 +471,12 @@ impl<M: LLMEngine> Orchestrator<M> {
 
     fn enrich_answer(
         &mut self,
+        attempt: &Attempt,
         result: &mut AnalysisResult,
         images: &[String],
         preference: &crate::config::PersonalizationSnapshot,
     ) -> Result<()> {
+        attempt.check_selected()?;
         self.workflow.check_request_progress()?;
         let retrieved = self
             .memory
@@ -456,6 +492,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                     .map_err(|_| anyhow::anyhow!("subject memory retrieval failed"))
             })
             .transpose()?;
+        attempt.check_selected()?;
         self.workflow.check_request_progress()?;
         use crate::memory::Status;
         if let Some(view) = &retrieved {
@@ -483,17 +520,24 @@ impl<M: LLMEngine> Orchestrator<M> {
             images,
             usable,
             Some(preference),
-            &mut || workflow.check_request_progress(),
+            &mut || {
+                attempt
+                    .check_selected()
+                    .and_then(|_| workflow.check_request_progress())
+            },
         )?;
+        attempt.check_selected()?;
         self.workflow.check_request_progress()?;
         Ok(())
     }
 
     fn verify_question(
         &mut self,
+        attempt: &Attempt,
         result: &AnalysisResult,
         images: &[String],
     ) -> Result<Option<Failure>> {
+        attempt.check_selected()?;
         let Some(bounds) = &result._question_box else {
             return Ok(Some(Failure::Transcription));
         };
@@ -516,7 +560,9 @@ impl<M: LLMEngine> Orchestrator<M> {
         }
         let mut progress_failed = false;
         let reading = match self.llm.execute_with_progress(&mut || {
-            let result = self.workflow.check_request_progress();
+            let result = attempt
+                .check_selected()
+                .and_then(|_| self.workflow.check_request_progress());
             progress_failed |= result.is_err();
             result
         }) {
@@ -534,6 +580,7 @@ impl<M: LLMEngine> Orchestrator<M> {
             "Independent question reading received ({} bytes)",
             reading.len()
         );
+        attempt.check_selected()?;
         Ok((!Self::transcriptions_agree(&result.question, &reading))
             .then_some(Failure::Transcription))
     }
