@@ -21,6 +21,11 @@ mod reader_uncertainty;
 pub mod receiving;
 pub mod resolution;
 mod selected;
+mod selected_reader_write;
+pub use selected_reader_write::{
+    SelectedReaderAcknowledgment, SelectedReaderPublication, SelectedReaderText,
+    SelectedReaderWrite,
+};
 #[cfg(test)]
 mod selected_context_tests;
 mod settlement;
