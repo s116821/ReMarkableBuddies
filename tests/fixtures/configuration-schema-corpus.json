@@ -288,6 +288,72 @@
       "schema_valid": false,
       "typed_valid": false,
       "basis": "Existing canonical inspector rejects duplicate namespace array entries; legacy set decoding stays unchanged."
+    },
+    {
+      "name": "reader-empty",
+      "raw_utf8": "{\"reader\":{}}",
+      "schema_valid": true,
+      "typed_valid": true
+    },
+    {
+      "name": "reader-null-parent",
+      "raw_utf8": "{\"reader\":null}",
+      "schema_valid": false,
+      "typed_valid": false
+    },
+    {
+      "name": "reader-null-selection",
+      "raw_utf8": "{\"reader\":{\"selection\":null}}",
+      "schema_valid": true,
+      "typed_valid": true
+    },
+    {
+      "name": "reader-selected",
+      "raw_utf8": "{\"reader\":{\"selection\":{\"group\":\"00000000-0000-0000-0000-000000000001\",\"key_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"binding_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}}",
+      "schema_valid": true,
+      "typed_valid": true
+    },
+    {
+      "name": "reader-array",
+      "raw_utf8": "{\"reader\":[]}",
+      "schema_valid": false,
+      "typed_valid": false
+    },
+    {
+      "name": "reader-selection-array",
+      "raw_utf8": "{\"reader\":{\"selection\":[\"00000000-0000-0000-0000-000000000001\",\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"]}}",
+      "schema_valid": false,
+      "typed_valid": false
+    },
+    {
+      "name": "reader-selection-unknown",
+      "raw_utf8": "{\"reader\":{\"selection\":{\"group\":\"00000000-0000-0000-0000-000000000001\",\"key_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"binding_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"extra\":true}}}",
+      "schema_valid": false,
+      "typed_valid": false
+    },
+    {
+      "name": "reader-selection-missing",
+      "raw_utf8": "{\"reader\":{\"selection\":{\"group\":\"00000000-0000-0000-0000-000000000001\"}}}",
+      "schema_valid": false,
+      "typed_valid": false
+    },
+    {
+      "name": "reader-selection-bad-digest",
+      "raw_utf8": "{\"reader\":{\"selection\":{\"group\":\"00000000-0000-0000-0000-000000000001\",\"key_sha256\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"binding_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}}",
+      "schema_valid": false,
+      "typed_valid": false
+    },
+    {
+      "name": "reader-selection-nil",
+      "raw_utf8": "{\"reader\":{\"selection\":{\"group\":\"00000000-0000-0000-0000-000000000000\",\"key_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"binding_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}}",
+      "schema_valid": true,
+      "typed_valid": false
+    },
+    {
+      "name": "reader-selection-with-legacy-sync",
+      "raw_utf8": "{\"reader\":{\"selection\":{\"group\":\"00000000-0000-0000-0000-000000000001\",\"key_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"binding_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"sync\":{\"enabled\":true}}",
+      "schema_valid": true,
+      "typed_valid": false
     }
   ]
 }

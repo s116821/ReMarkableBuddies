@@ -181,4 +181,44 @@ fn actual_cli_refuses_competing_one_shot_selectors_without_dispatch() {
         assert!(output.stdout.is_empty(), "one-shot dispatch occurred");
         assert_eq!(snapshot(&fixture.0), before);
     }
+    let memory = [
+        "--memory-operation",
+        "inspect",
+        "--memory-input",
+        "unused.json",
+    ];
+    let conversation = [
+        "--conversation-operation",
+        "inspect",
+        "--conversation-input",
+        "unused.json",
+    ];
+    for other in [
+        vec!["--inspect-owned-data"],
+        vec!["--export-note"],
+        vec!["--personalization-operation", "inspect"],
+        memory.to_vec(),
+        vec!["--configuration-schema"],
+        vec!["--product-settings-operation", "inspect"],
+    ] {
+        for conversation_first in [false, true] {
+            let flags = if conversation_first {
+                conversation
+                    .iter()
+                    .chain(other.iter())
+                    .copied()
+                    .collect::<Vec<_>>()
+            } else {
+                other
+                    .iter()
+                    .chain(conversation.iter())
+                    .copied()
+                    .collect::<Vec<_>>()
+            };
+            let output = command(&fixture).args(&flags).output().unwrap();
+            assert!(!output.status.success(), "{flags:?}");
+            assert!(output.stdout.is_empty(), "one-shot dispatch occurred");
+            assert_eq!(snapshot(&fixture.0), before);
+        }
+    }
 }

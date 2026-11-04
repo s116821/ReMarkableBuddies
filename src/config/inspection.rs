@@ -102,12 +102,15 @@ pub(crate) fn document(bytes: &[u8]) -> std::result::Result<(Config, Value), Sta
         return Err(Status::InvalidInput);
     };
     if !raw.is_object()
-        || ["paths", "memory", "sync", "personalization"]
+        || ["paths", "memory", "reader", "sync", "personalization"]
             .iter()
             .any(|key| raw.get(key).is_some_and(|v| !v.is_object()))
-        || raw
-            .pointer("/memory/selection")
-            .is_some_and(|v| !v.is_null() && !v.is_object())
+        || ["/memory/selection", "/reader/selection"]
+            .into_iter()
+            .any(|path| {
+                raw.pointer(path)
+                    .is_some_and(|v| !v.is_null() && !v.is_object())
+            })
     {
         return Err(Status::InvalidInput);
     }
