@@ -124,9 +124,20 @@ impl State {
     fn interrupt_request(&mut self, effect: Option<Effect>) {
         match effect {
             Some(Effect::OwnerChange) => self.visit += 1,
-            Some(Effect::ExternalInput) => self.request_lost = true,
+            Some(Effect::ExternalInput | Effect::KeyboardIdentityChanged) => {
+                self.request_lost = true;
+            }
             _ => {}
         }
+    }
+    fn observe_keyboard(&mut self, effect: Option<Effect>) {
+        let identity = if effect == Some(Effect::KeyboardIdentityChanged) {
+            "unmatched"
+        } else {
+            "owned"
+        };
+        self.event("keyboard_input", identity);
+        self.interrupt_request(effect);
     }
     fn history_page(&self) -> Result<crate::workflow::history::PageState> {
         self.history_page_at(self.active)
@@ -643,7 +654,7 @@ impl DeviceBackend for SimDevice {
             let effect = state.operation(Operation::Text)?;
             let page = state.active;
             state.pages[page].text.push_str(text);
-            state.interrupt_request(effect);
+            state.observe_keyboard(effect);
             Ok(())
         })();
         state.request_lost |= result.is_err();
@@ -657,7 +668,7 @@ impl DeviceBackend for SimDevice {
         let result = state.operation(Operation::Body);
         state.request_lost |= result.is_err();
         if let Ok(effect) = result {
-            state.interrupt_request(effect);
+            state.observe_keyboard(effect);
         }
         drop(state);
         result?;

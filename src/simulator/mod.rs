@@ -728,6 +728,41 @@ mod request_retirement_tests {
             assert!(device.capture().is_err());
         }
     }
+
+    #[test]
+    fn only_the_owned_keyboard_preserves_request_authority() {
+        use crate::device::backend::DeviceBackend;
+        use scenario::{Effect, Fault};
+
+        let (state, _) = blank_successor();
+        let mut device = SimDevice(state.clone());
+        device.capture().unwrap();
+        let pin = state.borrow().request_pin;
+        device.body_mode().unwrap();
+        device.render_text("owned").unwrap();
+        assert_eq!(state.borrow().request_pin, pin);
+
+        state.borrow_mut().faults.push(Fault {
+            operation: Operation::Text,
+            call: 2,
+            effect: Effect::KeyboardIdentityChanged,
+        });
+        assert!(device.render_text(" possible partial output").is_err());
+        assert!(device.render_text(" must not append").is_err());
+        let state = state.borrow();
+        assert_eq!(
+            state.pages[state.active].text,
+            "owned possible partial output"
+        );
+        assert_eq!(state.counts[&Operation::Text], 2);
+        let events: Vec<_> = state
+            .events
+            .iter()
+            .filter(|event| event.action == "keyboard_input")
+            .map(|event| event.detail.as_str())
+            .collect();
+        assert_eq!(events, ["owned", "owned", "unmatched"]);
+    }
 }
 
 #[cfg(test)]

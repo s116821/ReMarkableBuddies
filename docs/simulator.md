@@ -58,6 +58,13 @@ page count and verifies that the source image stays unchanged. This model
 covers the observed clean Close/reopen boundary. It does not simulate an
 interrupted vendor save or assert native persistence.
 
+The keyboard trace marks the simulated keyboard as `owned` when Buddy
+selects body mode or types. The `keyboard_identity_changed` fault applies
+to `body` and `text` operations. It models an event the observer cannot
+attribute to Buddy's exact keyboard identity. The attempted text can
+already be visible, but the request loses authority for further input.
+The separate `external_input` fault still models user activity.
+
 The resident transport fixture
 `low_space_indeterminate_reply_remains_unresolved_after_unchanged_observation`
 models the RM2 low-space run separately. A native indeterminate reply stays in

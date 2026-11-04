@@ -166,6 +166,7 @@ pub enum Operation {
 pub enum Effect {
     OwnerChange,
     ExternalInput,
+    KeyboardIdentityChanged,
     Error,
     NoMove,
     Stale,
@@ -354,6 +355,9 @@ impl Scenario {
                             | Operation::Text
                             | Operation::Body
                     ),
+                    Effect::KeyboardIdentityChanged => {
+                        matches!(fault.operation, Operation::Body | Operation::Text)
+                    }
                     Effect::NoMove => matches!(
                         fault.operation,
                         Operation::Next
