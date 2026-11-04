@@ -7,6 +7,7 @@ use std::time::Duration;
 
 enum ReadOnlyTransport {
     Unavailable,
+    #[cfg(test)]
     Development(Option<Box<remarkable_open_sdk::development_capture::ReadOnlyDevelopmentCapture>>),
 }
 
@@ -19,6 +20,7 @@ impl RefusingBackend {
             transport: ReadOnlyTransport::Unavailable,
         }
     }
+    #[cfg(test)]
     pub(in crate::workflow) fn with_capture(
         capture: remarkable_open_sdk::development_capture::ReadOnlyDevelopmentCapture,
     ) -> Self {
@@ -30,6 +32,7 @@ impl RefusingBackend {
 impl DeviceBackend for RefusingBackend {
     fn acquisition_kind(&self) -> crate::device::backend::AcquisitionKind {
         match &self.transport {
+            #[cfg(test)]
             ReadOnlyTransport::Development(_) => {
                 crate::device::backend::AcquisitionKind::Development
             }
@@ -40,6 +43,7 @@ impl DeviceBackend for RefusingBackend {
         &mut self,
     ) -> Result<remarkable_open_sdk::development_capture::ReadOnlyDevelopmentCapture> {
         match &mut self.transport {
+            #[cfg(test)]
             ReadOnlyTransport::Development(capture) => capture
                 .take()
                 .map(|capture| *capture)

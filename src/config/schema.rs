@@ -22,7 +22,7 @@ mod tests {
         let schema: Value = serde_json::from_slice(DOCUMENT).unwrap();
         assert_eq!(
             schema["$id"],
-            "urn:remarkable-buddies:configuration-object-schema:v1"
+            "urn:remarkable-buddies:configuration-object-schema:v2"
         );
         assert_eq!(
             schema["$schema"],
