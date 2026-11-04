@@ -1,7 +1,8 @@
 //! Composite destination readiness for the verified RM2 layout. Metadata alone
 //! is not visual proof; this is not a native rendering acknowledgement.
 use super::{
-    backend::NavigationCompletion, native_page::NavigationMetadata,
+    backend::NavigationCompletion,
+    native_page::NavigationMetadata,
     screenshot::{CaptureMappingsChanged, VanishedDiscoveryCandidate},
 };
 use crate::{workflow::xochitl_integration::NavigationDirection, Workflow};
