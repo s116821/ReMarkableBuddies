@@ -3,11 +3,48 @@ use clap::Parser;
 use dotenv::dotenv;
 use log::info;
 use remarkable_reader_buddy::config::{self, Config, Environment, Overrides};
-use remarkable_reader_buddy::storage::{files, sync::Worker, Store};
+use remarkable_reader_buddy::storage::{files, sync::Worker};
 use remarkable_reader_buddy::{OpenAI, Orchestrator, Workflow};
 use std::sync::Arc;
 use std::thread::sleep;
 use std::time::Duration;
+
+/// Existing ordinary stdin maintenance and selected history-file commands share
+/// their historical flag. Dispatch by operation and explicit input transport;
+/// decoding failures never fall through to another operation family.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum ConversationOperation {
+    Inspect,
+    Prepare,
+    Apply,
+    Status,
+    Context,
+    RecoverPending,
+}
+impl ConversationOperation {
+    fn selected(
+        self,
+        input: &std::path::Path,
+    ) -> Option<remarkable_reader_buddy::reader_runtime::Operation> {
+        use remarkable_reader_buddy::reader_runtime::Operation;
+        match self {
+            Self::Inspect if input != std::path::Path::new("-") => Some(Operation::Inspect),
+            Self::Context => Some(Operation::Context),
+            Self::RecoverPending => Some(Operation::RecoverPending),
+            _ => None,
+        }
+    }
+    fn ordinary(self) -> Option<remarkable_reader_buddy::conversation_maintenance::Operation> {
+        use remarkable_reader_buddy::conversation_maintenance::Operation;
+        match self {
+            Self::Inspect => Some(Operation::Inspect),
+            Self::Prepare => Some(Operation::Prepare),
+            Self::Apply => Some(Operation::Apply),
+            Self::Status => Some(Operation::Status),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(author, version = env!("READER_BUDDY_VERSION"))]
@@ -38,8 +75,8 @@ pub struct Args {
     inspect_conversations: bool,
     /// Deliberate Linux-only logical deletion of one ordinary historical conversation
     #[arg(long,value_enum,requires="conversation_input",conflicts_with_all=["inspect_source_cache","source_cache_operation","source_cache_input","simulate","inspect_owned_data","api_key","model","base_url","trigger_corner","log_level","debug_dump","memory_operation","memory_input","sync_mode_operation","sync_mode_input","archive_operation","archive_input","personalization_operation","export_note","configuration_operation","basic_settings_operation","basic_settings_input","restore_operation","restore_input","model_settings_operation","model_settings_input","ordinary_export_operation","ordinary_export_input","memory_settings_operation","memory_settings_input","model_credential_operation","model_credential_input","credential_reference_operation","credential_reference_input"])]
-    conversation_operation: Option<remarkable_reader_buddy::conversation_maintenance::Operation>,
-    /// Exact-dash strict JSON only; no arbitrary input or deletion paths
+    conversation_operation: Option<ConversationOperation>,
+    /// Exact-dash JSON for ordinary maintenance; bounded file JSON for selected history
     #[arg(long, value_name = "INPUT", requires = "conversation_operation")]
     conversation_input: Option<std::path::PathBuf>,
 
@@ -230,9 +267,19 @@ fn main() -> Result<()> {
         .write_to(&mut std::io::stdout().lock());
     }
     if let Some(operation) = args.conversation_operation {
+        let input = args.conversation_input.as_deref().expect("required input");
+        if let Some(selected) = operation.selected(input) {
+            let mut report = remarkable_reader_buddy::reader_runtime::run(
+                selected,
+                input,
+                std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+            );
+            report.write_to(&mut std::io::stdout().lock())?;
+            return Ok(());
+        }
         return remarkable_reader_buddy::conversation_maintenance::run(
-            operation,
-            args.conversation_input.as_deref().expect("required input"),
+            operation.ordinary().expect("ordinary operation family"),
+            input,
             std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
             &mut std::io::stdin().lock(),
         )
@@ -516,12 +563,24 @@ fn main() -> Result<()> {
         config.reader_enabled(),
         "Reader is disabled in saved settings"
     );
+    if config.reader.selection.is_none() {
+        remarkable_reader_buddy::memory::context::admit_ordinary(&config.memory)?;
+    }
+    let admitted_store = match remarkable_reader_buddy::reader_runtime::startup(&config) {
+        remarkable_reader_buddy::reader_runtime::StartupDecision::Ordinary(store) => store,
+        remarkable_reader_buddy::reader_runtime::StartupDecision::Report(mut report) => {
+            if config.reader.selection.is_none() {
+                return Err(report.into_ordinary_startup_error());
+            }
+            report.write_to(&mut std::io::stdout().lock())?;
+            return Ok(());
+        }
+    };
     #[cfg(target_os = "linux")]
     let service_health = match notification_environment {
         Some(environment) => environment.connect()?,
         None => None,
     };
-    remarkable_reader_buddy::memory::context::admit_ordinary(&config.memory)?;
     let effective = config::resolve(
         &config,
         Overrides {
@@ -542,7 +601,8 @@ fn main() -> Result<()> {
         .filter_module("ureq_proto", log::LevelFilter::Off)
         .init();
     info!("=== ReMarkable Reader Buddy Starting ===");
-    let store = Arc::new(Store::open(config.paths.clone())?);
+    let store = remarkable_reader_buddy::reader_runtime::ordinary_store(&config, admitted_store)
+        .map_err(|report| report.into_ordinary_startup_error())?;
     let _ordinary_runtime_lifetime =
         remarkable_reader_buddy::mode_maintenance::admit_ordinary(&store, config.sync.enabled)?;
     store.snapshot_config(&config)?;
