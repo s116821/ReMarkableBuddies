@@ -48,6 +48,16 @@ The report contains exact text, newly emitted X counts, unchanged-page results,
 active page, virtual elapsed milliseconds, model-call counts and ordered actions.
 
 The `blank-answer` and `occupied-return` scenarios cover the manual Reader route.
+Reader iteration actions can pair `{"action":"close"}` with
+`{"action":"reopen","page":1}` to model an ordinary notebook save and a fresh
+viewport on the saved page. The page index is zero-based. The pair must finish
+in the same iteration with no intervening input. The simulator keeps page
+content and order, clears the capture cache and the reopened page's menu, and
+invalidates undo ownership. The prepared-answer reopen check uses the same
+page count and verifies that the source image stays unchanged. This model
+covers the observed clean Close/reopen boundary. It does not simulate an
+interrupted vendor save or assert native persistence.
+
 The resident transport fixture
 `low_space_indeterminate_reply_remains_unresolved_after_unchanged_observation`
 models the RM2 low-space run separately. A native indeterminate reply stays in

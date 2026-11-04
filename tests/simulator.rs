@@ -341,6 +341,33 @@ macro_rules! scenario_test {
     };
 }
 scenario_test!(blank_answer, "blank-answer");
+
+#[test]
+fn prepared_answer_survives_close_and_reopen() {
+    use remarkable_reader_buddy::simulator::scenario::HistoryAction;
+
+    let mut scenario = load("blank-answer");
+    scenario.iterations[0].actions = vec![HistoryAction::Close, HistoryAction::Reopen { page: 1 }];
+    scenario.expect.history = Some("empty".into());
+    let run = execute(&scenario, &root()).unwrap();
+    assert!(
+        run.report.assertion_failures.is_empty(),
+        "{:?}",
+        run.report.assertion_failures
+    );
+    let events: Vec<_> = run
+        .report
+        .trace
+        .iter()
+        .filter(|event| event.action.starts_with("document_"))
+        .map(|event| (event.action.as_str(), event.page))
+        .collect();
+    assert_eq!(
+        events,
+        [("document_saved_and_closed", 1), ("document_reopened", 1)]
+    );
+}
+
 scenario_test!(
     highlight_without_question_is_rejected,
     "highlight-no-question"

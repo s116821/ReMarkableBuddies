@@ -392,6 +392,7 @@ fn history_actions<M: LLMEngine>(
                 }
             }
         };
+    let mut closed_pages = None;
     for action in actions {
         match action {
             HistoryAction::Hold { frames } => {
@@ -438,6 +439,23 @@ fn history_actions<M: LLMEngine>(
                 let page = state.active;
                 state.pages[page].text.push_str(text);
                 state.event("history_external_edit", "manual text retained");
+            }
+            HistoryAction::Close => {
+                orchestrator.invalidate_history();
+                let mut state = state.borrow_mut();
+                closed_pages = Some(std::mem::take(&mut state.pages));
+                state.last = Default::default();
+                state.persisted = None;
+                state.deletion = None;
+                state.visit += 1;
+                state.event("document_saved_and_closed", "visible page content saved");
+            }
+            HistoryAction::Reopen { page } => {
+                let mut state = state.borrow_mut();
+                state.pages = closed_pages.take().context("Document was not closed")?;
+                state.active = *page;
+                state.pages[*page].trigger_overlay = scenario::TriggerOverlay::Closed;
+                state.event("document_reopened", "saved pages in a fresh viewport");
             }
             HistoryAction::InputLost => {
                 orchestrator.invalidate_history();
