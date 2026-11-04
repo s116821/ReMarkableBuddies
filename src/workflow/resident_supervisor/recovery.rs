@@ -491,13 +491,20 @@ impl Profile {
             feature = "development-input-diagnostics"
         ))]
         {
-            use crate::workflow::resident_output::development::{ADAPTER, PROFILE};
+            use crate::workflow::resident_output::development::{
+                ADAPTER, PROFILE, REPEAT_ADAPTER, REPEAT_PROFILE,
+            };
+            let approved_adapter = [(PROFILE, ADAPTER), (REPEAT_PROFILE, REPEAT_ADAPTER)]
+                .iter()
+                .any(|(profile, adapter)| {
+                    self.native_profile_sha256 == hex_digest(profile)
+                        && self.adapter_sha256 == hex_digest(adapter)
+                });
             self.version == 5
                 && self.source_mode.as_deref() == Some("resident-installed-output-v1")
                 && self.companion.as_deref() == Some(service::vendor::PROFILE_ID)
                 && self.development_output.is_none()
-                && self.native_profile_sha256 == hex_digest(PROFILE)
-                && self.adapter_sha256 == hex_digest(ADAPTER)
+                && approved_adapter
         }
         #[cfg(not(all(
             feature = "development-resident-bootstrap",
