@@ -442,6 +442,7 @@ fn fifo_input_archive_marker_and_store_lock_refuse_without_blocking() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn notebook_archive_cli_exports_product_generated_records_and_inspects_detached() {
     let f = Fixture::new();
@@ -640,7 +641,11 @@ fn notebook_archive_cli_refuses_busy_wrong_format_and_incomplete_admission() {
     assert_eq!(run(&f, "export-notebook", &path)["status"], "unsupported");
     fs::remove_file(history.join("retained")).unwrap();
     let local_archive = f.root.join("local-only");
-    assert_eq!(run(&f, "export-notebook", &local_archive)["status"], "ok");
+    let exported = run(&f, "export-notebook", &local_archive);
+    assert_eq!(exported["status"], "ok");
+    let inspected = run(&f, "inspect-notebook", &local_archive);
+    assert_eq!(inspected["status"], "ok");
+    assert_eq!(inspected["data"], exported["data"]);
     fs::write(root.join("format.json"), b"1").unwrap();
     assert_eq!(run(&f, "export-notebook", &path)["status"], "unsupported");
     assert!(!path.exists());
