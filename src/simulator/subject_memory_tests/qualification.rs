@@ -228,10 +228,14 @@ fn run_case(
         .events
         .iter()
         .any(|event| matches!(event.action.as_str(), "text" | "next" | "previous")));
-    ensure!(records
+    let user = records
         .iter()
-        .any(|record| matches!(record, Record::Turn(turn)
-        if turn.role == Role::User && turn.text.as_deref() == Some(QUESTION))));
+        .find_map(|record| match record {
+            Record::Turn(turn) if turn.role == Role::User => Some(turn),
+            _ => None,
+        })
+        .context("verified user turn missing")?;
+    ensure!(user.text.as_deref() == Some(QUESTION));
     let assistants: Vec<_> = records
         .iter()
         .filter_map(|record| match record {
@@ -239,15 +243,21 @@ fn run_case(
             _ => None,
         })
         .collect();
-    if let Err(error) = result {
+    if result.is_err() {
         ensure!(
             assistants.is_empty(),
             "failed request published an assistant draft"
         );
-        return Err(error);
+        ensure!(records
+            .iter()
+            .any(|record| matches!(record, Record::OutcomeFact(fact)
+            if fact.turn == user.id && fact.outcome == Outcome::Failed
+                && fact.reason == AttemptReason::ProviderFailure)));
+        return Err(ReaderRejected.into());
     }
     ensure!(assistants.len() == 1);
     let assistant = assistants[0];
+    ensure!(assistant.exchange == user.exchange);
     ensure!(assistant.outcome == Outcome::Failed && assistant.completion.is_none());
     ensure!(records
         .iter()
@@ -263,6 +273,17 @@ struct CaseReceipt {
     answer: String,
     images: Vec<Value>,
 }
+
+#[derive(Debug)]
+struct ReaderRejected;
+
+impl std::fmt::Display for ReaderRejected {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Reader rejected the enrichment")
+    }
+}
+
+impl std::error::Error for ReaderRejected {}
 
 fn qualify(
     mut adapter: impl FnMut(usize) -> Result<OpenAI>,
@@ -312,20 +333,30 @@ enum ReplyMode {
 }
 
 fn loopback(replies: &[ReplyMode]) -> Result<Vec<CaseReceipt>> {
-    use std::{io::Write, net::TcpListener, thread};
+    use std::{
+        io::Write,
+        net::TcpListener,
+        sync::atomic::{AtomicBool, Ordering},
+        thread,
+    };
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let address = listener.local_addr()?;
     listener.set_nonblocking(true)?;
     let responses = replies.to_vec();
+    let finished = Arc::new(AtomicBool::new(false));
+    let client_finished = finished.clone();
     let server = thread::spawn(move || -> Result<_> {
         let mut requests = Vec::new();
         for response in responses {
-            let deadline = Instant::now() + Duration::from_secs(15);
+            let deadline = Instant::now() + TIMEOUT;
             let mut stream = loop {
                 match listener.accept() {
                     Ok((stream, _)) => break stream,
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        ensure!(Instant::now() < deadline, "loopback dispatch absent");
+                        ensure!(
+                            !client_finished.load(Ordering::Relaxed) && Instant::now() < deadline,
+                            "loopback dispatch absent"
+                        );
                         thread::sleep(Duration::from_millis(10));
                     }
                     Err(error) => return Err(error.into()),
@@ -370,6 +401,7 @@ fn loopback(replies: &[ReplyMode]) -> Result<Vec<CaseReceipt>> {
             Ok(())
         },
     );
+    finished.store(true, Ordering::Relaxed);
     let (observer, requests) = server.join().expect("loopback thread panicked")?;
     observer.set_nonblocking(true)?;
     ensure!(
@@ -414,7 +446,10 @@ fn loopback(replies: &[ReplyMode]) -> Result<Vec<CaseReceipt>> {
     }
     if replies.len() == 1 {
         ensure!(
-            result.is_err() && receipts.is_empty(),
+            result
+                .as_ref()
+                .is_err_and(|error| error.is::<ReaderRejected>())
+                && receipts.is_empty(),
             "failed dispatch became a journal answer"
         );
     } else {
