@@ -300,6 +300,14 @@ An inked source to blank notes is positive; blank-to-blank/identical pages and
 legitimate gutter ink conservatively refuse. Composite readiness is not a native
 render acknowledgement or independent pixel-to-page provenance.
 
+On RM2 firmware 3.28.0.172, a stock swipe to a prepared blank successor changed
+xochitl's mappings during capture. The first run stopped before writing. The
+retry discarded two captures, waited for a fresh stable pair after the same
+single swipe, and saved the answer on the prepared page. The scripted wait
+models the dropped observations and requires two fresh frames after the fault.
+The prepared blank page already had a stock `.rm` file. The stock corner menu
+can intercept the lower-left hold before the model is called.
+
 The scenario backend still models legacy navigation timing and does not render
 native scrollbar transitions. It now explicitly reports no movement for a boundary
 or injected no-move result, exercising the workflow's fresh-source verification

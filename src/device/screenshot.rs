@@ -6,6 +6,17 @@ use std::io::Write;
 use std::io::{Read, Seek};
 use std::process;
 
+#[derive(Debug)]
+pub(super) struct CaptureMappingsChanged;
+
+impl std::fmt::Display for CaptureMappingsChanged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Capture mappings changed")
+    }
+}
+
+impl std::error::Error for CaptureMappingsChanged {}
+
 #[cfg(feature = "development-resident-bootstrap")]
 mod resident;
 
@@ -507,7 +518,7 @@ impl Screenshot {
         })?;
         let mut verify = |read: &mut dyn FnMut(u64, &mut [u8]) -> Result<()>| -> Result<()> {
             check()?;
-            anyhow::ensure!(sample_maps()? == maps, "Capture mappings changed");
+            anyhow::ensure!(sample_maps()? == maps, CaptureMappingsChanged);
             let mut header = [0; 8];
             read(selected.address, &mut header)?;
             anyhow::ensure!(

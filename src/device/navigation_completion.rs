@@ -1,6 +1,9 @@
 //! Composite destination readiness for the verified RM2 layout. Metadata alone
 //! is not visual proof; this is not a native rendering acknowledgement.
-use super::{backend::NavigationCompletion, native_page::NavigationMetadata};
+use super::{
+    backend::NavigationCompletion, native_page::NavigationMetadata,
+    screenshot::CaptureMappingsChanged,
+};
 use crate::{workflow::xochitl_integration::NavigationDirection, Workflow};
 use anyhow::{ensure, Context, Result};
 use image::{DynamicImage, GrayImage};
@@ -148,12 +151,23 @@ pub(super) fn navigate(
                 }
                 anyhow::bail!("Destination not ready before deadline: pending identity, indistinguishable pixels or occupied chrome gutter/footer");
             }
-            let current = io.observe()?;
+            let current = io.observe();
             io.guard()?;
             ensure!(
                 io.now() < deadline,
                 "Navigation observation exceeded deadline"
             );
+            let current = match current {
+                Err(error) if error.is::<CaptureMappingsChanged>() => {
+                    // Xochitl can change mappings while the destination loads.
+                    // Discard that observation and wait for a new stable pair.
+                    candidate = None;
+                    source_confirmed = false;
+                    io.pace(Duration::from_millis(50).min(deadline.saturating_sub(io.now())));
+                    continue;
+                }
+                result => result?,
+            };
             check_metadata(&current.before, &source.before, &target, &mut target_visit)?;
             check_metadata(&current.after, &source.before, &target, &mut target_visit)?;
             ensure!(
@@ -249,6 +263,7 @@ mod tests {
         cost: Duration,
         swipes: usize,
         reads: usize,
+        mappings_change_at: Option<usize>,
         guard_calls: usize,
         cancel_at: Option<usize>,
         opens: usize,
@@ -268,6 +283,7 @@ mod tests {
                 cost: Duration::from_millis(10),
                 swipes: 0,
                 reads: 0,
+                mappings_change_at: None,
                 guard_calls: 0,
                 cancel_at: None,
                 opens: 0,
@@ -285,6 +301,10 @@ mod tests {
             assert!(self.guarding);
             self.reads += 1;
             self.clock += self.cost;
+            ensure!(
+                self.mappings_change_at != Some(self.reads),
+                CaptureMappingsChanged
+            );
             Ok(self.frames.pop_front().unwrap_or_else(|| self.last.clone()))
         }
         fn swipe(
@@ -341,6 +361,19 @@ mod tests {
             self.finished_owner = Some(owner.clone());
             Ok(())
         }
+    }
+
+    #[test]
+    fn mapping_change_breaks_the_destination_pair_without_replaying_swipe() {
+        let mut io = Scripted::new(vec![frame(false), frame(true)]);
+        io.mappings_change_at = Some(3);
+        assert!(matches!(
+            navigate(&mut io, NavigationDirection::Next).unwrap(),
+            NavigationCompletion::Settled
+        ));
+        assert_eq!(io.swipes, 1);
+        assert_eq!(io.reads, 5);
+        assert_eq!(io.finished_owner, Some(metadata(true).owner));
     }
 
     #[test]
