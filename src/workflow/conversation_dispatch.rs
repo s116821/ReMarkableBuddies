@@ -145,7 +145,7 @@ impl<'a> Dispatch<'a> {
                 }
             },
         );
-        Ok(ExportDecision::Attempt(report))
+        Ok(ExportDecision::Attempt(Box::new(report)))
     }
 
     pub(crate) fn writer<E: LLMEngine>(
@@ -438,7 +438,7 @@ pub(crate) struct PendingOutput {
 
 pub(crate) enum ExportDecision {
     Clarify(&'static str),
-    Attempt(crate::writer_flow::Report),
+    Attempt(Box<crate::writer_flow::Report>),
 }
 
 /// The input owner supplies an observation and stable event identity. A raw
