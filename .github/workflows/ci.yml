@@ -131,6 +131,21 @@ jobs:
         if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
       - run: npm audit --prefix cicd/release/fixtures
         if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
+      - name: Validate embedded configuration schema using the existing host command
+        env:
+          CARGO_MESSAGES: ${{ runner.temp }}/current-cargo-test.jsonl
+        run: |
+          binary="$(python - <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, 'scripts/predecessor')
+          from capture_producer import select_command
+          print(select_command(Path(os.environ['CARGO_MESSAGES']).read_text(encoding='utf-8'), Path.cwd())['executable'])
+          PY
+          )"
+          node scripts/check_configuration_schema.mjs --validator "$GITHUB_WORKSPACE/cicd/release/fixtures/node_modules/ajv/dist/2020.js" --binary "$binary"
+        if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
       - name: Verify CI stage and artifact gates
         run: node --test cicd/release/fixtures/workflow.test.mjs
         if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
