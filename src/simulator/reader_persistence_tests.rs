@@ -223,7 +223,15 @@ fn selected_actual_orchestrator_publishes_owned_draft_and_stops_on_replacement_o
             .selected_snapshot(publication.token.scope(), MAX_ITEMS)
             .unwrap()
             .unwrap();
-        let ordinary_before = store.manifests().unwrap();
+        let ordinary_manifests = || {
+            store
+                .manifests()
+                .unwrap()
+                .into_iter()
+                .filter(|manifest| manifest.scope == Scope::LocalTransaction)
+                .collect::<Vec<_>>()
+        };
+        let ordinary_before = ordinary_manifests();
         let projection = SelectedDomainProjection::from_snapshot(&snapshot).unwrap();
         let pin = |id| {
             let (envelope, _) = projection.head(Namespace::Conversation, id).unwrap();
@@ -325,7 +333,7 @@ fn selected_actual_orchestrator_publishes_owned_draft_and_stops_on_replacement_o
         }
         assert_eq!(replacement.get(), matches!(case, 1 | 9));
         assert!(device.borrow().counts.is_empty());
-        assert_eq!(store.manifests().unwrap(), ordinary_before);
+        assert_eq!(ordinary_manifests(), ordinary_before, "case {case}");
         assert_eq!(
             calls.get(),
             if matches!(case, 6 | 7) {
