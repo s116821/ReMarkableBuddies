@@ -49,9 +49,12 @@ pub fn run(config_path: Option<PathBuf>, input: &mut impl Read) -> ExportReport 
                 }
             }
         }
+        let config = Config::load(config_path).map_err(|_| Failure::Storage)?;
+        if matches!(command, Command::Export { .. }) && !config.admits_writer(true) {
+            return Err(Failure::Unsupported);
+        }
         let token = std::env::var("MEM_API_KEY").map_err(|_| Failure::MissingCredentials)?;
         let destination = mem::MemDestination::new(&token)?;
-        let config = Config::load(config_path).map_err(|_| Failure::Storage)?;
         let store = Arc::new(Store::open(config.paths).map_err(|_| Failure::Storage)?);
         let ledger = Ledger::new(store);
         let runtime = tokio::runtime::Builder::new_current_thread()

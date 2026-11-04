@@ -6,7 +6,10 @@ pub mod memory_settings;
 pub mod model_credential;
 pub mod model_settings;
 pub mod personalization;
+pub mod product;
+pub mod product_settings;
 pub mod research_settings;
+pub mod schema;
 use crate::conversation::receiving::memory::research::ResearchPolicy;
 use crate::{
     llm::openai::DEFAULT_MODEL,
@@ -74,6 +77,12 @@ impl SyncPolicy {
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub config_schema_version: u32,
+    #[serde(
+        default,
+        deserialize_with = "product::present_configuration",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub product_settings: Option<Option<product::ProductConfiguration>>,
     pub model: Option<String>,
     pub base_url: Option<String>,
     pub trigger_corner: Option<String>,
@@ -83,6 +92,7 @@ pub struct Config {
     pub model_credential: Option<String>,
     pub sync: SyncPolicy,
     pub memory: crate::memory::Configuration,
+    pub reader: crate::reader_runtime::Configuration,
     pub personalization: Personalization,
     #[serde(
         default,
@@ -95,6 +105,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             config_schema_version: 1,
+            product_settings: None,
             model: None,
             base_url: None,
             trigger_corner: None,
@@ -104,6 +115,7 @@ impl Default for Config {
             model_credential: None,
             sync: SyncPolicy::default(),
             memory: crate::memory::Configuration::default(),
+            reader: crate::reader_runtime::Configuration::default(),
             personalization: Personalization::default(),
             research_policy: None,
         }
@@ -133,8 +145,20 @@ impl Config {
             self.config_schema_version == 1,
             "unsupported configuration version"
         );
+        ensure!(
+            self.product_settings
+                .as_ref()
+                .and_then(Option::as_ref)
+                .is_none_or(|p| p.schema_version == 1),
+            "unsupported product settings version"
+        );
         self.sync.validate()?;
         self.memory.validate()?;
+        self.reader.validate()?;
+        ensure!(
+            !(self.reader.selection.is_some() && self.sync.enabled),
+            "selected Reader requires the separately qualified selected sync worker"
+        );
         ensure!(
             !(self.sync.enabled
                 && (self.memory.selection.is_some()

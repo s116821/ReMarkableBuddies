@@ -128,6 +128,382 @@ fn root(ledger: &Ledger, conversation: Uuid) -> ExpectedHeads {
         .expected(Namespace::Conversation, conversation)
         .unwrap()
 }
+
+fn select_fixture(store: &Arc<Store>) -> (Arc<SelectedAdmission>, selection::SelectionToken) {
+    let mut objects = BTreeMap::new();
+    let mut records = BTreeMap::new();
+    let mut namespaces = BTreeMap::new();
+    let mut media = BTreeMap::new();
+    for manifest in store.manifests().unwrap() {
+        for reference in manifest.records {
+            namespaces.insert(
+                reference.sha256.clone(),
+                manifest.record_namespaces[&reference.sha256],
+            );
+            objects.insert(
+                reference.sha256.clone(),
+                store.read_object(&reference).unwrap(),
+            );
+            records.insert(reference.sha256.clone(), reference);
+        }
+        for reference in manifest.media {
+            objects.insert(
+                reference.sha256.clone(),
+                store.read_object(&reference).unwrap(),
+            );
+            media.insert(reference.sha256.clone(), reference);
+        }
+    }
+    let scope = selection::SelectionScope {
+        group: Uuid::new_v4(),
+        key_sha256: digest(b"Reader text fixture"),
+        binding_sha256: digest(b"fixture binding"),
+    };
+    let admission = Arc::new(SelectedAdmission::new(store.clone(), scope).unwrap());
+    let selected = Manifest {
+        format: FORMAT,
+        transaction_id: Uuid::new_v4(),
+        scope: Scope::SelectedRecords,
+        records: records.into_values().collect(),
+        record_namespaces: namespaces,
+        media_coverage: media
+            .keys()
+            .map(|sha256| Coverage::Included {
+                sha256: sha256.clone(),
+            })
+            .collect(),
+        media: media.into_values().collect(),
+    };
+    let publication = admission
+        .initialize(
+            selection::SelectionChange {
+                operation: Uuid::new_v4(),
+                accepted_base_sha256: digest(b"fixture base"),
+                selected,
+                retained: vec![],
+            },
+            objects,
+        )
+        .unwrap();
+    (admission, publication.token)
+}
+fn selected_pin(store: &Store, token: &selection::SelectionToken, id: Uuid) -> IntentRecordRef {
+    let snapshot = store
+        .selected_snapshot(token.scope(), MAX_ITEMS)
+        .unwrap()
+        .unwrap();
+    let projection = SelectedDomainProjection::from_snapshot(&snapshot).unwrap();
+    let (envelope, _) = projection.head(Namespace::Conversation, id).unwrap();
+    let reference = snapshot
+        .selected_records
+        .iter()
+        .zip(&snapshot.transaction.selected.records)
+        .find(|(record, _)| record.revision_id == envelope.revision_id)
+        .unwrap()
+        .1;
+    IntentRecordRef {
+        namespace: Namespace::Conversation,
+        record_id: id,
+        revision_id: envelope.revision_id,
+        object: reference.clone(),
+    }
+}
+
+#[test]
+fn selected_reader_generation_preserves_user_capture_ownership_and_historical_retry() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    let ledger = Ledger::new(store.clone());
+    let conversation = create(&ledger);
+    let source = batch(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let original = ledger
+        .prepare_sdk_fixture(
+            Uuid::new_v4(),
+            root(&ledger, conversation),
+            request(conversation),
+            &source,
+        )
+        .unwrap();
+    let (admission, initial) = select_fixture(&store);
+    let interpretation = SelectedReaderWrite {
+        operation: Uuid::new_v4(),
+        root: selected_pin(&store, &initial, conversation),
+        user: selected_pin(&store, &initial, original.turn),
+        updated_ms: 11,
+        text: "Verified question".into(),
+        kind: SelectedReaderText::Interpret,
+    };
+    let SelectedReaderPublication::Published {
+        publication: interpreted,
+        acknowledgment,
+    } = admission
+        .publish_reader_text(&initial, interpretation.clone())
+        .unwrap()
+    else {
+        panic!("new interpretation historical")
+    };
+    let generation = SelectedReaderWrite {
+        operation: Uuid::new_v4(),
+        root: acknowledgment.root.clone(),
+        user: acknowledgment.turn.clone(),
+        updated_ms: 12,
+        text: "Generated answer".into(),
+        kind: SelectedReaderText::Generate {
+            assistant: Uuid::new_v4(),
+        },
+    };
+    let SelectedReaderPublication::Published {
+        publication: generated,
+        acknowledgment: draft,
+    } = admission
+        .publish_reader_text(&interpreted.token, generation.clone())
+        .unwrap()
+    else {
+        panic!("new draft historical")
+    };
+    assert!(draft.written.sources.is_empty());
+    assert_eq!(draft.written.exchange, draft.user.exchange);
+    assert_eq!(draft.user.sources, vec![original.capture]);
+    assert_eq!(draft.written.sequence, 1);
+    assert!(draft.receipt.admitted_intent.is_none());
+    let selected = store
+        .selected_snapshot(initial.scope(), MAX_ITEMS)
+        .unwrap()
+        .unwrap();
+    let records = SelectedDomainProjection::from_snapshot(&selected)
+        .unwrap()
+        .inspect(conversation)
+        .unwrap();
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(record, Record::Turn(_)))
+            .count(),
+        2
+    );
+    let SelectedCaptureImages::Sdk(actual) = admission
+        .capture_images(&generated.token, original.capture)
+        .unwrap()
+    else {
+        panic!("capture origin changed")
+    };
+    assert_eq!(actual.native_parent.bytes, original.native_parent.bytes);
+    assert_eq!(
+        actual
+            .images
+            .iter()
+            .map(|image| (&image.bytes, image.ordinal))
+            .collect::<Vec<_>>(),
+        original
+            .images
+            .iter()
+            .map(|image| (&image.bytes, image.ordinal))
+            .collect::<Vec<_>>()
+    );
+    let before = selected.token.clone();
+    for (token, input) in [
+        (&initial, &interpretation),
+        (&interpreted.token, &generation),
+    ] {
+        let SelectedReaderPublication::Historical { acknowledgment, .. } =
+            admission.publish_reader_text(token, input.clone()).unwrap()
+        else {
+            panic!("retry minted current result")
+        };
+        assert!(acknowledgment.receipt.admitted_intent.is_none());
+        let mut changed = input.clone();
+        changed.text.push('!');
+        assert!(admission.publish_reader_text(token, changed).is_err());
+    }
+    assert_eq!(
+        store
+            .selected_snapshot(initial.scope(), MAX_ITEMS)
+            .unwrap()
+            .unwrap()
+            .token,
+        before
+    );
+    let scope = initial.scope().clone();
+    drop(ledger);
+    drop(admission);
+    drop(store);
+    let reopened = fixture.open();
+    let reader = SelectedAdmission::new(reopened.clone(), scope).unwrap();
+    assert!(matches!(
+        reader
+            .publish_reader_text(&interpreted.token, generation)
+            .unwrap(),
+        SelectedReaderPublication::Historical { .. }
+    ));
+    let snapshot = reopened
+        .selected_snapshot(initial.scope(), MAX_ITEMS)
+        .unwrap()
+        .unwrap();
+    assert_eq!(snapshot.token, before);
+}
+
+#[test]
+fn selected_reader_write_recovers_lost_ack_and_preserves_precommit_failure() {
+    for fault in [Fault::BeforeCommit, Fault::AfterCommit] {
+        let fixture = Fixture::new();
+        let store = fixture.open();
+        let ledger = Ledger::new(store.clone());
+        let conversation = create(&ledger);
+        let source = batch(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let original = ledger
+            .prepare_sdk_fixture(
+                Uuid::new_v4(),
+                root(&ledger, conversation),
+                request(conversation),
+                &source,
+            )
+            .unwrap();
+        let (admission, initial) = select_fixture(&store);
+        let input = SelectedReaderWrite {
+            operation: Uuid::new_v4(),
+            root: selected_pin(&store, &initial, conversation),
+            user: selected_pin(&store, &initial, original.turn),
+            updated_ms: 11,
+            text: "One question".into(),
+            kind: SelectedReaderText::Interpret,
+        };
+        store.set_fault(fault).unwrap();
+        let result = admission.publish_reader_text(&initial, input.clone());
+        if fault == Fault::BeforeCommit {
+            assert!(result.is_err());
+            assert_eq!(
+                store
+                    .selected_snapshot(initial.scope(), MAX_ITEMS)
+                    .unwrap()
+                    .unwrap()
+                    .token,
+                initial
+            );
+            assert!(matches!(
+                admission
+                    .publish_reader_text(&initial, input.clone())
+                    .unwrap(),
+                SelectedReaderPublication::Published { .. }
+            ));
+        } else {
+            assert!(matches!(
+                result.unwrap(),
+                SelectedReaderPublication::Historical { .. }
+            ));
+        }
+        assert!(matches!(
+            admission.publish_reader_text(&initial, input).unwrap(),
+            SelectedReaderPublication::Historical { .. }
+        ));
+    }
+}
+
+#[test]
+fn selected_reader_write_refuses_nonlocal_modes_stale_pins_and_omitted_media() {
+    use sync::mode::SyncModeChoice;
+    for case in 0..6 {
+        let fixture = Fixture::new();
+        let store = fixture.open();
+        let ledger = Ledger::new(store.clone());
+        let conversation = create(&ledger);
+        let source = batch(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let original = ledger
+            .prepare_sdk_fixture(
+                Uuid::new_v4(),
+                root(&ledger, conversation),
+                request(conversation),
+                &source,
+            )
+            .unwrap();
+        let (admission, initial) = select_fixture(&store);
+        let mut input = SelectedReaderWrite {
+            operation: Uuid::new_v4(),
+            root: selected_pin(&store, &initial, conversation),
+            user: selected_pin(&store, &initial, original.turn),
+            updated_ms: 11,
+            text: "Question".into(),
+            kind: SelectedReaderText::Interpret,
+        };
+        let snapshot = store
+            .selected_snapshot(initial.scope(), MAX_ITEMS)
+            .unwrap()
+            .unwrap();
+        if case < 3 {
+            let mode = store.sync_mode_snapshot().unwrap();
+            let choice = match case {
+                0 => SyncModeChoice::LocalOnly,
+                1 => SyncModeChoice::IsolatedBackup {
+                    binding_sha256: digest(b"isolated"),
+                },
+                _ => SyncModeChoice::SharedGroup {
+                    group: Uuid::new_v4(),
+                    binding_sha256: initial.scope().binding_sha256.clone(),
+                    root_id: "sharedroot".into(),
+                },
+            };
+            store
+                .set_sync_mode(&mode.token, Uuid::new_v4(), choice)
+                .unwrap();
+        } else if case == 3 || case == 5 {
+            let mut selected = snapshot.transaction.selected.clone();
+            if case == 5 {
+                selected.media.clear();
+                for coverage in &mut selected.media_coverage {
+                    *coverage = Coverage::Omitted {
+                        sha256: coverage.hash().into(),
+                        reason: Omission::PolicyDisabled,
+                    };
+                }
+            }
+            let next = admission
+                .activate(
+                    &initial,
+                    selection::SelectionChange {
+                        operation: Uuid::new_v4(),
+                        accepted_base_sha256: snapshot.transaction.accepted_base_sha256.clone(),
+                        selected,
+                        retained: snapshot.transaction.retained.clone(),
+                    },
+                    BTreeMap::new(),
+                )
+                .unwrap();
+            if case == 5 {
+                let before = next.token.clone();
+                assert!(admission
+                    .publish_reader_text(&next.token, input.clone())
+                    .is_err());
+                assert_eq!(
+                    store
+                        .selected_snapshot(initial.scope(), MAX_ITEMS)
+                        .unwrap()
+                        .unwrap()
+                        .token,
+                    before
+                );
+                continue;
+            }
+        } else {
+            input.user.object.sha256 = digest(b"changed raw pin");
+        }
+        let before = store
+            .selected_snapshot(initial.scope(), MAX_ITEMS)
+            .unwrap()
+            .unwrap()
+            .token;
+        assert!(
+            admission.publish_reader_text(&initial, input).is_err(),
+            "case{case}"
+        );
+        assert_eq!(
+            store
+                .selected_snapshot(initial.scope(), MAX_ITEMS)
+                .unwrap()
+                .unwrap()
+                .token,
+            before
+        );
+    }
+}
 fn create(ledger: &Ledger) -> Uuid {
     let id = Uuid::new_v4();
     ledger.create(id, Uuid::new_v4(), 1).unwrap();
