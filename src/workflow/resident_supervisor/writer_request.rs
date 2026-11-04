@@ -26,6 +26,47 @@ pub(crate) enum Submission {
         page: Uuid,
         refinement: Request,
     },
+    AdoptLegacyPage {
+        approval: LegacyAdoption,
+    },
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LegacyAdoption {
+    pub operation: Uuid,
+    pub activation: Uuid,
+    pub document: Uuid,
+    pub source: Uuid,
+    pub target: Uuid,
+    pub scene_sha256: String,
+}
+
+impl LegacyAdoption {
+    fn validate(&self, lease: &Lease) -> Result<()> {
+        ensure!(
+            self.activation == lease.record().activation()
+                && !self.operation.is_nil()
+                && !self.document.is_nil()
+                && !self.source.is_nil()
+                && !self.target.is_nil()
+                && self.source != self.target
+                && self.scene_sha256.len() == 64
+                && self
+                    .scene_sha256
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "legacy adoption approval is outside the installed activation"
+        );
+        Ok(())
+    }
+
+    fn spent_name(&self) -> String {
+        format!(
+            "legacy-adoption-spent-{}-{}",
+            self.activation, self.operation
+        )
+    }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -36,9 +77,13 @@ struct Pending {
 }
 
 impl Submission {
-    pub(crate) fn refinement(&self) -> &Request {
-        let Self::RefineOnTablet { refinement, .. } = self;
-        refinement
+    pub(crate) fn identities(&self) -> (Uuid, Uuid) {
+        match self {
+            Self::RefineOnTablet { refinement, .. } => {
+                (refinement.conversation(), refinement.operation())
+            }
+            Self::AdoptLegacyPage { approval } => (Uuid::nil(), approval.operation),
+        }
     }
 }
 
@@ -62,6 +107,10 @@ fn lock(lease: &Lease) -> Result<()> {
 
 fn name(lease: &Lease) -> String {
     format!("writer-request-{}.json", lease.record().activation())
+}
+
+fn adoption_name(lease: &Lease) -> String {
+    format!("legacy-adoption-{}.json", lease.record().activation())
 }
 
 fn read(lease: &Lease, name: &str) -> Result<Option<Pending>> {
@@ -89,16 +138,19 @@ fn read(lease: &Lease, name: &str) -> Result<Option<Pending>> {
 }
 
 pub(crate) fn submit(submission: Submission) -> Result<()> {
-    let Submission::RefineOnTablet {
+    if let Submission::RefineOnTablet {
         document,
         page,
         refinement,
-    } = &submission;
-    ensure!(!document.is_nil() && !page.is_nil(), "empty Writer source");
-    let Request::Refine { .. } = refinement else {
-        anyhow::bail!("explicit Writer refinement required");
-    };
-    refinement.validate()?;
+    } = &submission
+    {
+        ensure!(!document.is_nil() && !page.is_nil(), "empty Writer source");
+        ensure!(
+            matches!(refinement, Request::Refine { .. }),
+            "explicit Writer refinement required"
+        );
+        refinement.validate()?;
+    }
     let deadline = Instant::now() + Duration::from_secs(10);
     let pin = recovery::activation::InstalledReaderSelection::load(deadline)?
         .context("installed Writer requires resident selection")?
@@ -111,11 +163,21 @@ pub(crate) fn submit(submission: Submission) -> Result<()> {
         "Writer activation pin changed"
     );
     lease.record.group.current_process()?;
-    let name = name(&lease);
+    let name = match &submission {
+        Submission::RefineOnTablet { .. } => name(&lease),
+        Submission::AdoptLegacyPage { approval } => {
+            approval.validate(&lease)?;
+            match open_at(&lease.directory, &approval.spent_name(), false, false) {
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                _ => anyhow::bail!("legacy adoption operation already spent"),
+            }
+            adoption_name(&lease)
+        }
+    };
     let now = boot_seconds()?;
     ensure!(
         read(&lease, &name)?.is_none_or(|request| request.expires <= now),
-        "a Writer refinement is already awaiting its page"
+        "a local request is already awaiting its page"
     );
     files::atomic_json(
         &lease.path.join(name),
@@ -144,7 +206,10 @@ pub(crate) fn take(activation: uuid::Uuid, document: Uuid, page: Uuid) -> Result
         document: expected_document,
         page: expected_page,
         refinement,
-    } = pending.submission;
+    } = pending.submission
+    else {
+        anyhow::bail!("unexpected command in Writer slot");
+    };
     if !expired && (document != expected_document || page != expected_page) {
         return Ok(None);
     }
@@ -154,6 +219,47 @@ pub(crate) fn take(activation: uuid::Uuid, document: Uuid, page: Uuid) -> Result
     }
     lease.current()?;
     Ok(Some(refinement))
+}
+
+fn legacy_pending(lease: &Lease) -> Result<Option<LegacyAdoption>> {
+    let Some(pending) = read(lease, &adoption_name(lease))? else {
+        return Ok(None);
+    };
+    if boot_seconds()? >= pending.expires {
+        return Ok(None);
+    }
+    let Submission::AdoptLegacyPage { approval } = pending.submission else {
+        anyhow::bail!("unexpected command in adoption slot");
+    };
+    approval.validate(lease)?;
+    Ok(Some(approval))
+}
+
+pub(crate) fn inspect_legacy(
+    document: Uuid,
+    source: Uuid,
+    target: Uuid,
+) -> Result<Option<LegacyAdoption>> {
+    let lease = Lease::reopen(Path::new(recovery::LEASE_DIRECTORY))?;
+    lease.record.group.current_caller()?;
+    lock(&lease)?;
+    Ok(legacy_pending(&lease)?.filter(|approval| {
+        (approval.document, approval.source, approval.target) == (document, source, target)
+    }))
+}
+
+pub(crate) fn claim_legacy(approval: &LegacyAdoption) -> Result<()> {
+    let lease = Lease::reopen(Path::new(recovery::LEASE_DIRECTORY))?;
+    lease.record.group.current_caller()?;
+    lock(&lease)?;
+    ensure!(
+        legacy_pending(&lease)?.as_ref() == Some(approval),
+        "legacy approval changed or expired"
+    );
+    open_at(&lease.directory, &approval.spent_name(), false, true)?.sync_all()?;
+    lease.directory.sync_all()?;
+    discard_locked(&lease, &adoption_name(&lease))?;
+    lease.current()
 }
 
 fn discard_locked(lease: &Lease, name: &str) -> Result<()> {
@@ -172,5 +278,6 @@ pub(super) fn discard(lease: &Lease) -> Result<()> {
         locked.record().activation() == lease.record().activation(),
         "Writer cleanup activation changed"
     );
-    discard_locked(&locked, &name(&locked))
+    discard_locked(&locked, &name(&locked))?;
+    discard_locked(&locked, &adoption_name(&locked))
 }

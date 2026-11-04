@@ -1,6 +1,7 @@
 //! Guarded native Reader output for installed and fixture requests.
 use super::*;
 use crate::workflow::resident_supervisor::recovery::activation::InstalledOutput;
+use crate::workflow::resident_supervisor::writer_request::{self, LegacyAdoption};
 use crate::{
     conversation::{
         BindingAcquisition, BindingReceipt, HistoricalPageAssociationInspection, SourceObservation,
@@ -152,7 +153,7 @@ pub struct NativeOutputBackend {
     corner: TriggerCorner,
     runtime: Option<RuntimeIdentity>,
     original: Option<ReaderFacts>,
-    adoption: Option<ReaderFacts>,
+    adoption: Option<(ReaderFacts, Option<LegacyAdoption>)>,
     admitted: u8,
     rendered: bool,
     reuse_binding: Option<Uuid>,
@@ -387,6 +388,15 @@ impl NativeOutputBackend {
         Ok(crate::storage::digest(&Self::page_file(facts)?))
     }
 
+    fn legacy_scene_matches(facts: &ReaderFacts, approval: &LegacyAdoption) -> Result<bool> {
+        let raw = Self::page_file(facts)?;
+        if crate::storage::digest(&raw) != approval.scene_sha256 {
+            return Ok(false);
+        }
+        let text = crate::device::native_text::read(&raw)?.text();
+        Ok(text.lines().next() == Some(HEADER.trim_end()))
+    }
+
     fn recognizes_ordinary_page(
         &self,
         facts: &ReaderFacts,
@@ -512,6 +522,7 @@ impl NativeOutputBackend {
         conversation: Uuid,
         facts: &ReaderFacts,
         new: bool,
+        legacy: Option<&LegacyAdoption>,
     ) -> Result<()> {
         let original = self
             .original
@@ -526,13 +537,22 @@ impl NativeOutputBackend {
         {
             return Ok(());
         }
-        let operation = Uuid::new_v4();
+        let operation = legacy.map_or_else(Uuid::new_v4, |approval| approval.operation);
         let runtime = self.runtime.as_ref().unwrap();
         let expected_order: Vec<Uuid> = original.order().iter().copied().map(stored).collect();
         let (request_fingerprint, evidence_procedure) = match self.pin.as_ref() {
             OutputPin::Fixture(pin) => (
                 crate::storage::digest(&pin.bytes),
                 "development-full-admission-fresh-observe-guarded-v1",
+            ),
+            OutputPin::Installed(pin) if legacy.is_some() => (
+                crate::storage::digest(&serde_json::to_vec(&(
+                    pin.digest(),
+                    legacy,
+                    conversation,
+                    &expected_order,
+                ))?),
+                "installed-explicit-legacy-adoption-v1",
             ),
             OutputPin::Installed(pin) => (
                 crate::storage::digest(&serde_json::to_vec(&(
@@ -629,6 +649,7 @@ impl ResidentOutputBackend for NativeOutputBackend {
     ) -> Result<()> {
         self.pin.current()?;
         ensure!(Instant::now() < end, "native output intent expired");
+        self.adoption = None;
         ensure!(
             crate::device::native_page::verified_contract(
                 crate::device::DeviceModel::detect(),
@@ -860,15 +881,47 @@ impl ResidentOutputBackend for NativeOutputBackend {
             })
         }) {
             log::info!("Explicit native legacy fixture matched; cached header match={cached_header_matches}");
-            self.adoption = Some(facts.clone());
+            self.adoption = Some((facts.clone(), None));
             return Ok(PageUse::LegacyBuddy);
+        }
+        use crate::conversation::HistoricalPageAssociationUnresolved::BindingMissing;
+        if plan.is_none()
+            && !blank_start_source
+            && matches!(
+                association,
+                HistoricalPageAssociationInspection::Unresolved(BindingMissing)
+            )
+        {
+            let original = self.original.as_ref().context("missing adoption source")?;
+            if original.page().document == facts.page().document
+                && original.order() == facts.order()
+                && facts
+                    .order()
+                    .windows(2)
+                    .any(|pair| pair == [original.page().page, facts.page().page])
+            {
+                if let Some(approval) = writer_request::inspect_legacy(
+                    stored(facts.page().document),
+                    stored(original.page().page),
+                    stored(facts.page().page),
+                )? {
+                    let matches = Self::legacy_scene_matches(facts, &approval)?;
+                    progress()?;
+                    self.pin.current()?;
+                    if matches {
+                        self.adoption = Some((facts.clone(), Some(approval)));
+                        return Ok(PageUse::LegacyBuddy);
+                    }
+                    log::info!("Resident legacy approval did not match the saved answer page");
+                    return Ok(PageUse::Unresolved);
+                }
+            }
         }
         if cached_header_matches {
             log::info!("Resident target unresolved: legacy header without selected adoption");
             return Ok(PageUse::Unresolved);
         }
         if plan.is_none_or(|plan| plan.recognize_plain_notebook || plan.recognize_original_pdf) {
-            use crate::conversation::HistoricalPageAssociationUnresolved::BindingMissing;
             let ordinary = matches!(
                 association,
                 HistoricalPageAssociationInspection::Unresolved(BindingMissing)
@@ -957,16 +1010,27 @@ impl ResidentOutputBackend for NativeOutputBackend {
         &mut self,
         ledger: &Ledger,
         conversation: Uuid,
-        _: &RuntimeIdentity,
+        runtime: &RuntimeIdentity,
         facts: &ReaderFacts,
-        _: Instant,
+        end: Instant,
     ) -> Result<bool> {
         self.pin.current()?;
+        let (selected, approval) = self
+            .adoption
+            .take()
+            .context("legacy adoption not explicitly selected")?;
         ensure!(
-            self.adoption.take().as_ref() == Some(facts),
-            "legacy adoption not explicitly selected"
+            &selected == facts && self.runtime.as_ref() == Some(runtime) && Instant::now() < end,
+            "legacy adoption context changed"
         );
-        self.bind(ledger, conversation, facts, false)?;
+        if let Some(approval) = &approval {
+            writer_request::claim_legacy(approval)?;
+            ensure!(
+                Self::legacy_scene_matches(facts, approval)? && Instant::now() < end,
+                "legacy target scene changed before binding"
+            );
+        }
+        self.bind(ledger, conversation, facts, false, approval.as_ref())?;
         Ok(true)
     }
     fn navigate(
@@ -1043,7 +1107,7 @@ impl ResidentOutputBackend for NativeOutputBackend {
         progress()?;
         self.pin.current()?;
         ensure!(Instant::now() < end, "renderer expired");
-        self.bind(ledger, conversation, target, new)?;
+        self.bind(ledger, conversation, target, new, None)?;
         Ok(Box::new(Renderer {
             keyboard: self.keyboard.clone(),
             pin: self.pin.clone(),

@@ -175,8 +175,7 @@ pub fn dispatch(config_path: Option<PathBuf>, input: &mut impl Read) -> CommandR
             feature = "development-input-diagnostics"
         ))]
         Ok(CommandRequest::Resident(submission)) => {
-            let conversation = submission.refinement().conversation();
-            let operation = submission.refinement().operation();
+            let (conversation, operation) = submission.identities();
             let result = crate::workflow::resident_supervisor::writer_request::submit(submission);
             CommandReport::Resident(ResidentReport {
                 status: if result.is_ok() { "queued" } else { "refused" },
