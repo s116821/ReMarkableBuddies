@@ -1259,6 +1259,7 @@ mod tests {
         images: Vec<String>,
         payload_delay: Duration,
         kill_pid: Option<u32>,
+        no_selection: bool,
     }
     impl crate::LLMEngine for Provider {
         fn add_text_content(&mut self, _: &str) {}
@@ -1276,6 +1277,9 @@ mod tests {
             let index = self.calls.get();
             self.calls.set(index + 1);
             self.batches.borrow_mut().push(self.images.clone());
+            if self.no_selection {
+                return Ok("NONE".into());
+            }
             Ok(if index.is_multiple_of(2) { "QUESTION: why?\nQUESTION_BOX: 130,35,200,50\nSELECTION_CENTER: 385,230\n---\nANSWER: Because the model fixture says so." }
                 else { "TRANSCRIPTION: why?" }.into())
         }
@@ -1295,6 +1299,7 @@ mod tests {
             images: vec![],
             payload_delay: Duration::ZERO,
             kill_pid: None,
+            no_selection: false,
         };
         let mut reader = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
         reader.run_iteration().unwrap();
@@ -1355,6 +1360,72 @@ mod tests {
         drop(store);
         std::fs::remove_dir_all(base).unwrap();
     }
+    #[test]
+    fn resident_selection_refusal_leaves_no_native_insertion_attempt() {
+        use crate::conversation::AttemptReason;
+
+        let (workflow, store, base, events, _notify) = workflow(
+            "reconnect-source-handoff",
+            vec![released(Instant::now())],
+            Duration::ZERO,
+        );
+        let calls = Rc::new(Cell::new(0));
+        let model = Provider {
+            calls: calls.clone(),
+            batches: Rc::new(RefCell::new(vec![])),
+            images: vec![],
+            payload_delay: Duration::ZERO,
+            kill_pid: None,
+            no_selection: true,
+        };
+        let mut reader = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
+
+        reader.run_iteration().unwrap();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(
+            &*events.borrow(),
+            &["activate", "spawn", "observe", "capture"]
+        );
+        assert!(super::super::resident_client::attempts(&store)
+            .unwrap()
+            .is_empty());
+
+        let stored = store
+            .snapshot_heads_matching(&[Namespace::Source], 10, |_| true)
+            .unwrap();
+        let [entry] = stored.as_slice() else {
+            panic!("expected one resident source capture");
+        };
+        let Record::ResidentCapture(evidence) =
+            serde_json::from_value::<Record>(entry.payload.clone()).unwrap()
+        else {
+            panic!("wrong historical origin");
+        };
+        let history = Ledger::new(store.clone())
+            .inspect(evidence.conversation, false)
+            .unwrap();
+        let outcomes = history
+            .iter()
+            .filter_map(|record| match record {
+                Record::OutcomeFact(fact) => Some((&fact.outcome, &fact.reason)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(outcomes, [(&Outcome::Failed, &AttemptReason::NoSelection)]);
+        assert!(!history.iter().any(|record| matches!(
+            record,
+            Record::Binding(_)
+                | Record::Turn(crate::conversation::Turn {
+                    role: crate::conversation::Role::Assistant,
+                    ..
+                })
+        )));
+
+        drop(reader);
+        drop(store);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
     #[test]
     fn selected_acquisition_without_release_or_after_original_expiry_never_dispatches() {
         for fault in ["no-release", "expired", "activation-cost", "corrupt"] {
@@ -1522,6 +1593,7 @@ mod tests {
             images: vec![],
             payload_delay: Duration::from_millis(1500),
             kill_pid: None,
+            no_selection: false,
         };
         let mut reader = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
         let error = reader.run_iteration().unwrap_err();
@@ -1611,6 +1683,7 @@ mod tests {
                         images: vec![],
                         payload_delay: Duration::ZERO,
                         kill_pid: Some(pid),
+                        no_selection: false,
                     };
                     let mut reader = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
                     reader.set_trigger_enabled(false); // The real release was already consumed above.
@@ -1653,6 +1726,7 @@ mod tests {
             images: vec![],
             payload_delay: Duration::ZERO,
             kill_pid: None,
+            no_selection: false,
         };
         let mut reader = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
         assert!(reader.run_iteration().is_err());
