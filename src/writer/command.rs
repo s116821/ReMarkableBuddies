@@ -106,6 +106,7 @@ pub enum CommandReport {
     Flow(crate::writer_flow::Report),
     #[cfg(all(target_os = "linux", feature = "development-resident-bootstrap", feature = "development-input-diagnostics"))]
     Resident(ResidentReport),
+    Notebook(Box<notebook::command::Report>),
 }
 
 #[cfg(all(target_os = "linux", feature = "development-resident-bootstrap", feature = "development-input-diagnostics"))]
@@ -124,6 +125,7 @@ enum CommandRequest {
     Flow(crate::writer_flow::Request),
     #[cfg(all(target_os = "linux", feature = "development-resident-bootstrap", feature = "development-input-diagnostics"))]
     Resident(crate::workflow::resident_supervisor::writer_request::Submission),
+    Notebook(Box<notebook::command::Request>),
 }
 /// Parse bounded stdin once; each strict variant rejects duplicates and unknown fields.
 pub fn dispatch(config_path: Option<PathBuf>, input: &mut impl Read) -> CommandReport {
@@ -163,6 +165,9 @@ pub fn dispatch(config_path: Option<PathBuf>, input: &mut impl Read) -> CommandR
                 operation,
                 failure: result.err().map(|_| "tablet-request-unavailable"),
             })
+        }
+        Ok(CommandRequest::Notebook(request)) => {
+            CommandReport::Notebook(Box::new(notebook::command::run(config_path, *request)))
         }
         Err(_) => CommandReport::Legacy(run(config_path, &mut &bytes[..])),
     }

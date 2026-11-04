@@ -695,7 +695,7 @@ and external-writer/platform immutability are separate qualifications.
 
 Ordinary local builds report development/unavailable metadata; controlled CI
 candidates embed their frozen future version but are not published releases.
-See [release tools, evidence limits and recovery](release/README.md) and the linked
+See [release tools, evidence limits and recovery](docs/release-workflow.md) and the linked
 central Docs contract for pins, local controls and coordinated delivery.
 
 ## Contributing

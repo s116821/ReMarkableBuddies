@@ -1,0 +1,78 @@
+{
+  "name": "writer-notebook-create-refine",
+  "mode": "writer",
+  "conversation": "20000000-0000-4000-8000-000000000001",
+  "replies": [
+    "Force = 10 N. (page 1).",
+    "Force = 10 N. (page 1).",
+    "# Force\n\nForce = 10 N. (page 1).",
+    "Force = 10 N. (page 1).",
+    "Force = 10 N. (page 1).",
+    "# Force\n\nForce = 10 N. (page 1). Refined."
+  ],
+  "reader_history": [
+    "Keep the physical units."
+  ],
+  "steps": [
+    {
+      "step": "notebook",
+      "request": {
+        "command": "generate-notebook-and-export",
+        "outer_operation": "20000000-0000-4000-8000-000000000004",
+        "generation": {
+          "command": "generate-notebook",
+          "conversation": "20000000-0000-4000-8000-000000000001",
+          "operation": "20000000-0000-4000-8000-000000000002",
+          "request": "Preserve Force = 10 N and cite page 1.",
+          "document_file": "writer-notebook-source.json",
+          "document_sha256": "debb857e44ea06ddb46af489beed2146cfad8743f8ec08ab0f03771a7c3d93bd",
+          "selection": {
+            "scope": "supplied-notebook"
+          },
+          "guidance": null,
+          "max_model_calls": 3,
+          "history_range": null
+        },
+        "correlation": "20000000-0000-4000-8000-000000000005",
+        "effect_operation": "20000000-0000-4000-8000-000000000006"
+      },
+      "fault": null
+    },
+    {
+      "step": "restart"
+    },
+    {
+      "step": "notebook",
+      "request": {
+        "command": "refine-notebook-and-export",
+        "outer_operation": "20000000-0000-4000-8000-000000000014",
+        "correlation": "20000000-0000-4000-8000-000000000005",
+        "effect_operation": "20000000-0000-4000-8000-000000000016",
+        "refinement": {
+          "command": "refine-notebook",
+          "conversation": "20000000-0000-4000-8000-000000000001",
+          "operation": "20000000-0000-4000-8000-000000000012",
+          "request": "Keep Force = 10 N and make a concise study note.",
+          "draft": "0b403ce4-4b5f-5594-9e36-9826c7e27e9e",
+          "max_model_calls": 3,
+          "history_range": null
+        }
+      },
+      "fault": null
+    }
+  ],
+  "output": "../output/writer-notebook-create-refine",
+  "expect": {
+    "statuses": [
+      "exported",
+      "exported"
+    ],
+    "model_calls": 6,
+    "destination_calls": 5,
+    "writes": 2,
+    "note_contains": [
+      "Force = 10 N",
+      "page 1"
+    ]
+  }
+}

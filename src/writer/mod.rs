@@ -1,5 +1,6 @@
 //! Generate local unrendered drafts from explicit text. No device or export effects.
 pub mod command;
+pub mod notebook;
 use crate::{
     config::PersonalizationSnapshot,
     conversation::{Ledger, Mode, NormalizedTextSource, Outcome, Record, Role, TextScope, Turn},

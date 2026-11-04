@@ -59,37 +59,7 @@ pub fn describe(fact: &OutcomeFact) -> Result<Option<FeedbackDescription>> {
             "This request was canceled.",
         )
     } else {
-        let (code, text) = match fact.reason {
-            AttemptReason::NoSelection => {
-                ("RMB-NO-SELECTION", "No usable source selection was found.")
-            }
-            AttemptReason::TranscriptionDisagreement => (
-                "RMB-READ-UNCERTAIN",
-                "The selected text could not be read reliably.",
-            ),
-            AttemptReason::ProviderFailure => (
-                "RMB-RESPONSE-UNAVAILABLE",
-                "The response service could not complete this request.",
-            ),
-            AttemptReason::NativeOutputUnavailable => (
-                "RMB-OUTPUT-UNAVAILABLE",
-                "Output is not available for this request.",
-            ),
-            AttemptReason::NoSuccessor => (
-                "RMB-PAGE-UNAVAILABLE",
-                "A usable Buddy page is unavailable.",
-            ),
-            AttemptReason::InvalidSuccessor => (
-                "RMB-PAGE-UNCONFIRMED",
-                "The Buddy page could not be confirmed.",
-            ),
-            AttemptReason::RequestFailed | AttemptReason::Canceled => {
-                ("RMB-REQUEST-FAILED", "This request could not be completed.")
-            }
-            AttemptReason::OutputPending
-            | AttemptReason::SubmittedUnverified
-            | AttemptReason::DeviceUncertain => unreachable!("uncertainty handled first"),
-        };
+        let (_, code, text) = describe_reason(&fact.reason, false);
         (FeedbackKind::Error, code, text)
     };
     Ok(Some(FeedbackDescription {
@@ -100,4 +70,54 @@ pub fn describe(fact: &OutcomeFact) -> Result<Option<FeedbackDescription>> {
         code,
         text,
     }))
+}
+
+/// Shared static catalog; does not create a fact or any association.
+pub(crate) fn describe_reason(
+    reason: &AttemptReason,
+    reconciliation: bool,
+) -> (FeedbackKind, &'static str, &'static str) {
+    if reconciliation {
+        return (
+            FeedbackKind::Reconciliation,
+            "RMB-ACTION-UNCERTAIN",
+            "The previous action needs checking.",
+        );
+    }
+    let (code, text) = match reason {
+        AttemptReason::NoSelection => ("RMB-NO-SELECTION", "No usable source selection was found."),
+        AttemptReason::TranscriptionDisagreement => (
+            "RMB-READ-UNCERTAIN",
+            "The selected text could not be read reliably.",
+        ),
+        AttemptReason::ProviderFailure => (
+            "RMB-RESPONSE-UNAVAILABLE",
+            "The response service could not complete this request.",
+        ),
+        AttemptReason::NativeOutputUnavailable => (
+            "RMB-OUTPUT-UNAVAILABLE",
+            "Output is not available for this request.",
+        ),
+        AttemptReason::NoSuccessor => (
+            "RMB-PAGE-UNAVAILABLE",
+            "A usable Buddy page is unavailable.",
+        ),
+        AttemptReason::InvalidSuccessor => (
+            "RMB-PAGE-UNCONFIRMED",
+            "The Buddy page could not be confirmed.",
+        ),
+        AttemptReason::RequestFailed | AttemptReason::Canceled => {
+            ("RMB-REQUEST-FAILED", "This request could not be completed.")
+        }
+        AttemptReason::OutputPending
+        | AttemptReason::SubmittedUnverified
+        | AttemptReason::DeviceUncertain => {
+            return (
+                FeedbackKind::Reconciliation,
+                "RMB-ACTION-UNCERTAIN",
+                "The previous action needs checking.",
+            )
+        }
+    };
+    (FeedbackKind::Error, code, text)
 }

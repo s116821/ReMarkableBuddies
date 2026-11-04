@@ -1,8 +1,8 @@
-# Unknown paths are relevant. Keep release/python-semantic-release.toml exclusions equivalent.
+# Unknown paths are relevant. Keep cicd/release/python-semantic-release.toml exclusions equivalent.
 application:
   - '**'
   - '!README.md'
-  - '!release/README.md'
+  - '!cicd/release/README.md'
   - '!AGENTS.md'
   - '!CHANGELOG.md'
   - '!LICENSE'

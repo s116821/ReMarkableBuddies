@@ -83,6 +83,10 @@ pub struct DomainUsage {
 pub struct OwnedDataReport {
     pub report_version: u32,
     pub status: InspectionStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_generation_format: Option<Option<u32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retained_generation_formats: Option<Vec<u32>>,
     pub owner_actor: Option<Uuid>,
     pub current_generation: Option<Uuid>,
     pub observed_files: u64,
@@ -106,7 +110,7 @@ pub struct OwnedDataReport {
 }
 impl OwnedDataReport {
     fn empty(status: InspectionStatus) -> Self {
-        Self { report_version: 1, status, owner_actor: None, current_generation: None,
+        Self { report_version: 1, status, current_generation_format: None, retained_generation_formats: None, owner_actor: None, current_generation: None,
             observed_files: 0, observed_apparent_bytes: 0, complete_apparent_bytes: None,
             storage: BTreeMap::new(), observed_domains: BTreeMap::new(), domain_accounting_complete: false,
             cache_inspected: false, shared_media_files: 0, shared_media_apparent_bytes: 0,
@@ -352,6 +356,13 @@ impl Scan {
                 self.issue(InspectionIssue::InvalidReference);
                 continue;
             };
+            if namespace == Namespace::UnassociatedFeedback {
+                self.report.report_version = 2;
+                self.report.current_generation_format.get_or_insert(None);
+                self.report
+                    .retained_generation_formats
+                    .get_or_insert_with(Vec::new);
+            }
             let key = (generation, reference.sha256.clone());
             let descriptor_media = if let Some(prior) = self.records.get(&key) {
                 if prior.reference != *reference || prior.namespace != namespace {
@@ -382,7 +393,18 @@ impl Scan {
                         continue;
                     }
                 };
-                if envelope.validate().is_err() || envelope.namespace != namespace {
+                let feedback_invalid = namespace == Namespace::UnassociatedFeedback
+                    && (self.json::<u32>(&root.join("format.json"), 64)
+                        != Some(feedback_generation::VERSION)
+                        || crate::unassociated_feedback::validate_envelope(
+                            &envelope,
+                            self.report.owner_actor.unwrap_or_default(),
+                        )
+                        .is_err());
+                if envelope.validate().is_err()
+                    || envelope.namespace != namespace
+                    || feedback_invalid
+                {
                     self.issue(InspectionIssue::InvalidReference);
                     continue;
                 }
@@ -437,16 +459,33 @@ impl Scan {
         let Some(version) = self.json::<u32>(&root.join("format.json"), 64) else {
             return;
         };
+        let feedback_feature = root.join(feedback_generation::MARKER);
+        if version == feedback_generation::VERSION
+            || fs::symlink_metadata(&feedback_feature).is_ok()
+        {
+            self.report.report_version = 2;
+            self.report.current_generation_format.get_or_insert(None);
+            self.report
+                .retained_generation_formats
+                .get_or_insert_with(Vec::new);
+        }
+        if self.report.report_version == 2 && current {
+            self.report.current_generation_format =
+                Some(matches!(version, 1..=3).then_some(version));
+        }
         // Account the existing pure validator's repeated bounded metadata reads.
         let feature = root.join("selection-feature.json");
         let repeated = fs::symlink_metadata(&feature).map_or(64, |meta| {
             64 + usize::try_from(meta.len()).unwrap_or(MAX_METADATA)
         });
-        if !self.budget.json(repeated) {
+        let feedback_repeated = fs::symlink_metadata(&feedback_feature).map_or(0, |meta| {
+            usize::try_from(meta.len()).unwrap_or(MAX_METADATA)
+        });
+        if !self.budget.json(repeated.saturating_add(feedback_repeated)) {
             self.issue(InspectionIssue::MetadataLimit);
             return;
         }
-        if !matches!(version, 1 | 2)
+        if !matches!(version, 1..=3)
             || selection::validate_generation(root, actor, generation).is_err()
         {
             self.issue(InspectionIssue::UnsupportedGeneration);
@@ -454,6 +493,16 @@ impl Scan {
                 self.report.status = InspectionStatus::Unsupported;
             }
             return;
+        }
+        if !current && self.report.report_version == 2 {
+            let formats = self
+                .report
+                .retained_generation_formats
+                .get_or_insert_with(Vec::new);
+            if !formats.contains(&version) {
+                formats.push(version);
+                formats.sort_unstable();
+            }
         }
         self.generations.insert(generation, root.to_owned());
         for required in ["objects", "commits"] {
@@ -467,7 +516,10 @@ impl Scan {
         for path in self.entries(root) {
             let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
             match name {
-                "format.json" | "selection-feature.json" | "restored-config.json" => self.file(
+                "format.json"
+                | "selection-feature.json"
+                | "feedback-feature.json"
+                | "restored-config.json" => self.file(
                     &path,
                     if current {
                         StorageKind::Structural
@@ -725,6 +777,35 @@ impl Scan {
         if overflow {
             self.issue(InspectionIssue::ByteCountOverflow);
         }
+        if self.report.report_version == 2 {
+            let current_root = self
+                .report
+                .current_generation
+                .and_then(|id| self.generations.get(&id).cloned());
+            let current_format = current_root
+                .as_ref()
+                .and_then(|root| self.json::<u32>(&root.join("format.json"), 64));
+            self.report.current_generation_format =
+                Some(current_format.filter(|v| matches!(v, 1..=3)));
+            let roots: Vec<_> = self
+                .generations
+                .iter()
+                .filter(|(id, _)| Some(**id) != self.report.current_generation)
+                .map(|(_, p)| p.clone())
+                .collect();
+            let mut formats = BTreeSet::new();
+            for root in roots {
+                if let Some(version) = self.json::<u32>(&root.join("format.json"), 64) {
+                    if matches!(version, 1..=3) {
+                        formats.insert(version);
+                    }
+                }
+            }
+            self.report.retained_generation_formats = Some(formats.into_iter().collect());
+            if current_format != Some(feedback_generation::VERSION) {
+                self.issue(InspectionIssue::UnsupportedGeneration);
+            }
+        }
         self.report.status = if self.report.status == InspectionStatus::Unsupported {
             InspectionStatus::Unsupported
         } else if self.report.issues.is_empty() {
@@ -735,6 +816,12 @@ impl Scan {
         self.report.domain_accounting_complete = self.report.status == InspectionStatus::Complete;
         if self.report.domain_accounting_complete {
             self.report.complete_apparent_bytes = Some(self.report.observed_apparent_bytes);
+            if self.report.report_version == 2 {
+                self.report
+                    .observed_domains
+                    .entry(Namespace::UnassociatedFeedback)
+                    .or_default();
+            }
             for namespace in [
                 Namespace::Conversation,
                 Namespace::Source,
@@ -908,6 +995,7 @@ pub fn inspect_owned_data(paths: &StorePaths) -> OwnedDataReport {
             | "store.lock"
             | "capabilities.json"
             | "contract-v1.json"
+            | "contract-v2.json"
             | "config.snapshot.json"
             | "effective-config.json" => scan.file(&path, StorageKind::Structural),
             "generations" => {

@@ -77,6 +77,10 @@ impl<T: DriveTransport> SyncEngine<T> {
         cancel: Arc<AtomicBool>,
     ) -> Result<Self> {
         policy.validate()?;
+        ensure!(
+            !policy.namespaces.contains(&Namespace::UnassociatedFeedback),
+            "unassociated feedback live sync unsupported"
+        );
         let path = store.paths.data.join("sync/state.json");
         let state = if path.exists() {
             files::json(&path, MAX_METADATA as u64)?
@@ -128,6 +132,7 @@ impl<T: DriveTransport> SyncEngine<T> {
         Ok(())
     }
     pub fn step(&mut self) -> Result<Status> {
+        self.policy.validate()?;
         if !self.policy.enabled {
             self.legacy_lease = None;
             return Ok(Status::Disabled);

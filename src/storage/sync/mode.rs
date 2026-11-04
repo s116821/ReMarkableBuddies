@@ -207,6 +207,15 @@ pub(crate) fn load(store: &Store) -> Result<Option<ModeState>> {
     }
     Ok(Some(state))
 }
+
+/// Read-only distinction for ordinary successor consumers. Mode-handle counts
+/// also include valid ordinary leases and cannot identify a sync publisher.
+pub(crate) fn ordinary_local(store: &Store) -> Result<bool> {
+    Ok(matches!(
+        snapshot(store, &load(store)?)?.mode,
+        None | Some(SyncMode::LocalOnly)
+    ))
+}
 fn snapshot(store: &Store, state: &Option<ModeState>) -> Result<SyncModeSnapshot> {
     let current = state.as_ref().and_then(|s| s.transitions.last());
     Ok(SyncModeSnapshot {
@@ -311,6 +320,12 @@ impl Store {
             .inner
             .lock()
             .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        let root = self.generation(inner.generation);
+        ensure!(
+            feedback_generation::version(&root)? != notebook_generation::VERSION
+                && !root.join(notebook_generation::MARKER).exists(),
+            "notebook storage does not support sync mode transitions"
+        );
         let original = load(self)?;
         let fingerprint = digest(&serde_json::to_vec(&(
             self.actor_id,

@@ -30,6 +30,7 @@ pub enum Namespace {
     ExportAssociation,
     SubjectMemory,
     Handwriting,
+    UnassociatedFeedback,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -85,7 +86,18 @@ impl Envelope {
                     && matches!(
                         self.namespace,
                         Namespace::Conversation | Namespace::Source | Namespace::ExportAssociation
-                    )),
+                    ))
+                || (self.domain_schema_version == 3
+                    && self.kind == Kind::Value
+                    && match self.namespace {
+                        Namespace::Source =>
+                            self.payload["record_kind"] == "archived-normalized-source",
+                        Namespace::Conversation => matches!(
+                            self.payload["record_kind"].as_str(),
+                            Some("notebook-plan" | "notebook-stage")
+                        ),
+                        _ => false,
+                    }),
             "unsupported domain schema version for namespace"
         );
         ensure!(

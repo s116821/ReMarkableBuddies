@@ -31,18 +31,21 @@ push cannot publish. Repository protection remains owner-managed.
   major; the separate REM-35 hold refuses premature 1.0 rather than downgrading it.
 - Exact GraphQL release lookup and octokit request Actions handle draft
   creation/read/finalization by ID, avoiding draft-list pagination.
-- Unmodified Svenstaro upload-release-action2.11.5 source29e53e917877a24fad85510ded594ab3c9ca12de
-  is compiled from a pinned minimal build/runtime recipe. TypeScript/ncc and
-  required supported dependencies are selected explicitly; the upstream empty
-  Jest placeholder and its unused ts-jest/lint graph are not part of this recipe.
-  The complete selected closure is audited; this does not turn the original
-  upstream audit or the SDK's other failing candidates green or prove security.
-  Source, original/selected lock, MIT license and emitted bytes are recorded.
-  Actual emitted-Action controls use loopback fake credentials only.
+- Svenstaro upload-release-action2.11.5 runs directly from its maintained
+  distribution at immutable revision29e53e917877a24fad85510ded594ab3c9ca12de.
+  Historical source-build recipes, dependency audits and loopback controls apply
+  only to their original candidates; they do not qualify this distribution.
 
 The earlier GitVersion6.8.2 equal-date failure and the SDK source-built softprops
 two-page draft-discovery limitation remain evidence, not accepted substitutions.
 Historical code/failures remain on the preserved REM-46 branches.
+
+The uploader runs directly from the pinned maintained
+`svenstaro/upload-release-action@29e53e917877a24fad85510ded594ab3c9ca12de`
+Action distribution. CI does not rebuild upstream JavaScript, maintain replacement
+vendor dependency locks, or repeat upstream implementation tests. Project-specific
+artifact identity, ARM ABI, same-release retry and remote byte verification remain
+local because the generic uploader does not establish those guarantees.
 
 ## Build and retry identity
 
@@ -81,11 +84,13 @@ immutability/external-writer guarantee or dispatch-chronology promise.
 ## Local focused controls
 
 Use Python 3.12, supported Node 24.21 and Git. Install the maintained tools with
-`python -m pip install --require-hashes -r release/python-tools.lock`.
-Run `python -m unittest discover -s release -v`. Rust metadata controls also need
-the declared Rust toolchain/dependency cache. Action controls require exact clones
-identified by PATHS_ACTION, GRAPHQL_ACTION, REQUEST_ACTION and the source-built
-UPLOADER_ACTION. See the workflow for the fixed pins and commands.
+`python -m pip install --require-hashes -r cicd/release/python-tools.lock`.
+Run `python -m unittest discover -s cicd/release -v`. Rust metadata controls also need
+the declared Rust toolchain/dependency cache. Workflow controls use
+`npm ci --prefix cicd/release/fixtures` followed by
+`node --test cicd/release/fixtures/workflow.test.mjs` on a host with jq.
+These controls validate project wiring and release guards, not upstream Action
+internals or tablet compatibility.
 
 No local fixture creates a production tag/release, changes repository settings,
 or operates a tablet. REM-35/full ecosystem/SDK production selection and current

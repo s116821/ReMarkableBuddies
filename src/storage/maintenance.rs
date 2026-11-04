@@ -116,6 +116,18 @@ impl Store {
             return Err(Refusal::Unsupported);
         }
         let generation_root = paths.data.join("generations").join(generation.to_string());
+        files::safe_path(&generation_root.join(super::notebook_generation::MARKER))
+            .map_err(|_| Refusal::Unsupported)?;
+        if record::<u32>(&generation_root.join("format.json"), 64)?
+            == super::notebook_generation::VERSION
+            || generation_root
+                .join(super::notebook_generation::MARKER)
+                .exists()
+        {
+            // These are legacy maintenance admissions. Explicit notebook
+            // preparation/history/backup use their separately validated APIs.
+            return Err(Refusal::Unsupported);
+        }
         for path in [
             &generation_root,
             &generation_root.join("objects"),

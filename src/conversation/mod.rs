@@ -10,6 +10,7 @@ pub use resident_capture::{
 };
 mod intent;
 mod legacy;
+pub mod notebook;
 pub use development::{DevelopmentCaptureHistory, PreparedDevelopmentCapture};
 pub mod evidence;
 mod export;
@@ -44,6 +45,7 @@ pub use historical_association::{
     HistoricalPageAssociationUnresolved,
 };
 pub use intent::*;
+pub use notebook::ArchivedNormalizedSource;
 pub use pending::{PendingIntentPublication, PendingIntentRequest, SourceAdmission};
 #[cfg(test)]
 pub(crate) use pending::{ReaderContext, ReaderPreparation};
@@ -126,6 +128,10 @@ impl Ledger {
                 }
                 Record::NormalizedText(_) => TEXT_SOURCE_SCHEMA,
                 Record::ResidentCapture(_) => TEXT_SOURCE_SCHEMA,
+                Record::ArchivedNormalizedSource(_) => notebook::NOTEBOOK_SOURCE_SCHEMA,
+                Record::NotebookPlan(_) | Record::NotebookStage(_) => {
+                    notebook::NOTEBOOK_PROCESSING_SCHEMA
+                }
                 _ => SCHEMA,
             },
             record_id: id,
@@ -140,14 +146,43 @@ impl Ledger {
         envelope.validate()?;
         Ok(envelope)
     }
-    fn decode(envelope: &Envelope) -> Result<Record> {
+    pub(crate) fn decode(envelope: &Envelope) -> Result<Record> {
+        envelope.validate()?;
         ensure!(
-            matches!(envelope.domain_schema_version, SCHEMA | INTENT_SCHEMA),
+            matches!(
+                envelope.domain_schema_version,
+                SCHEMA | INTENT_SCHEMA | notebook::NOTEBOOK_SOURCE_SCHEMA
+            ),
             "unsupported conversation schema"
         );
         ensure!(envelope.kind == Kind::Value, "deleted conversation record");
         let record: Record = serde_json::from_value(envelope.payload.clone())?;
-        if let Record::Binding(binding) = &record {
+        if envelope.domain_schema_version == notebook::NOTEBOOK_SOURCE_SCHEMA {
+            ensure!(
+                matches!(
+                    (&record, envelope.namespace),
+                    (Record::ArchivedNormalizedSource(_), Namespace::Source)
+                        | (
+                            Record::NotebookPlan(_) | Record::NotebookStage(_),
+                            Namespace::Conversation
+                        )
+                ),
+                "unsupported notebook record kind"
+            );
+        }
+        if matches!(&record, Record::ArchivedNormalizedSource(_)) {
+            ensure!(
+                envelope.namespace == Namespace::Source
+                    && envelope.domain_schema_version == notebook::NOTEBOOK_SOURCE_SCHEMA,
+                "notebook archive schema mismatch"
+            );
+        } else if matches!(&record, Record::NotebookPlan(_) | Record::NotebookStage(_)) {
+            ensure!(
+                envelope.namespace == Namespace::Conversation
+                    && envelope.domain_schema_version == notebook::NOTEBOOK_PROCESSING_SCHEMA,
+                "notebook processing schema mismatch"
+            );
+        } else if let Record::Binding(binding) = &record {
             ensure!(
                 (envelope.domain_schema_version == EXISTING_BINDING_SCHEMA)
                     == !binding.receipt.acquisition.is_inserted(),
@@ -207,6 +242,18 @@ impl Ledger {
             Record::NormalizedText(source) => {
                 source.validate()?;
                 (source.id, Namespace::Source, source.conversation)
+            }
+            Record::ArchivedNormalizedSource(source) => {
+                source.validate()?;
+                (source.id, Namespace::Source, source.conversation)
+            }
+            Record::NotebookPlan(plan) => {
+                plan.validate()?;
+                (plan.id, Namespace::Conversation, plan.conversation)
+            }
+            Record::NotebookStage(stage) => {
+                stage.validate()?;
+                (stage.id, Namespace::Conversation, stage.conversation)
             }
             Record::DevelopmentCapture(capture) => {
                 capture.validate()?;
@@ -274,6 +321,7 @@ impl Ledger {
             "domain envelope identity mismatch"
         );
         let mut media = match &record {
+            Record::ArchivedNormalizedSource(source) => vec![source.media.clone()],
             Record::Source(source) => vec![source.image.clone()],
             Record::Capture(capture) => capture.facts.media()?,
             Record::LegacyCapture(capture) => capture.media()?,
@@ -457,13 +505,23 @@ impl Ledger {
         &self,
         operation: Uuid,
         expected: ExpectedHeads,
-        mut turn: Turn,
+        turn: Turn,
         sources: Vec<ImageUse>,
     ) -> Result<WriteResult> {
         let fingerprint = Self::fingerprint(&("append", &turn, &sources))?;
         if let Some(prior) = self.replay(operation, &fingerprint)? {
             return Ok(prior);
         }
+        self.append_unreplayed(operation, expected, turn, sources, fingerprint)
+    }
+    fn append_unreplayed(
+        &self,
+        operation: Uuid,
+        expected: ExpectedHeads,
+        mut turn: Turn,
+        sources: Vec<ImageUse>,
+        fingerprint: String,
+    ) -> Result<WriteResult> {
         ensure!(
             !turn.id.is_nil() && !turn.exchange.is_nil(),
             "nil turn identity"
@@ -471,7 +529,18 @@ impl Ledger {
         ensure!(sources.len() <= MAX_ITEMS, "too many source uses");
         ensure!(turn.sequence == 0, "caller must not allocate chronology");
         Self::validate_turn(&turn)?;
-        let (_, mut root) = self.live_root(turn.conversation, Some(&expected))?;
+        let (_, mut root) = match self.live_root(turn.conversation, Some(&expected)) {
+            Ok(root) => root,
+            Err(error) => {
+                // An identical winner can commit after the initial receipt read
+                // but before this root read. Recover only its exact receipt;
+                // changed operations and unrelated stale heads still refuse.
+                if let Some(prior) = self.replay(operation, &fingerprint)? {
+                    return Ok(prior);
+                }
+                return Err(error);
+            }
+        };
         turn.sequence = root.next_sequence;
         root.next_sequence = root
             .next_sequence
@@ -506,6 +575,7 @@ impl Ledger {
                 Record::Source(source) => source.conversation,
                 Record::Capture(capture) => capture.conversation,
                 Record::NormalizedText(source) => source.conversation,
+                Record::ArchivedNormalizedSource(source) => source.conversation,
                 Record::LegacyCapture(capture) => capture.conversation,
                 Record::DevelopmentCapture(capture) => capture.conversation,
                 Record::ResidentCapture(capture) => capture.conversation,
@@ -1457,7 +1527,8 @@ impl Ledger {
         records.push(exported);
         let post = selection
             .as_ref()
-            .map(|_| WriterExportGuard::published(&root, &records));
+            .map(|_| WriterExportGuard::published(&root, &records, self.store.clone()))
+            .transpose()?;
         let (result, fresh) =
             self.publish_observed(operation, fingerprint, root, records, binding)?;
         Ok((result, fresh, if fresh { post } else { None }))
@@ -1671,6 +1742,7 @@ impl Ledger {
         let mut sources = Vec::new();
         let mut captures = Vec::new();
         let mut normalized_text = Vec::new();
+        let mut archived_sources = Vec::new();
         let mut legacy_captures = Vec::new();
         let mut development_captures = Vec::new();
         let mut resident_captures = Vec::new();
@@ -1682,6 +1754,9 @@ impl Ledger {
                 }
                 Record::NormalizedText(source) if source_ids.contains(&source.id) => {
                     normalized_text.push(*source)
+                }
+                Record::ArchivedNormalizedSource(source) if source_ids.contains(&source.id) => {
+                    archived_sources.push(*source)
                 }
                 Record::DevelopmentCapture(capture) if source_ids.contains(&capture.id) => {
                     development_captures.push(*capture)
@@ -1702,6 +1777,7 @@ impl Ledger {
                 + development_captures.len()
                 + resident_captures.len()
                 + normalized_text.len()
+                + archived_sources.len()
                 == source_ids.len(),
             "source reference absent"
         );
@@ -1724,6 +1800,11 @@ impl Ledger {
                 missing_media.push(media.clone());
             }
         }
+        for source in &archived_sources {
+            if !media_available(&source.media) && !missing_media.contains(&source.media) {
+                missing_media.push(source.media.clone());
+            }
+        }
         for source in &sources {
             for media in std::iter::once(&source.image).chain(source.parent.iter()) {
                 if !media_available(media) && !missing_media.contains(media) {
@@ -1736,6 +1817,7 @@ impl Ledger {
             sources,
             captures,
             normalized_text,
+            archived_sources,
             legacy_captures,
             development_captures,
             resident_captures,
@@ -1755,6 +1837,7 @@ impl Ledger {
         let mut media = BTreeMap::new();
         for envelope in revisions {
             let references = match Self::decode(&envelope)? {
+                Record::ArchivedNormalizedSource(source) => vec![source.media],
                 Record::Source(source) => {
                     std::iter::once(source.image).chain(source.parent).collect()
                 }
@@ -1825,3 +1908,6 @@ impl Ledger {
         })
     }
 }
+
+#[cfg(test)]
+mod append_replay_tests;

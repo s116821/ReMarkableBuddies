@@ -6,6 +6,7 @@ fn context(turns: Vec<Turn>) -> ContextView {
         turns,
         sources: vec![],
         normalized_text: vec![],
+        archived_sources: vec![],
         captures: vec![],
         legacy_captures: vec![],
         development_captures: vec![],
