@@ -21,15 +21,37 @@ use std::{
 pub mod activation;
 
 pub const LEASE_DIRECTORY: &str = "/run/reader-buddy-resident";
-const PROFILE: &str = "/home/root/.local/lib/reader-buddy/resident-recovery.json";
+struct Layout {
+    recovery: &'static str,
+    app: &'static str,
+    buddy_unit: &'static str,
+    helper_unit: &'static str,
+    native_profile: &'static str,
+    adapter: &'static str,
+}
+
+const LEGACY: Layout = Layout {
+    recovery: "/home/root/.local/lib/reader-buddy/resident-recovery.json",
+    app: "/home/root/.local/lib/reader-buddy/reader-buddy",
+    buddy_unit: "/etc/systemd/system/reader-buddy.service",
+    helper_unit: "/etc/systemd/system/reader-buddy-stock-recovery.service",
+    native_profile: "/home/root/.local/lib/reader-buddy/resident-profile.json",
+    adapter: "/home/root/.local/lib/reader-buddy/libremarkable-resident.so",
+};
+
+const PACKAGE: Layout = Layout {
+    recovery: "/home/root/.local/lib/remarkable-buddies/resident-recovery.json",
+    app: "/home/root/.local/lib/remarkable-buddies/reader-buddy",
+    buddy_unit: "/usr/lib/systemd/system/reader-buddy.service",
+    helper_unit: "/usr/lib/systemd/system/reader-buddy-stock-recovery.service",
+    native_profile: "/home/root/.local/lib/remarkable-buddies/resident-profile.json",
+    adapter: "/home/root/.local/lib/remarkable-buddies/libremarkable-resident.so",
+};
 pub(crate) const DEVELOPMENT_OUTPUT_PLAN: &str =
     "/home/root/.local/lib/reader-buddy/development-output/plan.json";
-const APP: &str = "/home/root/.local/lib/reader-buddy/reader-buddy";
 const BUDDY: &str = "reader-buddy.service";
 const HELPER: &str = "reader-buddy-stock-recovery.service";
 const STOCK: &str = "xochitl.service";
-const BUDDY_UNIT: &str = "/etc/systemd/system/reader-buddy.service";
-const HELPER_UNIT: &str = "/etc/systemd/system/reader-buddy-stock-recovery.service";
 const STOCK_EXE: &str = "/usr/bin/xochitl";
 const STOCK_UNIT: &str = "/usr/lib/systemd/system/xochitl.service";
 const STOCK_DROPIN: &str =
@@ -37,6 +59,33 @@ const STOCK_DROPIN: &str =
 const MOUNT: &str = "/sys/fs/cgroup/unified";
 const MAX_BYTES: u64 = 128 * 1024 * 1024;
 const RECOVERY_SECONDS: u64 = 120;
+
+fn profile_path() -> Result<Option<&'static str>> {
+    fn exists(path: &str) -> Result<bool> {
+        match fs::symlink_metadata(path) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+    match (exists(LEGACY.recovery)?, exists(PACKAGE.recovery)?) {
+        (false, false) => Ok(None),
+        (true, false) => Ok(Some(LEGACY.recovery)),
+        (false, true) => Ok(Some(PACKAGE.recovery)),
+        (true, true) => bail!("Conflicting installed recovery profiles"),
+    }
+}
+
+fn read_profile(path: &str, deadline: Instant) -> Result<(Pinned, Profile, [u8; 32])> {
+    let mut pin = Pinned::open(Path::new(path))?;
+    let bytes = pin.bytes(32 * 1024, deadline)?;
+    let profile = parse_profile(&bytes)?;
+    ensure!(
+        profile.layout().recovery == path && profile_path()? == Some(path),
+        "Recovery profile layout changed or mismatched"
+    );
+    Ok((pin, profile, sha256(&bytes)))
+}
 
 // The only permitted missing directory is the fixed final component below the
 // protected /run parent. Missing/replaced/untrusted ancestors never mean absent.
@@ -95,20 +144,14 @@ pub fn refuse_occupied_activation() -> Result<()> {
         feature = "development-resident-bootstrap",
         feature = "development-input-diagnostics"
     ))]
-    match fs::symlink_metadata(PROFILE) {
-        Ok(_) => {
-            let mut file = Pinned::open(Path::new(PROFILE))?;
-            let end = Instant::now() + Duration::from_secs(10);
-            let profile = parse_profile(&file.bytes(32 * 1024, end)?)?;
-            if profile.version == 4 {
-                let directory = profile.runtime_directory()?;
-                if installed_directory_identity_at(&directory)?.is_some() {
-                    require_unoccupied(&directory)?;
-                }
+    if let Some(path) = profile_path()? {
+        let (_, profile, _) = read_profile(path, Instant::now() + Duration::from_secs(10))?;
+        if profile.version == 4 {
+            let directory = profile.runtime_directory()?;
+            if installed_directory_identity_at(&directory)?.is_some() {
+                require_unoccupied(&directory)?;
             }
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
     }
     Ok(())
 }
@@ -347,10 +390,9 @@ struct Installation {
 }
 impl Installation {
     fn load(deadline: Instant) -> Result<Self> {
-        let mut file = Pinned::open(Path::new(PROFILE))?;
-        let bytes = file.bytes(32 * 1024, deadline)?;
-        let digest = sha256(&bytes);
-        let profile = parse_profile(&bytes)?;
+        let path = profile_path()?.context("installed recovery profile absent")?;
+        let (file, profile, digest) = read_profile(path, deadline)?;
+        let layout = profile.layout();
         ensure!(
             firmware_version(&text(Path::new("/etc/os-release"), 16 * 1024)?)? == profile.firmware
                 && text(Path::new("/proc/sys/kernel/osrelease"), 256)?.trim() == profile.kernel,
@@ -358,9 +400,9 @@ impl Installation {
         );
         let mut artifacts = vec![file];
         for (path, hash) in [
-            (APP, profile.app_sha256),
-            (BUDDY_UNIT, profile.buddy_unit_sha256),
-            (HELPER_UNIT, profile.helper_unit_sha256),
+            (layout.app, profile.app_sha256),
+            (layout.buddy_unit, profile.buddy_unit_sha256),
+            (layout.helper_unit, profile.helper_unit_sha256),
             (STOCK_EXE, profile.stock_executable_sha256),
             (STOCK_UNIT, profile.stock_unit_sha256),
             (STOCK_DROPIN, profile.stock_dropin_sha256),
@@ -380,6 +422,10 @@ impl Installation {
     }
     fn current(&self, deadline: Instant) -> Result<()> {
         check_deadline(deadline)?;
+        ensure!(
+            profile_path()? == Some(self.profile.layout().recovery),
+            "Installed recovery profile selection changed"
+        );
         for artifact in &self.artifacts {
             artifact.current()?;
         }
@@ -416,11 +462,12 @@ impl Installed {
         let after = service::observe(HELPER, deadline)?;
         ensure!(before == after, "helper changed during admission");
         helper_state(&before, helper_group.parent(), &profile.helper_policy)?;
+        let app = profile.layout().app;
         verify_process(
             helper_group.parent(),
-            APP,
+            app,
             profile.app_sha256,
-            &[APP, "--resident-stock-recovery"],
+            &[app, "--resident-stock-recovery"],
             deadline,
         )?;
         let vendor = record
@@ -485,6 +532,14 @@ fn hex_digest(text: &str) -> [u8; 32] {
     out
 }
 impl Profile {
+    fn layout(&self) -> &'static Layout {
+        if self.version == 6 {
+            &PACKAGE
+        } else {
+            &LEGACY
+        }
+    }
+
     fn installed_output_definition(&self) -> bool {
         #[cfg(all(
             feature = "development-resident-bootstrap",
@@ -507,7 +562,8 @@ impl Profile {
             let approved_adapter = approved_adapter
                 || matches_adapter(PROFILE, ADAPTER)
                 || matches_adapter(REPEAT_PROFILE, REPEAT_ADAPTER);
-            self.version == 5
+            (self.version == 5
+                || (self.version == 6 && cfg!(feature = "installed-resident-output")))
                 && self.source_mode.as_deref() == Some("resident-installed-output-v1")
                 && self.companion.as_deref() == Some(service::vendor::PROFILE_ID)
                 && self.development_output.is_none()
@@ -558,14 +614,15 @@ impl Profile {
         Ok(PathBuf::from(LEASE_DIRECTORY))
     }
     fn app_argv(&self) -> Vec<&str> {
+        let app = self.layout().app;
         if self.development_definition() {
             vec![
-                APP,
+                app,
                 "--development-resident-output-plan",
                 DEVELOPMENT_OUTPUT_PLAN,
             ]
         } else {
-            vec![APP]
+            vec![app]
         }
     }
 
@@ -611,9 +668,10 @@ impl Profile {
                 && self.kernel == "5.4.70-v1.6.3-rm11x",
             "unsupported recovery profile"
         );
+        let layout = self.layout();
         for (policy, fragment, dropins) in [
-            (&self.buddy_policy, BUDDY_UNIT, ""),
-            (&self.helper_policy, HELPER_UNIT, ""),
+            (&self.buddy_policy, layout.buddy_unit, ""),
+            (&self.helper_policy, layout.helper_unit, ""),
             (&self.stock_policy, STOCK_UNIT, STOCK_DROPIN),
         ] {
             ensure!(
@@ -943,14 +1001,9 @@ pub fn run_installed() -> Result<RecoveryOutcome> {
         feature = "development-resident-bootstrap",
         feature = "development-input-diagnostics"
     ))]
-    let directory = match fs::symlink_metadata(PROFILE) {
-        Ok(_) => {
-            let mut file = Pinned::open(Path::new(PROFILE))?;
-            parse_profile(&file.bytes(32 * 1024, Instant::now() + Duration::from_secs(10))?)?
-                .runtime_directory()?
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => directory,
-        Err(error) => return Err(error.into()),
+    let directory = match profile_path()? {
+        Some(path) => read_profile(path, deadline)?.1.runtime_directory()?,
+        None => directory,
     };
     let identity =
         installed_directory_identity_at(&directory)?.context("installed lease directory absent")?;

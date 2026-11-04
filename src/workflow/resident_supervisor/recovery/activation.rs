@@ -19,8 +19,6 @@ use remarkable_open_sdk::{
 };
 use std::sync::Arc;
 
-const NATIVE_PROFILE: &str = "/home/root/.local/lib/reader-buddy/resident-profile.json";
-const ADAPTER: &str = "/home/root/.local/lib/reader-buddy/libremarkable-resident.so";
 const ACTIVATION: Duration = Duration::from_secs(60);
 
 /// Explicit mode in a release-approved, strictly pinned installed profile.
@@ -75,14 +73,11 @@ impl InstalledReaderSelection {
     }
 
     pub fn load(deadline: Instant) -> Result<Option<Self>> {
-        match fs::symlink_metadata(PROFILE) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error.into()),
-            Ok(_) => {}
-        }
-        let mut pin = Pinned::open(Path::new(PROFILE))?;
-        let bytes = pin.bytes(32 * 1024, deadline)?;
-        let Some(selection) = Self::declared(&bytes)? else {
+        let Some(path) = profile_path()? else {
+            return Ok(None);
+        };
+        let (pin, profile, digest) = read_profile(path, deadline)?;
+        let Some(selection) = Self::from_profile(&profile, digest) else {
             pin.current()?;
             check_deadline(deadline)?;
             return Ok(None);
@@ -94,16 +89,19 @@ impl InstalledReaderSelection {
         check_deadline(deadline)?;
         Ok(Some(selection))
     }
+    #[cfg(test)]
     pub(super) fn declared(bytes: &[u8]) -> Result<Option<Self>> {
-        let profile = parse_profile(bytes)?;
-        Ok(profile.source_mode.as_ref().map(|_| Self {
-            digest: sha256(bytes),
+        Ok(Self::from_profile(&parse_profile(bytes)?, sha256(bytes)))
+    }
+    fn from_profile(profile: &Profile, digest: [u8; 32]) -> Option<Self> {
+        profile.source_mode.as_ref().map(|_| Self {
+            digest,
             #[cfg(all(
                 feature = "development-resident-bootstrap",
                 feature = "development-input-diagnostics"
             ))]
             installed_output: profile.installed_output_definition(),
-        }))
+        })
     }
     pub(super) fn require_digest(&self, digest: [u8; 32]) -> Result<()> {
         ensure!(
@@ -121,11 +119,15 @@ impl InstalledReaderSelection {
             "Installed resident source mode unsupported"
         );
         Pinned::verified(
-            NATIVE_PROFILE,
+            installation.profile.layout().native_profile,
             installation.profile.native_profile_sha256,
             deadline,
         )?;
-        Pinned::verified(ADAPTER, installation.profile.adapter_sha256, deadline)?;
+        Pinned::verified(
+            installation.profile.layout().adapter,
+            installation.profile.adapter_sha256,
+            deadline,
+        )?;
         check_deadline(deadline)
     }
     #[cfg(all(
@@ -143,7 +145,11 @@ impl InstalledReaderSelection {
             "installed output selection changed"
         );
         Self::validate_native(&installation, deadline)?;
-        let profile = Pinned::verified(PROFILE, self.digest, deadline)?;
+        let profile = Pinned::verified(
+            installation.profile.layout().recovery,
+            self.digest,
+            deadline,
+        )?;
         Ok(Some(InstalledOutput {
             profile,
             digest: self.digest,
@@ -288,12 +294,12 @@ impl Session {
             InstalledReaderSelection::validate_native(&installation, deadline)?;
         }
         installation.artifacts.push(Pinned::verified(
-            NATIVE_PROFILE,
+            installation.profile.layout().native_profile,
             installation.profile.native_profile_sha256,
             deadline,
         )?);
         installation.artifacts.push(Pinned::verified(
-            ADAPTER,
+            installation.profile.layout().adapter,
             installation.profile.adapter_sha256,
             deadline,
         )?);
@@ -302,7 +308,7 @@ impl Session {
         buddy_state(&buddy, &group, &installation.profile)?;
         verify_process(
             group.parent(),
-            APP,
+            installation.profile.layout().app,
             installation.profile.app_sha256,
             &installation.profile.app_argv(),
             deadline,
@@ -417,7 +423,7 @@ impl Session {
                 .as_ref()
                 .map(|_| CompanionProfile::rm2_3_28_0_172()),
             profile: Artifact {
-                path: NATIVE_PROFILE.into(),
+                path: profile.layout().native_profile.into(),
                 sha256: profile.native_profile_sha256,
             },
             executable: Artifact {
@@ -425,7 +431,7 @@ impl Session {
                 sha256: profile.stock_executable_sha256,
             },
             adapter: Artifact {
-                path: ADAPTER.into(),
+                path: profile.layout().adapter.into(),
                 sha256: profile.adapter_sha256,
             },
             directory,

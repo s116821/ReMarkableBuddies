@@ -510,13 +510,13 @@ pub(super) fn profile(record: &LeaseRecord) -> Profile {
         }
         p
     }
-    let mut buddy_policy = policy(BUDDY_UNIT);
+    let mut buddy_policy = policy(LEGACY.buddy_unit);
     buddy_policy.insert("Type".into(), "notify".into());
     buddy_policy.insert("OnSuccess".into(), HELPER.into());
     buddy_policy.insert("OnFailure".into(), HELPER.into());
     buddy_policy.insert("OnFailureJobMode".into(), "fail".into());
     buddy_policy.insert("WatchdogUSec".into(), "2min".into());
-    let mut helper_policy = policy(HELPER_UNIT);
+    let mut helper_policy = policy(LEGACY.helper_unit);
     helper_policy.insert("Type".into(), "oneshot".into());
     helper_policy.insert("WatchdogUSec".into(), "0".into());
     helper_policy.insert("TimeoutStartUSec".into(), "2min 10s".into());
