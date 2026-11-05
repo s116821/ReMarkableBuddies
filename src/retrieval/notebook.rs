@@ -425,6 +425,7 @@ pub(crate) enum Normalized {
 pub(crate) enum TranscriptionPolicy {
     WholePage,
     Partial,
+    PartialMath,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NormalizeFailure {
@@ -536,8 +537,21 @@ fn normalize_inner(
         None => admit_pages(pages, options, progress)?,
     };
     trace.phase = Phase::Prompt;
-    let partial = policy == TranscriptionPolicy::Partial;
+    let partial = matches!(
+        policy,
+        TranscriptionPolicy::Partial | TranscriptionPolicy::PartialMath
+    );
     let (protocol, prompt_revision, extractor_prefix) = match (policy, context.is_some()) {
+        (TranscriptionPolicy::PartialMath, true) => (
+            3,
+            "transcribe-partial-math-confirmed-examples-v1",
+            "notebook-ocr-partial-math-v1:",
+        ),
+        (TranscriptionPolicy::PartialMath, false) => (
+            3,
+            "transcribe-partial-math-v1",
+            "notebook-ocr-partial-math-v1:",
+        ),
         (TranscriptionPolicy::Partial, true) => (
             3,
             "transcribe-partial-confirmed-examples-v2",
@@ -571,6 +585,11 @@ fn normalize_inner(
         INSTRUCTIONS
     };
     let mut parts = vec![json!({"type":"text","text":instructions})];
+    if policy == TranscriptionPolicy::PartialMath {
+        parts.push(json!({"type":"text","text":include_str!(
+            "../handwriting_transcription/prompt-math-layout-v1.txt"
+        )}));
+    }
     if let Some(context) = context {
         let addendum = if partial {
             include_str!("../handwriting_transcription/context-instructions-partial-v2.txt")

@@ -179,6 +179,7 @@ impl Report {
 }
 struct Prepared {
     request: Option<Request>,
+    policy: TranscriptionPolicy,
     target: Option<AdmittedTarget>,
     report: Report,
 }
@@ -186,6 +187,7 @@ impl Prepared {
     fn admit(bytes: &[u8], progress: &mut dyn FnMut() -> anyhow::Result<()>) -> Self {
         let mut this = Self {
             request: None,
+            policy: TranscriptionPolicy::WholePage,
             target: None,
             report: Report::new(),
         };
@@ -203,11 +205,11 @@ impl Prepared {
                 let policy = strict
                     .as_object_mut()
                     .and_then(|object| object.remove("policy"));
-                if policy.as_ref().and_then(serde_json::Value::as_str)
-                    != Some("partial-transcription")
-                {
-                    return Err(Failure::InvalidInput);
-                }
+                this.policy = match policy.as_ref().and_then(serde_json::Value::as_str) {
+                    Some("partial-transcription") => TranscriptionPolicy::Partial,
+                    Some("partial-math-transcription") => TranscriptionPolicy::PartialMath,
+                    _ => return Err(Failure::InvalidInput),
+                };
             }
             let request: Request =
                 serde_json::from_value(strict).map_err(|_| Failure::InvalidInput)?;
@@ -348,11 +350,7 @@ impl Prepared {
             self.target.as_ref().expect("admitted target"),
             model_profile,
             self.report._owner.as_ref(),
-            if request.transcription_version == 2 {
-                TranscriptionPolicy::Partial
-            } else {
-                TranscriptionPolicy::WholePage
-            },
+            self.policy,
             engine,
             &mut |_| progress(),
         );

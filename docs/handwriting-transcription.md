@@ -32,3 +32,14 @@ markers when presenting the report. Exit zero indicates operation completion.
 Check `status` to distinguish partial, normalized, and unreadable outcomes.
 Partial text remains unconfirmed and is outside the normalized source, export,
 and confirmation paths.
+
+For explicit mathematical layout, keep version 2 and select
+`"policy":"partial-math-transcription"`. This asks the provider to preserve
+fractions, radicals, scripts and operator limits as LaTeX source in the same
+text fields. The ordinary partial policy and version 1 remain unchanged.
+
+LaTeX is unverified, inert text: this command does not render, execute or repair
+it. Never join text across an uncertainty marker. An uncertain attachment may
+require marking its entire enclosing expression uncertain; when no independent
+known text remains, the expected result is `unreadable`. Recognition accuracy
+still requires semantic qualification; valid JSON is not proof of faithful math.

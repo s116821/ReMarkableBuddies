@@ -29,6 +29,24 @@ fn actual_cli_refuses_strict_input_and_credentials_before_store_provider_or_cont
     v2["policy"] = json!("partial-transcription");
     let mut malformed = v2.clone();
     malformed["policy"] = json!(null);
+    let mut math = v2.clone();
+    math["policy"] = json!("partial-math-transcription");
+    let mut math_v1 = math.clone();
+    math_v1["transcription_version"] = json!(1);
+    let mut math_v3 = math.clone();
+    math_v3["transcription_version"] = json!(3);
+    let mut invalid_version = math_v3.clone();
+    invalid_version.as_object_mut().unwrap().remove("policy");
+    let mut invalid_page = math.clone();
+    invalid_page["page"] = json!(0);
+    invalid_page["target_png"] = json!("invalid image");
+    let mut invalid_image = math.clone();
+    invalid_image["target_png"] = json!("invalid image");
+    let duplicate_policy = serde_json::to_string(&math).unwrap().replacen(
+        "{",
+        "{\"policy\":\"partial-transcription\",",
+        1,
+    );
     for (input, failure, version) in [
         (b"{PRIVATE_INPUT_CANARY}".to_vec(), "invalid-input", 1),
         (
@@ -42,6 +60,29 @@ fn actual_cli_refuses_strict_input_and_credentials_before_store_provider_or_cont
             2,
         ),
         (serde_json::to_vec(&malformed).unwrap(), "invalid-input", 1),
+        (
+            serde_json::to_vec(&math).unwrap(),
+            "credentials-unavailable",
+            2,
+        ),
+        (serde_json::to_vec(&math_v1).unwrap(), "invalid-input", 1),
+        (serde_json::to_vec(&math_v3).unwrap(), "invalid-input", 1),
+        (
+            serde_json::to_vec(&invalid_version).unwrap(),
+            "invalid-version",
+            1,
+        ),
+        (
+            serde_json::to_vec(&invalid_page).unwrap(),
+            "invalid-input",
+            1,
+        ),
+        (
+            serde_json::to_vec(&invalid_image).unwrap(),
+            "invalid-image",
+            2,
+        ),
+        (duplicate_policy.into_bytes(), "invalid-input", 1),
     ] {
         let mut child = Command::new(env!("CARGO_BIN_EXE_reader-buddy"))
             .arg("--handwriting-transcription")

@@ -2,3 +2,4 @@
 tests/fixtures/product-settings-contract-v1.json -text
 src/config/configuration-schema.json text eol=lf
 tests/fixtures/configuration-schema-corpus.json text eol=lf
+src/handwriting_transcription/prompt-math-layout-v1.txt text eol=lf
