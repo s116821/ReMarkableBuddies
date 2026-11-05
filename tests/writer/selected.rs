@@ -6,6 +6,8 @@ use remarkable_reader_buddy::{
     writer::selected::{self, Selection},
 };
 use std::collections::BTreeMap;
+#[path = "selected_more.rs"]
+mod more;
 
 struct Fixture {
     local: Local,
@@ -14,6 +16,7 @@ struct Fixture {
     selection: Selection,
     req: Request,
     identity: memory::catalog::Identity,
+    initial: SelectionTransaction,
 }
 fn pin(e: &Envelope) -> IntentRecordRef {
     let bytes = serde_json::to_vec(e).unwrap();
@@ -91,6 +94,7 @@ impl Fixture {
             },
             req,
             identity,
+            initial: published.transaction,
         }
     }
     fn memory(&self, empty: bool) -> memory::selected::SelectedMemory {

@@ -6,6 +6,140 @@ use remarkable_open_sdk::{
 };
 use std::{collections::BTreeMap, io::Cursor, path::PathBuf, sync::Arc, time::Duration};
 
+#[test]
+fn selected_writer_join_panic_consumes_view_without_publication() {
+    use crate::{
+        memory::{self, Provider},
+        retrieval::{NormalizedDocument, SourceFormat, SourceUnit},
+    };
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    let ledger = Ledger::new(store.clone());
+    let conversation = Uuid::new_v4();
+    let document = Uuid::new_v4();
+    ledger.create(conversation, Uuid::new_v4(), 1).unwrap();
+    let identity = memory::catalog::Identity {
+        group: Uuid::new_v4(),
+        profile: Uuid::new_v4(),
+        binding_sha256: digest(b"Writer panic fixture"),
+    };
+    let scope = identity
+        .aggregate_scope(&memory::catalog::Owner::Document { document })
+        .unwrap();
+    let root = store
+        .heads(Namespace::Conversation, conversation)
+        .unwrap()
+        .pop()
+        .unwrap();
+    let raw = serde_json::to_vec(&root).unwrap();
+    let hash = digest(&raw);
+    let selected = Manifest {
+        format: FORMAT,
+        transaction_id: Uuid::new_v4(),
+        scope: Scope::SelectedRecords,
+        records: vec![ObjectRef {
+            sha256: hash.clone(),
+            bytes: raw.len() as u64,
+        }],
+        record_namespaces: BTreeMap::from([(hash.clone(), Namespace::Conversation)]),
+        media: vec![],
+        media_coverage: vec![],
+    };
+    let publication = store
+        .initialize_selected(
+            &scope,
+            crate::storage::selection::SelectionChange {
+                operation: Uuid::new_v4(),
+                accepted_base_sha256: digest(b"base"),
+                selected,
+                retained: vec![],
+            },
+            BTreeMap::from([(hash, raw)]),
+        )
+        .unwrap();
+    let writer = SelectedAdmission::new(store.clone(), scope).unwrap();
+    let operation = Uuid::new_v4();
+    let normalized = NormalizedTextSource::new(
+        conversation,
+        crate::writer::stage(operation, "user"),
+        NormalizedDocument {
+            document,
+            format: SourceFormat::Notebook,
+            source_sha256: digest(b"source"),
+            extractor_revision: "panic-fixture".into(),
+            units: vec![SourceUnit {
+                page: Some(1),
+                section: None,
+                text: "study notes x = 7".into(),
+            }],
+        },
+        TextScope::SuppliedNotebook,
+        None,
+    )
+    .unwrap();
+    let req = SelectedWriterPrepare {
+        operation,
+        root: IntentRecordRef {
+            namespace: root.namespace,
+            record_id: root.record_id,
+            revision_id: root.revision_id,
+            object: ObjectRef {
+                sha256: digest(&serde_json::to_vec(&root).unwrap()),
+                bytes: serde_json::to_vec(&root).unwrap().len() as u64,
+            },
+        },
+        request: "study notes".into(),
+        source: SelectedWriterSource::Generate { normalized },
+    };
+    let SelectedWriterPreparation::Fresh { prepared, .. } = writer
+        .prepare_selected_writer(&publication.token, req, 2)
+        .unwrap()
+    else {
+        panic!("fresh Writer prep")
+    };
+    let memory = super::SelectedMemory::new(store.clone(), identity).unwrap();
+    memory
+        .initialize_selection(super::InitializeSelection {
+            operation: Uuid::new_v4(),
+            accepted_base_sha256: digest(b"catalog"),
+            registrations: vec![],
+        })
+        .unwrap();
+    let view = memory
+        .query(&memory::Query::new("study notes".into(), 2))
+        .unwrap();
+    let finish = SelectedWriterFinish {
+        operation: crate::writer::stage(operation, "finish"),
+        prepared: *prepared,
+        assistant: crate::writer::stage(operation, "draft"),
+        outcome: Outcome::Generated,
+        text: Some("# Study\n\nx = 7".into()),
+        updated_ms: 3,
+    };
+    let before = serde_json::to_vec(&store.manifests().unwrap()).unwrap();
+    let arm = PanicArm::new();
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+        || memory.publish_selected_writer(&view, &writer, finish.clone())
+    ))
+    .is_err());
+    assert!(super::PANIC_AFTER_CONSUMPTION_WITNESSED.with(|v| v.get()));
+    drop(arm);
+    assert!(memory
+        .publish_selected_writer(&view, &writer, finish)
+        .is_err());
+    assert_eq!(
+        serde_json::to_vec(&store.manifests().unwrap()).unwrap(),
+        before
+    );
+    assert!(store
+        .selected_receipt(
+            publication.token.scope(),
+            crate::writer::stage(operation, "finish")
+        )
+        .unwrap()
+        .is_none());
+}
+
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {

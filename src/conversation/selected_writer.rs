@@ -38,11 +38,11 @@ pub struct SelectedWriterModelPermit {
 }
 pub enum SelectedWriterPreparation {
     Fresh {
-        prepared: SelectedWriterPrepared,
+        prepared: Box<SelectedWriterPrepared>,
         model: SelectedWriterModelPermit,
     },
     Historical {
-        transaction: SelectionTransaction,
+        transaction: Box<SelectionTransaction>,
         finished: Option<Box<SelectedWriterPublication>>,
     },
 }
@@ -208,6 +208,17 @@ fn source_input(
             (s.as_ref().clone(), Some(t.clone()))
         }
     };
+    ensure!(
+        p.document_ownership()?
+            .iter()
+            .all(|(conversation, owner)| match owner {
+                DocumentOwnership::Document(document) => *document == source.document.document,
+                DocumentOwnership::DeferredMissing =>
+                    *conversation == root.id && history.is_empty(),
+                DocumentOwnership::DeferredAmbiguous(_) => false,
+            }),
+        "selected Writer document ownership unavailable or foreign"
+    );
     Ok(SelectedWriterInput {
         source,
         prior,
@@ -487,7 +498,7 @@ impl SelectedAdmission {
                 };
                 let finished = recover_completed(store, &prepared, req.operation)?;
                 return Ok(SelectedWriterPreparation::Historical {
-                    transaction: tx,
+                    transaction: Box::new(tx),
                     finished: finished.map(Box::new),
                 });
             }
@@ -543,7 +554,7 @@ impl SelectedAdmission {
             };
             let identity = prepared_identity(&prepared)?;
             Ok(SelectedWriterPreparation::Fresh {
-                prepared,
+                prepared: Box::new(prepared),
                 model: SelectedWriterModelPermit {
                     owner: self.clone(),
                     fingerprint: identity,

@@ -215,7 +215,7 @@ fn run_case(
     };
     let mut reader = Orchestrator::new(workflow, model, ledger);
     reader.set_trigger_enabled(false);
-    reader.set_subject_memory(Some(provider));
+    reader.set_selected_subject_memory(provider);
     let result = reader.run_iteration();
     let records: Vec<Record> = store
         .snapshot_heads_matching(&[Namespace::Conversation], 4096, |_| true)?

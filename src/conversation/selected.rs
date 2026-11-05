@@ -125,6 +125,9 @@ impl SelectedDomainProjection {
                             if origin.sources.contains(&source.id)),
                         "selected normalized source origin relationship missing"
                     );
+                    // Stable logical source grouping only. Supplied text never
+                    // establishes a current device/page or native authority.
+                    document = Some(source.document.document);
                 }
                 Record::ArchivedNormalizedSource(source) => {
                     self.require_turn(source.turn, conversation)?;
@@ -675,7 +678,7 @@ mod tests {
         next
     }
     #[test]
-    fn supplied_writer_text_requires_its_turn_without_native_document_ownership() {
+    fn supplied_writer_text_requires_its_turn_for_logical_grouping_without_native_authority() {
         use crate::conversation::{Mode, NormalizedTextSource, Outcome, Role, TextScope, Turn};
         use crate::retrieval::{NormalizedDocument, SourceFormat, SourceUnit};
         let root = root();
@@ -699,6 +702,7 @@ mod tests {
             None,
         )
         .unwrap();
+        let document = source.document.document;
         let mut source_envelope = root.clone();
         source_envelope.namespace = Namespace::Source;
         source_envelope.domain_schema_version = 2;
@@ -733,7 +737,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             projection.document_ownership().unwrap()[&conversation],
-            DocumentOwnership::DeferredMissing
+            DocumentOwnership::Document(document)
         );
         let missing =
             SelectedDomainProjection::from_records(&[root.clone(), source_envelope.clone()])
@@ -835,9 +839,16 @@ mod tests {
             )
             .unwrap();
         let projection = SelectedDomainProjection::from_records(&records).unwrap();
+        let document = records
+            .iter()
+            .find_map(|e| match Ledger::decode(e).ok()? {
+                Record::NormalizedText(s) => Some(s.document.document),
+                _ => None,
+            })
+            .unwrap();
         assert_eq!(
             projection.document_ownership().unwrap()[&conversation],
-            DocumentOwnership::DeferredMissing
+            DocumentOwnership::Document(document)
         );
         let source = records
             .iter()

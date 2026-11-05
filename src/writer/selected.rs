@@ -36,8 +36,10 @@ pub fn run<E: LLMEngine>(
     memory: Option<&dyn crate::memory::Provider>,
     canceled: &mut dyn FnMut() -> bool,
 ) -> SelectedReport {
-    if request.preflight().is_err()
-        || matches!(request, Request::PrepareExport { .. })
+    if let Err(failure) = request.preflight() {
+        return result(Report::refused(request, failure));
+    }
+    if matches!(request, Request::PrepareExport { .. })
         || selection.root.record_id != request.conversation()
     {
         return result(Report::refused(request, Failure::Unsupported));
@@ -105,7 +107,7 @@ pub fn run<E: LLMEngine>(
     }
     let prepared = writer.prepare_selected_writer(&selection.accepted, prepare, now());
     let (prepared, permit) = match prepared {
-        Ok(SelectedWriterPreparation::Fresh { prepared, model }) => (prepared, model),
+        Ok(SelectedWriterPreparation::Fresh { prepared, model }) => (*prepared, model),
         Ok(SelectedWriterPreparation::Historical {
             transaction,
             finished,
@@ -128,13 +130,13 @@ pub fn run<E: LLMEngine>(
                 return SelectedReport {
                     report,
                     publication: Some(*publication),
-                    historical_preparation: Some(transaction),
+                    historical_preparation: Some(*transaction),
                 };
             }
             return SelectedReport {
                 report,
                 publication: None,
-                historical_preparation: Some(transaction),
+                historical_preparation: Some(*transaction),
             };
         }
         Err(_) => return result(Report::refused(request, Failure::Storage)),
@@ -167,8 +169,15 @@ pub fn run<E: LLMEngine>(
         let payload = serde_json::to_string(
             &serde_json::json!({"history":input.history,"request":text,"explicit_guidance":input.source.guidance,"source_provenance":{"document":input.source.document.document,"source_sha256":input.source.document.source_sha256,"extractor_revision":input.source.document.extractor_revision,"normalized_sha256":digest(&serde_json::to_vec(&input.source.document.units)?),"selection":input.source.selection,"coverage":"all selected supplied units; original notebook completeness unverified"},"source_units":input.source.selected(),"selected_draft":input.prior.as_ref().and_then(|t|t.text.as_deref())}),
         )?;
-        ensure!(payload.len() <= 96 * 1024, "selected Writer payload bound");
+        if payload.len() > 96 * 1024 {
+            failure = Some(Failure::TooLarge);
+            anyhow::bail!("selected Writer payload bound");
+        }
         let context = if let Some(provider) = memory {
+            if text.len() > 2048 {
+                failure = Some(Failure::TooLarge);
+                anyhow::bail!("selected Writer memory query bound");
+            }
             let mut query = crate::memory::Query::new(text.clone(), now());
             query.document = Some(input.source.document.document);
             query.validate()?;
@@ -178,7 +187,6 @@ pub fn run<E: LLMEngine>(
                 "selected Writer requires sealed selected memory"
             );
             let part = encode_memory(&view, input.source.document.document)?;
-            provider.check_selected_writer(&view, writer)?;
             memory_view = Some(view);
             part
         } else {
@@ -203,6 +211,9 @@ pub fn run<E: LLMEngine>(
             content.0.add_text_content(&part)
         }
         content.0.add_text_content(&payload);
+        if let (Some(provider), Some(view)) = (memory, memory_view.as_ref()) {
+            provider.check_selected_writer(view, writer)?;
+        }
         let output = content.0.execute_with_progress(&mut progress);
         progress()?;
         output
@@ -219,7 +230,7 @@ pub fn run<E: LLMEngine>(
                 (Outcome::Failed, None, Status::Failed)
             }
             Err(_) => {
-                failure = Some(if memory_view.is_none() && memory.is_some() {
+                failure.get_or_insert(if memory_view.is_none() && memory.is_some() {
                     Failure::Storage
                 } else {
                     Failure::Provider
