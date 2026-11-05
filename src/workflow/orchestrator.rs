@@ -1016,7 +1016,6 @@ impl<M: LLMEngine> Orchestrator<M> {
     /// 4. Check if page is valid (blank or existing QA page)
     /// 5. If not valid or didn't move â†’ verify the source and record a non-ink failure
     /// 6. If valid â†’ render Q&A on that page
-
     fn render_answer(&mut self, result: &AnalysisResult) -> Result<RenderOutcome> {
         anyhow::ensure!(
             !self.workflow.is_selected(),
