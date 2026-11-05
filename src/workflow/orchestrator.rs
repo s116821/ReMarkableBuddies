@@ -84,10 +84,10 @@ impl<M: LLMEngine> Orchestrator<M> {
         user: crate::conversation::IntentRecordRef,
         capture: crate::storage::Uuid,
     ) -> Result<()> {
-        anyhow::ensure!(
-            self.memory.is_none(),
-            "Selected prepared entry requires a reviewed combined subject-memory admission set"
-        );
+        if let Some(memory) = &self.memory {
+            let admission = self.workflow.selected_admission()?;
+            memory.require_selected_reader(admission.as_ref())?;
+        }
         let mut attempt =
             Attempt::prepare_selected(&self.ledger, &self.workflow, token, root, user, capture)?;
         self.workflow.begin_iteration()?;
@@ -116,12 +116,22 @@ impl<M: LLMEngine> Orchestrator<M> {
         self.personalization = snapshot;
     }
 
-    /// Optional receiving context; never used for recognition or automatic learning.
+    /// Ordinary local context only.
     pub fn set_subject_memory(
         &mut self,
-        memory: Option<std::sync::Arc<dyn crate::memory::Provider>>,
+        memory: Option<std::sync::Arc<crate::memory::LocalMemory>>,
     ) {
-        self.memory = memory;
+        self.memory =
+            memory.map(|provider| provider as std::sync::Arc<dyn crate::memory::Provider>);
+    }
+
+    /// Set a provider for guarded selected publication. Admission still checks
+    /// its exact receiving Store and selection before any model work.
+    pub fn set_selected_subject_memory(
+        &mut self,
+        memory: std::sync::Arc<dyn crate::memory::Provider>,
+    ) {
+        self.memory = Some(memory);
     }
 
     pub fn invalidate_history(&mut self) {
@@ -145,7 +155,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         let _timing = crate::measurement::Span::new("reader.iteration");
         self.workflow.begin_iteration()?;
         let result = self.run_iteration_inner(wait_for_trigger);
-        // A failed request guard must not be cleared by cleanup or another turn.
+        // A failed input guard or service health cannot be cleared by cleanup.
         if self.workflow.runtime_failed() {
             return result.and(Err(anyhow::anyhow!(
                 "Runtime health or input lost; further activity stopped"
@@ -475,17 +485,18 @@ impl<M: LLMEngine> Orchestrator<M> {
                     let enriched =
                         self.enrich_answer(attempt, &mut result, &verification, &personalization);
                     if let Err(error) = enriched {
-                        log::warn!("Subject memory answer was not completed");
+                        log::warn!("Contextual answer was not completed");
                         self.workflow.report_failure(Failure::Provider)?;
+                        let canceled = self.workflow.input_failed();
                         attempt.outcome(
                             &self.ledger,
                             false,
-                            if self.workflow.input_failed() {
+                            if canceled {
                                 Outcome::Canceled
                             } else {
                                 Outcome::Failed
                             },
-                            if self.workflow.input_failed() {
+                            if canceled {
                                 AttemptReason::Canceled
                             } else {
                                 AttemptReason::ProviderFailure
@@ -496,12 +507,15 @@ impl<M: LLMEngine> Orchestrator<M> {
                     memory_view = enriched?;
                     info!("Got verified Q&A with optional subject memory");
                 }
-
                 let memory = self.memory.clone();
                 if let (Some(memory), Some(view)) = (memory, memory_view.as_ref()) {
-                    let published = memory.with_current(view, &mut || {
-                        self.publish_answer(attempt, &result, !view.selected())
-                    });
+                    let published = if attempt.is_selected() {
+                        self.publish_answer(attempt, &result, false, Some((memory.as_ref(), view)))
+                    } else {
+                        memory.with_current(view, &mut || {
+                            self.publish_answer(attempt, &result, !view.selected(), None)
+                        })
+                    };
                     if let Err(error) = published {
                         if attempt.assistant.is_none() {
                             let canceled = self.workflow.input_failed();
@@ -523,7 +537,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                         return Err(error);
                     }
                 } else {
-                    self.publish_answer(attempt, &result, true)?;
+                    self.publish_answer(attempt, &result, true, None)?;
                 }
             }
         }
@@ -537,12 +551,14 @@ impl<M: LLMEngine> Orchestrator<M> {
         attempt: &mut Attempt,
         result: &AnalysisResult,
         allow_native: bool,
+        memory: Option<(&dyn crate::memory::Provider, &crate::memory::QueryResult)>,
     ) -> Result<()> {
         self.workflow.check_request_progress()?;
         attempt.check_selected()?;
-        attempt.generated(
+        attempt.generated_with_memory(
             &self.ledger,
             Workflow::compose_qa(&result.question, &result.answer, result.selection_center),
+            memory,
         )?;
         if attempt.is_selected() {
             anyhow::bail!("Selected Generated draft acknowledged; qualified Pending/native output unavailable");
@@ -927,9 +943,12 @@ impl<M: LLMEngine> Orchestrator<M> {
                     .duration_since(std::time::UNIX_EPOCH)?
                     .as_millis()
                     .try_into()?;
-                // Ordinary historical capture has no verified document association.
+                // Selected ownership supplies historical data scope only, never
+                // native authority. Ordinary capture supplies no association.
+                let mut query = crate::memory::Query::new(result.question.clone(), now);
+                query.document = attempt.memory_document()?;
                 memory
-                    .query(&crate::memory::Query::new(result.question.clone(), now))
+                    .query(&query)
                     .map_err(|_| anyhow::anyhow!("subject memory retrieval failed"))
             })
             .transpose()?;
