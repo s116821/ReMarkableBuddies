@@ -8,12 +8,20 @@ use anyhow::{Context, Result};
 use std::time::{SystemTime, UNIX_EPOCH};
 mod selected;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EvidenceKind {
+    Legacy,
+    SdkFixture,
+    Development,
+    ResidentHistorical,
+}
+
 pub(super) struct Attempt {
     pub user: Turn,
     pub assistant: Option<Turn>,
     evidence: Uuid,
-    pub legacy_output: bool,
-    development_evidence: bool,
+    kind: EvidenceKind,
+    pub(super) resident_answer: Option<HistoricalPageAssociation>,
     #[cfg(test)]
     reader_preparation: Option<ReaderPreparation>,
     selected: Option<selected::Selected>,
@@ -121,8 +129,8 @@ pub(crate) fn assert_attachment_behavior(
         user,
         assistant: Some(assistant),
         evidence,
-        legacy_output: false,
-        development_evidence: false,
+        kind: EvidenceKind::SdkFixture,
+        resident_answer: None,
         reader_preparation: None,
         selected: None,
     };
@@ -161,8 +169,12 @@ impl Attempt {
             user,
             assistant: None,
             evidence: capture,
-            legacy_output: false,
-            development_evidence: workflow.development_non_output,
+            kind: if workflow.development_non_output {
+                EvidenceKind::Development
+            } else {
+                EvidenceKind::SdkFixture
+            },
+            resident_answer: None,
             #[cfg(test)]
             reader_preparation: None,
             selected: Some(selected),
@@ -176,9 +188,23 @@ impl Attempt {
     pub(super) fn is_selected(&self) -> bool {
         self.selected.is_some()
     }
+    pub(super) fn memory_document(&self) -> Result<Option<Uuid>> {
+        self.selected
+            .as_ref()
+            .map_or(Ok(None), |selected| selected.document())
+    }
     pub fn prepare(ledger: &Ledger, acquired: AcquiredEvidence) -> Result<Self> {
         let timestamp = now()?;
-        let conversation = Uuid::new_v4();
+        let resident_answer = match &acquired {
+            AcquiredEvidence::ResidentHistorical(capture) => {
+                ledger.resident_answer_association(capture)?
+            }
+            _ => None,
+        };
+        let conversation = resident_answer
+            .as_ref()
+            .map(|association| association.receipt().conversation)
+            .unwrap_or_else(Uuid::new_v4);
         let user = Turn {
             id: Uuid::new_v4(),
             conversation,
@@ -194,9 +220,13 @@ impl Attempt {
             updated_ms: timestamp,
             completion: None,
         };
-        ledger.create(conversation, Uuid::new_v4(), timestamp)?;
-        let expected = ledger.expected(Namespace::Conversation, conversation)?;
-        let (evidence, legacy_output, development_evidence) = match acquired {
+        let expected = if let Some(association) = &resident_answer {
+            ExpectedHeads([association.root_revision()].into_iter().collect())
+        } else {
+            ledger.create(conversation, Uuid::new_v4(), timestamp)?;
+            ledger.expected(Namespace::Conversation, conversation)?
+        };
+        let (evidence, kind) = match acquired {
             AcquiredEvidence::Legacy { images } => {
                 let images = images
                     .into_iter()
@@ -238,7 +268,7 @@ impl Attempt {
                     None,
                     images,
                 )?;
-                (prepared.evidence.id, true, false)
+                (prepared.evidence.id, EvidenceKind::Legacy)
             }
             AcquiredEvidence::Development(capture) => {
                 let prepared = ledger.prepare_development(
@@ -248,20 +278,30 @@ impl Attempt {
                     Uuid::new_v4(),
                     &capture,
                 )?;
-                (prepared.evidence.id, false, true)
+                (prepared.evidence.id, EvidenceKind::Development)
+            }
+            AcquiredEvidence::ResidentHistorical(capture) => {
+                let prepared = ledger.prepare_resident_historical(
+                    Uuid::new_v4(),
+                    expected,
+                    user.clone(),
+                    Uuid::new_v4(),
+                    &capture,
+                )?;
+                (prepared.evidence.id, EvidenceKind::ResidentHistorical)
             }
             AcquiredEvidence::Sdk(batch) => {
                 let prepared =
                     ledger.prepare_sdk_fixture(Uuid::new_v4(), expected, user.clone(), &batch)?;
-                (prepared.capture, false, false)
+                (prepared.capture, EvidenceKind::SdkFixture)
             }
         };
         let mut attempt = Self {
             user,
             assistant: None,
             evidence,
-            legacy_output,
-            development_evidence,
+            kind,
+            resident_answer,
             #[cfg(test)]
             reader_preparation: None,
             selected: None,
@@ -277,7 +317,7 @@ impl Attempt {
         preparation: ReaderPreparation,
     ) -> Result<()> {
         anyhow::ensure!(
-            self.reader_preparation.is_none() && !self.legacy_output && !self.development_evidence,
+            self.reader_preparation.is_none() && self.kind == EvidenceKind::SdkFixture,
             "Reader preparation already attached, legacy or development"
         );
         let assistant = self
@@ -343,22 +383,32 @@ impl Attempt {
         if let Some(selected) = &self.selected {
             return selected.images();
         }
-        if self.development_evidence {
-            Ok(ledger.stored_development_images(self.evidence)?.images)
-        } else if self.legacy_output {
-            Ok(ledger.stored_legacy_images(self.evidence)?.images)
-        } else {
-            Ok(ledger
+        match self.kind {
+            EvidenceKind::Development => {
+                Ok(ledger.stored_development_images(self.evidence)?.images)
+            }
+            EvidenceKind::ResidentHistorical => {
+                Ok(ledger.stored_resident_images(self.evidence)?.images)
+            }
+            EvidenceKind::Legacy => Ok(ledger.stored_legacy_images(self.evidence)?.images),
+            EvidenceKind::SdkFixture => Ok(ledger
                 .stored_sdk_images(self.evidence)?
                 .images
                 .into_iter()
                 .map(|i| i.bytes)
-                .collect())
+                .collect()),
         }
+    }
+    pub(super) fn resident_output(&self) -> bool {
+        self.kind == EvidenceKind::ResidentHistorical
+    }
+
+    pub(super) fn legacy_output(&self) -> bool {
+        self.kind == EvidenceKind::Legacy
     }
     pub fn interpret(&mut self, ledger: &Ledger, text: &str) -> Result<()> {
         if let Some(selected) = &mut self.selected {
-            let acknowledgment = selected.write(text, false)?;
+            let acknowledgment = selected.write(text, false, None)?;
             self.user = acknowledgment.written;
             return Ok(());
         }
@@ -379,12 +429,25 @@ impl Attempt {
         self.user = turn;
         Ok(())
     }
+    #[cfg(test)]
     pub fn generated(&mut self, ledger: &Ledger, text: String) -> Result<()> {
+        self.generated_with_memory(ledger, text, None)
+    }
+    pub(super) fn generated_with_memory(
+        &mut self,
+        ledger: &Ledger,
+        text: String,
+        memory: Option<(&dyn crate::memory::Provider, &crate::memory::QueryResult)>,
+    ) -> Result<()> {
         if let Some(selected) = &mut self.selected {
-            let acknowledgment = selected.write(&text, true)?;
+            let acknowledgment = selected.write(&text, true, memory)?;
             self.assistant = Some(acknowledgment.written);
             return Ok(());
         }
+        anyhow::ensure!(
+            memory.is_none(),
+            "composed memory publication requires selected Attempt"
+        );
         anyhow::ensure!(
             !self.has_reader_preparation(),
             "Selected Reader preparation requires selected domain mutation/settlement"

@@ -1,5 +1,5 @@
 //! Explicit associative facts over the existing Store. No automatic extraction or sync engine.
-mod aggregate;
+pub(crate) mod aggregate;
 pub mod catalog;
 pub mod context;
 pub mod maintenance;
@@ -333,6 +333,49 @@ impl Inspection {
     }
 }
 pub trait Provider: Send + Sync {
+    fn require_selected_writer(
+        &self,
+        _writer: &crate::conversation::SelectedAdmission,
+    ) -> Result<()> {
+        anyhow::bail!("memory provider does not support selected Writer")
+    }
+    fn check_selected_writer(
+        &self,
+        _result: &QueryResult,
+        _writer: &crate::conversation::SelectedAdmission,
+    ) -> Result<()> {
+        anyhow::bail!("memory provider does not support selected Writer view")
+    }
+    fn publish_selected_writer(
+        &self,
+        _result: &QueryResult,
+        _writer: &crate::conversation::SelectedAdmission,
+        _finish: crate::conversation::SelectedWriterFinish,
+    ) -> Result<crate::conversation::SelectedWriterPublication> {
+        anyhow::bail!("memory provider does not support selected Writer publication")
+    }
+    /// Opt in to ordinary Writer snapshots from this exact receiving Store.
+    /// Selected providers need a separate consuming publication contract.
+    fn admit_ordinary_writer(&self, _store: &Store) -> Result<()> {
+        anyhow::bail!("memory provider does not support ordinary Writer snapshots")
+    }
+    /// Setup compatibility only; actual selected publication still validates
+    /// current receiving pins under its complete ordered admission set.
+    fn require_selected_reader(
+        &self,
+        _reader: &crate::conversation::SelectedAdmission,
+    ) -> Result<()> {
+        anyhow::bail!("subject memory provider does not support selected Reader admission")
+    }
+    fn publish_selected_reader_text(
+        &self,
+        _result: &QueryResult,
+        _reader: &crate::conversation::SelectedAdmission,
+        _accepted: &crate::storage::selection::SelectionToken,
+        _request: crate::conversation::SelectedReaderWrite,
+    ) -> Result<crate::conversation::SelectedReaderPublication> {
+        anyhow::bail!("subject memory provider does not support selected Reader publication")
+    }
     fn put(&self, mutation: Mutation) -> Result<Uuid>;
     fn forget(&self, mutation: Forget) -> Result<Uuid>;
     fn inspect(&self, key: &Key) -> Result<Vec<Envelope>>;
@@ -427,6 +470,13 @@ fn tokens(value: &str) -> BTreeSet<String> {
         .collect()
 }
 impl Provider for LocalMemory {
+    fn admit_ordinary_writer(&self, store: &Store) -> Result<()> {
+        ensure!(
+            std::ptr::eq(self.store.as_ref(), store),
+            "foreign Writer memory Store"
+        );
+        Ok(())
+    }
     fn put(&self, mutation: Mutation) -> Result<Uuid> {
         self.available()?;
         mutation.fact.validate()?;

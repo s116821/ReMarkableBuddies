@@ -418,6 +418,7 @@ fn source_link(record: &Record) -> Option<(Uuid, Uuid, Uuid)> {
         Record::Capture(s) => Some((s.id, s.conversation, s.turn)),
         Record::LegacyCapture(s) => Some((s.id, s.conversation, s.turn)),
         Record::DevelopmentCapture(s) => Some((s.id, s.conversation, s.turn)),
+        Record::ResidentCapture(s) => Some((s.id, s.conversation, s.turn)),
         _ => None,
     }
 }

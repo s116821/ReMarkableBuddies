@@ -4,6 +4,10 @@ mod binding_projection;
 pub mod capture_facts;
 pub(crate) mod cleanup;
 pub mod development;
+pub mod resident_capture;
+pub use resident_capture::{
+    PreparedResidentCapture, ResidentCaptureHistory, ResidentSourceCapture,
+};
 mod intent;
 mod legacy;
 pub mod notebook;
@@ -22,10 +26,12 @@ pub mod receiving;
 pub mod resolution;
 mod selected;
 mod selected_reader_write;
+mod selected_writer;
 pub use selected_reader_write::{
     SelectedReaderAcknowledgment, SelectedReaderPublication, SelectedReaderText,
     SelectedReaderWrite,
 };
+pub use selected_writer::*;
 #[cfg(test)]
 mod selected_context_tests;
 mod settlement;
@@ -130,6 +136,7 @@ impl Ledger {
                     EXISTING_BINDING_SCHEMA
                 }
                 Record::NormalizedText(_) => TEXT_SOURCE_SCHEMA,
+                Record::ResidentCapture(_) => TEXT_SOURCE_SCHEMA,
                 Record::ArchivedNormalizedSource(_) => notebook::NOTEBOOK_SOURCE_SCHEMA,
                 Record::NotebookPlan(_) | Record::NotebookStage(_) => {
                     notebook::NOTEBOOK_PROCESSING_SCHEMA
@@ -195,6 +202,11 @@ impl Ledger {
                 // full receipt semantics by avoiding the explicit binding query.
                 Self::validate_binding_receipt(&binding.receipt)?;
             }
+        } else if matches!(&record, Record::ResidentCapture(_)) {
+            ensure!(
+                envelope.namespace == Namespace::Source && envelope.domain_schema_version == 2,
+                "resident evidence schema/namespace mismatch"
+            );
         } else if matches!(&record, Record::NormalizedText(_)) {
             ensure!(
                 envelope.namespace == Namespace::Source
@@ -253,6 +265,10 @@ impl Ledger {
                 (stage.id, Namespace::Conversation, stage.conversation)
             }
             Record::DevelopmentCapture(capture) => {
+                capture.validate()?;
+                (capture.id, Namespace::Source, capture.conversation)
+            }
+            Record::ResidentCapture(capture) => {
                 capture.validate()?;
                 (capture.id, Namespace::Source, capture.conversation)
             }
@@ -319,6 +335,7 @@ impl Ledger {
             Record::Capture(capture) => capture.facts.media()?,
             Record::LegacyCapture(capture) => capture.media()?,
             Record::DevelopmentCapture(capture) => capture.media()?,
+            Record::ResidentCapture(capture) => capture.media()?,
             Record::Receipt(receipt) => receipt
                 .admitted_intent
                 .as_ref()
@@ -570,6 +587,7 @@ impl Ledger {
                 Record::ArchivedNormalizedSource(source) => source.conversation,
                 Record::LegacyCapture(capture) => capture.conversation,
                 Record::DevelopmentCapture(capture) => capture.conversation,
+                Record::ResidentCapture(capture) => capture.conversation,
                 _ => bail!("invalid existing source reference"),
             };
             ensure!(
@@ -1736,6 +1754,7 @@ impl Ledger {
         let mut archived_sources = Vec::new();
         let mut legacy_captures = Vec::new();
         let mut development_captures = Vec::new();
+        let mut resident_captures = Vec::new();
         for record in records {
             match record {
                 Record::Source(source) if source_ids.contains(&source.id) => sources.push(source),
@@ -1751,6 +1770,9 @@ impl Ledger {
                 Record::DevelopmentCapture(capture) if source_ids.contains(&capture.id) => {
                     development_captures.push(*capture)
                 }
+                Record::ResidentCapture(capture) if source_ids.contains(&capture.id) => {
+                    resident_captures.push(*capture)
+                }
                 Record::LegacyCapture(capture) if source_ids.contains(&capture.id) => {
                     legacy_captures.push(capture)
                 }
@@ -1762,6 +1784,7 @@ impl Ledger {
                 + captures.len()
                 + legacy_captures.len()
                 + development_captures.len()
+                + resident_captures.len()
                 + normalized_text.len()
                 + archived_sources.len()
                 == source_ids.len(),
@@ -1771,6 +1794,9 @@ impl Ledger {
         let mut capture_media = Vec::new();
         for capture in &captures {
             capture_media.extend(capture.facts.media()?);
+        }
+        for capture in &resident_captures {
+            capture_media.extend(capture.media()?);
         }
         for capture in &development_captures {
             capture_media.extend(capture.media()?);
@@ -1803,6 +1829,7 @@ impl Ledger {
             archived_sources,
             legacy_captures,
             development_captures,
+            resident_captures,
             missing_media,
             selection,
         })
@@ -1826,6 +1853,7 @@ impl Ledger {
                 Record::Capture(capture) => capture.facts.media()?,
                 Record::LegacyCapture(capture) => capture.media()?,
                 Record::DevelopmentCapture(capture) => capture.media()?,
+                Record::ResidentCapture(capture) => capture.media()?,
                 _ => vec![],
             };
             for item in references {

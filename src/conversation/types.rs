@@ -71,6 +71,7 @@ pub enum SelectedCaptureImages {
     Sdk(PreparedSdkCapture),
     Legacy(PreparedLegacyCapture),
     Development(Box<super::PreparedDevelopmentCapture>),
+    Resident(Box<super::PreparedResidentCapture>),
 }
 #[derive(Clone, Debug)]
 pub struct PreparedSdkImage {
@@ -307,6 +308,7 @@ pub enum Record {
     NotebookStage(Box<super::notebook::NotebookStage>),
     LegacyCapture(LegacyCapture),
     DevelopmentCapture(Box<super::development::DevelopmentCaptureHistory>),
+    ResidentCapture(Box<super::ResidentCaptureHistory>),
     OutcomeFact(OutcomeFact),
     Binding(Binding),
     Export(ExportAssociation),
@@ -353,6 +355,7 @@ pub struct ContextView {
     pub archived_sources: Vec<super::ArchivedNormalizedSource>,
     pub legacy_captures: Vec<LegacyCapture>,
     pub development_captures: Vec<super::development::DevelopmentCaptureHistory>,
+    pub resident_captures: Vec<super::ResidentCaptureHistory>,
     pub missing_media: Vec<Media>,
     pub selection: Option<TurnRange>,
 }

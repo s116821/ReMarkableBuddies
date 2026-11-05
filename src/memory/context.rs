@@ -41,16 +41,43 @@ pub fn answer_with_preference(
     progress: &mut dyn FnMut() -> Result<()>,
 ) -> Result<String> {
     ensure!(
+        memory.is_none_or(|value| !value.selected()),
+        "selected memory requires separately admitted answer context"
+    );
+    answer_payload(model, question, images, memory, preference, progress)
+}
+
+/// Explicit selected-provider candidate used only by guarded Reader publication.
+/// This grants neither ordinary startup permission nor native output authority.
+pub(crate) fn answer_with_selected_view(
+    model: &mut dyn LLMEngine,
+    question: &str,
+    images: &[String],
+    memory: &QueryResult,
+    store: &crate::storage::Store,
+    preference: Option<&crate::config::PersonalizationSnapshot>,
+    progress: &mut dyn FnMut() -> Result<()>,
+) -> Result<String> {
+    ensure!(memory.selected(), "selected memory view required");
+    super::selected::validate_answer_view(memory, store)?;
+    answer_payload(model, question, images, Some(memory), preference, progress)
+}
+
+fn answer_payload(
+    model: &mut dyn LLMEngine,
+    question: &str,
+    images: &[String],
+    memory: Option<&QueryResult>,
+    preference: Option<&crate::config::PersonalizationSnapshot>,
+    progress: &mut dyn FnMut() -> Result<()>,
+) -> Result<String> {
+    ensure!(
         !question.trim().is_empty() && question.len() <= 2048,
         "invalid memory answer request"
     );
     ensure!(
         !images.is_empty() && images.len() <= 16,
         "invalid memory source batch"
-    );
-    ensure!(
-        memory.is_none_or(|value| !value.selected()),
-        "selected memory requires separately admitted answer context"
     );
     let preference = preference.and_then(|value| value.effective_text());
     ensure!(
