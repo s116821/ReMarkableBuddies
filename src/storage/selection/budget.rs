@@ -15,6 +15,7 @@ pub struct SelectedReadBudget {
     limits: SelectedReadUsage,
     usage: SelectedReadUsage,
     exhausted: bool,
+    total_bytes: Option<u64>,
 }
 impl SelectedReadBudget {
     pub fn new(aggregates: u64, work_items: u64, metadata_bytes: u64, media_bytes: u64) -> Self {
@@ -27,7 +28,13 @@ impl SelectedReadBudget {
             },
             usage: SelectedReadUsage::default(),
             exhausted: false,
+            total_bytes: None,
         }
+    }
+    pub(crate) fn combined_bytes(work_items: u64, bytes: u64) -> Self {
+        let mut budget = Self::new(0, work_items, bytes, bytes);
+        budget.total_bytes = Some(bytes);
+        budget
     }
     pub fn usage(&self) -> SelectedReadUsage {
         self.usage
@@ -58,6 +65,14 @@ impl SelectedReadBudget {
         );
         if let (Some(aggregates), Some(work_items), Some(metadata_bytes), Some(media_bytes)) = next
         {
+            if self.total_bytes.is_some_and(|limit| {
+                metadata_bytes
+                    .checked_add(media_bytes)
+                    .is_none_or(|total| total > limit)
+            }) {
+                self.exhausted = true;
+                anyhow::bail!("combined archive work budget exhausted");
+            }
             self.usage = SelectedReadUsage {
                 aggregates,
                 work_items,

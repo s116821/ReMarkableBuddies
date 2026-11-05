@@ -75,6 +75,11 @@ impl ServiceHealth {
         NotificationEnvironment::capture().connect()
     }
 
+    #[cfg(test)]
+    pub(crate) fn fixture(socket: UnixDatagram) -> Self {
+        Self::new(socket)
+    }
+
     fn new(socket: UnixDatagram) -> Self {
         Self {
             socket,
@@ -94,6 +99,15 @@ impl ServiceHealth {
     /// Called after a successful main-thread input poll or request-progress check.
     pub fn progress(&mut self) -> Result<()> {
         self.notify(Instant::now(), false)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn failure_witness(&self) -> Arc<AtomicBool> {
+        self.failed.clone()
+    }
+
+    pub(crate) fn poison(&self) {
+        self.failed.store(true, Ordering::Release);
     }
 
     pub fn failed(&self) -> bool {

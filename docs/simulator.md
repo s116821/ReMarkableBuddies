@@ -46,6 +46,35 @@ Each scenario writes `page-0.png`, `page-1.png`, etc. and `report.json` beneath 
 configured output directory (bundled scenarios use `target/simulator/<name>`).
 The report contains exact text, newly emitted X counts, unchanged-page results,
 active page, virtual elapsed milliseconds, model-call counts and ordered actions.
+
+The `blank-answer` and `occupied-return` scenarios cover the manual Reader route.
+Reader iteration actions can pair `{"action":"close"}` with
+`{"action":"reopen","page":1}` to model an ordinary notebook save and a fresh
+viewport on the saved page. The page index is zero-based. The pair must finish
+in the same iteration with no intervening input. The simulator keeps page
+content and order, clears the capture cache and the reopened page's menu, and
+invalidates undo ownership. The prepared-answer reopen check uses the same
+page count and verifies that the source image stays unchanged. This model
+reports `saved_modified_at_ms` only for pages whose modeled pixels changed at
+save. This is virtual time. Reopening or saving again without a content change
+keeps the previous value and the page index. This models the target-only
+modification time observed when Writer reused a bound page on RM2. The model
+still covers only a clean save. Interrupted vendor saves and native persistence
+require device evidence.
+
+The keyboard trace marks the simulated keyboard as `owned` when Buddy
+selects body mode or types. The `keyboard_identity_changed` fault applies
+to `body` and `text` operations. It models an event the observer cannot
+attribute to Buddy's exact keyboard identity. The attempted text can
+already be visible, but the request loses authority for further input.
+The separate `external_input` fault still models user activity.
+
+The resident transport fixture
+`low_space_indeterminate_reply_remains_unresolved_after_unchanged_observation`
+models the RM2 low-space run separately. A native indeterminate reply stays in
+the insertion journal after a read-only observation finds the original page
+order. The client refuses a replacement insertion. The fixture scripts the reply
+and page observation and leaves vendor disk-space policy to the tablet.
 Expected-result mismatches exit nonzero **after** saving results. Expected injected
 failures can pass when the recorded behavior matches the assertions.
 
@@ -291,6 +320,14 @@ observer-open failure, boundary/no movement and late capture cannot repeat input
 An inked source to blank notes is positive; blank-to-blank/identical pages and
 legitimate gutter ink conservatively refuse. Composite readiness is not a native
 render acknowledgement or independent pixel-to-page provenance.
+
+On RM2 firmware 3.28.0.172, a stock swipe to a prepared blank successor changed
+xochitl's mappings during capture. The first run stopped before writing. The
+retry discarded two captures, waited for a fresh stable pair after the same
+single swipe, and saved the answer on the prepared page. The scripted wait
+models the dropped observations and requires two fresh frames after the fault.
+The prepared blank page already had a stock `.rm` file. The stock corner menu
+can intercept the lower-left hold before the model is called.
 
 The scenario backend still models legacy navigation timing and does not render
 native scrollbar transitions. It now explicitly reports no movement for a boundary

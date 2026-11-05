@@ -131,6 +131,7 @@ impl SelectedAdmission {
                 Record::Capture(c) => (c.conversation, c.turn),
                 Record::LegacyCapture(c) => (c.conversation, c.turn),
                 Record::DevelopmentCapture(c) => (c.conversation, c.turn),
+                Record::ResidentCapture(c) => (c.conversation, c.turn),
                 _ => anyhow::bail!("not selected capture evidence"),
             };
             let records = projection.inspect(conversation)?;
@@ -201,6 +202,9 @@ impl SelectedAdmission {
                         Ledger::development_images_from_evidence((**c).clone(), &mut load)?,
                     )))
                 }
+                Record::ResidentCapture(c) => Ok(super::SelectedCaptureImages::Resident(Box::new(
+                    Ledger::resident_images_from_evidence((**c).clone(), &mut load)?,
+                ))),
                 _ => unreachable!(),
             }
         })

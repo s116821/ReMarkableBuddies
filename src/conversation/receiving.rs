@@ -285,6 +285,7 @@ pub(super) fn validate_historical(
             Record::Capture(s) => (s.conversation, s.turn),
             Record::LegacyCapture(s) => (s.conversation, s.turn),
             Record::DevelopmentCapture(s) => (s.conversation, s.turn),
+            Record::ResidentCapture(s) => (s.conversation, s.turn),
             _ => unreachable!(),
         };
         ensure!(owner == conversation && records.iter().any(|r| matches!(r, Record::Turn(t) if t.id == turn && t.sources.contains(&source_id(record).unwrap()))), "foreign historical source");
@@ -370,6 +371,7 @@ pub(super) fn source_id(record: &Record) -> Option<Uuid> {
         Record::Capture(source) => Some(source.id),
         Record::LegacyCapture(source) => Some(source.id),
         Record::DevelopmentCapture(source) => Some(source.id),
+        Record::ResidentCapture(source) => Some(source.id),
         _ => None,
     }
 }
@@ -382,6 +384,7 @@ pub(super) fn source_media(record: &Record) -> Result<Vec<Media>> {
         Record::Capture(source) => source.facts.media(),
         Record::LegacyCapture(source) => source.media(),
         Record::DevelopmentCapture(source) => source.media(),
+        Record::ResidentCapture(source) => source.media(),
         _ => Err(ReceivingRefusal::OriginalUnavailable.into()),
     }
 }
@@ -429,6 +432,9 @@ pub(super) fn original(
             source.turn,
             source.facts.source.document.value(),
         ),
+        Record::ResidentCapture(source) => {
+            (source.conversation, source.turn, source.before.document)
+        }
         Record::DevelopmentCapture(source) => {
             let label = &source.expected_binding.document_id;
             let id = Uuid::parse_str(label).map_err(|_| ReceivingRefusal::OriginalUnavailable)?;

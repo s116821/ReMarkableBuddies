@@ -1,6 +1,9 @@
 //! Explicit ordinary same-actor notebook archives. Legacy backup formats stay unchanged.
 use super::*;
 
+#[path = "notebook_backup/command.rs"]
+pub(crate) mod command;
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NotebookBackup {
@@ -16,9 +19,82 @@ struct NotebookBackup {
     config_snapshot: Option<crate::config::Config>,
 }
 impl NotebookBackup {
+    fn build(
+        paths: &StorePaths,
+        root: &Path,
+        actor: Uuid,
+        generation: Uuid,
+        manifests: Vec<Manifest>,
+        budget: Option<&mut selection::SelectedReadBudget>,
+    ) -> Result<Self> {
+        let mut inventory = BTreeMap::new();
+        for manifest in &manifests {
+            ensure!(
+                matches!(manifest.scope, Scope::LocalTransaction),
+                "selected notebook backup unsupported"
+            );
+            for item in manifest.records.iter().chain(&manifest.media) {
+                if let Some(prior) = inventory.insert(item.sha256.clone(), item.clone()) {
+                    ensure!(prior == *item, "notebook object collision");
+                }
+            }
+        }
+        ensure!(
+            manifests
+                .iter()
+                .flat_map(|m| &m.media_coverage)
+                .all(|coverage| inventory.contains_key(coverage.hash())),
+            "incomplete notebook backup"
+        );
+        let snapshot = paths.data.join("config.snapshot.json");
+        let config_snapshot = if budget.is_some() {
+            match command::regular_if_present(&snapshot)? {
+                true => Some(serde_json::from_slice::<crate::config::Config>(
+                    &files::read_with_budget(&snapshot, MAX_RECORD as u64, budget)?,
+                )?),
+                false => None,
+            }
+        } else if snapshot.exists() {
+            Some(files::json(&snapshot, MAX_RECORD as u64)?)
+        } else {
+            None
+        };
+        if let Some(config) = &config_snapshot {
+            config.validate()?;
+        }
+        Ok(Self {
+            format: 4,
+            origin_actor: actor,
+            origin_generation: generation,
+            notebook_feature: 1,
+            feedback_feature: root.join(feedback_generation::MARKER).exists(),
+            selected_feature: root.join("selection-feature.json").exists(),
+            manifests,
+            objects: inventory.into_values().collect(),
+            complete_media: true,
+            config_snapshot,
+        })
+    }
+
+    fn encode(&self) -> Result<Vec<u8>> {
+        let bytes = serde_json::to_vec(self)?;
+        ensure!(
+            bytes.len() <= MAX_METADATA
+                && self.objects.len() <= MAX_ITEMS
+                && self.manifests.len() <= MAX_ITEMS,
+            "notebook backup bound"
+        );
+        Ok(bytes)
+    }
+
     fn read(source: &Path) -> Result<Self> {
         files::safe_path(source)?;
         let value: Self = files::json(&source.join("backup.json"), MAX_METADATA as u64)?;
+        value.admit_format()
+    }
+
+    fn admit_format(self) -> Result<Self> {
+        let value = self;
         ensure!(
             value.format == 4
                 && value.notebook_feature == 1
@@ -29,6 +105,13 @@ impl NotebookBackup {
         Ok(value)
     }
     fn inspect(&self, source: &Path) -> Result<BackupInspection> {
+        self.inspect_with_budget(source, None)
+    }
+    fn inspect_with_budget(
+        &self,
+        source: &Path,
+        mut budget: Option<&mut selection::SelectedReadBudget>,
+    ) -> Result<BackupInspection> {
         if let Some(config) = &self.config_snapshot {
             config.validate_values()?;
         }
@@ -48,7 +131,12 @@ impl NotebookBackup {
                     .is_none(),
                 "duplicate notebook backup object"
             );
-            files::Source::open(&source.join("objects").join(&item.sha256), item)?;
+            files::Source::open_with_budget(
+                &source.join("objects").join(&item.sha256),
+                item,
+                budget.as_deref_mut(),
+                true,
+            )?;
         }
         let mut required = BTreeSet::new();
         let mut manifests = BTreeSet::new();
@@ -81,9 +169,12 @@ impl NotebookBackup {
             }
             // This authority comes only from validated format4 metadata, never
             // from arbitrary files a legacy archive could plant beside objects.
-            for (record, hash) in
-                Store::validate_objects_policy(source, manifest, None, Some(self.origin_actor))?
-            {
+            for (record, hash) in Store::validate_objects_policy(
+                source,
+                manifest,
+                budget.as_deref_mut(),
+                Some(self.origin_actor),
+            )? {
                 if record.namespace == Namespace::UnassociatedFeedback {
                     ensure!(
                         self.feedback_feature,
@@ -104,7 +195,12 @@ impl NotebookBackup {
         );
         let records = records.into_values().collect::<Vec<_>>();
         Store::can_apply(&Index::default(), &records)?;
-        notebook_generation::validate_records(source, &Index::default(), &records)?;
+        notebook_generation::validate_records_with_budget(
+            source,
+            &Index::default(),
+            &records,
+            budget,
+        )?;
         let complete = self
             .manifests
             .iter()
@@ -150,56 +246,18 @@ impl Store {
             .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
         self.notebook_archive_custody(&inner)?;
         let root = self.generation(inner.generation);
-        let mut inventory = BTreeMap::new();
         for manifest in inner.index.manifests.values() {
-            ensure!(
-                matches!(manifest.scope, Scope::LocalTransaction),
-                "selected notebook backup unsupported"
-            );
             Self::validate_objects(&root, manifest)?;
-            for item in manifest.records.iter().chain(&manifest.media) {
-                if let Some(prior) = inventory.insert(item.sha256.clone(), item.clone()) {
-                    ensure!(prior == *item, "notebook object collision");
-                }
-            }
         }
-        ensure!(
-            inner
-                .index
-                .manifests
-                .values()
-                .flat_map(|m| &m.media_coverage)
-                .all(|coverage| inventory.contains_key(coverage.hash())),
-            "incomplete notebook backup"
-        );
-        let backup = NotebookBackup {
-            format: 4,
-            origin_actor: self.actor_id,
-            origin_generation: inner.generation,
-            notebook_feature: 1,
-            feedback_feature: root.join(feedback_generation::MARKER).exists(),
-            selected_feature: root.join("selection-feature.json").exists(),
-            manifests: inner.index.manifests.values().cloned().collect(),
-            objects: inventory.into_values().collect(),
-            complete_media: true,
-            config_snapshot: if self.paths.data.join("config.snapshot.json").exists() {
-                let config: crate::config::Config = files::json(
-                    &self.paths.data.join("config.snapshot.json"),
-                    MAX_RECORD as u64,
-                )?;
-                config.validate()?;
-                Some(config)
-            } else {
-                None
-            },
-        };
-        let bytes = serde_json::to_vec(&backup)?;
-        ensure!(
-            bytes.len() <= MAX_METADATA
-                && backup.objects.len() <= MAX_ITEMS
-                && backup.manifests.len() <= MAX_ITEMS,
-            "notebook backup bound"
-        );
+        let backup = NotebookBackup::build(
+            &self.paths,
+            &root,
+            self.actor_id,
+            inner.generation,
+            inner.index.manifests.values().cloned().collect(),
+            None,
+        )?;
+        let bytes = backup.encode()?;
         // All policy checks precede destination staging.
         files::directory(&destination.join("objects"))?;
         for item in &backup.objects {

@@ -107,13 +107,39 @@ pub fn run(config_path: Option<PathBuf>, input: &mut impl Read) -> Report {
 pub enum CommandReport {
     Legacy(Report),
     Flow(crate::writer_flow::Report),
+    #[cfg(all(
+        target_os = "linux",
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    Resident(ResidentReport),
     Notebook(Box<notebook::command::Report>),
 }
+
+#[cfg(all(
+    target_os = "linux",
+    feature = "development-resident-bootstrap",
+    feature = "development-input-diagnostics"
+))]
+#[derive(Serialize)]
+pub struct ResidentReport {
+    status: &'static str,
+    conversation: Uuid,
+    operation: Uuid,
+    failure: Option<&'static str>,
+}
+
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum CommandRequest {
     Legacy(Request),
     Flow(crate::writer_flow::Request),
+    #[cfg(all(
+        target_os = "linux",
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    Resident(crate::workflow::resident_supervisor::writer_request::Submission),
     Notebook(Box<notebook::command::Request>),
 }
 /// Parse bounded stdin once; each strict variant rejects duplicates and unknown fields.
@@ -143,6 +169,21 @@ pub fn dispatch(config_path: Option<PathBuf>, input: &mut impl Read) -> CommandR
             CommandReport::Legacy(run(config_path, &mut &bytes[..]))
         }
         Ok(CommandRequest::Flow(request)) => CommandReport::Flow(run_flow(config_path, request)),
+        #[cfg(all(
+            target_os = "linux",
+            feature = "development-resident-bootstrap",
+            feature = "development-input-diagnostics"
+        ))]
+        Ok(CommandRequest::Resident(submission)) => {
+            let (conversation, operation) = submission.identities();
+            let result = crate::workflow::resident_supervisor::writer_request::submit(submission);
+            CommandReport::Resident(ResidentReport {
+                status: if result.is_ok() { "queued" } else { "refused" },
+                conversation,
+                operation,
+                failure: result.err().map(|_| "tablet-request-unavailable"),
+            })
+        }
         Ok(CommandRequest::Notebook(request)) => {
             CommandReport::Notebook(Box::new(notebook::command::run(config_path, *request)))
         }

@@ -50,9 +50,22 @@ impl ConversationOperation {
 #[command(author, version = env!("READER_BUDDY_VERSION"))]
 #[command(about = "ReMarkable Reader Buddy - AI-powered reading assistant for reMarkable tablets")]
 pub struct Args {
+    /// Explicit one-shot disposable native Reader output; development build only.
+    #[cfg(all(
+        target_os = "linux",
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics",
+        not(feature = "installed-resident-output")
+    ))]
+    #[arg(long, exclusive = true)]
+    development_resident_output_plan: Option<std::path::PathBuf>,
+
     /// Existing-only generation-inclusive accounting; no runtime activation
     #[arg(long, exclusive = true)]
     inspect_owned_data_v3: bool,
+    /// Count validated historical local selected-outbox records
+    #[arg(long, exclusive = true)]
+    inspect_selected_outbox: bool,
     /// Emit the embedded canonical-object schema without reading saved configuration
     #[arg(long, exclusive = true)]
     configuration_schema: bool,
@@ -212,6 +225,12 @@ fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_lo
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    if args.inspect_selected_outbox {
+        return remarkable_reader_buddy::outbox_status::run(
+            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+        )
+        .write_to(&mut std::io::stdout().lock());
+    }
     if args.configuration_schema {
         return config::schema::write_to(&mut std::io::stdout().lock());
     }
@@ -642,6 +661,10 @@ fn main() -> Result<()> {
         None
     };
     let personalization = config.personalization_snapshot()?;
+    #[cfg(target_os = "linux")]
+    let resident_selection = remarkable_reader_buddy::workflow::resident_supervisor::recovery::activation::InstalledReaderSelection::load(
+        std::time::Instant::now() + Duration::from_secs(10),
+    )?;
     let workflow = Workflow::new(false, effective.trigger_corner, effective.debug_dump)?;
     sleep(Duration::from_millis(1000));
     let _sync_worker = Worker::google(store.clone(), config.sync)?;
@@ -650,6 +673,30 @@ fn main() -> Result<()> {
         let mut workflow = workflow;
         if let Some(health) = service_health {
             workflow.enable_service_health(health)?;
+        }
+        #[cfg(all(
+            feature = "development-resident-bootstrap",
+            feature = "development-input-diagnostics",
+            not(feature = "installed-resident-output")
+        ))]
+        anyhow::ensure!(
+            args.development_resident_output_plan.is_none() || resident_selection.is_some(),
+            "development output requires approved installed resident source profile"
+        );
+        if let Some(selection) = resident_selection {
+            workflow.configure_resident_source(selection, store.clone())?;
+            #[cfg(all(
+                feature = "development-resident-bootstrap",
+                feature = "development-input-diagnostics",
+                not(feature = "installed-resident-output")
+            ))]
+            if let Some(plan) = args.development_resident_output_plan.as_deref() {
+                workflow.configure_development_resident_output(plan)?;
+            } else {
+                workflow.configure_installed_resident_output()?;
+            }
+            #[cfg(feature = "installed-resident-output")]
+            workflow.configure_installed_resident_output()?;
         }
         workflow
     };
@@ -909,11 +956,19 @@ mod tests {
                 "credential-reference-input",
                 "credential-reference-operation",
                 "debug-dump",
+                #[cfg(all(
+                    target_os = "linux",
+                    feature = "development-resident-bootstrap",
+                    feature = "development-input-diagnostics",
+                    not(feature = "installed-resident-output")
+                ))]
+                "development-resident-output-plan",
                 "export-note",
                 "handwriting",
                 "inspect-conversations",
                 "inspect-owned-data",
                 "inspect-owned-data-v3",
+                "inspect-selected-outbox",
                 "inspect-source-cache",
                 "log-level",
                 "memory-input",
@@ -1035,7 +1090,11 @@ mod tests {
 
     #[test]
     fn schema_discovery_is_exclusive_with_every_other_argument() {
-        for selector in ["configuration-schema", "inspect-owned-data-v3"] {
+        for selector in [
+            "configuration-schema",
+            "inspect-owned-data-v3",
+            "inspect-selected-outbox",
+        ] {
             for argument in Args::command().get_arguments() {
                 let Some(long) = argument.get_long() else {
                     continue;

@@ -6,7 +6,7 @@ pub(crate) mod ordinary_export;
 pub(crate) mod ordinary_restore;
 
 #[path = "notebook_backup.rs"]
-mod notebook_backup;
+pub(crate) mod notebook_backup;
 
 /// Distinguish a proved prepublication conflict from a possible atomic publication.
 pub(crate) enum ConfigPublication {
