@@ -60,8 +60,8 @@ pub(crate) enum Publication {
     NotActivated,
     Unknown,
 }
-struct History {
-    manifests: BTreeMap<Uuid, Manifest>,
+pub(super) struct History {
+    pub(super) manifests: BTreeMap<Uuid, Manifest>,
     objects: BTreeMap<String, ObjectRef>,
     records: BTreeMap<Uuid, (Envelope, String)>,
     manifest_bytes: usize,
@@ -69,7 +69,7 @@ struct History {
     record_hashes: BTreeSet<String>,
 }
 impl History {
-    fn empty() -> Self {
+    pub(super) fn empty() -> Self {
         Self {
             manifests: BTreeMap::new(),
             objects: BTreeMap::new(),
@@ -80,9 +80,17 @@ impl History {
         }
     }
     fn add(&mut self, root: &Path, manifest: &Manifest) -> Result<()> {
+        self.add_with_actor(root, manifest, None)
+    }
+    pub(super) fn add_with_actor(
+        &mut self,
+        root: &Path,
+        manifest: &Manifest,
+        actor: Option<Uuid>,
+    ) -> Result<()> {
         if let Some(old) = self.manifests.get(&manifest.transaction_id) {
             ensure!(old == manifest, "restore transaction collision");
-            Store::validate_objects(root, manifest)?;
+            Store::validate_objects_policy(root, manifest, None, actor)?;
             return Ok(());
         }
         let encoded = serde_json::to_vec(manifest)?;
@@ -98,7 +106,7 @@ impl History {
             self.objects
                 .insert(reference.sha256.clone(), reference.clone());
         }
-        for (record, hash) in Store::validate_objects(root, manifest)? {
+        for (record, hash) in Store::validate_objects_policy(root, manifest, None, actor)? {
             // Require a record object only on this new admission; arbitrary
             // domain payload arrays remain valid and old readers are untouched.
             let bytes = files::read(&root.join("objects").join(&hash), MAX_RECORD as u64)?;
@@ -132,16 +140,16 @@ impl History {
         );
         Ok(())
     }
-    fn validate(&self) -> Result<()> {
+    pub(super) fn validate(&self) -> Result<()> {
         Store::can_apply(
             &Index::default(),
             &self.records.values().cloned().collect::<Vec<_>>(),
         )
     }
-    fn hash(&self) -> Result<String> {
+    pub(super) fn hash(&self) -> Result<String> {
         history_hash(&self.manifests)
     }
-    fn summary(&self, config: bool) -> Summary {
+    pub(super) fn summary(&self, config: bool) -> Summary {
         Summary {
             manifests: self.manifests.len(),
             objects: self.objects.len(),

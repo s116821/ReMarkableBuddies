@@ -57,3 +57,39 @@ Input/report caps are16KiB, including whitespace and the report LF. Existing
 metadata/record/object bounds and host deadlines remain in force. The full
 [versioned contract](https://github.com/s116821/ReMarkableBuddiesDocs/blob/5ed60540affe670c89dac2ff4db9c61f12a2a53a/openspec/changes/restore-ordinary-owned-archive/contract.md)
 defines exact shapes, fingerprints, private conditions, statuses and limits.
+
+## Same-actor notebook archives
+
+A ready local notebook Store can restore its own complete format4 archive through
+these explicit operations, using the same protected stdin/configuration transport:
+
+```text
+reader-buddy --restore-operation prepare-notebook --restore-input -
+reader-buddy --restore-operation apply-notebook --restore-input -
+reader-buddy --restore-operation status-notebook --restore-input -
+```
+
+Notebook Prepare takes
+`{restore_version:2,operation:NONNIL_UUID,source:ABSOLUTE_ARCHIVE_PATH}`.
+Apply/Status take the source and complete original returned intent as above;
+notebook reports have `report_version:2`. Keep the returned intent unchanged.
+Legacy selectors remain version1-only and continue to refuse notebook layouts.
+Cross-actor archives, selected heads/retained history, shared/isolated modes and
+incomplete notebook readiness remain unsupported.
+
+The existing notebook writer preserves original records, causal revisions and
+complete media alongside unrelated current history. Apply binds original
+source/configuration/mode/base conditions and an absent target, then verifies
+desired history, feature flags and staged configuration. The exclusive Store
+lease remains held through report write and flush. Optional configuration stays
+inactive; native references remain historical and runtime activation unverified.
+
+Use original Status after a lost acknowledgement. It does not need the source
+archive and never replays Apply or repairs capabilities. Preserve an earlier
+`unknown` result even when Status observes desired state. An interrupted
+CURRENT/capabilities gap can refuse observation and requires separately owned
+recovery. Existing staging is retained and never automatically reused or cleaned.
+
+This uses trusted local parents, quiescent archive input and cooperating Store
+writers. Windows directory-sync limitations remain; no new power-loss guarantee
+or single cumulative I/O budget for the entire invocation is claimed.

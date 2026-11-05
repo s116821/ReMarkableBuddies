@@ -152,12 +152,22 @@ impl Store {
         admit: impl FnOnce(&StorePaths, &std::fs::File) -> anyhow::Result<()>,
         recover: impl FnOnce(&Store, Uuid) -> anyhow::Result<super::Index>,
     ) -> Result<Self, Refusal> {
-        Self::open_existing_using(paths, false, admit, recover)
+        Self::open_existing_using(paths, false, false, admit, recover)
     }
     fn open_existing_inner(paths: StorePaths, selected_aware: bool) -> Result<Self, Refusal> {
         Self::open_existing_using(
             paths,
             selected_aware,
+            false,
+            |_, _| Ok(()),
+            |store, generation| store.recover(generation),
+        )
+    }
+    pub(crate) fn open_existing_for_notebook_restore(paths: StorePaths) -> Result<Self, Refusal> {
+        Self::open_existing_using(
+            paths,
+            false,
+            true,
             |_, _| Ok(()),
             |store, generation| store.recover(generation),
         )
@@ -165,6 +175,7 @@ impl Store {
     fn open_existing_using(
         paths: StorePaths,
         selected_aware: bool,
+        notebook: bool,
         admit: impl FnOnce(&StorePaths, &std::fs::File) -> anyhow::Result<()>,
         recover: impl FnOnce(&Store, Uuid) -> anyhow::Result<super::Index>,
     ) -> Result<Self, Refusal> {
@@ -177,11 +188,12 @@ impl Store {
         let generation_root = paths.data.join("generations").join(generation.to_string());
         files::safe_path(&generation_root.join(super::notebook_generation::MARKER))
             .map_err(|_| Refusal::Unsupported)?;
-        if record::<u32>(&generation_root.join("format.json"), 64)?
-            == super::notebook_generation::VERSION
-            || generation_root
-                .join(super::notebook_generation::MARKER)
-                .exists()
+        if !notebook
+            && (record::<u32>(&generation_root.join("format.json"), 64)?
+                == super::notebook_generation::VERSION
+                || generation_root
+                    .join(super::notebook_generation::MARKER)
+                    .exists())
         {
             // These are legacy maintenance admissions. Explicit notebook
             // preparation/history/backup use their separately validated APIs.
@@ -194,7 +206,10 @@ impl Store {
         ] {
             directory(path)?;
         }
-        if selected_aware {
+        if notebook {
+            super::notebook_generation::validate_ready(&paths, actor, generation)
+                .map_err(|_| Refusal::Unsupported)?;
+        } else if selected_aware {
             super::selection::validate_generation(&generation_root, actor, generation)
                 .map_err(|_| Refusal::Unsupported)?;
         } else if record::<u32>(&generation_root.join("format.json"), 64)? != FORMAT {

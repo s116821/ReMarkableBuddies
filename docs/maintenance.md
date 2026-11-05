@@ -38,6 +38,7 @@ native-page qualification. Individual guides identify remaining companion work.
 | Export or inspect a selected archive | [Selected archives](host-selection-archives.md) |
 | Export an ordinary owned archive | [Ordinary export](ordinary-export.md) |
 | Restore an ordinary archive into an existing ordinary Store | [Ordinary restore](ordinary-restore.md) |
+| Restore a complete same-actor notebook archive | [Notebook restore](ordinary-restore.md#same-actor-notebook-archives) |
 
 ## Source caches and conversations
 
