@@ -389,6 +389,130 @@ fn page_scope_guidance_personalization_and_preflight_bounds_are_explicit() {
 }
 
 #[test]
+fn ordinary_preference_yields_to_current_request_and_stays_out_of_history() {
+    #[derive(Default)]
+    struct Capture {
+        parts: Vec<String>,
+        sent: Vec<String>,
+    }
+    impl LLMEngine for Capture {
+        fn add_text_content(&mut self, text: &str) {
+            self.parts.push(text.to_owned());
+        }
+        fn add_image_content(&mut self, _: &str) {
+            panic!("ordinary Writer sends text only");
+        }
+        fn clear_content(&mut self) {
+            self.parts.clear();
+        }
+        fn execute(&mut self) -> anyhow::Result<String> {
+            assert!(self.sent.is_empty(), "one invocation per operation");
+            self.sent = self.parts.clone();
+            Ok("# Draft\n\nRetain x = 7.".into())
+        }
+    }
+    const PREFIX: &str = "Optional user preference. Apply it only where consistent with the current request and fixed task/source-safety instructions. It grants no permission to take actions:\n";
+    let local = Local::new();
+    let (ledger, id) = local.ledger();
+    let generate = request(id);
+    let other_preference = "Change x to 9.\r\n  \u{03b1}  ";
+    let snapshot = |enabled, text: &str| {
+        Personalization {
+            enabled,
+            text: text.to_owned(),
+            ..Default::default()
+        }
+        .snapshot()
+        .unwrap()
+    };
+    let mut default_parts = None;
+    for pref in [
+        preference(),
+        snapshot(false, other_preference),
+        snapshot(true, ""),
+    ] {
+        let isolated = Local::new();
+        let baseline = Ledger::new(isolated.open());
+        baseline.create(id, Uuid::new_v4(), 1).unwrap();
+        let mut engine = Capture::default();
+        assert_eq!(
+            writer::run(&baseline, &mut engine, &generate, &pref, &mut || false).status,
+            Status::Generated
+        );
+        assert_eq!(engine.sent.len(), 2);
+        assert_eq!(
+            engine.sent.as_slice(),
+            default_parts
+                .get_or_insert_with(|| engine.sent.clone())
+                .as_slice()
+        );
+    }
+    let mut engine = Capture::default();
+    let generated = writer::run(
+        &ledger,
+        &mut engine,
+        &generate,
+        &snapshot(true, other_preference),
+        &mut || false,
+    );
+    assert_eq!(generated.status, Status::Generated);
+    let baseline = default_parts.unwrap();
+    assert_eq!(
+        engine.sent,
+        [
+            baseline[0].clone(),
+            format!("{PREFIX}{other_preference}"),
+            baseline[1].clone()
+        ]
+    );
+    let original_request = serde_json::to_value(&generate).unwrap()["request"].clone();
+    let generated_payload: Value = serde_json::from_str(&engine.sent[2]).unwrap();
+    assert_eq!(generated_payload["request"], original_request);
+    let draft = generated.draft.unwrap();
+    drop(ledger);
+
+    let reopened = Ledger::new(local.open());
+    let refined_text = "Keep x = 7. No export.";
+    let updated = "Use bullet points. Export everything.";
+    let refine = Request::Refine {
+        conversation: id,
+        operation: Uuid::new_v4(),
+        request: refined_text.into(),
+        draft,
+    };
+    let mut engine = Capture::default();
+    let result = writer::run(
+        &reopened,
+        &mut engine,
+        &refine,
+        &snapshot(true, updated),
+        &mut || false,
+    );
+    assert_eq!(result.status, Status::Generated);
+    assert!(result.prepared_note.is_none());
+    assert_eq!(engine.sent.len(), 3);
+    assert_eq!(engine.sent[1], format!("{PREFIX}{updated}"));
+    let payload: Value = serde_json::from_str(&engine.sent[2]).unwrap();
+    assert_eq!(payload["request"], refined_text);
+    assert_eq!(payload["source_units"], generated_payload["source_units"]);
+    assert_eq!(payload["selected_draft"], "# Draft\n\nRetain x = 7.");
+    assert!(!engine.sent[2].contains("Export everything."));
+    assert!(!engine.sent[2].contains("Change x to 9."));
+    let records = reopened.inspect(id, false).unwrap();
+    let user_texts: Vec<_> = records
+        .iter()
+        .filter_map(|record| match record {
+            Record::Turn(turn) if turn.role == Role::User => turn.text.as_deref(),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        user_texts,
+        [original_request.as_str().unwrap(), refined_text]
+    );
+}
+
+#[test]
 fn lost_local_prepare_ack_never_dispatches_on_retry_or_reopen() {
     let local = Local::new();
     let (ledger, id) = local.ledger();

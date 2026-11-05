@@ -75,6 +75,25 @@ enum RenderOutcome {
 }
 
 impl<M: LLMEngine> Orchestrator<M> {
+    /// Continue an explicitly acknowledged selected input. This consumes current
+    /// stored data only; installed acquisition and native output remain separate.
+    pub fn run_selected_prepared(
+        &mut self,
+        token: crate::storage::selection::SelectionToken,
+        root: crate::conversation::IntentRecordRef,
+        user: crate::conversation::IntentRecordRef,
+        capture: crate::storage::Uuid,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.memory.is_none(),
+            "Selected prepared entry requires a reviewed combined subject-memory admission set"
+        );
+        let mut attempt =
+            Attempt::prepare_selected(&self.ledger, &self.workflow, token, root, user, capture)?;
+        self.workflow.begin_iteration()?;
+        attempt.check_selected()?;
+        self.run_prepared(&mut attempt)
+    }
     pub fn new(workflow: Workflow, llm: M, ledger: Ledger) -> Self {
         Self {
             workflow,
@@ -163,6 +182,22 @@ impl<M: LLMEngine> Orchestrator<M> {
 
         // Step 2: Capture screenshot (of current/question page)
         let acquired = self.workflow.acquire_reader_evidence()?;
+        #[cfg(target_os = "linux")]
+        if let Some(request) = self.workflow.selected_resident_conversation(&acquired)? {
+            use super::resident_output::SelectedConversationRequest;
+            let super::AcquiredEvidence::ResidentHistorical(capture) = acquired else {
+                anyhow::bail!("selected conversation requires the retained native source");
+            };
+            return match request {
+                SelectedConversationRequest::BlankStart(conversation) => {
+                    self.run_blank_start(conversation, &capture)
+                }
+                SelectedConversationRequest::WriterRefinement {
+                    request,
+                    require_current_draft,
+                } => self.run_resident_writer_refinement(&request, &capture, require_current_draft),
+            };
+        }
         let mut attempt = Attempt::prepare(&self.ledger, acquired)?;
         let result = self.run_prepared(&mut attempt);
         match &result {
@@ -191,6 +226,186 @@ impl<M: LLMEngine> Orchestrator<M> {
         }
         result
     }
+    #[cfg(target_os = "linux")]
+    fn run_blank_start(
+        &mut self,
+        selected_conversation: Option<crate::storage::Uuid>,
+        capture: &crate::conversation::ResidentSourceCapture,
+    ) -> Result<()> {
+        use super::resident_output::ResidentOutputOutcome;
+        use crate::storage::{Namespace, Uuid};
+
+        let association = self.ledger.resident_answer_association(capture)?;
+        let conversation = selected_conversation
+            .or_else(|| {
+                association
+                    .as_ref()
+                    .map(|binding| binding.receipt().conversation)
+            })
+            .unwrap_or_else(Uuid::new_v4);
+        if let Some(association) = &association {
+            anyhow::ensure!(
+                association.receipt().conversation == conversation,
+                "blank start target belongs to a different conversation"
+            );
+        } else {
+            // An existing unbound root can represent a previously interrupted
+            // insertion. Only a fresh root may start a new blank page.
+            anyhow::ensure!(
+                self.ledger
+                    .expected(Namespace::Conversation, conversation)?
+                    .0
+                    .is_empty(),
+                "blank start already exists without a resolved page binding"
+            );
+            let created_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_millis()
+                .try_into()?;
+            self.ledger
+                .create(conversation, Uuid::new_v4(), created_ms)?;
+        }
+        match self.workflow.render_resident_answer(
+            &self.ledger,
+            conversation,
+            "",
+            association.as_ref(),
+            &mut || Ok(()),
+        )? {
+            ResidentOutputOutcome::SubmittedUnverified => {
+                info!("Blank conversation page submitted")
+            }
+            ResidentOutputOutcome::ReusedWithoutWrite => {
+                info!("Blank conversation reopened on existing bound page")
+            }
+            ResidentOutputOutcome::Unavailable | ResidentOutputOutcome::Unresolved => {
+                anyhow::bail!("blank conversation page placement unresolved");
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn run_resident_writer_refinement(
+        &mut self,
+        request: &crate::writer::Request,
+        capture: &crate::conversation::ResidentSourceCapture,
+        require_current_draft: bool,
+    ) -> Result<()> {
+        use super::resident_output::ResidentOutputOutcome;
+        use crate::{storage::Namespace, writer};
+
+        let writer::Request::Refine {
+            conversation,
+            draft,
+            ..
+        } = request
+        else {
+            anyhow::bail!("native Writer placement requires a refinement request");
+        };
+        let owner = writer::Owner::acquire(self.ledger.store())
+            .ok_or_else(|| anyhow::anyhow!("Writer is already active"))?;
+        let expected = self
+            .ledger
+            .expected(Namespace::Conversation, *conversation)?;
+        if require_current_draft {
+            use crate::conversation::{Mode, Outcome, Record, Role};
+            let records = self.ledger.inspect(*conversation, false)?;
+            let latest = records
+                .iter()
+                .filter_map(|record| match record {
+                    Record::Turn(turn)
+                        if turn.mode == Mode::Writer
+                            && turn.role == Role::Assistant
+                            && turn.outcome == Outcome::Generated =>
+                    {
+                        Some(turn)
+                    }
+                    _ => None,
+                })
+                .max_by_key(|turn| turn.sequence);
+            anyhow::ensure!(
+                latest.is_some_and(|turn| turn.id == *draft),
+                "Writer tablet request no longer names the current draft"
+            );
+        }
+        let selection =
+            self.ledger
+                .select_writer_for_flow(*conversation, *draft, expected.clone())?;
+        let (_, source) = selection.values()?;
+        anyhow::ensure!(
+            source.document.document == capture.document(),
+            "Writer draft belongs to a different source document"
+        );
+        let association_before = self.ledger.resident_answer_association(capture)?;
+        anyhow::ensure!(
+            association_before
+                .as_ref()
+                .is_none_or(|association| association.receipt().conversation == *conversation),
+            "Writer target belongs to a different conversation"
+        );
+        if require_current_draft {
+            info!(
+                "Installed Writer refinement accepted: {}",
+                request.operation()
+            );
+        }
+        let mut produced = None;
+        let report = writer::run_owned(
+            &self.ledger,
+            &mut self.llm,
+            request,
+            &self.personalization,
+            &mut || self.workflow.check_request_progress().is_err(),
+            writer::OwnedRun {
+                owner: &owner,
+                expected_root: Some(expected),
+                produced: &mut produced,
+            },
+        );
+        anyhow::ensure!(
+            report.status == writer::Status::Generated,
+            "Writer refinement did not generate a fresh draft"
+        );
+        let selected =
+            produced.ok_or_else(|| anyhow::anyhow!("fresh Writer selection unavailable"))?;
+        let (draft, source) = selected.values()?;
+        anyhow::ensure!(
+            source.document.document == capture.document()
+                && self
+                    .ledger
+                    .expected(Namespace::Conversation, *conversation)?
+                    == selected.root,
+            "Writer draft changed before page placement"
+        );
+        let association = self.ledger.resident_answer_association(capture)?;
+        anyhow::ensure!(
+            association.as_ref().map(|a| a.binding_revision())
+                == association_before.as_ref().map(|a| a.binding_revision()),
+            "Writer page association changed during refinement"
+        );
+        let (title, body) = writer::parse_draft(
+            draft
+                .text
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("Writer draft text unavailable"))?,
+        )?;
+        let text = format!("{title}\n\n{body}\n");
+        self.workflow.validate_resident_new_page_text(&text)?;
+        anyhow::ensure!(
+            self.workflow.render_resident_answer(
+                &self.ledger,
+                *conversation,
+                &text,
+                association.as_ref(),
+                &mut || Ok(())
+            )? == ResidentOutputOutcome::SubmittedUnverified,
+            "Writer draft generated but native placement is unresolved"
+        );
+        info!("Writer refinement submitted to the resident page");
+        Ok(())
+    }
+
     fn run_prepared(&mut self, attempt: &mut Attempt) -> Result<()> {
         let personalization = self.personalization.clone();
         let images = attempt.images(&self.ledger)?;
@@ -208,8 +423,12 @@ impl<M: LLMEngine> Orchestrator<M> {
         // - Detect outlined or highlighted region
         // - Extract question text
         // - Generate answer
-        let result =
-            self.analyze_and_answer(screenshot_base64, screenshot_png_data, &encoded[1..])?;
+        let result = self.analyze_and_answer(
+            attempt,
+            screenshot_base64,
+            screenshot_png_data,
+            &encoded[1..],
+        )?;
 
         match result {
             None => {
@@ -231,7 +450,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                     .iter()
                     .map(|bytes| STANDARD.encode(bytes))
                     .collect();
-                if let Some(failure) = self.verify_question(&result, &verification)? {
+                if let Some(failure) = self.verify_question(attempt, &result, &verification)? {
                     info!(
                         "Independent question reading disagreed or was uncertain; no answer written"
                     );
@@ -253,7 +472,8 @@ impl<M: LLMEngine> Orchestrator<M> {
                 attempt.interpret(&self.ledger, &result.question)?;
                 let mut memory_view = None;
                 if self.memory.is_some() || personalization.effective_text().is_some() {
-                    let enriched = self.enrich_answer(&mut result, &verification, &personalization);
+                    let enriched =
+                        self.enrich_answer(attempt, &mut result, &verification, &personalization);
                     if let Err(error) = enriched {
                         log::warn!("Subject memory answer was not completed");
                         self.workflow.report_failure(Failure::Provider)?;
@@ -319,11 +539,104 @@ impl<M: LLMEngine> Orchestrator<M> {
         allow_native: bool,
     ) -> Result<()> {
         self.workflow.check_request_progress()?;
+        attempt.check_selected()?;
         attempt.generated(
             &self.ledger,
             Workflow::compose_qa(&result.question, &result.answer, result.selection_center),
         )?;
-        if !attempt.legacy_output || !allow_native {
+        if attempt.is_selected() {
+            anyhow::bail!("Selected Generated draft acknowledged; qualified Pending/native output unavailable");
+        }
+        if !allow_native {
+            attempt.outcome(
+                &self.ledger,
+                true,
+                Outcome::Failed,
+                AttemptReason::NativeOutputUnavailable,
+            )?;
+            return Ok(());
+        }
+        #[cfg(target_os = "linux")]
+        if attempt.resident_output() {
+            let text =
+                Workflow::compose_qa(&result.question, &result.answer, result.selection_center);
+            let conversation = attempt.user.conversation;
+            let association = attempt.resident_answer.clone();
+            let mut output_started = false;
+            let rendered = self.workflow.render_resident_answer(
+                &self.ledger,
+                conversation,
+                &text,
+                association.as_ref(),
+                &mut || {
+                    if !output_started {
+                        attempt.outcome(
+                            &self.ledger,
+                            true,
+                            Outcome::ReconcileRequired,
+                            AttemptReason::OutputPending,
+                        )?;
+                        output_started = true;
+                    }
+                    Ok(())
+                },
+            );
+            let recorded = match &rendered {
+                Ok(super::resident_output::ResidentOutputOutcome::Unavailable) => attempt.outcome(
+                    &self.ledger,
+                    true,
+                    Outcome::Failed,
+                    AttemptReason::NativeOutputUnavailable,
+                ),
+                Ok(super::resident_output::ResidentOutputOutcome::Unresolved) => attempt.outcome(
+                    &self.ledger,
+                    true,
+                    Outcome::ReconcileRequired,
+                    AttemptReason::DeviceUncertain,
+                ),
+                Ok(super::resident_output::ResidentOutputOutcome::SubmittedUnverified) => attempt
+                    .outcome(
+                        &self.ledger,
+                        true,
+                        Outcome::ReconcileRequired,
+                        AttemptReason::SubmittedUnverified,
+                    ),
+                Ok(super::resident_output::ResidentOutputOutcome::ReusedWithoutWrite) => attempt
+                    .outcome(
+                        &self.ledger,
+                        true,
+                        Outcome::Failed,
+                        AttemptReason::NativeOutputUnavailable,
+                    ),
+                Err(_)
+                    if !output_started
+                        && self.workflow.input_failed()
+                        && !self.workflow.runtime_failed() =>
+                {
+                    attempt.outcome(
+                        &self.ledger,
+                        true,
+                        Outcome::Canceled,
+                        AttemptReason::Canceled,
+                    )
+                }
+                Err(_) => attempt.outcome(
+                    &self.ledger,
+                    true,
+                    Outcome::ReconcileRequired,
+                    AttemptReason::DeviceUncertain,
+                ),
+            };
+            if let Err(recording) = recorded {
+                return Err(anyhow::anyhow!(
+                    "resident output {:?}; terminal recording failed: {recording:#}",
+                    rendered.as_ref().err()
+                ));
+            }
+            rendered?;
+            return Ok(());
+        }
+        if !attempt.legacy_output() {
             attempt.outcome(
                 &self.ledger,
                 true,
@@ -384,10 +697,12 @@ impl<M: LLMEngine> Orchestrator<M> {
     /// Returns None if no clear selection/question is found.
     fn analyze_and_answer(
         &mut self,
+        attempt: &Attempt,
         screenshot_base64: &str,
         screenshot_png_data: Vec<u8>,
         details: &[String],
     ) -> Result<Option<AnalysisResult>> {
+        attempt.check_selected()?;
         info!("Sending analysis + answer proposal");
 
         self.llm.clear_content();
@@ -398,8 +713,14 @@ impl<M: LLMEngine> Orchestrator<M> {
         }
 
         let mut progress_failed = false;
+        // Stored source readback, recipe verification, base64 encoding and model
+        // payload assembly all consume the original acquisition budget. Retire
+        // that deadline only at the actual first provider-admission boundary.
+        self.workflow.deliver_reader_acquisition()?;
         let response = match self.llm.execute_with_progress(&mut || {
-            let result = self.workflow.check_request_progress();
+            let result = attempt
+                .check_selected()
+                .and_then(|_| self.workflow.check_request_progress());
             progress_failed |= result.is_err();
             result
         }) {
@@ -413,6 +734,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         };
         self.workflow.check_request_progress()?;
         info!("Analysis response received ({} bytes)", response.len());
+        attempt.check_selected()?;
         Ok(Self::parse_analysis_response(
             &response,
             screenshot_png_data,
@@ -477,9 +799,11 @@ impl<M: LLMEngine> Orchestrator<M> {
 
     fn verify_question(
         &mut self,
+        attempt: &Attempt,
         result: &AnalysisResult,
         images: &[String],
     ) -> Result<Option<Failure>> {
+        attempt.check_selected()?;
         let Some(bounds) = &result._question_box else {
             return Ok(Some(Failure::Transcription));
         };
@@ -502,7 +826,9 @@ impl<M: LLMEngine> Orchestrator<M> {
         }
         let mut progress_failed = false;
         let reading = match self.llm.execute_with_progress(&mut || {
-            let result = self.workflow.check_request_progress();
+            let result = attempt
+                .check_selected()
+                .and_then(|_| self.workflow.check_request_progress());
             progress_failed |= result.is_err();
             result
         }) {
@@ -520,6 +846,7 @@ impl<M: LLMEngine> Orchestrator<M> {
             "Independent question reading received ({} bytes)",
             reading.len()
         );
+        attempt.check_selected()?;
         Ok((!Self::transcriptions_agree(&result.question, &reading))
             .then_some(Failure::Transcription))
     }
@@ -585,10 +912,12 @@ impl<M: LLMEngine> Orchestrator<M> {
 
     fn enrich_answer(
         &mut self,
+        attempt: &Attempt,
         result: &mut AnalysisResult,
         images: &[String],
         preference: &crate::config::PersonalizationSnapshot,
     ) -> Result<Option<crate::memory::QueryResult>> {
+        attempt.check_selected()?;
         self.workflow.check_request_progress()?;
         let retrieved = self
             .memory
@@ -604,6 +933,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                     .map_err(|_| anyhow::anyhow!("subject memory retrieval failed"))
             })
             .transpose()?;
+        attempt.check_selected()?;
         self.workflow.check_request_progress()?;
         use crate::memory::Status;
         if let Some(view) = &retrieved {
@@ -633,7 +963,11 @@ impl<M: LLMEngine> Orchestrator<M> {
                 view,
                 self.ledger.store(),
                 Some(preference),
-                &mut || workflow.check_request_progress(),
+                &mut || {
+                    attempt
+                        .check_selected()
+                        .and_then(|_| workflow.check_request_progress())
+                },
             )
         } else {
             crate::memory::context::answer_with_preference(
@@ -642,13 +976,27 @@ impl<M: LLMEngine> Orchestrator<M> {
                 images,
                 usable,
                 Some(preference),
-                &mut || workflow.check_request_progress(),
+                &mut || {
+                    attempt
+                        .check_selected()
+                        .and_then(|_| workflow.check_request_progress())
+                },
             )
         }?;
+        attempt.check_selected()?;
         self.workflow.check_request_progress()?;
         Ok(retrieved)
     }
 
+    /// Render the answer on the next page
+    ///
+    /// Simplified flow:
+    /// 1. Store original page screenshot for later comparison
+    /// 2. Navigate right to next page
+    /// 3. Compare to original to verify we actually moved
+    /// 4. Check if page is valid (blank or existing QA page)
+    /// 5. If not valid or didn't move â†’ verify the source and record a non-ink failure
+    /// 6. If valid â†’ render Q&A on that page
     fn render_answer(&mut self, result: &AnalysisResult) -> Result<RenderOutcome> {
         anyhow::ensure!(
             !self.workflow.is_selected(),

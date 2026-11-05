@@ -61,6 +61,10 @@ impl SelectedDomainProjection {
                                     s.id == *source
                                         && s.conversation == conversation
                                         && s.turn == turn.id,
+                                Record::ResidentCapture(s) =>
+                                    s.id == *source
+                                        && s.conversation == conversation
+                                        && s.turn == turn.id,
                                 Record::LegacyCapture(s) =>
                                     s.id == *source
                                         && s.conversation == conversation
@@ -105,6 +109,10 @@ impl SelectedDomainProjection {
                 }
                 Record::DevelopmentCapture(capture) => {
                     self.require_turn(capture.turn, conversation)?;
+                }
+                Record::ResidentCapture(capture) => {
+                    self.require_turn(capture.turn, conversation)?;
+                    document = Some(capture.before.document);
                 }
                 Record::LegacyCapture(capture) => {
                     self.require_turn(capture.turn, conversation)?;
@@ -505,6 +513,7 @@ pub(super) fn conversation_id(record: &Record) -> Uuid {
         Record::Capture(r) => r.conversation,
         Record::LegacyCapture(r) => r.conversation,
         Record::DevelopmentCapture(r) => r.conversation,
+        Record::ResidentCapture(r) => r.conversation,
         Record::OutcomeFact(r) => r.conversation,
         Record::Binding(r) => r.conversation,
         Record::Export(r) => r.conversation,

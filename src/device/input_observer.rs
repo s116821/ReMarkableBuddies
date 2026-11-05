@@ -293,6 +293,10 @@ impl InputObserver {
         contacts
     }
 
+    pub(super) fn enable_blank_start(&mut self) {
+        self.reducer.enable_blank_start();
+    }
+
     /// Call frequently, including while waiting for persistence. A failed poll
     /// permanently invalidates this observer and the caller's saved history.
     /// Process every Invalidated event before considering any action returned
@@ -608,6 +612,29 @@ impl InputObserver {
         observer
     }
 
+    #[cfg(test)]
+    pub(super) fn replay_seeded_release() -> Self {
+        let mut observer =
+            Self::replay_request(vec![(true, vec![(3, 47, 0), (3, 57, -1), (0, 0, 0)])]);
+        observer.frames = ContactFrames::seeded(
+            vec![Slot {
+                tracking: Some(7),
+                x: Some(80),
+                y: Some(90),
+            }],
+            0,
+        )
+        .unwrap();
+        let contacts = observer.frames.contacts().unwrap();
+        observer.reducer.frame(
+            &Self::transform(observer.model, contacts),
+            observer.clock.elapsed(),
+        );
+        // This is the same initial-input cancellation used after the actual
+        // kernel slot snapshot in poll_inner; a seeded lift cannot authorize.
+        observer.reducer.cancel();
+        observer
+    }
     #[cfg(test)]
     pub(super) fn replay_request(
         batches: Vec<(bool, Vec<super::owned_pen_window::Event>)>,

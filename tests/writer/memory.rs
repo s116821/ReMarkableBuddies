@@ -254,6 +254,68 @@ struct ViewProvider {
     view: Option<memory::QueryResult>,
     queries: AtomicUsize,
 }
+
+#[test]
+fn ordinary_memory_usable_partial_is_a_snapshot_not_an_atomic_freshness_seal() {
+    let local = Local::new();
+    let (ledger, id) = local.ledger();
+    let profile = Uuid::new_v4();
+    let memory = memory::LocalMemory::new_local(ledger.store().clone(), profile).unwrap();
+    remember(&memory, profile, memory::Scope::Global, "snapshot-canary");
+    let mut view = memory
+        .query(&memory::Query::new("study notes".into(), 2))
+        .unwrap();
+    view.status = memory::Status::Partial;
+    let fact = view.context.facts[0].clone();
+    let expected = ledger
+        .store()
+        .heads(Namespace::SubjectMemory, fact.record)
+        .unwrap()
+        .iter()
+        .map(|head| head.revision_id)
+        .collect();
+    let other = memory::LocalMemory::new_local(ledger.store().clone(), profile).unwrap();
+    let key = fact.fact.key.clone();
+    let mut engine = Capture {
+        hook: Some(Box::new(move || {
+            other
+                .forget(memory::Forget {
+                    operation: Uuid::new_v4(),
+                    expected,
+                    key,
+                })
+                .unwrap();
+        })),
+        ..Default::default()
+    };
+    let provider = ViewProvider {
+        store: ledger.store().clone(),
+        view: Some(view),
+        queries: AtomicUsize::new(0),
+    };
+    assert_eq!(
+        writer::run_with_subject_memory(
+            &ledger,
+            &mut engine,
+            &request(id),
+            &preference(),
+            Some(&provider),
+            &mut || false
+        )
+        .status,
+        Status::Generated
+    );
+    assert_eq!(provider.queries.load(Ordering::SeqCst), 1);
+    assert!(engine.calls[0]
+        .iter()
+        .any(|part| part.contains("snapshot-canary") && part.contains(&fact.revision.to_string())));
+    assert!(ledger
+        .store()
+        .heads(Namespace::SubjectMemory, fact.record)
+        .unwrap()
+        .iter()
+        .all(|head| head.kind == remarkable_reader_buddy::storage::Kind::Tombstone));
+}
 impl Provider for ViewProvider {
     fn admit_ordinary_writer(&self, store: &Store) -> anyhow::Result<()> {
         anyhow::ensure!(
@@ -465,7 +527,7 @@ fn ordinary_memory_cancellation_replacement_and_commit_races_keep_writer_guards(
     }
 }
 
-fn invoke(config: &PathBuf, request: &Request, model: bool) -> Value {
+fn invoke(config: &std::path::Path, request: &Request, model: bool) -> Value {
     use std::process::{Command, Stdio};
     let mut command = Command::new(env!("CARGO_BIN_EXE_reader-buddy"));
     command
@@ -507,7 +569,10 @@ fn ordinary_memory_actual_command_enriches_but_export_ignores_selected_configura
     remember(&memory, profile, memory::Scope::Global, "command-canary");
     drop(memory);
     drop(ledger);
-    let api = Api::new(vec![reply("# Command note\n\nx = 7 (page 1).")]);
+    let api = Api::new(vec![
+        reply("# Command note\n\nx = 7 (page 1)."),
+        reply("# Disabled note\n\nx = 7 (page 1)."),
+    ]);
     let mut config = remarkable_reader_buddy::config::Config {
         model: Some("fixture-model".into()),
         base_url: Some(api.origin.clone()),
@@ -544,6 +609,18 @@ fn ordinary_memory_actual_command_enriches_but_export_ignores_selected_configura
     };
     assert_eq!(invoke(&path, &prepare, false)["status"], "prepared-export");
     assert_eq!(api.count(), 1);
+    config.memory.enabled = false;
+    std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+    let mut disabled = req.clone();
+    let Request::Generate { operation, .. } = &mut disabled else {
+        unreachable!()
+    };
+    *operation = Uuid::new_v4();
+    assert_eq!(invoke(&path, &disabled, true)["status"], "generated");
+    let captured = api.requests.lock().unwrap();
+    assert_eq!(captured.len(), 2);
+    assert!(!captured[1].to_string().contains("command-canary"));
+    assert!(!captured[1].to_string().contains("ASSOCIATIVE_MEMORY"));
 }
 
 #[test]

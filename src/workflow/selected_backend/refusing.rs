@@ -5,20 +5,34 @@ use anyhow::Result;
 use image::DynamicImage;
 use std::time::Duration;
 
+#[cfg(test)]
 enum ReadOnlyTransport {
     Unavailable,
     Development(Option<Box<remarkable_open_sdk::development_capture::ReadOnlyDevelopmentCapture>>),
+    #[cfg(target_os = "linux")]
+    Resident(std::collections::VecDeque<crate::device::request_input::ReleasedReaderInput>),
 }
 
 pub(in crate::workflow) struct RefusingBackend {
+    #[cfg(test)]
     transport: ReadOnlyTransport,
 }
 impl RefusingBackend {
     pub(in crate::workflow) fn new() -> Self {
         Self {
+            #[cfg(test)]
             transport: ReadOnlyTransport::Unavailable,
         }
     }
+    #[cfg(all(test, target_os = "linux"))]
+    pub(in crate::workflow) fn with_resident_releases(
+        releases: Vec<crate::device::request_input::ReleasedReaderInput>,
+    ) -> Self {
+        Self {
+            transport: ReadOnlyTransport::Resident(releases.into()),
+        }
+    }
+    #[cfg(test)]
     pub(in crate::workflow) fn with_capture(
         capture: remarkable_open_sdk::development_capture::ReadOnlyDevelopmentCapture,
     ) -> Self {
@@ -29,23 +43,23 @@ impl RefusingBackend {
 }
 impl DeviceBackend for RefusingBackend {
     fn acquisition_kind(&self) -> crate::device::backend::AcquisitionKind {
-        match &self.transport {
-            ReadOnlyTransport::Development(_) => {
-                crate::device::backend::AcquisitionKind::Development
-            }
-            ReadOnlyTransport::Unavailable => crate::device::backend::AcquisitionKind::Unsupported,
+        #[cfg(test)]
+        if matches!(self.transport, ReadOnlyTransport::Development(_)) {
+            return crate::device::backend::AcquisitionKind::Development;
         }
+        crate::device::backend::AcquisitionKind::Unsupported
     }
     fn capture_development(
         &mut self,
     ) -> Result<remarkable_open_sdk::development_capture::ReadOnlyDevelopmentCapture> {
-        match &mut self.transport {
-            ReadOnlyTransport::Development(capture) => capture
+        #[cfg(test)]
+        if let ReadOnlyTransport::Development(capture) = &mut self.transport {
+            return capture
                 .take()
                 .map(|capture| *capture)
-                .ok_or_else(|| anyhow::anyhow!("Owned development capture consumed")),
-            ReadOnlyTransport::Unavailable => anyhow::bail!("Development acquisition unsupported"),
+                .ok_or_else(|| anyhow::anyhow!("Owned development capture consumed"));
         }
+        anyhow::bail!("Development acquisition unsupported")
     }
     fn capture(&mut self) -> Result<Frame> {
         anyhow::bail!("Selected acquisition unsupported")
@@ -56,11 +70,24 @@ impl DeviceBackend for RefusingBackend {
     fn check_request_guard(&mut self) -> Result<()> {
         // This check protects only immutable, already-owned transport. It never
         // calls native setup, validates a current device, or grants effect authority.
-        anyhow::ensure!(
-            !matches!(self.transport, ReadOnlyTransport::Unavailable),
-            "Selected operation requires context dispatch"
-        );
-        Ok(())
+        #[cfg(test)]
+        if !matches!(self.transport, ReadOnlyTransport::Unavailable) {
+            return Ok(());
+        }
+        anyhow::bail!("Selected operation requires context dispatch")
+    }
+    #[cfg(all(test, target_os = "linux"))]
+    fn wait_for_resident_reader(
+        &mut self,
+        progress: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<crate::device::request_input::ReleasedReaderInput> {
+        progress()?;
+        let ReadOnlyTransport::Resident(releases) = &mut self.transport else {
+            anyhow::bail!("No released resident gesture")
+        };
+        releases
+            .pop_front()
+            .ok_or_else(|| anyhow::anyhow!("No next genuine gesture"))
     }
     fn wait_for_trigger(&mut self) -> Result<()> {
         anyhow::bail!("Selected trigger unsupported")

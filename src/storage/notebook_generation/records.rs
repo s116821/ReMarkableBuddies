@@ -18,6 +18,15 @@ pub(in crate::storage) fn validate_records(
     index: &Index,
     records: &[(Envelope, String)],
 ) -> Result<()> {
+    validate_records_with_budget(root, index, records, None)
+}
+
+pub(in crate::storage) fn validate_records_with_budget(
+    root: &Path,
+    index: &Index,
+    records: &[(Envelope, String)],
+    mut budget: Option<&mut selection::SelectedReadBudget>,
+) -> Result<()> {
     for (envelope, _) in records {
         if envelope.domain_schema_version != 3 {
             continue;
@@ -30,9 +39,10 @@ pub(in crate::storage) fn validate_records(
                 else {
                     anyhow::bail!("notebook plan archive revision absent")
                 };
-                let bytes = files::read(
+                let bytes = files::read_with_budget(
                     &root.join("objects").join(&archive.media.sha256),
                     crate::writer::notebook::MAX_CANONICAL_BYTES as u64,
+                    budget.as_deref_mut(),
                 )?;
                 let source = archive.validate_bytes(&bytes)?;
                 plan.validate_source(&archive, &source)?;

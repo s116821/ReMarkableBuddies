@@ -20,6 +20,11 @@ const LEASE_NAME: &str = "activation.json";
 pub mod health;
 pub mod recovery;
 pub mod service;
+#[cfg(all(
+    feature = "development-resident-bootstrap",
+    feature = "development-input-diagnostics"
+))]
+pub(crate) mod writer_request;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -364,6 +369,8 @@ pub struct LeaseRecord {
     profile_sha256: [u8; 32],
     adapter_sha256: [u8; 32],
     recovery_profile_sha256: [u8; 32],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    companion: Option<String>,
 }
 impl LeaseRecord {
     pub fn new(
@@ -385,9 +392,16 @@ impl LeaseRecord {
             profile_sha256,
             adapter_sha256,
             recovery_profile_sha256,
+            companion: None,
         };
         record.validate()?;
         Ok(record)
+    }
+    fn with_companion(mut self, baseline: String) -> Result<Self> {
+        self.version = 3;
+        self.companion = Some(baseline);
+        self.validate()?;
+        Ok(self)
     }
     pub fn group(&self) -> &GroupBaseline {
         &self.group
@@ -409,10 +423,22 @@ impl LeaseRecord {
     }
     fn validate(&self) -> Result<()> {
         ensure!(
-            self.version == 2 && !self.activation.is_nil(),
+            ((self.version == 2 && self.companion.is_none())
+                || (self.version == 3 && self.companion.is_some()))
+                && !self.activation.is_nil(),
             "unsupported or empty lease"
         );
         self.group.validate()?;
+        if let Some(record) = &self.companion {
+            let original = service::baseline::ServiceBaseline::decode(record.as_bytes())?;
+            ensure!(
+                original.group().unit == "rm-sync.service"
+                    && original.group().group != self.group.group
+                    && original.group().mount_path == self.group.mount_path
+                    && original.group().context == self.group.context,
+                "companion lease context mismatch"
+            );
+        }
         self.stock.process.validate()?;
         validate_invocation(&self.buddy_invocation)?;
         ensure!(
@@ -540,6 +566,33 @@ impl Lease {
     pub fn record(&self) -> &LeaseRecord {
         &self.record
     }
+
+    /// Preserve the exact active record at a terminal name after recovery.
+    /// The recovery owner must verify the service postconditions first.
+    fn archive_recovered(&self) -> Result<()> {
+        self.current()?;
+        let active = CString::new(LEASE_NAME)?;
+        let terminal = CString::new(format!("recovered-{}.json", self.record.activation()))?;
+        let directory = self.directory.as_raw_fd();
+        // One move within the pinned directory. An existing archive is never
+        // replaced and a failed move leaves the active name occupied.
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                directory,
+                active.as_ptr(),
+                directory,
+                terminal.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if result != 0 {
+            return Err(std::io::Error::last_os_error()).context("archive recovered activation");
+        }
+        self.directory.sync_all()?;
+        Ok(())
+    }
+
     pub fn current(&self) -> Result<()> {
         ensure!(
             same_file(&self.file_metadata, &self.file.metadata()?)

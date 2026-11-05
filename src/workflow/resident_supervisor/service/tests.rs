@@ -462,3 +462,95 @@ fn stock_stop_is_fixed_nonblocking_and_never_replaces_a_job() {
         ]
     );
 }
+
+#[test]
+fn observation_progress_cancels_pending_child_and_reaps_it() {
+    let fixture = Fixture::new();
+    let marker = fixture.lease_dir().join("progress-child-ready");
+    let mut command =
+        python("import sys,time; open(sys.argv[1],'x').write('ready'); time.sleep(10)");
+    command.arg(&marker);
+    let start = Instant::now();
+    let error = run_with_progress(command, start + Duration::from_secs(3), &mut || {
+        ensure!(!marker.exists(), "caller canceled after child started");
+        Ok(())
+    })
+    .unwrap_err();
+    let failure = error.downcast_ref::<CommandFailure>().unwrap();
+    assert!(failure.reaped, "{failure:?}");
+    assert_eq!(
+        failure.error.to_string(),
+        "caller canceled after child started"
+    );
+    assert!(!std::path::Path::new(&format!("/proc/{}", failure.pid)).exists());
+    assert!(start.elapsed() < Duration::from_secs(3));
+}
+
+#[test]
+fn observation_progress_refuses_before_spawn_and_during_observation() {
+    let error = run_with_progress(
+        python("raise Exception('must not spawn')"),
+        Instant::now() + Duration::from_secs(1),
+        &mut || anyhow::bail!("cancel before spawn"),
+    )
+    .unwrap_err();
+    assert_eq!(error.to_string(), "cancel before spawn");
+    assert!(error.downcast_ref::<CommandFailure>().is_none());
+    let mut checks = 0;
+    let error = run_with_progress(
+        python("print('result')"),
+        Instant::now() + Duration::from_secs(3),
+        &mut || {
+            checks += 1;
+            ensure!(checks < 2, "cancel during observation");
+            Ok(())
+        },
+    )
+    .unwrap_err();
+    let failure = error.downcast_ref::<CommandFailure>().unwrap();
+    assert!(failure.reaped);
+    assert_eq!(failure.error.to_string(), "cancel during observation");
+}
+
+#[test]
+fn observation_progress_withholds_output_after_helper_was_reaped() {
+    let fixture = Fixture::new();
+    let directory = fixture.lease_dir();
+    let marker = directory.join("delivery-child-pid");
+    let release = directory.join("delivery-child-release");
+    let mut command = python(
+        "import os,sys,time; os.write(1,b'withhold this reply'); os.close(1); os.close(2); open(sys.argv[1],'x').write(str(os.getpid()))\nwhile not os.path.exists(sys.argv[2]): time.sleep(0.005)",
+    );
+    command.arg(&marker).arg(&release);
+    let mut ready_checks = 0;
+    let error = run_with_progress(
+        command,
+        Instant::now() + Duration::from_secs(3),
+        &mut || {
+            if let Ok(text) = std::fs::read_to_string(&marker) {
+                if let Ok(pid) = text.parse::<u32>() {
+                    // Both pipes were closed before readiness. Permit a full
+                    // polling pass to drain EOF before allowing child exit, so
+                    // cancellation after reap must be the final delivery check.
+                    ready_checks += 1;
+                    if ready_checks == 2 {
+                        std::fs::write(&release, b"exit")?;
+                    }
+                    ensure!(
+                        std::path::Path::new(&format!("/proc/{pid}")).exists(),
+                        "cancel after helper reaped"
+                    );
+                }
+            }
+            Ok(())
+        },
+    )
+    .unwrap_err();
+    let failure = error.downcast_ref::<CommandFailure>().unwrap();
+    assert!(failure.reaped);
+    assert_eq!(failure.error.to_string(), "cancel after helper reaped");
+    assert_eq!(
+        std::fs::read_to_string(marker).unwrap(),
+        failure.pid.to_string()
+    );
+}

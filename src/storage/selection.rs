@@ -4,6 +4,7 @@ pub use budget::{SelectedReadBudget, SelectedReadUsage};
 mod outbox;
 pub(crate) mod portable;
 mod publication;
+pub(crate) use outbox::InventoryRefusal;
 pub use outbox::{SelectedAttempt, SelectedAttemptRequest, SelectedAttemptState};
 mod retained;
 pub use retained::RetainedCommit;

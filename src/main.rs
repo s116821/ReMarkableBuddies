@@ -3,16 +3,69 @@ use clap::Parser;
 use dotenv::dotenv;
 use log::info;
 use remarkable_reader_buddy::config::{self, Config, Environment, Overrides};
-use remarkable_reader_buddy::storage::{files, sync::Worker, Store};
+use remarkable_reader_buddy::storage::{files, sync::Worker};
 use remarkable_reader_buddy::{OpenAI, Orchestrator, Workflow};
 use std::sync::Arc;
 use std::thread::sleep;
 use std::time::Duration;
 
+/// Existing ordinary stdin maintenance and selected history-file commands share
+/// their historical flag. Dispatch by operation and explicit input transport;
+/// decoding failures never fall through to another operation family.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum ConversationOperation {
+    Inspect,
+    Prepare,
+    Apply,
+    Status,
+    Context,
+    RecoverPending,
+}
+impl ConversationOperation {
+    fn selected(
+        self,
+        input: &std::path::Path,
+    ) -> Option<remarkable_reader_buddy::reader_runtime::Operation> {
+        use remarkable_reader_buddy::reader_runtime::Operation;
+        match self {
+            Self::Inspect if input != std::path::Path::new("-") => Some(Operation::Inspect),
+            Self::Context => Some(Operation::Context),
+            Self::RecoverPending => Some(Operation::RecoverPending),
+            _ => None,
+        }
+    }
+    fn ordinary(self) -> Option<remarkable_reader_buddy::conversation_maintenance::Operation> {
+        use remarkable_reader_buddy::conversation_maintenance::Operation;
+        match self {
+            Self::Inspect => Some(Operation::Inspect),
+            Self::Prepare => Some(Operation::Prepare),
+            Self::Apply => Some(Operation::Apply),
+            Self::Status => Some(Operation::Status),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(author, version = env!("READER_BUDDY_VERSION"))]
 #[command(about = "ReMarkable Reader Buddy - AI-powered reading assistant for reMarkable tablets")]
 pub struct Args {
+    /// Explicit one-shot disposable native Reader output; development build only.
+    #[cfg(all(
+        target_os = "linux",
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics",
+        not(feature = "installed-resident-output")
+    ))]
+    #[arg(long, exclusive = true)]
+    development_resident_output_plan: Option<std::path::PathBuf>,
+
+    /// Existing-only generation-inclusive accounting; no runtime activation
+    #[arg(long, exclusive = true)]
+    inspect_owned_data_v3: bool,
+    /// Count validated historical local selected-outbox records
+    #[arg(long, exclusive = true)]
+    inspect_selected_outbox: bool,
     /// Emit the embedded canonical-object schema without reading saved configuration
     #[arg(long, exclusive = true)]
     configuration_schema: bool,
@@ -38,8 +91,8 @@ pub struct Args {
     inspect_conversations: bool,
     /// Deliberate Linux-only logical deletion of one ordinary historical conversation
     #[arg(long,value_enum,requires="conversation_input",conflicts_with_all=["inspect_source_cache","source_cache_operation","source_cache_input","simulate","inspect_owned_data","api_key","model","base_url","trigger_corner","log_level","debug_dump","memory_operation","memory_input","sync_mode_operation","sync_mode_input","archive_operation","archive_input","personalization_operation","export_note","configuration_operation","basic_settings_operation","basic_settings_input","restore_operation","restore_input","model_settings_operation","model_settings_input","ordinary_export_operation","ordinary_export_input","memory_settings_operation","memory_settings_input","model_credential_operation","model_credential_input","credential_reference_operation","credential_reference_input"])]
-    conversation_operation: Option<remarkable_reader_buddy::conversation_maintenance::Operation>,
-    /// Exact-dash strict JSON only; no arbitrary input or deletion paths
+    conversation_operation: Option<ConversationOperation>,
+    /// Exact-dash JSON for ordinary maintenance; bounded file JSON for selected history
     #[arg(long, value_name = "INPUT", requires = "conversation_operation")]
     conversation_input: Option<std::path::PathBuf>,
 
@@ -172,6 +225,12 @@ fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_lo
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    if args.inspect_selected_outbox {
+        return remarkable_reader_buddy::outbox_status::run(
+            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+        )
+        .write_to(&mut std::io::stdout().lock());
+    }
     if args.configuration_schema {
         return config::schema::write_to(&mut std::io::stdout().lock());
     }
@@ -230,9 +289,19 @@ fn main() -> Result<()> {
         .write_to(&mut std::io::stdout().lock());
     }
     if let Some(operation) = args.conversation_operation {
+        let input = args.conversation_input.as_deref().expect("required input");
+        if let Some(selected) = operation.selected(input) {
+            let mut report = remarkable_reader_buddy::reader_runtime::run(
+                selected,
+                input,
+                std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+            );
+            report.write_to(&mut std::io::stdout().lock())?;
+            return Ok(());
+        }
         return remarkable_reader_buddy::conversation_maintenance::run(
-            operation,
-            args.conversation_input.as_deref().expect("required input"),
+            operation.ordinary().expect("ordinary operation family"),
+            input,
             std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
             &mut std::io::stdin().lock(),
         )
@@ -471,6 +540,14 @@ fn main() -> Result<()> {
         report.write_to(&mut std::io::stdout().lock())?;
         return Ok(());
     }
+    if args.inspect_owned_data_v3 {
+        let report = match Config::load(std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into)) {
+            Ok(config) => remarkable_reader_buddy::storage::inspection_v3::inspect_owned_data(&config.paths),
+            Err(_) => remarkable_reader_buddy::storage::inspection_v3::Inspection::configuration_unavailable(),
+        };
+        report.write_to(&mut std::io::stdout().lock())?;
+        return Ok(());
+    }
     if args.inspect_owned_data {
         let report = match Config::load(std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into)) {
             Ok(config) => remarkable_reader_buddy::storage::inspection::inspect_owned_data(&config.paths),
@@ -516,12 +593,24 @@ fn main() -> Result<()> {
         config.reader_enabled(),
         "Reader is disabled in saved settings"
     );
+    if config.reader.selection.is_none() {
+        remarkable_reader_buddy::memory::context::admit_ordinary(&config.memory)?;
+    }
+    let admitted_store = match remarkable_reader_buddy::reader_runtime::startup(&config) {
+        remarkable_reader_buddy::reader_runtime::StartupDecision::Ordinary(store) => store,
+        remarkable_reader_buddy::reader_runtime::StartupDecision::Report(mut report) => {
+            if config.reader.selection.is_none() {
+                return Err(report.into_ordinary_startup_error());
+            }
+            report.write_to(&mut std::io::stdout().lock())?;
+            return Ok(());
+        }
+    };
     #[cfg(target_os = "linux")]
     let service_health = match notification_environment {
         Some(environment) => environment.connect()?,
         None => None,
     };
-    remarkable_reader_buddy::memory::context::admit_ordinary(&config.memory)?;
     let effective = config::resolve(
         &config,
         Overrides {
@@ -542,7 +631,8 @@ fn main() -> Result<()> {
         .filter_module("ureq_proto", log::LevelFilter::Off)
         .init();
     info!("=== ReMarkable Reader Buddy Starting ===");
-    let store = Arc::new(Store::open(config.paths.clone())?);
+    let store = remarkable_reader_buddy::reader_runtime::ordinary_store(&config, admitted_store)
+        .map_err(|report| report.into_ordinary_startup_error())?;
     let _ordinary_runtime_lifetime =
         remarkable_reader_buddy::mode_maintenance::admit_ordinary(&store, config.sync.enabled)?;
     store.snapshot_config(&config)?;
@@ -571,6 +661,10 @@ fn main() -> Result<()> {
         None
     };
     let personalization = config.personalization_snapshot()?;
+    #[cfg(target_os = "linux")]
+    let resident_selection = remarkable_reader_buddy::workflow::resident_supervisor::recovery::activation::InstalledReaderSelection::load(
+        std::time::Instant::now() + Duration::from_secs(10),
+    )?;
     let workflow = Workflow::new(false, effective.trigger_corner, effective.debug_dump)?;
     sleep(Duration::from_millis(1000));
     let _sync_worker = Worker::google(store.clone(), config.sync)?;
@@ -579,6 +673,30 @@ fn main() -> Result<()> {
         let mut workflow = workflow;
         if let Some(health) = service_health {
             workflow.enable_service_health(health)?;
+        }
+        #[cfg(all(
+            feature = "development-resident-bootstrap",
+            feature = "development-input-diagnostics",
+            not(feature = "installed-resident-output")
+        ))]
+        anyhow::ensure!(
+            args.development_resident_output_plan.is_none() || resident_selection.is_some(),
+            "development output requires approved installed resident source profile"
+        );
+        if let Some(selection) = resident_selection {
+            workflow.configure_resident_source(selection, store.clone())?;
+            #[cfg(all(
+                feature = "development-resident-bootstrap",
+                feature = "development-input-diagnostics",
+                not(feature = "installed-resident-output")
+            ))]
+            if let Some(plan) = args.development_resident_output_plan.as_deref() {
+                workflow.configure_development_resident_output(plan)?;
+            } else {
+                workflow.configure_installed_resident_output()?;
+            }
+            #[cfg(feature = "installed-resident-output")]
+            workflow.configure_installed_resident_output()?;
         }
         workflow
     };
@@ -840,10 +958,19 @@ mod tests {
                 "credential-reference-input",
                 "credential-reference-operation",
                 "debug-dump",
+                #[cfg(all(
+                    target_os = "linux",
+                    feature = "development-resident-bootstrap",
+                    feature = "development-input-diagnostics",
+                    not(feature = "installed-resident-output")
+                ))]
+                "development-resident-output-plan",
                 "export-note",
                 "handwriting",
                 "inspect-conversations",
                 "inspect-owned-data",
+                "inspect-owned-data-v3",
+                "inspect-selected-outbox",
                 "inspect-source-cache",
                 "log-level",
                 "memory-input",
@@ -965,43 +1092,49 @@ mod tests {
 
     #[test]
     fn schema_discovery_is_exclusive_with_every_other_argument() {
-        for argument in Args::command().get_arguments() {
-            let Some(long) = argument.get_long() else {
-                continue;
-            };
-            if long == "configuration-schema" {
-                continue;
-            }
-            let mut argv = vec![
-                "reader-buddy".to_owned(),
-                "--configuration-schema".into(),
-                format!("--{long}"),
-            ];
-            if argument.get_action().takes_values() {
-                argv.push(
-                    argument
-                        .get_value_parser()
-                        .possible_values()
-                        .and_then(|mut values| values.next())
-                        .map(|v| v.get_name().to_owned())
-                        .unwrap_or_else(|| {
-                            if long == "log-level" {
-                                "info".into()
-                            } else {
-                                "PRIVATE_SCHEMA_INPUT".into()
-                            }
-                        }),
+        for selector in [
+            "configuration-schema",
+            "inspect-owned-data-v3",
+            "inspect-selected-outbox",
+        ] {
+            for argument in Args::command().get_arguments() {
+                let Some(long) = argument.get_long() else {
+                    continue;
+                };
+                if long == selector {
+                    continue;
+                }
+                let mut argv = vec![
+                    "reader-buddy".to_owned(),
+                    format!("--{selector}"),
+                    format!("--{long}"),
+                ];
+                if argument.get_action().takes_values() {
+                    argv.push(
+                        argument
+                            .get_value_parser()
+                            .possible_values()
+                            .and_then(|mut values| values.next())
+                            .map(|v| v.get_name().to_owned())
+                            .unwrap_or_else(|| {
+                                if long == "log-level" {
+                                    "info".into()
+                                } else {
+                                    "PRIVATE_SCHEMA_INPUT".into()
+                                }
+                            }),
+                    );
+                }
+                let error = Args::try_parse_from(argv)
+                    .err()
+                    .expect("schema discovery must be exclusive");
+                assert_eq!(
+                    error.kind(),
+                    clap::error::ErrorKind::ArgumentConflict,
+                    "{long}: {error}"
                 );
+                assert!(!error.to_string().contains("PRIVATE_SCHEMA_INPUT"));
             }
-            let error = Args::try_parse_from(argv)
-                .err()
-                .expect("schema discovery must be exclusive");
-            assert_eq!(
-                error.kind(),
-                clap::error::ErrorKind::ArgumentConflict,
-                "{long}: {error}"
-            );
-            assert!(!error.to_string().contains("PRIVATE_SCHEMA_INPUT"));
         }
     }
 

@@ -182,8 +182,8 @@ fn main() -> Result<()> {
                 .parse()?;
             let stagger: u64 = args.get(4).map(|s| s.parse()).transpose()?.unwrap_or(0);
             anyhow::ensure!(
-                matches!(contacts, 2 | 4) && millis <= 5000 && stagger <= 500,
-                "expected 2/4 contacts, at most 5000ms hold and 500ms stagger"
+                matches!(contacts, 2..=4) && millis <= 5000 && stagger <= 500,
+                "expected 2 to 4 contacts, at most 5000ms hold and 500ms stagger"
             );
             let mut device = Device::open("/dev/input/event2")?;
             let abs = |code, value| InputEvent::new(EventType::ABSOLUTE.0, code, value);
@@ -442,22 +442,43 @@ fn main() -> Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("gap milliseconds required"))?
                 .parse()?;
             anyhow::ensure!(millis <= 2000, "round-trip gap exceeds 2000ms");
+            anyhow::ensure!(
+                args.get(3).map(String::as_str) == Some("portrait"),
+                "Explicit portrait orientation required as fourth argument"
+            );
+            let orientation = remarkable_open_sdk::navigation::gesture::Orientation::Portrait;
             let mut touch = Touch::new(false, TriggerCorner::LowerLeft);
-            XochitlIntegration::navigate_to_page(&mut touch, NavigationDirection::Previous)?;
+            XochitlIntegration::navigate_to_page(
+                &mut touch,
+                NavigationDirection::Previous,
+                orientation,
+            )?;
             sleep(Duration::from_millis(millis));
-            XochitlIntegration::navigate_to_page(&mut touch, NavigationDirection::Next)?;
+            XochitlIntegration::navigate_to_page(
+                &mut touch,
+                NavigationDirection::Next,
+                orientation,
+            )?;
         }
         Some("next") | Some("previous") => {
             use remarkable_reader_buddy::workflow::xochitl_integration::{
                 NavigationDirection, XochitlIntegration,
             };
-            let mut touch = Touch::new(false, TriggerCorner::LowerLeft);
+            anyhow::ensure!(
+                args.get(2).map(String::as_str) == Some("portrait"),
+                "Explicit portrait orientation required as third argument"
+            );
             let direction = if args[1] == "next" {
                 NavigationDirection::Next
             } else {
                 NavigationDirection::Previous
             };
-            XochitlIntegration::navigate_to_page(&mut touch, direction)?;
+            let mut touch = Touch::new(false, TriggerCorner::LowerLeft);
+            XochitlIntegration::navigate_to_page(
+                &mut touch,
+                direction,
+                remarkable_open_sdk::navigation::gesture::Orientation::Portrait,
+            )?;
         }
         Some("key-layout") => {
             use evdev::KeyCode as K;
