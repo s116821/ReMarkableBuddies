@@ -360,7 +360,7 @@ fn v1_bytes_and_reservations_survive_upgrade_restart_and_append() {
                 .unwrap()
                 .request
                 .wire_revision(),
-            3
+            remarkable_open_sdk::native_adapter::PROTOCOL_REVISION
         );
     }
 }
@@ -415,62 +415,75 @@ fn mixed_revision_and_reencoded_digest_refuse_without_rewriting_history() {
 }
 
 #[test]
-fn original_v2_insert_and_select_history_survives_v3_append() {
-    let insertion = include_bytes!("fixtures/v2-insertion.bin").as_slice();
-    let observed = include_bytes!("fixtures/v2-insertion-observed.bin").as_slice();
-    let selection = include_bytes!("fixtures/v2-selection.bin").as_slice();
-    for (original, outcome) in [
-        (insertion, Outcome::Reserved {}),
+fn original_v2_and_v3_insert_and_select_history_survives_current_append() {
+    for (revision, insertion, observed, selection) in [
         (
-            insertion,
-            Outcome::HistoricalReply {
-                frame: STANDARD.encode(observed),
-            },
+            2,
+            include_bytes!("fixtures/v2-insertion.bin").as_slice(),
+            include_bytes!("fixtures/v2-insertion-observed.bin").as_slice(),
+            include_bytes!("fixtures/v2-selection.bin").as_slice(),
         ),
-        (insertion, Outcome::NotDispatched {}),
-        (selection, Outcome::Reserved {}),
-        (selection, Outcome::NotDispatched {}),
+        (
+            3,
+            include_bytes!("fixtures/v3-insertion.bin").as_slice(),
+            include_bytes!("fixtures/v3-insertion-observed.bin").as_slice(),
+            include_bytes!("fixtures/v3-selection.bin").as_slice(),
+        ),
     ] {
-        let fixture = Fixture::new();
-        let store = fixture.open();
-        let conversation = Uuid::new_v4();
-        let mut state = legacy_state(&store, conversation, outcome.clone());
-        state.attempts[0].frame = STANDARD.encode(original);
-        state.attempts[0].sha256 = crate::storage::digest(original);
-        state.format = 2;
-        let path = store.paths.data.join(JOURNAL_FILE);
-        persist(&path, &state).unwrap();
-        let initial: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        drop(store);
-        let store = fixture.open();
-        let saved = attempts(&store).unwrap();
-        assert_eq!(saved[0].request.wire_revision(), 2);
-        assert_eq!(saved[0].request.encoded(), original);
-        assert_eq!(
-            saved[0].request.fingerprint(),
-            sha2::Sha256::digest(original).as_slice()
-        );
-        let reencoded = saved[0].request.frame().clone();
-        assert!(finish(&store, &reencoded, Outcome::NotDispatched {}).is_err());
-        assert!(claim(&store, Uuid::new_v4(), &reencoded).is_err());
-        let before = fs::read(&path).unwrap();
-        if !matches!(outcome, Outcome::NotDispatched {}) {
-            assert!(claim(&store, conversation, &request(70, 14)).is_err());
-            assert_eq!(fs::read(&path).unwrap(), before);
+        for (original, outcome) in [
+            (insertion, Outcome::Reserved {}),
+            (
+                insertion,
+                Outcome::HistoricalReply {
+                    frame: STANDARD.encode(observed),
+                },
+            ),
+            (insertion, Outcome::NotDispatched {}),
+            (selection, Outcome::Reserved {}),
+            (selection, Outcome::NotDispatched {}),
+        ] {
+            let fixture = Fixture::new();
+            let store = fixture.open();
+            let conversation = Uuid::new_v4();
+            let mut state = legacy_state(&store, conversation, outcome.clone());
+            state.attempts[0].frame = STANDARD.encode(original);
+            state.attempts[0].sha256 = crate::storage::digest(original);
+            state.format = 2;
+            let path = store.paths.data.join(JOURNAL_FILE);
+            persist(&path, &state).unwrap();
+            let initial: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            drop(store);
+            let store = fixture.open();
+            let saved = attempts(&store).unwrap();
+            assert_eq!(saved[0].request.wire_revision(), revision);
+            assert_eq!(saved[0].request.encoded(), original);
+            assert_eq!(
+                saved[0].request.fingerprint(),
+                sha2::Sha256::digest(original).as_slice()
+            );
+            let reencoded = saved[0].request.frame().clone();
+            assert!(finish(&store, &reencoded, Outcome::NotDispatched {}).is_err());
+            assert!(claim(&store, Uuid::new_v4(), &reencoded).is_err());
+            let before = fs::read(&path).unwrap();
+            if !matches!(outcome, Outcome::NotDispatched {}) {
+                assert!(claim(&store, conversation, &request(70, 14)).is_err());
+                assert_eq!(fs::read(&path).unwrap(), before);
+            }
+            claim(&store, Uuid::new_v4(), &request(71, 15)).unwrap();
+            let appended: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            assert_eq!(appended["attempts"][0], initial["attempts"][0]);
+            assert_eq!(
+                attempts(&store)
+                    .unwrap()
+                    .last()
+                    .unwrap()
+                    .request
+                    .wire_revision(),
+                remarkable_open_sdk::native_adapter::PROTOCOL_REVISION
+            );
         }
-        claim(&store, Uuid::new_v4(), &request(71, 15)).unwrap();
-        let appended: serde_json::Value =
-            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert_eq!(appended["attempts"][0], initial["attempts"][0]);
-        assert_eq!(
-            attempts(&store)
-                .unwrap()
-                .last()
-                .unwrap()
-                .request
-                .wire_revision(),
-            3
-        );
     }
 }
 #[cfg(target_os = "linux")]
@@ -1052,6 +1065,17 @@ mod sockets {
     }
     #[test]
     fn lost_native_reply_reopens_only_for_original_target_reconciliation() {
+        indeterminate_insertion_reopens_only_for_reconciliation(false);
+    }
+
+    #[test]
+    fn low_space_indeterminate_reply_remains_unresolved_after_unchanged_observation() {
+        // On RM2, the vendor refused Add Page for low disk space. The SDK
+        // received Indeterminate and the saved PDF still had its original order.
+        indeterminate_insertion_reopens_only_for_reconciliation(true);
+    }
+
+    fn indeterminate_insertion_reopens_only_for_reconciliation(explicit_reply: bool) {
         let f = Fixture::new();
         let store = f.open();
         let conversation = Uuid::new_v4();
@@ -1064,6 +1088,9 @@ mod sockets {
                 original.message,
                 Message::Request(Command::InsertAfter(_))
             ));
+            if explicit_reply {
+                send(&mut first, &response(&original, Reply::Indeterminate));
+            }
             drop(first);
             let mut next = accept(&listener);
             let reconciliation = read(&mut next);
@@ -1100,12 +1127,15 @@ mod sockets {
             source: facts(),
             target: id(13),
         };
-        let failure = connection
-            .insert_after(conversation, OperationId(id(51)), insertion.clone(), end())
-            .unwrap_err();
-        assert!(
-            matches!(failure.lost,LostRequest::Indeterminate{operation,..} if operation==OperationId(id(51)))
-        );
+        let outcome =
+            connection.insert_after(conversation, OperationId(id(51)), insertion.clone(), end());
+        if explicit_reply {
+            assert_eq!(outcome.unwrap(), Reply::Indeterminate);
+        } else {
+            assert!(
+                matches!(outcome.unwrap_err().lost, LostRequest::Indeterminate { operation, .. } if operation == OperationId(id(51)))
+            );
+        }
         drop(connection);
         drop(store);
         let store = f.open();
@@ -1139,7 +1169,10 @@ mod sockets {
             )
             .is_err());
         assert_eq!(attempts(&store).unwrap().len(), 1);
-        assert!(attempts(&store).unwrap()[0].reply.is_none());
+        assert_eq!(
+            attempts(&store).unwrap()[0].reply,
+            explicit_reply.then_some(Reply::Indeterminate)
+        );
         peer.join().unwrap();
     }
 

@@ -207,7 +207,7 @@ impl History {
         match event {
             Interaction::Undo => self.perform(Action::Undo, ledger, backend),
             Interaction::Redo => self.perform(Action::Redo, ledger, backend),
-            Interaction::Invalidated | Interaction::Reader => {
+            Interaction::Invalidated | Interaction::Reader | Interaction::BlankStart => {
                 self.discard();
                 OutcomeStatus::Refused
             }

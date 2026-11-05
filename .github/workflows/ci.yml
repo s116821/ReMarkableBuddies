@@ -125,6 +125,17 @@ jobs:
         if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
       - run: python -m unittest discover -s cicd/release -v
         if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
+      - name: Verify ordinary Git source admission in an isolated fixture
+        timeout-minutes: 3
+        run: |
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --pids-limit 128 --memory 256m --cpus 2 \
+            --tmpfs /tmp:rw,nosuid,nodev,size=64m,mode=1777 \
+            --mount type=bind,source="$GITHUB_WORKSPACE/cicd/release",target=/tests,readonly \
+            --workdir /tests \
+            python:3.12-bookworm@sha256:034c3e9d991f148d14c32ff8350286b91420baca7757d37819c7a9cc771317a0 \
+            python -B -m unittest discover -s integration -v
+        if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
       - run: python -m unittest discover -s scripts/systemd_fixture -p test_bootstrap_fixture.py -v
         if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
       - run: npm ci --prefix cicd/release/fixtures --ignore-scripts --no-audit --no-fund

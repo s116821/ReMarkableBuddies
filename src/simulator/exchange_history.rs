@@ -37,6 +37,8 @@ enum Case {
     ChangedReadback,
     Refused,
     Cancel,
+    BlankStart,
+    BlankStartAfterUndo,
 }
 
 #[derive(Deserialize)]
@@ -374,6 +376,29 @@ fn run_case(case: Case, composer: &str, exchanges: usize) -> Result<()> {
             Cancel => {
                 history.handle(Interaction::Invalidated, &ledger, &mut page);
                 (OutcomeStatus::Refused, 0)
+            }
+            BlankStart | BlankStartAfterUndo => {
+                if matches!(case, BlankStartAfterUndo) {
+                    let mut removed = before.content.clone();
+                    removed.exchanges.remove(0);
+                    ensure!(
+                        history.handle(Interaction::Undo, &ledger, &mut page)
+                            == OutcomeStatus::Applied
+                            && page.state.content == removed
+                            && page.calls == 1,
+                        "blank-start fixture did not establish undone ownership"
+                    );
+                }
+                let state = page.state.clone();
+                let calls = page.calls;
+                ensure!(
+                    history.handle(Interaction::BlankStart, &ledger, &mut page)
+                        == OutcomeStatus::Refused
+                        && page.state == state
+                        && page.calls == calls,
+                    "blank start edited the old exchange"
+                );
+                (OutcomeStatus::Refused, calls)
             }
             Unknown | WrongOperation | ChangedReadback => {
                 page.fault = Some(case);

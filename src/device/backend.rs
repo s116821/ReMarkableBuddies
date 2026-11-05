@@ -34,6 +34,38 @@ pub enum AcquisitionKind {
 }
 
 pub trait DeviceBackend {
+    #[cfg(all(
+        target_os = "linux",
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    fn configure_installed_resident_output(
+        &mut self,
+        _pin: crate::workflow::resident_supervisor::recovery::activation::InstalledOutput,
+    ) -> Result<TriggerCorner> {
+        anyhow::bail!("installed native output backend unavailable")
+    }
+    #[cfg(all(
+        target_os = "linux",
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    fn configure_development_resident_output(
+        &mut self,
+        _plan: &std::path::Path,
+    ) -> Result<Option<TriggerCorner>> {
+        anyhow::bail!("development native output backend unavailable")
+    }
+
+    /// Historical resident capture does not enable native output. A qualified
+    /// adapter must explicitly override this and own every returned render lease.
+    #[cfg(target_os = "linux")]
+    fn resident_output_backend(
+        &mut self,
+    ) -> Option<&mut dyn crate::workflow::resident_output::ResidentOutputBackend> {
+        None
+    }
+
     /// Must be selected before acquisition; failed SDK capture cannot downgrade.
     fn acquisition_kind(&self) -> AcquisitionKind {
         AcquisitionKind::Unsupported
@@ -100,6 +132,13 @@ pub trait DeviceBackend {
         progress()
     }
     fn prepare_reader_trigger(&mut self) -> Result<()>;
+    #[cfg(target_os = "linux")]
+    fn wait_for_resident_reader(
+        &mut self,
+        _progress: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<super::request_input::ReleasedReaderInput> {
+        anyhow::bail!("Resident released-input handoff unavailable")
+    }
     fn navigate(&mut self, direction: NavigationDirection) -> Result<NavigationCompletion>;
     fn render_text(&mut self, text: &str) -> Result<()>;
     fn body_mode(&mut self) -> Result<()>;
@@ -133,6 +172,15 @@ pub enum NavigationCompletion {
 }
 
 pub struct RealDevice {
+    #[cfg(all(
+        target_os = "linux",
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    development_output: Option<crate::workflow::resident_output::development::NativeOutputBackend>,
+
+    #[cfg(target_os = "linux")]
+    resident_corner: TriggerCorner,
     #[cfg(target_os = "linux")]
     request: Option<NativeRequest>,
     status_style: Option<super::status_style::Lease>,
@@ -640,6 +688,15 @@ impl RealDevice {
         }
         Ok(Self {
             #[cfg(target_os = "linux")]
+            resident_corner: corner.clone(),
+            #[cfg(all(
+                target_os = "linux",
+                feature = "development-resident-bootstrap",
+                feature = "development-input-diagnostics"
+            ))]
+            development_output: None,
+
+            #[cfg(target_os = "linux")]
             request: None,
             status_style: None,
             legacy_status_diagnostics: false,
@@ -665,6 +722,62 @@ impl RealDevice {
 }
 
 impl DeviceBackend for RealDevice {
+    #[cfg(all(
+        target_os = "linux",
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    fn configure_installed_resident_output(
+        &mut self,
+        pin: crate::workflow::resident_supervisor::recovery::activation::InstalledOutput,
+    ) -> Result<TriggerCorner> {
+        anyhow::ensure!(
+            self.development_output.is_none(),
+            "native output already selected"
+        );
+        self.development_output = Some(
+            crate::workflow::resident_output::development::NativeOutputBackend::installed(
+                pin,
+                self.resident_corner.clone(),
+            )?,
+        );
+        Ok(self.resident_corner.clone())
+    }
+    #[cfg(all(
+        target_os = "linux",
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    fn configure_development_resident_output(
+        &mut self,
+        plan: &std::path::Path,
+    ) -> Result<Option<TriggerCorner>> {
+        anyhow::ensure!(
+            self.development_output.is_none(),
+            "development output already selected"
+        );
+        let backend = crate::workflow::resident_output::development::NativeOutputBackend::load(
+            plan,
+            self.resident_corner.clone(),
+        )?;
+        let startup_corner = backend.startup_activation_corner();
+        self.development_output = Some(backend);
+        Ok(startup_corner)
+    }
+    #[cfg(target_os = "linux")]
+    fn resident_output_backend(
+        &mut self,
+    ) -> Option<&mut dyn crate::workflow::resident_output::ResidentOutputBackend> {
+        #[cfg(all(
+            feature = "development-resident-bootstrap",
+            feature = "development-input-diagnostics"
+        ))]
+        if let Some(backend) = self.development_output.as_mut() {
+            return Some(backend);
+        }
+        None
+    }
+
     fn acquisition_kind(&self) -> AcquisitionKind {
         AcquisitionKind::LegacyUnqualified
     }
@@ -753,6 +866,41 @@ impl DeviceBackend for RealDevice {
         progress: &mut dyn FnMut() -> Result<()>,
     ) -> Result<()> {
         self.touch.wait_for_trigger_with_progress(progress)
+    }
+    #[cfg(target_os = "linux")]
+    fn wait_for_resident_reader(
+        &mut self,
+        progress: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<super::request_input::ReleasedReaderInput> {
+        self.status_wait_cancellation.check()?;
+        anyhow::ensure!(
+            self.request.is_none() && self.status_style.is_none(),
+            "Legacy request/style cannot cross resident activation"
+        );
+        self.history.discard();
+        let blank_start = {
+            #[cfg(all(
+                feature = "development-resident-bootstrap",
+                feature = "development-input-diagnostics"
+            ))]
+            {
+                self.development_output
+                    .as_ref()
+                    .is_some_and(|backend| backend.accepts_blank_start())
+            }
+            #[cfg(not(all(
+                feature = "development-resident-bootstrap",
+                feature = "development-input-diagnostics"
+            )))]
+            {
+                false
+            }
+        };
+        super::request_input::RequestInput::wait_released_reader(
+            self.resident_corner.clone(),
+            blank_start,
+            progress,
+        )
     }
     fn prepare_reader_trigger(&mut self) -> Result<()> {
         let _timing = crate::measurement::Span::new("reader.trigger_dismiss");

@@ -154,6 +154,8 @@ pub struct PageResult {
     pub failure_codes: Vec<String>,
     pub indicator_visible: bool,
     pub unchanged: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub saved_modified_at_ms: Option<u64>,
     pub png: String,
 }
 #[derive(Serialize)]
@@ -246,6 +248,10 @@ fn execute_with_model<M: LLMEngine>(
             failure_codes: page.failure_codes(),
             indicator_visible: page.indicator_visible,
             unchanged: images[index] == state.initial[index],
+            saved_modified_at_ms: state
+                .saved_pages
+                .as_ref()
+                .and_then(|pages| pages[index].modified_at_ms),
             png: format!("page-{index}.png"),
         })
         .collect();
@@ -393,6 +399,7 @@ fn history_actions<M: LLMEngine>(
                 }
             }
         };
+    let mut closed_pages = None;
     for action in actions {
         match action {
             HistoryAction::Hold { frames } => {
@@ -439,6 +446,24 @@ fn history_actions<M: LLMEngine>(
                 let page = state.active;
                 state.pages[page].text.push_str(text);
                 state.event("history_external_edit", "manual text retained");
+            }
+            HistoryAction::Close => {
+                orchestrator.invalidate_history();
+                let mut state = state.borrow_mut();
+                state.save_visible_pages();
+                closed_pages = Some(std::mem::take(&mut state.pages));
+                state.last = Default::default();
+                state.persisted = None;
+                state.deletion = None;
+                state.visit += 1;
+                state.event("document_saved_and_closed", "visible page content saved");
+            }
+            HistoryAction::Reopen { page } => {
+                let mut state = state.borrow_mut();
+                state.pages = closed_pages.take().context("Document was not closed")?;
+                state.active = *page;
+                state.pages[*page].trigger_overlay = scenario::TriggerOverlay::Closed;
+                state.event("document_reopened", "saved pages in a fresh viewport");
             }
             HistoryAction::InputLost => {
                 orchestrator.invalidate_history();
@@ -724,6 +749,41 @@ mod request_retirement_tests {
             state.borrow_mut().visit += 1;
             assert!(device.capture().is_err());
         }
+    }
+
+    #[test]
+    fn only_the_owned_keyboard_preserves_request_authority() {
+        use crate::device::backend::DeviceBackend;
+        use scenario::{Effect, Fault};
+
+        let (state, _) = blank_successor();
+        let mut device = SimDevice(state.clone());
+        device.capture().unwrap();
+        let pin = state.borrow().request_pin;
+        device.body_mode().unwrap();
+        device.render_text("owned").unwrap();
+        assert_eq!(state.borrow().request_pin, pin);
+
+        state.borrow_mut().faults.push(Fault {
+            operation: Operation::Text,
+            call: 2,
+            effect: Effect::KeyboardIdentityChanged,
+        });
+        assert!(device.render_text(" possible partial output").is_err());
+        assert!(device.render_text(" must not append").is_err());
+        let state = state.borrow();
+        assert_eq!(
+            state.pages[state.active].text,
+            "owned possible partial output"
+        );
+        assert_eq!(state.counts[&Operation::Text], 2);
+        let events: Vec<_> = state
+            .events
+            .iter()
+            .filter(|event| event.action == "keyboard_input")
+            .map(|event| event.detail.as_str())
+            .collect();
+        assert_eq!(events, ["owned", "owned", "unmatched"]);
     }
 }
 

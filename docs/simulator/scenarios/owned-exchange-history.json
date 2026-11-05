@@ -20,6 +20,8 @@
     "wrong-operation",
     "changed-readback",
     "refused",
-    "cancel"
+    "cancel",
+    "blank-start",
+    "blank-start-after-undo"
   ]
 }

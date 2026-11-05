@@ -354,7 +354,9 @@ fn stopped_original_requires_stable_identity_terminal_state_and_empty_group() {
         ],
     );
     assert!(stopped_stock(&cleared, &original, GroupObservation::OriginalAbsent).unwrap());
-    assert!(stopped_stock(&cleared, &original, GroupObservation::EmptyOriginal).is_err());
+    for group in [GroupObservation::EmptyOriginal, GroupObservation::Populated] {
+        assert!(!stopped_stock(&cleared, &original, group).unwrap());
+    }
     let failed = changed(
         &cleared,
         &[("ActiveState", "failed"), ("SubState", "failed")],
