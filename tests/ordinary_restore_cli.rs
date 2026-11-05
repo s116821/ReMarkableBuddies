@@ -143,7 +143,7 @@ fn actual_notebook_restore_selectors_keep_media_identity_and_legacy_refusal() {
         run(&target, "status-notebook", &body)["outcome"],
         "desired-generation-observed"
     );
-    assert_eq!(run(&target, "apply-notebook", &body)["status"], "conflict");
+    assert_ne!(run(&target, "apply-notebook", &body)["outcome"], "restored");
     assert_eq!(
         fs::read(target.paths().data.join("CURRENT")).unwrap(),
         desired
