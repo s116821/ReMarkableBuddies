@@ -13,6 +13,9 @@ from test_apk_contract import specimen
 import apk_source_build
 
 class BuildInputs(unittest.TestCase):
+    def sdk_proof(self):
+        return {'fixture_only':True,'manifest_sha256':'a'*64,'snapshot':{'tag_oid':'f'*40}}
+
     def arguments(self, root):
         return argparse.Namespace(source=root/'source', sdk_source=root/'sdk',
             target_dir=root/'cache', output=root/'output', tag='v1.2.3',
@@ -37,7 +40,7 @@ class BuildInputs(unittest.TestCase):
                 metadata['target'].update(rust_target=target, apk_arch='aarch64',
                     abi='gnu-aarch64', elf_class=64, elf_machine='AArch64',
                     interpreter='/lib/ld-linux-aarch64.so.1')
-            return path, metadata, {'fixture_only': True}
+            return path, metadata, {'fixture_only': True, 'sdk_release_source':self.sdk_proof()}
         return build
 
     def emit(self, root):
@@ -45,6 +48,7 @@ class BuildInputs(unittest.TestCase):
         identity = specimen()['source']
         with patch('apk_build_inputs.producer_identity'), \
              patch('apk_build_inputs.source_snapshot', return_value={'source':identity}), \
+             patch('apk_build_inputs.sdk_release_source',return_value=self.sdk_proof()), \
              patch('apk_build_inputs.build', side_effect=self.build_fixture(root)) as build:
             receipt = inputs.produce(args)
         self.assertEqual(build.call_count, 2)
@@ -123,9 +127,27 @@ class BuildInputs(unittest.TestCase):
                 return binary,metadata,evidence
             with patch('apk_build_inputs.producer_identity'), \
                  patch('apk_build_inputs.source_snapshot',return_value={'source':specimen()['source']}), \
+                 patch('apk_build_inputs.sdk_release_source',return_value=self.sdk_proof()), \
                  patch('apk_build_inputs.build',side_effect=wrong), self.assertRaisesRegex(Refusal,'SDK correspondence'):
                 inputs.produce(args)
             self.assertFalse((args.output/inputs.COMPLETION).exists())
+
+    def test_sdk_proof_change_between_targets_or_before_completion_refuses(self):
+        for phase in ['between-targets','before-completion']:
+            with self.subTest(phase=phase),tempfile.TemporaryDirectory() as directory:
+                root=Path(directory);args=self.arguments(root);fake=self.build_fixture(root)
+                changed=self.sdk_proof();changed['snapshot']['tag_oid']='e'*40
+                def build(*values,**kwargs):
+                    binary,metadata,evidence=fake(*values,**kwargs)
+                    if phase=='between-targets' and not kwargs['rm2_resident']:
+                        evidence['sdk_release_source']=changed
+                    return binary,metadata,evidence
+                with patch('apk_build_inputs.producer_identity'), \
+                     patch('apk_build_inputs.source_snapshot',return_value={'source':specimen()['source']}), \
+                     patch('apk_build_inputs.sdk_release_source',return_value=changed), \
+                     patch('apk_build_inputs.build',side_effect=build), self.assertRaisesRegex(Refusal,'SDK release source changed'):
+                    inputs.produce(args)
+                self.assertFalse((args.output/inputs.COMPLETION).exists())
 
 class MaintainedCrossMapping(unittest.TestCase):
     @unittest.skipIf(os.name == 'nt', 'Linux mapping admission control')

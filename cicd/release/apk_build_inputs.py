@@ -6,7 +6,7 @@ from pathlib import Path
 from apk_builder import copy_verified
 from apk_contract import (HEX40, REPOSITORY, RM2_FEATURE, RM2_SDK_SHA,
                           canonical, parse_build, require, stable)
-from apk_source_build import build, sha, source_git, source_snapshot
+from apk_source_build import build, sha, source_git, source_snapshot, sdk_release_source
 
 TARGETS = [('armv7', 'armv7-unknown-linux-gnueabihf'),
            ('aarch64', 'aarch64-unknown-linux-gnu')]
@@ -50,6 +50,7 @@ def _verify(directory, tag, commit, producer_commit, completion):
             receipt['producer_commit'] == producer_commit, 'completion identity')
     require(set(receipt['files']) == {f'{arch}/{name}' for arch, _ in TARGETS for name in MEMBERS}, 'completion inventory')
     sdk = None
+    sdk_proof = None
     for arch, target in TARGETS:
         folder = directory / arch
         require(not folder.is_symlink() and folder.is_dir() and names(folder, 3) == set(MEMBERS), 'target input inventory')
@@ -72,6 +73,11 @@ def _verify(directory, tag, commit, producer_commit, completion):
                 current_sdk['tag'] == 'v0.2.0' and current_sdk['sha'] == RM2_SDK_SHA, 'selected SDK correspondence')
         require(sdk is None or sdk == current_sdk, 'cross-target SDK changed')
         sdk = current_sdk
+        evidence = json.loads(read_regular(folder / 'private-evidence.json', MAX_EVIDENCE))
+        proof = evidence.get('sdk_release_source')
+        require(isinstance(proof, dict) and proof.get('manifest_sha256') == sdk['manifest_sha256'], 'retained SDK proof required')
+        require(sdk_proof is None or sdk_proof == proof, 'cross-target SDK release proof changed')
+        sdk_proof = proof
     return receipt
 
 def verify(directory, tag, commit, producer_commit):
@@ -95,19 +101,24 @@ def produce(args):
         require(all(not path.is_relative_to(root) and not root.is_relative_to(path)
                     for root in (source, sdk, producer)), 'external output roots')
     producer_identity(producer, args.producer_sha)
-    identity = source_snapshot(source, args.tag)['source']
+    source_proof = source_snapshot(source, args.tag)
+    identity = source_proof['source']
     require(identity['sha'] == args.source_sha, 'expected release commit')
     target.mkdir()
     output.mkdir()
     (target / 'diagnostics').mkdir()
     receipt = dict(schema=1, status='strict-build-inputs-only', eligibility='not-qualified',
                    producer_commit=args.producer_sha, source=identity, files={})
+    sdk_proof = None
     for arch, rust_target in TARGETS:
         binary, metadata, private = build(source, args.tag, rust_target, target / arch,
             producer / 'cicd/release/Cross.apk.toml', sdk_tag='v0.2.0',
             rm2_resident=arch == 'armv7', sdk_tag_source=sdk,
             diagnostics=target / 'diagnostics' / arch)
         require(metadata['source'] == identity, 'build source changed')
+        proof = private.get('sdk_release_source')
+        require(proof is not None and (sdk_proof is None or sdk_proof == proof), 'SDK release source changed across targets')
+        sdk_proof = proof
         folder = output / arch
         folder.mkdir()
         copy_verified(binary, folder / 'reader-buddy', metadata['binary']['bytes'], metadata['binary']['sha256'])
@@ -121,6 +132,9 @@ def produce(args):
     # Validate a candidate manifest before publishing the authoritative marker.
     # The final check also rehashes every retained file after publication.
     producer_identity(producer, args.producer_sha)
+    require(source_snapshot(source, args.tag) == source_proof, 'release source changed before completion')
+    require(sdk_release_source(sdk, 'v0.2.0', RM2_SDK_SHA, metadata['sdk']['manifest_sha256']) == sdk_proof,
+            'SDK release source changed before completion')
     pending = output / 'completion-pending.json'
     write_new(pending, encoded(receipt))
     _verify(output, args.tag, args.source_sha, args.producer_sha, pending.name)
