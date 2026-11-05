@@ -1,7 +1,8 @@
 """Actual developer source-build admission. No external artifacts or release writes."""
 import hashlib,json,os,re,shutil,stat,subprocess,tomllib,threading,time,queue
 from pathlib import Path
-from apk_contract import REPOSITORY,SDK_REPOSITORY,TARGETS,Refusal,require,stable
+from apk_contract import (ORDINARY_BINARY, RM2_BINARY, RM2_FEATURE, RM2_PROFILE, RM2_SDK_SHA,
+                          REPOSITORY, SDK_REPOSITORY, TARGETS, Refusal, require, stable)
 from process_guard import OwnedProcess
 
 OVERRIDES=['RUSTFLAGS','CFLAGS','CXXFLAGS','CPPFLAGS','LDFLAGS']
@@ -377,8 +378,9 @@ def clean_sdk_checkout(root,fragment):
  require(not git(root,'status','--porcelain=v1','--untracked-files=all','--','.',':(top,exclude,literal).cargo-ok'),'clean actual SDK checkout')
  require(marker_identity()==before,'SDK completion marker changed')
 
-def cargo_identity(repo,target,sdk_tag=None,private_observations=None):
- data=json.loads(run(['cargo','metadata','--locked','--format-version','1','--filter-platform',target],repo,stdout_limit=16*1024*1024,combined_limit=None))
+def cargo_identity(repo,target,sdk_tag=None,private_observations=None,rm2_resident=False):
+ feature_args=['--features',RM2_FEATURE] if rm2_resident else []
+ data=json.loads(run(['cargo','metadata','--locked','--format-version','1','--filter-platform',target,*feature_args],repo,stdout_limit=16*1024*1024,combined_limit=None))
  if private_observations is not None: private_observations.append(data)
  resolve=data.get('resolve') or {};root_id=resolve.get('root')
  by_id={node['id']:node for node in resolve.get('nodes',[])}
@@ -433,12 +435,13 @@ def elf_header(path):
  require((cls,machine) in [(32,40),(64,183)],'supported actual ELF')
  return cls,'ARM' if machine==40 else 'AArch64'
 
-def build(repo,tag,target,target_dir,cross_configuration,sdk_tag=None):
+def build(repo,tag,target,target_dir,cross_configuration,sdk_tag=None,rm2_resident=False):
  from apk_compiler import identity as compiler_identity
  from docker_owned import cross_phase
  from abi import qualify
  repo=repo.resolve();target_dir=target_dir.resolve();configuration=cross_configuration.resolve()
  require(target in TARGETS and configuration.is_file(),'build target/configuration')
+ require(not rm2_resident or TARGETS[target][0]=='armv7','resident build requires ARMv7')
  require(not target_dir.exists() and not target_dir.is_relative_to(repo),'fresh external target root required')
  require((repo/'.git').is_dir(),'initial Cross source requires standalone full Git checkout')
  config=tomllib.loads(configuration.read_text());image=config['target'][target]['image']
@@ -455,7 +458,10 @@ def build(repo,tag,target,target_dir,cross_configuration,sdk_tag=None):
  mapping=cross_source_mapping(repo,cross)
  before_conversion=container_source_snapshot(repo,image,mapping,before_host)
  private_cargo=[];license_id=source_license(repo)
- configurations=cargo_configuration(repo);before_cargo=cargo_identity(repo,target,sdk_tag,private_cargo)
+ configurations=cargo_configuration(repo);before_cargo=cargo_identity(repo,target,sdk_tag,private_cargo,rm2_resident)
+ if rm2_resident:
+  sdk=before_cargo['sdk']
+  require(sdk is not None and sdk['sha']==RM2_SDK_SHA and RM2_FEATURE in before_cargo['features'],'approved resident Cargo selection')
  metadata=private_cargo[0]
  require(Path(metadata['workspace_root']).resolve()==repo,'actual Cross workspace root')
  require('cross' not in (metadata.get('metadata') or {}) and all(
@@ -467,7 +473,8 @@ def build(repo,tag,target,target_dir,cross_configuration,sdk_tag=None):
  before_compiler=compiler_identity(repo,target,image,cross,run,sha)
  # Use exactly the observed stable Linux counterpart chosen by the pinned
  # Cross image platform. A source/compiler/container switch refuses below.
- argv=[str(cross),'+stable','build','--locked','--release','--target',target,'--target-dir',str(target_dir),'--bin','reader-buddy']
+ feature_args=['--features',RM2_FEATURE] if rm2_resident else []
+ argv=[str(cross),'+stable','build','--locked','--release','--target',target,'--target-dir',str(target_dir),'--bin','reader-buddy',*feature_args]
  cross_phase(argv,repo,env,run,timeout=900,private_diagnostics=target_dir/'compiler-diagnostics')
  binary=target_dir/target/'release/reader-buddy'
  require(binary.is_file() and not binary.is_symlink(),'new build executable')
@@ -499,17 +506,19 @@ def build(repo,tag,target,target_dir,cross_configuration,sdk_tag=None):
  actual_elf=qualify(frozen,target,lambda command:run(command,repo,stdout_limit=65536,combined_limit=None))
  after_compiler=compiler_identity(repo,target,image,cross,run,sha)
  require(after_compiler==before_compiler,'actual Cross compiler/image identity changed')
- require(cargo_identity(repo,target,sdk_tag,private_cargo)==before_cargo,'build inputs changed')
+ require(cargo_identity(repo,target,sdk_tag,private_cargo,rm2_resident)==before_cargo,'build inputs changed')
  require(cargo_configuration(repo)==configurations and source_license(repo)==license_id,'source configuration/license changed')
  require(sha(configuration)==configuration_hash and sha(Path(__file__))==helper_hash,'build helper/configuration changed')
  fields=before_compiler['rustc_fields'];sdk=before_cargo['sdk']
+ profile=RM2_PROFILE if rm2_resident else ('legacy-no-sdk' if sdk is None else 'unqualified-development')
+ binary_path=RM2_BINARY if rm2_resident else ORDINARY_BINARY
  observed_image=next(value for value in before_compiler['image']['digests'] if value==image)
  metadata=dict(schema=1,evidence='developer-source-build',eligibility='not-qualified',source=before_source,
   target=dict(rust_target=target,apk_arch=arch,abi=abi,elf_class=cls,elf_machine=machine,elf_endian='little',interpreter=actual_elf['elf']['interpreter']),
   sdk=sdk,cargo={key:before_cargo[key] for key in ['lock_sha256','metadata_identity_sha256','features']},
   toolchain=dict(rustc_release=fields['release'],rustc_commit=None if fields.get('commit-hash')=='unknown' else fields.get('commit-hash'),rustc_host=fields['host'],cross_version=before_compiler['cross_version'],cross_binary_sha256=before_compiler['cross_binary_sha256'],image_digest='sha256:'+observed_image.split('@sha256:',1)[1],build_configuration_sha256=configuration_hash),
-  build=dict(argv=['TOOL_ROOT/'+cross.name,'+stable','build','--locked','--release','--target',target,'--target-dir','TARGET_ROOT','--bin','reader-buddy'],environment={key:'' for key in OVERRIDES},profile='legacy-no-sdk' if sdk is None else 'unqualified-development',source_build_helper_sha256=helper_hash),
-  binary=dict(path='usr/bin/reader-buddy',sha256=executed_hash,bytes=before.st_size,mode=493))
+  build=dict(argv=['TOOL_ROOT/'+cross.name,'+stable','build','--locked','--release','--target',target,'--target-dir','TARGET_ROOT','--bin','reader-buddy',*feature_args],environment={key:'' for key in OVERRIDES},profile=profile,source_build_helper_sha256=helper_hash),
+  binary=dict(path=binary_path,sha256=executed_hash,bytes=before.st_size,mode=493))
  from apk_contract import canonical
  canonical(metadata)
  private_evidence=dict(source_root=str(repo),target_root=str(target_dir),configuration_path=str(configuration),cargo_configuration_digests=configurations,actual_build_argv=argv,actual_runtime_argv=runtime_argv,recorded_environment={key:env[key] for key in [*OVERRIDES,'READER_BUDDY_RELEASE_TAG','READER_BUDDY_RELEASE_SHA','CROSS_CONFIG','LD_BIND_NOW','SOURCE_DATE_EPOCH']},cargo_observations=private_cargo,compiler_before=before_compiler,compiler_after=after_compiler,executed_binary_identity=list(identity(before)),executed_binary_sha256=executed_hash,elf_observation=actual_elf,runtime_version_output=output,source_license=license_id,license_basis=dict(project_declaration=LICENSE_DECLARATION,committed_blob=LICENSE_BLOB,actual_file_sha256=sha(repo/'LICENSE'),existing_detected_identifier='GPL-3.0',classifier_is_owner_grant=False))

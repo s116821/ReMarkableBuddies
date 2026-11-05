@@ -10,8 +10,10 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
+    ffi::CString,
     fs::{self, File, Metadata},
-    io::Read,
+    io::{Read, Seek},
+    os::fd::AsRawFd,
     os::unix::fs::MetadataExt,
     path::{Component, Path, PathBuf},
     thread,
@@ -21,13 +23,37 @@ use std::{
 pub mod activation;
 
 pub const LEASE_DIRECTORY: &str = "/run/reader-buddy-resident";
-const PROFILE: &str = "/home/root/.local/lib/reader-buddy/resident-recovery.json";
-const APP: &str = "/home/root/.local/lib/reader-buddy/reader-buddy";
+struct Layout {
+    recovery: &'static str,
+    app: &'static str,
+    buddy_unit: &'static str,
+    helper_unit: &'static str,
+    native_profile: &'static str,
+    adapter: &'static str,
+}
+
+const LEGACY: Layout = Layout {
+    recovery: "/home/root/.local/lib/reader-buddy/resident-recovery.json",
+    app: "/home/root/.local/lib/reader-buddy/reader-buddy",
+    buddy_unit: "/etc/systemd/system/reader-buddy.service",
+    helper_unit: "/etc/systemd/system/reader-buddy-stock-recovery.service",
+    native_profile: "/home/root/.local/lib/reader-buddy/resident-profile.json",
+    adapter: "/home/root/.local/lib/reader-buddy/libremarkable-resident.so",
+};
+
+const PACKAGE: Layout = Layout {
+    recovery: "/home/root/.local/lib/remarkable-buddies/resident-recovery.json",
+    app: "/home/root/.local/lib/remarkable-buddies/reader-buddy",
+    buddy_unit: "/usr/lib/systemd/system/reader-buddy.service",
+    helper_unit: "/usr/lib/systemd/system/reader-buddy-stock-recovery.service",
+    native_profile: "/home/root/.local/lib/remarkable-buddies/resident-profile.json",
+    adapter: "/home/root/.local/lib/remarkable-buddies/libremarkable-resident.so",
+};
+pub(crate) const DEVELOPMENT_OUTPUT_PLAN: &str =
+    "/home/root/.local/lib/reader-buddy/development-output/plan.json";
 const BUDDY: &str = "reader-buddy.service";
 const HELPER: &str = "reader-buddy-stock-recovery.service";
 const STOCK: &str = "xochitl.service";
-const BUDDY_UNIT: &str = "/etc/systemd/system/reader-buddy.service";
-const HELPER_UNIT: &str = "/etc/systemd/system/reader-buddy-stock-recovery.service";
 const STOCK_EXE: &str = "/usr/bin/xochitl";
 const STOCK_UNIT: &str = "/usr/lib/systemd/system/xochitl.service";
 const STOCK_DROPIN: &str =
@@ -36,9 +62,47 @@ const MOUNT: &str = "/sys/fs/cgroup/unified";
 const MAX_BYTES: u64 = 128 * 1024 * 1024;
 const RECOVERY_SECONDS: u64 = 120;
 
+fn profile_path() -> Result<Option<&'static str>> {
+    fn exists(path: &str) -> Result<bool> {
+        match fs::symlink_metadata(path) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+    match (exists(LEGACY.recovery)?, exists(PACKAGE.recovery)?) {
+        (false, false) => Ok(None),
+        (true, false) => Ok(Some(LEGACY.recovery)),
+        (false, true) => Ok(Some(PACKAGE.recovery)),
+        (true, true) => bail!("Conflicting installed recovery profiles"),
+    }
+}
+
+fn read_profile(path: &str, deadline: Instant) -> Result<(Pinned, Profile, [u8; 32])> {
+    let mut pin = Pinned::open(Path::new(path))?;
+    let bytes = pin.bytes(32 * 1024, deadline)?;
+    let profile = parse_profile(&bytes)?;
+    ensure!(
+        profile.layout().recovery == path && profile_path()? == Some(path),
+        "Recovery profile layout changed or mismatched"
+    );
+    Ok((pin, profile, sha256(&bytes)))
+}
+
 // The only permitted missing directory is the fixed final component below the
 // protected /run parent. Missing/replaced/untrusted ancestors never mean absent.
 fn installed_directory_identity() -> Result<Option<super::Identity>> {
+    installed_directory_identity_at(Path::new(LEASE_DIRECTORY))
+}
+fn installed_directory_identity_at(path: &Path) -> Result<Option<super::Identity>> {
+    ensure!(
+        path.parent() == Some(Path::new("/run")),
+        "runtime parent mismatch"
+    );
+    let leaf = path
+        .file_name()
+        .and_then(|v| v.to_str())
+        .context("runtime leaf")?;
     let parent = trusted_file(Path::new("/run"))?;
     let identity = super::Identity::of(&parent.metadata()?);
     ensure!(
@@ -46,7 +110,7 @@ fn installed_directory_identity() -> Result<Option<super::Identity>> {
         "untrusted runtime directory"
     );
     let observe = || -> Result<Option<super::Identity>> {
-        match open_at(&parent, "reader-buddy-resident", true, false) {
+        match open_at(&parent, leaf, true, false) {
             Ok(directory) => {
                 let metadata = directory.metadata()?;
                 ensure!(
@@ -78,6 +142,19 @@ pub fn refuse_occupied_activation() -> Result<()> {
             "installed lease directory changed"
         );
     }
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    if let Some(path) = profile_path()? {
+        let (_, profile, _) = read_profile(path, Instant::now() + Duration::from_secs(10))?;
+        if profile.version == 4 {
+            let directory = profile.runtime_directory()?;
+            if installed_directory_identity_at(&directory)?.is_some() {
+                require_unoccupied(&directory)?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -95,6 +172,9 @@ pub(super) fn require_unoccupied(path: &Path) -> Result<()> {
 /// The installer creates it once per boot; service stop must never remove it.
 /// A failed publication leaves the directory occupied and cannot authorize stop.
 pub fn publish_installed(record: LeaseRecord) -> Result<Lease> {
+    publish_installed_at(record, Path::new(LEASE_DIRECTORY))
+}
+fn publish_installed_at(record: LeaseRecord, directory: &Path) -> Result<Lease> {
     ensure!(
         unsafe { libc::geteuid() } == 0,
         "installed activation requires root"
@@ -105,13 +185,28 @@ pub fn publish_installed(record: LeaseRecord) -> Result<Lease> {
     );
     // Profile admission/stock/service bracketing must precede this call. Publishing
     // alone still grants neither stock-stop nor native-launch authority.
-    Lease::publish(Path::new(LEASE_DIRECTORY), record)
+    Lease::publish(directory, record)
 }
 
 #[derive(Deserialize)]
+#[cfg_attr(test, derive(serde::Serialize))]
+#[serde(deny_unknown_fields)]
+struct DevelopmentOutputInstallation {
+    path: String,
+    sha256: [u8; 32],
+    nonce: String,
+}
+#[derive(Deserialize)]
+#[cfg_attr(test, derive(serde::Serialize))]
 #[serde(deny_unknown_fields)]
 struct Profile {
     version: u32,
+    #[serde(default)]
+    companion: Option<String>,
+    #[serde(default)]
+    source_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    development_output: Option<DevelopmentOutputInstallation>,
     firmware: String,
     kernel: String,
     native_profile_sha256: [u8; 32],
@@ -128,6 +223,13 @@ struct Profile {
     helper_policy: BTreeMap<String, String>,
     #[serde(deserialize_with = "policy_fields")]
     stock_policy: BTreeMap<String, String>,
+}
+
+fn parse_profile(bytes: &[u8]) -> Result<Profile> {
+    ensure!(bytes.len() <= 32 * 1024, "installed profile size bound");
+    let profile: Profile = serde_json::from_slice(bytes)?;
+    profile.validate_definition()?;
+    Ok(profile)
 }
 
 fn policy_fields<'de, D: serde::Deserializer<'de>>(
@@ -195,6 +297,9 @@ impl Pinned {
         Ok(())
     }
     pub(super) fn bytes(&mut self, limit: u64, deadline: Instant) -> Result<Vec<u8>> {
+        // A verified pin has already hashed this descriptor to EOF. Reading the
+        // same immutable artifact must start at its beginning, not that cursor.
+        self.file.rewind()?;
         let bytes = bounded_bytes(&mut self.file, limit, deadline)?;
         ensure!(
             bytes.len() as u64 == self.metadata.len(),
@@ -287,11 +392,9 @@ struct Installation {
 }
 impl Installation {
     fn load(deadline: Instant) -> Result<Self> {
-        let mut file = Pinned::open(Path::new(PROFILE))?;
-        let bytes = file.bytes(32 * 1024, deadline)?;
-        let digest = sha256(&bytes);
-        let profile: Profile = serde_json::from_slice(&bytes)?;
-        profile.validate_definition()?;
+        let path = profile_path()?.context("installed recovery profile absent")?;
+        let (file, profile, digest) = read_profile(path, deadline)?;
+        let layout = profile.layout();
         ensure!(
             firmware_version(&text(Path::new("/etc/os-release"), 16 * 1024)?)? == profile.firmware
                 && text(Path::new("/proc/sys/kernel/osrelease"), 256)?.trim() == profile.kernel,
@@ -299,14 +402,17 @@ impl Installation {
         );
         let mut artifacts = vec![file];
         for (path, hash) in [
-            (APP, profile.app_sha256),
-            (BUDDY_UNIT, profile.buddy_unit_sha256),
-            (HELPER_UNIT, profile.helper_unit_sha256),
+            (layout.app, profile.app_sha256),
+            (layout.buddy_unit, profile.buddy_unit_sha256),
+            (layout.helper_unit, profile.helper_unit_sha256),
             (STOCK_EXE, profile.stock_executable_sha256),
             (STOCK_UNIT, profile.stock_unit_sha256),
             (STOCK_DROPIN, profile.stock_dropin_sha256),
         ] {
             artifacts.push(Pinned::verified(path, hash, deadline)?);
+        }
+        if let Some(plan) = &profile.development_output {
+            artifacts.push(Pinned::verified(&plan.path, plan.sha256, deadline)?);
         }
         let installation = Self {
             profile,
@@ -318,6 +424,10 @@ impl Installation {
     }
     fn current(&self, deadline: Instant) -> Result<()> {
         check_deadline(deadline)?;
+        ensure!(
+            profile_path()? == Some(self.profile.layout().recovery),
+            "Installed recovery profile selection changed"
+        );
         for artifact in &self.artifacts {
             artifact.current()?;
         }
@@ -331,6 +441,7 @@ struct Installed {
     helper_group: GroupBaseline,
     helper_invocation: String,
     helper_start: u64,
+    vendor: Option<service::vendor::OriginalCompanion>,
 }
 impl Installed {
     fn load(lease: &Lease, deadline: Instant) -> Result<Self> {
@@ -353,19 +464,26 @@ impl Installed {
         let after = service::observe(HELPER, deadline)?;
         ensure!(before == after, "helper changed during admission");
         helper_state(&before, helper_group.parent(), &profile.helper_policy)?;
+        let app = profile.layout().app;
         verify_process(
             helper_group.parent(),
-            APP,
+            app,
             profile.app_sha256,
-            &[APP, "--resident-stock-recovery"],
+            &[app, "--resident-stock-recovery"],
             deadline,
         )?;
+        let vendor = record
+            .companion
+            .as_deref()
+            .map(|record| service::vendor::OriginalCompanion::load(record, deadline))
+            .transpose()?;
         let result = Self {
             profile,
             artifacts,
             helper_group,
             helper_invocation: before.invocation().to_owned(),
             helper_start: before.start_micros(),
+            vendor,
         };
         result.current(lease, deadline)?;
         Ok(result)
@@ -375,6 +493,9 @@ impl Installed {
         lease.current()?;
         for file in &self.artifacts {
             file.current()?;
+        }
+        if let Some(vendor) = &self.vendor {
+            vendor.policy(deadline)?;
         }
         let before = service::observe(HELPER, deadline)?;
         helper_state(
@@ -404,15 +525,119 @@ impl Installed {
     }
 }
 
+fn hex_digest(text: &str) -> [u8; 32] {
+    let mut out = [0; 32];
+    for (i, pair) in text.as_bytes().as_chunks::<2>().0.iter().enumerate() {
+        let nibble = |b: u8| if b <= b'9' { b - b'0' } else { b - b'a' + 10 };
+        out[i] = (nibble(pair[0]) << 4) | nibble(pair[1]);
+    }
+    out
+}
 impl Profile {
+    fn layout(&self) -> &'static Layout {
+        if self.version == 6 {
+            &PACKAGE
+        } else {
+            &LEGACY
+        }
+    }
+
+    fn installed_output_definition(&self) -> bool {
+        #[cfg(all(
+            feature = "development-resident-bootstrap",
+            feature = "development-input-diagnostics"
+        ))]
+        {
+            #[cfg(not(feature = "installed-resident-output"))]
+            use crate::workflow::resident_output::development::{
+                ADAPTER, PROFILE, REPEAT_ADAPTER, REPEAT_PROFILE,
+            };
+            let matches_adapter = |profile, adapter| {
+                self.native_profile_sha256 == hex_digest(profile)
+                    && self.adapter_sha256 == hex_digest(adapter)
+            };
+            let approved_adapter = matches_adapter(
+                "f49f297717cc09cf21fad47e52d47a4faad0c84f4fed4f98ca69ddb41b96b146",
+                "8fc60498eb404f5a833d4b4ec4c99b76080f146012c76eb1ea7cb55d44b2b62c",
+            );
+            #[cfg(not(feature = "installed-resident-output"))]
+            let approved_adapter = approved_adapter
+                || matches_adapter(PROFILE, ADAPTER)
+                || matches_adapter(REPEAT_PROFILE, REPEAT_ADAPTER);
+            (self.version == 5
+                || (self.version == 6 && cfg!(feature = "installed-resident-output")))
+                && self.source_mode.as_deref() == Some("resident-installed-output-v1")
+                && self.companion.as_deref() == Some(service::vendor::PROFILE_ID)
+                && self.development_output.is_none()
+                && approved_adapter
+        }
+        #[cfg(not(all(
+            feature = "development-resident-bootstrap",
+            feature = "development-input-diagnostics"
+        )))]
+        false
+    }
+
+    fn development_definition(&self) -> bool {
+        #[cfg(all(
+            feature = "development-resident-bootstrap",
+            feature = "development-input-diagnostics",
+            not(feature = "installed-resident-output")
+        ))]
+        if self.version == 4
+            && self.source_mode.as_deref() == Some("resident-development-output-v1")
+            && self.companion.as_deref() == Some(service::vendor::PROFILE_ID)
+        {
+            if let Some(plan) = &self.development_output {
+                use crate::workflow::resident_output::development::{
+                    REPEAT_ADAPTER, REPEAT_PROFILE,
+                };
+                let repeat = self.native_profile_sha256 == hex_digest(REPEAT_PROFILE)
+                    && self.adapter_sha256 == hex_digest(REPEAT_ADAPTER);
+                return plan.path==DEVELOPMENT_OUTPUT_PLAN && plan.sha256!=[0;32] && uuid::Uuid::parse_str(&plan.nonce).is_ok_and(|id|!id.is_nil()&&id.to_string()==plan.nonce)
+                    && (repeat || (self.native_profile_sha256==hex_digest("91ba3d8c200f8bfa3898ef7410595bf4ddff62f25fba3106c7f4ed442938eb5b")
+                    && self.adapter_sha256==hex_digest("fe52512fd08f26bc727357106a7e9e5e0bdacdd0f93c8b3a6ba1e0ee63b843fc")));
+            }
+        }
+        false
+    }
+    fn runtime_directory(&self) -> Result<PathBuf> {
+        if self.version == 4 {
+            ensure!(
+                self.development_definition(),
+                "unsupported development installation"
+            );
+            let nonce = &self.development_output.as_ref().unwrap().nonce;
+            return Ok(PathBuf::from(format!(
+                "/run/rb-dev-{}",
+                nonce.replace('-', "")
+            )));
+        }
+        Ok(PathBuf::from(LEASE_DIRECTORY))
+    }
+    fn app_argv(&self) -> Vec<&str> {
+        let app = self.layout().app;
+        if self.development_definition() {
+            vec![
+                app,
+                "--development-resident-output-plan",
+                DEVELOPMENT_OUTPUT_PLAN,
+            ]
+        } else {
+            vec![app]
+        }
+    }
+
     fn validate(&self, record: &LeaseRecord) -> Result<()> {
         self.validate_definition()?;
+        record.validate()?;
         ensure!(
             self.native_profile_sha256 == record.profile_sha256
                 && self.adapter_sha256 == record.adapter_sha256
                 && self.stock_executable_sha256 == record.stock.executable_sha256
                 && self.stock_unit_sha256 == record.stock.unit_sha256
-                && self.stock_dropin_sha256 == record.stock.dropin_sha256,
+                && self.stock_dropin_sha256 == record.stock.dropin_sha256
+                && self.companion.is_some() == record.companion.is_some(),
             "recovery profile differs from admitted activation"
         );
         Ok(())
@@ -431,14 +656,24 @@ impl Profile {
             ensure!(digest != [0; 32], "missing installed artifact digest");
         }
         ensure!(
-            self.version == 1
+            ((self.version == 1 && self.companion.is_none() && self.source_mode.is_none())
+                || (self.version == 2
+                    && self.source_mode.is_none()
+                    && self.companion.as_deref() == Some(service::vendor::PROFILE_ID))
+                || (self.version == 3
+                    && self.source_mode.as_deref() == Some("resident-source-v1")
+                    && self.companion.as_deref() == Some(service::vendor::PROFILE_ID))
+                || self.development_definition()
+                || self.installed_output_definition())
+                && (self.version == 4 || self.development_output.is_none())
                 && self.firmware == "3.28.0.172"
                 && self.kernel == "5.4.70-v1.6.3-rm11x",
             "unsupported recovery profile"
         );
+        let layout = self.layout();
         for (policy, fragment, dropins) in [
-            (&self.buddy_policy, BUDDY_UNIT, ""),
-            (&self.helper_policy, HELPER_UNIT, ""),
+            (&self.buddy_policy, layout.buddy_unit, ""),
+            (&self.helper_policy, layout.helper_unit, ""),
             (&self.stock_policy, STOCK_UNIT, STOCK_DROPIN),
         ] {
             ensure!(
@@ -490,7 +725,7 @@ fn require(policy: &BTreeMap<String, String>, key: &str, value: &str) -> Result<
     );
     Ok(())
 }
-fn firmware_version(input: &str) -> Result<&str> {
+pub(super) fn firmware_version(input: &str) -> Result<&str> {
     let mut values = input
         .lines()
         .filter_map(|line| line.strip_prefix("IMG_VERSION="));
@@ -738,6 +973,14 @@ pub struct RestoredStock {
     pub process: ProcessIdentity,
     pub invocation: String,
     pub start_requested: bool,
+    pub companion: Option<RestoredCompanion>,
+}
+
+/// Observed original vendor service, separate from reader/UI readiness.
+#[derive(Debug)]
+pub struct RestoredCompanion {
+    pub process: ProcessIdentity,
+    pub invocation: String,
 }
 
 #[derive(Debug)]
@@ -745,6 +988,55 @@ pub enum RecoveryOutcome {
     /// A no-op observation, not proof of stock readiness or past nonactivation.
     NoRecordedActivation,
     Restored(RestoredStock),
+}
+
+fn reclaim_recovered_copies(lease: &Lease, deadline: Instant) -> Result<()> {
+    let leaf = format!("session-{}", lease.record().activation());
+    let directory = match open_at(&lease.directory, &leaf, true, false) {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let metadata = directory.metadata()?;
+    ensure!(
+        metadata.uid() == 0 && metadata.mode() & 0o7777 == 0o700,
+        "untrusted recovered session directory"
+    );
+    for (name, digest) in [
+        ("reader", lease.record().stock.executable_sha256),
+        ("adapter.so", lease.record().adapter_sha256),
+    ] {
+        let mut file = match open_at(&directory, name, false, false) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let before = file.metadata()?;
+        ensure!(
+            before.is_file()
+                && before.uid() == 0
+                && before.mode() & 0o22 == 0
+                && before.nlink() == 1,
+            "untrusted recovered session copy"
+        );
+        ensure!(
+            hash_reader(&mut file, MAX_BYTES, deadline)? == digest
+                && metadata_equal(
+                    &before,
+                    &open_at(&directory, name, false, false)?.metadata()?
+                )
+                && super::Identity::of(&metadata)
+                    == super::Identity::of(
+                        &open_at(&lease.directory, &leaf, true, false)?.metadata()?
+                    ),
+            "recovered session copy changed"
+        );
+        let name = CString::new(name)?;
+        if unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+            return Err(std::io::Error::last_os_error()).context("reclaim recovered session copy");
+        }
+    }
+    Ok(())
 }
 
 /// Fixed installed operation. No provider/config/Store startup and no arbitrary
@@ -755,10 +1047,20 @@ pub fn run_installed() -> Result<RecoveryOutcome> {
         "stock recovery requires root"
     );
     let deadline = Instant::now() + Duration::from_secs(RECOVERY_SECONDS);
-    let identity = installed_directory_identity()?.context("installed lease directory absent")?;
-    let lease = Lease::reopen_if_present(Path::new(LEASE_DIRECTORY))?;
+    let directory = PathBuf::from(LEASE_DIRECTORY);
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    let directory = match profile_path()? {
+        Some(path) => read_profile(path, deadline)?.1.runtime_directory()?,
+        None => directory,
+    };
+    let identity =
+        installed_directory_identity_at(&directory)?.context("installed lease directory absent")?;
+    let lease = Lease::reopen_if_present(&directory)?;
     ensure!(
-        installed_directory_identity()? == Some(identity),
+        installed_directory_identity_at(&directory)? == Some(identity),
         "installed lease directory changed"
     );
     let Some(lease) = lease else {
@@ -766,7 +1068,38 @@ pub fn run_installed() -> Result<RecoveryOutcome> {
         return Ok(RecoveryOutcome::NoRecordedActivation);
     };
     let installed = Installed::load(&lease, deadline)?;
-    restore(&mut Native { installed, lease }, deadline).map(RecoveryOutcome::Restored)
+    let mut backend = Native {
+        installed,
+        lease,
+        restored_companion: None,
+    };
+    let restored = restore(&mut backend, deadline)?;
+    if backend.installed.profile.installed_output_definition() {
+        backend.admit(deadline)?;
+        let stock = backend.stock(deadline)?;
+        ensure!(
+            stock_state(&stock)? == StockState::Ready
+                && stock.invocation() == restored.invocation
+                && ProcessIdentity::read(stock.main_pid())? == restored.process,
+            "stock changed before activation retirement"
+        );
+        backend.companion_current(deadline)?;
+        check_deadline(deadline)?;
+        #[cfg(all(
+            feature = "development-resident-bootstrap",
+            feature = "development-input-diagnostics"
+        ))]
+        super::writer_request::discard(&backend.lease)?;
+        backend.lease.archive_recovered()?;
+        log::info!(
+            "Archived recovered activation {}",
+            backend.lease.record().activation()
+        );
+        if let Err(error) = reclaim_recovered_copies(&backend.lease, deadline) {
+            log::warn!("Could not reclaim recovered session copies: {error:#}");
+        }
+    }
+    Ok(RecoveryOutcome::Restored(restored))
 }
 
 // Private test seam runs the same sequencing; callers cannot inject a command,
@@ -777,6 +1110,8 @@ trait Backend {
     fn stock(&mut self, deadline: Instant) -> Result<service::Snapshot>;
     fn start(&mut self, deadline: Instant) -> Result<()>;
     fn empty_stock_group(&mut self, deadline: Instant) -> Result<()>;
+    fn companion_stopped(&mut self, deadline: Instant) -> Result<bool>;
+    fn companion_current(&mut self, deadline: Instant) -> Result<Option<RestoredCompanion>>;
     fn verify(
         &mut self,
         snapshot: &service::Snapshot,
@@ -791,6 +1126,7 @@ trait Backend {
 struct Native {
     installed: Installed,
     lease: Lease,
+    restored_companion: Option<service::baseline::ServiceBaseline>,
 }
 impl Native {
     fn stock_group(&self, deadline: Instant) -> Result<Option<super::Identity>> {
@@ -845,6 +1181,25 @@ impl Backend for Native {
     fn empty_stock_group(&mut self, deadline: Instant) -> Result<()> {
         self.stock_group(deadline).map(|_| ())
     }
+    fn companion_stopped(&mut self, deadline: Instant) -> Result<bool> {
+        self.installed
+            .vendor
+            .as_ref()
+            .map_or(Ok(true), |vendor| vendor.stopped(deadline))
+    }
+    fn companion_current(&mut self, deadline: Instant) -> Result<Option<RestoredCompanion>> {
+        match (&self.installed.vendor, &self.restored_companion) {
+            (None, None) => Ok(None),
+            (Some(vendor), Some(running)) => {
+                vendor.verify_running(running, deadline)?;
+                Ok(Some(RestoredCompanion {
+                    process: running.group().parent().clone(),
+                    invocation: running.original().invocation().into(),
+                }))
+            }
+            _ => bail!("missing restored companion evidence"),
+        }
+    }
     fn verify(
         &mut self,
         snapshot: &service::Snapshot,
@@ -868,6 +1223,18 @@ impl Backend for Native {
             snapshot == &after && stock_state(&after)? == StockState::Ready,
             "stock changed during verification"
         );
+        if let Some(vendor) = &self.installed.vendor {
+            let running = vendor.restored(deadline, &mut || {
+                self.installed.admit(&self.lease, deadline)?;
+                group.current_process()?;
+                ensure!(
+                    service::observe(STOCK, deadline)? == *snapshot,
+                    "stock changed while restoring sync"
+                );
+                check_deadline(deadline)
+            })?;
+            self.restored_companion = Some(running);
+        }
         Ok(group.parent)
     }
 }
@@ -883,6 +1250,7 @@ fn restore(backend: &mut impl Backend, deadline: Instant) -> Result<RestoredStoc
             StockState::Ready => {
                 let process = backend.verify(&snapshot, deadline)?;
                 backend.admit(deadline)?;
+                let companion = backend.companion_current(deadline)?;
                 // Admission can take time; do not report a now-replaced stock.
                 ensure!(
                     backend.stock(deadline)? == snapshot,
@@ -893,6 +1261,7 @@ fn restore(backend: &mut impl Backend, deadline: Instant) -> Result<RestoredStoc
                     process,
                     invocation: snapshot.invocation().to_owned(),
                     start_requested: requested,
+                    companion,
                 });
             }
             StockState::Startable => {
@@ -904,10 +1273,18 @@ fn restore(backend: &mut impl Backend, deadline: Instant) -> Result<RestoredStoc
                     identity.terminal(&snapshot)?;
                 }
                 backend.admit(deadline)?;
+                if !backend.companion_stopped(deadline)? {
+                    backend.pace(deadline);
+                    continue;
+                }
                 backend.empty_stock_group(deadline)?;
                 ensure!(
                     backend.stock(deadline)?.same_observation(&snapshot),
                     "stock changed before start request"
+                );
+                ensure!(
+                    backend.companion_stopped(deadline)?,
+                    "original companion changed before stock start"
                 );
                 check_deadline(deadline)?;
                 requested = true;

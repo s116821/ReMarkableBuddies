@@ -27,18 +27,18 @@ An AI-powered reading assistant for the reMarkable tablet that watches for outli
 
 ## How It Works
 
-1. **Prepare Answer Page**: Before triggering, create a blank page to the **right** of your question page
+1. **Prepare Answer Page**: With the manual workflow, create a blank page immediately to the **right** of your question page before triggering.
 2. **Select Content**: Highlight the passage or draw a closed shape (circle, rectangle, etc.) around the concept you want to ask about
 3. **Write Question**: Write your question near the selected content
 4. **Trigger**: Touch and **hold for at least 2 seconds** in the **lower-left corner**, then release
 5. **Capture**: The app takes a screenshot of your current page
 6. **Read and Verify**: A vision request identifies the selected concept, reads the question, and proposes an answer. An independent transcription pass over the page, without seeing the proposed question or answer, must agree before anything is written. Unreadable or conflicting readings produce an X instead.
-7. **Page Check**: App navigates right and checks for a valid answer page:
-   - **Valid**: Blank page or existing Reader Buddy answer page → renders Q&A
-   - **Invalid**: No page exists or page has other content → draws an **X** in the bottom-right corner of the original page
+7. **Page Check**: The manual workflow checks the immediate successor. It accepts a blank page or a recognized Reader Buddy answer page and leaves unrelated content intact.
 8. **Render**: Displays the question and answer on the answer page (with "=== Reader Buddy Answers ===" header on first use)
 
-**Important**: You must manually create a blank page to the right of your question page before triggering. The app will NOT create pages automatically.
+The standard installation uses manual page preparation. The separately staged
+RM2 resident integration on firmware 3.28.0.172 can create a native page
+immediately after the source, or reuse the page already bound to the conversation.
 
 The circle selects the topic to explain. Answers may use surrounding page content
 and general knowledge; paper-specific values must match the visible paper. The
@@ -506,18 +506,17 @@ Set the environment variable: `export OPENAI_API_KEY=your-key`
 - The trigger zone is 68x68 pixels in the specified corner
 - Keep your finger still in the zone for the full duration
 
-### X appears on my question page instead of answer
-If you see an X drawn in the bottom-right corner of your question page, it means the app could not find a valid answer page. This happens when:
-- **No page to the right**: You need to manually create a blank page to the right of your question page before triggering
-- **Page has existing content**: The page to the right has content that isn't a Reader Buddy answer page (e.g., your notes, a different document page)
+### Manual workflow cannot find an answer page
 
-**Solution**: Navigate to the page with your question, add a new blank page to the right using the reMarkable's page menu, then trigger Reader Buddy again.
+In the stock reMarkable UI, add a blank notebook page or PDF note page
+immediately after the question page. Return to the question page and trigger
+Reader Buddy. If the next page already contains unrelated content, add the blank
+page between the source and that page. Reader Buddy first checks whether it has
+already returned to the source. If it still needs to return, it tries one swipe.
 
-If an occupied successor is rejected, Reader Buddy checks whether the source is
-already visible before swiping back. It attempts at most one return swipe. A failed
-return draws the X on the current page without repeated swipes; navigate manually
-if the source was not restored. At the end of the document, an unchanged page gets
-the X without a reverse swipe.
+If the resident integration reports an unresolved insertion, inspect the original
+document and its page order before taking another action. The outstanding request
+remains recorded for reconciliation.
 
 ### Answer not appearing on new page
 If the answer doesn't render and no X appears:
@@ -657,7 +656,7 @@ killall reader-buddy
 
 ## Known Limitations
 
-- **Manual Page Creation Required**: You must create a blank page to the right of your question page before triggering - the app does not create pages automatically
+- **Standard Installation**: The manual Reader workflow uses a blank page you prepare immediately after the source.
 - **Single Question Per Trigger**: Processes one outline-question pair per trigger
 - **Outline Detection**: Currently LLM-based (future: add local CV algorithms as optimization)
 - **Internet Required**: Requires connection for ChatGPT API
@@ -704,7 +703,7 @@ Contributions welcome! Areas for enhancement:
 - Local CV outline detection (reduce LLM calls)
 - Multi-question support per trigger
 - Device testing and refinement
-- Automatic page creation (currently requires manual page setup)
+- Resident page creation and firmware coverage
 
 **Recent Improvements (v0.3)**:
 - ✅ Simplified workflow - user creates answer page, app detects blank/QA pages

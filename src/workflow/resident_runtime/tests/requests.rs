@@ -349,6 +349,15 @@ fn dispatched_cancellation_remains_original_through_dispatcher_reconnect_and_rec
             Reply::Captured(_)
         ));
         assert_eq!(fs::read(&journal).unwrap(), before_capture);
+        #[cfg(feature = "development-resident-bootstrap")]
+        {
+            use crate::workflow::resident_supervisor::service::bootstrap::setup::visual::capture_on_runtime;
+            let loss = runtime.retired_loss.clone();
+            capture_on_runtime(&mut runtime, end(), &mut || Ok(())).unwrap();
+            assert_eq!(runtime.identity(), &identity);
+            assert_eq!(runtime.retired_loss, loss);
+            assert_eq!(fs::read(&journal).unwrap(), before_capture);
+        }
         let refused = request::execute(
             &mut runtime,
             OperationId(nonce()),
@@ -382,5 +391,188 @@ fn dispatched_cancellation_remains_original_through_dispatcher_reconnect_and_rec
         let report = runtime.shutdown(end());
         assert!(report.reaped && report.error.is_none(), "{report:?}");
         assert_eq!(report.lost, error.lost);
+    }
+}
+
+struct ReadOnlyProbe {
+    boundaries: usize,
+    pulses: usize,
+    inflate: usize,
+    fail: &'static str,
+    prepared: bool,
+    received: bool,
+    closing: Vec<(bool, bool)>,
+}
+impl ReadOnlyAdmission for ReadOnlyProbe {
+    fn pulse(&mut self, deadline: Instant) -> Result<()> {
+        for _ in 0..self.inflate {
+            self.pulses += 1;
+            before(deadline)?;
+        }
+        if self.received && self.fail == "closing" {
+            anyhow::bail!("closing ownership loss");
+        }
+        Ok(())
+    }
+    fn boundary(&mut self, deadline: Instant) -> Result<()> {
+        self.boundaries += 1;
+        self.pulse(deadline)?;
+        if self.fail == "policy" {
+            return Err(resident_request::authority_error(anyhow::anyhow!(
+                "changed loaded policy"
+            )));
+        }
+        if self.fail == "cancel" {
+            return resident_request::admission(
+                deadline,
+                &mut || Ok(crate::workflow::resident_request::InputProgress::Canceled),
+                &mut || Ok(()),
+            );
+        }
+        Ok(())
+    }
+    fn before_api(&mut self, _: Instant) -> Result<()> {
+        self.prepared = true;
+        if self.fail == "entry-expiry" {
+            return Err(crate::workflow::resident_request::DeadlineExpired(
+                "entry retention expired",
+            )
+            .into());
+        }
+        Ok(())
+    }
+    fn reply_observed(&mut self) {
+        self.received = true;
+    }
+    fn after_api(
+        &mut self,
+        _: Instant,
+        invoked: bool,
+        result: &Result<remarkable_open_sdk::native_adapter::Reply>,
+    ) -> Result<()> {
+        self.closing.push((invoked, result.is_ok()));
+        Ok(())
+    }
+}
+#[test]
+fn closed_read_only_actual_peer_has_fixed_boundaries_and_preserves_api_retention() {
+    for fault in [
+        "none",
+        "policy",
+        "cancel",
+        "entry-expiry",
+        "closing",
+        "missing",
+    ] {
+        let fixture = Fixture::new();
+        let mut runtime = fixture
+            .start("reconnect-source-handoff", Duration::from_secs(5))
+            .unwrap();
+        let mut guard = ReadOnlyProbe {
+            boundaries: 0,
+            pulses: 0,
+            inflate: 1,
+            fail: fault,
+            prepared: false,
+            received: false,
+            closing: vec![],
+        };
+        if fault == "missing" {
+            runtime.retire_connection();
+        }
+        let result = runtime.request_read_only(
+            OperationId(nonce()),
+            ReadOnlyRequest::Observe,
+            Instant::now() + Duration::from_secs(3),
+            &mut guard,
+        );
+        match fault {
+            "none" => {
+                assert!(matches!(result.unwrap(), Reply::Observed(_)));
+                assert_eq!(guard.boundaries, 3);
+                assert_eq!(guard.closing, [(true, true)]);
+            }
+            "entry-expiry" => {
+                assert!(result.is_err());
+                assert_eq!(guard.closing, [(false, false)]);
+            }
+            "closing" => {
+                assert!(result.is_err());
+                assert_eq!(guard.closing, [(true, false)]);
+                assert_eq!(guard.boundaries, 2);
+            }
+            "missing" => {
+                assert!(result.is_err());
+                assert!(!guard.prepared);
+                assert!(guard.closing.is_empty());
+            }
+            "policy" | "cancel" => {
+                let failure = resident_request::finish(&mut runtime, result).unwrap_err();
+                assert_eq!(
+                    failure.kind,
+                    if fault == "policy" {
+                        resident_request::FailureKind::Integrity
+                    } else {
+                        resident_request::FailureKind::Canceled
+                    }
+                );
+                assert!(!guard.prepared);
+                assert!(guard.closing.is_empty());
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            runtime
+                .shutdown(Instant::now() + Duration::from_secs(2))
+                .reaped
+        );
+    }
+}
+#[test]
+fn read_only_actual_peer_poll_growth_never_multiplies_full_admission() {
+    for inflate in [1, 1000] {
+        let fixture = Fixture::new();
+        let mut runtime = fixture
+            .start("reconnect-source-handoff", Duration::from_secs(5))
+            .unwrap();
+        let mut guard = ReadOnlyProbe {
+            boundaries: 0,
+            pulses: 0,
+            inflate,
+            fail: "none",
+            prepared: false,
+            received: false,
+            closing: vec![],
+        };
+        let first = runtime
+            .request_read_only(
+                OperationId(nonce()),
+                ReadOnlyRequest::Observe,
+                Instant::now() + Duration::from_secs(3),
+                &mut guard,
+            )
+            .unwrap();
+        let Reply::Observed(facts) = first else {
+            panic!("wrong response")
+        };
+        runtime
+            .request_read_only(
+                OperationId(nonce()),
+                ReadOnlyRequest::CaptureSource(facts),
+                Instant::now() + Duration::from_secs(3),
+                &mut guard,
+            )
+            .unwrap();
+        assert_eq!(guard.boundaries, 6);
+        assert!(guard.pulses >= inflate * 6);
+        assert_eq!(guard.closing, [(true, true), (true, true)]);
+        assert!(resident_client::attempts(&runtime.store)
+            .unwrap()
+            .is_empty());
+        assert!(
+            runtime
+                .shutdown(Instant::now() + Duration::from_secs(2))
+                .reaped
+        );
     }
 }

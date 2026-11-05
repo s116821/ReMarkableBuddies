@@ -1,14 +1,15 @@
 """Build both actual tagged targets, then generate offline test-key APK artifacts."""
 import argparse,hashlib,json,os,shutil,tempfile
 from pathlib import Path
-from apk_contract import canonical,require,integer
+from apk_contract import RM2_BUNDLE_SHA,canonical,require,integer
+from apk_payload import BUNDLE_FILE,TOOL_FILES
 from apk_source_build import build,run,sha,source_identity,source_license
 from docker_owned import phase
 
 IMAGE='sha256:8d79948df2c7c568a043683f786e7ce4ad2e25e469673b72b8da8d2dbb2fa9ac'
 TOOL_SHA='7488a9650411143a205bf80af511203fadd79499e21613c970b4ef8c207fe11a'
 TARGETS=[('armv7','armv7-unknown-linux-gnueabihf'),('aarch64','aarch64-unknown-linux-gnu')]
-MODULES=['apk_generate.py','apk_observe.py','apk_contract.py','apk_source_build.py','apk_index.py','process_guard.py','docker_owned.py','apk_compiler.py']
+MODULES=['apk_generate.py','apk_observe.py','apk_contract.py','apk_source_build.py','apk_index.py','process_guard.py','docker_owned.py','apk_compiler.py','apk_payload.py']
 
 def copy_verified(source,destination,expected_bytes,expected_sha):
  require(source.is_file() and not source.is_symlink(),'regular generated input')
@@ -28,6 +29,10 @@ def produce(args):
  require(integer(args.pkgrel,0,65535),'pkgrel')
  require(not output.exists() and not target_root.exists() and not output.is_relative_to(source) and not target_root.is_relative_to(source),'new external output roots')
  identity=source_identity(source,args.tag);license_id=source_license(source)
+ bundle=getattr(args,'rm2_native_bundle',None)
+ if bundle is not None:
+  require(bundle.is_file() and not bundle.is_symlink() and 0<bundle.stat().st_size<=8*1024*1024,'bounded RM2 native bundle')
+  require(sha(bundle)==RM2_BUNDLE_SHA,'approved RM2 native bundle')
  tool=args.apk_tool.resolve();require(tool.name=='apk' and tool.is_file() and sha(tool)==TOOL_SHA,'pinned APK tool')
  require(run(['docker','image','inspect',IMAGE,'--format','{{.Id}}'],source)==IMAGE,'existing pinned generation image')
  target_root.mkdir(exist_ok=False)
@@ -37,8 +42,15 @@ def produce(args):
  inputs=work/'inputs';inputs.mkdir();artifacts=work/'artifacts';artifacts.mkdir();modules=work/'modules';modules.mkdir()
  for name in MODULES:shutil.copyfile(Path(__file__).with_name(name),modules/name)
  private={};input_hashes={}
+ if bundle is not None:
+  resident_tools=modules/'rm2-resident';resident_tools.mkdir()
+  for name in TOOL_FILES:
+   shutil.copyfile(Path(__file__).resolve().parent.parent/'deploy/rm2-resident'/name,resident_tools/name)
+  copy_verified(bundle,inputs/BUNDLE_FILE,bundle.stat().st_size,RM2_BUNDLE_SHA)
+  input_hashes[BUNDLE_FILE]=RM2_BUNDLE_SHA
  for arch,target in TARGETS:
-  binary,metadata,evidence=build(source,args.tag,target,target_root/arch,Path(__file__).with_name('Cross.apk.toml'),args.sdk_tag)
+  binary,metadata,evidence=build(source,args.tag,target,target_root/arch,Path(__file__).with_name('Cross.apk.toml'),args.sdk_tag,
+                                 rm2_resident=bundle is not None and arch=='armv7')
   require(metadata['source']==identity,'source unchanged across targets')
   directory=inputs/arch;directory.mkdir()
   copy_verified(binary,directory/'reader-buddy',metadata['binary']['bytes'],metadata['binary']['sha256'])
@@ -69,7 +81,7 @@ def produce(args):
  # its owned container absence is confirmed before this separate phase.
  # Pass the pin via the generation control channel, never from adjacent key
  # bytes or signed package metadata. This remains local fixture trust only.
- observation_command=['--rm','--network','none','--cap-drop','ALL','--read-only','--memory','768m','--pids-limit','32','--tmpfs','/tmp:rw,nosuid,noexec,size=32m',
+ observation_command=['--rm','--network','none','--cap-drop','ALL','--read-only','--memory','768m','--pids-limit','32','--tmpfs','/tmp:rw,nosuid,noexec,size=512m',
   '--mount',f'type=bind,source={inputs},target=/inputs,readonly','--mount',f'type=bind,source={artifacts},target=/artifacts,readonly',
   '--mount',f'type=bind,source={observations},target=/observations,readonly','--mount',f'type=bind,source={modules},target=/modules,readonly',
   '--mount',f'type=bind,source={tool.parent},target=/tool,readonly','--entrypoint','/usr/bin/python3',IMAGE,
@@ -95,4 +107,5 @@ if __name__=='__main__':
  parser.add_argument('--pkgrel',type=int,default=0);parser.add_argument('--sdk-tag')
  parser.add_argument('--target-dir',type=Path,required=True);parser.add_argument('--output',type=Path,required=True)
  parser.add_argument('--apk-tool',type=Path,required=True)
+ parser.add_argument('--rm2-native-bundle',type=Path,help='Approved native bundle for the ARMv7 resident test-key package')
  print(json.dumps(produce(parser.parse_args()),sort_keys=True))

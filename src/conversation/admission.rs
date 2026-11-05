@@ -23,12 +23,19 @@ pub struct HistoricalIntent {
 
 /// All handles for the same Store and aggregate share admission, including a
 /// replacement binding. Callers still own qualified source/backend validation.
+#[derive(Clone)]
 pub struct SelectedAdmission {
     store: Arc<Store>,
     scope: SelectionScope,
     gate: Arc<Mutex<()>>,
 }
 impl SelectedAdmission {
+    pub(crate) fn writer_store(&self) -> &Arc<Store> {
+        &self.store
+    }
+    pub(crate) fn same_store(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.store, &other.store)
+    }
     pub(crate) fn uses_store(&self, store: &Arc<Store>) -> bool {
         Arc::ptr_eq(&self.store, store)
     }
@@ -131,6 +138,7 @@ impl SelectedAdmission {
                 Record::Capture(c) => (c.conversation, c.turn),
                 Record::LegacyCapture(c) => (c.conversation, c.turn),
                 Record::DevelopmentCapture(c) => (c.conversation, c.turn),
+                Record::ResidentCapture(c) => (c.conversation, c.turn),
                 _ => anyhow::bail!("not selected capture evidence"),
             };
             let records = projection.inspect(conversation)?;
@@ -201,6 +209,9 @@ impl SelectedAdmission {
                         Ledger::development_images_from_evidence((**c).clone(), &mut load)?,
                     )))
                 }
+                Record::ResidentCapture(c) => Ok(super::SelectedCaptureImages::Resident(Box::new(
+                    Ledger::resident_images_from_evidence((**c).clone(), &mut load)?,
+                ))),
                 _ => unreachable!(),
             }
         })
@@ -277,7 +288,7 @@ impl SelectedAdmission {
             .map_err(|_| anyhow::anyhow!("domain admission unavailable"))?;
         operation(&self.store)
     }
-    pub(super) fn scope(&self) -> &SelectionScope {
+    pub(crate) fn scope(&self) -> &SelectionScope {
         &self.scope
     }
     pub fn initialize(

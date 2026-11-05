@@ -1,3 +1,6 @@
+#[path = "reader_composed_memory_tests.rs"]
+mod composed_memory_tests;
+
 use super::*;
 use crate::{
     conversation::*,
@@ -325,7 +328,7 @@ fn selected_actual_orchestrator_publishes_owned_draft_and_stops_on_replacement_o
         if case == 6 {
             assert!(error
                 .to_string()
-                .contains("requires a reviewed combined subject-memory admission set"));
+                .contains("subject memory provider does not support selected Reader admission"));
         } else if case == 7 {
             assert!(error
                 .to_string()

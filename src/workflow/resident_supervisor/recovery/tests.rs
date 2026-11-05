@@ -59,6 +59,11 @@ struct Fake {
     populated: bool,
     fail_start: bool,
     fail_verify: bool,
+    companion: bool,
+    sync_stop_samples: VecDeque<bool>,
+    fail_sync_verify: bool,
+    fail_sync_delivery: bool,
+    sync_verified: bool,
 }
 impl Fake {
     fn new(snapshots: Vec<service::Snapshot>) -> Self {
@@ -82,6 +87,11 @@ impl Fake {
             populated: false,
             fail_start: false,
             fail_verify: false,
+            companion: false,
+            sync_stop_samples: VecDeque::new(),
+            fail_sync_verify: false,
+            fail_sync_delivery: false,
+            sync_verified: false,
         }
     }
 }
@@ -112,8 +122,32 @@ impl Backend for Fake {
         ensure!(!self.populated, "stock group populated");
         Ok(())
     }
+    fn companion_stopped(&mut self, _: Instant) -> Result<bool> {
+        Ok(self.sync_stop_samples.pop_front().unwrap_or(true))
+    }
+    fn companion_current(&mut self, _: Instant) -> Result<Option<RestoredCompanion>> {
+        if self.companion {
+            ensure!(
+                self.sync_verified && !self.fail_sync_delivery,
+                "companion changed at completion"
+            );
+            Ok(Some(RestoredCompanion {
+                process: ProcessIdentity {
+                    pid: 43,
+                    start_ticks: 101,
+                },
+                invocation: "34".repeat(16),
+            }))
+        } else {
+            Ok(None)
+        }
+    }
     fn verify(&mut self, _: &service::Snapshot, _: Instant) -> Result<ProcessIdentity> {
         ensure!(!self.fail_verify, "stock executable or group mismatch");
+        if self.companion {
+            ensure!(!self.fail_sync_verify, "companion restoration failed");
+            self.sync_verified = true;
+        }
         Ok(ProcessIdentity {
             pid: 42,
             start_ticks: 100,
@@ -136,6 +170,65 @@ fn restoration_starts_once_then_observes_and_verifies() {
     assert_eq!(result.process.pid, 42);
     assert_eq!((b.starts, b.empty_checks), (1, 1));
     assert!(b.snapshots.is_empty());
+}
+
+#[test]
+fn installed_restore_waits_for_sync_drain_and_reports_separate_identity() {
+    let mut b = Fake::new(vec![stopped(), stopped(), stopped(), ready(), ready()]);
+    b.companion = true;
+    b.sync_stop_samples = [false, true, true].into();
+    let restored = restore(&mut b, deadline()).unwrap();
+    assert_eq!((b.starts, b.empty_checks), (1, 1));
+    assert!(b.sync_stop_samples.is_empty());
+    assert_eq!(restored.companion.unwrap().process.pid, 43);
+    assert!(b.snapshots.is_empty());
+}
+
+#[test]
+fn lost_sync_drain_at_dispatch_withholds_stock_start() {
+    let mut b = Fake::new(vec![stopped(), stopped()]);
+    b.companion = true;
+    b.sync_stop_samples = [true, false].into();
+    assert!(restore(&mut b, deadline()).is_err());
+    assert_eq!(b.starts, 0);
+}
+
+#[test]
+fn active_stock_needs_sync_restoration_and_closing_proof_but_no_old_sync_stop() {
+    for mode in 0..3 {
+        let mut b = Fake::new(vec![ready(), ready()]);
+        b.companion = true;
+        b.sync_stop_samples = [false].into(); // must not be consumed on active path
+        b.fail_sync_verify = mode == 1;
+        b.fail_sync_delivery = mode == 2;
+        let result = restore(&mut b, deadline());
+        assert_eq!(result.is_ok(), mode == 0);
+        assert_eq!(b.starts, 0);
+        assert_eq!(b.sync_stop_samples.len(), 1);
+    }
+}
+
+#[test]
+fn installed_profile_and_lease_cannot_silently_upgrade_each_other() {
+    let f = crate::workflow::resident_supervisor::tests::Fixture::new();
+    let original = f.record();
+    let new = original
+        .clone()
+        .with_companion(f.companion_record())
+        .unwrap();
+    let mut p = profile(&original);
+    p.validate(&original).unwrap();
+    assert!(p.validate(&new).is_err());
+    p.version = 2;
+    assert!(p.validate_definition().is_err());
+    p.companion = Some(service::vendor::PROFILE_ID.into());
+    p.validate(&new).unwrap();
+    assert!(p.validate(&original).is_err());
+    p.companion = Some("unqualified-profile".into());
+    assert!(p.validate_definition().is_err());
+    p.version = 1;
+    p.companion = Some(service::vendor::PROFILE_ID.into());
+    assert!(p.validate_definition().is_err());
 }
 #[test]
 fn startable_recheck_tolerates_only_dependency_order_after_group_admission() {
@@ -417,13 +510,13 @@ pub(super) fn profile(record: &LeaseRecord) -> Profile {
         }
         p
     }
-    let mut buddy_policy = policy(BUDDY_UNIT);
+    let mut buddy_policy = policy(LEGACY.buddy_unit);
     buddy_policy.insert("Type".into(), "notify".into());
     buddy_policy.insert("OnSuccess".into(), HELPER.into());
     buddy_policy.insert("OnFailure".into(), HELPER.into());
     buddy_policy.insert("OnFailureJobMode".into(), "fail".into());
     buddy_policy.insert("WatchdogUSec".into(), "2min".into());
-    let mut helper_policy = policy(HELPER_UNIT);
+    let mut helper_policy = policy(LEGACY.helper_unit);
     helper_policy.insert("Type".into(), "oneshot".into());
     helper_policy.insert("WatchdogUSec".into(), "0".into());
     helper_policy.insert("TimeoutStartUSec".into(), "2min 10s".into());
@@ -434,6 +527,9 @@ pub(super) fn profile(record: &LeaseRecord) -> Profile {
     stock_policy.insert("TimeoutStopUSec".into(), "1min 30s".into());
     Profile {
         version: 1,
+        companion: None,
+        source_mode: None,
+        development_output: None,
         firmware: "3.28.0.172".into(),
         kernel: "5.4.70-v1.6.3-rm11x".into(),
         native_profile_sha256: record.profile_sha256,
@@ -788,4 +884,47 @@ fn profile_requires_supported_watchdog_and_both_service_timeout_budgets() {
     let mut p = profile(&record);
     p.buddy_policy.insert("WatchdogUSec".into(), "1min".into());
     assert!(p.validate(&record).is_err());
+}
+
+#[test]
+fn installed_source_startup_parser_is_explicit_strict_and_digest_bound() {
+    use super::activation::InstalledReaderSelection;
+    let fixture = crate::workflow::resident_supervisor::tests::Fixture::new();
+    for version in [1, 2, 3] {
+        let mut profile = profile(&fixture.record());
+        profile.version = version;
+        profile.companion = (version >= 2).then(|| service::vendor::PROFILE_ID.to_owned());
+        profile.source_mode = (version == 3).then(|| "resident-source-v1".to_owned());
+        let bytes = serde_json::to_vec(&profile).unwrap();
+        let declared = InstalledReaderSelection::declared(&bytes).unwrap();
+        assert_eq!(declared.is_some(), version == 3);
+        if let Some(selection) = declared {
+            selection.require_digest(sha256(&bytes)).unwrap();
+            let mut changed = bytes.clone();
+            changed.push(b' ');
+            assert!(selection.require_digest(sha256(&changed)).is_err());
+        }
+        for fault in ["mode", "version", "field", "truncated", "legacy-mode"] {
+            let mut value = serde_json::to_value(&profile).unwrap();
+            match fault {
+                "mode" => value["source_mode"] = serde_json::json!("invented"),
+                "version" => value["version"] = serde_json::json!(99),
+                "field" => value["qualified"] = serde_json::json!(true),
+                "legacy-mode" => {
+                    value["version"] = serde_json::json!(1);
+                    value["source_mode"] = serde_json::json!("resident-source-v1");
+                }
+                "truncated" => {}
+                _ => unreachable!(),
+            }
+            let mut bytes = serde_json::to_vec(&value).unwrap();
+            if fault == "truncated" {
+                bytes.pop();
+            }
+            assert!(
+                InstalledReaderSelection::declared(&bytes).is_err(),
+                "{version}/{fault}"
+            );
+        }
+    }
 }

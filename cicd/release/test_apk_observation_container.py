@@ -25,6 +25,7 @@ class PublicObservation(unittest.TestCase):
    with patch.object(apk_generate,'INPUT',inputs),patch.object(apk_generate,'OUTPUT',artifacts):control=apk_generate.generate()
    pin=control['fixture_public_key_spki_sha256']
    self.assertFalse(list(root.rglob('*.pem')),'private generation key escaped volatile temporary root')
+   control['regenerated_index_readback']='deliberately invalid generation readback'
    (observations/'generated-control.json').write_text(json.dumps(control))
    # The observer is a distinct call with only public artifact/control inputs.
    actual=Path
@@ -32,6 +33,8 @@ class PublicObservation(unittest.TestCase):
     return {'/artifacts':artifacts,'/inputs':inputs,'/observations/generated-control.json':observations/'generated-control.json'}.get(value,actual(value))
    with patch.object(apk_observe,'Path',side_effect=mapped):
     result=apk_observe.observe(pin);self.assertEqual(result['status'],'public-key-only-observed')
+    self.assertEqual(result['eligibility'],'not-qualified')
+    self.assertIsNone(result['resident_package'])
     with self.assertRaisesRegex(Refusal,'pin'):apk_observe.observe('0'*64)
     package=artifacts/'remarkable-buddies-1.2.3-r2.armv7.apk';raw=package.read_bytes();package.write_bytes(raw[:-1])
     with self.assertRaisesRegex(Refusal,'immutable generation'):apk_observe.observe(pin)

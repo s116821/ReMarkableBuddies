@@ -10,6 +10,7 @@ fn context(turns: Vec<Turn>) -> ContextView {
         captures: vec![],
         legacy_captures: vec![],
         development_captures: vec![],
+        resident_captures: vec![],
         missing_media: vec![],
         selection: None,
     }

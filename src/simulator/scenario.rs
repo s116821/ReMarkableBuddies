@@ -108,6 +108,8 @@ pub enum HistoryAction {
     Hold { frames: Vec<ContactFrame> },
     Page { page: usize },
     Edit { text: String },
+    Close,
+    Reopen { page: usize },
     InputLost,
     Restart,
 }
@@ -164,6 +166,7 @@ pub enum Operation {
 pub enum Effect {
     OwnerChange,
     ExternalInput,
+    KeyboardIdentityChanged,
     Error,
     NoMove,
     Stale,
@@ -256,13 +259,26 @@ impl Scenario {
                 "Invalid iteration page"
             );
             ensure!(iteration.actions.len() <= 100, "Too many history actions");
+            let mut closed = false;
             for action in &iteration.actions {
+                ensure!(
+                    !closed || matches!(action, HistoryAction::Reopen { .. }),
+                    "A closed simulator document must reopen before any other action"
+                );
                 match action {
                     HistoryAction::Page { page } => {
                         ensure!(*page < self.pages.len(), "Invalid history page")
                     }
                     HistoryAction::Edit { text } => {
                         ensure!(text.len() <= 16000, "History edit too long")
+                    }
+                    HistoryAction::Close => closed = true,
+                    HistoryAction::Reopen { page } => {
+                        ensure!(
+                            closed && *page < self.pages.len(),
+                            "Invalid document reopen"
+                        );
+                        closed = false;
                     }
                     HistoryAction::Hold { frames } => {
                         ensure!(
@@ -285,6 +301,10 @@ impl Scenario {
                     _ => {}
                 }
             }
+            ensure!(
+                !closed,
+                "A closed simulator document must reopen in the same iteration"
+            );
         }
         for reply in &self.replies {
             ensure!(
@@ -335,6 +355,9 @@ impl Scenario {
                             | Operation::Text
                             | Operation::Body
                     ),
+                    Effect::KeyboardIdentityChanged => {
+                        matches!(fault.operation, Operation::Body | Operation::Text)
+                    }
                     Effect::NoMove => matches!(
                         fault.operation,
                         Operation::Next

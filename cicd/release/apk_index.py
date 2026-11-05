@@ -1,6 +1,6 @@
 """Compare authenticated pinned-tool index readbacks; no custom metadata hash."""
 import json
-from apk_contract import HEX64,require,tags,integer
+from apk_contract import HEX64,dependencies,require,tags,integer
 
 FIELDS={'name','version','arch','origin','repo-commit','build-time','license','description','tags','hashes','file-size','installed-size'}
 FILENAME_PATTERN='${name}-${version}.${arch}.apk'
@@ -18,7 +18,7 @@ def entries(value):
  require(isinstance(value,dict) and set(value)=={'packages','pkgname-spec'} and value['pkgname-spec']==FILENAME_PATTERN and isinstance(value['packages'],list) and len(value['packages'])==2,'exact two-target index and filename pattern')
  result={}
  for item in value['packages']:
-  require(isinstance(item,dict) and set(item)==FIELDS,'exact initial index fields')
+  require(isinstance(item,dict) and set(item) in (FIELDS,FIELDS|{'depends'}),'exact initial index fields')
   arch=item['arch'];require(arch in ('armv7','aarch64') and arch not in result,'duplicate or unknown index architecture')
   require(isinstance(item['hashes'],str) and HEX64.fullmatch(item['hashes']),'pinned mkndx SHA256 metadata identity')
   require(integer(item['file-size'],1,268435456) and integer(item['installed-size'],0,268435456),'index sizes')
@@ -35,5 +35,7 @@ def compare(original_raw,regenerated_raw,builds,pkgrel,licenses,apk_sizes):
   expected=dict(name='remarkable-buddies',origin='remarkable-buddies',version=source['tag'][1:]+'-r'+str(pkgrel),arch=arch,
    **{'repo-commit':source['sha'],'build-time':source['epoch'],'license':licenses[arch],
       'description':'ReMarkableBuddies test-key source-build package','tags':tags(build,pkgrel),'file-size':apk_sizes[arch]})
+  depends=dependencies(build)
+  require(item.get('depends')==depends if depends else 'depends' not in item,'index firmware/device dependencies')
   require(all(item[key]==value and type(item[key]) is type(value) for key,value in expected.items()),'index/source-build correspondence')
  return {arch:dict(index_metadata_hash_algorithm='sha256',index_metadata_hash_encoding='lowercase-hex',index_metadata_hash=item['hashes'],apk_file_bytes=item['file-size']) for arch,item in original.items()}

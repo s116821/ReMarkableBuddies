@@ -20,7 +20,8 @@ class ActualSchema(unittest.TestCase):
    command(['openssl','rsa','-in',str(key),'-pubout','-out',str(public)])
    common=[str(tool),'--root',str(meta),'--keys-dir','keys','--no-network']
    package=root/'filename-schema-probe-1.0.0-r0.armv7.apk'
-   command(common+['mkpkg','--sign-key',str(key),'--compression','none','--info','name:filename-schema-probe','--info','version:1.0.0-r0','--info','arch:armv7','--output',str(package)])
+   command(common+['mkpkg','--sign-key',str(key),'--compression','none','--info','name:filename-schema-probe','--info','version:1.0.0-r0','--info','arch:armv7',
+                   '--info','depends:remarkable-os=3.28.0.172-r0 rm2','--output',str(package)])
    command(common+['verify',str(package)])
    index=root/'schema-index.adb';pattern='${name}-${version}.${arch}.apk'
    command(common+['mkndx','--hash','sha256','--pkgname-spec',pattern,'--sign-key',str(key),'--compression','none','--output',str(index),str(package)])
@@ -31,6 +32,7 @@ class ActualSchema(unittest.TestCase):
    self.assertEqual(len(dump['packages']),1)
    self.assertEqual(dump['packages'][0]['file-size'],package.stat().st_size)
    self.assertEqual(len(dump['packages'][0]['hashes']),64)
+   self.assertEqual(dump['packages'][0]['depends'],['remarkable-os=3.28.0.172-r0','rm2'])
 
  def test_fixed_inventory_and_tampering(self):
   tool=Path('/tool/apk');self.assertEqual(hashlib.sha256(tool.read_bytes()).hexdigest(),TOOL_SHA)
