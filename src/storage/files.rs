@@ -181,7 +181,9 @@ pub fn safe_path(path: &Path) -> Result<()> {
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
-            Err(_) => anyhow::bail!("cannot validate owned path"),
+            Err(error) => {
+                return Err(anyhow::Error::new(error).context("cannot validate owned path"))
+            }
         }
     }
     for forbidden in [
@@ -329,6 +331,37 @@ impl Drop for Temporary {
         let _ = fs::remove_file(&self.path);
     }
 }
+/// Publish a synced marker into an exclusively reserved new archive root.
+pub(crate) fn publish_archive_marker(root: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = root.parent().context("archive parent absent")?;
+    let marker = root.join("backup.json");
+    safe_path(&marker)?;
+    let path = parent.join(format!(".stage-notebook-{}", Uuid::new_v4()));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut temporary = Temporary {
+        file: Some(options.open(&path)?),
+        path,
+    };
+    let file = temporary.file.as_mut().expect("created marker temporary");
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    drop(temporary.file.take());
+    #[cfg(all(test, unix))]
+    atomic_failure(&marker, AtomicFailure::BeforeRename)?;
+    fs::hard_link(&temporary.path, &marker)?;
+    #[cfg(all(test, unix))]
+    atomic_failure(&marker, AtomicFailure::RenameAcknowledgment)?;
+    sync_dir(root)?;
+    drop(temporary);
+    sync_dir(parent)
+}
+
 fn atomic_with(path: &Path, write: impl FnOnce(&mut File) -> Result<()>) -> Result<()> {
     safe_path(path)?;
     let parent = path.parent().context("missing owned parent")?;

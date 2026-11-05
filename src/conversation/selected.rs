@@ -61,6 +61,10 @@ impl SelectedDomainProjection {
                                     s.id == *source
                                         && s.conversation == conversation
                                         && s.turn == turn.id,
+                                Record::ResidentCapture(s) =>
+                                    s.id == *source
+                                        && s.conversation == conversation
+                                        && s.turn == turn.id,
                                 Record::LegacyCapture(s) =>
                                     s.id == *source
                                         && s.conversation == conversation
@@ -106,6 +110,10 @@ impl SelectedDomainProjection {
                 Record::DevelopmentCapture(capture) => {
                     self.require_turn(capture.turn, conversation)?;
                 }
+                Record::ResidentCapture(capture) => {
+                    self.require_turn(capture.turn, conversation)?;
+                    document = Some(capture.before.document);
+                }
                 Record::LegacyCapture(capture) => {
                     self.require_turn(capture.turn, conversation)?;
                 }
@@ -117,6 +125,9 @@ impl SelectedDomainProjection {
                             if origin.sources.contains(&source.id)),
                         "selected normalized source origin relationship missing"
                     );
+                    // Stable logical source grouping only. Supplied text never
+                    // establishes a current device/page or native authority.
+                    document = Some(source.document.document);
                 }
                 Record::ArchivedNormalizedSource(source) => {
                     self.require_turn(source.turn, conversation)?;
@@ -302,10 +313,128 @@ impl SelectedDomainProjection {
     }
     /// Retained records deliberately do not enter current projection.
     pub fn from_snapshot(snapshot: &SelectedSnapshot) -> Result<Self> {
-        Self::from_pinned_records(
+        Self::from_mixed_records(
             &snapshot.selected_records,
             &snapshot.transaction.selected.records,
+            &snapshot.transaction.scope,
         )
+    }
+    /// Explicit reciprocal document partition. Domain-only projection below
+    /// stays strict; this path validates the complete mixed graph first.
+    pub(crate) fn from_mixed_records(
+        records: &[Envelope],
+        references: &[ObjectRef],
+        scope: &crate::storage::selection::SelectionScope,
+    ) -> Result<Self> {
+        if !records
+            .iter()
+            .any(|record| record.namespace == Namespace::SubjectMemory)
+        {
+            return Self::from_pinned_records(records, references);
+        }
+        ensure!(
+            records.len() == references.len() && !records.is_empty() && records.len() <= MAX_ITEMS,
+            "invalid mixed selected references"
+        );
+        let mut all = BTreeMap::new();
+        let mut candidates: BTreeMap<(Namespace, Uuid), BTreeSet<Uuid>> = BTreeMap::new();
+        let mut bytes = 0usize;
+        let mut domain = Vec::new();
+        let mut domain_refs = Vec::new();
+        let mut memory = Vec::new();
+        for (record, reference) in records.iter().zip(references) {
+            record.validate()?;
+            ensure!(
+                crate::storage::valid_digest(&reference.sha256)
+                    && reference.bytes > 0
+                    && reference.bytes <= crate::storage::MAX_RECORD as u64,
+                "invalid mixed object reference"
+            );
+            bytes = bytes
+                .checked_add(usize::try_from(reference.bytes)?)
+                .context("mixed metadata overflow")?;
+            ensure!(bytes <= MAX_METADATA, "mixed metadata exceeds bound");
+            ensure!(
+                all.insert(record.revision_id, record).is_none(),
+                "duplicate mixed revision"
+            );
+            candidates
+                .entry((record.namespace, record.record_id))
+                .or_default()
+                .insert(record.revision_id);
+            match record.namespace {
+                Namespace::SubjectMemory => memory.push(record.clone()),
+                Namespace::Conversation | Namespace::Source | Namespace::ExportAssociation => {
+                    domain.push(record.clone());
+                    domain_refs.push(reference.clone());
+                }
+                _ => anyhow::bail!("unsupported mixed selected namespace"),
+            }
+        }
+        let mut remaining: BTreeMap<_, usize> = all
+            .iter()
+            .map(|(id, record)| (*id, record.parents.len()))
+            .collect();
+        let mut children: BTreeMap<Uuid, Vec<Uuid>> = BTreeMap::new();
+        for record in records {
+            for parent in &record.parents {
+                let prior = all.get(parent).context("mixed ancestor missing")?;
+                ensure!(
+                    prior.namespace == record.namespace && prior.record_id == record.record_id,
+                    "foreign mixed parent"
+                );
+                candidates
+                    .get_mut(&(record.namespace, record.record_id))
+                    .unwrap()
+                    .remove(parent);
+                children
+                    .entry(*parent)
+                    .or_default()
+                    .push(record.revision_id);
+            }
+        }
+        let mut ready: Vec<_> = remaining
+            .iter()
+            .filter_map(|(id, count)| (*count == 0).then_some(*id))
+            .collect();
+        let mut processed = 0;
+        while let Some(id) = ready.pop() {
+            processed += 1;
+            for child in children.get(&id).into_iter().flatten() {
+                let count = remaining.get_mut(child).unwrap();
+                *count -= 1;
+                if *count == 0 {
+                    ready.push(*child);
+                }
+            }
+        }
+        ensure!(processed == records.len(), "mixed causal cycle");
+        let mut pending = Vec::new();
+        for heads in candidates.values() {
+            ensure!(heads.len() == 1, "mixed causal fork or cycle");
+            pending.extend(heads.iter().copied());
+        }
+        let mut reached = BTreeSet::new();
+        while let Some(id) = pending.pop() {
+            if reached.insert(id) {
+                pending.extend(all[&id].parents.iter().copied());
+            }
+        }
+        ensure!(reached.len() == records.len(), "unreachable mixed history");
+        let projection = Self::from_pinned_records(&domain, &domain_refs)?;
+        let owners = projection.document_ownership()?;
+        let Some(DocumentOwnership::Document(document)) = owners.values().next() else {
+            anyhow::bail!("mixed document ownership unavailable")
+        };
+        ensure!(
+            owners
+                .values()
+                .all(|owner| *owner == DocumentOwnership::Document(*document))
+                && scope.key_sha256 == crate::memory::catalog::document_key(*document)?,
+            "foreign or ambiguous mixed document"
+        );
+        crate::memory::aggregate::validate_document_partition(&memory, *document)?;
+        Ok(projection)
     }
     #[cfg(test)]
     fn from_records(records: &[Envelope]) -> Result<Self> {
@@ -491,6 +620,25 @@ impl SelectedDomainProjection {
             .get(&reference.revision_id)
             .context("intent reference is a tombstone")
     }
+    /// Exact original object identity of a current value, including imported JSON.
+    pub fn current_reference(&self, namespace: Namespace, id: Uuid) -> Result<IntentRecordRef> {
+        let (envelope, Some(_)) = self
+            .head(namespace, id)
+            .context("selected reference absent")?
+        else {
+            anyhow::bail!("selected reference deleted")
+        };
+        Ok(IntentRecordRef {
+            namespace,
+            record_id: id,
+            revision_id: envelope.revision_id,
+            object: self
+                .objects
+                .get(&envelope.revision_id)
+                .context("selected object identity absent")?
+                .clone(),
+        })
+    }
 }
 pub(super) fn conversation_id(record: &Record) -> Uuid {
     match record {
@@ -505,6 +653,7 @@ pub(super) fn conversation_id(record: &Record) -> Uuid {
         Record::Capture(r) => r.conversation,
         Record::LegacyCapture(r) => r.conversation,
         Record::DevelopmentCapture(r) => r.conversation,
+        Record::ResidentCapture(r) => r.conversation,
         Record::OutcomeFact(r) => r.conversation,
         Record::Binding(r) => r.conversation,
         Record::Export(r) => r.conversation,
@@ -548,7 +697,7 @@ mod tests {
         next
     }
     #[test]
-    fn supplied_writer_text_requires_its_turn_without_native_document_ownership() {
+    fn supplied_writer_text_requires_its_turn_for_logical_grouping_without_native_authority() {
         use crate::conversation::{Mode, NormalizedTextSource, Outcome, Role, TextScope, Turn};
         use crate::retrieval::{NormalizedDocument, SourceFormat, SourceUnit};
         let root = root();
@@ -572,6 +721,7 @@ mod tests {
             None,
         )
         .unwrap();
+        let document = source.document.document;
         let mut source_envelope = root.clone();
         source_envelope.namespace = Namespace::Source;
         source_envelope.domain_schema_version = 2;
@@ -606,7 +756,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             projection.document_ownership().unwrap()[&conversation],
-            DocumentOwnership::DeferredMissing
+            DocumentOwnership::Document(document)
         );
         let missing =
             SelectedDomainProjection::from_records(&[root.clone(), source_envelope.clone()])
@@ -708,9 +858,16 @@ mod tests {
             )
             .unwrap();
         let projection = SelectedDomainProjection::from_records(&records).unwrap();
+        let document = records
+            .iter()
+            .find_map(|e| match Ledger::decode(e).ok()? {
+                Record::NormalizedText(s) => Some(s.document.document),
+                _ => None,
+            })
+            .unwrap();
         assert_eq!(
             projection.document_ownership().unwrap()[&conversation],
-            DocumentOwnership::DeferredMissing
+            DocumentOwnership::Document(document)
         );
         let source = records
             .iter()

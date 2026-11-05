@@ -6,12 +6,14 @@ pub mod drive;
 pub(crate) mod feedback_generation;
 pub mod files;
 pub mod inspection;
+pub mod inspection_v3;
 #[cfg(all(test, unix))]
 mod lease_tests;
 pub mod maintenance;
 pub mod migration;
 pub(crate) mod notebook_generation;
 mod recovery;
+pub(crate) use recovery::notebook_backup::command as notebook_archive;
 #[cfg(test)]
 mod selected_projection_tests;
 pub mod selection;
@@ -605,13 +607,16 @@ impl Store {
                                 && reference.bytes == source.media.bytes),
                         "notebook archive requires complete JSON media"
                     );
-                    if let Some(budget) = budget.as_deref_mut() {
-                        budget.charge(0, 0, 0, source.media.bytes)?;
-                    }
-                    let bytes = files::read(
-                        &root.join("objects").join(&source.media.sha256),
-                        crate::writer::notebook::MAX_CANONICAL_BYTES as u64,
-                    )?;
+                    let path = root.join("objects").join(&source.media.sha256);
+                    let limit = crate::writer::notebook::MAX_CANONICAL_BYTES as u64;
+                    let bytes = if notebook_archive_actor.is_some() {
+                        files::read_with_budget(&path, limit, budget.as_deref_mut())?
+                    } else {
+                        if let Some(budget) = budget.as_deref_mut() {
+                            budget.charge(0, 0, 0, source.media.bytes)?;
+                        }
+                        files::read(&path, limit)?
+                    };
                     source.validate_bytes(&bytes)?;
                 }
             }

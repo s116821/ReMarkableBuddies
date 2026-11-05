@@ -38,6 +38,93 @@ fn record<T: DeserializeOwned>(path: &Path, limit: u64) -> Result<T, Refusal> {
     files::json(path, limit).map_err(|_| Refusal::Unsupported)
 }
 
+fn read_record<T: DeserializeOwned>(
+    path: &Path,
+    limit: u64,
+    budget: Option<&mut super::selection::SelectedReadBudget>,
+) -> Result<T, Refusal> {
+    if let Some(budget) = budget {
+        files::safe_path(path).map_err(|_| Refusal::Unsupported)?;
+        let meta = fs::symlink_metadata(path).map_err(|_| Refusal::Unavailable)?;
+        if !meta.is_file() {
+            return Err(Refusal::Unsupported);
+        }
+        let bytes =
+            files::read_with_budget(path, limit, Some(budget)).map_err(|_| Refusal::Unsupported)?;
+        serde_json::from_slice(&bytes).map_err(|_| Refusal::Unsupported)
+    } else {
+        record(path, limit)
+    }
+}
+
+pub(crate) struct ExistingCustody {
+    pub(super) paths: StorePaths,
+    pub(super) actor: Uuid,
+    pub(super) generation: Uuid,
+    lease: Lease,
+}
+
+impl ExistingCustody {
+    pub(super) fn open(
+        paths: StorePaths,
+        admit: impl FnOnce(&StorePaths, &std::fs::File) -> anyhow::Result<()>,
+        mut budget: Option<&mut super::selection::SelectedReadBudget>,
+    ) -> Result<Self, Refusal> {
+        paths.validate().map_err(|_| Refusal::Unsupported)?;
+        directory(&paths.data)?;
+        let lock_path = paths.data.join("store.lock");
+        files::safe_path(&lock_path).map_err(|_| Refusal::Unsupported)?;
+        let metadata = fs::symlink_metadata(&lock_path).map_err(|_| Refusal::Unavailable)?;
+        if !metadata.is_file() {
+            return Err(Refusal::Unsupported);
+        }
+        let lease = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(lock_path)
+            .map_err(|_| Refusal::Unavailable)?;
+        lease.try_lock().map_err(|error| match error {
+            fs::TryLockError::WouldBlock => Refusal::Busy,
+            fs::TryLockError::Error(_) => Refusal::Unsupported,
+        })?;
+        // Unlock even if validation fails before a Store can be constructed.
+        let lease = Lease(lease);
+        admit(&paths, &lease.0).map_err(|_| Refusal::Unsupported)?;
+        let identity: Identity = read_record(
+            &paths.data.join("identity.json"),
+            MAX_RECORD as u64,
+            budget.as_deref_mut(),
+        )?;
+        if identity.format != FORMAT || identity.actor.is_nil() {
+            return Err(Refusal::Unsupported);
+        }
+        for root in [&paths.cache, &paths.credentials] {
+            directory(root)?;
+            let owner: Identity = read_record(
+                &root.join("owner.json"),
+                MAX_RECORD as u64,
+                budget.as_deref_mut(),
+            )?;
+            if owner.actor != identity.actor || owner.format != FORMAT {
+                return Err(Refusal::Unsupported);
+            }
+        }
+        for child in ["generations", "quarantine", "sync"] {
+            directory(&paths.data.join(child))?;
+        }
+        let generation: Uuid = read_record(&paths.data.join("CURRENT"), 128, budget)?;
+        if generation.is_nil() {
+            return Err(Refusal::Unsupported);
+        }
+        Ok(Self {
+            paths,
+            actor: identity.actor,
+            generation,
+            lease,
+        })
+    }
+}
+
 impl Store {
     /// Retains one lease through caller maintenance. Does not create directories,
     /// repair markers, clean staging, publish capabilities or initialize a store.
@@ -56,6 +143,10 @@ impl Store {
     }
     /// Selected archive custody only; no initialization or restore admission.
     pub(crate) fn open_existing_for_archive(paths: StorePaths) -> Result<Self, Refusal> {
+        Self::open_existing_inner(paths, true)
+    }
+    /// Historical selected-outbox custody only; no initialization or repair.
+    pub(crate) fn open_existing_for_outbox(paths: StorePaths) -> Result<Self, Refusal> {
         Self::open_existing_inner(paths, true)
     }
     /// Explicit configuration publication only; never initialize or activate a mode.
@@ -83,44 +174,12 @@ impl Store {
         admit: impl FnOnce(&StorePaths, &std::fs::File) -> anyhow::Result<()>,
         recover: impl FnOnce(&Store, Uuid) -> anyhow::Result<super::Index>,
     ) -> Result<Self, Refusal> {
-        paths.validate().map_err(|_| Refusal::Unsupported)?;
-        directory(&paths.data)?;
-        let lock_path = paths.data.join("store.lock");
-        files::safe_path(&lock_path).map_err(|_| Refusal::Unsupported)?;
-        let metadata = fs::symlink_metadata(&lock_path).map_err(|_| Refusal::Unavailable)?;
-        if !metadata.is_file() {
-            return Err(Refusal::Unsupported);
-        }
-        let lease = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(lock_path)
-            .map_err(|_| Refusal::Unavailable)?;
-        lease.try_lock().map_err(|error| match error {
-            fs::TryLockError::WouldBlock => Refusal::Busy,
-            fs::TryLockError::Error(_) => Refusal::Unsupported,
-        })?;
-        // Unlock even if validation fails before a Store can be constructed.
-        let lease = Lease(lease);
-        admit(&paths, &lease.0).map_err(|_| Refusal::Unsupported)?;
-        let identity: Identity = record(&paths.data.join("identity.json"), MAX_RECORD as u64)?;
-        if identity.format != FORMAT || identity.actor.is_nil() {
-            return Err(Refusal::Unsupported);
-        }
-        for root in [&paths.cache, &paths.credentials] {
-            directory(root)?;
-            let owner: Identity = record(&root.join("owner.json"), MAX_RECORD as u64)?;
-            if owner.actor != identity.actor || owner.format != FORMAT {
-                return Err(Refusal::Unsupported);
-            }
-        }
-        for child in ["generations", "quarantine", "sync"] {
-            directory(&paths.data.join(child))?;
-        }
-        let generation: Uuid = record(&paths.data.join("CURRENT"), 128)?;
-        if generation.is_nil() {
-            return Err(Refusal::Unsupported);
-        }
+        let ExistingCustody {
+            paths,
+            actor,
+            generation,
+            lease,
+        } = ExistingCustody::open(paths, admit, None)?;
         let generation_root = paths.data.join("generations").join(generation.to_string());
         files::safe_path(&generation_root.join(super::notebook_generation::MARKER))
             .map_err(|_| Refusal::Unsupported)?;
@@ -142,14 +201,14 @@ impl Store {
             directory(path)?;
         }
         if selected_aware {
-            super::selection::validate_generation(&generation_root, identity.actor, generation)
+            super::selection::validate_generation(&generation_root, actor, generation)
                 .map_err(|_| Refusal::Unsupported)?;
         } else if record::<u32>(&generation_root.join("format.json"), 64)? != FORMAT {
             return Err(Refusal::Unsupported);
         }
         let store = Self {
             paths,
-            actor_id: identity.actor,
+            actor_id: actor,
             _lease: lease,
             inner: Mutex::new(Inner {
                 generation,

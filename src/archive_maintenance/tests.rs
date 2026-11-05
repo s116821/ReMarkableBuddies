@@ -180,3 +180,168 @@ fn partial_media_is_truthful_and_complete_archive_inspection_requires_no_config_
     assert!(report.incomplete);
     assert!(!report.data.unwrap().inspection.configuration_included);
 }
+
+#[test]
+fn notebook_archive_report_keeps_lease_through_prefix_and_flush_errors() {
+    struct Output {
+        paths: crate::storage::StorePaths,
+        prefix: bool,
+        writes: usize,
+        flushes: usize,
+    }
+    impl Write for Output {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            assert!(matches!(
+                ExportSource::open(self.paths.clone()),
+                Err(Refusal::Busy)
+            ));
+            self.writes += 1;
+            if self.prefix && self.writes == 2 {
+                return Err(std::io::ErrorKind::BrokenPipe.into());
+            }
+            Ok(if self.prefix { 7 } else { bytes.len() })
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            assert!(matches!(
+                ExportSource::open(self.paths.clone()),
+                Err(Refusal::Busy)
+            ));
+            self.flushes += 1;
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+    }
+
+    let f = Fixture::new();
+    drop(Store::prepare_notebook(f.paths()).unwrap());
+    for prefix in [false, true] {
+        let path = f.root.join(if prefix { "prefix" } else { "flush" });
+        let report = export_notebook(
+            Config {
+                paths: f.paths(),
+                ..Config::default()
+            },
+            &path,
+        );
+        assert_eq!(report.status, Status::Ok);
+        let mut output = Output {
+            paths: f.paths(),
+            prefix,
+            writes: 0,
+            flushes: 0,
+        };
+        assert!(report.write_to(&mut output).is_err());
+        assert_eq!(
+            (output.writes, output.flushes),
+            if prefix { (2, 0) } else { (1, 1) }
+        );
+        assert!(ExportSource::open(f.paths()).is_ok());
+        assert_eq!(inspect_notebook(&path).status, Status::Ok);
+    }
+}
+
+#[test]
+fn notebook_archive_detached_witness_refuses_change_during_flush() {
+    struct Output {
+        marker: PathBuf,
+        frames: Vec<u8>,
+    }
+    impl Write for Output {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.frames.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            fs::write(&self.marker, b"{")
+        }
+    }
+    let f = Fixture::new();
+    drop(Store::prepare_notebook(f.paths()).unwrap());
+    let path = f.root.join("archive");
+    let mut export_frame = Vec::new();
+    export_notebook(
+        Config {
+            paths: f.paths(),
+            ..Config::default()
+        },
+        &path,
+    )
+    .write_to(&mut export_frame)
+    .unwrap();
+    let report = inspect_notebook(&path);
+    assert_eq!(report.status, Status::Ok);
+    let mut output = Output {
+        marker: path.join("backup.json"),
+        frames: Vec::new(),
+    };
+    assert!(report.write_to(&mut output).is_err());
+    assert_eq!(
+        output.frames.iter().filter(|byte| **byte == b'\n').count(),
+        1
+    );
+    assert_eq!(inspect_notebook(&path).status, Status::Unsupported);
+}
+
+#[test]
+fn notebook_archive_no_clobber_has_one_winner_and_refuses_existing_marker() {
+    let a = Fixture::new();
+    let b = Fixture::new();
+    for fixture in [&a, &b] {
+        drop(Store::prepare_notebook(fixture.paths()).unwrap());
+    }
+    let destination = a.root.join("archive");
+    let barrier = std::sync::Barrier::new(2);
+    let results = std::thread::scope(|scope| {
+        let launch = |paths| {
+            let destination = &destination;
+            let barrier = &barrier;
+            scope.spawn(move || {
+                let mut source = ExportSource::open(paths).unwrap();
+                let prepared = source.prepare().unwrap();
+                barrier.wait();
+                source.export(prepared, destination).is_ok()
+            })
+        };
+        let first = launch(a.paths());
+        let second = launch(b.paths());
+        [first.join().unwrap(), second.join().unwrap()]
+    });
+    assert_ne!(results[0], results[1]);
+    let marker = destination.join("backup.json");
+    let original = fs::read(&marker).unwrap();
+    assert!(files::publish_archive_marker(&destination, b"collision").is_err());
+    assert_eq!(fs::read(marker).unwrap(), original);
+    assert_eq!(inspect_notebook(&destination).status, Status::Ok);
+}
+
+#[test]
+#[cfg(unix)]
+fn notebook_archive_marker_fault_preserves_unpublished_and_possibly_published_roots() {
+    let f = Fixture::new();
+    drop(Store::prepare_notebook(f.paths()).unwrap());
+    for (name, fault, status) in [
+        (
+            "before",
+            files::AtomicFailure::BeforeRename,
+            Status::Unavailable,
+        ),
+        (
+            "after",
+            files::AtomicFailure::RenameAcknowledgment,
+            Status::Ok,
+        ),
+    ] {
+        let path = f.root.join(name);
+        files::fail_next_atomic(path.join("backup.json"), fault);
+        let report = export_notebook(
+            Config {
+                paths: f.paths(),
+                ..Config::default()
+            },
+            &path,
+        );
+        assert_eq!(report.status, Status::Failed);
+        drop(report);
+        assert!(path.join("objects").is_dir());
+        assert_eq!(inspect_notebook(&path).status, status);
+    }
+}
