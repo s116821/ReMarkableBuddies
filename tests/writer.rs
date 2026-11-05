@@ -7,6 +7,10 @@ use remarkable_reader_buddy::{
     LLMEngine, OpenAI,
 };
 use serde_json::{json, Value};
+#[path = "writer/selected.rs"]
+mod selected_memory_tests;
+#[path = "writer/memory.rs"]
+mod subject_memory_tests;
 use std::{
     collections::VecDeque,
     io::{Read, Write},

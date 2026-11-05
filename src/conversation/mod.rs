@@ -26,10 +26,12 @@ pub mod receiving;
 pub mod resolution;
 mod selected;
 mod selected_reader_write;
+mod selected_writer;
 pub use selected_reader_write::{
     SelectedReaderAcknowledgment, SelectedReaderPublication, SelectedReaderText,
     SelectedReaderWrite,
 };
+pub use selected_writer::*;
 #[cfg(test)]
 mod selected_context_tests;
 mod settlement;
