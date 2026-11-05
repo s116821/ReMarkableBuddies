@@ -9,6 +9,8 @@ use std::time::Duration;
 enum ReadOnlyTransport {
     Unavailable,
     Development(Option<Box<remarkable_open_sdk::development_capture::ReadOnlyDevelopmentCapture>>),
+    #[cfg(target_os = "linux")]
+    Resident(std::collections::VecDeque<crate::device::request_input::ReleasedReaderInput>),
 }
 
 pub(in crate::workflow) struct RefusingBackend {
@@ -20,6 +22,14 @@ impl RefusingBackend {
         Self {
             #[cfg(test)]
             transport: ReadOnlyTransport::Unavailable,
+        }
+    }
+    #[cfg(all(test, target_os = "linux"))]
+    pub(in crate::workflow) fn with_resident_releases(
+        releases: Vec<crate::device::request_input::ReleasedReaderInput>,
+    ) -> Self {
+        Self {
+            transport: ReadOnlyTransport::Resident(releases.into()),
         }
     }
     #[cfg(test)]
@@ -65,6 +75,19 @@ impl DeviceBackend for RefusingBackend {
             return Ok(());
         }
         anyhow::bail!("Selected operation requires context dispatch")
+    }
+    #[cfg(all(test, target_os = "linux"))]
+    fn wait_for_resident_reader(
+        &mut self,
+        progress: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<crate::device::request_input::ReleasedReaderInput> {
+        progress()?;
+        let ReadOnlyTransport::Resident(releases) = &mut self.transport else {
+            anyhow::bail!("No released resident gesture")
+        };
+        releases
+            .pop_front()
+            .ok_or_else(|| anyhow::anyhow!("No next genuine gesture"))
     }
     fn wait_for_trigger(&mut self) -> Result<()> {
         anyhow::bail!("Selected trigger unsupported")

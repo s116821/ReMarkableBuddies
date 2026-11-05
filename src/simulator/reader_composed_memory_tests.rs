@@ -217,7 +217,14 @@ fn composed_actual_orchestrator_publishes_owned_draft_and_stops_on_replacement_o
     use crate::memory::{self, Provider};
     use crate::storage::selection::{SelectionChange, SelectionScope};
     use crate::storage::{Coverage, Manifest, ObjectRef, Scope, FORMAT, MAX_ITEMS};
-    for case in 0..14 {
+    for fixture_case in 0..17 {
+        let resident = fixture_case >= 14;
+        let case = match fixture_case {
+            14 => 7,
+            15 => 1,
+            16 => 2,
+            other => other,
+        };
         let fixture = SimulatorLedger::new();
         let ledger = fixture.open().unwrap();
         let store = ledger.store().clone();
@@ -275,7 +282,50 @@ fn composed_actual_orchestrator_publishes_owned_draft_and_stops_on_replacement_o
             updated_ms: 1,
             completion: None,
         };
-        let (prepared_images, prepared_evidence) = if matches!(case, 7 | 8 | 12) {
+        let (prepared_images, prepared_evidence) = if resident {
+            use remarkable_open_sdk::native_adapter::{
+                HistoricalCapture, ReaderFacts, RuntimeIdentity,
+            };
+            use remarkable_open_sdk::{OperationId, PageKey};
+            use sha2::Digest;
+            let page = PageKey {
+                document: sdk_id(document),
+                page: sdk_id(Uuid::new_v4()),
+            };
+            let facts = ReaderFacts::new(page, vec![page.page]).unwrap();
+            let png = encode_png(&image::DynamicImage::ImageRgba8(
+                image::RgbaImage::from_pixel(12, 20, image::Rgba([17, 29, 41, 255])),
+            ));
+            let hash = sha2::Sha256::digest(&png).into();
+            let captured = crate::conversation::ResidentSourceCapture::from_session(
+                &RuntimeIdentity {
+                    profile_sha256: [1; 32],
+                    executable_sha256: [2; 32],
+                    adapter_sha256: [3; 32],
+                    boot: sdk_id(Uuid::new_v4()),
+                    activation: sdk_id(Uuid::new_v4()),
+                    pid: 123,
+                    start_ticks: 456,
+                },
+                OperationId(sdk_id(Uuid::new_v4())),
+                OperationId(sdk_id(Uuid::new_v4())),
+                facts.clone(),
+                HistoricalCapture::new(facts.clone(), facts, [12, 20], 1.0, png, hash).unwrap(),
+            )
+            .unwrap();
+            let prepared = ledger
+                .prepare_resident_historical(
+                    Uuid::new_v4(),
+                    ledger
+                        .expected(Namespace::Conversation, conversation)
+                        .unwrap(),
+                    user.clone(),
+                    Uuid::new_v4(),
+                    &captured,
+                )
+                .unwrap();
+            (prepared.images, prepared.evidence.id)
+        } else if matches!(case, 7 | 8 | 12) {
             let batch = composed_sdk_batch(Uuid::new_v4(), document, Uuid::new_v4());
             let prepared = ledger
                 .prepare_sdk_fixture(
@@ -493,8 +543,11 @@ fn composed_actual_orchestrator_publishes_owned_draft_and_stops_on_replacement_o
             prepared_evidence,
         );
         if matches!(case, 7 | 12) {
-            assert!(format!("{:#}", result.as_ref().unwrap_err())
-                .contains("Selected Generated draft acknowledged"));
+            let error = format!("{:#}", result.as_ref().unwrap_err());
+            assert!(
+                error.contains("Selected Generated draft acknowledged"),
+                "case {fixture_case}: {error}"
+            );
         }
         assert!(result.is_err());
         assert!(device.borrow().counts.is_empty());
@@ -548,6 +601,16 @@ fn composed_actual_orchestrator_publishes_owned_draft_and_stops_on_replacement_o
         assert!(!records
             .iter()
             .any(|record| matches!(record, Record::OutcomeFact(_) | Record::Binding(_))));
+        if resident {
+            let SelectedCaptureImages::Resident(saved) = admission
+                .capture_images(&current.token, prepared_evidence)
+                .unwrap()
+            else {
+                panic!("resident historical origin changed")
+            };
+            assert_eq!(saved.images, prepared_images);
+            continue;
+        }
         if matches!(case, 7 | 8 | 12) {
             let SelectedCaptureImages::Sdk(saved) = admission
                 .capture_images(&current.token, prepared_evidence)

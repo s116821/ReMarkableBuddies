@@ -1,0 +1,15 @@
+[Unit]
+Description=Restore the stock reMarkable services after Buddy stops
+After=reader-buddy.service
+Conflicts=reader-buddy.service
+
+[Service]
+Type=oneshot
+ExecStart=/home/root/.local/lib/remarkable-buddies/reader-buddy --resident-stock-recovery
+Restart=no
+KillMode=control-group
+SendSIGKILL=yes
+TimeoutStartSec=130s
+TimeoutStopSec=10s
+StandardOutput=journal
+StandardError=journal

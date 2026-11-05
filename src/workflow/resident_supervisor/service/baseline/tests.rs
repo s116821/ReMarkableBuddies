@@ -437,14 +437,13 @@ fn typed_terminal_bracket_requires_original_identity_group_and_policy() {
     )
     .unwrap()
     .is_none());
-    assert!(stopped_bracket(
-        original,
-        &cleared,
-        GroupObservation::EmptyOriginal,
-        &cleared,
-        deadline
-    )
-    .is_err());
+    for group in [GroupObservation::EmptyOriginal, GroupObservation::Populated] {
+        assert!(
+            stopped_bracket(original, &cleared, group, &cleared, deadline)
+                .unwrap()
+                .is_none()
+        );
+    }
     for (key, value) in [
         ("InvocationID", ""),
         ("ExecMainPID", "0"),

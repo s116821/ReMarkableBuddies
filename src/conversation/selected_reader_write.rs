@@ -200,6 +200,11 @@ fn prepare(
             {
                 capture.media()?
             }
+            Record::ResidentCapture(capture)
+                if capture.conversation == root.id && capture.turn == user.id =>
+            {
+                capture.media()?
+            }
             _ => bail!("selected Reader source ownership mismatch"),
         };
         for media in media {

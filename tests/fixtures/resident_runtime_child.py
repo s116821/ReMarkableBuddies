@@ -1,9 +1,11 @@
 """Owned Linux protocol fixture; no tablet libraries or native operations."""
 import ctypes
 import hashlib
+import json
 import os
 import pathlib
 import socket
+import signal
 import struct
 import sys
 import time
@@ -14,6 +16,16 @@ root = pathlib.Path(os.environ["RSDK_ACTIVATION_DIRECTORY"])
 mode = sys.argv[1]
 assert sys.argv[2:] == ["--system", "two words", "", "$(not-a-command); *", "λ"]
 assert "LD_PRELOAD" not in os.environ  # fixture-only launch, explicitly removed
+if mode == "reconnect-companion-term":
+    def terminate(_signal, _frame):
+        companion = json.loads((root.parent / "companion-evidence").read_text())
+        result = {"companion_absent": not pathlib.Path(f"/proc/{companion['pid']}").exists(),
+                  "companion_term": (root.parent / "companion-evidence.term").read_text() == "TERM"}
+        (root / "reader-term").write_text(json.dumps(result))
+        sys.exit(0)
+    signal.signal(signal.SIGTERM, terminate)
+elif mode == "reconnect-companion-ignore-term":
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
 assert not any(key in os.environ for key in ("LD_AUDIT", "LD_LIBRARY_PATH", "QT_PLUGIN_PATH", "QML_IMPORT_PATH", "HOSTNAME"))
 admission = (root / "admission.bin").read_bytes()
 assert len(admission) == 168 and admission[:8] == b"RSDKACT1"
@@ -75,14 +87,22 @@ def send(payload):
 connections = set()
 handshakes = set()
 count = 0
+# Explicit owned source-handoff model, never native current-page authority.
+source_page = uuid.uuid4().bytes
+source_facts = uuid.uuid4().bytes + source_page + struct.pack(">H", 1) + source_page
 while True:
     peer, _ = listener.accept()
-    peer.settimeout(3)
+    # The companion-startup fixture must outlive its five-second readiness
+    # deadline; an idle fixture exit must not masquerade as absent-broker refusal.
+    # Only the command-count probe deliberately spends up to its fixed 90s
+    # request budget in pre-request admission; normal fixture timing is intact.
+    peer.settimeout(95 if mode == "reconnect-source-handoff-count-probe" else
+                    10 if mode.startswith("reconnect-companion-") else 3)
     credentials = peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
     assert struct.unpack("3i", credentials)[:2] == (os.getppid(), os.geteuid())
     try:
         hello = bytearray(frame())
-        assert len(hello) == 203 and hello[:6] == b"RSDK\x00\x03" and hello[202] == 0
+        assert len(hello) == 203 and hello[:6] == b"RSDK\x00\x04" and hello[202] == 0
         assert hello[6:118] == admission[8:120]
         assert struct.unpack(">I", hello[118:122])[0] == os.getpid()
         assert hello[130:146] == admission[120:136]
@@ -111,9 +131,16 @@ while True:
                 with (root / "commands").open("ab") as commands:
                     commands.write(request[202:204])
             digest = hashlib.sha256(struct.pack(">I", len(request)) + request).digest()
-            if request[202:204] == b"\x02\x05":
+            if mode.startswith("reconnect-source-handoff") and request[202:204] == b"\x02\x00":
+                send(request[:202] + b"\x03" + digest + b"\x00" + source_facts)
+                continue
+            if request[202:204] in (b"\x02\x05", b"\x02\x06"):
                 # Independent owned PNG encoder, not a native Reader model.
+                visual = request[203] == 6
                 facts = request[204:]
+                assert not visual or not facts
+                if mode.startswith("reconnect-source-handoff"):
+                    assert facts == source_facts
                 (root / "capture-received").touch()
                 if mode in ("reconnect-capture-cancel", "reconnect-capture-timeout") and count == 1:
                     assert peer.recv(1) == b""
@@ -129,12 +156,12 @@ while True:
                        + chunk(b"IEND", b""))
                 assert len(png) > 65536
                 image_hash = hashlib.sha256(png).digest()
-                if mode == "reconnect-capture-corrupt":
+                if mode in ("reconnect-capture-corrupt", "reconnect-source-handoff-corrupt"):
                     png = png[:-1] + bytes([png[-1] ^ 1])
-                if mode == "reconnect-capture-source":
+                if mode == "reconnect-capture-source" and not visual:
                     facts = bytes([facts[0] ^ 1]) + facts[1:]
-                capture = facts + facts + struct.pack(">IIdB", width, height, 1.0, 1) + image_hash + struct.pack(">I", len(png)) + png
-                response = request[:202] + b"\x03" + digest + b"\x07" + capture
+                capture = facts + facts + struct.pack(">IIdB", width, height, 1.0, 2 if visual else 1) + image_hash + struct.pack(">I", len(png)) + png
+                response = request[:202] + b"\x03" + digest + (b"\x08" if visual else b"\x07") + capture
                 if mode == "reconnect-capture-eof":
                     peer.sendall(struct.pack(">I", len(response)) + response[:500])
                     break

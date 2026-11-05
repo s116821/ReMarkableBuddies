@@ -133,6 +133,7 @@ impl Selected {
             }
             SelectedCaptureImages::Development(images) => images.images,
             SelectedCaptureImages::Legacy(images) => images.images,
+            SelectedCaptureImages::Resident(images) => images.images,
         })
     }
     pub(super) fn write(
