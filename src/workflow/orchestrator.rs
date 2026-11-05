@@ -370,6 +370,9 @@ impl<M: LLMEngine> Orchestrator<M> {
             writer::OwnedRun {
                 owner: &owner,
                 expected_root: Some(expected),
+                // Preserve resident refinement's delivered text-only contract;
+                // its current capture authorizes placement, not image opt-in.
+                historical_images: false,
                 produced: &mut produced,
             },
         );
