@@ -1011,7 +1011,7 @@ impl<M: LLMEngine> Orchestrator<M> {
     ///
     /// Simplified flow:
     /// 1. Store original page screenshot for later comparison
-    /// 2. Navigate right to next page  
+    /// 2. Navigate right to next page
     /// 3. Compare to original to verify we actually moved
     /// 4. Check if page is valid (blank or existing QA page)
     /// 5. If not valid or didn't move â†’ verify the source and record a non-ink failure
