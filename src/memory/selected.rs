@@ -585,6 +585,56 @@ impl Pins {
     }
 }
 impl Provider for SelectedMemory {
+    fn require_selected_writer(&self, writer: &SelectedAdmission) -> Result<()> {
+        self.require_selected_reader(writer)
+    }
+    fn check_selected_writer(
+        &self,
+        result: &QueryResult,
+        writer: &SelectedAdmission,
+    ) -> Result<()> {
+        self.require_selected_writer(writer)?;
+        let mut pins = result
+            .pins
+            .as_ref()
+            .context("Writer memory pins absent")?
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Writer memory pins unavailable"))?;
+        ensure!(
+            pins.instance == self.instance
+                && pins.result_sha256.as_deref() == Some(result_identity(result)?.as_str()),
+            "foreign or changed Writer memory view"
+        );
+        pins.guard(&self.store, || Ok(()))
+    }
+    fn publish_selected_writer(
+        &self,
+        result: &QueryResult,
+        writer: &SelectedAdmission,
+        finish: crate::conversation::SelectedWriterFinish,
+    ) -> Result<crate::conversation::SelectedWriterPublication> {
+        self.require_selected_writer(writer)?;
+        let mut pins = result
+            .pins
+            .as_ref()
+            .context("Writer memory pins absent")?
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Writer memory pins unavailable"))?;
+        ensure!(
+            pins.instance == self.instance
+                && pins.result_sha256.as_deref() == Some(result_identity(result)?.as_str()),
+            "foreign or changed Writer memory view"
+        );
+        let admissions = pins.admissions.clone();
+        let handles: Vec<_> = admissions.iter().collect();
+        writer.finish_selected_writer_joined(finish, &handles, |store| {
+            let validation = pins.validate_current(store);
+            pins.consumed = true;
+            #[cfg(test)]
+            witness_composed_panic(validation.is_ok());
+            validation
+        })
+    }
     fn require_selected_reader(&self, reader: &SelectedAdmission) -> Result<()> {
         ensure!(
             reader.uses_store(&self.store)

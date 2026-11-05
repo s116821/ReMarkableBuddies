@@ -30,6 +30,12 @@ pub struct SelectedAdmission {
     gate: Arc<Mutex<()>>,
 }
 impl SelectedAdmission {
+    pub(crate) fn writer_store(&self) -> &Arc<Store> {
+        &self.store
+    }
+    pub(crate) fn same_store(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.store, &other.store)
+    }
     pub(crate) fn uses_store(&self, store: &Arc<Store>) -> bool {
         Arc::ptr_eq(&self.store, store)
     }

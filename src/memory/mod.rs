@@ -333,6 +333,27 @@ impl Inspection {
     }
 }
 pub trait Provider: Send + Sync {
+    fn require_selected_writer(
+        &self,
+        _writer: &crate::conversation::SelectedAdmission,
+    ) -> Result<()> {
+        anyhow::bail!("memory provider does not support selected Writer")
+    }
+    fn check_selected_writer(
+        &self,
+        _result: &QueryResult,
+        _writer: &crate::conversation::SelectedAdmission,
+    ) -> Result<()> {
+        anyhow::bail!("memory provider does not support selected Writer view")
+    }
+    fn publish_selected_writer(
+        &self,
+        _result: &QueryResult,
+        _writer: &crate::conversation::SelectedAdmission,
+        _finish: crate::conversation::SelectedWriterFinish,
+    ) -> Result<crate::conversation::SelectedWriterPublication> {
+        anyhow::bail!("memory provider does not support selected Writer publication")
+    }
     /// Opt in to ordinary Writer snapshots from this exact receiving Store.
     /// Selected providers need a separate consuming publication contract.
     fn admit_ordinary_writer(&self, _store: &Store) -> Result<()> {

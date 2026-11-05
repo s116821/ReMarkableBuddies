@@ -1,6 +1,7 @@
 //! Generate local unrendered drafts from explicit text. No device or export effects.
 pub mod command;
 pub mod notebook;
+pub mod selected;
 mod subject_memory;
 use crate::{
     config::PersonalizationSnapshot,
