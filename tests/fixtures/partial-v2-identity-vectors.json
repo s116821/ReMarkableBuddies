@@ -124,19 +124,19 @@
     },
     {
       "name": "unknown-version-with-policy",
-      "request_json": "{\"transcription_version\":3,\"invocation\":\"00000000-0000-4000-8000-000000000001\",\"document\":\"00000000-0000-4000-8000-000000000002\",\"page\":7,\"target_png\":\"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGP4DwABAQEAsTj2FAAAAABJRU5ErkJggg==\",\"context\":null,\"policy\":\"partial-transcription\"}",
+      "request_json": "{\"transcription_version\":4,\"invocation\":\"00000000-0000-4000-8000-000000000001\",\"document\":\"00000000-0000-4000-8000-000000000002\",\"page\":7,\"target_png\":\"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGP4DwABAQEAsTj2FAAAAABJRU5ErkJggg==\",\"context\":null,\"policy\":\"partial-transcription\"}",
       "report_json": "{\"confirmed\":false,\"context\":null,\"failure\":\"invalid-input\",\"invocation\":null,\"provider_attempt\":\"not-called\",\"result\":null,\"status\":\"refused\",\"target_sha256\":null,\"transcription_version\":1}\n",
       "report_sha256": "b737657ca20d15c9b0cf0832a761a3d89e20eefce37f965e6f035c8748682c9b"
     },
     {
       "name": "unknown-version-valid-legacy-envelope",
-      "request_json": "{\"transcription_version\":3,\"invocation\":\"00000000-0000-4000-8000-000000000001\",\"document\":\"00000000-0000-4000-8000-000000000002\",\"page\":7,\"target_png\":\"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGP4DwABAQEAsTj2FAAAAABJRU5ErkJggg==\",\"context\":null}",
+      "request_json": "{\"transcription_version\":4,\"invocation\":\"00000000-0000-4000-8000-000000000001\",\"document\":\"00000000-0000-4000-8000-000000000002\",\"page\":7,\"target_png\":\"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGP4DwABAQEAsTj2FAAAAABJRU5ErkJggg==\",\"context\":null}",
       "report_json": "{\"confirmed\":false,\"context\":null,\"failure\":\"invalid-version\",\"invocation\":\"00000000-0000-4000-8000-000000000001\",\"provider_attempt\":\"not-called\",\"result\":null,\"status\":\"refused\",\"target_sha256\":null,\"transcription_version\":1}\n",
       "report_sha256": "31ed126fbe1c55e02ec174e7be66ca760aeacb9d7dcf140ce106b078b2b2bee2"
     },
     {
       "name": "unknown-version-invalid-page",
-      "request_json": "{\"transcription_version\":3,\"invocation\":\"00000000-0000-4000-8000-000000000001\",\"document\":\"00000000-0000-4000-8000-000000000002\",\"page\":0,\"target_png\":\"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGP4DwABAQEAsTj2FAAAAABJRU5ErkJggg==\",\"context\":null}",
+      "request_json": "{\"transcription_version\":4,\"invocation\":\"00000000-0000-4000-8000-000000000001\",\"document\":\"00000000-0000-4000-8000-000000000002\",\"page\":0,\"target_png\":\"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGP4DwABAQEAsTj2FAAAAABJRU5ErkJggg==\",\"context\":null}",
       "report_json": "{\"confirmed\":false,\"context\":null,\"failure\":\"invalid-input\",\"invocation\":null,\"provider_attempt\":\"not-called\",\"result\":null,\"status\":\"refused\",\"target_sha256\":null,\"transcription_version\":1}\n",
       "report_sha256": "b737657ca20d15c9b0cf0832a761a3d89e20eefce37f965e6f035c8748682c9b"
     },

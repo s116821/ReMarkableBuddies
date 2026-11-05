@@ -81,6 +81,12 @@ fn math_vectors() -> Value {
     ))
     .unwrap()
 }
+fn structured_vectors() -> Value {
+    serde_json::from_str(include_str!(
+        "../../tests/fixtures/structured-math-identity-vectors.json"
+    ))
+    .unwrap()
+}
 fn partial_request(context: Value) -> Value {
     let mut value = request(context);
     value["transcription_version"] = json!(2);
@@ -91,6 +97,18 @@ fn math_request(context: Value) -> Value {
     let mut value = partial_request(context);
     value["policy"] = json!("partial-math-transcription");
     value
+}
+fn structured_request(context: Value) -> Value {
+    let mut value = request(context);
+    value["transcription_version"] = json!(3);
+    value["policy"] = json!("structured-math-transcription");
+    value
+}
+fn structured_reply() -> String {
+    json!({"pages":[{"page":7,"status":"structured","spans":[{"kind":"math","root":
+        {"tag":"mfrac","children":[{"tag":"unknown"},{"tag":"msub","children":[
+            {"tag":"msqrt","children":[{"tag":"unknown"}]},{"tag":"unknown"}]}]}}]}]})
+    .to_string()
 }
 fn profile() -> Uuid {
     Uuid::parse_str("00000000-0000-4000-8000-000000000010").unwrap()
@@ -206,6 +224,7 @@ fn six_literal_vectors_exercise_production_context_payload_and_profile_recipes()
     let vector = fixture();
     let partial = partial_vectors();
     let math = math_vectors();
+    let structured = structured_vectors();
     for case in vector["cases"].as_array().unwrap() {
         let target = notebook::admit_target(7, png(), &mut |_| Ok(())).unwrap();
         let examples = case["selected"].as_array().unwrap();
@@ -285,6 +304,7 @@ fn six_literal_vectors_exercise_production_context_payload_and_profile_recipes()
         for (policy, vectors) in [
             (TranscriptionPolicy::Partial, &partial),
             (TranscriptionPolicy::PartialMath, &math),
+            (TranscriptionPolicy::StructuredMath, &structured),
         ] {
             let expected = vectors["cases"]
                 .as_array()
@@ -1451,4 +1471,206 @@ fn actual_os_contention_is_typed_busy_and_existing_unknown_context_does_not_publ
     assert!(Store::open(local.config.paths.clone()).is_err());
     drop(report);
     assert_eq!(before, tree_bytes(&local.root));
+}
+
+#[test]
+fn structured_math_roundtrip_preserves_unknown_children_and_local_provenance() {
+    let local = Local::new();
+    let input = structured_request(Value::Null);
+    let mut engine = Engine::new();
+    engine.reply = structured_reply();
+    let expected: Value = serde_json::from_str(&engine.reply).unwrap();
+    let report = run(&local, &input, &mut engine);
+    assert_eq!(report.status, Status::Structured);
+    assert_eq!(report.provider_attempt, Attempt::Called);
+    assert_eq!(engine.calls, 1);
+    assert!(report.succeeded());
+    let wire = output(&report);
+    assert_eq!(wire["transcription_version"], 3);
+    assert_eq!(wire["confirmed"], false);
+    assert!(wire["result"].is_null() && wire["partial"].is_null());
+    let result = &wire["structured_math"];
+    assert_eq!(result["spans"], expected["pages"][0]["spans"]);
+    assert_eq!(result["coverage"], "partial");
+    assert_eq!(result["document"], input["document"]);
+    assert_eq!(result["page"], 7);
+    assert_eq!(result["profile"]["protocol"], 4);
+    assert_eq!(
+        result["profile"]["prompt_revision"],
+        "transcribe-structured-math-v1"
+    );
+    assert_eq!(result["response_sha256"], digest(engine.reply.as_bytes()));
+    assert_eq!(
+        result["authority"],
+        "unverified-historical-page-image-structured-math-ocr"
+    );
+    assert_eq!(result["source_sha256"], fixture()["source_sha256"]);
+    assert_eq!(wire["target_sha256"], digest(&png()));
+    assert_eq!(
+        engine.captured.last().unwrap()["image_url"],
+        input["target_png"]
+    );
+    assert!(!local.config.paths.data.exists());
+    assert!(
+        serde_json::from_value::<crate::retrieval::NormalizedDocument>(result.clone()).is_err()
+    );
+    assert!(handwriting::parse(&mut Cursor::new(serde_json::to_vec(&wire).unwrap())).is_err());
+}
+
+#[test]
+fn structured_admission_and_legacy_receivers_refuse_cross_version_data() {
+    let local = Local::new();
+    for policy in [
+        Value::Null,
+        json!(1),
+        json!("partial-transcription"),
+        json!("partial-math-transcription"),
+    ] {
+        let mut input = structured_request(Value::Null);
+        input["policy"] = policy;
+        let mut engine = Engine::new();
+        let report = run(&local, &input, &mut engine);
+        assert_eq!(report.failure, Some(Failure::InvalidInput));
+        assert_eq!(report.provider_attempt, Attempt::NotCalled);
+        assert_eq!(engine.calls, 0);
+        let wire = output(&report);
+        assert_eq!(wire["transcription_version"], 1);
+        assert!(wire.get("partial").is_none() && wire.get("structured_math").is_none());
+    }
+    for input in [
+        request(Value::Null),
+        partial_request(Value::Null),
+        math_request(Value::Null),
+    ] {
+        let mut engine = Engine::new();
+        engine.reply = structured_reply();
+        let report = run(&local, &input, &mut engine);
+        assert_eq!(report.failure, Some(Failure::InvalidResponse));
+        assert_eq!(engine.calls, 1);
+        assert!(output(&report).get("structured_math").is_none());
+    }
+    let mut input = structured_request(Value::Null);
+    input["target_png"] = json!("not png");
+    let mut engine = Engine::new();
+    let report = run(&local, &input, &mut engine);
+    assert_eq!(report.failure, Some(Failure::InvalidImage));
+    let wire = output(&report);
+    assert_eq!(wire["transcription_version"], 3);
+    assert_eq!(wire.get("partial"), Some(&Value::Null));
+    assert_eq!(wire.get("structured_math"), Some(&Value::Null));
+    assert_eq!(engine.calls, 0);
+}
+
+#[test]
+fn structured_provider_boundary_rejects_malformed_deep_and_excessive_responses() {
+    let local = Local::new();
+    let mut bad_page: Value = serde_json::from_str(&structured_reply()).unwrap();
+    bad_page["pages"][0]["page"] = json!(8);
+    let mut invented: Value = serde_json::from_str(&structured_reply()).unwrap();
+    invented["pages"][0]["spans"][0]["root"]["children"][0]["text"] = json!("guessed");
+    let mut deep = json!({"tag":"mi","text":"x"});
+    for _ in 0..40 {
+        deep = json!({"tag":"msqrt","children":[deep]});
+    }
+    let deep =
+        json!({"pages":[{"page":7,"status":"structured","spans":[{"kind":"math","root":deep}]}]});
+    for reply in [
+        bad_page.to_string(),
+        invented.to_string(),
+        deep.to_string(),
+        structured_reply().replacen("\"page\":7", "\"page\":7,\"page\":7", 1),
+        format!("{}\n{{}}", structured_reply()),
+        " ".repeat(16385),
+    ] {
+        let mut engine = Engine::new();
+        engine.reply = reply;
+        let report = run(&local, &structured_request(Value::Null), &mut engine);
+        assert_eq!(report.failure, Some(Failure::InvalidResponse));
+        assert_eq!(report.provider_attempt, Attempt::Called);
+        assert_eq!(engine.calls, 1);
+        let wire = output(&report);
+        assert!(
+            wire["result"].is_null()
+                && wire["partial"].is_null()
+                && wire["structured_math"].is_null()
+        );
+    }
+}
+
+#[test]
+fn structured_context_custody_survives_cancel_and_output_limit_without_payload() {
+    let local = Local::new();
+    let correction = Uuid::new_v4();
+    let (_, revision) = local.confirm(correction, &png(), "original", "corrected");
+    let before = tree_bytes(&local.root);
+    let input = structured_request(context(correction, revision));
+    for cancel_at in [1, 4] {
+        let mut prepared = Prepared::admit(&serde_json::to_vec(&input).unwrap(), &mut || Ok(()));
+        prepared.capture(&local.config, &mut || Ok(()));
+        let mut engine = Engine::new();
+        engine.reply = structured_reply();
+        let mut checkpoints = 0;
+        let report = prepared.execute("model", &mut engine, &mut || {
+            checkpoints += 1;
+            anyhow::ensure!(checkpoints != cancel_at, "synthetic cancellation");
+            Ok(())
+        });
+        assert_eq!(report.status, Status::Canceled);
+        assert_eq!(engine.calls, usize::from(cancel_at != 1));
+        let wire = output(&report);
+        assert!(
+            wire["result"].is_null()
+                && wire["partial"].is_null()
+                && wire["structured_math"].is_null()
+        );
+        assert!(Store::open(local.config.paths.clone()).is_err());
+        drop(report);
+        assert_eq!(tree_bytes(&local.root), before);
+    }
+    let mut engine = Engine::new();
+    engine.reply = structured_reply();
+    let mut report = run(&local, &input, &mut engine);
+    assert_eq!(report.status, Status::Structured);
+    assert_eq!(
+        report.structured_math().unwrap().profile.prompt_revision,
+        "transcribe-structured-math-confirmed-examples-v1"
+    );
+    assert!(Store::open(local.config.paths.clone()).is_err());
+    report
+        .structured_math
+        .as_mut()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .spans = vec![notebook::StructuredSpan::Known {
+        text: "x".repeat(40000),
+    }];
+    let wire = output(&report);
+    assert_eq!(wire["failure"], "output-limit");
+    assert_eq!(wire["provider_attempt"], "called");
+    assert!(
+        wire["result"].is_null() && wire["partial"].is_null() && wire["structured_math"].is_null()
+    );
+    assert!(Store::open(local.config.paths.clone()).is_err());
+    drop(report);
+    assert_eq!(tree_bytes(&local.root), before);
+}
+
+#[test]
+fn structured_version_keeps_all_existing_whole_page_outcomes() {
+    let local = Local::new();
+    for (variant, text, status) in [
+        ("transcribed", "literal x²", Status::Normalized),
+        ("blank", "", Status::Normalized),
+        ("unreadable", "", Status::Unreadable),
+    ] {
+        let mut engine = Engine::new();
+        engine.reply = json!({"pages":[{"page":7,"status":variant,"text":text}]}).to_string();
+        let report = run(&local, &structured_request(Value::Null), &mut engine);
+        assert_eq!(report.status, status);
+        let wire = output(&report);
+        assert_eq!(wire.get("partial"), Some(&Value::Null));
+        assert_eq!(wire.get("structured_math"), Some(&Value::Null));
+        assert_eq!(wire["confirmed"], false);
+    }
 }

@@ -36,7 +36,12 @@ fn actual_cli_refuses_strict_input_and_credentials_before_store_provider_or_cont
     let mut math_v3 = math.clone();
     math_v3["transcription_version"] = json!(3);
     let mut invalid_version = math_v3.clone();
+    invalid_version["transcription_version"] = json!(4);
     invalid_version.as_object_mut().unwrap().remove("policy");
+    let mut structured = math_v3.clone();
+    structured["policy"] = json!("structured-math-transcription");
+    let mut missing_v3_policy = structured.clone();
+    missing_v3_policy.as_object_mut().unwrap().remove("policy");
     let mut invalid_page = math.clone();
     invalid_page["page"] = json!(0);
     invalid_page["target_png"] = json!("invalid image");
@@ -67,6 +72,16 @@ fn actual_cli_refuses_strict_input_and_credentials_before_store_provider_or_cont
         ),
         (serde_json::to_vec(&math_v1).unwrap(), "invalid-input", 1),
         (serde_json::to_vec(&math_v3).unwrap(), "invalid-input", 1),
+        (
+            serde_json::to_vec(&missing_v3_policy).unwrap(),
+            "invalid-input",
+            1,
+        ),
+        (
+            serde_json::to_vec(&structured).unwrap(),
+            "credentials-unavailable",
+            3,
+        ),
         (
             serde_json::to_vec(&invalid_version).unwrap(),
             "invalid-version",
@@ -100,10 +115,15 @@ fn actual_cli_refuses_strict_input_and_credentials_before_store_provider_or_cont
         let report: Value = serde_json::from_slice(&result.stdout).unwrap();
         assert_eq!(report["failure"], failure);
         assert_eq!(report["transcription_version"], version);
-        if version == 2 {
+        if version >= 2 {
             assert_eq!(report.get("partial"), Some(&Value::Null));
         } else {
             assert!(report.get("partial").is_none());
+        }
+        if version == 3 {
+            assert_eq!(report.get("structured_math"), Some(&Value::Null));
+        } else {
+            assert!(report.get("structured_math").is_none());
         }
         assert_eq!(report["provider_attempt"], "not-called");
         assert_eq!(report["confirmed"], false);

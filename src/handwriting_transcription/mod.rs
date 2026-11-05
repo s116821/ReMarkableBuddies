@@ -6,7 +6,7 @@ use crate::{
     llm::LLMEngine,
     retrieval::notebook::{
         self, AdmittedTarget, NormalizeFailure, Normalized, NotebookText, PartialTranscription,
-        TranscriptionPolicy,
+        StructuredMathTranscription, TranscriptionPolicy,
     },
     storage::{Store, Uuid},
 };
@@ -44,6 +44,7 @@ pub enum Failure {
 pub enum Status {
     Normalized,
     Partial,
+    Structured,
     Unreadable,
     Refused,
     Canceled,
@@ -105,6 +106,9 @@ pub struct Report {
     // Outer None omits the v1 field. Some(None) serializes the required v2 null.
     #[serde(skip_serializing_if = "Option::is_none")]
     partial: Option<Option<Box<PartialTranscription>>>,
+    // Present, including null, only for an admitted v3 request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    structured_math: Option<Option<Box<StructuredMathTranscription>>>,
     pub confirmed: bool,
     #[serde(skip)]
     _owner: Option<ConfirmedContext>,
@@ -123,6 +127,7 @@ impl Report {
             context: None,
             result: None,
             partial: None,
+            structured_math: None,
             confirmed: false,
             _owner: None,
             _refused_owner: None,
@@ -134,6 +139,9 @@ impl Report {
         if let Some(partial) = &mut self.partial {
             *partial = None;
         }
+        if let Some(structured) = &mut self.structured_math {
+            *structured = None;
+        }
         self.status = match f {
             Failure::Canceled => Status::Canceled,
             Failure::StorageUnavailable | Failure::ProviderFailed => Status::Failed,
@@ -143,10 +151,13 @@ impl Report {
     pub fn partial(&self) -> Option<&PartialTranscription> {
         self.partial.as_ref().and_then(Option::as_deref)
     }
+    pub fn structured_math(&self) -> Option<&StructuredMathTranscription> {
+        self.structured_math.as_ref().and_then(Option::as_deref)
+    }
     pub fn succeeded(&self) -> bool {
         matches!(
             self.status,
-            Status::Normalized | Status::Unreadable | Status::Partial
+            Status::Normalized | Status::Unreadable | Status::Partial | Status::Structured
         )
     }
     /// Ownership spans serialization, actual write/flush, errors, and caller drop.
@@ -163,6 +174,9 @@ impl Report {
             value["result"] = serde_json::Value::Null;
             if self.partial.is_some() {
                 value["partial"] = serde_json::Value::Null;
+            }
+            if self.structured_math.is_some() {
+                value["structured_math"] = serde_json::Value::Null;
             }
             success = false;
             bytes =
@@ -201,13 +215,20 @@ impl Prepared {
                 .get("transcription_version")
                 .and_then(serde_json::Value::as_u64)
                 == Some(2);
-            if v2 {
+            let v3 = strict
+                .get("transcription_version")
+                .and_then(serde_json::Value::as_u64)
+                == Some(3);
+            if v2 || v3 {
                 let policy = strict
                     .as_object_mut()
                     .and_then(|object| object.remove("policy"));
-                this.policy = match policy.as_ref().and_then(serde_json::Value::as_str) {
-                    Some("partial-transcription") => TranscriptionPolicy::Partial,
-                    Some("partial-math-transcription") => TranscriptionPolicy::PartialMath,
+                this.policy = match (v3, policy.as_ref().and_then(serde_json::Value::as_str)) {
+                    (false, Some("partial-transcription")) => TranscriptionPolicy::Partial,
+                    (false, Some("partial-math-transcription")) => TranscriptionPolicy::PartialMath,
+                    (true, Some("structured-math-transcription")) => {
+                        TranscriptionPolicy::StructuredMath
+                    }
                     _ => return Err(Failure::InvalidInput),
                 };
             }
@@ -217,12 +238,15 @@ impl Prepared {
                 return Err(Failure::InvalidInput);
             }
             this.report.invocation = Some(request.invocation);
-            if !v2 && request.transcription_version != 1 {
+            if !v2 && !v3 && request.transcription_version != 1 {
                 return Err(Failure::InvalidVersion);
             }
-            if v2 {
-                this.report.transcription_version = 2;
+            if v2 || v3 {
+                this.report.transcription_version = if v3 { 3 } else { 2 };
                 this.report.partial = Some(None);
+            }
+            if v3 {
+                this.report.structured_math = Some(None);
             }
             if request.target_png.len() > (8 * 1024 * 1024usize).div_ceil(3) * 4 {
                 return Err(Failure::InvalidImage);
@@ -367,6 +391,10 @@ impl Prepared {
             Ok(Normalized::Partial(partial)) => {
                 self.report.status = Status::Partial;
                 self.report.partial = Some(Some(partial));
+            }
+            Ok(Normalized::StructuredMath(structured)) => {
+                self.report.status = Status::Structured;
+                self.report.structured_math = Some(Some(structured));
             }
             Ok(Normalized::Unreadable) => self.report.status = Status::Unreadable,
             Err(f) => self.report.fail(match f {

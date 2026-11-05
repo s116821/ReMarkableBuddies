@@ -43,3 +43,35 @@ it. Never join text across an uncertainty marker. An uncertain attachment may
 require marking its entire enclosing expression uncertain; when no independent
 known text remains, the expected result is `unreadable`. Recognition accuracy
 still requires semantic qualification; valid JSON is not proof of faithful math.
+
+## Opt-in structured math
+
+Set `"transcription_version":3` and `"policy":"structured-math-transcription"`
+to retain mathematical relationships with unknown child expressions. A v3 report
+always includes nullable `partial` and `structured_math` fields. Status
+`structured` has a nonnull `structured_math` payload and null `result`/`partial`.
+The other four outcomes keep their existing payloads. Failures clear every
+payload; `confirmed` remains false. Existing versions and defaults are unchanged.
+
+The payload's ordered spans are known text, opaque uncertainty, or math roots.
+For example, a visible fraction with two unreadable operands can retain:
+
+```json
+{"kind":"math","root":{"tag":"mfrac","children":[{"tag":"unknown"},{"tag":"unknown"}]}}
+```
+
+Trees use restricted Presentation MathML roles as inert JSON, with explicit
+ordered child slots for fractions, radicals, scripts and limits. This is not
+XML or executable TeX. Unknown children carry no guessed text. An uncertain
+attachment requires an unknown enclosing subtree, not an invented position.
+Consumers must support version 3 explicitly and must not flatten trees or join
+across uncertainty. No renderer, confirmation, export or Reader/Writer hook is
+introduced by this command.
+
+Bounds are shared per page: 64 spans, 128 math nodes, depth 8, 256 UTF-8 bytes
+per token and 4,096 total known text/token bytes. At least one math root must
+retain a known token or a relationship beyond grouping unknowns. Derived coverage
+is `partial` when any explicit gap remains; `complete` means only that no gap was
+declared, not that the output is accurate. Recognition qualification remains
+pending. See the central [structured contract](https://github.com/s116821/ReMarkableBuddiesDocs/blob/docs/rem-26-explicit-handwriting-transcription/openspec/changes/transcribe-with-confirmed-handwriting-context/structured-math-contract.md)
+for exact forms and provenance.
