@@ -20,6 +20,10 @@ enum ConversationOperation {
     Status,
     Context,
     RecoverPending,
+    WriterInspect,
+    WriterGenerate,
+    WriterRefine,
+    WriterRecover,
 }
 impl ConversationOperation {
     fn selected(
@@ -290,6 +294,23 @@ fn main() -> Result<()> {
     }
     if let Some(operation) = args.conversation_operation {
         let input = args.conversation_input.as_deref().expect("required input");
+        use remarkable_reader_buddy::writer::selected_command as selected_writer;
+        let writer_operation = match operation {
+            ConversationOperation::WriterInspect => Some(selected_writer::Operation::Inspect),
+            ConversationOperation::WriterGenerate => Some(selected_writer::Operation::Generate),
+            ConversationOperation::WriterRefine => Some(selected_writer::Operation::Refine),
+            ConversationOperation::WriterRecover => Some(selected_writer::Operation::Recover),
+            _ => None,
+        };
+        if let Some(operation) = writer_operation {
+            return selected_writer::run(
+                operation,
+                input,
+                std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+                &mut std::io::stdin().lock(),
+            )
+            .write_to(&mut std::io::stdout().lock());
+        }
         if let Some(selected) = operation.selected(input) {
             let mut report = remarkable_reader_buddy::reader_runtime::run(
                 selected,

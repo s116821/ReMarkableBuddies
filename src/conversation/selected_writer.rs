@@ -419,6 +419,57 @@ impl SelectedWriterModelPermit {
     }
 }
 impl SelectedAdmission {
+    /// Evidence-only recovery. Never writes or mints a fresh model permit.
+    pub fn recover_selected_writer_evidence(
+        &self,
+        evidence: &IntentSelectionEvidence,
+        raw_head: &str,
+        req: &SelectedWriterPrepare,
+    ) -> Result<Option<SelectedWriterPreparation>> {
+        evidence.validate()?;
+        ensure!(
+            crate::storage::valid_digest(raw_head),
+            "invalid original raw head"
+        );
+        Self::with_gates(&[self], |store| {
+            if store
+                .selected_receipt(self.scope(), req.operation)?
+                .is_none()
+            {
+                return Ok(None);
+            }
+            let token = store
+                .historical_predecessor_token(self.scope(), req.operation)?
+                .context("Writer predecessor token absent")?;
+            ensure!(
+                IntentSelectionEvidence::from_token(&token) == *evidence,
+                "Writer original evidence differs"
+            );
+            let mut budget = crate::storage::selection::SelectedReadBudget::new(
+                64,
+                4096,
+                8 * 1024 * 1024,
+                32 * 1024 * 1024,
+            );
+            let read = store
+                .selected_snapshot_with_budget(self.scope(), MAX_ITEMS, &mut budget)?
+                .context("Writer lineage absent")?;
+            let predecessor = read
+                .accepted_history
+                .iter()
+                .find(|item| item.sha256 == raw_head)
+                .context("Writer original raw head absent")?;
+            ensure!(
+                predecessor.transaction.scope == *token.scope()
+                    && predecessor.transaction.store_generation == token.store_generation()
+                    && crate::storage::digest(&serde_json::to_vec(&predecessor.transaction)?)
+                        == token.selection_sha256(),
+                "Writer original raw head differs"
+            );
+            let fingerprint = Ledger::fingerprint(&("selected-writer-prepare-v1", evidence, req))?;
+            historical_preparation(store, &token, req, &fingerprint)
+        })
+    }
     pub(crate) fn uses_same_admission(&self, other: &Self) -> bool {
         self.scope() == other.scope() && self.same_store(other)
     }
@@ -428,7 +479,9 @@ impl SelectedAdmission {
         req: &SelectedWriterPrepare,
     ) -> Result<SelectedWriterInput> {
         self.with_current(accepted, |s| {
-            source_input(&SelectedDomainProjection::from_snapshot(s)?, req)
+            let input = source_input(&SelectedDomainProjection::from_snapshot(s)?, req)?;
+            validate_document(self.scope(), &input.source)?;
+            Ok(input)
         })
     }
     pub fn prepare_selected_writer(
@@ -444,63 +497,8 @@ impl SelectedAdmission {
             &req,
         ))?;
         Self::with_gates(&[self], |store| {
-            if let Some((tx, prev, p, _)) = original(store, accepted, req.operation, &fingerprint)?
-            {
-                let (_, Some(Record::Turn(user))) = p
-                    .head(
-                        Namespace::Conversation,
-                        crate::writer::stage(req.operation, "user"),
-                    )
-                    .context("historical Writer user absent")?
-                else {
-                    bail!("historical Writer user variant")
-                };
-                let (records, _) = prepare_records(
-                    store,
-                    &prev,
-                    &req,
-                    &fingerprint,
-                    user.created_ms,
-                    store.actor_id,
-                )?;
-                verify_records(&p, &records)?;
-                let token = store
-                    .historical_selection_token(self.scope(), req.operation)?
-                    .context("Writer original token absent")?;
-                let pin = |ns, id| -> Result<IntentRecordRef> {
-                    let (e, Some(_)) =
-                        p.head(ns, id).context("Writer original reference absent")?
-                    else {
-                        bail!("Writer original reference deleted")
-                    };
-                    pending::pin(e)
-                };
-                let source = match &req.source {
-                    SelectedWriterSource::Generate { normalized } => {
-                        pin(Namespace::Source, normalized.id)?
-                    }
-                    SelectedWriterSource::Refine { source, .. } => source.clone(),
-                };
-                let refined_draft = match &req.source {
-                    SelectedWriterSource::Refine { draft, .. } => Some(draft.clone()),
-                    _ => None,
-                };
-                let prepared = SelectedWriterPrepared {
-                    accepted: token,
-                    root: pin(Namespace::Conversation, req.root.record_id)?,
-                    user: pin(
-                        Namespace::Conversation,
-                        crate::writer::stage(req.operation, "user"),
-                    )?,
-                    source,
-                    refined_draft,
-                    preparation_fingerprint: fingerprint.clone(),
-                };
-                let finished = recover_completed(store, &prepared, req.operation)?;
-                return Ok(SelectedWriterPreparation::Historical {
-                    transaction: Box::new(tx),
-                    finished: finished.map(Box::new),
-                });
+            if let Some(history) = historical_preparation(store, accepted, &req, &fingerprint)? {
+                return Ok(history);
             }
             ensure!(store.unavailable_commits()? == 0, "Writer store incomplete");
             let _mode = self.reader_mode_lease()?;
@@ -885,4 +883,66 @@ impl SelectedAdmission {
             }
         })
     }
+}
+
+fn historical_preparation(
+    store: &Store,
+    accepted: &SelectionToken,
+    req: &SelectedWriterPrepare,
+    fingerprint: &str,
+) -> Result<Option<SelectedWriterPreparation>> {
+    if let Some((tx, prev, p, _)) = original(store, accepted, req.operation, fingerprint)? {
+        let (_, Some(Record::Turn(user))) = p
+            .head(
+                Namespace::Conversation,
+                crate::writer::stage(req.operation, "user"),
+            )
+            .context("historical Writer user absent")?
+        else {
+            bail!("historical Writer user variant")
+        };
+        let (records, _) = prepare_records(
+            store,
+            &prev,
+            req,
+            fingerprint,
+            user.created_ms,
+            store.actor_id,
+        )?;
+        verify_records(&p, &records)?;
+        let token = store
+            .historical_selection_token(accepted.scope(), req.operation)?
+            .context("Writer original token absent")?;
+        let pin = |ns, id| -> Result<IntentRecordRef> {
+            let (e, Some(_)) = p.head(ns, id).context("Writer original reference absent")? else {
+                bail!("Writer original reference deleted")
+            };
+            pending::pin(e)
+        };
+        let source = match &req.source {
+            SelectedWriterSource::Generate { normalized } => pin(Namespace::Source, normalized.id)?,
+            SelectedWriterSource::Refine { source, .. } => source.clone(),
+        };
+        let refined_draft = match &req.source {
+            SelectedWriterSource::Refine { draft, .. } => Some(draft.clone()),
+            _ => None,
+        };
+        let prepared = SelectedWriterPrepared {
+            accepted: token,
+            root: pin(Namespace::Conversation, req.root.record_id)?,
+            user: pin(
+                Namespace::Conversation,
+                crate::writer::stage(req.operation, "user"),
+            )?,
+            source,
+            refined_draft,
+            preparation_fingerprint: fingerprint.to_owned(),
+        };
+        let finished = recover_completed(store, &prepared, req.operation)?;
+        return Ok(Some(SelectedWriterPreparation::Historical {
+            transaction: Box::new(tx),
+            finished: finished.map(Box::new),
+        }));
+    }
+    Ok(None)
 }

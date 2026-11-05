@@ -2,6 +2,7 @@
 pub mod command;
 pub mod notebook;
 pub mod selected;
+pub mod selected_command;
 mod subject_memory;
 use crate::{
     config::PersonalizationSnapshot,

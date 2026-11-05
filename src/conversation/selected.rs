@@ -620,6 +620,25 @@ impl SelectedDomainProjection {
             .get(&reference.revision_id)
             .context("intent reference is a tombstone")
     }
+    /// Exact original object identity of a current value, including imported JSON.
+    pub fn current_reference(&self, namespace: Namespace, id: Uuid) -> Result<IntentRecordRef> {
+        let (envelope, Some(_)) = self
+            .head(namespace, id)
+            .context("selected reference absent")?
+        else {
+            anyhow::bail!("selected reference deleted")
+        };
+        Ok(IntentRecordRef {
+            namespace,
+            record_id: id,
+            revision_id: envelope.revision_id,
+            object: self
+                .objects
+                .get(&envelope.revision_id)
+                .context("selected object identity absent")?
+                .clone(),
+        })
+    }
 }
 pub(super) fn conversation_id(record: &Record) -> Uuid {
     match record {

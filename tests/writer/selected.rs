@@ -6,6 +6,8 @@ use remarkable_reader_buddy::{
     writer::selected::{self, Selection},
 };
 use std::collections::BTreeMap;
+#[path = "selected_command.rs"]
+mod command;
 #[path = "selected_more.rs"]
 mod more;
 #[path = "selected_review.rs"]
