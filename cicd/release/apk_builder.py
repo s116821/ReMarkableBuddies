@@ -28,6 +28,7 @@ def produce(args):
  source=args.source.resolve();target_root=args.target_dir.resolve();output=args.output.resolve()
  require(integer(args.pkgrel,0,65535),'pkgrel')
  require(not output.exists() and not target_root.exists() and not output.is_relative_to(source) and not target_root.is_relative_to(source),'new external output roots')
+ require(not output.is_relative_to(target_root) and not target_root.is_relative_to(output),'disjoint build and final output roots')
  identity=source_identity(source,args.tag);license_id=source_license(source)
  bundle=getattr(args,'rm2_native_bundle',None)
  if bundle is not None:

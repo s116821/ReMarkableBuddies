@@ -1,9 +1,30 @@
 """Real child-process refusal controls; no device or network access."""
-import json,os,pathlib,sys,time,unittest,tempfile,hashlib
+import argparse,json,os,pathlib,sys,time,unittest,tempfile,hashlib
 from apk_contract import Refusal
 from apk_source_build import run,source_license,LICENSE_BLOB,build,git_conversion,container_source_snapshot,source_snapshot,runtime,RUNTIMES,IMAGES
-from apk_builder import copy_verified
+from apk_builder import copy_verified,produce
 from unittest.mock import patch
+
+class OutputRoots(unittest.TestCase):
+ def test_overlap_refuses_before_source_tools_or_output_creation(self):
+  with tempfile.TemporaryDirectory() as directory:
+   root=pathlib.Path(directory);source=root/'source';source.mkdir()
+   build=root/'build'
+   for target,output in [(build,build),(build,build/'artifacts'),(build/'target',build)]:
+    args=argparse.Namespace(source=source,target_dir=target,output=output,pkgrel=0,tag='v1.2.3')
+    with self.subTest(target=target,output=output),patch('apk_builder.source_identity') as identity:
+     with self.assertRaisesRegex(Refusal,'disjoint build and final output roots'):produce(args)
+     identity.assert_not_called()
+     self.assertFalse(build.exists())
+
+ def test_sibling_roots_continue_to_normal_source_admission(self):
+  with tempfile.TemporaryDirectory() as directory:
+   root=pathlib.Path(directory);source=root/'source';source.mkdir()
+   args=argparse.Namespace(source=source,target_dir=root/'build',output=root/'artifacts',pkgrel=0,tag='v1.2.3')
+   with patch('apk_builder.source_identity',side_effect=Refusal('source admission sentinel')) as identity:
+    with self.assertRaisesRegex(Refusal,'source admission sentinel'):produce(args)
+    identity.assert_called_once_with(source.resolve(),'v1.2.3')
+   self.assertEqual(set(root.iterdir()),{source})
 
 class CommandBounds(unittest.TestCase):
  def command(self,code,timeout=3):
