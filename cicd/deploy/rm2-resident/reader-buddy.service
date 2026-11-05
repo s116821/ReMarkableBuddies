@@ -1,0 +1,30 @@
+[Unit]
+Description=ReMarkable Reader Buddy
+After=home.mount xochitl.service network-online.target
+Wants=xochitl.service
+ConditionPathExists=/home/root/.config/reader-buddy/environment
+OnSuccess=reader-buddy-stock-recovery.service
+OnFailure=reader-buddy-stock-recovery.service
+OnSuccessJobMode=fail
+OnFailureJobMode=fail
+
+[Service]
+Type=notify
+NotifyAccess=main
+WorkingDirectory=/home/root
+EnvironmentFile=/home/root/.config/reader-buddy/environment
+ExecStart=/home/root/.local/lib/remarkable-buddies/reader-buddy
+Restart=no
+KillMode=control-group
+SendSIGKILL=yes
+TimeoutStartSec=60s
+TimeoutStopSec=10s
+WatchdogSec=120s
+RuntimeDirectory=reader-buddy-resident
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

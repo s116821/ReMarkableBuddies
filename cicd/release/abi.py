@@ -9,9 +9,11 @@ import shlex
 import subprocess
 
 
-def inspect_elf(binary):
+def inspect_elf(binary, bounded_read=None):
     command = shlex.split(os.environ.get("READELF", "readelf"))
     def read(*args):
+        if bounded_read is not None:
+            return bounded_read(command + list(args) + [str(binary)])
         return subprocess.check_output(command + list(args) + [str(binary)], text=True)
     headers = read("--wide", "--file-header", "--program-headers", "--dynamic")
     symbols = read("--wide", "--dyn-syms")
@@ -122,8 +124,8 @@ def verify_runtime(artifact, target, baseline=None):
                            for name in artifact["required_symbols"]})
 
 
-def qualify(binary, target):
-    artifact = inspect_elf(binary)
+def qualify(binary, target, bounded_read=None):
+    artifact = inspect_elf(binary, bounded_read)
     baseline_path = Path(__file__).with_name("rm2-runtime-baseline.json")
     baseline = json.loads(baseline_path.read_text()) if target.startswith("armv7") else None
     qualification = verify_runtime(artifact, target, baseline)

@@ -38,8 +38,9 @@ def build(repo, release, directory):
         git(repo, "config", "--file", str(home / "git/config"), "safe.directory", repo.as_posix())
         env["XDG_CONFIG_HOME"] = str(home)
         for target in TARGETS:
+            features = ["--features", "installed-resident-output"] if target == TARGETS[0] else []
             subprocess.run(["cross", "build", "--locked", "--release", "--target", target,
-                            "--bin", "reader-buddy"], cwd=repo, env=env, check=True)
+                            "--bin", "reader-buddy", *features], cwd=repo, env=env, check=True)
             binary = repo / "target" / target / "release/reader-buddy"
             artifacts[target] = qualify(binary, target)
             artifacts[target]["build_image"] = images[target]["image"]

@@ -3,11 +3,13 @@ use crate::storage::{StorePaths, Uuid as StoreUuid};
 use remarkable_open_sdk::native_adapter::{Rejection, Reply};
 
 mod capture;
+mod companion;
 mod requests;
+mod shutdown;
 
-struct Fixture(PathBuf);
+pub(crate) struct Fixture(PathBuf);
 impl Fixture {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let path = std::env::temp_dir().join(format!("rsdk-{}", StoreUuid::new_v4().simple()));
         DirBuilder::new().mode(0o700).create(&path).unwrap();
         for name in ["profile", "adapter"] {
@@ -32,6 +34,7 @@ impl Fixture {
             path,
         };
         Launch {
+            companion: None,
             profile: artifact(self.0.join("profile")),
             executable: artifact(
                 fs::canonicalize("/usr/bin/python3")
@@ -57,6 +60,23 @@ impl Fixture {
         timeout: Duration,
         admit: impl FnMut(Instant) -> Result<()>,
     ) -> std::result::Result<ResidentRuntime, StartupFailure> {
+        self.start_admitted_with_store(self.store(), mode, timeout, admit)
+    }
+    pub(crate) fn start_with_store(
+        &self,
+        store: Arc<Store>,
+        mode: &str,
+        timeout: Duration,
+    ) -> std::result::Result<ResidentRuntime, StartupFailure> {
+        self.start_admitted_with_store(store, mode, timeout, |_| Ok(()))
+    }
+    fn start_admitted_with_store(
+        &self,
+        store: Arc<Store>,
+        mode: &str,
+        timeout: Duration,
+        mut admit: impl FnMut(Instant) -> Result<()>,
+    ) -> std::result::Result<ResidentRuntime, StartupFailure> {
         let mut input = self.launch();
         input.arguments = [
             "-S",
@@ -72,14 +92,14 @@ impl Fixture {
         .map(str::to_owned)
         .to_vec();
         ResidentRuntime::launch_checked(
-            self.store(),
+            store,
             input,
             Instant::now() + timeout,
             |command| {
                 // Owned protocol fixture, explicitly no actual LD_PRELOAD/native code.
                 command.env_remove("LD_PRELOAD");
             },
-            admit,
+            |deadline, _| admit(deadline),
         )
     }
     fn preserved_and_reaped(&self, mode: &str, failure: StartupFailure) {
@@ -105,6 +125,50 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
     }
+}
+
+#[test]
+fn identity_refusal_retains_inode_and_start_observations_without_relaxing_checks() {
+    let fixture = Fixture::new();
+    let mut runtime = fixture.start("ready", Duration::from_secs(5)).unwrap();
+    let original = runtime.prepared.artifacts[1].metadata.clone();
+    let start = runtime.prepared.identity.start_ticks;
+    let observed_inode = format!(
+        "observed_inode=Ok(({}, {}))",
+        original.dev(),
+        original.ino()
+    );
+    for mismatch in ["inode", "start"] {
+        if mismatch == "inode" {
+            runtime.prepared.artifacts[1].metadata =
+                fs::metadata(fixture.0.join("profile")).unwrap();
+        } else {
+            runtime.prepared.identity.start_ticks = start + 1;
+        }
+        let error = check_child(&mut runtime.child, &runtime.prepared)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&observed_inode), "{error}");
+        assert!(
+            error.contains(&format!("observed_start=Ok({start})")),
+            "{error}"
+        );
+        assert!(error.contains("executable=Ok("), "{error}");
+        assert!(error.contains("/run/reader"), "{error}");
+        assert_eq!(
+            runtime.prepared.identity.start_ticks,
+            if mismatch == "start" {
+                start + 1
+            } else {
+                start
+            }
+        );
+        runtime.prepared.artifacts[1].metadata = original.clone();
+        runtime.prepared.identity.start_ticks = start;
+    }
+    check_child(&mut runtime.child, &runtime.prepared).unwrap();
+    let report = runtime.shutdown(Instant::now() + Duration::from_secs(1));
+    assert!(report.reaped && report.error.is_none(), "{report:?}");
 }
 
 #[test]
