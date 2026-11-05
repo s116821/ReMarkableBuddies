@@ -267,7 +267,8 @@ def cross_source_mapping(repo,cross):
   mount='/mnt/'+repo.drive[0].lower()+repo.as_posix()[2:]
   user='1000:1000'
  else:
-  require(run([str(cross),'--version'],repo).startswith('cross 0.2.5 (49cd054 '),'unreviewed Cross source mapping')
+  banner=run([str(cross),'--version'],repo)
+  require(any(banner.startswith('cross 0.2.5 ('+revision+' ') for revision in ('49cd054','8c1a8aa')),'unreviewed Cross source mapping')
   mount=repo.as_posix()
   user=f'{os.getuid()}:{os.getgid()}'
  require(',' not in str(repo) and ',' not in mount,'unsupported source bind path')
@@ -485,7 +486,7 @@ def elf_header(path):
  require((cls,machine) in [(32,40),(64,183)],'supported actual ELF')
  return cls,'ARM' if machine==40 else 'AArch64'
 
-def build(repo,tag,target,target_dir,cross_configuration,sdk_tag=None,rm2_resident=False,sdk_tag_source=None):
+def build(repo,tag,target,target_dir,cross_configuration,sdk_tag=None,rm2_resident=False,sdk_tag_source=None,diagnostics=None):
  from apk_compiler import identity as compiler_identity
  from docker_owned import cross_phase
  from abi import qualify
@@ -506,7 +507,12 @@ def build(repo,tag,target,target_dir,cross_configuration,sdk_tag=None,rm2_reside
  before_host=source_snapshot(repo,tag)
  before_source=before_host['source']
  mapping=cross_source_mapping(repo,cross)
- before_conversion=container_source_snapshot(repo,image,mapping,before_host)
+ if diagnostics is not None:
+  diagnostics=Path(diagnostics).resolve()
+  require(not diagnostics.exists() and not diagnostics.is_relative_to(repo),'fresh external build diagnostics required')
+  diagnostics.mkdir()
+ before_conversion=container_source_snapshot(repo,image,mapping,before_host,
+  None if diagnostics is None else diagnostics/'source-before.json')
  private_cargo=[];license_id=source_license(repo)
  configurations=cargo_configuration(repo);before_cargo=cargo_identity(repo,target,sdk_tag,private_cargo,rm2_resident,sdk_tag_source)
  if rm2_resident:
@@ -541,7 +547,8 @@ def build(repo,tag,target,target_dir,cross_configuration,sdk_tag=None,rm2_reside
   after_host=source_snapshot(repo,tag)
   require(after_host==before_host,'source Git admission identity changed')
   require(cross_source_mapping(repo,cross)==mapping,'Cross source mapping changed')
-  require(container_source_snapshot(repo,image,mapping,after_host)==before_conversion,'container Git admission identity changed')
+  require(container_source_snapshot(repo,image,mapping,after_host,
+   None if diagnostics is None else diagnostics/'source-after.json')==before_conversion,'container Git admission identity changed')
   checked.seek(0)
   frozen_dir=target_dir/'verified-input';frozen_dir.mkdir(exist_ok=False);frozen=frozen_dir/'reader-buddy'
   with frozen.open('xb') as destination:
