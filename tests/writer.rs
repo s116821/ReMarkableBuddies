@@ -1391,6 +1391,71 @@ fn relocated_notebook_scenario_binary_freezes_local_asset_and_retains_a_closed_r
     );
     drop(restored);
     drop(store);
+    // Exercise the protected subprocess route over the product-produced
+    // Source3/plan/stage/media fixture, with no live Store lease or provider.
+    let config = local.0.join("restore-config.json");
+    std::fs::write(
+        &config,
+        serde_json::to_vec(&json!({"paths":paths})).unwrap(),
+    )
+    .unwrap();
+    let restore = |operation: &str, request: &Value| {
+        use std::process::Stdio;
+        let mut child = Command::new(env!("CARGO_BIN_EXE_reader-buddy"))
+            .current_dir(&local.0)
+            .env("REMARKABLE_BUDDIES_CONFIG", &config)
+            .env_remove("OPENAI_API_KEY")
+            .env_remove("MEM_API_KEY")
+            .args(["--restore-operation", operation, "--restore-input", "-"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(&serde_json::to_vec(request).unwrap())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stderr.is_empty());
+        assert!(output.stdout.len() <= remarkable_reader_buddy::restore_maintenance::MAX_IO);
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    let prepared = restore(
+        "prepare-notebook",
+        &json!({
+            "restore_version":2,"operation":Uuid::new_v4(),"source":archive
+        }),
+    );
+    assert_eq!(prepared["outcome"], "prepared", "{prepared}");
+    assert_eq!(
+        std::fs::read(paths.data.join("CURRENT")).unwrap(),
+        after_current
+    );
+    let intent = json!({"source":archive,"intent":prepared["data"]["intent"]});
+    let applied = restore("apply-notebook", &intent);
+    assert_eq!(applied["outcome"], "restored", "{applied}");
+    assert_eq!(applied["runtime_activation"], "unverified");
+    assert_eq!(
+        restore("status-notebook", &intent)["outcome"],
+        "desired-generation-observed"
+    );
+    assert_eq!(restore("apply-notebook", &intent)["status"], "conflict");
+    let reopened = Arc::new(Store::prepare_notebook(paths.clone()).unwrap());
+    let records = Ledger::new(reopened.clone());
+    assert_eq!(
+        serde_json::to_value(records.inspect(conversation, false).unwrap()).unwrap(),
+        before_records
+    );
+    drop(records);
+    drop(reopened);
     let repeat = execute();
     assert!(
         !repeat.status.success(),
