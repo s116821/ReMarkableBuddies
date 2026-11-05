@@ -47,6 +47,24 @@ fn prepared(f: &Fixture, source: &Path) -> Value {
 fn notebook_restore_real_prepare_apply_status_reopen_and_legacy_isolation() {
     let f = Fixture::new();
     let (source, original) = archive(&f);
+    // Model lost current transactions after a complete archive, retaining the
+    // same owned actor/generation and ready notebook capabilities. Restoration
+    // must actually recover absent facts, rather than only copy duplicates.
+    let generation: String =
+        serde_json::from_slice(&fs::read(f.paths().data.join("CURRENT")).unwrap()).unwrap();
+    for directory in ["commits", "objects"] {
+        for entry in fs::read_dir(
+            f.paths()
+                .data
+                .join("generations")
+                .join(&generation)
+                .join(directory),
+        )
+        .unwrap()
+        {
+            fs::remove_file(entry.unwrap().path()).unwrap();
+        }
+    }
     let store = Store::open_existing_for_notebook_restore(f.paths()).unwrap();
     let extra = record(&store);
     let extra_revision = extra.revision_id;
@@ -155,6 +173,31 @@ fn notebook_restore_original_base_and_configuration_are_not_refreshed() {
         invoke(&f, Operation::ApplyNotebook, &body)["status"],
         "conflict"
     );
+}
+
+#[test]
+fn notebook_restore_refuses_legacy_archive_and_never_repairs_incomplete_capabilities() {
+    let f = Fixture::new();
+    let (source, _) = archive(&f);
+    let legacy = Fixture::new();
+    let legacy_source = legacy.archive();
+    let before = fs::read(f.paths().data.join("CURRENT")).unwrap();
+    assert_eq!(
+        invoke(
+            &f,
+            Operation::PrepareNotebook,
+            &json!({"restore_version":2,"operation":Uuid::new_v4(),"source":legacy_source})
+        )["status"],
+        "unsupported"
+    );
+    let body = prepared(&f, &source);
+    let capabilities = f.paths().data.join("capabilities.json");
+    fs::write(&capabilities, b"{}").unwrap();
+    for operation in [Operation::ApplyNotebook, Operation::StatusNotebook] {
+        assert_eq!(invoke(&f, operation, &body)["status"], "unsupported");
+        assert_eq!(fs::read(&capabilities).unwrap(), b"{}");
+        assert_eq!(fs::read(f.paths().data.join("CURRENT")).unwrap(), before);
+    }
 }
 
 #[test]
