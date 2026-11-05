@@ -333,6 +333,11 @@ impl Inspection {
     }
 }
 pub trait Provider: Send + Sync {
+    /// Opt in to ordinary Writer snapshots from this exact receiving Store.
+    /// Selected providers need a separate consuming publication contract.
+    fn admit_ordinary_writer(&self, _store: &Store) -> Result<()> {
+        anyhow::bail!("memory provider does not support ordinary Writer snapshots")
+    }
     fn put(&self, mutation: Mutation) -> Result<Uuid>;
     fn forget(&self, mutation: Forget) -> Result<Uuid>;
     fn inspect(&self, key: &Key) -> Result<Vec<Envelope>>;
@@ -427,6 +432,13 @@ fn tokens(value: &str) -> BTreeSet<String> {
         .collect()
 }
 impl Provider for LocalMemory {
+    fn admit_ordinary_writer(&self, store: &Store) -> Result<()> {
+        ensure!(
+            std::ptr::eq(self.store.as_ref(), store),
+            "foreign Writer memory Store"
+        );
+        Ok(())
+    }
     fn put(&self, mutation: Mutation) -> Result<Uuid> {
         self.available()?;
         mutation.fact.validate()?;
