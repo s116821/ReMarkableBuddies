@@ -3,7 +3,7 @@ import argparse,hashlib,json,os,shutil,tempfile
 from pathlib import Path
 from apk_contract import RM2_BUNDLE_SHA,canonical,require,integer
 from apk_payload import BUNDLE_FILE,TOOL_FILES
-from apk_source_build import build,run,sha,source_identity,source_license
+from apk_source_build import build,run,sha,source_identity,source_license,sdk_release_source
 from docker_owned import phase
 
 IMAGE='sha256:8d79948df2c7c568a043683f786e7ce4ad2e25e469673b72b8da8d2dbb2fa9ac'
@@ -28,6 +28,9 @@ def produce(args):
  source=args.source.resolve();target_root=args.target_dir.resolve();output=args.output.resolve()
  require(integer(args.pkgrel,0,65535),'pkgrel')
  require(not output.exists() and not target_root.exists() and not output.is_relative_to(source) and not target_root.is_relative_to(source),'new external output roots')
+ require(not output.is_relative_to(target_root) and not target_root.is_relative_to(output),'disjoint build and final output roots')
+ sdk_source=getattr(args,'sdk_tag_source',None);sdk_tag=getattr(args,'sdk_tag',None)
+ require((sdk_tag is None)==(sdk_source is None),'--sdk-tag and --sdk-tag-source must be supplied together')
  identity=source_identity(source,args.tag);license_id=source_license(source)
  bundle=getattr(args,'rm2_native_bundle',None)
  if bundle is not None:
@@ -50,13 +53,14 @@ def produce(args):
   input_hashes[BUNDLE_FILE]=RM2_BUNDLE_SHA
  for arch,target in TARGETS:
   binary,metadata,evidence=build(source,args.tag,target,target_root/arch,Path(__file__).with_name('Cross.apk.toml'),args.sdk_tag,
-                                 rm2_resident=bundle is not None and arch=='armv7')
+                                 rm2_resident=bundle is not None and arch=='armv7',sdk_tag_source=sdk_source)
   require(metadata['source']==identity,'source unchanged across targets')
   directory=inputs/arch;directory.mkdir()
   copy_verified(binary,directory/'reader-buddy',metadata['binary']['bytes'],metadata['binary']['sha256'])
   license_file=source/'LICENSE';copy_verified(license_file,directory/'LICENSE',license_file.stat().st_size,sha(license_file))
   with (directory/'build.json').open('xb') as stream:stream.write(canonical(metadata))
   private[arch]=evidence
+  if arch=='aarch64':require(private[arch].get('sdk_release_source')==private['armv7'].get('sdk_release_source'),'SDK release source changed across targets')
   for path in directory.iterdir():input_hashes[str(path.relative_to(inputs))]=sha(path)
  with (inputs/'input-set.json').open('x',encoding='ascii',newline='\n') as stream:
   json.dump(dict(pkgrel=args.pkgrel,source_license=license_id,targets=[arch for arch,_ in TARGETS]),stream,sort_keys=True,separators=(',',':'));stream.write('\n')
@@ -68,6 +72,9 @@ def produce(args):
   '--entrypoint','/usr/bin/python3',IMAGE,'/modules/apk_generate.py']
  result=json.loads(phase(command,source,run,timeout=120,stdout_limit=65536,combined_limit=None))
  require(source_identity(source,args.tag)==identity and source_license(source)==license_id,'source changed before output')
+ if sdk_tag is not None:
+  sdk=metadata['sdk']
+  require(sdk_release_source(sdk_source,sdk_tag,sdk['sha'],sdk['manifest_sha256'])==private['armv7']['sdk_release_source'],'SDK release source changed before output')
  require(all(sha(inputs/path)==digest for path,digest in input_hashes.items()),'internal inputs changed during generation')
  require(sha(tool)==TOOL_SHA,'APK tool changed during generation')
  version=args.tag[1:]+'-r'+str(args.pkgrel)
@@ -105,6 +112,7 @@ if __name__=='__main__':
  parser=argparse.ArgumentParser(description=__doc__)
  parser.add_argument('--source',type=Path,required=True);parser.add_argument('--tag',required=True)
  parser.add_argument('--pkgrel',type=int,default=0);parser.add_argument('--sdk-tag')
+ parser.add_argument('--sdk-tag-source',type=Path,help='Independent clean full SDK release Git source; required with --sdk-tag')
  parser.add_argument('--target-dir',type=Path,required=True);parser.add_argument('--output',type=Path,required=True)
  parser.add_argument('--apk-tool',type=Path,required=True)
  parser.add_argument('--rm2-native-bundle',type=Path,help='Approved native bundle for the ARMv7 resident test-key package')
