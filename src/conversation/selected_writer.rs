@@ -548,7 +548,12 @@ impl SelectedAdmission {
                     Namespace::Conversation,
                     crate::writer::stage(req.operation, "user"),
                 )?,
-                source: pin(Namespace::Source, input.source.id)?,
+                source: match &req.source {
+                    SelectedWriterSource::Refine { source, .. } => source.clone(),
+                    SelectedWriterSource::Generate { .. } => {
+                        pin(Namespace::Source, input.source.id)?
+                    }
+                },
                 refined_draft,
                 preparation_fingerprint: fingerprint.clone(),
             };

@@ -8,6 +8,8 @@ use remarkable_reader_buddy::{
 use std::collections::BTreeMap;
 #[path = "selected_more.rs"]
 mod more;
+#[path = "selected_review.rs"]
+mod review;
 
 struct Fixture {
     local: Local,

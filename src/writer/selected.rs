@@ -146,6 +146,15 @@ pub fn run<E: LLMEngine>(
     let mut was_canceled = false;
     let response = (|| -> Result<String> {
         let input = writer.writer_input(&prepared)?;
+        // Bound the exact unmodified history sent below, including Generated,
+        // Failed and Canceled Writer turns excluded by Reader context assembly.
+        let history_bytes = input.history.iter().try_fold(0usize, |total, turn| {
+            total.checked_add(turn.text.as_ref().map_or(0, String::len))
+        });
+        if input.history.len() > 64 || history_bytes.is_none_or(|bytes| bytes > MAX_HISTORY) {
+            failure = Some(Failure::TooLarge);
+            anyhow::bail!("selected Writer history bound");
+        }
         let view = writer.context_range(
             &prepared.accepted,
             request.conversation(),
