@@ -98,6 +98,78 @@ fn prepare(target: &Fixture, source: &Path) -> Value {
     json!({"source":source,"intent":p["data"]["intent"]})
 }
 #[test]
+fn actual_notebook_restore_selectors_keep_media_identity_and_legacy_refusal() {
+    let target = Fixture::new();
+    let store = Store::prepare_notebook(target.paths()).unwrap();
+    let media = b"notebook restore owned media".to_vec();
+    let hash = digest(&media);
+    let mut envelope = record(&store);
+    let revision = envelope.revision_id;
+    envelope.media_descriptors.push(buddy::storage::Media {
+        sha256: hash.clone(),
+        bytes: media.len() as u64,
+        media_type: "application/octet-stream".into(),
+    });
+    store
+        .commit(
+            vec![envelope],
+            BTreeMap::from([(hash.clone(), media.clone())]),
+        )
+        .unwrap();
+    let archive = target.root.join("notebook-archive");
+    store.export_notebook_backup(&archive).unwrap();
+    drop(store);
+    let before = fs::read(target.paths().data.join("CURRENT")).unwrap();
+    let prepared = run(
+        &target,
+        "prepare-notebook",
+        &json!({"restore_version":2,"operation":Uuid::new_v4(),"source":archive}),
+    );
+    assert_eq!(prepared["outcome"], "prepared", "{prepared}");
+    assert_eq!(prepared["report_version"], 2);
+    let body = json!({"source":archive,"intent":prepared["data"]["intent"]});
+    assert_eq!(run(&target, "apply", &body)["status"], "unsupported");
+    assert_eq!(
+        fs::read(target.paths().data.join("CURRENT")).unwrap(),
+        before
+    );
+    let applied = run(&target, "apply-notebook", &body);
+    assert_eq!(applied["outcome"], "restored", "{applied}");
+    let desired = fs::read(target.paths().data.join("CURRENT")).unwrap();
+    assert_ne!(desired, before);
+    // Status has no source-archive dependency and never resubmits Apply.
+    fs::rename(&archive, target.root.join("held-archive")).unwrap();
+    assert_eq!(
+        run(&target, "status-notebook", &body)["outcome"],
+        "desired-generation-observed"
+    );
+    assert_eq!(run(&target, "apply-notebook", &body)["status"], "conflict");
+    assert_eq!(
+        fs::read(target.paths().data.join("CURRENT")).unwrap(),
+        desired
+    );
+    let generation: String = serde_json::from_slice(&desired).unwrap();
+    assert_eq!(
+        fs::read(
+            target
+                .paths()
+                .data
+                .join("generations")
+                .join(generation)
+                .join("objects")
+                .join(hash)
+        )
+        .unwrap(),
+        media
+    );
+    let reopened = Store::prepare_notebook(target.paths()).unwrap();
+    assert!(reopened
+        .snapshot_revisions_matching(&[Namespace::Conversation], 32, |_| true)
+        .unwrap()
+        .iter()
+        .any(|record| record.revision_id == revision));
+}
+#[test]
 fn actual_restore_additive_readback_source_config_privacy_and_archive_absent_status() {
     let source = Fixture::new();
     let path = archive(&source);
