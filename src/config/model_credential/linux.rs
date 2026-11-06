@@ -962,6 +962,30 @@ mod tests {
         assert_eq!(finish(r)["outcome"], "unknown");
     }
     #[test]
+    fn notebook_reference_admission_does_not_admit_actual_credential_file_publication() {
+        for action in ["install", "replace", "remove"] {
+            let f = Fixture::new();
+            if action != "install" {
+                f.set(SECRET.as_bytes(), 0o600);
+            }
+            crate::config::notebook_preferences_tests::seed(&f.paths);
+            let intent = f.prepare(change(action));
+            let before = crate::config::notebook_preferences_tests::inventory(&f.root);
+            let result = finish(f.run(
+                Operation::Apply,
+                json!({"intent":intent,"change":change(action)}),
+            ));
+            assert_eq!(result["status"], "unsupported");
+            assert_eq!(result["outcome"], "not-dispatched");
+            assert_eq!(
+                crate::config::notebook_preferences_tests::inventory(&f.root),
+                before
+            );
+            // The separately named reference entry is usable on this same owned store.
+            drop(Store::open_existing_for_credential_reference(f.paths.clone()).unwrap());
+        }
+    }
+    #[test]
     fn consuming_prefix_keeps_actual_store_busy_and_emits_only_one_prefix() {
         let f = Fixture::new();
         let intent = f.prepare(change("install"));
