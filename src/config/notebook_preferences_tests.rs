@@ -367,10 +367,6 @@ fn notebook_preferences_do_not_widen_other_admissions_and_require_definite_empty
         Err(Refusal::Unsupported)
     ));
     assert!(matches!(
-        Store::open_existing_for_config(f.paths.clone()),
-        Err(Refusal::Unsupported)
-    ));
-    assert!(matches!(
         Store::open_existing_for_mode(f.paths.clone()),
         Err(Refusal::Unsupported)
     ));

@@ -18,4 +18,5 @@ selected/retained history, and validated absent/LocalOnly mode. Existing support
 legacy1/2/3 admission remains. Unsupported notebook state refuses without repair.
 The saved reference may name no existing credential file; origin/presence and
 verified Config bytes still do not establish credential readiness. Actual
-credential-file operations retain their separate notebook refusal.
+credential-file operations use their own scoped admission and confidential
+[file protocol](model-credential.md); reference edits do not perform file maintenance.

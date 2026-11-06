@@ -1,6 +1,6 @@
 # Declared protected model credential
 
-The Linux-only `--model-credential-operation inspect|prepare|apply|status` protocol manages only the existing `model_credential` reference in an explicit absolute `REMARKABLE_BUDDIES_CONFIG` file. Other targets report unsupported before credential access. This is a tablet-side maintenance command usable by future browser and Electron consumers, not a credential vault or provider login.
+The Linux-only `--model-credential-operation inspect|prepare|apply|status` protocol manages only the protected file selected by the existing `model_credential` reference in an explicit absolute `REMARKABLE_BUDDIES_CONFIG` file. Other targets report unsupported before credential access. This is a tablet-side maintenance command usable by future browser and Electron consumers, not a credential vault or provider login.
 
 Inspect has no input or stdin access. The other operations require exact `--model-credential-input -` and one strict EOF-delimited request. Request and single-LF report each cap16384 bytes; config/existing credential cap1MiB; new decoded UTF8 secret caps8192 bytes. Nonblank validation does not trim or rewrite accepted CRLF, controls or trailing contents. Never put secrets in command arguments.
 
@@ -11,3 +11,11 @@ Treat the entire binding/intent/report transport as confidential. Unsalted conte
 Verified apply confirms current saved bytes/private permissions or absence only. Every operation reports runtime unverified. CLI/environment precedence remains unchanged; removal does not revoke a credential selected elsewhere or prove provider logout. Once destination publication/removal is attempted, missing/failed/truncated output remains unknown without rollback or replay. Explicit original-intent status observes current desired state and cannot establish the original publisher or settle historical uncertainty.
 
 The coordinated central `manage-declared-model-credential` contract fixes exact confidential records, fingerprint recipes, status mappings and evidence requirements. Initial reference binding, host UI, effective authentication and runtime/native qualification remain separate.
+
+Apply also admits an already-ready ordinary notebook (format4) through its
+distinct Linux credential-file entry. It requires complete owned local records
+and media, validated readiness/capabilities, empty selected/retained history and
+absent/LocalOnly mode. Incomplete or unsupported notebook state refuses without
+repair. Existing supported legacy1/2/3 stores and modes remain admitted. This
+scoped extension is specified by central `manage-notebook-model-credential`;
+other maintenance admission paths keep their existing boundaries.
