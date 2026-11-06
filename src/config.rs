@@ -422,3 +422,6 @@ pub fn resolve(config: &Config, cli: Overrides, env: Environment) -> Result<Effe
         sources,
     })
 }
+
+#[cfg(test)]
+mod notebook_preferences_tests;

@@ -40,3 +40,12 @@ projection remain unchanged; the dedicated versioned response negotiates support
 The shared contract and broader remaining product requirements are maintained in
 the central Docs `configure-product-settings` OpenSpec change. This control does
 not add automatic Reader-to-Writer routing or qualify tablet/runtime integration.
+
+
+Apply also supports an already-ready ordinary local notebook generation (format4).
+It validates the current owned roots, notebook contract/capabilities and complete
+local history under the original store lease. Selected or retained selection
+history, incomplete readiness and backup/shared mode refuse without adoption or
+repair. Only the selected configuration target changes; notebook metadata,
+records and media stay intact. Other settings and credential-file maintenance
+retain their existing admission rules. This does not restart or activate a runtime.
