@@ -451,7 +451,7 @@ fn actual_notebook_private_file_lifecycle_busy_stale_noop_and_feedback() {
                 if let Some(value) = value {
                     assert_eq!(fs::read(&target).unwrap(), value.as_bytes());
                     assert_eq!(
-                        fs::metadata(&target).unwrap().mode() & 0o777,
+                        fs::metadata(&target).unwrap().permissions().mode() & 0o777,
                         if action == "install" { 0o600 } else { mode }
                     );
                 } else {
