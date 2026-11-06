@@ -243,6 +243,18 @@ impl Store {
             |store, generation| store.recover(generation),
         )
     }
+    /// Portable preferences use the common legacy1/ordinary notebook family only.
+    pub(crate) fn open_existing_for_portable_preferences(
+        paths: StorePaths,
+    ) -> Result<Self, Refusal> {
+        Self::open_existing_using(
+            paths,
+            false,
+            NotebookAdmission::Preferences,
+            |_, _| Ok(()),
+            |store, generation| store.recover(generation),
+        )
+    }
     fn open_existing_using(
         paths: StorePaths,
         selected_aware: bool,

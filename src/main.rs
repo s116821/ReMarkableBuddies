@@ -79,6 +79,17 @@ pub struct Args {
     /// Validate an explicit portable preference artifact without exposing its text
     #[arg(long, exclusive = true, value_name = "ARTIFACT_FILE")]
     inspect_portable_configuration: Option<std::path::PathBuf>,
+    /// Private conditional import of explicit portable preference declarations
+    #[arg(long,value_enum,conflicts_with_all=["product_settings_operation","product_settings_input","research_settings_operation","research_settings_input","inspect_conversations","conversation_operation","conversation_input","inspect_source_cache","source_cache_operation","source_cache_input","credential_reference_operation","credential_reference_input","model_credential_operation","model_credential_input","memory_settings_operation","memory_settings_input","ordinary_export_operation","ordinary_export_input","model_settings_operation","model_settings_input","restore_operation","restore_input","basic_settings_operation","basic_settings_input","configuration_operation","simulate","inspect_owned_data","api_key","model","base_url","trigger_corner","log_level","debug_dump","memory_operation","memory_input","sync_mode_operation","sync_mode_input","archive_operation","archive_input","personalization_operation","export_note","writer_note"])]
+    portable_configuration_operation: Option<config::portable::import::Operation>,
+    /// Exact-dash private JSON stdin only; no input-file fallback
+    #[arg(
+        long,
+        value_name = "INPUT",
+        requires = "portable_configuration_operation",
+        conflicts_with_all=["product_settings_operation","product_settings_input","research_settings_operation","research_settings_input","inspect_conversations","conversation_operation","conversation_input","inspect_source_cache","source_cache_operation","source_cache_input","credential_reference_operation","credential_reference_input","model_credential_operation","model_credential_input","memory_settings_operation","memory_settings_input","ordinary_export_operation","ordinary_export_input","model_settings_operation","model_settings_input","restore_operation","restore_input","basic_settings_operation","basic_settings_input","configuration_operation","simulate","inspect_owned_data","api_key","model","base_url","trigger_corner","log_level","debug_dump","memory_operation","memory_input","sync_mode_operation","sync_mode_input","archive_operation","archive_input","personalization_operation","export_note","writer_note"]
+    )]
+    portable_configuration_input: Option<std::path::PathBuf>,
     /// Fixed installed stock recovery; never starts ordinary application services
     #[arg(long, exclusive = true)]
     resident_stock_recovery: bool,
@@ -235,6 +246,26 @@ fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_lo
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    if let Some(operation) = args.portable_configuration_operation {
+        use config::portable::import;
+        let path = std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into);
+        let report = if operation == import::Operation::Inspect {
+            if args.portable_configuration_input.is_some() {
+                import::invalid_input(operation)
+            } else {
+                import::inspect(path)
+            }
+        } else if args
+            .portable_configuration_input
+            .as_ref()
+            .is_some_and(|p| p.as_os_str() == std::ffi::OsStr::new("-"))
+        {
+            import::run_stdin(operation, path, &mut std::io::stdin().lock())
+        } else {
+            import::unsupported_input(operation)
+        };
+        return report.write_to(&mut std::io::stdout().lock());
+    }
     if let Some(path) = args.export_portable_configuration {
         return config::portable::export(path).write_to(&mut std::io::stdout().lock());
     }
@@ -1035,6 +1066,8 @@ mod tests {
                 "ordinary-export-input",
                 "ordinary-export-operation",
                 "personalization-operation",
+                "portable-configuration-input",
+                "portable-configuration-operation",
                 "product-settings-input",
                 "product-settings-operation",
                 "research-settings-input",
@@ -1067,6 +1100,8 @@ mod tests {
         assert!(args.configuration_operation.is_none());
         assert!(args.export_portable_configuration.is_none());
         assert!(args.inspect_portable_configuration.is_none());
+        assert!(args.portable_configuration_operation.is_none());
+        assert!(args.portable_configuration_input.is_none());
         assert!(args.research_settings_operation.is_none());
         assert!(args.research_settings_input.is_none());
         assert!(args.model.is_none());
