@@ -22,6 +22,22 @@ def admit_apk_tool(tool):
           ((mode>>shift)&0o5)==0o5,'readable executable pinned APK tool')
  return tool.resolve()
 
+def admit_mount_access(work,inputs,artifacts,modules,tool,observations=None):
+ # Admission checks only: initialization belongs to fresh task staging.
+ require(os.name=='posix' and not work.is_symlink(),'private owned package work root')
+ info=work.lstat()
+ require(stat.S_ISDIR(info.st_mode) and info.st_uid==os.getuid() and
+         stat.S_IMODE(info.st_mode)==0o700,'private owned package work root')
+ for root in (inputs,modules,artifacts,*(() if observations is None else (observations,))):
+  require(root.parent==work and root.is_dir() and not root.is_symlink(),'fixed staged mount root')
+  for path in (root,*root.rglob('*')):
+   info=path.lstat();mode=stat.S_IMODE(info.st_mode)
+   require(stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode),'regular staged mount content')
+   shift=6 if info.st_uid==0 else 3 if info.st_gid==0 else 0
+   required=7 if path==artifacts else 5 if stat.S_ISDIR(info.st_mode) else 4
+   require(((mode>>shift)&required)==required,'pinned UID0 mount access')
+ admit_apk_tool(tool)
+
 def copy_verified(source,destination,expected_bytes,expected_sha):
  require(source.is_file() and not source.is_symlink(),'regular generated input')
  with source.open('rb') as stream,destination.open('xb') as output:
@@ -53,7 +69,7 @@ def produce(args):
  # Preserve failed or incomplete builds as private working evidence. Only the
  # final output has a completed two-target artifact receipt.
  work=Path(tempfile.mkdtemp(prefix='buddy-apk-work-',dir=output.parent))
- inputs=work/'inputs';inputs.mkdir();artifacts=work/'artifacts';artifacts.mkdir();modules=work/'modules';modules.mkdir()
+ inputs=work/'inputs';inputs.mkdir();artifacts=work/'artifacts';artifacts.mkdir();artifacts.chmod(0o777);modules=work/'modules';modules.mkdir()
  for name in MODULES:shutil.copyfile(Path(__file__).with_name(name),modules/name)
  private={};input_hashes={}
  if bundle is not None:
@@ -88,17 +104,17 @@ def produce(args):
 def generate_and_observe(source,tag,pkgrel,output,work,inputs,artifacts,modules,tool,input_hashes,identity,
                          after_generation,recheck=lambda:None,completion_context=None):
  """Shared existing isolated phases; callers own checked source/input staging."""
- admit_apk_tool(tool)
+ admit_mount_access(work,inputs,artifacts,modules,tool)
  recheck()
  command=['--rm','--network','none','--cap-drop','ALL','--read-only','--memory','1536m','--pids-limit','64','--tmpfs','/tmp:rw,nosuid,noexec,size=768m',
   '--mount',f'type=bind,source={inputs},target=/inputs,readonly','--mount',f'type=bind,source={artifacts},target=/output',
-  '--mount',f'type=bind,source={modules},target=/modules,readonly','--mount',f'type=bind,source={tool.parent},target=/tool,readonly',
+  '--mount',f'type=bind,source={modules},target=/modules,readonly','--mount',f'type=bind,source={tool},target=/tool/apk,readonly',
   '--entrypoint','/usr/bin/python3',IMAGE,'/modules/apk_generate.py']
  result=json.loads(phase(command,source,run,timeout=120,stdout_limit=65536,combined_limit=None,
                          private_diagnostics=work/'generation-diagnostics'))
  after_generation()
  require(all(sha(inputs/path)==digest for path,digest in input_hashes.items()),'internal inputs changed during generation')
- admit_apk_tool(tool)
+ admit_mount_access(work,inputs,artifacts,modules,tool)
  version=tag[1:]+'-r'+str(pkgrel)
  names={f'remarkable-buddies-{version}.{arch}.apk' for arch,_ in TARGETS}|{'buddy-index.adb','fixture.pub'}
  require({path.name for path in artifacts.iterdir()}==names,'exact completed artifact set')
@@ -113,16 +129,18 @@ def generate_and_observe(source,tag,pkgrel,output,work,inputs,artifacts,modules,
  observation_command=['--rm','--network','none','--cap-drop','ALL','--read-only','--memory','768m','--pids-limit','32','--tmpfs','/tmp:rw,nosuid,noexec,size=512m',
   '--mount',f'type=bind,source={inputs},target=/inputs,readonly','--mount',f'type=bind,source={artifacts},target=/artifacts,readonly',
   '--mount',f'type=bind,source={observations},target=/observations,readonly','--mount',f'type=bind,source={modules},target=/modules,readonly',
-  '--mount',f'type=bind,source={tool.parent},target=/tool,readonly','--entrypoint','/usr/bin/python3',IMAGE,
+  '--mount',f'type=bind,source={tool},target=/tool/apk,readonly','--entrypoint','/usr/bin/python3',IMAGE,
   '/modules/apk_observe.py','--expected-spki',result['fixture_public_key_spki_sha256']]
+ admit_mount_access(work,inputs,artifacts,modules,tool,observations)
  observation=json.loads(phase(observation_command,source,run,timeout=120,
                               private_diagnostics=work/'observation-diagnostics'))
  require(observation['status']=='public-key-only-observed' and observation['private_key_available'] is False,'independent public-key-only observation required')
- admit_apk_tool(tool)
+ admit_mount_access(work,inputs,artifacts,modules,tool,observations)
  recheck()
  output.mkdir(exist_ok=False)
  published={}
  for name in sorted(names):
+  admit_mount_access(work,inputs,artifacts,modules,tool,observations)
   path=artifacts/name;size=result['artifact_files'][name]['bytes'];digest=result['artifact_files'][name]['sha256']
   require(0<size<=268435456,'artifact bound')
   copy_verified(path,output/name,size,digest);published[name]=dict(bytes=size,sha256=digest)
@@ -131,7 +149,7 @@ def generate_and_observe(source,tag,pkgrel,output,work,inputs,artifacts,modules,
  receipt=dict(status='test-key-source-build-only',eligibility='not-qualified',source=identity,artifacts=published,
   fixture_public_key_spki_sha256=result['fixture_public_key_spki_sha256'],generation_observations=result,public_key_observation=observation)
  if completion_context is not None:receipt['build_input_provenance']=completion_context
- admit_apk_tool(tool)
+ admit_mount_access(work,inputs,artifacts,modules,tool,observations)
  recheck()
  with (output/'test-key-build-receipt.json').open('x',encoding='ascii',newline='\n') as stream:json.dump(receipt,stream,sort_keys=True);stream.write('\n')
  return receipt

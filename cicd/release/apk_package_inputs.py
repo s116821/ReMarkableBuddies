@@ -149,7 +149,7 @@ def produce(args):
     require(run(['docker', 'image', 'inspect', IMAGE, '--format', '{{.Id}}'], source) == IMAGE,
             'existing pinned generation image')
 
-    work.mkdir(exist_ok=False)
+    work.mkdir(mode=0o700, exist_ok=False)
     correspondence_path = work / 'sdk-proof-correspondence.json'
     correspondence_bytes = (json.dumps(correspondence, sort_keys=True, separators=(',', ':'),
                                         allow_nan=False) + '\n').encode()
@@ -160,6 +160,7 @@ def produce(args):
     inputs, artifacts, modules = (work / name for name in ('inputs', 'artifacts', 'modules'))
     for directory in (inputs, artifacts, modules):
         directory.mkdir()
+    artifacts.chmod(0o777)  # Newly created child only, under private work0700.
     helper_root = Path(__file__).resolve().parent
     for name in MODULES:
         shutil.copyfile(helper_root / name, modules / name)

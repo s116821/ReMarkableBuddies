@@ -80,6 +80,12 @@ class PackageInputs(unittest.TestCase):
             self.assertEqual(kwargs['timeout'], 120)
             self.assertIn('--read-only', argv)
             self.assertIn('none', argv)
+            self.assertIn(f'type=bind,source={args.apk_tool.resolve()},target=/tool/apk,readonly', argv)
+            self.assertFalse(any('target=/tool,readonly' in part for part in argv))
+            self.assertNotIn('--user', argv)
+            self.assertNotIn('--cap-add', argv)
+            self.assertEqual(args.work_dir.stat().st_mode & 0o777, 0o700)
+            self.assertEqual((args.work_dir/'artifacts').stat().st_mode & 0o777, 0o777)
             if len(calls) == 1:
                 self.assertEqual(kwargs['private_diagnostics'], args.work_dir / 'generation-diagnostics')
                 self.assertEqual(argv[-1], '/modules/apk_generate.py')
@@ -408,18 +414,114 @@ class PackageInputs(unittest.TestCase):
             fake_build = fixtures.BuildInputs().build_fixture(root)
             def original_build(source, tag, target, cache, configuration, sdk_tag, **kwargs):
                 return fake_build(source, tag, target, cache, configuration, **kwargs)
+            def checked_tail(*arguments,**kwargs):
+                work,inputs,artifacts,modules,tool=arguments[4:9]
+                builder.admit_mount_access(work,inputs,artifacts,modules,tool)
+                self.assertEqual(work.stat().st_mode & 0o777,0o700)
+                self.assertEqual(artifacts.stat().st_mode & 0o777,0o777)
+                return 'shared tail'
             with patch('apk_builder.source_identity', return_value=receipt['source']), \
                  patch('apk_builder.source_license', return_value='GPL-3.0-only'), \
                  patch('apk_builder.RM2_BUNDLE_SHA', sha(args.rm2_native_bundle)), \
                  patch('apk_builder.TOOL_SHA', sha(args.apk_tool)), \
                  patch('apk_builder.run', return_value=builder.IMAGE), \
                  patch('apk_builder.build', side_effect=original_build) as build, \
-                 patch('apk_builder.generate_and_observe', return_value='shared tail') as shared:
+                 patch('apk_builder.generate_and_observe', side_effect=checked_tail) as shared:
                 self.assertEqual(builder.produce(old), 'shared tail')
             self.assertEqual(build.call_count, 2)
             shared.assert_called_once()
             self.assertEqual([call.args[2] for call in build.call_args_list],
                              ['armv7-unknown-linux-gnueabihf', 'aarch64-unknown-linux-gnu'])
+
+    @unittest.skipUnless(os.name == 'posix', 'real POSIX mode admission')
+    def test_exact_tool_file_mount_keeps_original_parent_private(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args, receipt, proof, snapshot = self.fixture(Path(directory))
+            args.apk_tool.parent.chmod(0o700)
+            phase, calls = self.phase_control(args)
+            with self.controls(args, proof, snapshot, phase):
+                consumer.produce(args)
+            self.assertEqual(len(calls),2)
+            self.assertEqual(args.apk_tool.parent.stat().st_mode & 0o777,0o700)
+
+    @unittest.skipUnless(os.name == 'posix', 'real POSIX staging modes')
+    def test_restrictive_umask_refuses_before_phase_without_normalizing_inputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args, receipt, proof, snapshot = self.fixture(Path(directory))
+            previous=os.umask(0o077)
+            try:
+                with self.controls(args, proof, snapshot), self.assertRaisesRegex(Refusal,'pinned UID0 mount access'):
+                    consumer.produce(args)
+                self.phase.assert_not_called()
+                self.assertEqual(args.work_dir.stat().st_mode & 0o777,0o700)
+                self.assertEqual((args.work_dir/'artifacts').stat().st_mode & 0o777,0o777)
+                self.assertEqual((args.work_dir/'inputs').stat().st_mode & 0o777,0o700)
+            finally:os.umask(previous)
+
+    @unittest.skipUnless(os.name == 'posix', 'real POSIX mount objects')
+    def test_bad_work_or_staged_objects_refuse_before_generation(self):
+        for fault in ('work-mode','work-link','work-file','work-fifo','work-owner','input-mode','module-mode','artifact-mode','entry-link','entry-fifo'):
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory() as directory:
+                args, receipt, proof, snapshot = self.fixture(Path(directory))
+                original=builder.admit_mount_access
+                def corrupt(work,inputs,artifacts,modules,tool,observations=None):
+                    if fault=='work-mode':work.chmod(0o755)
+                    if fault in ('work-link','work-file','work-fifo'):
+                        moved=work.with_name('original-work');work.rename(moved)
+                        if fault=='work-link':work.symlink_to(moved,target_is_directory=True)
+                        elif fault=='work-file':work.write_bytes(b'non-directory')
+                        else:os.mkfifo(work)
+                    if fault=='input-mode':inputs.chmod(0o700)
+                    if fault=='module-mode':(modules/'apk_generate.py').chmod(0o600)
+                    if fault=='artifact-mode':artifacts.chmod(0o775)
+                    if fault=='entry-link':(inputs/'alias').symlink_to(inputs/'input-set.json')
+                    if fault=='entry-fifo':os.mkfifo(modules/'pipe')
+                    if fault=='work-owner':
+                        uid=os.getuid()
+                        with patch('apk_builder.os.getuid',return_value=uid+1):return original(work,inputs,artifacts,modules,tool,observations)
+                    return original(work,inputs,artifacts,modules,tool,observations)
+                with self.controls(args,proof,snapshot),patch('apk_builder.admit_mount_access',side_effect=corrupt),self.assertRaises(Refusal):
+                    consumer.produce(args)
+                self.phase.assert_not_called()
+                self.assertFalse(args.output.exists())
+
+    @unittest.skipUnless(os.name == 'posix', 'real POSIX access drift')
+    def test_mount_access_loss_after_generation_or_observer_refuses_completion(self):
+        for when in (1,2):
+            for victim in ('input','artifact-root','artifact-file','control'):
+                if when==1 and victim=='control':continue
+                with self.subTest(when=when,victim=victim),tempfile.TemporaryDirectory() as directory:
+                    args,receipt,proof,snapshot=self.fixture(Path(directory))
+                    def mutate(count):
+                        if count!=when:return
+                        if victim=='input':(args.work_dir/'inputs/armv7/build.json').chmod(0o600)
+                        if victim=='artifact-root':(args.work_dir/'artifacts').chmod(0o775)
+                        if victim=='artifact-file':(args.work_dir/'artifacts/fixture.pub').chmod(0o600)
+                        if victim=='control':(args.work_dir/'observations/generated-control.json').chmod(0o600)
+                    phase,calls=self.phase_control(args,mutate)
+                    with self.controls(args,proof,snapshot,phase),self.assertRaisesRegex(Refusal,'pinned UID0 mount access'):
+                        consumer.produce(args)
+                    self.assertEqual(len(calls),when)
+                    self.assertFalse((args.output/'test-key-build-receipt.json').exists())
+
+    @unittest.skipUnless(os.name == 'posix', 'real POSIX observer/control boundaries')
+    def test_control_readiness_before_observer_and_during_final_copy(self):
+        for boundary in ('before-observer','final-copy'):
+            with self.subTest(boundary=boundary),tempfile.TemporaryDirectory() as directory:
+                args,receipt,proof,snapshot=self.fixture(Path(directory));phase,calls=self.phase_control(args)
+                admit=builder.admit_mount_access;copy=builder.copy_verified
+                def guarded(work,inputs,artifacts,modules,tool,observations=None):
+                    if boundary=='before-observer' and observations is not None:
+                        (observations/'generated-control.json').chmod(0o600)
+                    return admit(work,inputs,artifacts,modules,tool,observations)
+                def copied(source,destination,size,digest):
+                    copy(source,destination,size,digest)
+                    if boundary=='final-copy' and destination.parent==args.output:
+                        (args.work_dir/'observations/generated-control.json').chmod(0o600)
+                with self.controls(args,proof,snapshot,phase),patch('apk_builder.admit_mount_access',side_effect=guarded),patch('apk_builder.copy_verified',side_effect=copied),self.assertRaisesRegex(Refusal,'pinned UID0 mount access'):
+                    consumer.produce(args)
+                self.assertEqual(len(calls),1 if boundary=='before-observer' else 2)
+                self.assertFalse((args.output/'test-key-build-receipt.json').exists())
 
     @unittest.skipUnless(os.name == 'posix', 'real POSIX mode admission')
     def test_shared_tool_admission_refuses_both_entry_points_before_image_or_build(self):

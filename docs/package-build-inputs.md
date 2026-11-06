@@ -118,3 +118,18 @@ work before a new explicit attempt; there is no automatic retry. A successful
 receipt additionally records the accepted input-receipt digest, original producer
 commit and packaging executor commit. This does not publish a release or enable
 installation, production signing trust or device compatibility.
+
+Both isolated phases bind the exact admitted tool file read-only at `/tool/apk`;
+the original host tool directory may remain private. Fresh packaging work is
+owned/private0700; only its newly created artifact child is initialized0777 so
+the unchanged cap-dropped UID/GID0 container can export root-owned files. The
+private work parent prevents unrelated host traversal. Frozen input/tool/source
+permissions are never normalized.
+
+Before generation, between phases, before/after public-only observation and at
+final-copy/completion boundaries, shared admission checks the private ordinary
+work root and applicable UID0/GID0 access to fixed mounted directories/files.
+Unknown/symlink/nonordinary or inaccessible staging refuses; admission never
+chmods. Restrictive umask staging may therefore refuse before container launch.
+Existing source/input/SDK proof, signing disposal, SPKI channel, root/root payload
+inventory, read-only observer mounts and cleanup/resource bounds remain required.
