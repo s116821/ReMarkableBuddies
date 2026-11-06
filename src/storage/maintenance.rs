@@ -213,6 +213,17 @@ impl Store {
             |store, generation| store.recover(generation),
         )
     }
+    /// Personalization retains legacy format1-only admission. The ordinary
+    /// notebook gate is shared, without admitting legacy selected/feedback stores.
+    pub(crate) fn open_existing_for_personalization(paths: StorePaths) -> Result<Self, Refusal> {
+        Self::open_existing_using(
+            paths,
+            false,
+            NotebookAdmission::Preferences,
+            |_, _| Ok(()),
+            |store, generation| store.recover(generation),
+        )
+    }
     fn open_existing_using(
         paths: StorePaths,
         selected_aware: bool,
