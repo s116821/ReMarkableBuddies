@@ -73,6 +73,12 @@ pub struct Args {
     /// Emit the embedded canonical-object schema without reading saved configuration
     #[arg(long, exclusive = true)]
     configuration_schema: bool,
+    /// Export explicit private portable preferences; no runtime/configuration changes
+    #[arg(long, exclusive = true, value_name = "CONFIG_FILE")]
+    export_portable_configuration: Option<std::path::PathBuf>,
+    /// Validate an explicit portable preference artifact without exposing its text
+    #[arg(long, exclusive = true, value_name = "ARTIFACT_FILE")]
+    inspect_portable_configuration: Option<std::path::PathBuf>,
     /// Fixed installed stock recovery; never starts ordinary application services
     #[arg(long, exclusive = true)]
     resident_stock_recovery: bool,
@@ -229,6 +235,12 @@ fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_lo
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    if let Some(path) = args.export_portable_configuration {
+        return config::portable::export(path).write_to(&mut std::io::stdout().lock());
+    }
+    if let Some(path) = args.inspect_portable_configuration {
+        return config::portable::inspect(path).write_to(&mut std::io::stdout().lock());
+    }
     if args.inspect_selected_outbox {
         return remarkable_reader_buddy::outbox_status::run(
             std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
@@ -985,10 +997,12 @@ mod tests {
                 ))]
                 "development-resident-output-plan",
                 "export-note",
+                "export-portable-configuration",
                 "handwriting",
                 "inspect-conversations",
                 "inspect-owned-data",
                 "inspect-owned-data-v3",
+                "inspect-portable-configuration",
                 "inspect-selected-outbox",
                 "inspect-source-cache",
                 "log-level",
@@ -1034,6 +1048,8 @@ mod tests {
         assert!(args.basic_settings_operation.is_none());
         assert!(args.basic_settings_input.is_none());
         assert!(args.configuration_operation.is_none());
+        assert!(args.export_portable_configuration.is_none());
+        assert!(args.inspect_portable_configuration.is_none());
         assert!(args.research_settings_operation.is_none());
         assert!(args.research_settings_input.is_none());
         assert!(args.model.is_none());
