@@ -486,11 +486,13 @@ fn apply(doc: Observation, intent: Intent, change: Change) -> Checked<Report> {
         }
     }
     let store = Arc::new(
-        Store::open_existing_for_config(doc.config.paths.clone()).map_err(|r| match r {
-            Refusal::Busy => Status::Busy,
-            Refusal::Unavailable => Status::Unavailable,
-            Refusal::Unsupported => Status::Unsupported,
-        })?,
+        Store::open_existing_for_credential_file(doc.config.paths.clone()).map_err(
+            |r| match r {
+                Refusal::Busy => Status::Busy,
+                Refusal::Unavailable => Status::Unavailable,
+                Refusal::Unsupported => Status::Unsupported,
+            },
+        )?,
     );
     let custody = Custody::acquire(store.clone()).map_err(|_| Status::Unsupported)?;
     let mut report = store.publish_declared_model_credential(&doc.path, &intent, &change);
@@ -673,6 +675,7 @@ mod tests {
         path: PathBuf,
         target: PathBuf,
         paths: StorePaths,
+        history: BTreeMap<PathBuf, Vec<u8>>,
     }
     impl Fixture {
         fn new() -> Self {
@@ -699,7 +702,32 @@ mod tests {
                 path,
                 target,
                 paths,
+                history: BTreeMap::new(),
             }
+        }
+        fn for_layout(layout: usize) -> Self {
+            let mut f = Self::new();
+            if layout == 2 {
+                let store = Store::open(f.paths.clone()).unwrap();
+                store
+                    .set_sync_mode(
+                        &store.sync_mode_snapshot().unwrap().token,
+                        Uuid::new_v4(),
+                        crate::storage::sync::mode::SyncModeChoice::LocalOnly,
+                    )
+                    .unwrap();
+            }
+            if layout != 0 {
+                crate::config::notebook_preferences_tests::seed(&f.paths);
+            }
+            f.history = f.history_inventory();
+            f
+        }
+        fn history_inventory(&self) -> BTreeMap<PathBuf, Vec<u8>> {
+            crate::config::notebook_preferences_tests::inventory(&self.root)
+                .into_iter()
+                .filter(|(p, _)| p.starts_with("data") || p.starts_with("cache"))
+                .collect()
         }
         fn run(&self, op: Operation, input: Value) -> Report {
             run(
@@ -719,6 +747,9 @@ mod tests {
             fs::set_permissions(&self.target, fs::Permissions::from_mode(mode)).unwrap();
         }
         fn unchanged(&self) {
+            if !self.history.is_empty() {
+                assert_eq!(self.history_inventory(), self.history);
+            }
             for p in [
                 self.paths.data.join("sentinel"),
                 self.paths.cache.join("sentinel"),
@@ -793,237 +824,264 @@ mod tests {
     }
     #[test]
     fn real_install_replace_private_modes_remove_and_noop_preserve_sentinels() {
-        let f = Fixture::new();
-        let original = fs::read(&f.path).unwrap();
-        for action in ["install", "replace", "remove"] {
-            if action == "replace" {
-                fs::set_permissions(&f.target, fs::Permissions::from_mode(0o400)).unwrap();
-            }
-            let ch = if action == "replace" {
-                json!({"action":"replace","value":"SYNTHETIC_SECRET_CHANGED\r\n α "})
-            } else {
-                change(action)
-            };
-            let intent = f.prepare(ch.clone());
-            let before = finish(f.run(Operation::Status, json!({"intent":intent})));
-            assert_eq!(before["outcome"], "unresolved");
-            let applied = finish(f.run(Operation::Apply, json!({"intent":intent,"change":ch})));
-            assert_eq!(applied["outcome"], "verified");
-            assert_eq!(applied["disk_readback_verified"], true);
-            assert_eq!(
-                finish(f.run(Operation::Status, json!({"intent":intent})))["outcome"],
-                "desired-file-observed"
-            );
-            if let Some(s) = ch.get("value") {
-                assert_eq!(fs::read(&f.target).unwrap(), s.as_str().unwrap().as_bytes());
+        for layout in 0..3 {
+            let f = Fixture::for_layout(layout);
+            let original = fs::read(&f.path).unwrap();
+            for action in ["install", "replace", "remove"] {
+                if action == "replace" {
+                    fs::set_permissions(&f.target, fs::Permissions::from_mode(0o400)).unwrap();
+                }
+                let ch = if action == "replace" {
+                    json!({"action":"replace","value":"SYNTHETIC_SECRET_CHANGED\r\n α "})
+                } else {
+                    change(action)
+                };
+                let intent = f.prepare(ch.clone());
+                let before = finish(f.run(Operation::Status, json!({"intent":intent})));
+                assert_eq!(before["outcome"], "unresolved");
+                let applied = finish(f.run(Operation::Apply, json!({"intent":intent,"change":ch})));
+                assert_eq!(applied["outcome"], "verified");
+                assert_eq!(applied["disk_readback_verified"], true);
                 assert_eq!(
-                    fs::metadata(&f.target).unwrap().mode() & 0o777,
-                    if action == "replace" { 0o400 } else { 0o600 }
+                    finish(f.run(Operation::Status, json!({"intent":intent})))["outcome"],
+                    "desired-file-observed"
                 );
+                if let Some(s) = ch.get("value") {
+                    assert_eq!(fs::read(&f.target).unwrap(), s.as_str().unwrap().as_bytes());
+                    assert_eq!(
+                        fs::metadata(&f.target).unwrap().mode() & 0o777,
+                        if action == "replace" { 0o400 } else { 0o600 }
+                    );
+                }
             }
+            assert!(!f.target.exists());
+            assert_eq!(fs::read(&f.path).unwrap(), original);
+            f.unchanged();
+            let base = observe(Some(f.path.clone())).unwrap().binding;
+            assert_eq!(finish(f.run(Operation::Prepare,json!({"credential_version":1,"operation":Uuid::new_v4(),"base":base,"change":{"action":"remove"}})))["outcome"],"no-change");
+            f.set(SECRET.as_bytes(), 0o600);
+            let before = observe(Some(f.path.clone())).unwrap().binding;
+            assert_eq!(finish(f.run(Operation::Prepare,json!({"credential_version":1,"operation":Uuid::new_v4(),"base":before,"change":change("replace")})))["outcome"],"no-change");
+            assert!(observe(Some(f.path.clone())).unwrap().binding == before);
         }
-        assert!(!f.target.exists());
-        assert_eq!(fs::read(&f.path).unwrap(), original);
-        f.unchanged();
-        let base = observe(Some(f.path.clone())).unwrap().binding;
-        assert_eq!(finish(f.run(Operation::Prepare,json!({"credential_version":1,"operation":Uuid::new_v4(),"base":base,"change":{"action":"remove"}})))["outcome"],"no-change");
-        f.set(SECRET.as_bytes(), 0o600);
-        let before = observe(Some(f.path.clone())).unwrap().binding;
-        assert_eq!(finish(f.run(Operation::Prepare,json!({"credential_version":1,"operation":Uuid::new_v4(),"base":before,"change":change("replace")})))["outcome"],"no-change");
-        assert!(observe(Some(f.path.clone())).unwrap().binding == before);
     }
     #[test]
     fn original_config_file_metadata_and_parent_changes_never_refresh() {
-        for kind in ["config", "content", "inode", "mode", "parent"] {
-            let f = Fixture::new();
-            f.set(b"original", 0o600);
-            let intent = f.prepare(change("replace"));
-            match kind {
-                "config" => {
-                    let mut b = fs::read(&f.path).unwrap();
-                    b.push(b' ');
-                    fs::write(&f.path, b).unwrap();
+        for layout in 0..3 {
+            for kind in ["config", "content", "inode", "mode", "parent"] {
+                let f = Fixture::for_layout(layout);
+                f.set(b"original", 0o600);
+                let intent = f.prepare(change("replace"));
+                match kind {
+                    "config" => {
+                        let mut b = fs::read(&f.path).unwrap();
+                        b.push(b' ');
+                        fs::write(&f.path, b).unwrap();
+                    }
+                    "content" => f.set(b"intervening", 0o600),
+                    "inode" => f.set(b"original", 0o600),
+                    "mode" => {
+                        fs::set_permissions(&f.target, fs::Permissions::from_mode(0o400)).unwrap()
+                    }
+                    _ => {
+                        fs::rename(&f.paths.credentials, f.root.join("old-credentials")).unwrap();
+                        files::directory(&f.paths.credentials).unwrap();
+                        f.set(b"original", 0o600);
+                    }
                 }
-                "content" => f.set(b"intervening", 0o600),
-                "inode" => f.set(b"original", 0o600),
-                "mode" => {
-                    fs::set_permissions(&f.target, fs::Permissions::from_mode(0o400)).unwrap()
-                }
-                _ => {
-                    fs::rename(&f.paths.credentials, f.root.join("old-credentials")).unwrap();
-                    files::directory(&f.paths.credentials).unwrap();
-                    f.set(b"original", 0o600);
-                }
+                let before = fs::read(&f.target).unwrap();
+                assert_eq!(
+                    f.run(
+                        Operation::Apply,
+                        json!({"intent":intent,"change":change("replace")})
+                    )
+                    .status,
+                    Status::Conflict
+                );
+                assert_eq!(fs::read(&f.target).unwrap(), before);
             }
-            let before = fs::read(&f.target).unwrap();
-            assert_eq!(
-                f.run(
-                    Operation::Apply,
-                    json!({"intent":intent,"change":change("replace")})
-                )
-                .status,
-                Status::Conflict
-            );
-            assert_eq!(fs::read(&f.target).unwrap(), before);
         }
     }
     #[test]
     fn unsafe_modes_links_aliases_and_unconfigured_reference_refuse() {
-        let f = Fixture::new();
-        f.set(b"original", 0o600);
-        fs::set_permissions(&f.target, fs::Permissions::from_mode(0o644)).unwrap();
-        assert_eq!(inspect(Some(f.path.clone())).status, Status::Unsupported);
-        fs::set_permissions(&f.target, fs::Permissions::from_mode(0o600)).unwrap();
-        fs::hard_link(&f.target, f.root.join("alias")).unwrap();
-        assert_eq!(inspect(Some(f.path.clone())).status, Status::Unsupported);
-        fs::remove_file(f.root.join("alias")).unwrap();
-        fs::remove_file(&f.target).unwrap();
-        std::os::unix::fs::symlink(f.paths.credentials.join("other"), &f.target).unwrap();
-        assert_eq!(inspect(Some(f.path.clone())).status, Status::Unsupported);
-        fs::remove_file(&f.target).unwrap();
-        fs::hard_link(&f.path, &f.target).unwrap();
-        assert_eq!(inspect(Some(f.path.clone())).status, Status::Unsupported);
-        fs::remove_file(&f.target).unwrap();
-        fs::set_permissions(&f.paths.credentials, fs::Permissions::from_mode(0o755)).unwrap();
-        assert_eq!(inspect(Some(f.path.clone())).status, Status::Unsupported);
-        fs::set_permissions(&f.paths.credentials, fs::Permissions::from_mode(0o700)).unwrap();
-        let mut cfg: Value = serde_json::from_slice(&fs::read(&f.path).unwrap()).unwrap();
-        cfg.as_object_mut().unwrap().remove("model_credential");
-        fs::write(&f.path, serde_json::to_vec(&cfg).unwrap()).unwrap();
-        assert_eq!(inspect(Some(f.path.clone())).status, Status::Unsupported);
+        for layout in 0..3 {
+            let f = Fixture::for_layout(layout);
+            f.set(b"original", 0o600);
+            fs::set_permissions(&f.target, fs::Permissions::from_mode(0o644)).unwrap();
+            assert_eq!(inspect(Some(f.path.clone())).status, Status::Unsupported);
+            fs::set_permissions(&f.target, fs::Permissions::from_mode(0o600)).unwrap();
+            fs::hard_link(&f.target, f.root.join("alias")).unwrap();
+            assert_eq!(inspect(Some(f.path.clone())).status, Status::Unsupported);
+            fs::remove_file(f.root.join("alias")).unwrap();
+            fs::remove_file(&f.target).unwrap();
+            std::os::unix::fs::symlink(f.paths.credentials.join("other"), &f.target).unwrap();
+            assert_eq!(inspect(Some(f.path.clone())).status, Status::Unsupported);
+            fs::remove_file(&f.target).unwrap();
+            fs::hard_link(&f.path, &f.target).unwrap();
+            assert_eq!(inspect(Some(f.path.clone())).status, Status::Unsupported);
+            fs::remove_file(&f.target).unwrap();
+            fs::set_permissions(&f.paths.credentials, fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(inspect(Some(f.path.clone())).status, Status::Unsupported);
+            fs::set_permissions(&f.paths.credentials, fs::Permissions::from_mode(0o700)).unwrap();
+            let mut cfg: Value = serde_json::from_slice(&fs::read(&f.path).unwrap()).unwrap();
+            cfg.as_object_mut().unwrap().remove("model_credential");
+            fs::write(&f.path, serde_json::to_vec(&cfg).unwrap()).unwrap();
+            assert_eq!(inspect(Some(f.path.clone())).status, Status::Unsupported);
+        }
     }
     #[test]
     fn no_clobber_install_race_retains_other_writer_and_unknown() {
-        let f = Fixture::new();
-        let intent = f.prepare(change("install"));
-        let ch: Change = serde_json::from_value(change("install")).unwrap();
-        let report = publish_with(&f.path, &f.paths, &intent, &ch, |phase| {
-            if phase == Phase::BeforeSyscall {
-                f.set(b"race-winner", 0o600)
-            }
-            Ok(())
-        });
-        assert_eq!(finish(report)["outcome"], "unknown");
-        assert_eq!(fs::read(&f.target).unwrap(), b"race-winner");
-        assert_eq!(
-            finish(f.run(Operation::Status, json!({"intent":intent})))["outcome"],
-            "unresolved"
-        );
-        f.unchanged();
+        for layout in 0..3 {
+            let f = Fixture::for_layout(layout);
+            let intent = f.prepare(change("install"));
+            let ch: Change = serde_json::from_value(change("install")).unwrap();
+            let report = publish_with(&f.path, &f.paths, &intent, &ch, |phase| {
+                if phase == Phase::BeforeSyscall {
+                    f.set(b"race-winner", 0o600)
+                }
+                Ok(())
+            });
+            assert_eq!(finish(report)["outcome"], "unknown");
+            assert_eq!(fs::read(&f.target).unwrap(), b"race-winner");
+            assert_eq!(
+                finish(f.run(Operation::Status, json!({"intent":intent})))["outcome"],
+                "unresolved"
+            );
+            f.unchanged();
+        }
     }
     #[test]
     fn before_and_after_attempt_faults_are_phase_truthful_for_all_actions() {
-        for action in ["install", "replace", "remove"] {
-            for phase in [
-                Phase::Staged,
-                Phase::BeforeSyscall,
-                Phase::AfterSyscall,
-                Phase::BeforeSync,
-                Phase::BeforeReadback,
-            ] {
-                let f = Fixture::new();
-                if action != "install" {
-                    f.set(b"original", 0o400)
-                }
-                let before = fs::read(&f.target).ok();
-                let intent = f.prepare(change(action));
-                let ch: Change = serde_json::from_value(change(action)).unwrap();
-                let r = publish_with(&f.path, &f.paths, &intent, &ch, |p| {
-                    if p == phase {
-                        Err(Status::Unavailable)
-                    } else {
-                        Ok(())
+        for layout in 0..3 {
+            for action in ["install", "replace", "remove"] {
+                for phase in [
+                    Phase::Staged,
+                    Phase::BeforeSyscall,
+                    Phase::AfterSyscall,
+                    Phase::BeforeSync,
+                    Phase::BeforeReadback,
+                ] {
+                    let f = Fixture::for_layout(layout);
+                    if action != "install" {
+                        f.set(b"original", 0o400)
                     }
-                });
-                let v = finish(r);
-                if matches!(phase, Phase::Staged | Phase::BeforeSyscall) {
-                    assert_eq!(v["outcome"], "not-dispatched");
-                    assert_eq!(fs::read(&f.target).ok(), before);
-                } else {
-                    assert_eq!(v["outcome"], "unknown");
-                    assert_eq!(
-                        finish(f.run(Operation::Status, json!({"intent":intent})))["outcome"],
-                        "desired-file-observed"
-                    );
+                    let before = fs::read(&f.target).ok();
+                    let intent = f.prepare(change(action));
+                    let ch: Change = serde_json::from_value(change(action)).unwrap();
+                    let r = publish_with(&f.path, &f.paths, &intent, &ch, |p| {
+                        if p == phase {
+                            Err(Status::Unavailable)
+                        } else {
+                            Ok(())
+                        }
+                    });
+                    let v = finish(r);
+                    if matches!(phase, Phase::Staged | Phase::BeforeSyscall) {
+                        assert_eq!(v["outcome"], "not-dispatched");
+                        assert_eq!(fs::read(&f.target).ok(), before);
+                    } else {
+                        assert_eq!(v["outcome"], "unknown");
+                        assert_eq!(
+                            finish(f.run(Operation::Status, json!({"intent":intent})))["outcome"],
+                            "desired-file-observed"
+                        );
+                    }
+                    f.unchanged();
                 }
-                f.unchanged();
             }
+            let f = Fixture::for_layout(layout);
+            f.set(b"original", 0o600);
+            let i = f.prepare(change("replace"));
+            let ch: Change = serde_json::from_value(change("replace")).unwrap();
+            let r = publish_with(&f.path, &f.paths, &i, &ch, |p| {
+                if p == Phase::BeforeReadback {
+                    f.set(b"different-readback", 0o600)
+                }
+                Ok(())
+            });
+            assert_eq!(finish(r)["outcome"], "unknown");
         }
-        let f = Fixture::new();
-        f.set(b"original", 0o600);
-        let i = f.prepare(change("replace"));
-        let ch: Change = serde_json::from_value(change("replace")).unwrap();
-        let r = publish_with(&f.path, &f.paths, &i, &ch, |p| {
-            if p == Phase::BeforeReadback {
-                f.set(b"different-readback", 0o600)
-            }
-            Ok(())
-        });
-        assert_eq!(finish(r)["outcome"], "unknown");
     }
     #[test]
-    fn notebook_reference_admission_does_not_admit_actual_credential_file_publication() {
-        for action in ["install", "replace", "remove"] {
-            let f = Fixture::new();
-            if action == "replace" {
-                f.set(b"different original synthetic credential", 0o600);
-            } else if action == "remove" {
-                f.set(SECRET.as_bytes(), 0o600);
+    fn notebook_file_apply_refuses_incomplete_markers_modes_and_retained_history_without_repair() {
+        for case in 0..3 {
+            let f = Fixture::for_layout(1);
+            let intent = f.prepare(change("install"));
+            let generation: Uuid =
+                serde_json::from_slice(&fs::read(f.paths.data.join("CURRENT")).unwrap()).unwrap();
+            let generation = f
+                .paths
+                .data
+                .join("generations")
+                .join(generation.to_string());
+            match case {
+                0 => fs::remove_file(f.paths.data.join("capabilities.json")).unwrap(),
+                1 => fs::write(f.paths.data.join("sync/mode.json"), b"invalid mode").unwrap(),
+                _ => {
+                    fs::create_dir_all(generation.join("selection-history")).unwrap();
+                    fs::write(generation.join("selection-history/residue"), b"retained").unwrap();
+                }
             }
-            crate::config::notebook_preferences_tests::seed(&f.paths);
-            let intent = f.prepare(change(action));
             let before = crate::config::notebook_preferences_tests::inventory(&f.root);
             let result = finish(f.run(
                 Operation::Apply,
-                json!({"intent":intent,"change":change(action)}),
+                json!({"intent":intent,"change":change("install")}),
             ));
-            assert_eq!(result["status"], "unsupported");
+            assert!(matches!(
+                result["status"].as_str(),
+                Some("unsupported" | "unavailable")
+            ));
             assert_eq!(result["outcome"], "not-dispatched");
             assert_eq!(
                 crate::config::notebook_preferences_tests::inventory(&f.root),
                 before
             );
-            // The separately named reference entry is usable on this same owned store.
-            drop(Store::open_existing_for_credential_reference(f.paths.clone()).unwrap());
         }
     }
     #[test]
     fn consuming_prefix_keeps_actual_store_busy_and_emits_only_one_prefix() {
-        let f = Fixture::new();
-        let intent = f.prepare(change("install"));
-        let r = f.run(
-            Operation::Apply,
-            json!({"intent":intent,"change":change("install")}),
-        );
-        assert_eq!(r.status, Status::Ok);
-        struct Prefix<'a> {
-            f: &'a Fixture,
-            bytes: Vec<u8>,
-        }
-        impl Write for Prefix<'_> {
-            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-                assert!(matches!(
-                    Store::open_existing_for_config(self.f.paths.clone()),
-                    Err(Refusal::Busy)
-                ));
-                if self.bytes.len() == 17 {
-                    return Err(std::io::ErrorKind::BrokenPipe.into());
+        for layout in 0..3 {
+            for limit in [0, 17] {
+                let f = Fixture::for_layout(layout);
+                let intent = f.prepare(change("install"));
+                let r = f.run(
+                    Operation::Apply,
+                    json!({"intent":intent,"change":change("install")}),
+                );
+                assert_eq!(r.status, Status::Ok);
+                struct Prefix<'a> {
+                    f: &'a Fixture,
+                    bytes: Vec<u8>,
+                    limit: usize,
                 }
-                let n = (17 - self.bytes.len()).min(b.len());
-                self.bytes.extend_from_slice(&b[..n]);
-                Ok(n)
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
+                impl Write for Prefix<'_> {
+                    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                        assert!(matches!(
+                            Store::open_existing_for_credential_file(self.f.paths.clone()),
+                            Err(Refusal::Busy)
+                        ));
+                        if self.bytes.len() == self.limit {
+                            return Err(std::io::ErrorKind::BrokenPipe.into());
+                        }
+                        let n = (self.limit - self.bytes.len()).min(b.len());
+                        self.bytes.extend_from_slice(&b[..n]);
+                        Ok(n)
+                    }
+                    fn flush(&mut self) -> std::io::Result<()> {
+                        panic!("report must not flush")
+                    }
+                }
+                let mut sink = Prefix {
+                    f: &f,
+                    bytes: Vec::new(),
+                    limit,
+                };
+                assert!(r.write_to(&mut sink).is_err());
+                assert_eq!(sink.bytes.len(), limit);
+                assert!(Store::open_existing_for_credential_file(f.paths.clone()).is_ok());
+                f.unchanged();
             }
         }
-        let mut sink = Prefix {
-            f: &f,
-            bytes: Vec::new(),
-        };
-        assert!(r.write_to(&mut sink).is_err());
-        assert_eq!(sink.bytes.len(), 17);
-        assert!(Store::open_existing_for_config(f.paths.clone()).is_ok());
     }
     #[test]
     fn strict_requests_caps_and_inspect_never_read_or_create_store() {
@@ -1116,93 +1174,98 @@ mod tests {
     }
     #[test]
     fn actual_config_writer_cannot_interleave_credential_publication_mutex() {
-        use std::{sync::mpsc, time::Duration};
-        let f = Fixture::new();
-        let intent = f.prepare(change("install"));
-        let ch: Change = serde_json::from_value(change("install")).unwrap();
-        let store = Arc::new(Store::open_existing_for_config(f.paths.clone()).unwrap());
-        let (entered_tx, entered_rx) = mpsc::channel();
-        let (resume_tx, resume_rx) = mpsc::channel();
-        let owner = store.clone();
-        let path = f.path.clone();
-        let first = std::thread::spawn(move || {
-            owner.credential_publication_test_hook(&path, &intent, &ch, |phase| {
-                if phase == Phase::BeforeSyscall {
-                    entered_tx.send(()).unwrap();
-                    resume_rx.recv_timeout(Duration::from_secs(10)).unwrap();
-                }
-                Ok(())
-            })
-        });
-        entered_rx.recv_timeout(Duration::from_secs(10)).unwrap();
-        let original = fs::read(&f.path).unwrap();
-        let mut next: Value = serde_json::from_slice(&original).unwrap();
-        next["debug_dump"] = json!(true);
-        let next = serde_json::to_vec(&next).unwrap();
-        let owner = store.clone();
-        let path = f.path.clone();
-        let hash = digest(&original);
-        let (started_tx, started_rx) = mpsc::channel();
-        let (done_tx, done_rx) = mpsc::channel();
-        let second = std::thread::spawn(move || {
-            started_tx.send(()).unwrap();
-            let r = owner.replace_config_document(&path, &hash, &next);
-            assert!(done_tx.send(r).is_ok());
-        });
-        started_rx.recv_timeout(Duration::from_secs(10)).unwrap();
-        // Barrier establishes the held publication lock; timeout is only a bounded
-        // negative assertion. Actual completion is required after explicit release.
-        assert!(matches!(
-            done_rx.recv_timeout(Duration::from_millis(50)),
-            Err(mpsc::RecvTimeoutError::Timeout)
-        ));
-        assert_eq!(fs::read(&f.path).unwrap(), original);
-        assert!(!f.target.exists());
-        resume_tx.send(()).unwrap();
-        assert_eq!(finish(first.join().unwrap())["outcome"], "verified");
-        assert!(matches!(
-            done_rx.recv_timeout(Duration::from_secs(10)).unwrap(),
-            crate::storage::ConfigPublication::Verified(_)
-        ));
-        second.join().unwrap();
-        assert_eq!(fs::read(&f.target).unwrap(), SECRET.as_bytes());
-        assert_eq!(
-            serde_json::from_slice::<Value>(&fs::read(&f.path).unwrap()).unwrap()["debug_dump"],
-            true
-        );
+        for layout in 0..3 {
+            use std::{sync::mpsc, time::Duration};
+            let f = Fixture::for_layout(layout);
+            let intent = f.prepare(change("install"));
+            let ch: Change = serde_json::from_value(change("install")).unwrap();
+            let store =
+                Arc::new(Store::open_existing_for_credential_file(f.paths.clone()).unwrap());
+            let (entered_tx, entered_rx) = mpsc::channel();
+            let (resume_tx, resume_rx) = mpsc::channel();
+            let owner = store.clone();
+            let path = f.path.clone();
+            let first = std::thread::spawn(move || {
+                owner.credential_publication_test_hook(&path, &intent, &ch, |phase| {
+                    if phase == Phase::BeforeSyscall {
+                        entered_tx.send(()).unwrap();
+                        resume_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                    }
+                    Ok(())
+                })
+            });
+            entered_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            let original = fs::read(&f.path).unwrap();
+            let mut next: Value = serde_json::from_slice(&original).unwrap();
+            next["debug_dump"] = json!(true);
+            let next = serde_json::to_vec(&next).unwrap();
+            let owner = store.clone();
+            let path = f.path.clone();
+            let hash = digest(&original);
+            let (started_tx, started_rx) = mpsc::channel();
+            let (done_tx, done_rx) = mpsc::channel();
+            let second = std::thread::spawn(move || {
+                started_tx.send(()).unwrap();
+                let r = owner.replace_config_document(&path, &hash, &next);
+                assert!(done_tx.send(r).is_ok());
+            });
+            started_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            // Barrier establishes the held publication lock; timeout is only a bounded
+            // negative assertion. Actual completion is required after explicit release.
+            assert!(matches!(
+                done_rx.recv_timeout(Duration::from_millis(50)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ));
+            assert_eq!(fs::read(&f.path).unwrap(), original);
+            assert!(!f.target.exists());
+            resume_tx.send(()).unwrap();
+            assert_eq!(finish(first.join().unwrap())["outcome"], "verified");
+            assert!(matches!(
+                done_rx.recv_timeout(Duration::from_secs(10)).unwrap(),
+                crate::storage::ConfigPublication::Verified(_)
+            ));
+            second.join().unwrap();
+            assert_eq!(fs::read(&f.target).unwrap(), SECRET.as_bytes());
+            assert_eq!(
+                serde_json::from_slice::<Value>(&fs::read(&f.path).unwrap()).unwrap()["debug_dump"],
+                true
+            );
+        }
     }
 
     #[test]
     fn changed_or_aliased_sealed_stage_never_reaches_destination_syscall() {
-        for alias in [false, true] {
-            let f = Fixture::new();
-            let intent = f.prepare(change("install"));
-            let ch: Change = serde_json::from_value(change("install")).unwrap();
-            let report = publish_with(&f.path, &f.paths, &intent, &ch, |phase| {
-                if phase == Phase::BeforeSyscall {
-                    let stage = fs::read_dir(&f.paths.credentials)
-                        .unwrap()
-                        .map(|e| e.unwrap().path())
-                        .find(|p| {
-                            p.file_name()
-                                .unwrap()
-                                .to_string_lossy()
-                                .starts_with(".credential-stage-")
-                        })
-                        .unwrap();
-                    if alias {
-                        fs::rename(&stage, f.root.join("retained-stage")).unwrap();
-                        std::os::unix::fs::symlink(f.paths.credentials.join("other"), &stage)
+        for layout in 0..3 {
+            for alias in [false, true] {
+                let f = Fixture::for_layout(layout);
+                let intent = f.prepare(change("install"));
+                let ch: Change = serde_json::from_value(change("install")).unwrap();
+                let report = publish_with(&f.path, &f.paths, &intent, &ch, |phase| {
+                    if phase == Phase::BeforeSyscall {
+                        let stage = fs::read_dir(&f.paths.credentials)
+                            .unwrap()
+                            .map(|e| e.unwrap().path())
+                            .find(|p| {
+                                p.file_name()
+                                    .unwrap()
+                                    .to_string_lossy()
+                                    .starts_with(".credential-stage-")
+                            })
                             .unwrap();
-                    } else {
-                        fs::write(&stage, b"changed stage").unwrap();
+                        if alias {
+                            fs::rename(&stage, f.root.join("retained-stage")).unwrap();
+                            std::os::unix::fs::symlink(f.paths.credentials.join("other"), &stage)
+                                .unwrap();
+                        } else {
+                            fs::write(&stage, b"changed stage").unwrap();
+                        }
                     }
-                }
-                Ok(())
-            });
-            assert_eq!(finish(report)["outcome"], "not-dispatched");
-            assert!(!f.target.exists());
-            f.unchanged();
+                    Ok(())
+                });
+                assert_eq!(finish(report)["outcome"], "not-dispatched");
+                assert!(!f.target.exists());
+                f.unchanged();
+            }
         }
     }
 

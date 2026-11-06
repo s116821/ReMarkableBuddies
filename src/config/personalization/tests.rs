@@ -275,7 +275,6 @@ fn distinct_admission_keeps_legacy_refusals_and_notebook_guards_without_repair()
     assert_eq!(f.run(Operation::Set, &f.set("new")).status, Status::Busy);
     drop(owner);
     assert!(Store::open_existing(f.paths.clone()).is_err());
-    assert!(Store::open_existing_for_config(f.paths.clone()).is_err());
     // No new ordinary-mode rule is silently imposed on previously admitted legacy1.
     let f = Fixture::with_mode(
         1,

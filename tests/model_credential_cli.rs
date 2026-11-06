@@ -4,6 +4,7 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use buddy::storage::{digest, sync::mode::SyncModeChoice, Store, Uuid};
 use remarkable_reader_buddy as buddy;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::{
     fs,
     io::Write,
@@ -332,5 +333,202 @@ fn actual_synthetic_cli_modes_busy_exact_bytes_and_clean_build_corpus() {
     emit(
         "END",
         &json!({"provenance":provenance,"records":records.len(),"executable_sha256":exe_sha}),
+    );
+}
+
+fn notebook_fixture(local: bool) -> Fixture {
+    use buddy::storage::{Envelope, Kind, Media, Namespace};
+    let f = Fixture::new();
+    let store = Store::open(f.paths()).unwrap();
+    let media = b"retained notebook media";
+    let record = Envelope {
+        envelope_version: 1,
+        namespace: Namespace::SubjectMemory,
+        domain_schema_version: 1,
+        record_id: Uuid::new_v4(),
+        revision_id: Uuid::new_v4(),
+        parents: Default::default(),
+        operation_id: Uuid::new_v4(),
+        actor_id: store.actor_id,
+        kind: Kind::Value,
+        payload: json!({"fixture":"retained"}),
+        media_descriptors: vec![Media {
+            sha256: digest(media),
+            bytes: media.len() as u64,
+            media_type: "text/plain".into(),
+        }],
+    };
+    store
+        .commit(
+            vec![record],
+            BTreeMap::from([(digest(media), media.to_vec())]),
+        )
+        .unwrap();
+    if local {
+        store
+            .set_sync_mode(
+                &store.sync_mode_snapshot().unwrap().token,
+                Uuid::new_v4(),
+                SyncModeChoice::LocalOnly,
+            )
+            .unwrap();
+    }
+    drop(store);
+    drop(Store::prepare_notebook(f.paths()).unwrap());
+    fs::write(
+        f.paths().credentials.join("unrelated-private-file"),
+        b"PRIVATE_SECRET_SENTINEL\r\n exact ",
+    )
+    .unwrap();
+    let path = f.root.join("config.json");
+    let mut raw: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    raw["model"] = Value::Null;
+    raw["personalization"] = json!({"enabled":false,"text":"PRIVATE exact\r\n α "});
+    raw["memory"] = json!({});
+    fs::write(path, serde_json::to_vec_pretty(&raw).unwrap()).unwrap();
+    f
+}
+#[test]
+fn actual_notebook_private_file_lifecycle_busy_stale_noop_and_feedback() {
+    let mut records = Vec::new();
+    for local in [false, true] {
+        let f = notebook_fixture(local);
+        configure(&f);
+        for mode in [0o600, 0o400] {
+            for (action, value) in [
+                ("install", Some(SECRET)),
+                ("replace", Some("SYNTHETIC_CREDENTIAL_CHANGED\r\n α ")),
+                ("remove", None),
+            ] {
+                let target = f.paths().credentials.join("fixture");
+                if action == "replace" {
+                    fs::set_permissions(&target, fs::Permissions::from_mode(mode)).unwrap();
+                }
+                let change = match value {
+                    Some(value) => json!({"action":action,"value":value}),
+                    None => json!({"action":action}),
+                };
+                let name = format!("notebook-{local}-{mode:o}-{action}");
+                let input = prepare(&mut records, &name, &f, change.clone());
+                let owner = Store::prepare_notebook(f.paths()).unwrap();
+                capture(
+                    &mut records,
+                    &format!("{name}-busy"),
+                    &f,
+                    "apply",
+                    Some(input.clone()),
+                    "busy",
+                    "not-dispatched",
+                );
+                capture(
+                    &mut records,
+                    &format!("{name}-status-busy"),
+                    &f,
+                    "status",
+                    Some(json!({"intent":input["intent"]})),
+                    "ok",
+                    "unresolved",
+                );
+                drop(owner);
+                capture(
+                    &mut records,
+                    &name,
+                    &f,
+                    "apply",
+                    Some(input.clone()),
+                    "ok",
+                    "verified",
+                );
+                capture(
+                    &mut records,
+                    &format!("{name}-status"),
+                    &f,
+                    "status",
+                    Some(json!({"intent":input["intent"]})),
+                    "ok",
+                    "desired-file-observed",
+                );
+                if let Some(value) = value {
+                    assert_eq!(fs::read(&target).unwrap(), value.as_bytes());
+                    assert_eq!(
+                        fs::metadata(&target).unwrap().mode() & 0o777,
+                        if action == "install" { 0o600 } else { mode }
+                    );
+                } else {
+                    assert!(!target.exists());
+                }
+                let view = capture(
+                    &mut records,
+                    &format!("{name}-noop-inspect"),
+                    &f,
+                    "inspect",
+                    None,
+                    "ok",
+                    "read-only",
+                );
+                let noop = if action == "install" {
+                    json!({"action":"replace","value":SECRET})
+                } else {
+                    change
+                };
+                capture(
+                    &mut records,
+                    &format!("{name}-noop"),
+                    &f,
+                    "prepare",
+                    Some(
+                        json!({"credential_version":1,"operation":Uuid::new_v4(),"base":view["data"]["binding"],"change":noop}),
+                    ),
+                    "ok",
+                    "no-change",
+                );
+            }
+        }
+        let input = prepare(
+            &mut records,
+            "notebook-stale",
+            &f,
+            json!({"action":"install","value":SECRET}),
+        );
+        let config = f.root.join("config.json");
+        let mut bytes = fs::read(&config).unwrap();
+        bytes.push(b' ');
+        fs::write(config, bytes).unwrap();
+        capture(
+            &mut records,
+            "notebook-stale-apply",
+            &f,
+            "apply",
+            Some(input.clone()),
+            "conflict",
+            "not-dispatched",
+        );
+        capture(
+            &mut records,
+            "notebook-stale-status",
+            &f,
+            "status",
+            Some(json!({"intent":input["intent"]})),
+            "conflict",
+            "not-dispatched",
+        );
+    }
+    let f = Fixture::new();
+    drop(buddy::unassociated_feedback::Feedback::prepare(f.paths()).unwrap());
+    configure(&f);
+    let input = prepare(
+        &mut records,
+        "legacy-feedback",
+        &f,
+        json!({"action":"install","value":SECRET}),
+    );
+    capture(
+        &mut records,
+        "legacy-feedback-apply",
+        &f,
+        "apply",
+        Some(input),
+        "ok",
+        "verified",
     );
 }

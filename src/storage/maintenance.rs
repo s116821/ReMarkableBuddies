@@ -173,9 +173,16 @@ impl Store {
     pub(crate) fn open_existing_for_outbox(paths: StorePaths) -> Result<Self, Refusal> {
         Self::open_existing_inner(paths, true)
     }
-    /// Explicit configuration publication only; never initialize or activate a mode.
-    pub(crate) fn open_existing_for_config(paths: StorePaths) -> Result<Self, Refusal> {
-        Self::open_existing_inner(paths, true)
+    /// Protected Linux credential-file publication only; never initialize or activate a mode.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn open_existing_for_credential_file(paths: StorePaths) -> Result<Self, Refusal> {
+        Self::open_existing_using(
+            paths,
+            true,
+            NotebookAdmission::Preferences,
+            |_, _| Ok(()),
+            |store, generation| store.recover(generation),
+        )
     }
     pub(super) fn open_existing_for_conversation(
         paths: StorePaths,
@@ -203,7 +210,7 @@ impl Store {
         )
     }
     /// Nonsecret basic/model/memory/product/research declaration writers may admit
-    /// a ready ordinary notebook. Generic and credential callers retain refusal.
+    /// a ready ordinary notebook. Other writers use their own scoped entries.
     pub(crate) fn open_existing_for_preferences(paths: StorePaths) -> Result<Self, Refusal> {
         Self::open_existing_using(
             paths,
@@ -213,8 +220,7 @@ impl Store {
             |store, generation| store.recover(generation),
         )
     }
-    /// Saved reference declarations only; actual credential-file operations retain
-    /// generic configuration admission and never inherit notebook support here.
+    /// Saved reference declarations only; protected file operations use a separate entry.
     pub(crate) fn open_existing_for_credential_reference(
         paths: StorePaths,
     ) -> Result<Self, Refusal> {
