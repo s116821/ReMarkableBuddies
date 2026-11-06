@@ -374,3 +374,45 @@ fn ordinary_memory_admits_ready_notebook_without_relaxing_legacy() {
         current
     );
 }
+
+#[test]
+fn ready_receiving_refuses_remote_mode_and_retained_selection_without_repair() {
+    for variant in 0..3 {
+        let fixture = Fixture::new();
+        let store = Arc::new(Store::prepare_notebook(fixture.paths()).unwrap());
+        if variant < 2 {
+            set(&store, choice(variant + 1));
+        }
+        let generations = store.paths.data.join("generations");
+        let generation = fs::read_dir(&generations)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        if variant == 2 {
+            fs::create_dir_all(generation.join("selection-history")).unwrap();
+            fs::write(generation.join("selection-history/held.json"), b"{}").unwrap();
+        }
+        let current = fs::read(store.paths.data.join("CURRENT")).unwrap();
+        let format = fs::read(generation.join("format.json")).unwrap();
+        let marker = fs::read(generation.join("notebook-feature.json")).unwrap();
+        drop(store);
+        assert!(Store::open_existing_for_ready_notebook_receiving(fixture.paths()).is_err());
+        assert_eq!(
+            fs::read(fixture.paths().data.join("CURRENT")).unwrap(),
+            current
+        );
+        assert_eq!(fs::read(generation.join("format.json")).unwrap(), format);
+        assert_eq!(
+            fs::read(generation.join("notebook-feature.json")).unwrap(),
+            marker
+        );
+        if variant == 2 {
+            assert_eq!(
+                fs::read(generation.join("selection-history/held.json")).unwrap(),
+                b"{}"
+            );
+        }
+    }
+}

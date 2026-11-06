@@ -641,6 +641,11 @@ pub fn run(config_path: Option<PathBuf>, request: Request) -> Report {
             None
         };
         let (ledger, prepared, memory) = if config.memory.enabled {
+            if crate::workflow::conversation_dispatch::RuntimeRoute::for_config(&config)
+                != crate::workflow::conversation_dispatch::RuntimeRoute::OrdinaryLocal
+            {
+                return Err(runner::Failure::Unsupported);
+            }
             crate::memory::context::admit_ordinary(&config.memory)
                 .map_err(|_| runner::Failure::Unsupported)?;
             let store = Arc::new(

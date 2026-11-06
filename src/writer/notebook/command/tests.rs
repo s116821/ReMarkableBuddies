@@ -562,6 +562,7 @@ fn joined_export_rechecks_archive_bytes_at_both_destination_poll_boundaries() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn ordinary_memory_reducer_binding_and_spent_operation_query_count() {
     use crate::memory::Provider;
     let fixture = Fixture::new();
