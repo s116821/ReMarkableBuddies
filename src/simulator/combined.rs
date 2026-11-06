@@ -13,6 +13,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{collections::VecDeque, io::Cursor};
 
+pub(super) mod qualification;
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Scenario {
@@ -72,6 +74,18 @@ fn seed_image(
     tone: u8,
 ) -> Result<(Uuid, String)> {
     let png = fixture_png(tone)?;
+    seed_image_bytes(ledger, conversation, source, png, u32::from(tone))
+}
+
+fn seed_image_bytes(
+    ledger: &Ledger,
+    conversation: Uuid,
+    source: &SourceObservation,
+    png: Vec<u8>,
+    ordinal: u32,
+) -> Result<(Uuid, String)> {
+    use image::GenericImageView;
+    let (width, height) = image::load_from_memory(&png)?.dimensions();
     let image = Media {
         sha256: digest(&png),
         bytes: png.len() as u64,
@@ -104,10 +118,10 @@ fn seed_image(
             turn,
             image,
             observation: source.clone(),
-            width: 2,
-            height: 2,
+            width,
+            height,
             purpose: "overview".into(),
-            ordinal: u32::from(tone),
+            ordinal,
             parent: None,
             parent_dimensions: None,
             crop: None,

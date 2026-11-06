@@ -517,6 +517,7 @@ enum ParsedScenario {
     Reader(Box<Scenario>),
     Writer(Box<writer::Scenario>),
     Combined(Box<combined::Scenario>),
+    CombinedQualification(combined::qualification::Scenario),
     ExchangeHistory(exchange_history::Scenario),
 }
 /// Probe the mode, then parse original bytes directly without untagged buffering.
@@ -544,6 +545,15 @@ fn parse_scenario(bytes: &[u8]) -> Result<ParsedScenario> {
             let scenario = serde_json::from_slice(bytes)?;
             Ok(ParsedScenario::Combined(Box::new(scenario)))
         }
+        "combined-qualification" => {
+            ensure!(
+                bytes.len() <= 16 * 1024,
+                "qualification scenario exceeds bound"
+            );
+            let scenario = serde_json::from_slice(bytes)?;
+            combined::qualification::validate(&scenario)?;
+            Ok(ParsedScenario::CombinedQualification(scenario))
+        }
         "exchange-history" => {
             ensure!(
                 bytes.len() <= 16 * 1024,
@@ -570,6 +580,9 @@ pub fn run_any_file(path: &Path) -> Result<()> {
         ParsedScenario::Combined(scenario) => {
             println!("{}", combined::run(*scenario)?);
             Ok(())
+        }
+        ParsedScenario::CombinedQualification(scenario) => {
+            combined::qualification::save(scenario, root)
         }
         ParsedScenario::ExchangeHistory(scenario) => {
             println!("{}", exchange_history::run(scenario)?);
