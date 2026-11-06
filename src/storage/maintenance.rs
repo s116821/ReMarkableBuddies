@@ -213,6 +213,19 @@ impl Store {
             |store, generation| store.recover(generation),
         )
     }
+    /// Saved reference declarations only; actual credential-file operations retain
+    /// generic configuration admission and never inherit notebook support here.
+    pub(crate) fn open_existing_for_credential_reference(
+        paths: StorePaths,
+    ) -> Result<Self, Refusal> {
+        Self::open_existing_using(
+            paths,
+            true,
+            NotebookAdmission::Preferences,
+            |_, _| Ok(()),
+            |store, generation| store.recover(generation),
+        )
+    }
     /// Personalization retains legacy format1-only admission. The ordinary
     /// notebook gate is shared, without admitting legacy selected/feedback stores.
     pub(crate) fn open_existing_for_personalization(paths: StorePaths) -> Result<Self, Refusal> {
