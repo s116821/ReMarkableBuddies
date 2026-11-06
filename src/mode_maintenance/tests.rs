@@ -299,3 +299,78 @@ fn unsupported_input_never_reads_and_only_exact_trusted_errors_are_classified() 
         Status::Failed
     );
 }
+
+#[test]
+fn admitted_memory_pins_exact_local_lifetime_until_final_provider_drop() {
+    let fixture = Fixture::new();
+    let store = fixture.store();
+    let other_fixture = Fixture::new();
+    let other = other_fixture.store();
+    let lifetime = Arc::new(admit_local_dispatch(&store).unwrap());
+    assert!(
+        crate::memory::LocalMemory::admitted_local(other, Uuid::new_v4(), lifetime.clone())
+            .is_err()
+    );
+    let provider = Arc::new(
+        crate::memory::LocalMemory::admitted_local(store.clone(), Uuid::new_v4(), lifetime.clone())
+            .unwrap(),
+    );
+    drop(lifetime);
+    assert!(store.legacy_publisher_lease().is_err());
+    assert!(store
+        .set_sync_mode(
+            &store.sync_mode_snapshot().unwrap().token,
+            Uuid::new_v4(),
+            choice(1)
+        )
+        .is_err());
+    let final_provider = provider.clone();
+    drop(provider);
+    assert!(store.legacy_publisher_lease().is_err());
+    drop(final_provider);
+    assert!(store.legacy_publisher_lease().is_ok());
+    assert!(store
+        .set_sync_mode(
+            &store.sync_mode_snapshot().unwrap().token,
+            Uuid::new_v4(),
+            choice(1)
+        )
+        .is_ok());
+}
+
+#[test]
+fn ordinary_memory_admits_ready_notebook_without_relaxing_legacy() {
+    let fixture = Fixture::new();
+    let store = Arc::new(Store::prepare_notebook(fixture.paths()).unwrap());
+    assert!(store.legacy_sync_lease().is_err());
+    assert!(crate::memory::LocalMemory::new_local(store.clone(), Uuid::new_v4()).is_err());
+    let lifetime = Arc::new(admit_local_dispatch(&store).unwrap());
+    let memory =
+        crate::memory::LocalMemory::admitted_local(store.clone(), Uuid::new_v4(), lifetime)
+            .unwrap();
+    use crate::memory::Provider;
+    assert_eq!(
+        memory
+            .query(&crate::memory::Query::new("source".into(), 1))
+            .unwrap()
+            .status,
+        crate::memory::Status::CompleteEmpty
+    );
+    drop(memory);
+    let current = fs::read(store.paths.data.join("CURRENT")).unwrap();
+    drop(store);
+    let opened = Store::open_existing_for_ready_notebook_receiving(fixture.paths()).unwrap();
+    assert_eq!(
+        fs::read(opened.paths.data.join("CURRENT")).unwrap(),
+        current
+    );
+    drop(opened);
+    let legacy = Fixture::new();
+    drop(legacy.store());
+    let current = fs::read(legacy.paths().data.join("CURRENT")).unwrap();
+    assert!(Store::open_existing_for_ready_notebook_receiving(legacy.paths()).is_err());
+    assert_eq!(
+        fs::read(legacy.paths().data.join("CURRENT")).unwrap(),
+        current
+    );
+}

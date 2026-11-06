@@ -378,3 +378,18 @@ gates. Do not quote virtual-clock values as tablet performance.
 returns that page's pixels without changing the modeled active page. The full
 workflow regression combines it with `next: no_move`: conflicting fresh pixels
 must stop before classification, further navigation, answer text or failure ink.
+
+### Ordinary receiving memory fixture
+
+`docs/simulator/scenarios/combined-qualification-memory.json` enables the closed
+`local-fixture-v1` selector on the maintained seven-stage qualification sequence.
+It seeds two synthetic assertions on each scratch Store: compatible global SI
+context and a deliberately stale/hostile original-document assertion. The saved
+live model configuration supplies transport identity only. The default scenario
+keeps memory disabled. Reader and Writer use the actual ordinary receivers;
+notebook maps receive no memory and the reducer receives one frozen snapshot.
+The report retains actual labeled context/payloads and query counts (four ordinary,
+two notebook sequence queries). Scripted replies demonstrate payload wiring and
+ownership assertions; they do not demonstrate model semantics or native effects.
+A live enabled run requires separate exact-source/fixture selection and retains
+the existing seven-call, no-retry and time/token bounds.

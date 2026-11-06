@@ -726,7 +726,9 @@ fn main() -> Result<()> {
         effective.key.into_string(),
         effective.base_url,
     );
-    let reader_memory = if config.reader_enabled() && config.memory.enabled {
+    let reader_memory = if let Some(dispatch) = &dispatch {
+        dispatch.local_memory()
+    } else if config.reader_enabled() && config.memory.enabled {
         Some(Arc::new(
             remarkable_reader_buddy::memory::LocalMemory::new_local(
                 store.clone(),
