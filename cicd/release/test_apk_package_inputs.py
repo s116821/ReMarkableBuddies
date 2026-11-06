@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 import apk_builder as builder
 import apk_package_inputs as consumer
-from apk_contract import Refusal
+from apk_contract import Refusal, RM2_SDK_SHA, SDK_REPOSITORY
 from apk_source_build import sha
 import test_apk_build_inputs as fixtures
 
@@ -19,8 +19,12 @@ import test_apk_build_inputs as fixtures
 class PackageInputs(unittest.TestCase):
     def fixture(self, root):
         helper = fixtures.BuildInputs()
-        proof = helper.sdk_proof()
-        proof['location_identity'] = [(1, 2, 3, 4)]
+        proof = dict(root=str(root / 'sdk'), location_identity=[(1, 2, 16877, 10), (1, 3, 16877, 20)],
+            manifest_sha256='a' * 64,
+            snapshot=dict(source=dict(repository=SDK_REPOSITORY, tag='v0.2.0', sha=RM2_SDK_SHA, epoch=1),
+                tag_oid='f' * 40, conversion=dict(autocrlf='false', eol='native', resolved_eol='lf'),
+                working=['6' * 40], committed=['6' * 40], file_identity='7' * 64),
+            remote_tag={'refs/tags/v0.2.0': 'f' * 40, 'refs/tags/v0.2.0^{}': RM2_SDK_SHA})
         with patch.object(helper, 'sdk_proof', return_value=proof):
             built, receipt = helper.emit(root)
         source = built.source
@@ -107,7 +111,18 @@ class PackageInputs(unittest.TestCase):
                 result = consumer.produce(args)
             self.assertEqual(len(calls), 2)
             self.assertEqual(result['eligibility'], 'not-qualified')
-            self.assertEqual(result['build_input_provenance'], dict(
+            provenance = dict(result['build_input_provenance'])
+            correspondence = provenance.pop('sdk_proof_correspondence')
+            self.assertEqual(correspondence['classification'], 'historical-proof-equal')
+            self.assertEqual(correspondence['differences'], [])
+            self.assertFalse(correspondence['continuous_custody_claimed'])
+            private_path = args.work_dir / correspondence['private_evidence_name']
+            self.assertEqual(sha(private_path), correspondence['private_evidence_sha256'])
+            self.assertEqual(private_path.stat().st_size, correspondence['private_evidence_bytes'])
+            retained = json.loads(private_path.read_text())
+            self.assertEqual(retained['historical'], consumer.normalized(proof))
+            self.assertEqual(retained['admitted_current'], consumer.normalized(proof))
+            self.assertEqual(provenance, dict(
                 receipt_sha256=args.expected_receipt_sha256,
                 original_producer_commit=args.build_producer_sha, packaging_executor_commit=args.executor_sha))
             for arch in ('armv7', 'aarch64'):
@@ -138,6 +153,143 @@ class PackageInputs(unittest.TestCase):
                 consumer.produce(args)
             self.assertTrue(args.output.exists())
             self.assertFalse((args.output / 'test-key-build-receipt.json').exists())
+
+    def test_historical_git_ctime_only_records_complete_correspondence_without_rebuild(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args, receipt, historical, snapshot = self.fixture(Path(directory))
+            originals = {p: p.read_bytes() for p in args.build_inputs.rglob('*') if p.is_file()}
+            current = consumer.normalized(historical)
+            current['location_identity'][1][3] += 1
+            phase, calls = self.phase_control(args)
+            with self.controls(args, current, snapshot, phase):
+                result = consumer.produce(args)
+            self.assertEqual(len(calls), 2)
+            bound = result['build_input_provenance']['sdk_proof_correspondence']
+            record_path = args.work_dir / bound['private_evidence_name']
+            record = json.loads(record_path.read_text())
+            self.assertEqual(record['historical'], consumer.normalized(historical))
+            self.assertEqual(record['admitted_current'], current)
+            self.assertEqual(record['classification'], 'historical-git-ctime-only-revalidated')
+            self.assertFalse(record['continuous_custody_claimed'])
+            self.assertEqual(record['differences'], [dict(path='$["location_identity"][1][3]',
+                components=['location_identity', 1, 3], kind='value', historical=20, current=21)])
+            self.assertEqual(bound['classification'], record['classification'])
+            self.assertEqual(bound['differences'], record['differences'])
+            self.assertEqual(bound['private_evidence_sha256'], sha(record_path))
+            self.assertEqual(bound['private_evidence_bytes'], record_path.stat().st_size)
+            self.assertFalse(bound['continuous_custody_claimed'])
+            self.assertEqual({p.name for p in args.output.iterdir()}, set(result['artifacts']) | {'test-key-build-receipt.json'})
+            for path, raw in originals.items(): self.assertEqual(path.read_bytes(), raw)
+            for build in self.builds: build.assert_not_called()
+
+    def test_every_other_historical_identity_class_refuses_before_generation(self):
+        def set_value(value, path, replacement):
+            for key in path[:-1]: value = value[key]
+            value[path[-1]] = replacement
+        cases = [
+            ('root-path', ['root'], '/different-sdk'),
+            ('manifest', ['manifest_sha256'], 'b' * 64),
+            ('repository', ['snapshot', 'source', 'repository'], 'https://example.invalid/sdk'),
+            ('tag', ['snapshot', 'source', 'tag'], 'v9.9.9'),
+            ('commit', ['snapshot', 'source', 'sha'], '0' * 40),
+            ('epoch', ['snapshot', 'source', 'epoch'], 2),
+            ('epoch-bool-alias', ['snapshot', 'source', 'epoch'], True),
+            ('local-tag', ['snapshot', 'tag_oid'], '0' * 40),
+            ('remote-tag', ['remote_tag', 'refs/tags/v0.2.0'], '0' * 40),
+            ('remote-peel', ['remote_tag', 'refs/tags/v0.2.0^{}'], '0' * 40),
+            ('raw-working', ['snapshot', 'working', 0], '0' * 40),
+            ('committed', ['snapshot', 'committed', 0], '0' * 40),
+            ('file-identity', ['snapshot', 'file_identity'], '0' * 64),
+            ('autocrlf', ['snapshot', 'conversion', 'autocrlf'], 'true'),
+            ('eol', ['snapshot', 'conversion', 'eol'], 'crlf'),
+            ('resolved-eol', ['snapshot', 'conversion', 'resolved_eol'], 'crlf'),
+        ]
+        for row, column, name in ((0, 0, 'root-dev'), (0, 1, 'root-inode'), (0, 2, 'root-mode'),
+                                  (0, 3, 'root-ctime'), (1, 0, 'git-dev'), (1, 1, 'git-inode'), (1, 2, 'git-mode')):
+            old = [[1, 2, 16877, 10], [1, 3, 16877, 20]][row][column]
+            cases.append((name, ['location_identity', row, column], old + 1))
+        for value in (-1, True, 21.0, '21', None):
+            cases.append(('invalid-ctime-' + repr(value), ['location_identity', 1, 3], value))
+        actions = [(name, lambda value, path=path, replacement=replacement: set_value(value, path, replacement))
+                   for name, path, replacement in cases]
+        actions.extend([
+            ('missing-root-field', lambda value: value.pop('manifest_sha256')),
+            ('extra-root-field', lambda value: value.update(extra=True)),
+            ('missing-nested-field', lambda value: value['snapshot'].pop('file_identity')),
+            ('extra-nested-field', lambda value: value['snapshot'].update(extra=True)),
+            ('path-string-alias', lambda value: value.update({'location_identity[1][3]': 21})),
+            ('missing-remote-key', lambda value: value['remote_tag'].pop('refs/tags/v0.2.0^{}')),
+            ('extra-remote-key', lambda value: value['remote_tag'].update(extra='0' * 40)),
+            ('location-list-length', lambda value: value['location_identity'].pop()),
+            ('location-record-length', lambda value: value['location_identity'][1].append(0)),
+            ('location-list-type', lambda value: value.update(location_identity={})),
+            ('raw-list-length', lambda value: value['snapshot']['working'].append('0' * 40)),
+            ('ctime-and-second-difference', lambda value: (set_value(value, ['location_identity', 1, 3], 21),
+                                                          value.update(manifest_sha256='b' * 64))),
+        ])
+        for name, change in actions:
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as directory:
+                args, receipt, historical, snapshot = self.fixture(Path(directory))
+                current = consumer.normalized(historical)
+                change(current)
+                with self.controls(args, current, snapshot), self.assertRaisesRegex(Refusal, 'SDK proof correspondence'):
+                    consumer.produce(args)
+                self.phase.assert_not_called()
+                self.assertFalse(args.work_dir.exists())
+                self.assertFalse(args.output.exists())
+
+    def test_current_git_ctime_is_strict_at_every_later_boundary(self):
+        for boundary, expected_phases in ((2, 0), (3, 1), (4, 2), (5, 2)):
+            with self.subTest(observation=boundary), tempfile.TemporaryDirectory() as directory:
+                args, receipt, historical, snapshot = self.fixture(Path(directory))
+                current = consumer.normalized(historical)
+                current['location_identity'][1][3] = 21
+                observations = []
+                def observe(*values):
+                    observations.append(values)
+                    result = copy.deepcopy(current)
+                    if len(observations) >= boundary: result['location_identity'][1][3] = 22
+                    return result
+                phase, calls = self.phase_control(args)
+                with self.controls(args, current, snapshot, phase), \
+                     patch('apk_package_inputs.sdk_release_source', side_effect=observe), \
+                     self.assertRaisesRegex(Refusal, 'independent SDK proof changed'):
+                    consumer.produce(args)
+                self.assertEqual(len(calls), expected_phases)
+                self.assertEqual(len(observations), boundary)
+                self.assertFalse((args.output / 'test-key-build-receipt.json').exists())
+                record = json.loads((args.work_dir / 'sdk-proof-correspondence.json').read_text())
+                self.assertEqual(record['admitted_current']['location_identity'][1][3], 21)
+                for build in self.builds: build.assert_not_called()
+
+    def test_correspondence_record_change_refuses_before_observation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args, receipt, proof, snapshot = self.fixture(Path(directory))
+            def mutate(count):
+                if count == 1: (args.work_dir / 'sdk-proof-correspondence.json').write_bytes(b'{}')
+            phase, calls = self.phase_control(args, mutate)
+            with self.controls(args, proof, snapshot, phase), self.assertRaisesRegex(Refusal, 'SDK correspondence evidence changed'):
+                consumer.produce(args)
+            self.assertEqual(len(calls), 1)
+            self.assertFalse((args.output / 'test-key-build-receipt.json').exists())
+
+    def test_retained_target_proof_type_alias_or_extra_field_refuses(self):
+        for case in ('bool', 'float', 'extra-field'):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                args, receipt, proof, snapshot = self.fixture(Path(directory))
+                path = args.build_inputs / 'aarch64/private-evidence.json'
+                record = json.loads(path.read_text())
+                if case == 'extra-field': record['sdk_release_source']['extra'] = True
+                else: record['sdk_release_source']['snapshot']['source']['epoch'] = True if case == 'bool' else 1.0
+                path.write_bytes(fixtures.inputs.encoded(record))
+                receipt['files']['aarch64/private-evidence.json'] = dict(bytes=path.stat().st_size, sha256=sha(path))
+                marker = args.build_inputs / 'build-input-receipt.json'
+                marker.write_bytes(fixtures.inputs.encoded(receipt))
+                args.expected_receipt_sha256 = sha(marker)
+                with self.controls(args, proof, snapshot), self.assertRaises(Refusal):
+                    consumer.produce(args)
+                self.phase.assert_not_called()
+                self.assertFalse(args.work_dir.exists())
 
     def test_admission_refuses_tampering_before_any_phase(self):
         for case in ('pin', 'binary', 'metadata', 'evidence', 'extra', 'missing', 'noncanonical',

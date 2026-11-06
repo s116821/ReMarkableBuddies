@@ -24,6 +24,52 @@ def normalized(value):
     return json.loads(json.dumps(value, sort_keys=True, allow_nan=False))
 
 
+def proof_differences(historical, current, components=()):
+    """Compare all JSON fields/types; structured paths cannot alias dotted keys."""
+    def difference(kind, old, new, **extra):
+        path = '$' + ''.join(f'[{key}]' if type(key) is int else '[' + json.dumps(key) + ']'
+                             for key in components)
+        return dict(path=path, components=list(components), kind=kind,
+                    historical=old, current=new, **extra)
+    if type(historical) is not type(current):
+        return [difference('type', historical, current)]
+    if isinstance(historical, dict):
+        result = []
+        for key in sorted(set(historical) | set(current)):
+            if key not in historical or key not in current:
+                result.append(dict(path='$' + ''.join('[' + json.dumps(k) + ']' if type(k) is str
+                    else f'[{k}]' for k in (*components, key)), components=[*components, key],
+                    kind='field-inventory', historical_present=key in historical,
+                    current_present=key in current, historical=historical.get(key), current=current.get(key)))
+            else:
+                result.extend(proof_differences(historical[key], current[key], (*components, key)))
+        return result
+    if isinstance(historical, list):
+        result = [] if len(historical) == len(current) else [difference('list-length', historical, current)]
+        for index, (old, new) in enumerate(zip(historical, current)):
+            result.extend(proof_differences(old, new, (*components, index)))
+        return result
+    return [] if historical == current else [difference('value', historical, current)]
+
+
+def sdk_correspondence(historical, current):
+    historical, current = normalized(historical), normalized(current)
+    changes = proof_differences(historical, current)
+    classification = 'historical-proof-equal'
+    if changes:
+        def locations(proof):
+            value = proof.get('location_identity') if isinstance(proof, dict) else None
+            return (isinstance(value, list) and len(value) == 2 and
+                    all(isinstance(row, list) and len(row) == 4 and
+                        all(type(item) is int and item >= 0 for item in row) for row in value))
+        require(len(changes) == 1 and changes[0]['components'] == ['location_identity', 1, 3] and
+                changes[0]['kind'] == 'value' and locations(historical) and locations(current),
+                'retained independent SDK proof correspondence')
+        classification = 'historical-git-ctime-only-revalidated'
+    return dict(historical=historical, admitted_current=current, classification=classification,
+                differences=changes, continuous_custody_claimed=False)
+
+
 def staged_inventory(directory):
     require(directory.is_dir() and not directory.is_symlink(), 'regular staged root')
     result = {}
@@ -89,8 +135,10 @@ def produce(args):
     selected_sdk = builds['armv7']['sdk']
     proof = normalized(sdk_release_source(sdk, selected_sdk['tag'], selected_sdk['sha'],
                                         selected_sdk['manifest_sha256']))
-    require(all(normalized(private[arch]['sdk_release_source']) == proof for arch in private),
-            'retained independent SDK proof correspondence')
+    historical = normalized(private['armv7']['sdk_release_source'])
+    require(not proof_differences(historical, normalized(private['aarch64']['sdk_release_source'])),
+            'retained target SDK proofs differ')
+    correspondence = sdk_correspondence(historical, proof)
 
     bundle, tool = args.rm2_native_bundle, args.apk_tool
     require(bundle.is_file() and not bundle.is_symlink() and
@@ -103,6 +151,13 @@ def produce(args):
             'existing pinned generation image')
 
     work.mkdir(exist_ok=False)
+    correspondence_path = work / 'sdk-proof-correspondence.json'
+    correspondence_bytes = (json.dumps(correspondence, sort_keys=True, separators=(',', ':'),
+                                        allow_nan=False) + '\n').encode()
+    require(len(correspondence_bytes) <= MAX_EVIDENCE, 'SDK correspondence evidence bound')
+    with correspondence_path.open('xb') as stream:
+        stream.write(correspondence_bytes)
+    correspondence_sha = hashlib.sha256(correspondence_bytes).hexdigest()
     inputs, artifacts, modules = (work / name for name in ('inputs', 'artifacts', 'modules'))
     for directory in (inputs, artifacts, modules):
         directory.mkdir()
@@ -137,9 +192,12 @@ def produce(args):
         producer_identity(executor, args.executor_sha)
         require(source_snapshot(source, args.tag) == snapshot and source_license(source) == license_id and
                 sha(license_path) == license_sha, 'release source/license changed')
-        require(normalized(sdk_release_source(sdk, selected_sdk['tag'], selected_sdk['sha'],
-                                             selected_sdk['manifest_sha256'])) == proof,
+        current_proof = normalized(sdk_release_source(sdk, selected_sdk['tag'], selected_sdk['sha'],
+                                                    selected_sdk['manifest_sha256']))
+        require(not proof_differences(proof, current_proof),
                 'independent SDK proof changed')
+        require(read_regular(correspondence_path, MAX_EVIDENCE) == correspondence_bytes,
+                'SDK correspondence evidence changed')
         require(not bundle.is_symlink() and bundle.is_file() and not tool.is_symlink() and tool.is_file() and
                 sha(bundle) == RM2_BUNDLE_SHA and sha(tool) == TOOL_SHA, 'packaging tool/bundle changed')
         for directory, expected in ((inputs, staged_inputs), (modules, staged_modules)):
@@ -148,7 +206,11 @@ def produce(args):
 
     provenance = dict(receipt_sha256=args.expected_receipt_sha256,
                       original_producer_commit=args.build_producer_sha,
-                      packaging_executor_commit=args.executor_sha)
+                      packaging_executor_commit=args.executor_sha,
+                      sdk_proof_correspondence=dict(classification=correspondence['classification'],
+                        differences=correspondence['differences'], continuous_custody_claimed=False,
+                        private_evidence_name=correspondence_path.name,
+                        private_evidence_bytes=len(correspondence_bytes), private_evidence_sha256=correspondence_sha))
     return generate_and_observe(source, args.tag, args.pkgrel, output, work, inputs, artifacts,
                                 modules, tool, input_hashes, receipt['source'], recheck,
                                 recheck=recheck, completion_context=provenance)

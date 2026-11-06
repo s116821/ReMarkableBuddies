@@ -67,9 +67,25 @@ python -B cicd/release/apk_package_inputs.py --build-inputs INPUTS --expected-re
 The external receipt digest binds accepted provenance; adjacent files cannot
 establish it. Both original producer and packaging executor must be clean full
 canonical checkouts. They remain distinct and the original inputs are read-only.
-Actual source/tag/raw-file/license identity and the full independent SDK proof
-must still match the accepted evidence. The consumer copies original binary and
-canonical build metadata bytes without relabeling versions or profiles.
+Actual source/tag/raw-file/license identity must still match accepted evidence.
+The consumer compares every field and type in the complete historical and newly
+observed independent SDK proofs. Equal proofs are recorded as
+`historical-proof-equal`. Exactly a Git-directory ctime-only difference may be
+recorded as `historical-git-ctime-only-revalidated`; root identity/ctime, Git
+device/inode/mode, raw bytes, tag/remote/manifest/conversion, field/type/structure
+changes and any second difference still refuse. This is fresh content
+correspondence, with no claim of continuous historical custody. No allow-drift
+flag or replacement proof is accepted. Original binary/canonical build metadata
+bytes remain unchanged, including versions and profiles.
+
+The unchanged SDK observer enforces full before/after stability within each
+observation. Every later packaging recheck must match the newly admitted full
+proof exactly, including ctime. A later ctime-only change refuses; it is never
+reclassified. Private work evidence `sdk-proof-correspondence.json` retains both
+complete proofs, classification, explicit old/current differences and
+`continuous_custody_claimed=false`. Completion provenance binds that record's
+name, byte count and SHA256 plus classification/differences. Preserve this private
+record with operation evidence; it is not a public APK asset or production trust.
 
 The ARMv7 resident profile requires its exact pinned native bundle; it cannot be
 downgraded to ordinary packaging to bypass a missing bundle. The existing pinned
