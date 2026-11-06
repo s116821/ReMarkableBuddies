@@ -66,18 +66,27 @@ def produce(args):
   json.dump(dict(pkgrel=args.pkgrel,source_license=license_id,targets=[arch for arch,_ in TARGETS]),stream,sort_keys=True,separators=(',',':'));stream.write('\n')
  input_hashes['input-set.json']=sha(inputs/'input-set.json')
  with (work/'private-source-build-evidence.json').open('x',encoding='utf-8') as stream:json.dump(private,stream,sort_keys=True)
+ def after_generation():
+  require(source_identity(source,args.tag)==identity and source_license(source)==license_id,'source changed before output')
+  if sdk_tag is not None:
+   sdk=metadata['sdk']
+   require(sdk_release_source(sdk_source,sdk_tag,sdk['sha'],sdk['manifest_sha256'])==private['armv7']['sdk_release_source'],'SDK release source changed before output')
+ return generate_and_observe(source,args.tag,args.pkgrel,output,work,inputs,artifacts,modules,tool,input_hashes,identity,after_generation)
+
+
+def generate_and_observe(source,tag,pkgrel,output,work,inputs,artifacts,modules,tool,input_hashes,identity,
+                         after_generation,recheck=lambda:None,completion_context=None):
+ """Shared existing isolated phases; callers own checked source/input staging."""
+ recheck()
  command=['--rm','--network','none','--cap-drop','ALL','--read-only','--memory','1536m','--pids-limit','64','--tmpfs','/tmp:rw,nosuid,noexec,size=768m',
   '--mount',f'type=bind,source={inputs},target=/inputs,readonly','--mount',f'type=bind,source={artifacts},target=/output',
   '--mount',f'type=bind,source={modules},target=/modules,readonly','--mount',f'type=bind,source={tool.parent},target=/tool,readonly',
   '--entrypoint','/usr/bin/python3',IMAGE,'/modules/apk_generate.py']
  result=json.loads(phase(command,source,run,timeout=120,stdout_limit=65536,combined_limit=None))
- require(source_identity(source,args.tag)==identity and source_license(source)==license_id,'source changed before output')
- if sdk_tag is not None:
-  sdk=metadata['sdk']
-  require(sdk_release_source(sdk_source,sdk_tag,sdk['sha'],sdk['manifest_sha256'])==private['armv7']['sdk_release_source'],'SDK release source changed before output')
+ after_generation()
  require(all(sha(inputs/path)==digest for path,digest in input_hashes.items()),'internal inputs changed during generation')
  require(sha(tool)==TOOL_SHA,'APK tool changed during generation')
- version=args.tag[1:]+'-r'+str(args.pkgrel)
+ version=tag[1:]+'-r'+str(pkgrel)
  names={f'remarkable-buddies-{version}.{arch}.apk' for arch,_ in TARGETS}|{'buddy-index.adb','fixture.pub'}
  require({path.name for path in artifacts.iterdir()}==names,'exact completed artifact set')
  require(result['status']=='generation-self-checks-only' and result['eligibility']=='not-qualified' and result['private_key_exported'] is False,'generation result')
@@ -95,6 +104,7 @@ def produce(args):
   '/modules/apk_observe.py','--expected-spki',result['fixture_public_key_spki_sha256']]
  observation=json.loads(phase(observation_command,source,run,timeout=120))
  require(observation['status']=='public-key-only-observed' and observation['private_key_available'] is False,'independent public-key-only observation required')
+ recheck()
  output.mkdir(exist_ok=False)
  published={}
  for name in sorted(names):
@@ -105,6 +115,8 @@ def produce(args):
  # it remain unfinished. Future consumers must revalidate actual bytes.
  receipt=dict(status='test-key-source-build-only',eligibility='not-qualified',source=identity,artifacts=published,
   fixture_public_key_spki_sha256=result['fixture_public_key_spki_sha256'],generation_observations=result,public_key_observation=observation)
+ if completion_context is not None:receipt['build_input_provenance']=completion_context
+ recheck()
  with (output/'test-key-build-receipt.json').open('x',encoding='ascii',newline='\n') as stream:json.dump(receipt,stream,sort_keys=True);stream.write('\n')
  return receipt
 

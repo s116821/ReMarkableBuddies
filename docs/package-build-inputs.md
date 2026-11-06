@@ -33,7 +33,8 @@ supplied outside the reviewed workflow. A hash manifest is not production trust.
 Output remains `strict-build-inputs-only` / `not-qualified`. There is no APK,
 private key, signature, signer/trust setup, installation or tablet operation.
 The current weaker release tarballs cannot be relabeled as these strict inputs.
-Future APK consumption and production trust require their own reviewed admission.
+APK consumption uses the separate explicit entry below. Production trust remains
+unqualified.
 
 The workflow has a55-minute job limit; existing build900-second and bounded
 helper/runtime phases remain. Compiler stdout/stderr retain the existing16KiB
@@ -52,3 +53,35 @@ and [host ID defaults](https://github.com/cross-rs/cross/blob/8c1a8aa4b661711f4b
 retain the normally owned Linux path/UID/GID mapping. Existing environment override,
 non-rootless endpoint and ordinary ownership checks still apply. Windows mapping
 is unchanged; this workflow does not replay its spent ownership probe.
+
+## Explicit packaging of accepted inputs
+
+`cicd/release/apk_package_inputs.py` consumes completed strict inputs without a
+compiler or target-runtime call. Select its execution separately from source
+delivery. Supply these arguments using independently reviewed values:
+
+```text
+python -B cicd/release/apk_package_inputs.py --build-inputs INPUTS --expected-receipt-sha256 RECEIPT_SHA256 --build-producer-source ORIGINAL_PRODUCER --build-producer-sha ORIGINAL_PRODUCER_COMMIT --executor-sha THIS_EXECUTOR_COMMIT --source RELEASE_SOURCE --source-sha RELEASE_COMMIT --tag RELEASE_TAG --sdk-source SDK_RELEASE_SOURCE --pkgrel 0 --apk-tool PINNED_TOOL_DIRECTORY/apk --rm2-native-bundle PINNED_BUNDLE --work-dir NEW_WORK --output NEW_OUTPUT
+```
+
+The external receipt digest binds accepted provenance; adjacent files cannot
+establish it. Both original producer and packaging executor must be clean full
+canonical checkouts. They remain distinct and the original inputs are read-only.
+Actual source/tag/raw-file/license identity and the full independent SDK proof
+must still match the accepted evidence. The consumer copies original binary and
+canonical build metadata bytes without relabeling versions or profiles.
+
+The ARMv7 resident profile requires its exact pinned native bundle; it cannot be
+downgraded to ordinary packaging to bypass a missing bundle. The existing pinned
+APK tool/image and generator/observer isolation remain unchanged. The generation
+container's private fixture key stays in temporary storage and is disposed before
+the separate public-key-only observer. Only its public key and control-channel
+SPKI pin pass forward. This operation remains test-key-only and not-qualified.
+
+Work/final directories must be fresh disjoint external roots, separate from all
+source and input checkouts. Failed or changed inputs never publish the final
+`test-key-build-receipt.json`. Preserve useful diagnostics and inspect partial
+work before a new explicit attempt; there is no automatic retry. A successful
+receipt additionally records the accepted input-receipt digest, original producer
+commit and packaging executor commit. This does not publish a release or enable
+installation, production signing trust or device compatibility.
