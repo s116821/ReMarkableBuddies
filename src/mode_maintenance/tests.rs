@@ -379,9 +379,22 @@ fn ordinary_memory_admits_ready_notebook_without_relaxing_legacy() {
 fn ready_receiving_refuses_remote_mode_and_retained_selection_without_repair() {
     for variant in 0..3 {
         let fixture = Fixture::new();
+        let mode = if variant < 2 {
+            let legacy = fixture.store();
+            set(&legacy, choice(variant + 1));
+            let path = legacy.paths.data.join("sync/mode.json");
+            let bytes = fs::read(&path).unwrap();
+            fs::remove_file(path).unwrap();
+            drop(legacy);
+            Some(bytes)
+        } else {
+            None
+        };
         let store = Arc::new(Store::prepare_notebook(fixture.paths()).unwrap());
-        if variant < 2 {
-            set(&store, choice(variant + 1));
+        // Deliberately construct an invalid ready-store fixture, without widening
+        // the production transition API that correctly refuses generation 4.
+        if let Some(bytes) = mode {
+            fs::write(store.paths.data.join("sync/mode.json"), bytes).unwrap();
         }
         let generations = store.paths.data.join("generations");
         let generation = fs::read_dir(&generations)
