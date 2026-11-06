@@ -4,6 +4,7 @@ from contextlib import ExitStack
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -33,6 +34,7 @@ class PackageInputs(unittest.TestCase):
         tool = root / 'tools/apk'
         tool.parent.mkdir()
         tool.write_bytes(b'synthetic tool; never executed')
+        tool.chmod(0o755)
         bundle = root / 'bundle.tar.gz'
         bundle.write_bytes(b'synthetic bundle; never extracted')
         args = argparse.Namespace(build_inputs=built.output,
@@ -64,7 +66,6 @@ class PackageInputs(unittest.TestCase):
         stack.enter_context(patch('apk_package_inputs.source_license', return_value='GPL-3.0-only'))
         stack.enter_context(patch('apk_package_inputs.sdk_release_source', return_value=proof))
         stack.enter_context(patch('apk_package_inputs.RM2_BUNDLE_SHA', sha(args.rm2_native_bundle)))
-        stack.enter_context(patch('apk_package_inputs.TOOL_SHA', sha(args.apk_tool)))
         stack.enter_context(patch('apk_builder.TOOL_SHA', sha(args.apk_tool)))
         stack.enter_context(patch('apk_package_inputs.run', return_value=builder.IMAGE))
         self.builds = [stack.enter_context(patch(name, side_effect=AssertionError('unexpected build')))
@@ -80,6 +81,7 @@ class PackageInputs(unittest.TestCase):
             self.assertIn('--read-only', argv)
             self.assertIn('none', argv)
             if len(calls) == 1:
+                self.assertEqual(kwargs['private_diagnostics'], args.work_dir / 'generation-diagnostics')
                 self.assertEqual(argv[-1], '/modules/apk_generate.py')
                 self.assertIn('1536m', argv)
                 artifacts = args.work_dir / 'artifacts'
@@ -93,6 +95,7 @@ class PackageInputs(unittest.TestCase):
                               private_key_exported=False, fixture_public_key_spki_sha256='a' * 64,
                               artifact_files=records)
             else:
+                self.assertEqual(kwargs['private_diagnostics'], args.work_dir / 'observation-diagnostics')
                 self.assertEqual(argv[-3:], ['/modules/apk_observe.py', '--expected-spki', 'a' * 64])
                 self.assertIn('768m', argv)
                 self.assertFalse(any('target=/output' in part for part in argv))
@@ -417,6 +420,71 @@ class PackageInputs(unittest.TestCase):
             shared.assert_called_once()
             self.assertEqual([call.args[2] for call in build.call_args_list],
                              ['armv7-unknown-linux-gnueabihf', 'aarch64-unknown-linux-gnu'])
+
+    @unittest.skipUnless(os.name == 'posix', 'real POSIX mode admission')
+    def test_shared_tool_admission_refuses_both_entry_points_before_image_or_build(self):
+        for mode in (0o664, 0o744, 0o701):
+            with self.subTest(mode=oct(mode)), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                args, receipt, proof, snapshot = self.fixture(root)
+                args.apk_tool.chmod(mode)
+                old = argparse.Namespace(source=args.source, target_dir=root/'old-cache', output=root/'old-output',
+                    tag=args.tag, pkgrel=0, sdk_tag=None, sdk_tag_source=None,
+                    apk_tool=args.apk_tool, rm2_native_bundle=None)
+                with self.controls(args, proof, snapshot), \
+                     patch('apk_package_inputs.run') as inspect, \
+                     self.assertRaisesRegex(Refusal, 'readable executable pinned APK tool'):
+                    consumer.produce(args)
+                inspect.assert_not_called();self.phase.assert_not_called()
+                with patch('apk_builder.TOOL_SHA', sha(args.apk_tool)), \
+                     patch('apk_builder.source_identity', return_value=receipt['source']), \
+                     patch('apk_builder.source_license', return_value='GPL-3.0-only'), \
+                     patch('apk_builder.run') as inspect, patch('apk_builder.build') as build, \
+                     self.assertRaisesRegex(Refusal, 'readable executable pinned APK tool'):
+                    builder.produce(old)
+                inspect.assert_not_called();build.assert_not_called()
+                self.assertFalse(args.work_dir.exists());self.assertFalse(args.output.exists())
+                self.assertEqual(args.apk_tool.stat().st_mode & 0o777, mode)
+
+    @unittest.skipUnless(os.name == 'posix', 'real POSIX equivalent modes')
+    def test_equivalent_tool_modes_are_accepted_without_chmod_or_exact_whitelist(self):
+        for mode in (0o755, 0o775, 0o555, 0o705, 0o745):
+            with self.subTest(mode=oct(mode)), tempfile.TemporaryDirectory() as directory:
+                args, receipt, proof, snapshot = self.fixture(Path(directory))
+                args.apk_tool.chmod(mode)
+                with patch('apk_builder.TOOL_SHA', sha(args.apk_tool)):
+                    self.assertEqual(builder.admit_apk_tool(args.apk_tool), args.apk_tool.resolve())
+                self.assertEqual(args.apk_tool.stat().st_mode & 0o777, mode)
+
+    @unittest.skipUnless(os.name == 'posix', 'real POSIX later-mode loss')
+    def test_tool_mode_loss_after_generation_or_observer_refuses_completion(self):
+        for when in (1, 2):
+            with self.subTest(phase=when), tempfile.TemporaryDirectory() as directory:
+                args, receipt, proof, snapshot = self.fixture(Path(directory))
+                def mutate(count):
+                    if count == when: args.apk_tool.chmod(0o664)
+                phase, calls = self.phase_control(args, mutate)
+                with self.controls(args, proof, snapshot, phase), \
+                     self.assertRaisesRegex(Refusal, 'readable executable pinned APK tool'):
+                    consumer.produce(args)
+                self.assertEqual(len(calls), when)
+                self.assertFalse((args.output/'test-key-build-receipt.json').exists())
+
+    @unittest.skipUnless(os.name == 'posix', 'real POSIX last-copy mode loss')
+    def test_tool_mode_loss_during_final_copies_refuses_completion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args, receipt, proof, snapshot = self.fixture(Path(directory))
+            phase, calls = self.phase_control(args)
+            original_copy = builder.copy_verified
+            def copy_then_strip(source, destination, size, digest):
+                original_copy(source, destination, size, digest)
+                if destination.parent == args.output: args.apk_tool.chmod(0o664)
+            with self.controls(args, proof, snapshot, phase), \
+                 patch('apk_builder.copy_verified', side_effect=copy_then_strip), \
+                 self.assertRaisesRegex(Refusal, 'readable executable pinned APK tool'):
+                consumer.produce(args)
+            self.assertEqual(len(calls), 2)
+            self.assertFalse((args.output/'test-key-build-receipt.json').exists())
 
 
 if __name__ == '__main__':

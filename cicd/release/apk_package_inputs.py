@@ -11,7 +11,7 @@ import stat
 
 from apk_build_inputs import (COMPLETION, MAX_EVIDENCE, producer_identity,
                               read_regular, verify)
-from apk_builder import (IMAGE, MODULES, TOOL_SHA, copy_verified,
+from apk_builder import (IMAGE, MODULES, admit_apk_tool, copy_verified,
                          generate_and_observe)
 from apk_contract import HEX40, HEX64, RM2_BUNDLE_SHA, integer, parse_build, require
 from apk_payload import BUNDLE_FILE, TOOL_FILES
@@ -144,9 +144,8 @@ def produce(args):
     require(bundle.is_file() and not bundle.is_symlink() and
             0 < bundle.stat().st_size <= 8 * 1024 * 1024 and sha(bundle) == RM2_BUNDLE_SHA,
             'approved required RM2 native bundle')
-    require(tool.name == 'apk' and tool.is_file() and not tool.is_symlink() and sha(tool) == TOOL_SHA,
-            'pinned APK tool')
-    bundle, tool = bundle.resolve(), tool.resolve()
+    tool = admit_apk_tool(tool)
+    bundle = bundle.resolve()
     require(run(['docker', 'image', 'inspect', IMAGE, '--format', '{{.Id}}'], source) == IMAGE,
             'existing pinned generation image')
 
@@ -198,8 +197,9 @@ def produce(args):
                 'independent SDK proof changed')
         require(read_regular(correspondence_path, MAX_EVIDENCE) == correspondence_bytes,
                 'SDK correspondence evidence changed')
-        require(not bundle.is_symlink() and bundle.is_file() and not tool.is_symlink() and tool.is_file() and
-                sha(bundle) == RM2_BUNDLE_SHA and sha(tool) == TOOL_SHA, 'packaging tool/bundle changed')
+        require(not bundle.is_symlink() and bundle.is_file() and
+                sha(bundle) == RM2_BUNDLE_SHA, 'packaging bundle changed')
+        admit_apk_tool(tool)
         for directory, expected in ((inputs, staged_inputs), (modules, staged_modules)):
             require(staged_inventory(directory) == expected,
                     'staged packaging inputs/modules changed')

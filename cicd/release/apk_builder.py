@@ -1,5 +1,5 @@
 """Build both actual tagged targets, then generate offline test-key APK artifacts."""
-import argparse,hashlib,json,os,shutil,tempfile
+import argparse,hashlib,json,os,shutil,stat,tempfile
 from pathlib import Path
 from apk_contract import RM2_BUNDLE_SHA,canonical,require,integer
 from apk_payload import BUNDLE_FILE,TOOL_FILES
@@ -10,6 +10,17 @@ IMAGE='sha256:8d79948df2c7c568a043683f786e7ce4ad2e25e469673b72b8da8d2dbb2fa9ac'
 TOOL_SHA='7488a9650411143a205bf80af511203fadd79499e21613c970b4ef8c207fe11a'
 TARGETS=[('armv7','armv7-unknown-linux-gnueabihf'),('aarch64','aarch64-unknown-linux-gnu')]
 MODULES=['apk_generate.py','apk_observe.py','apk_contract.py','apk_source_build.py','apk_index.py','process_guard.py','docker_owned.py','apk_compiler.py','apk_payload.py']
+
+def admit_apk_tool(tool):
+ require(tool.name=='apk' and tool.is_file() and not tool.is_symlink() and sha(tool)==TOOL_SHA,'pinned APK tool')
+ if os.name=='posix':
+  info=tool.stat();mode=stat.S_IMODE(info.st_mode)
+  # The pinned image uses default UID/GID0 without DAC override capabilities.
+  # Select its applicable permission class, rather than whitelisting0755.
+  shift=6 if info.st_uid==0 else 3 if info.st_gid==0 else 0
+  require(not mode&0o7000 and os.access(tool,os.R_OK|os.X_OK) and
+          ((mode>>shift)&0o5)==0o5,'readable executable pinned APK tool')
+ return tool.resolve()
 
 def copy_verified(source,destination,expected_bytes,expected_sha):
  require(source.is_file() and not source.is_symlink(),'regular generated input')
@@ -36,7 +47,7 @@ def produce(args):
  if bundle is not None:
   require(bundle.is_file() and not bundle.is_symlink() and 0<bundle.stat().st_size<=8*1024*1024,'bounded RM2 native bundle')
   require(sha(bundle)==RM2_BUNDLE_SHA,'approved RM2 native bundle')
- tool=args.apk_tool.resolve();require(tool.name=='apk' and tool.is_file() and sha(tool)==TOOL_SHA,'pinned APK tool')
+ tool=admit_apk_tool(args.apk_tool)
  require(run(['docker','image','inspect',IMAGE,'--format','{{.Id}}'],source)==IMAGE,'existing pinned generation image')
  target_root.mkdir(exist_ok=False)
  # Preserve failed or incomplete builds as private working evidence. Only the
@@ -77,15 +88,17 @@ def produce(args):
 def generate_and_observe(source,tag,pkgrel,output,work,inputs,artifacts,modules,tool,input_hashes,identity,
                          after_generation,recheck=lambda:None,completion_context=None):
  """Shared existing isolated phases; callers own checked source/input staging."""
+ admit_apk_tool(tool)
  recheck()
  command=['--rm','--network','none','--cap-drop','ALL','--read-only','--memory','1536m','--pids-limit','64','--tmpfs','/tmp:rw,nosuid,noexec,size=768m',
   '--mount',f'type=bind,source={inputs},target=/inputs,readonly','--mount',f'type=bind,source={artifacts},target=/output',
   '--mount',f'type=bind,source={modules},target=/modules,readonly','--mount',f'type=bind,source={tool.parent},target=/tool,readonly',
   '--entrypoint','/usr/bin/python3',IMAGE,'/modules/apk_generate.py']
- result=json.loads(phase(command,source,run,timeout=120,stdout_limit=65536,combined_limit=None))
+ result=json.loads(phase(command,source,run,timeout=120,stdout_limit=65536,combined_limit=None,
+                         private_diagnostics=work/'generation-diagnostics'))
  after_generation()
  require(all(sha(inputs/path)==digest for path,digest in input_hashes.items()),'internal inputs changed during generation')
- require(sha(tool)==TOOL_SHA,'APK tool changed during generation')
+ admit_apk_tool(tool)
  version=tag[1:]+'-r'+str(pkgrel)
  names={f'remarkable-buddies-{version}.{arch}.apk' for arch,_ in TARGETS}|{'buddy-index.adb','fixture.pub'}
  require({path.name for path in artifacts.iterdir()}==names,'exact completed artifact set')
@@ -102,8 +115,10 @@ def generate_and_observe(source,tag,pkgrel,output,work,inputs,artifacts,modules,
   '--mount',f'type=bind,source={observations},target=/observations,readonly','--mount',f'type=bind,source={modules},target=/modules,readonly',
   '--mount',f'type=bind,source={tool.parent},target=/tool,readonly','--entrypoint','/usr/bin/python3',IMAGE,
   '/modules/apk_observe.py','--expected-spki',result['fixture_public_key_spki_sha256']]
- observation=json.loads(phase(observation_command,source,run,timeout=120))
+ observation=json.loads(phase(observation_command,source,run,timeout=120,
+                              private_diagnostics=work/'observation-diagnostics'))
  require(observation['status']=='public-key-only-observed' and observation['private_key_available'] is False,'independent public-key-only observation required')
+ admit_apk_tool(tool)
  recheck()
  output.mkdir(exist_ok=False)
  published={}
@@ -116,6 +131,7 @@ def generate_and_observe(source,tag,pkgrel,output,work,inputs,artifacts,modules,
  receipt=dict(status='test-key-source-build-only',eligibility='not-qualified',source=identity,artifacts=published,
   fixture_public_key_spki_sha256=result['fixture_public_key_spki_sha256'],generation_observations=result,public_key_observation=observation)
  if completion_context is not None:receipt['build_input_provenance']=completion_context
+ admit_apk_tool(tool)
  recheck()
  with (output/'test-key-build-receipt.json').open('x',encoding='ascii',newline='\n') as stream:json.dump(receipt,stream,sort_keys=True);stream.write('\n')
  return receipt

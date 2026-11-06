@@ -61,7 +61,8 @@ SOURCE_PROBE_EVENT=re.compile(
 def run(argv,cwd,env=None,timeout=120,stdout_limit=16384,combined_limit=16384,return_streams=False,private_diagnostics=None,source_probe_lines=None):
  if private_diagnostics is not None:
   private_diagnostics=Path(private_diagnostics)
-  require(combined_limit in {8192,16384},'private compiler diagnostic bound')
+  require(combined_limit in {8192,16384} or (type(stdout_limit) is int and stdout_limit==65536 and combined_limit is None),
+          'private compiler diagnostic bound')
   private_diagnostics.mkdir(exist_ok=False)
  guard=OwnedProcess(argv,cwd=cwd,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
  process=guard.process

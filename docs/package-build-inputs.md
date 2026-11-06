@@ -94,6 +94,23 @@ container's private fixture key stays in temporary storage and is disposed befor
 the separate public-key-only observer. Only its public key and control-channel
 SPKI pin pass forward. This operation remains test-key-only and not-qualified.
 
+Correct tool bytes also need executable permissions. Shared admission checks both
+entry points and existing rechecks: on POSIX the task owner needs effective read/
+execute access and the pinned image's cap-dropped UID/GID0 needs read/execute in
+the applicable file permission class. Special mode bits refuse; equivalent
+ordinary modes are accepted without an exact0755 whitelist. A non-executable0664
+or owner-only0744 tool refuses before building or image/signing execution. The
+operator may prepare an owned tool's ordinary mode separately (for example0755),
+recording unchanged content/owner/inode. Production admission never chmods it.
+
+Fresh private `generation-diagnostics` and `observation-diagnostics` work folders
+retain bounded outer phase stdout/stderr on success, failure or deadline. The
+existing writer additionally accepts only generation's existing64KiB-stdout/
+None-combined profile; stderr remains16KiB and all command/cleanup/time limits
+remain unchanged. No private key, environment dump or public artifact is added.
+Outer Python/container tracebacks do not recover stderr already discarded by a
+nested failing command. Preserve the first failure; do not replay to obtain logs.
+
 Work/final directories must be fresh disjoint external roots, separate from all
 source and input checkouts. Failed or changed inputs never publish the final
 `test-key-build-receipt.json`. Preserve useful diagnostics and inspect partial

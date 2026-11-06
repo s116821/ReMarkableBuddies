@@ -65,6 +65,39 @@ class CommandBounds(unittest.TestCase):
  def test_stdout_and_combined_diagnostic_caps(self):
   for code in ["print('x'*17000)","import sys;sys.stdout.write('x'*9000);sys.stderr.write('y'*9000)"]:
    with self.subTest(code=code),self.assertRaisesRegex(Refusal,'bound'):self.command(code)
+ def test_exact_generation_private_profile_retains_success_and_failure(self):
+  with tempfile.TemporaryDirectory() as directory:
+   root=pathlib.Path(directory)
+   output=run([sys.executable,'-c',"import sys;sys.stdout.write('m'*40000)"],root,
+              stdout_limit=65536,combined_limit=None,private_diagnostics=root/'metadata')
+   self.assertEqual(len(output),40000)
+   self.assertEqual((root/'metadata/stdout.bin').read_bytes(),b'm'*40000)
+   with self.assertRaisesRegex(Refusal,'command failed') as error:
+    run([sys.executable,'-c',"import sys;sys.stderr.write('owned phase fixture error');sys.exit(7)"],root,
+        stdout_limit=65536,combined_limit=None,private_diagnostics=root/'failure')
+   self.assertNotIn('owned phase fixture error',str(error.exception))
+   self.assertEqual((root/'failure/stderr.bin').read_bytes(),b'owned phase fixture error')
+ def test_generation_private_profile_keeps_output_and_deadline_bounds(self):
+  with tempfile.TemporaryDirectory() as directory:
+   root=pathlib.Path(directory)
+   for name,code,timeout in [('stdout',"import sys;sys.stdout.write('x'*70000)",3),
+                             ('stderr',"import sys;sys.stderr.write('x'*17000)",3),
+                             ('deadline',"import sys,time;sys.stderr.write('owned deadline');sys.stderr.flush();time.sleep(10)",0.2)]:
+    with self.subTest(name=name),self.assertRaisesRegex(Refusal,'bound|deadline'):
+     run([sys.executable,'-c',code],root,stdout_limit=65536,combined_limit=None,timeout=timeout,
+         private_diagnostics=root/name)
+    self.assertLessEqual((root/name/'stdout.bin').stat().st_size,65536)
+    self.assertLessEqual((root/name/'stderr.bin').stat().st_size,16384)
+   self.assertEqual((root/'deadline/stderr.bin').read_bytes(),b'owned deadline')
+ def test_other_uncombined_private_profiles_refuse_before_launch(self):
+  with tempfile.TemporaryDirectory() as directory:
+   root=pathlib.Path(directory)
+   for stdout,combined in [(16384,None),(65535,None),(65537,None),(65536.0,None),(65536,32768)]:
+    with self.subTest(stdout=stdout,combined=combined),patch('apk_source_build.OwnedProcess') as launch:
+     with self.assertRaisesRegex(Refusal,'private compiler diagnostic bound'):
+      run([sys.executable,'-c',"print('must not launch')"],root,stdout_limit=stdout,
+          combined_limit=combined,private_diagnostics=root/'never')
+     launch.assert_not_called();self.assertFalse((root/'never').exists())
  def test_descendant_cannot_write_after_refusal(self):
   with tempfile.TemporaryDirectory() as directory:
    marker=pathlib.Path(directory)/'late-marker'
