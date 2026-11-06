@@ -965,7 +965,9 @@ mod tests {
     fn notebook_reference_admission_does_not_admit_actual_credential_file_publication() {
         for action in ["install", "replace", "remove"] {
             let f = Fixture::new();
-            if action != "install" {
+            if action == "replace" {
+                f.set(b"different original synthetic credential", 0o600);
+            } else if action == "remove" {
                 f.set(SECRET.as_bytes(), 0o600);
             }
             crate::config::notebook_preferences_tests::seed(&f.paths);
