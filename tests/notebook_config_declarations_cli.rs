@@ -286,20 +286,28 @@ fn actual_memory_notebook_private_declarations_roundtrip() {
 }
 
 #[test]
-fn actual_three_declaration_writers_keep_legacy_feedback_admission() {
-    for family in ["basic", "model", "memory"] {
-        let f = Fixture::new();
-        drop(buddy::unassociated_feedback::Feedback::prepare(f.paths()).unwrap());
-        let inventory = root_inventory(&f);
-        let patch = changes(family, false);
-        let prepared = run(&f, family, "prepare", Some(&request(&f, family, &patch)));
-        assert_eq!(prepared["outcome"], "prepared");
-        let mut input = json!({"intent":prepared["data"]["intent"]});
-        if family != "basic" {
-            input["changes"] = patch;
+fn actual_three_declaration_writers_keep_legacy_selected_and_feedback_admission() {
+    for feedback in [false, true] {
+        for family in ["basic", "model", "memory"] {
+            let f = Fixture::new();
+            if feedback {
+                drop(buddy::unassociated_feedback::Feedback::prepare(f.paths()).unwrap());
+            } else {
+                drop(f.selected(false).0);
+            }
+            let storage_inventory = f.inventory();
+            let inventory = root_inventory(&f);
+            let patch = changes(family, false);
+            let prepared = run(&f, family, "prepare", Some(&request(&f, family, &patch)));
+            assert_eq!(prepared["outcome"], "prepared");
+            let mut input = json!({"intent":prepared["data"]["intent"]});
+            if family != "basic" {
+                input["changes"] = patch;
+            }
+            let applied = run(&f, family, "apply", Some(&input));
+            assert_eq!(applied["outcome"], "verified");
+            assert_eq!(root_inventory(&f), inventory);
+            assert_eq!(f.inventory(), storage_inventory);
         }
-        let applied = run(&f, family, "apply", Some(&input));
-        assert_eq!(applied["outcome"], "verified");
-        assert_eq!(root_inventory(&f), inventory);
     }
 }
