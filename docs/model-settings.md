@@ -11,3 +11,11 @@ Prepare returns a digest-only intent, with no original/new model or endpoint tex
 A complete verified apply confirms saved disk bytes and reports restart-required. Possible publication/readback or missing output remains unknown. Do not retry/reapply automatically; explicit status can observe desired-file-observed or unresolved. It cannot settle an earlier unknown attempt merely because a later invocation refused. No runtime/effective-provider qualification follows: model CLI/file/default and endpoint CLI/environment/file precedence remain unchanged.
 
 The exact protocol lives in the coordinated central `edit-saved-model-settings` change. Host API/UI and private patch-buffer lifetime require separate implementation and review. The existing three-field basic editor and general inspection contracts remain unchanged.
+
+Apply also supports an already-ready ordinary notebook store (format 4) under the
+existing preference admission gate: complete owned history, no selected or retained
+selected history, and absent or LocalOnly mode. Unsupported/interrupted notebook
+state refuses without repair. Supported legacy formats 1/2/3 retain their existing
+mode rules. Only saved configuration changes; notebook data/media and credential
+files remain untouched. Generic configuration and credential writers retain their
+separate notebook refusal. This does not activate a provider or running service.
