@@ -384,3 +384,128 @@ fn existing_store_open_only_reads_and_holds_one_lease() {
         Status::Ok
     );
 }
+
+#[test]
+fn public_report_construction_and_nonconsuming_seven_member_frame_stay_compatible() {
+    let report = personalization::Report {
+        report_version: 1,
+        operation: Operation::Inspect,
+        status: Status::Ok,
+        disk_reload_verified: true,
+        runtime_activation: "unverified",
+        config_sha256: Some("a".repeat(64)),
+        personalization: Some(Personalization::default()),
+    };
+    let mut first = vec![];
+    report.write_to(&mut first).unwrap();
+    let mut second = vec![];
+    report.write_to(&mut second).unwrap();
+    assert_eq!(first, second);
+    let value: Value = serde_json::from_slice(&first).unwrap();
+    assert_eq!(value.as_object().unwrap().len(), 7);
+    assert_eq!(report.status, Status::Ok);
+}
+
+#[test]
+fn actual_notebook_cli_preserves_raw_declarations_and_inspect_needs_no_stdin_eof() {
+    use remarkable_reader_buddy::storage::{Envelope, Kind, Namespace};
+    use std::{
+        collections::BTreeMap,
+        time::{Duration, Instant},
+    };
+    let f = Fixture::new(true);
+    let store = Store::open(f.config.paths.clone()).unwrap();
+    let record = Envelope {
+        envelope_version: 1,
+        namespace: Namespace::SubjectMemory,
+        domain_schema_version: 1,
+        record_id: Uuid::new_v4(),
+        revision_id: Uuid::new_v4(),
+        parents: Default::default(),
+        operation_id: Uuid::new_v4(),
+        actor_id: store.actor_id,
+        kind: Kind::Value,
+        payload: json!({"fixture":"retained"}),
+        media_descriptors: vec![],
+    };
+    store.commit(vec![record], BTreeMap::new()).unwrap();
+    drop(store);
+    drop(Store::prepare_notebook(f.config.paths.clone()).unwrap());
+    let raw = json!({"paths":f.config.paths,"model":null,"base_url":"https://private.invalid/SIBLING_SENTINEL",
+        "memory":{},"reader":{},"product_settings":{"writer_enabled":false},"research_policy":null});
+    fs::write(&f.path, serde_json::to_vec_pretty(&raw).unwrap()).unwrap();
+    let before = tree_bytes(&f.root);
+    let invoke = |operation: &str, input: Option<&Value>| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_reader-buddy"))
+            .env_clear()
+            .current_dir(&f.root)
+            .env("REMARKABLE_BUDDIES_CONFIG", &f.path)
+            .env("OPENAI_API_KEY", "PRIVATE_UNUSED")
+            .env("OPENAI_BASE_URL", "http://127.0.0.1:1/unused")
+            .args(["--personalization-operation", operation])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take();
+        let writer = input.map(|input| {
+            let bytes = serde_json::to_vec(input).unwrap();
+            let mut pipe = stdin.take().unwrap();
+            std::thread::spawn(move || pipe.write_all(&bytes).unwrap())
+        });
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("personalization CLI deadline");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        drop(stdin);
+        if let Some(writer) = writer {
+            writer.join().unwrap();
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stderr.is_empty());
+        assert!(
+            output.stdout.len() <= personalization::MAX_IO_BYTES && output.stdout.ends_with(b"\n")
+        );
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("SIBLING_SENTINEL"));
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report.as_object().unwrap().len(), 7);
+        report
+    };
+    let view = invoke("inspect", None);
+    assert_eq!(view["runtime_activation"], "unverified");
+    let text = "  CLI exact 🦊\r\n第二行\n ";
+    let request = json!({"contract_version":1,"expected_config_sha256":view["config_sha256"],"enabled":true,"text":text});
+    let saved = invoke("set", Some(&request));
+    assert_eq!(saved["status"], "ok");
+    assert_eq!(saved["personalization"]["text"], text);
+    assert_eq!(saved["runtime_activation"], "restart-required");
+    assert_eq!(invoke("set", Some(&request))["status"], "conflict");
+    for operation in ["disable", "clear"] {
+        let input = json!({"contract_version":1,"expected_config_sha256":invoke("inspect",None)["config_sha256"]});
+        assert_eq!(invoke(operation, Some(&input))["status"], "ok");
+    }
+    let mut after: Value = serde_json::from_slice(&fs::read(&f.path).unwrap()).unwrap();
+    assert_eq!(
+        after["personalization"],
+        json!({"schema_version":1,"enabled":false,"text":""})
+    );
+    after.as_object_mut().unwrap().remove("personalization");
+    assert_eq!(after, raw);
+    let mut final_tree = tree_bytes(&f.root);
+    let mut expected = before;
+    final_tree.remove(std::path::Path::new("config.json"));
+    expected.remove(std::path::Path::new("config.json"));
+    assert_eq!(final_tree, expected);
+    drop(Store::open(f.config.paths.clone()).unwrap());
+}

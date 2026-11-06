@@ -202,12 +202,23 @@ impl Store {
             |store, generation| store.recover(generation),
         )
     }
-    /// Only nonsecret product/research preference writers may admit a ready
-    /// ordinary notebook. Other configuration callers retain legacy refusal.
+    /// Nonsecret basic/model/memory/product/research declaration writers may admit
+    /// a ready ordinary notebook. Generic and credential callers retain refusal.
     pub(crate) fn open_existing_for_preferences(paths: StorePaths) -> Result<Self, Refusal> {
         Self::open_existing_using(
             paths,
             true,
+            NotebookAdmission::Preferences,
+            |_, _| Ok(()),
+            |store, generation| store.recover(generation),
+        )
+    }
+    /// Personalization retains legacy format1-only admission. The ordinary
+    /// notebook gate is shared, without admitting legacy selected/feedback stores.
+    pub(crate) fn open_existing_for_personalization(paths: StorePaths) -> Result<Self, Refusal> {
+        Self::open_existing_using(
+            paths,
+            false,
             NotebookAdmission::Preferences,
             |_, _| Ok(()),
             |store, generation| store.recover(generation),

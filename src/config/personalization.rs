@@ -1,6 +1,6 @@
 //! Portable preference and one-shot maintenance through the existing config writer.
-use super::Config;
-use crate::storage::{digest, files, valid_digest, Store, MAX_RECORD};
+use super::{inspection, Config};
+use crate::storage::{digest, files, valid_digest, ConfigPublication, Store, MAX_RECORD};
 use anyhow::{ensure, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -131,19 +131,28 @@ struct Set {
     enabled: bool,
     text: String,
 }
-fn load(path: &Path) -> Result<(Config, String)> {
+fn load(path: &Path) -> Result<(Config, serde_json::Value, String)> {
     let bytes = files::read(path, MAX_RECORD as u64)?;
-    let config: Config = serde_json::from_slice(&bytes)?;
+    let (config, raw) = inspection::document(&bytes)
+        .map_err(|_| anyhow::anyhow!("invalid configuration document"))?;
     config.validate()?;
-    Ok((config, digest(&bytes)))
+    Ok((config, raw, digest(&bytes)))
 }
 /// No runtime, credentials, provider or device startup. Failures contain no text/path.
 /// A failure after publication is an uncertain outcome, never proof of rollback.
 pub fn run(operation: Operation, path: Option<PathBuf>, input: &mut impl Read) -> Report {
+    run_with(operation, path, input, Store::replace_config_document)
+}
+fn run_with(
+    operation: Operation,
+    path: Option<PathBuf>,
+    input: &mut impl Read,
+    publish: impl FnOnce(&Store, &Path, &str, &[u8]) -> ConfigPublication,
+) -> Report {
     let Some(path) = path else {
         return Report::new(operation, Status::Unavailable);
     };
-    let (mut config, revision) = match load(&path) {
+    let (mut config, mut document, revision) = match load(&path) {
         Ok(value) => value,
         Err(_) => return Report::new(operation, Status::Unavailable),
     };
@@ -197,7 +206,7 @@ pub fn run(operation: Operation, path: Option<PathBuf>, input: &mut impl Read) -
             return Report::new(operation, Status::Conflict);
         }
         // Shared storage owns admission and keeps the same lease through readback.
-        let store = match Store::open_existing(config.paths.clone()) {
+        let store = match Store::open_existing_for_personalization(config.paths.clone()) {
             Ok(store) => store,
             Err(refusal) => {
                 use crate::storage::maintenance::Refusal;
@@ -211,13 +220,26 @@ pub fn run(operation: Operation, path: Option<PathBuf>, input: &mut impl Read) -
                 );
             }
         };
-        let published = match store.replace_config(&path, Some(&expected), &config) {
+        // Preserve every unrelated raw declaration instead of materializing
+        // the defaults of a whole typed Config. Only this selected parent changes.
+        document["personalization"] = match serde_json::to_value(&config.personalization) {
             Ok(value) => value,
-            // Publication can precede an I/O/durability failure. Do not infer
-            // that no write happened from a missing successful receipt.
             Err(_) => return Report::new(operation, Status::Failed),
         };
-        let (reloaded, observed) = match load(&path) {
+        let target = match serde_json::to_vec(&document) {
+            Ok(bytes) => bytes,
+            Err(_) => return Report::new(operation, Status::Failed),
+        };
+        let published = match publish(&store, &path, &expected, &target) {
+            ConfigPublication::Verified(hash) => hash,
+            // Preserve v1's existing generic failure after entering the writer.
+            // Even a lower-level conflict/refusal does not change that public
+            // mapping or turn a possible publication into rollback evidence.
+            ConfigPublication::Conflict
+            | ConfigPublication::Refused
+            | ConfigPublication::Unknown => return Report::new(operation, Status::Failed),
+        };
+        let (reloaded, _, observed) = match load(&path) {
             Ok(value) => value,
             Err(_) => return Report::new(operation, Status::Failed),
         };
@@ -245,3 +267,6 @@ pub fn run(operation: Operation, path: Option<PathBuf>, input: &mut impl Read) -
         personalization: Some(config.personalization),
     }
 }
+
+#[cfg(test)]
+mod tests;
