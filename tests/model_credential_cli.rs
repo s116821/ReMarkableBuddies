@@ -510,7 +510,7 @@ fn actual_notebook_private_file_lifecycle_busy_stale_noop_and_feedback() {
             "status",
             Some(json!({"intent":input["intent"]})),
             "conflict",
-            "not-dispatched",
+            "read-only",
         );
     }
     let f = Fixture::new();
