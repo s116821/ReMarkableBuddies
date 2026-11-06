@@ -997,10 +997,12 @@ mod tests {
                 ))]
                 "development-resident-output-plan",
                 "export-note",
+                "export-portable-configuration",
                 "handwriting",
                 "inspect-conversations",
                 "inspect-owned-data",
                 "inspect-owned-data-v3",
+                "inspect-portable-configuration",
                 "inspect-selected-outbox",
                 "inspect-source-cache",
                 "log-level",
@@ -1046,6 +1048,8 @@ mod tests {
         assert!(args.basic_settings_operation.is_none());
         assert!(args.basic_settings_input.is_none());
         assert!(args.configuration_operation.is_none());
+        assert!(args.export_portable_configuration.is_none());
+        assert!(args.inspect_portable_configuration.is_none());
         assert!(args.research_settings_operation.is_none());
         assert!(args.research_settings_input.is_none());
         assert!(args.model.is_none());
