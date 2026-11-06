@@ -79,3 +79,12 @@ Fixtures use real temporary config/Store/CLI data, all saved declaration states,
 existing editors, custody/faults, and real source/memory frames with authored
 synthetic research. They contact no tablet, model, provider or service and establish
 local saved-policy/composition behavior only.
+
+
+Apply also supports an already-ready ordinary local notebook generation (format4).
+It validates the current owned roots, notebook contract/capabilities and complete
+local history under the original store lease. Selected or retained selection
+history, incomplete readiness and backup/shared mode refuse without adoption or
+repair. Only the selected configuration target changes; notebook metadata,
+records and media stay intact. Other settings and credential-file maintenance
+retain their existing admission rules. This does not restart or activate a runtime.

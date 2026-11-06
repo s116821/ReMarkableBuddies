@@ -4,8 +4,10 @@ use buddy::storage::{digest, maintenance::Refusal, sync::mode::SyncModeChoice, S
 use remarkable_reader_buddy as buddy;
 use serde_json::{json, Value};
 use std::{
+    collections::BTreeMap,
     fs,
     io::Write,
+    path::{Path, PathBuf},
     process::{Command, Output, Stdio},
     sync::Arc,
     time::{Duration, Instant},
@@ -527,4 +529,235 @@ fn actual_pure_readers_ignore_credential_root_alias_but_apply_keeps_safety() {
     );
     assert_eq!(run(&f, "apply", &input)["status"], "unsupported");
     assert_eq!(f.inventory(), inventory);
+}
+
+fn notebook_fixture(local: bool) -> Fixture {
+    use buddy::storage::{Envelope, Kind, Media, Namespace};
+    let f = Fixture::new();
+    let store = Store::open(f.paths()).unwrap();
+    let media = b"retained notebook media";
+    let record = Envelope {
+        envelope_version: 1,
+        namespace: Namespace::SubjectMemory,
+        domain_schema_version: 1,
+        record_id: Uuid::new_v4(),
+        revision_id: Uuid::new_v4(),
+        parents: Default::default(),
+        operation_id: Uuid::new_v4(),
+        actor_id: store.actor_id,
+        kind: Kind::Value,
+        payload: json!({"fixture":"retained"}),
+        media_descriptors: vec![Media {
+            sha256: digest(media),
+            bytes: media.len() as u64,
+            media_type: "text/plain".into(),
+        }],
+    };
+    store
+        .commit(
+            vec![record],
+            BTreeMap::from([(digest(media), media.to_vec())]),
+        )
+        .unwrap();
+    if local {
+        store
+            .set_sync_mode(
+                &store.sync_mode_snapshot().unwrap().token,
+                Uuid::new_v4(),
+                SyncModeChoice::LocalOnly,
+            )
+            .unwrap();
+    }
+    drop(store);
+    drop(Store::prepare_notebook(f.paths()).unwrap());
+    fs::write(
+        f.paths().credentials.join("unrelated-private-file"),
+        b"PRIVATE_SECRET_SENTINEL\r\n exact ",
+    )
+    .unwrap();
+    let path = f.root.join("config.json");
+    let mut raw: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    raw["model"] = Value::Null;
+    raw["personalization"] = json!({"enabled":false,"text":"PRIVATE exact\r\n α "});
+    raw["memory"] = json!({});
+    fs::write(path, serde_json::to_vec_pretty(&raw).unwrap()).unwrap();
+    f
+}
+fn notebook_inventory(f: &Fixture) -> BTreeMap<PathBuf, Vec<u8>> {
+    fn walk(root: &Path, path: &Path, out: &mut BTreeMap<PathBuf, Vec<u8>>) {
+        for entry in fs::read_dir(path).unwrap() {
+            let path = entry.unwrap().path();
+            let relative = path.strip_prefix(root).unwrap().to_owned();
+            if path.is_dir() {
+                out.insert(relative, b"directory".to_vec());
+                walk(root, &path, out);
+            } else if relative != Path::new("config.json") {
+                let bytes = if path.file_name().is_some_and(|n| n == "store.lock") {
+                    fs::metadata(&path).unwrap().len().to_le_bytes().to_vec()
+                } else {
+                    fs::read(path).unwrap()
+                };
+                out.insert(relative, bytes);
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    walk(&f.root, &f.root, &mut out);
+    out
+}
+#[test]
+fn actual_notebook_reference_private_set_clear_origins_and_no_file_authority() {
+    for local in [false, true] {
+        let f = notebook_fixture(local);
+        let path = f.root.join("config.json");
+        let inventory = notebook_inventory(&f);
+        let mut inspect = command(&f);
+        inspect
+            .args(["--credential-reference-operation", "inspect"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = inspect.spawn().unwrap();
+        let held = child.stdin.take().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("notebook Inspect waited for EOF");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let out = child.wait_with_output().unwrap();
+        drop(held);
+        assert!(out.status.success() && out.stderr.is_empty());
+        assert!(
+            out.stdout.len() <= buddy::config::credential_reference::MAX_IO
+                && out.stdout.ends_with(b"\n")
+        );
+        assert!(!String::from_utf8_lossy(&out.stdout).contains("PRIVATE_"));
+        assert_eq!(
+            serde_json::from_slice::<Value>(&out.stdout).unwrap()["status"],
+            "ok"
+        );
+        assert_eq!(notebook_inventory(&f), inventory);
+
+        let missing = "PRIVATE_Missing_api-01";
+        assert!(!f.paths().credentials.join(missing).exists());
+        let old = fs::read(&path).unwrap();
+        assert_eq!(
+            run(
+                &f,
+                "prepare",
+                &prepare_request(&f, json!({"action":"clear"}))
+            )["outcome"],
+            "no-change"
+        );
+        assert_eq!(fs::read(&path).unwrap(), old);
+        for change in [
+            json!({"action":"set","value":missing}),
+            json!({"action":"clear"}),
+        ] {
+            let before: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            let input = prepare(&f, change.clone());
+            let original = fs::read(&path).unwrap();
+            let owner = Store::open(f.paths()).unwrap();
+            assert_eq!(run(&f, "apply", &input)["status"], "busy");
+            drop(owner);
+            for field in [
+                "base_sha256",
+                "config_path_sha256",
+                "target_sha256",
+                "changes_sha256",
+            ] {
+                let mut bad = input.clone();
+                bad["intent"][field] = json!("0".repeat(64));
+                assert_ne!(run(&f, "apply", &bad)["status"], "ok");
+            }
+            let mut bad = input.clone();
+            bad["change"] = json!({"action":"set","value":"PRIVATE_DIFFERENT"});
+            assert_eq!(run(&f, "apply", &bad)["status"], "invalid-input");
+            assert_eq!(fs::read(&path).unwrap(), original);
+            let applied = run(&f, "apply", &input);
+            assert_eq!(applied["outcome"], "verified");
+            assert_eq!(applied["disk_readback_verified"], true);
+            let saved = fs::read(&path).unwrap();
+            assert_eq!(applied["data"]["target_sha256"], digest(&saved));
+            let after: Value = serde_json::from_slice(&saved).unwrap();
+            let mut a = before.as_object().unwrap().clone();
+            let mut b = after.as_object().unwrap().clone();
+            a.remove("model_credential");
+            b.remove("model_credential");
+            assert_eq!(a, b);
+            if change["action"] == "set" {
+                assert_eq!(after["model_credential"], missing);
+            } else {
+                assert!(after.get("model_credential").is_none());
+            }
+            assert_eq!(
+                run(&f, "status", &json!({"intent":input["intent"]}))["outcome"],
+                "desired-file-observed"
+            );
+            assert_eq!(run(&f, "apply", &input)["status"], "conflict");
+            assert_eq!(
+                run(&f, "prepare", &prepare_request(&f, change))["outcome"],
+                "no-change"
+            );
+            assert_eq!(fs::read(&path).unwrap(), saved);
+            assert_eq!(notebook_inventory(&f), inventory);
+            assert!(!f.paths().credentials.join(missing).exists());
+        }
+        let mut raw: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        raw["model_credential"] = Value::Null;
+        fs::write(&path, serde_json::to_vec_pretty(&raw).unwrap()).unwrap();
+        assert_eq!(
+            run_bytes(&f, "inspect", None)["data"]["current"]["model_credential"]["origin"],
+            "declared-null"
+        );
+        let input = prepare(&f, json!({"action":"clear"}));
+        assert_eq!(run(&f, "apply", &input)["outcome"], "verified");
+        assert_eq!(notebook_inventory(&f), inventory);
+    }
+}
+#[test]
+fn actual_reference_notebook_refusals_and_legacy_feedback_remain_scoped() {
+    for case in 0..3 {
+        let f = notebook_fixture(false);
+        let path = f.root.join("config.json");
+        let input = prepare(&f, json!({"action":"set","value":"PRIVATE_Missing"}));
+        let generation: Uuid =
+            serde_json::from_slice(&fs::read(f.paths().data.join("CURRENT")).unwrap()).unwrap();
+        let generation = f
+            .paths()
+            .data
+            .join("generations")
+            .join(generation.to_string());
+        match case {
+            0 => fs::write(f.paths().data.join("sync/mode.json"), b"invalid mode").unwrap(),
+            1 => {
+                fs::create_dir_all(generation.join("selection-history")).unwrap();
+                fs::write(generation.join("selection-history/residue"), b"PRIVATE").unwrap();
+            }
+            _ => fs::write(
+                generation.join("notebook-feature.json"),
+                b"interrupted marker",
+            )
+            .unwrap(),
+        }
+        let before = notebook_inventory(&f);
+        let original = fs::read(&path).unwrap();
+        assert_eq!(run(&f, "apply", &input)["status"], "unsupported");
+        assert_eq!(
+            run(&f, "status", &json!({"intent":input["intent"]}))["outcome"],
+            "unresolved"
+        );
+        assert_eq!(notebook_inventory(&f), before);
+        assert_eq!(fs::read(&path).unwrap(), original);
+    }
+    let f = Fixture::new();
+    drop(buddy::unassociated_feedback::Feedback::prepare(f.paths()).unwrap());
+    let before = notebook_inventory(&f);
+    let input = prepare(&f, json!({"action":"set","value":"PRIVATE_Missing"}));
+    assert_eq!(run(&f, "apply", &input)["outcome"], "verified");
+    assert_eq!(notebook_inventory(&f), before);
 }

@@ -1,9 +1,38 @@
 """Real child-process refusal controls; no device or network access."""
-import json,os,pathlib,sys,time,unittest,tempfile,hashlib
+import argparse,json,os,pathlib,sys,time,unittest,tempfile,hashlib
 from apk_contract import Refusal
 from apk_source_build import run,source_license,LICENSE_BLOB,build,git_conversion,container_source_snapshot,source_snapshot,runtime,RUNTIMES,IMAGES
-from apk_builder import copy_verified
+from apk_builder import copy_verified,produce
 from unittest.mock import patch
+
+class OutputRoots(unittest.TestCase):
+ def test_sdk_proof_pair_refuses_before_source_or_output(self):
+  with tempfile.TemporaryDirectory() as directory:
+   root=pathlib.Path(directory);source=root/'source';source.mkdir()
+   for tag,proof in [('v1.2.3',None),(None,root/'sdk')]:
+    args=argparse.Namespace(source=source,target_dir=root/'build',output=root/'output',pkgrel=0,sdk_tag=tag,sdk_tag_source=proof)
+    with self.subTest(tag=tag,proof=proof),patch('apk_builder.source_identity') as identity:
+     with self.assertRaisesRegex(Refusal,'must be supplied together'):produce(args)
+     identity.assert_not_called();self.assertFalse((root/'build').exists())
+ def test_overlap_refuses_before_source_tools_or_output_creation(self):
+  with tempfile.TemporaryDirectory() as directory:
+   root=pathlib.Path(directory);source=root/'source';source.mkdir()
+   build=root/'build'
+   for target,output in [(build,build),(build,build/'artifacts'),(build/'target',build)]:
+    args=argparse.Namespace(source=source,target_dir=target,output=output,pkgrel=0,tag='v1.2.3')
+    with self.subTest(target=target,output=output),patch('apk_builder.source_identity') as identity:
+     with self.assertRaisesRegex(Refusal,'disjoint build and final output roots'):produce(args)
+     identity.assert_not_called()
+     self.assertFalse(build.exists())
+
+ def test_sibling_roots_continue_to_normal_source_admission(self):
+  with tempfile.TemporaryDirectory() as directory:
+   root=pathlib.Path(directory);source=root/'source';source.mkdir()
+   args=argparse.Namespace(source=source,target_dir=root/'build',output=root/'artifacts',pkgrel=0,tag='v1.2.3')
+   with patch('apk_builder.source_identity',side_effect=Refusal('source admission sentinel')) as identity:
+    with self.assertRaisesRegex(Refusal,'source admission sentinel'):produce(args)
+    identity.assert_called_once_with(source.resolve(),'v1.2.3')
+   self.assertEqual(set(root.iterdir()),{source})
 
 class CommandBounds(unittest.TestCase):
  def command(self,code,timeout=3):
@@ -36,6 +65,39 @@ class CommandBounds(unittest.TestCase):
  def test_stdout_and_combined_diagnostic_caps(self):
   for code in ["print('x'*17000)","import sys;sys.stdout.write('x'*9000);sys.stderr.write('y'*9000)"]:
    with self.subTest(code=code),self.assertRaisesRegex(Refusal,'bound'):self.command(code)
+ def test_exact_generation_private_profile_retains_success_and_failure(self):
+  with tempfile.TemporaryDirectory() as directory:
+   root=pathlib.Path(directory)
+   output=run([sys.executable,'-c',"import sys;sys.stdout.write('m'*40000)"],root,
+              stdout_limit=65536,combined_limit=None,private_diagnostics=root/'metadata')
+   self.assertEqual(len(output),40000)
+   self.assertEqual((root/'metadata/stdout.bin').read_bytes(),b'm'*40000)
+   with self.assertRaisesRegex(Refusal,'command failed') as error:
+    run([sys.executable,'-c',"import sys;sys.stderr.write('owned phase fixture error');sys.exit(7)"],root,
+        stdout_limit=65536,combined_limit=None,private_diagnostics=root/'failure')
+   self.assertNotIn('owned phase fixture error',str(error.exception))
+   self.assertEqual((root/'failure/stderr.bin').read_bytes(),b'owned phase fixture error')
+ def test_generation_private_profile_keeps_output_and_deadline_bounds(self):
+  with tempfile.TemporaryDirectory() as directory:
+   root=pathlib.Path(directory)
+   for name,code,timeout in [('stdout',"import sys;sys.stdout.write('x'*70000)",3),
+                             ('stderr',"import sys;sys.stderr.write('x'*17000)",3),
+                             ('deadline',"import sys,time;sys.stderr.write('owned deadline');sys.stderr.flush();time.sleep(10)",0.2)]:
+    with self.subTest(name=name),self.assertRaisesRegex(Refusal,'bound|deadline'):
+     run([sys.executable,'-c',code],root,stdout_limit=65536,combined_limit=None,timeout=timeout,
+         private_diagnostics=root/name)
+    self.assertLessEqual((root/name/'stdout.bin').stat().st_size,65536)
+    self.assertLessEqual((root/name/'stderr.bin').stat().st_size,16384)
+   self.assertEqual((root/'deadline/stderr.bin').read_bytes(),b'owned deadline')
+ def test_other_uncombined_private_profiles_refuse_before_launch(self):
+  with tempfile.TemporaryDirectory() as directory:
+   root=pathlib.Path(directory)
+   for stdout,combined in [(16384,None),(65535,None),(65537,None),(65536.0,None),(65536,32768)]:
+    with self.subTest(stdout=stdout,combined=combined),patch('apk_source_build.OwnedProcess') as launch:
+     with self.assertRaisesRegex(Refusal,'private compiler diagnostic bound'):
+      run([sys.executable,'-c',"print('must not launch')"],root,stdout_limit=stdout,
+          combined_limit=combined,private_diagnostics=root/'never')
+     launch.assert_not_called();self.assertFalse((root/'never').exists())
  def test_descendant_cannot_write_after_refusal(self):
   with tempfile.TemporaryDirectory() as directory:
    marker=pathlib.Path(directory)/'late-marker'
@@ -196,7 +258,7 @@ class FreshBuildAdmission(unittest.TestCase):
  def test_runtime_replacement_or_compiler_switch_refuses(self):
   # Real file changes, with compiler/runner transport mocked. No source-build
   # result or real executable authority is inferred from this fixture.
-  for fault in ['runtime-replacement','compiler-switch','git-conversion-switch','container-refusal']:
+  for fault in ['runtime-replacement','compiler-switch','git-conversion-switch','container-refusal','sdk-proof-change']:
    with self.subTest(fault=fault),tempfile.TemporaryDirectory() as directory:
     root=pathlib.Path(directory);source=root/'source';source.mkdir();(source/'.git').mkdir();target=root/'fresh-output'
     configuration=pathlib.Path(__file__).with_name('Cross.apk.toml')
@@ -216,9 +278,10 @@ class FreshBuildAdmission(unittest.TestCase):
      if fault=='runtime-replacement':binary.write_bytes(b'changed after runtime')
      return 'reader-buddy 1.2.3',dict(actual_container_argv=[[],['docker','run','observed-runtime'],[]])
     identities=[compiler,changed if fault=='compiler-switch' else compiler]
-    def cargo_call(repo,target,sdk_tag,observations,rm2_resident):
+    def cargo_call(repo,target,sdk_tag,observations,rm2_resident,sdk_tag_source=None):
      self.assertFalse(rm2_resident)
      observations.append(dict(workspace_root=str(source),packages=[],workspace_members=[]))
+     if fault=='sdk-proof-change':return dict(cargo,sdk_release_source={'observation':len(observations)})
      return cargo
     host=dict(source=source_id,conversion={'autocrlf':'false'})
     after=dict(host,conversion={'autocrlf':'true'}) if fault=='git-conversion-switch' else host
@@ -239,7 +302,8 @@ class FreshBuildAdmission(unittest.TestCase):
      messages={'runtime-replacement':'executed binary file identity changed',
                'compiler-switch':'actual Cross compiler/image identity changed',
                'git-conversion-switch':'source Git admission identity changed',
-               'container-refusal':'ordinary container Git ownership'}
+               'container-refusal':'ordinary container Git ownership',
+               'sdk-proof-change':'build inputs changed'}
      with self.assertRaisesRegex(Refusal,messages[fault]):
       build(source,'v1.2.3','armv7-unknown-linux-gnueabihf',target,configuration)
      if fault=='container-refusal':

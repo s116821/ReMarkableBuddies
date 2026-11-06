@@ -14,7 +14,7 @@ use std::io::{self, Write};
 pub struct Inspection {
     report: Report,
     #[cfg(target_os = "linux")]
-    custody: Option<(linux::Access, std::fs::File)>,
+    custody: Option<(linux::Access, super::Lease)>,
 }
 impl Inspection {
     pub fn configuration_unavailable() -> Self {

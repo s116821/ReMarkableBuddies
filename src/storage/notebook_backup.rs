@@ -3,6 +3,8 @@ use super::*;
 
 #[path = "notebook_backup/command.rs"]
 pub(crate) mod command;
+#[path = "notebook_backup/conditional_restore.rs"]
+mod conditional_restore;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -318,11 +320,32 @@ impl Store {
             .lock()
             .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
         self.notebook_archive_custody(&inner)?;
+        self.restore_notebook_locked(
+            &mut inner,
+            source,
+            backup,
+            Uuid::new_v4(),
+            false,
+            &mut false,
+        )
+    }
+    fn restore_notebook_locked(
+        &self,
+        inner: &mut Inner,
+        source: &Path,
+        backup: NotebookBackup,
+        next: Uuid,
+        exclusive: bool,
+        attempted: &mut bool,
+    ) -> Result<()> {
         let root = self.generation(inner.generation);
         let feedback = root.join(feedback_generation::MARKER).exists() || backup.feedback_feature;
         let selected_feature =
             root.join("selection-feature.json").exists() || backup.selected_feature;
-        let next = Uuid::new_v4();
+        if exclusive {
+            files::safe_path(&self.generation(next))?;
+            fs::create_dir(self.generation(next))?;
+        }
         notebook_generation::create(
             &self.paths.data,
             self.actor_id,
@@ -367,12 +390,13 @@ impl Store {
             rebuilt.unavailable == 0,
             "notebook restore unresolved lineage"
         );
-        Self::trip(&mut inner, Fault::BeforeActivation)?;
+        Self::trip(inner, Fault::BeforeActivation)?;
+        *attempted = true;
         files::atomic_json(&self.paths.data.join("CURRENT"), &next)?;
         inner.generation = next;
         inner.index = rebuilt;
         notebook_generation::publish_capabilities(self, next)?;
-        Self::trip(&mut inner, Fault::AfterActivation)?;
+        Self::trip(inner, Fault::AfterActivation)?;
         Ok(())
     }
 }

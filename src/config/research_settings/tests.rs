@@ -503,3 +503,82 @@ fn personalization_update_preserves_an_explicit_null_policy_declaration() {
     );
     assert_eq!(f.raw().get("research_policy"), Some(&Value::Null));
 }
+
+#[test]
+fn notebook_preferences_faults_and_report_output_keep_original_custody() {
+    use crate::config::notebook_preferences_tests::{inventory, seed};
+    use crate::storage::ConfigFault;
+    for (fault, immediate_failure) in [
+        (ConfigFault::AtomicCall, false),
+        (ConfigFault::AfterPublication, true),
+        (ConfigFault::ChangedReadback, false),
+    ] {
+        let f = Fixture::new();
+        seed(&f.paths);
+        let changes = patch("disabled");
+        let intent = f.intent(&changes);
+        let doc = Document::load(Some(f.file.clone())).unwrap();
+        let before = inventory(&f.paths.data);
+        let report = apply_with(
+            doc,
+            serde_json::from_value(intent.clone()).unwrap(),
+            serde_json::from_value(changes).unwrap(),
+            |store, path, base, target| {
+                store.replace_config_document_fault(path, base, target, fault)
+            },
+        );
+        assert_eq!(report.outcome, Outcome::Unknown);
+        assert!(matches!(
+            Store::open_existing_for_preferences(f.paths.clone()),
+            Err(crate::storage::maintenance::Refusal::Busy)
+        ));
+        struct Output<'a> {
+            paths: &'a crate::storage::StorePaths,
+            immediate_failure: bool,
+            calls: usize,
+        }
+        impl Write for Output<'_> {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                assert!(matches!(
+                    Store::open_existing_for_preferences(self.paths.clone()),
+                    Err(crate::storage::maintenance::Refusal::Busy)
+                ));
+                self.calls += 1;
+                if self.immediate_failure {
+                    Err(io::Error::other("fixture immediate failure"))
+                } else if self.calls == 1 {
+                    Ok(bytes.len().min(7))
+                } else {
+                    Err(io::Error::other("fixture prefix failure"))
+                }
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                assert!(matches!(
+                    Store::open_existing_for_preferences(self.paths.clone()),
+                    Err(crate::storage::maintenance::Refusal::Busy)
+                ));
+                panic!("existing report interface must not add a flush")
+            }
+        }
+        let mut output = Output {
+            paths: &f.paths,
+            immediate_failure,
+            calls: 0,
+        };
+        assert!(report.write_to(&mut output).is_err());
+        assert_eq!(output.calls, if immediate_failure { 1 } else { 2 });
+        drop(Store::open_existing_for_preferences(f.paths.clone()).unwrap());
+        assert_eq!(inventory(&f.paths.data), before);
+        let observed = fs::read(&f.file).unwrap();
+        let status = finish(f.run(Operation::Status, &json!({"intent":intent})));
+        assert_eq!(
+            status["outcome"],
+            if digest(&observed) == intent["target_sha256"].as_str().unwrap() {
+                "desired-file-observed"
+            } else {
+                "unresolved"
+            }
+        );
+        assert_eq!(fs::read(&f.file).unwrap(), observed);
+    }
+}

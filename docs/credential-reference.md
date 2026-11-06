@@ -11,3 +11,12 @@ Inspect/prepare/status avoid declared-root, Store and credential-file probes. Ap
 A saved reference does not prove a file exists, is protected, is effectively selected or authenticates. Clearing it neither deletes a file nor revokes environment/CLI/active credentials. CLI > environment > protected-file precedence remains unchanged. The separate [credential-file protocol](model-credential.md) retains its own original Config binding and uncertainty. Reference edits can make that binding stale, which does not settle an earlier unknown attempt.
 
 Possible publication/readback failure or incomplete output remains unknown. Do not automatically retry, rebase, roll back or issue a second report. Explicit original-intent status is current-byte observation only. Companion UI, private buffer lifetime and multi-step reference/file setup require their own reviewed sequencing; no atomic two-file setup is promised. The exact protocol and synthetic vectors are in the coordinated central `edit-saved-model-credential-reference` change.
+
+Apply supports an already-ready ordinary notebook (format4) through a distinct
+reference-only admission entry. It requires complete owned local history, empty
+selected/retained history, and validated absent/LocalOnly mode. Existing supported
+legacy1/2/3 admission remains. Unsupported notebook state refuses without repair.
+The saved reference may name no existing credential file; origin/presence and
+verified Config bytes still do not establish credential readiness. Actual
+credential-file operations use their own scoped admission and confidential
+[file protocol](model-credential.md); reference edits do not perform file maintenance.

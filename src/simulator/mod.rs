@@ -1,6 +1,7 @@
 //! Deterministic Reader scenarios through the production orchestrator.
 mod combined;
 mod device;
+mod exchange_history;
 mod raster;
 #[cfg(test)]
 mod reader_persistence_tests;
@@ -516,6 +517,7 @@ enum ParsedScenario {
     Reader(Box<Scenario>),
     Writer(Box<writer::Scenario>),
     Combined(Box<combined::Scenario>),
+    ExchangeHistory(exchange_history::Scenario),
 }
 /// Probe the mode, then parse original bytes directly without untagged buffering.
 /// Reader retains its original admissibility; only the new Writer schema is capped.
@@ -542,6 +544,15 @@ fn parse_scenario(bytes: &[u8]) -> Result<ParsedScenario> {
             let scenario = serde_json::from_slice(bytes)?;
             Ok(ParsedScenario::Combined(Box::new(scenario)))
         }
+        "exchange-history" => {
+            ensure!(
+                bytes.len() <= 16 * 1024,
+                "exchange history scenario exceeds bound"
+            );
+            Ok(ParsedScenario::ExchangeHistory(serde_json::from_slice(
+                bytes,
+            )?))
+        }
         _ => anyhow::bail!(
             "unsupported simulator mode; combined/native Writer routing is unsupported"
         ),
@@ -558,6 +569,10 @@ pub fn run_any_file(path: &Path) -> Result<()> {
         ParsedScenario::Writer(scenario) => writer::save(&scenario, root),
         ParsedScenario::Combined(scenario) => {
             println!("{}", combined::run(*scenario)?);
+            Ok(())
+        }
+        ParsedScenario::ExchangeHistory(scenario) => {
+            println!("{}", exchange_history::run(scenario)?);
             Ok(())
         }
     }

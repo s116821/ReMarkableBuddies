@@ -1,15 +1,42 @@
 """Build both actual tagged targets, then generate offline test-key APK artifacts."""
-import argparse,hashlib,json,os,shutil,tempfile
+import argparse,hashlib,json,os,shutil,stat,tempfile
 from pathlib import Path
 from apk_contract import RM2_BUNDLE_SHA,canonical,require,integer
 from apk_payload import BUNDLE_FILE,TOOL_FILES
-from apk_source_build import build,run,sha,source_identity,source_license
+from apk_source_build import build,run,sha,source_identity,source_license,sdk_release_source
 from docker_owned import phase
 
 IMAGE='sha256:8d79948df2c7c568a043683f786e7ce4ad2e25e469673b72b8da8d2dbb2fa9ac'
 TOOL_SHA='7488a9650411143a205bf80af511203fadd79499e21613c970b4ef8c207fe11a'
 TARGETS=[('armv7','armv7-unknown-linux-gnueabihf'),('aarch64','aarch64-unknown-linux-gnu')]
 MODULES=['apk_generate.py','apk_observe.py','apk_contract.py','apk_source_build.py','apk_index.py','process_guard.py','docker_owned.py','apk_compiler.py','apk_payload.py']
+
+def admit_apk_tool(tool):
+ require(tool.name=='apk' and tool.is_file() and not tool.is_symlink() and sha(tool)==TOOL_SHA,'pinned APK tool')
+ if os.name=='posix':
+  info=tool.stat();mode=stat.S_IMODE(info.st_mode)
+  # The pinned image uses default UID/GID0 without DAC override capabilities.
+  # Select its applicable permission class, rather than whitelisting0755.
+  shift=6 if info.st_uid==0 else 3 if info.st_gid==0 else 0
+  require(not mode&0o7000 and os.access(tool,os.R_OK|os.X_OK) and
+          ((mode>>shift)&0o5)==0o5,'readable executable pinned APK tool')
+ return tool.resolve()
+
+def admit_mount_access(work,inputs,artifacts,modules,tool,observations=None):
+ # Admission checks only: initialization belongs to fresh task staging.
+ require(os.name=='posix' and not work.is_symlink(),'private owned package work root')
+ info=work.lstat()
+ require(stat.S_ISDIR(info.st_mode) and info.st_uid==os.getuid() and
+         stat.S_IMODE(info.st_mode)==0o700,'private owned package work root')
+ for root in (inputs,modules,artifacts,*(() if observations is None else (observations,))):
+  require(root.parent==work and root.is_dir() and not root.is_symlink(),'fixed staged mount root')
+  for path in (root,*root.rglob('*')):
+   info=path.lstat();mode=stat.S_IMODE(info.st_mode)
+   require(stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode),'regular staged mount content')
+   shift=6 if info.st_uid==0 else 3 if info.st_gid==0 else 0
+   required=7 if path==artifacts else 5 if stat.S_ISDIR(info.st_mode) else 4
+   require(((mode>>shift)&required)==required,'pinned UID0 mount access')
+ admit_apk_tool(tool)
 
 def copy_verified(source,destination,expected_bytes,expected_sha):
  require(source.is_file() and not source.is_symlink(),'regular generated input')
@@ -28,18 +55,21 @@ def produce(args):
  source=args.source.resolve();target_root=args.target_dir.resolve();output=args.output.resolve()
  require(integer(args.pkgrel,0,65535),'pkgrel')
  require(not output.exists() and not target_root.exists() and not output.is_relative_to(source) and not target_root.is_relative_to(source),'new external output roots')
+ require(not output.is_relative_to(target_root) and not target_root.is_relative_to(output),'disjoint build and final output roots')
+ sdk_source=getattr(args,'sdk_tag_source',None);sdk_tag=getattr(args,'sdk_tag',None)
+ require((sdk_tag is None)==(sdk_source is None),'--sdk-tag and --sdk-tag-source must be supplied together')
  identity=source_identity(source,args.tag);license_id=source_license(source)
  bundle=getattr(args,'rm2_native_bundle',None)
  if bundle is not None:
   require(bundle.is_file() and not bundle.is_symlink() and 0<bundle.stat().st_size<=8*1024*1024,'bounded RM2 native bundle')
   require(sha(bundle)==RM2_BUNDLE_SHA,'approved RM2 native bundle')
- tool=args.apk_tool.resolve();require(tool.name=='apk' and tool.is_file() and sha(tool)==TOOL_SHA,'pinned APK tool')
+ tool=admit_apk_tool(args.apk_tool)
  require(run(['docker','image','inspect',IMAGE,'--format','{{.Id}}'],source)==IMAGE,'existing pinned generation image')
  target_root.mkdir(exist_ok=False)
  # Preserve failed or incomplete builds as private working evidence. Only the
  # final output has a completed two-target artifact receipt.
  work=Path(tempfile.mkdtemp(prefix='buddy-apk-work-',dir=output.parent))
- inputs=work/'inputs';inputs.mkdir();artifacts=work/'artifacts';artifacts.mkdir();modules=work/'modules';modules.mkdir()
+ inputs=work/'inputs';inputs.mkdir();artifacts=work/'artifacts';artifacts.mkdir();artifacts.chmod(0o777);modules=work/'modules';modules.mkdir()
  for name in MODULES:shutil.copyfile(Path(__file__).with_name(name),modules/name)
  private={};input_hashes={}
  if bundle is not None:
@@ -50,27 +80,42 @@ def produce(args):
   input_hashes[BUNDLE_FILE]=RM2_BUNDLE_SHA
  for arch,target in TARGETS:
   binary,metadata,evidence=build(source,args.tag,target,target_root/arch,Path(__file__).with_name('Cross.apk.toml'),args.sdk_tag,
-                                 rm2_resident=bundle is not None and arch=='armv7')
+                                 rm2_resident=bundle is not None and arch=='armv7',sdk_tag_source=sdk_source)
   require(metadata['source']==identity,'source unchanged across targets')
   directory=inputs/arch;directory.mkdir()
   copy_verified(binary,directory/'reader-buddy',metadata['binary']['bytes'],metadata['binary']['sha256'])
   license_file=source/'LICENSE';copy_verified(license_file,directory/'LICENSE',license_file.stat().st_size,sha(license_file))
   with (directory/'build.json').open('xb') as stream:stream.write(canonical(metadata))
   private[arch]=evidence
+  if arch=='aarch64':require(private[arch].get('sdk_release_source')==private['armv7'].get('sdk_release_source'),'SDK release source changed across targets')
   for path in directory.iterdir():input_hashes[str(path.relative_to(inputs))]=sha(path)
  with (inputs/'input-set.json').open('x',encoding='ascii',newline='\n') as stream:
   json.dump(dict(pkgrel=args.pkgrel,source_license=license_id,targets=[arch for arch,_ in TARGETS]),stream,sort_keys=True,separators=(',',':'));stream.write('\n')
  input_hashes['input-set.json']=sha(inputs/'input-set.json')
  with (work/'private-source-build-evidence.json').open('x',encoding='utf-8') as stream:json.dump(private,stream,sort_keys=True)
+ def after_generation():
+  require(source_identity(source,args.tag)==identity and source_license(source)==license_id,'source changed before output')
+  if sdk_tag is not None:
+   sdk=metadata['sdk']
+   require(sdk_release_source(sdk_source,sdk_tag,sdk['sha'],sdk['manifest_sha256'])==private['armv7']['sdk_release_source'],'SDK release source changed before output')
+ return generate_and_observe(source,args.tag,args.pkgrel,output,work,inputs,artifacts,modules,tool,input_hashes,identity,after_generation)
+
+
+def generate_and_observe(source,tag,pkgrel,output,work,inputs,artifacts,modules,tool,input_hashes,identity,
+                         after_generation,recheck=lambda:None,completion_context=None):
+ """Shared existing isolated phases; callers own checked source/input staging."""
+ admit_mount_access(work,inputs,artifacts,modules,tool)
+ recheck()
  command=['--rm','--network','none','--cap-drop','ALL','--read-only','--memory','1536m','--pids-limit','64','--tmpfs','/tmp:rw,nosuid,noexec,size=768m',
   '--mount',f'type=bind,source={inputs},target=/inputs,readonly','--mount',f'type=bind,source={artifacts},target=/output',
-  '--mount',f'type=bind,source={modules},target=/modules,readonly','--mount',f'type=bind,source={tool.parent},target=/tool,readonly',
+  '--mount',f'type=bind,source={modules},target=/modules,readonly','--mount',f'type=bind,source={tool},target=/tool/apk,readonly',
   '--entrypoint','/usr/bin/python3',IMAGE,'/modules/apk_generate.py']
- result=json.loads(phase(command,source,run,timeout=120,stdout_limit=65536,combined_limit=None))
- require(source_identity(source,args.tag)==identity and source_license(source)==license_id,'source changed before output')
+ result=json.loads(phase(command,source,run,timeout=120,stdout_limit=65536,combined_limit=None,
+                         private_diagnostics=work/'generation-diagnostics'))
+ after_generation()
  require(all(sha(inputs/path)==digest for path,digest in input_hashes.items()),'internal inputs changed during generation')
- require(sha(tool)==TOOL_SHA,'APK tool changed during generation')
- version=args.tag[1:]+'-r'+str(args.pkgrel)
+ admit_mount_access(work,inputs,artifacts,modules,tool)
+ version=tag[1:]+'-r'+str(pkgrel)
  names={f'remarkable-buddies-{version}.{arch}.apk' for arch,_ in TARGETS}|{'buddy-index.adb','fixture.pub'}
  require({path.name for path in artifacts.iterdir()}==names,'exact completed artifact set')
  require(result['status']=='generation-self-checks-only' and result['eligibility']=='not-qualified' and result['private_key_exported'] is False,'generation result')
@@ -84,13 +129,18 @@ def produce(args):
  observation_command=['--rm','--network','none','--cap-drop','ALL','--read-only','--memory','768m','--pids-limit','32','--tmpfs','/tmp:rw,nosuid,noexec,size=512m',
   '--mount',f'type=bind,source={inputs},target=/inputs,readonly','--mount',f'type=bind,source={artifacts},target=/artifacts,readonly',
   '--mount',f'type=bind,source={observations},target=/observations,readonly','--mount',f'type=bind,source={modules},target=/modules,readonly',
-  '--mount',f'type=bind,source={tool.parent},target=/tool,readonly','--entrypoint','/usr/bin/python3',IMAGE,
+  '--mount',f'type=bind,source={tool},target=/tool/apk,readonly','--entrypoint','/usr/bin/python3',IMAGE,
   '/modules/apk_observe.py','--expected-spki',result['fixture_public_key_spki_sha256']]
- observation=json.loads(phase(observation_command,source,run,timeout=120))
+ admit_mount_access(work,inputs,artifacts,modules,tool,observations)
+ observation=json.loads(phase(observation_command,source,run,timeout=120,
+                              private_diagnostics=work/'observation-diagnostics'))
  require(observation['status']=='public-key-only-observed' and observation['private_key_available'] is False,'independent public-key-only observation required')
+ admit_mount_access(work,inputs,artifacts,modules,tool,observations)
+ recheck()
  output.mkdir(exist_ok=False)
  published={}
  for name in sorted(names):
+  admit_mount_access(work,inputs,artifacts,modules,tool,observations)
   path=artifacts/name;size=result['artifact_files'][name]['bytes'];digest=result['artifact_files'][name]['sha256']
   require(0<size<=268435456,'artifact bound')
   copy_verified(path,output/name,size,digest);published[name]=dict(bytes=size,sha256=digest)
@@ -98,6 +148,9 @@ def produce(args):
  # it remain unfinished. Future consumers must revalidate actual bytes.
  receipt=dict(status='test-key-source-build-only',eligibility='not-qualified',source=identity,artifacts=published,
   fixture_public_key_spki_sha256=result['fixture_public_key_spki_sha256'],generation_observations=result,public_key_observation=observation)
+ if completion_context is not None:receipt['build_input_provenance']=completion_context
+ admit_mount_access(work,inputs,artifacts,modules,tool,observations)
+ recheck()
  with (output/'test-key-build-receipt.json').open('x',encoding='ascii',newline='\n') as stream:json.dump(receipt,stream,sort_keys=True);stream.write('\n')
  return receipt
 
@@ -105,6 +158,7 @@ if __name__=='__main__':
  parser=argparse.ArgumentParser(description=__doc__)
  parser.add_argument('--source',type=Path,required=True);parser.add_argument('--tag',required=True)
  parser.add_argument('--pkgrel',type=int,default=0);parser.add_argument('--sdk-tag')
+ parser.add_argument('--sdk-tag-source',type=Path,help='Independent clean full SDK release Git source; required with --sdk-tag')
  parser.add_argument('--target-dir',type=Path,required=True);parser.add_argument('--output',type=Path,required=True)
  parser.add_argument('--apk-tool',type=Path,required=True)
  parser.add_argument('--rm2-native-bundle',type=Path,help='Approved native bundle for the ARMv7 resident test-key package')

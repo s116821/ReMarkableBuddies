@@ -504,7 +504,7 @@ fn apply_with(
     if doc.config.validate().is_err() {
         return Report::refusal(operation, Status::Unsupported);
     }
-    let store = match Store::open_existing_for_config(doc.config.paths.clone()) {
+    let store = match Store::open_existing_for_preferences(doc.config.paths.clone()) {
         Ok(v) => Arc::new(v),
         Err(refusal) => {
             return Report::refusal(
@@ -829,72 +829,93 @@ mod tests {
     }
     #[test]
     fn actual_atomic_faults_stay_unknown_and_status_needs_no_patch() {
-        for fault in [
-            ConfigFault::AtomicCall,
-            ConfigFault::AfterPublication,
-            ConfigFault::ChangedReadback,
-        ] {
-            let f = Fixture::new();
-            let intent = f.prepare(patch());
-            let doc = Document::load(Some(f.config.clone())).unwrap();
-            let changes = serde_json::from_value(patch()).unwrap();
-            let report = apply_with(doc, intent.clone(), changes, |store, path, hash, bytes| {
-                store.replace_config_document_fault(path, hash, bytes, fault)
-            });
-            let r = finish(report);
-            assert_eq!(r["outcome"], "unknown");
-            assert_eq!(r["runtime_activation"], "unverified");
-            assert!(r["data"].is_null());
-            let bytes = fs::read(&f.config).unwrap();
-            let r = finish(f.run(Operation::Status, &json!({"intent":intent})));
-            assert_eq!(
-                r["outcome"],
-                if digest(&bytes) == intent.target_sha256 {
-                    "desired-file-observed"
-                } else {
-                    "unresolved"
+        for notebook in [false, true] {
+            for fault in [
+                ConfigFault::AtomicCall,
+                ConfigFault::AfterPublication,
+                ConfigFault::ChangedReadback,
+            ] {
+                let f = Fixture::new();
+                if notebook {
+                    crate::config::notebook_preferences_tests::seed(&f.paths);
                 }
-            );
-            assert_eq!(fs::read(&f.config).unwrap(), bytes);
+                let inventory = crate::config::notebook_preferences_tests::inventory(&f.paths.data);
+                let intent = f.prepare(patch());
+                let doc = Document::load(Some(f.config.clone())).unwrap();
+                let changes = serde_json::from_value(patch()).unwrap();
+                let report =
+                    apply_with(doc, intent.clone(), changes, |store, path, hash, bytes| {
+                        store.replace_config_document_fault(path, hash, bytes, fault)
+                    });
+                let r = finish(report);
+                assert_eq!(r["outcome"], "unknown");
+                assert_eq!(r["runtime_activation"], "unverified");
+                assert!(r["data"].is_null());
+                let bytes = fs::read(&f.config).unwrap();
+                let r = finish(f.run(Operation::Status, &json!({"intent":intent})));
+                assert_eq!(
+                    r["outcome"],
+                    if digest(&bytes) == intent.target_sha256 {
+                        "desired-file-observed"
+                    } else {
+                        "unresolved"
+                    }
+                );
+                assert_eq!(fs::read(&f.config).unwrap(), bytes);
+                assert_eq!(
+                    crate::config::notebook_preferences_tests::inventory(&f.paths.data),
+                    inventory
+                );
+            }
         }
     }
     #[test]
     fn consuming_prefix_holds_real_store_until_failure_and_emits_no_second_report() {
-        let f = Fixture::new();
-        let i = f.prepare(patch());
-        let report = f.run(Operation::Apply, &json!({"intent":i,"changes":patch()}));
-        assert_eq!(report.status, Status::Ok);
-        struct Prefix {
-            paths: StorePaths,
-            calls: usize,
-            bytes: Vec<u8>,
-        }
-        impl Write for Prefix {
-            fn write(&mut self, b: &[u8]) -> io::Result<usize> {
-                assert!(matches!(
-                    Store::open_existing(self.paths.clone()),
-                    Err(Refusal::Busy)
-                ));
-                self.calls += 1;
-                if self.calls > 1 {
-                    return Err(io::Error::other("prefix stopped"));
+        for notebook in [false, true] {
+            let f = Fixture::new();
+            if notebook {
+                crate::config::notebook_preferences_tests::seed(&f.paths);
+            }
+            let inventory = crate::config::notebook_preferences_tests::inventory(&f.paths.data);
+            let i = f.prepare(patch());
+            let report = f.run(Operation::Apply, &json!({"intent":i,"changes":patch()}));
+            assert_eq!(report.status, Status::Ok);
+            struct Prefix {
+                paths: StorePaths,
+                calls: usize,
+                bytes: Vec<u8>,
+            }
+            impl Write for Prefix {
+                fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+                    assert!(matches!(
+                        Store::open_existing_for_preferences(self.paths.clone()),
+                        Err(Refusal::Busy)
+                    ));
+                    self.calls += 1;
+                    if self.calls > 1 {
+                        return Err(io::Error::other("prefix stopped"));
+                    }
+                    self.bytes.extend_from_slice(&b[..17]);
+                    Ok(17)
                 }
-                self.bytes.extend_from_slice(&b[..17]);
-                Ok(17)
+                fn flush(&mut self) -> io::Result<()> {
+                    Ok(())
+                }
             }
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
+            let mut out = Prefix {
+                paths: f.paths.clone(),
+                calls: 0,
+                bytes: vec![],
+            };
+            assert!(report.write_to(&mut out).is_err());
+            assert_eq!(out.calls, 2);
+            assert_eq!(out.bytes.len(), 17);
+            drop(Store::open_existing_for_preferences(f.paths.clone()).unwrap());
+            assert_eq!(
+                crate::config::notebook_preferences_tests::inventory(&f.paths.data),
+                inventory
+            );
         }
-        let mut out = Prefix {
-            paths: f.paths.clone(),
-            calls: 0,
-            bytes: vec![],
-        };
-        assert!(report.write_to(&mut out).is_err());
-        assert_eq!(out.calls, 2);
-        assert_eq!(out.bytes.len(), 17);
-        drop(Store::open_existing(f.paths.clone()).unwrap());
     }
     #[test]
     fn strict_shapes_caps_uuid_types_no_inspect_read_and_target_bound() {
