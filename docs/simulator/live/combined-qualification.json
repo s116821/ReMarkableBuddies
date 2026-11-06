@@ -1,0 +1,5 @@
+{
+  "mode": "combined-qualification",
+  "llm": {"mode": "live", "max_calls": 7, "timeout_seconds": 90},
+  "output": "../../../target/simulator/combined-qualification-live"
+}

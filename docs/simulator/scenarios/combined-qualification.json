@@ -1,0 +1,5 @@
+{
+  "mode": "combined-qualification",
+  "llm": {"mode": "scripted"},
+  "output": "../../../target/simulator/combined-qualification-offline"
+}

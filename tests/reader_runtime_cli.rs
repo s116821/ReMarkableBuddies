@@ -22,6 +22,68 @@ struct Fixture {
     conversation: Uuid,
     scope: SelectionScope,
 }
+
+#[test]
+fn ordinary_local_startup_admits_ready_notebook_without_adopting_an_incomplete_one() {
+    use remarkable_reader_buddy::{
+        config::Config,
+        conversation::Ledger,
+        reader_runtime::StartupDecision,
+        workflow::conversation_dispatch::{Dispatch, RuntimeRoute},
+    };
+    let fixture = Fixture::new();
+    let paths = StorePaths {
+        data: fixture.root.join("notebook-data"),
+        cache: fixture.root.join("notebook-cache"),
+        credentials: fixture.root.join("notebook-credentials"),
+    };
+    drop(Store::prepare_notebook(paths.clone()).unwrap());
+    let config = Config {
+        paths,
+        ..Config::default()
+    };
+    assert_eq!(
+        RuntimeRoute::for_config(&config),
+        RuntimeRoute::OrdinaryLocal
+    );
+    let current = config.paths.data.join("CURRENT");
+    let original = fs::read(&current).unwrap();
+    let StartupDecision::Ordinary(Some(store)) = reader_runtime::startup(&config) else {
+        panic!("ready notebook did not reach ordinary startup");
+    };
+    let store = reader_runtime::ordinary_store(&config, Some(store))
+        .ok()
+        .unwrap();
+    let ledger = Ledger::new(store);
+    let dispatch = Dispatch::local(&config, &ledger).unwrap();
+    let mode = ledger.store().sync_mode_snapshot().unwrap();
+    assert!(ledger
+        .store()
+        .set_sync_mode(
+            &mode.token,
+            Uuid::new_v4(),
+            storage::sync::mode::SyncModeChoice::LocalOnly
+        )
+        .is_err());
+    drop(dispatch);
+    drop(ledger);
+    assert_eq!(fs::read(&current).unwrap(), original);
+
+    let generation: Uuid = serde_json::from_slice(&original).unwrap();
+    let marker = config
+        .paths
+        .data
+        .join("generations")
+        .join(generation.to_string())
+        .join("notebook-feature.json");
+    fs::remove_file(&marker).unwrap();
+    assert!(matches!(
+        reader_runtime::startup(&config),
+        StartupDecision::Report(_)
+    ));
+    assert!(!marker.exists());
+    assert_eq!(fs::read(current).unwrap(), original);
+}
 impl Fixture {
     fn mode(&self, choice: storage::sync::mode::SyncModeChoice) {
         let store = Store::open(self.paths()).unwrap();

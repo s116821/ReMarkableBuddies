@@ -287,6 +287,41 @@ pub(crate) fn prepare_frozen(
     preference: &PersonalizationSnapshot,
     frozen: Option<ValidatedNotebook>,
 ) -> Result<Prepared> {
+    prepare_inner(ledger, request, preference, frozen, None)
+}
+
+pub(crate) fn prepare_receiving(
+    ledger: &Ledger,
+    request: &Request,
+    preference: &PersonalizationSnapshot,
+    frozen: Option<ValidatedNotebook>,
+    expected: &crate::conversation::ExpectedHeads,
+    document: Uuid,
+) -> Result<runner::Input> {
+    ensure!(
+        request.joined().is_none()
+            && matches!(request, Request::GenerateNotebook(_)) == frozen.is_some(),
+        "routed notebook requires an explicit frozen source and separate export admission"
+    );
+    match prepare_inner(
+        ledger,
+        request,
+        preference,
+        frozen,
+        Some((expected, document)),
+    )? {
+        Prepared::Fresh(input) => Ok(*input),
+        Prepared::Replay(_) => anyhow::bail!("routed notebook operation consumed"),
+    }
+}
+
+fn prepare_inner(
+    ledger: &Ledger,
+    request: &Request,
+    preference: &PersonalizationSnapshot,
+    frozen: Option<ValidatedNotebook>,
+    routed: Option<(&crate::conversation::ExpectedHeads, Uuid)>,
+) -> Result<Prepared> {
     request.preflight()?;
     ensure!(
         ledger.store().unavailable_commits()? == 0,
@@ -295,6 +330,7 @@ pub(crate) fn prepare_frozen(
     let (text, calls, range) = request.fields()?;
     let plan_id = NotebookPlan::identity(request.operation());
     if let Some(envelope) = ledger.store().value(Namespace::Conversation, plan_id)? {
+        ensure!(routed.is_none(), "routed notebook operation consumed");
         let Record::NotebookPlan(plan) = Ledger::decode(&envelope)? else {
             anyhow::bail!("notebook operation identity changed")
         };
@@ -361,6 +397,10 @@ pub(crate) fn prepare_frozen(
     }
     // This snapshot is captured before all related reads, then carried through adoption.
     let expected = ledger.expected(Namespace::Conversation, request.conversation())?;
+    ensure!(
+        routed.is_none_or(|(admitted, _)| *admitted == expected),
+        "routed notebook history changed"
+    );
     let context = ledger.context_range(
         request.conversation(),
         range,
@@ -430,7 +470,16 @@ pub(crate) fn prepare_frozen(
         }
         _ => unreachable!(),
     };
-    let payloads = FrozenNotebookPayloads::new(
+    let images = if let Some((_, document)) = routed {
+        ensure!(
+            archive.document == document,
+            "routed notebook source document changed"
+        );
+        crate::conversation::receiving::images::resolve(ledger, &context)?
+    } else {
+        Default::default()
+    };
+    let payloads = FrozenNotebookPayloads::new_with_images(
         &source,
         &archive,
         PayloadContext {
@@ -444,6 +493,7 @@ pub(crate) fn prepare_frozen(
                 .map(|(turn, revision, _)| (turn, revision.clone())),
             max_model_calls: calls,
         },
+        images,
     )?;
     let mut guards = Vec::new();
     for turn in &context.turns {

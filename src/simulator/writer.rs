@@ -133,8 +133,12 @@ struct State {
     lose_ack: bool,
 }
 #[derive(Default)]
-struct Destination(Mutex<State>);
+pub(super) struct Destination(Mutex<State>);
 impl Destination {
+    pub(super) fn writes(&self) -> usize {
+        self.0.lock().unwrap().writes
+    }
+
     fn write(&self, id: &str, content: &str, version: u64) -> note_export::Result<RemoteNote> {
         let mut s = self.0.lock().unwrap();
         s.writes += 1;
