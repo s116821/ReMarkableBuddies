@@ -6,6 +6,7 @@ use std::{
     collections::BTreeMap,
     fs,
     io::Write,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     time::{Duration, Instant},
 };
@@ -29,11 +30,11 @@ fn run(f: &Fixture, family: &str, operation: &str, input: Option<&Value>) -> Val
         command.args([format!("--{family}-settings-input"), "-".into()]);
     }
     let mut child = command.spawn().unwrap();
-    let pipe = child.stdin.take().unwrap();
+    let mut pipe = Some(child.stdin.take().unwrap());
     let writer = input.map(|input| {
         let bytes = serde_json::to_vec(input).unwrap();
+        let mut pipe = pipe.take().unwrap();
         std::thread::spawn(move || {
-            let mut pipe = pipe;
             pipe.write_all(&bytes).unwrap();
         })
     });
@@ -60,6 +61,31 @@ fn run(f: &Fixture, family: &str, operation: &str, input: Option<&Value>) -> Val
     assert!(!String::from_utf8_lossy(&result.stdout).contains("PRIVATE"));
     assert!(!String::from_utf8_lossy(&result.stdout).contains(PRIVATE_ID));
     serde_json::from_slice(&result.stdout).unwrap()
+}
+
+// Compare the whole fixture, including parent-directory publication staging, except
+// the selected configuration file. Lock contents are platform-specific bookkeeping.
+fn root_inventory(f: &Fixture) -> BTreeMap<PathBuf, Vec<u8>> {
+    fn walk(root: &Path, path: &Path, out: &mut BTreeMap<PathBuf, Vec<u8>>) {
+        for entry in fs::read_dir(path).unwrap() {
+            let path = entry.unwrap().path();
+            let relative = path.strip_prefix(root).unwrap().to_owned();
+            if path.is_dir() {
+                out.insert(relative, b"directory".to_vec());
+                walk(root, &path, out);
+            } else if relative != Path::new("config.json") {
+                let bytes = if path.file_name().is_some_and(|n| n == "store.lock") {
+                    fs::metadata(&path).unwrap().len().to_le_bytes().to_vec()
+                } else {
+                    fs::read(path).unwrap()
+                };
+                out.insert(relative, bytes);
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    walk(&f.root, &f.root, &mut out);
+    out
 }
 
 const PRIVATE_ID: &str = "123E4567-E89B-12D3-A456-426614174000";
@@ -142,7 +168,7 @@ fn exercise(family: &str) {
         raw["product_settings"] = Value::Null;
         raw["memory"] = json!({});
         fs::write(&path, serde_json::to_vec_pretty(&raw).unwrap()).unwrap();
-        let inventory = f.inventory();
+        let inventory = root_inventory(&f);
         for clear in [false, true] {
             let old = fs::read(&path).unwrap();
             let before: Value = serde_json::from_slice(&old).unwrap();
@@ -226,7 +252,7 @@ fn exercise(family: &str) {
                 "no-change"
             );
             assert_eq!(fs::read(&path).unwrap(), saved);
-            assert_eq!(f.inventory(), inventory);
+            assert_eq!(root_inventory(&f), inventory);
         }
         // Each newly admitted caller must still refuse corrupt persisted notebook state.
         let patch = changes(family, false);
@@ -236,14 +262,14 @@ fn exercise(family: &str) {
             input["changes"] = patch;
         }
         fs::write(f.paths().data.join("sync/mode.json"), b"not valid mode").unwrap();
-        let held = f.inventory();
+        let held = root_inventory(&f);
         let old = fs::read(&path).unwrap();
         assert_eq!(
             run(&f, family, "apply", Some(&input))["status"],
             "unsupported"
         );
         assert_eq!(fs::read(&path).unwrap(), old);
-        assert_eq!(f.inventory(), held);
+        assert_eq!(root_inventory(&f), held);
     }
 }
 #[test]
@@ -264,7 +290,7 @@ fn actual_three_declaration_writers_keep_legacy_feedback_admission() {
     for family in ["basic", "model", "memory"] {
         let f = Fixture::new();
         drop(buddy::unassociated_feedback::Feedback::prepare(f.paths()).unwrap());
-        let inventory = f.inventory();
+        let inventory = root_inventory(&f);
         let patch = changes(family, false);
         let prepared = run(&f, family, "prepare", Some(&request(&f, family, &patch)));
         assert_eq!(prepared["outcome"], "prepared");
@@ -274,6 +300,6 @@ fn actual_three_declaration_writers_keep_legacy_feedback_admission() {
         }
         let applied = run(&f, family, "apply", Some(&input));
         assert_eq!(applied["outcome"], "verified");
-        assert_eq!(f.inventory(), inventory);
+        assert_eq!(root_inventory(&f), inventory);
     }
 }
