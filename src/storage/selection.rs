@@ -156,6 +156,30 @@ pub struct SelectionToken {
     accepted_base_sha256: String,
     selection_sha256: String,
 }
+impl Store {
+    pub(crate) fn historical_predecessor_token(
+        &self,
+        scope: &SelectionScope,
+        operation: Uuid,
+    ) -> Result<Option<SelectionToken>> {
+        self.selected_predecessor(scope, operation)?
+            .as_ref()
+            .map(publication::token)
+            .transpose()
+    }
+    /// Exact original receipt token for domain reconciliation only. May be stale;
+    /// this never establishes current membership or a fresh model/effect permit.
+    pub(crate) fn historical_selection_token(
+        &self,
+        scope: &SelectionScope,
+        operation: Uuid,
+    ) -> Result<Option<SelectionToken>> {
+        self.selected_receipt(scope, operation)?
+            .as_ref()
+            .map(publication::token)
+            .transpose()
+    }
+}
 impl SelectionToken {
     pub fn scope(&self) -> &SelectionScope {
         &self.scope

@@ -12,6 +12,8 @@ pub struct OpenAI {
     base_url: String,
     api_key: String,
     content: Vec<JsonValue>,
+    #[cfg(test)]
+    single_request: bool,
 }
 
 impl OpenAI {
@@ -24,6 +26,8 @@ impl OpenAI {
             base_url,
             api_key,
             content: Vec::new(),
+            #[cfg(test)]
+            single_request: false,
         }
     }
 
@@ -40,6 +44,12 @@ impl OpenAI {
     /// Bound explicitly requested development calls without changing tablet defaults.
     pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_single_request(mut self) -> Self {
+        self.single_request = true;
         self
     }
 
@@ -96,6 +106,8 @@ impl LLMEngine for OpenAI {
         let endpoint = format!("{}/v1/chat/completions", self.base_url);
         let api_key = self.api_key.clone();
         let timeout = self.timeout;
+        #[cfg(test)]
+        let single_request = self.single_request;
         let (cancel, mut canceled) = tokio::sync::watch::channel(false);
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         let worker = std::thread::Builder::new().name("buddy-provider-request".into()).spawn(move || {
@@ -106,7 +118,16 @@ impl LLMEngine for OpenAI {
                 runtime.block_on(async {
                     let request = async {
                         let _timing = crate::measurement::Span::new("provider.request");
-                        let client = reqwest::Client::builder().timeout(timeout).hickory_dns(true).build()
+                        let client = reqwest::Client::builder().timeout(timeout).hickory_dns(true);
+                        #[cfg(test)]
+                        let client = if single_request {
+                            client.redirect(reqwest::redirect::Policy::none())
+                                .retry(reqwest::retry::never())
+                                .no_proxy()
+                        } else {
+                            client
+                        };
+                        let client = client.build()
                             .context("Create asynchronous provider transport")?;
                         let mut response = client.post(endpoint).bearer_auth(api_key).json(&body).send().await
                             .map_err(provider_error)?

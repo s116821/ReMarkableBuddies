@@ -11,6 +11,37 @@ const workflow = name => parse(readFileSync(path.join(root, '.github/workflows',
 const expr = text => String.fromCharCode(36) + '{{ ' + text + ' }}';
 const manager = false;
 
+test('strict package build inputs require deliberate manual execution and normal Git custody', () => {
+  const w = workflow('package-build-inputs');
+  assert.deepEqual(Object.keys(w.on), ['workflow_dispatch']);
+  assert.equal(w.on.workflow_dispatch.inputs.execute_build.default, false);
+  assert.equal(w.jobs.inputs.if, expr('inputs.execute_build == true'));
+  assert.deepEqual(w.permissions, {contents: 'read'});
+  assert.equal(w.jobs.inputs['runs-on'], 'ubuntu-latest');
+  assert.equal(w.jobs.inputs['timeout-minutes'], 55);
+  const steps = w.jobs.inputs.steps;
+  const checkouts = steps.filter(s => s.uses?.startsWith('actions/checkout@'));
+  assert.equal(checkouts.length, 3);
+  for (const step of checkouts) {
+    assert.equal(step.with['set-safe-directory'], false);
+    assert.equal(step.with['persist-credentials'], false);
+    assert.equal(step.with['fetch-depth'], 0);
+  }
+  const build = steps.find(s => /apk_build_inputs.py/.test(s.run ?? ''));
+  assert(build);
+  assert.match(build.run, /--source-sha "\$RELEASE_SHA"/);
+  assert.match(build.run, /--producer-sha "\$PRODUCER_SHA"/);
+  for (const step of steps) {
+    assert(!/apk_builder.py|apk_generate.py|safe\.directory|chown|chmod|workflow run/.test(step.run ?? ''));
+    assert(!/\$\{\{\s*inputs\./.test(step.run ?? ''));
+  }
+  const uploads = steps.filter(s => s.uses?.startsWith('actions/upload-artifact@'));
+  assert.equal(uploads.length, 2);
+  assert.equal(uploads[1].if, expr('failure()'));
+  for (const step of uploads) assert.equal(step.with['retention-days'], 14);
+  assert(!uploads.some(s => /package-build-cache\s*$/.test(s.with.path)));
+});
+
 test('configuration schema replay reuses the locked engine and proven normal host binary', () => {
   const checks = workflow('ci').jobs.checks.steps;
   const step = checks.find(s => s.name === 'Validate embedded configuration schema using the existing host command');

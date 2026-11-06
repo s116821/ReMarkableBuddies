@@ -24,6 +24,24 @@ pub enum Operation {
     Prepare,
     Apply,
     Status,
+    PrepareNotebook,
+    ApplyNotebook,
+    StatusNotebook,
+}
+impl Operation {
+    fn notebook(self) -> bool {
+        matches!(
+            self,
+            Self::PrepareNotebook | Self::ApplyNotebook | Self::StatusNotebook
+        )
+    }
+    fn version(self) -> u32 {
+        if self.notebook() {
+            2
+        } else {
+            1
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -74,7 +92,7 @@ struct Intent {
 }
 impl Intent {
     fn validate(&self) -> std::result::Result<(), Status> {
-        if self.restore_version != 1 {
+        if !matches!(self.restore_version, 1 | 2) {
             return Err(Status::Unsupported);
         }
         if [
@@ -138,7 +156,7 @@ enum Data {
 }
 struct Custody {
     store: Arc<Store>,
-    _mode: OrdinaryModeLease,
+    _mode: Option<OrdinaryModeLease>,
 }
 #[derive(Serialize)]
 pub struct Report {
@@ -155,7 +173,7 @@ pub struct Report {
 impl Report {
     fn refusal(operation: Operation, status: Status) -> Self {
         Self {
-            report_version: 1,
+            report_version: operation.version(),
             operation,
             status,
             outcome: Outcome::NotDispatched,
@@ -170,6 +188,9 @@ impl Report {
         bytes.push(b'\n');
         ensure!(bytes.len() <= MAX_IO, "restore report exceeds bound");
         writer.write_all(&bytes)?;
+        if self.operation.notebook() {
+            writer.flush()?;
+        }
         Ok(())
     }
 }
@@ -316,14 +337,18 @@ struct Token {
 fn acquire(
     document: &Document,
     expected: Option<&Intent>,
+    notebook: bool,
 ) -> std::result::Result<(Custody, Token), Status> {
-    let store = Arc::new(Store::open_existing(document.config.paths.clone()).map_err(
-        |r| match r {
-            Refusal::Unavailable => Status::Unavailable,
-            Refusal::Unsupported => Status::Unsupported,
-            Refusal::Busy => Status::Busy,
-        },
-    )?);
+    let open = if notebook {
+        Store::open_existing_for_notebook_restore
+    } else {
+        Store::open_existing
+    };
+    let store = Arc::new(open(document.config.paths.clone()).map_err(|r| match r {
+        Refusal::Unavailable => Status::Unavailable,
+        Refusal::Unsupported => Status::Unsupported,
+        Refusal::Busy => Status::Busy,
+    })?);
     let current = store
         .sync_mode_snapshot()
         .map_err(|_| Status::Unsupported)?;
@@ -344,9 +369,22 @@ fn acquire(
         }
         None => current.token,
     };
-    let mode = store
-        .ordinary_mode_lease(&mode_token)
-        .map_err(|_| Status::Conflict)?;
+    let mode = if notebook {
+        // The exclusive existing Store OS lease and private Store instance
+        // serialize this local-only route. Do not mint an extra live mode handle.
+        if let Some(i) = expected {
+            if i.actor != token.actor || i.mode_sha256 != token.sha256 {
+                return Err(Status::Conflict);
+            }
+        }
+        None
+    } else {
+        Some(
+            store
+                .ordinary_mode_lease(&mode_token)
+                .map_err(|_| Status::Conflict)?,
+        )
+    };
     Ok((Custody { store, _mode: mode }, token))
 }
 fn parse<T: DeserializeOwned>(bytes: &[u8]) -> std::result::Result<T, Status> {
@@ -372,32 +410,42 @@ fn error_status(error: &anyhow::Error) -> Status {
         None => Status::Failed,
     }
 }
-fn prepare(document: &Document, bytes: &[u8]) -> std::result::Result<Report, Status> {
+fn prepare(
+    operation: Operation,
+    document: &Document,
+    bytes: &[u8],
+) -> std::result::Result<Report, Status> {
     let request: Prepare = parse(bytes)?;
-    if request.restore_version != 1 {
+    if request.restore_version != operation.version() {
         return Err(Status::Unsupported);
     }
     if request.operation.is_nil() {
         return Err(Status::InvalidInput);
     }
     let source_hash = document.source(&request.source, true)?;
-    let (custody, token) = acquire(document, None)?;
-    let plan = custody
-        .store
-        .prepare_ordinary_restore(&request.source, || document.original());
+    let (custody, token) = acquire(document, None, operation.notebook())?;
+    let plan = if operation.notebook() {
+        custody
+            .store
+            .prepare_notebook_restore(&request.source, || document.original())
+    } else {
+        custody
+            .store
+            .prepare_ordinary_restore(&request.source, || document.original())
+    };
     let Plan {
         conditions: c,
         preview,
     } = match plan {
         Ok(plan) => plan,
         Err(e) => {
-            let mut report = Report::refusal(Operation::Prepare, error_status(&e));
+            let mut report = Report::refusal(operation, error_status(&e));
             report._custody = Some(custody);
             return Ok(report);
         }
     };
     let intent = Intent {
-        restore_version: 1,
+        restore_version: operation.version(),
         operation: request.operation,
         config_path_sha256: document.path_hash.clone(),
         config_sha256: document.hash.clone(),
@@ -412,7 +460,7 @@ fn prepare(document: &Document, bytes: &[u8]) -> std::result::Result<Report, Sta
         staged_configuration_sha256: c.staged_configuration_sha256,
         complete_media: c.complete_media,
     };
-    let mut report = Report::refusal(Operation::Prepare, Status::Ok);
+    let mut report = Report::refusal(operation, Status::Ok);
     report.outcome = Outcome::Prepared;
     report.data = Some(Data::Prepared {
         preview,
@@ -431,7 +479,11 @@ fn intent_operation(
         document,
         bytes,
         |store, source, conditions, document| {
-            store.apply_ordinary_restore(source, conditions, || document.original())
+            if operation.notebook() {
+                store.apply_notebook_restore(source, conditions, || document.original())
+            } else {
+                store.apply_ordinary_restore(source, conditions, || document.original())
+            }
         },
     )
 }
@@ -444,18 +496,24 @@ fn intent_operation_with(
     let request: IntentRequest = parse(bytes)?;
     let i = &request.intent;
     i.validate()?;
-    let source_hash = document.source(&request.source, matches!(operation, Operation::Apply))?;
+    if i.restore_version != operation.version() {
+        return Err(Status::Unsupported);
+    }
+    let source_hash = document.source(
+        &request.source,
+        matches!(operation, Operation::Apply | Operation::ApplyNotebook),
+    )?;
     if i.config_path_sha256 != document.path_hash
         || i.config_sha256 != document.hash
         || i.source_path_sha256 != source_hash
     {
         return Err(Status::Conflict);
     }
-    let (custody, _) = acquire(document, Some(i))?;
+    let (custody, _) = acquire(document, Some(i), operation.notebook())?;
     let conditions = i.conditions();
     let mut report = Report::refusal(operation, Status::Ok);
     match operation {
-        Operation::Apply => {
+        Operation::Apply | Operation::ApplyNotebook => {
             let publication = apply(&custody.store, &request.source, &conditions, document);
             match publication {
                 Err(e) => report.status = error_status(&e),
@@ -477,11 +535,17 @@ fn intent_operation_with(
                 }
             }
         }
-        Operation::Status => {
-            match custody
-                .store
-                .observe_ordinary_restore(&conditions, || document.original())
-            {
+        Operation::Status | Operation::StatusNotebook => {
+            let observation = if operation.notebook() {
+                custody
+                    .store
+                    .observe_notebook_restore(&conditions, || document.original())
+            } else {
+                custody
+                    .store
+                    .observe_ordinary_restore(&conditions, || document.original())
+            };
+            match observation {
                 Err(e) => report.status = error_status(&e),
                 Ok(Some(inspection)) => {
                     report.outcome = Outcome::DesiredGenerationObserved;
@@ -493,7 +557,7 @@ fn intent_operation_with(
                 Ok(None) => report.outcome = Outcome::Unresolved,
             }
         }
-        Operation::Prepare => unreachable!(),
+        Operation::Prepare | Operation::PrepareNotebook => unreachable!(),
     }
     report._custody = Some(custody);
     Ok(report)
@@ -518,7 +582,9 @@ pub fn run(
         }
         let document = Document::load(config)?;
         match operation {
-            Operation::Prepare => prepare(&document, &bytes),
+            Operation::Prepare | Operation::PrepareNotebook => {
+                prepare(operation, &document, &bytes)
+            }
             _ => intent_operation(operation, &document, &bytes),
         }
     };
@@ -704,3 +770,7 @@ mod tests {
             .exists());
     }
 }
+
+#[cfg(test)]
+#[path = "restore_maintenance/notebook_tests.rs"]
+mod notebook_tests;

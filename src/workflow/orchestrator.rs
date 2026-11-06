@@ -7,12 +7,10 @@ use crate::analysis::{BoundingBox, SelectionCenter};
 use crate::conversation::{AttemptReason, Ledger, Outcome};
 use crate::device::screenshot::{SCREENSHOT_VIRTUAL_HEIGHT, SCREENSHOT_VIRTUAL_WIDTH};
 use crate::llm::{openai::OpenAI, LLMEngine};
-use crate::memory::Provider;
 use base64::{engine::general_purpose::STANDARD, Engine};
 
 /// Shared by the live workflow and bounded vision-comparison helper.
-pub const ANALYSIS_PROMPT: &str =
-    "Read the handwritten question annotation on this tablet page and answer it from \
+pub const ANALYSIS_PROMPT: &str = "Read the handwritten question annotation on this tablet page and answer it from \
              the technical concept selected by a hand-drawn closed outline or a deliberate \
              highlighted passage. A highlight can select content without any surrounding \
              outline and may appear gray on a grayscale tablet. Handwriting may be neat \
@@ -68,7 +66,7 @@ pub struct Orchestrator<M: LLMEngine = OpenAI> {
     llm: M,
     trigger_enabled: bool,
     ledger: Ledger,
-    memory: Option<std::sync::Arc<crate::memory::LocalMemory>>,
+    memory: Option<std::sync::Arc<dyn crate::memory::Provider>>,
     personalization: crate::config::PersonalizationSnapshot,
 }
 enum RenderOutcome {
@@ -86,10 +84,10 @@ impl<M: LLMEngine> Orchestrator<M> {
         user: crate::conversation::IntentRecordRef,
         capture: crate::storage::Uuid,
     ) -> Result<()> {
-        anyhow::ensure!(
-            self.memory.is_none(),
-            "Selected prepared entry requires a reviewed combined subject-memory admission set"
-        );
+        if let Some(memory) = &self.memory {
+            let admission = self.workflow.selected_admission()?;
+            memory.require_selected_reader(admission.as_ref())?;
+        }
         let mut attempt =
             Attempt::prepare_selected(&self.ledger, &self.workflow, token, root, user, capture)?;
         self.workflow.begin_iteration()?;
@@ -113,17 +111,27 @@ impl<M: LLMEngine> Orchestrator<M> {
         self.trigger_enabled = enabled;
     }
 
-    /// Startup configuration only; the prepared request owns an immutable clone.
+    /// Startup preference only; each request retains an immutable snapshot.
     pub fn set_personalization(&mut self, snapshot: crate::config::PersonalizationSnapshot) {
         self.personalization = snapshot;
     }
 
-    /// Ordinary local context only. This cannot accept a selected provider.
+    /// Ordinary local context only.
     pub fn set_subject_memory(
         &mut self,
         memory: Option<std::sync::Arc<crate::memory::LocalMemory>>,
     ) {
-        self.memory = memory;
+        self.memory =
+            memory.map(|provider| provider as std::sync::Arc<dyn crate::memory::Provider>);
+    }
+
+    /// Set a provider for guarded selected publication. Admission still checks
+    /// its exact receiving Store and selection before any model work.
+    pub fn set_selected_subject_memory(
+        &mut self,
+        memory: std::sync::Arc<dyn crate::memory::Provider>,
+    ) {
+        self.memory = Some(memory);
     }
 
     pub fn invalidate_history(&mut self) {
@@ -472,10 +480,11 @@ impl<M: LLMEngine> Orchestrator<M> {
                 info!("Got verified Q&A");
 
                 attempt.interpret(&self.ledger, &result.question)?;
+                let mut memory_view = None;
                 if self.memory.is_some() || personalization.effective_text().is_some() {
-                    if let Err(error) =
-                        self.enrich_answer(attempt, &mut result, &verification, &personalization)
-                    {
+                    let enriched =
+                        self.enrich_answer(attempt, &mut result, &verification, &personalization);
+                    if let Err(error) = enriched {
                         log::warn!("Contextual answer was not completed");
                         self.workflow.report_failure(Failure::Provider)?;
                         let canceled = self.workflow.input_failed();
@@ -495,155 +504,203 @@ impl<M: LLMEngine> Orchestrator<M> {
                         )?;
                         return Err(error);
                     }
+                    memory_view = enriched?;
+                    info!("Got verified Q&A with optional subject memory");
                 }
-                attempt.check_selected()?;
-                attempt.generated(
-                    &self.ledger,
-                    Workflow::compose_qa(&result.question, &result.answer, result.selection_center),
-                )?;
-                if attempt.is_selected() {
-                    anyhow::bail!("Selected Generated draft acknowledged; qualified Pending/native output unavailable");
-                }
-                #[cfg(target_os = "linux")]
-                if attempt.resident_output() {
-                    let text = Workflow::compose_qa(
-                        &result.question,
-                        &result.answer,
-                        result.selection_center,
-                    );
-                    let conversation = attempt.user.conversation;
-                    let association = attempt.resident_answer.clone();
-                    let mut output_started = false;
-                    let rendered = self.workflow.render_resident_answer(
-                        &self.ledger,
-                        conversation,
-                        &text,
-                        association.as_ref(),
-                        &mut || {
-                            if !output_started {
-                                attempt.outcome(
-                                    &self.ledger,
-                                    true,
-                                    Outcome::ReconcileRequired,
-                                    AttemptReason::OutputPending,
-                                )?;
-                                output_started = true;
-                            }
-                            Ok(())
-                        },
-                    );
-                    let recorded = match &rendered {
-                        Ok(super::resident_output::ResidentOutputOutcome::Unavailable) => attempt
-                            .outcome(
-                                &self.ledger,
-                                true,
-                                Outcome::Failed,
-                                AttemptReason::NativeOutputUnavailable,
-                            ),
-                        Ok(super::resident_output::ResidentOutputOutcome::Unresolved) => attempt
-                            .outcome(
-                                &self.ledger,
-                                true,
-                                Outcome::ReconcileRequired,
-                                AttemptReason::DeviceUncertain,
-                            ),
-                        Ok(super::resident_output::ResidentOutputOutcome::SubmittedUnverified) => {
-                            attempt.outcome(
-                                &self.ledger,
-                                true,
-                                Outcome::ReconcileRequired,
-                                AttemptReason::SubmittedUnverified,
-                            )
-                        }
-                        Ok(super::resident_output::ResidentOutputOutcome::ReusedWithoutWrite) => {
-                            attempt.outcome(
-                                &self.ledger,
-                                true,
-                                Outcome::Failed,
-                                AttemptReason::NativeOutputUnavailable,
-                            )
-                        }
-                        Err(_)
-                            if !output_started
-                                && self.workflow.input_failed()
-                                && !self.workflow.runtime_failed() =>
-                        {
-                            attempt.outcome(
-                                &self.ledger,
-                                true,
-                                Outcome::Canceled,
-                                AttemptReason::Canceled,
-                            )
-                        }
-                        Err(_) => attempt.outcome(
-                            &self.ledger,
-                            true,
-                            Outcome::ReconcileRequired,
-                            AttemptReason::DeviceUncertain,
-                        ),
+                let memory = self.memory.clone();
+                if let (Some(memory), Some(view)) = (memory, memory_view.as_ref()) {
+                    let published = if attempt.is_selected() {
+                        self.publish_answer(attempt, &result, false, Some((memory.as_ref(), view)))
+                    } else {
+                        memory.with_current(view, &mut || {
+                            self.publish_answer(attempt, &result, !view.selected(), None)
+                        })
                     };
-                    if let Err(recording) = recorded {
-                        return Err(anyhow::anyhow!(
-                            "resident output {:?}; terminal recording failed: {recording:#}",
-                            rendered.as_ref().err()
-                        ));
+                    if let Err(error) = published {
+                        if attempt.assistant.is_none() {
+                            let canceled = self.workflow.input_failed();
+                            attempt.outcome(
+                                &self.ledger,
+                                false,
+                                if canceled {
+                                    Outcome::Canceled
+                                } else {
+                                    Outcome::Failed
+                                },
+                                if canceled {
+                                    AttemptReason::Canceled
+                                } else {
+                                    AttemptReason::ProviderFailure
+                                },
+                            )?;
+                        }
+                        return Err(error);
                     }
-                    rendered?;
-                    return Ok(());
-                }
-                if !attempt.legacy_output() {
-                    attempt.outcome(
-                        &self.ledger,
-                        true,
-                        Outcome::Failed,
-                        AttemptReason::NativeOutputUnavailable,
-                    )?;
-                    return Ok(());
-                }
-                // Persist uncertainty before the first navigation/output effect.
-                attempt.outcome(
-                    &self.ledger,
-                    true,
-                    Outcome::ReconcileRequired,
-                    AttemptReason::OutputPending,
-                )?;
-                let rendered = self.render_answer(&result);
-                let recorded = match &rendered {
-                    Ok(RenderOutcome::NoOutput(reason)) => {
-                        attempt.outcome(&self.ledger, true, Outcome::Failed, reason.clone())
-                    }
-                    Ok(RenderOutcome::SubmittedUnverified) => attempt.outcome(
-                        &self.ledger,
-                        true,
-                        Outcome::ReconcileRequired,
-                        AttemptReason::SubmittedUnverified,
-                    ),
-                    Err(_) => attempt.outcome(
-                        &self.ledger,
-                        true,
-                        Outcome::ReconcileRequired,
-                        AttemptReason::DeviceUncertain,
-                    ),
-                };
-                if let Err(recording) = recorded {
-                    return Err(anyhow::anyhow!(
-                        "output result {:?}; terminal recording failed: {recording:#}",
-                        rendered.as_ref().err()
-                    ));
-                }
-                if let Err(e) = rendered {
-                    error!("Error rendering answer: {}", e);
-                    if self.workflow.runtime_failed() {
-                        return Err(e);
-                    }
-                    // On error, retain the typed diagnostic without source feedback
-                    self.workflow.report_failure(Failure::Device)?;
-                    return Err(e);
+                } else {
+                    self.publish_answer(attempt, &result, true, None)?;
                 }
             }
         }
 
         info!("=== Iteration Complete ===");
+        Ok(())
+    }
+
+    fn publish_answer(
+        &mut self,
+        attempt: &mut Attempt,
+        result: &AnalysisResult,
+        allow_native: bool,
+        memory: Option<(&dyn crate::memory::Provider, &crate::memory::QueryResult)>,
+    ) -> Result<()> {
+        self.workflow.check_request_progress()?;
+        attempt.check_selected()?;
+        attempt.generated_with_memory(
+            &self.ledger,
+            Workflow::compose_qa(&result.question, &result.answer, result.selection_center),
+            memory,
+        )?;
+        if attempt.is_selected() {
+            anyhow::bail!("Selected Generated draft acknowledged; qualified Pending/native output unavailable");
+        }
+        if !allow_native {
+            attempt.outcome(
+                &self.ledger,
+                true,
+                Outcome::Failed,
+                AttemptReason::NativeOutputUnavailable,
+            )?;
+            return Ok(());
+        }
+        #[cfg(target_os = "linux")]
+        if attempt.resident_output() {
+            let text =
+                Workflow::compose_qa(&result.question, &result.answer, result.selection_center);
+            let conversation = attempt.user.conversation;
+            let association = attempt.resident_answer.clone();
+            let mut output_started = false;
+            let rendered = self.workflow.render_resident_answer(
+                &self.ledger,
+                conversation,
+                &text,
+                association.as_ref(),
+                &mut || {
+                    if !output_started {
+                        attempt.outcome(
+                            &self.ledger,
+                            true,
+                            Outcome::ReconcileRequired,
+                            AttemptReason::OutputPending,
+                        )?;
+                        output_started = true;
+                    }
+                    Ok(())
+                },
+            );
+            let recorded = match &rendered {
+                Ok(super::resident_output::ResidentOutputOutcome::Unavailable) => attempt.outcome(
+                    &self.ledger,
+                    true,
+                    Outcome::Failed,
+                    AttemptReason::NativeOutputUnavailable,
+                ),
+                Ok(super::resident_output::ResidentOutputOutcome::Unresolved) => attempt.outcome(
+                    &self.ledger,
+                    true,
+                    Outcome::ReconcileRequired,
+                    AttemptReason::DeviceUncertain,
+                ),
+                Ok(super::resident_output::ResidentOutputOutcome::SubmittedUnverified) => attempt
+                    .outcome(
+                        &self.ledger,
+                        true,
+                        Outcome::ReconcileRequired,
+                        AttemptReason::SubmittedUnverified,
+                    ),
+                Ok(super::resident_output::ResidentOutputOutcome::ReusedWithoutWrite) => attempt
+                    .outcome(
+                        &self.ledger,
+                        true,
+                        Outcome::Failed,
+                        AttemptReason::NativeOutputUnavailable,
+                    ),
+                Err(_)
+                    if !output_started
+                        && self.workflow.input_failed()
+                        && !self.workflow.runtime_failed() =>
+                {
+                    attempt.outcome(
+                        &self.ledger,
+                        true,
+                        Outcome::Canceled,
+                        AttemptReason::Canceled,
+                    )
+                }
+                Err(_) => attempt.outcome(
+                    &self.ledger,
+                    true,
+                    Outcome::ReconcileRequired,
+                    AttemptReason::DeviceUncertain,
+                ),
+            };
+            if let Err(recording) = recorded {
+                return Err(anyhow::anyhow!(
+                    "resident output {:?}; terminal recording failed: {recording:#}",
+                    rendered.as_ref().err()
+                ));
+            }
+            rendered?;
+            return Ok(());
+        }
+        if !attempt.legacy_output() {
+            attempt.outcome(
+                &self.ledger,
+                true,
+                Outcome::Failed,
+                AttemptReason::NativeOutputUnavailable,
+            )?;
+            return Ok(());
+        }
+        // Persist uncertainty before the first navigation/output effect.
+        attempt.outcome(
+            &self.ledger,
+            true,
+            Outcome::ReconcileRequired,
+            AttemptReason::OutputPending,
+        )?;
+        let rendered = self.render_answer(result);
+        let recorded = match &rendered {
+            Ok(RenderOutcome::NoOutput(reason)) => {
+                attempt.outcome(&self.ledger, true, Outcome::Failed, reason.clone())
+            }
+            Ok(RenderOutcome::SubmittedUnverified) => attempt.outcome(
+                &self.ledger,
+                true,
+                Outcome::ReconcileRequired,
+                AttemptReason::SubmittedUnverified,
+            ),
+            Err(_) => attempt.outcome(
+                &self.ledger,
+                true,
+                Outcome::ReconcileRequired,
+                AttemptReason::DeviceUncertain,
+            ),
+        };
+        if let Err(recording) = recorded {
+            return Err(anyhow::anyhow!(
+                "output result {:?}; terminal recording failed: {recording:#}",
+                rendered.as_ref().err()
+            ));
+        }
+        if let Err(e) = rendered {
+            error!("Error rendering answer: {}", e);
+            if self.workflow.runtime_failed() {
+                return Err(e);
+            }
+            // On error, retain the typed diagnostic without source feedback
+            self.workflow.report_failure(Failure::Device)?;
+            return Err(e);
+        }
         Ok(())
     }
 
@@ -754,68 +811,6 @@ impl<M: LLMEngine> Orchestrator<M> {
             selection_center,
             _screenshot_data: screenshot_png_data,
         })
-    }
-
-    fn enrich_answer(
-        &mut self,
-        attempt: &Attempt,
-        result: &mut AnalysisResult,
-        images: &[String],
-        preference: &crate::config::PersonalizationSnapshot,
-    ) -> Result<()> {
-        attempt.check_selected()?;
-        self.workflow.check_request_progress()?;
-        let retrieved = self
-            .memory
-            .as_ref()
-            .map(|memory| -> Result<_> {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)?
-                    .as_millis()
-                    .try_into()?;
-                // Ordinary historical capture has no verified document association.
-                memory
-                    .query(&crate::memory::Query::new(result.question.clone(), now))
-                    .map_err(|_| anyhow::anyhow!("subject memory retrieval failed"))
-            })
-            .transpose()?;
-        attempt.check_selected()?;
-        self.workflow.check_request_progress()?;
-        use crate::memory::Status;
-        if let Some(view) = &retrieved {
-            match view.status {
-                Status::Disabled | Status::CompleteEmpty
-                    if preference.effective_text().is_none() =>
-                {
-                    return Ok(())
-                }
-                Status::Unavailable => anyhow::bail!("subject memory retrieval unavailable"),
-                Status::Partial if view.context.facts.is_empty() => {
-                    anyhow::bail!("subject memory retrieval incomplete without usable facts")
-                }
-                _ => {}
-            }
-        }
-        let usable = retrieved.as_ref().filter(|view| {
-            matches!(view.status, Status::Complete | Status::Partial)
-                && !view.context.facts.is_empty()
-        });
-        let workflow = &mut self.workflow;
-        result.answer = crate::memory::context::answer_with_preference(
-            &mut self.llm,
-            &result.question,
-            images,
-            usable,
-            Some(preference),
-            &mut || {
-                attempt
-                    .check_selected()
-                    .and_then(|_| workflow.check_request_progress())
-            },
-        )?;
-        attempt.check_selected()?;
-        self.workflow.check_request_progress()?;
-        Ok(())
     }
 
     fn verify_question(
@@ -931,11 +926,92 @@ impl<M: LLMEngine> Orchestrator<M> {
         None
     }
 
+    fn enrich_answer(
+        &mut self,
+        attempt: &Attempt,
+        result: &mut AnalysisResult,
+        images: &[String],
+        preference: &crate::config::PersonalizationSnapshot,
+    ) -> Result<Option<crate::memory::QueryResult>> {
+        attempt.check_selected()?;
+        self.workflow.check_request_progress()?;
+        let retrieved = self
+            .memory
+            .as_ref()
+            .map(|memory| -> Result<_> {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_millis()
+                    .try_into()?;
+                // Selected ownership supplies historical data scope only, never
+                // native authority. Ordinary capture supplies no association.
+                let mut query = crate::memory::Query::new(result.question.clone(), now);
+                query.document = attempt.memory_document()?;
+                memory
+                    .query(&query)
+                    .map_err(|_| anyhow::anyhow!("subject memory retrieval failed"))
+            })
+            .transpose()?;
+        attempt.check_selected()?;
+        self.workflow.check_request_progress()?;
+        use crate::memory::Status;
+        if let Some(view) = &retrieved {
+            match view.status {
+                Status::Disabled | Status::CompleteEmpty
+                    if preference.effective_text().is_none() =>
+                {
+                    return Ok(retrieved)
+                }
+                Status::Unavailable => anyhow::bail!("subject memory retrieval unavailable"),
+                Status::Partial if view.context.facts.is_empty() => {
+                    anyhow::bail!("subject memory retrieval incomplete without usable facts")
+                }
+                _ => {}
+            }
+        }
+        let usable = retrieved.as_ref().filter(|view| {
+            matches!(view.status, Status::Complete | Status::Partial)
+                && !view.context.facts.is_empty()
+        });
+        let workflow = &mut self.workflow;
+        result.answer = if let Some(view) = usable.filter(|view| view.selected()) {
+            crate::memory::context::answer_with_selected_view(
+                &mut self.llm,
+                &result.question,
+                images,
+                view,
+                self.ledger.store(),
+                Some(preference),
+                &mut || {
+                    attempt
+                        .check_selected()
+                        .and_then(|_| workflow.check_request_progress())
+                },
+            )
+        } else {
+            crate::memory::context::answer_with_preference(
+                &mut self.llm,
+                &result.question,
+                images,
+                usable,
+                Some(preference),
+                &mut || {
+                    attempt
+                        .check_selected()
+                        .and_then(|_| workflow.check_request_progress())
+                },
+            )
+        }?;
+        attempt.check_selected()?;
+        self.workflow.check_request_progress()?;
+        Ok(retrieved)
+    }
+
     /// Render the answer on the next page
     ///
     /// Simplified flow:
     /// 1. Store original page screenshot for later comparison
-    /// 2. Navigate right to next page  
+    /// 2. Navigate right to next page
     /// 3. Compare to original to verify we actually moved
     /// 4. Check if page is valid (blank or existing QA page)
     /// 5. If not valid or didn't move â†’ verify the source and record a non-ink failure
@@ -1155,7 +1231,9 @@ mod tests {
             "SELECTION_CENTER: 384,512\nSELECTION_CENTER: 1,2",
             "OUTLINE_BOX: 1,2,3,4",
         ] {
-            let response = format!("QUESTION: G unc.?\nQUESTION_BOX: 130,35,200,50\n{center}\n---\nANSWER: About 14 ppm.");
+            let response = format!(
+                "QUESTION: G unc.?\nQUESTION_BOX: 130,35,200,50\n{center}\n---\nANSWER: About 14 ppm."
+            );
             assert!(
                 Orchestrator::<OpenAI>::parse_analysis_response(&response, vec![]).is_none(),
                 "{center}"
