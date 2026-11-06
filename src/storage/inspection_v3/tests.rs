@@ -418,6 +418,94 @@ mod linux_controls {
         drop(Store::open_existing(f.paths()).unwrap());
     }
     #[test]
+    fn consumed_inspection_unlocks_even_while_a_fork_inherits_its_descriptor() {
+        use std::{
+            io::Read,
+            os::{fd::AsRawFd, unix::net::UnixStream},
+        };
+        let f = Fixture::new();
+        drop(Store::open(f.paths()).unwrap());
+        let inspection = inspect_owned_data(&f.paths());
+        let probe = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(f.paths().data.join("store.lock"))
+            .unwrap();
+        assert!(matches!(
+            probe.try_lock(),
+            Err(fs::TryLockError::WouldBlock)
+        ));
+        let (parent, child) = UnixStream::pair().unwrap();
+        let parent_fd = parent.as_raw_fd();
+        let child_fd = child.as_raw_fd();
+        // The child uses only async-signal-safe syscalls before _exit: no Rust
+        // allocator, mutex, destructor or provider call after a multithreaded fork.
+        let pid = unsafe { nix::libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            unsafe {
+                nix::libc::close(parent_fd);
+                let mut byte = 1u8;
+                if nix::libc::write(child_fd, (&byte as *const u8).cast(), 1) != 1 {
+                    nix::libc::_exit(2);
+                }
+                loop {
+                    let n = nix::libc::read(child_fd, (&mut byte as *mut u8).cast(), 1);
+                    if n == 1 {
+                        nix::libc::_exit(0);
+                    }
+                    if n == 0 {
+                        nix::libc::_exit(3);
+                    }
+                    if *nix::libc::__errno_location() != nix::libc::EINTR {
+                        nix::libc::_exit(4);
+                    }
+                }
+            }
+        }
+        drop(child);
+        struct Child {
+            pid: nix::libc::pid_t,
+            stream: UnixStream,
+        }
+        impl Drop for Child {
+            fn drop(&mut self) {
+                let _ = self.stream.write_all(&[1]);
+                let mut status = 0;
+                loop {
+                    let result = unsafe { nix::libc::waitpid(self.pid, &mut status, 0) };
+                    if result == self.pid {
+                        break;
+                    }
+                    if result != -1
+                        || io::Error::last_os_error().raw_os_error() != Some(nix::libc::EINTR)
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+        let mut child = Child {
+            pid,
+            stream: parent,
+        };
+        child
+            .stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        child.stream.read_exact(&mut [0]).unwrap();
+        let mut bytes = vec![];
+        inspection.write_to(&mut bytes).unwrap();
+        let report: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(report["status"], "complete");
+        // The child is still blocked and holds inherited descriptors here.
+        // Closing parent copies alone would leave this distinct open blocked.
+        probe.try_lock().unwrap();
+        probe.unlock().unwrap();
+        drop(child);
+        drop(Store::open_existing(f.paths()).unwrap());
+    }
+    #[test]
     fn busy_and_changed_witness_never_become_complete() {
         let f = Fixture::new();
         let store = Store::open(f.paths()).unwrap();

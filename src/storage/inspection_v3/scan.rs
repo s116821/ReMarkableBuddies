@@ -769,6 +769,9 @@ pub(super) fn inspect(paths: &StorePaths) -> Inspection {
             return Inspection::failure(InspectionStatus::Unsupported, "lock-unsupported")
         }
     };
+    // Close-on-exec does not prevent transient fork inheritance. Reuse the
+    // Store's explicit unlock so custody ends when this report is consumed.
+    let lease = super::super::Lease(lease);
     scan.report.lease_identity_check = "device-inode";
     let identity = scan.json::<Identity>(&paths.data.join("identity.json"), MAX_RECORD);
     let current = scan.json::<Uuid>(&paths.data.join("CURRENT"), 128);
