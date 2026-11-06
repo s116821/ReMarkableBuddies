@@ -1,31 +1,49 @@
-name: Explicit package build inputs
+name: Observe hosted Git ownership configuration
 on:
   workflow_dispatch:
     inputs:
-      execute_build:
-        description: Run the separately reviewed build-input operation
+      observe_git:
+        description: Run the separately reviewed key-only configuration observation
         type: boolean
         default: false
-      release_tag:
-        description: Exact published stable Buddy tag selected for this operation
-        type: string
-        required: true
-      release_sha:
-        description: Exact selected full Buddy release commit
-        type: string
-        required: true
 permissions:
   contents: read
 jobs:
-  inputs:
-    if: ${{ inputs.execute_build == true }}
+  observation:
+    if: ${{ inputs.observe_git == true }}
     runs-on: ubuntu-latest
-    timeout-minutes: 55
-    env:
-      RELEASE_TAG: ${{ inputs.release_tag }}
-      RELEASE_SHA: ${{ inputs.release_sha }}
-      PRODUCER_SHA: ${{ github.sha }}
+    timeout-minutes: 10
     steps:
+      - name: Prepare key-only observer and inspect initial configuration
+        run: |
+          cat > "$RUNNER_TEMP/observe-safe-directory.sh" <<'SCRIPT'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          printf 'Observation phase: %s\n' "$1"
+          query() {
+            local label="$1"
+            shift
+            local result
+            printf 'Context: %s\n' "$label"
+            if timeout 10s git "$@" config --show-origin --show-scope --get-all safe.directory; then
+              result=0
+            else
+              result=$?
+            fi
+            case "$result" in
+              0) printf 'Query result: entries present\n' ;;
+              1) printf 'Query result: no entries\n' ;;
+              *) printf 'Query failed: exit %s\n' "$result" >&2; return "$result" ;;
+            esac
+          }
+          query outside-checkouts -C "$RUNNER_TEMP"
+          for context in producer release-source sdk-source; do
+            if test -d "$GITHUB_WORKSPACE/$context/.git"; then
+              query "$context" -C "$GITHUB_WORKSPACE/$context"
+            fi
+          done
+          SCRIPT
+          bash "$RUNNER_TEMP/observe-safe-directory.sh" initial
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
@@ -33,13 +51,19 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
           set-safe-directory: false
+      - name: Observe after producer checkout
+        run: bash "$RUNNER_TEMP/observe-safe-directory.sh" producer-checkout
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.release_tag }}
+          ref: v0.65.0
           path: release-source
           fetch-depth: 0
           persist-credentials: false
           set-safe-directory: false
+      - name: Observe after release checkout
+        run: |
+          test "$(git -C "$GITHUB_WORKSPACE/release-source" rev-parse HEAD)" = 4a75316e358a471a08ba28c0c9408d1c6eacff3f
+          bash "$RUNNER_TEMP/observe-safe-directory.sh" release-checkout
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: s116821/ReMarkableOpenSDK
@@ -48,43 +72,20 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
           set-safe-directory: false
-      - name: Require a published stable source release
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Observe after SDK checkout
         run: |
-          test "$(gh release view "$RELEASE_TAG" --repo s116821/ReMarkableBuddies --json isDraft,isPrerelease,tagName --jq '.isDraft == false and .isPrerelease == false and (.tagName | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))')" = true
+          test "$(git -C "$GITHUB_WORKSPACE/sdk-source" rev-parse HEAD)" = a0c6480be6785480c2e0da76a3c06697a18efae4
+          bash "$RUNNER_TEMP/observe-safe-directory.sh" sdk-checkout
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
         with:
           toolchain: stable
           targets: armv7-unknown-linux-gnueabihf,aarch64-unknown-linux-gnu
-      - name: Install maintained pinned Cross
+      - name: Observe after Rust setup and before Cross installation
+        run: bash "$RUNNER_TEMP/observe-safe-directory.sh" before-cross
+      - name: Install the same maintained pinned Cross tool
         run: cargo install cross --git https://github.com/cross-rs/cross --rev 8c1a8aa4b661711f4b7b6ac07c2e8929ce2f7d27 --locked
-      - name: Prepare the existing immutable build images
-        run: |
-          docker pull ghcr.io/cross-rs/armv7-unknown-linux-gnueabihf@sha256:1ab143450cd888657baa3563ad663203bc5887629e338ef77718ef515d56fb7a
-          docker pull ghcr.io/cross-rs/aarch64-unknown-linux-gnu@sha256:99294ae75048aa07d00bb4f1a18a017e0812ff25753768d21d5938bf7562b40a
-      - name: Produce strict build inputs without APK or signing
-        run: |
-          python producer/cicd/release/apk_build_inputs.py \
-            --source "$GITHUB_WORKSPACE/release-source" --source-sha "$RELEASE_SHA" --tag "$RELEASE_TAG" \
-            --sdk-source "$GITHUB_WORKSPACE/sdk-source" --producer-sha "$PRODUCER_SHA" \
-            --target-dir "$RUNNER_TEMP/package-build-cache" --output "$RUNNER_TEMP/package-build-inputs"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: strict-build-inputs-${{ inputs.release_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/package-build-inputs/
-          if-no-files-found: error
-          retention-days: 14
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: ${{ failure() }}
-        with:
-          name: build-input-failure-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ runner.temp }}/package-build-cache/diagnostics/**/*.json
-            ${{ runner.temp }}/package-build-cache/armv7/compiler-diagnostics/*.bin
-            ${{ runner.temp }}/package-build-cache/aarch64/compiler-diagnostics/*.bin
-          if-no-files-found: ignore
-          retention-days: 14
+      - name: Observe after Cross installation
+        run: bash "$RUNNER_TEMP/observe-safe-directory.sh" after-cross
     defaults:
       run:
         shell: bash
