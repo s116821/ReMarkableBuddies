@@ -1049,12 +1049,25 @@ impl DevelopmentTargetLease<'_> {
 mod tests {
     use super::*;
     use crate::workflow::resident_runtime::{tests::Fixture, ResidentRuntime};
+    use crate::workflow::{
+        resident_client,
+        resident_output::{
+            PageUse, ResidentOutputBackend, ResidentOutputOutcome, ResidentRenderer,
+        },
+    };
     use crate::{
-        conversation::{Ledger, Outcome, Record},
-        storage::{Namespace, StorePaths},
+        conversation::{HistoricalPageAssociation, Ledger, Outcome, Record},
+        storage::{Namespace, StorePaths, Uuid as ConversationId},
         workflow::{orchestrator::Orchestrator, Workflow},
     };
     use nix::libc;
+    use remarkable_open_sdk::{
+        native_adapter::{
+            Command, ConnectionIdentity, Frame, HistoricalCapture, InsertAfter, Message,
+            ReaderFacts,
+        },
+        navigation::LogicalDirection,
+    };
     use std::{
         cell::{Cell, RefCell},
         os::unix::net::UnixDatagram,
@@ -1360,6 +1373,158 @@ mod tests {
         drop(store);
         std::fs::remove_dir_all(base).unwrap();
     }
+    #[derive(Default)]
+    struct RecognitionProbe {
+        conversation: Option<ConversationId>,
+    }
+
+    impl ResidentOutputBackend for RecognitionProbe {
+        fn admit(
+            &mut self,
+            _: &RuntimeIdentity,
+            _: Option<&HistoricalPageAssociation>,
+            _: Instant,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn classify(
+            &mut self,
+            _: &Ledger,
+            conversation: ConversationId,
+            _: &RuntimeIdentity,
+            _: &ReaderFacts,
+            _: &HistoricalCapture,
+            _: bool,
+            _: Instant,
+            _: &mut dyn FnMut() -> Result<()>,
+        ) -> Result<PageUse> {
+            assert!(self.conversation.replace(conversation).is_none());
+            Ok(PageUse::Unresolved)
+        }
+
+        fn adopt(
+            &mut self,
+            _: &Ledger,
+            _: ConversationId,
+            _: &RuntimeIdentity,
+            _: &ReaderFacts,
+            _: Instant,
+        ) -> Result<bool> {
+            panic!("unexpected adoption");
+        }
+
+        fn navigate(
+            &mut self,
+            _: RequestInput,
+            _: LogicalDirection,
+            _: &RuntimeIdentity,
+            _: Instant,
+            _: &mut dyn FnMut() -> Result<()>,
+        ) -> Result<RequestInput> {
+            panic!("unexpected navigation");
+        }
+
+        fn renderer(
+            &mut self,
+            _: &Ledger,
+            _: ConversationId,
+            _: &RuntimeIdentity,
+            _: &ReaderFacts,
+            _: bool,
+            _: Instant,
+            _: &mut dyn FnMut() -> Result<()>,
+        ) -> Result<Box<dyn ResidentRenderer + '_>> {
+            panic!("unexpected renderer request");
+        }
+    }
+
+    #[test]
+    fn resident_output_fences_a_different_conversation_after_indeterminate_insertion() {
+        // R103 observed an indeterminate low-space insertion with unchanged saved
+        // page order. A later conversation is a synthetic follow-on to that run.
+        // https://linear.app/magentumdragon/issue/REM-25#comment-ac409995-98cd-4235-887b-afb43cf85904
+        for seed_insertion in [false, true] {
+            let (mut workflow, store, base, events, _notify) =
+                workflow("reconnect-source-handoff", vec![], Duration::ZERO);
+            let owner = workflow.resident_source.as_mut().unwrap();
+            let health = workflow.service_health.as_mut().unwrap();
+            owner.begin(released(Instant::now()), health).unwrap();
+            owner.acquire(health).unwrap();
+            owner.deliver(health).unwrap();
+
+            let ledger = Ledger::new(store.clone());
+            let prior = ConversationId::new_v4();
+            let next = ConversationId::new_v4();
+            for conversation in [prior, next] {
+                ledger
+                    .create(conversation, ConversationId::new_v4(), 1)
+                    .unwrap();
+            }
+            let journal = store.paths.data.join("native-insertion-attempts-v1.json");
+            let original_journal = if seed_insertion {
+                let source = owner.captured_source.clone().unwrap();
+                let target = operation().0;
+                assert!(!source.order().contains(&target));
+                let request = Frame {
+                    scope: ConnectionIdentity {
+                        runtime: owner.session.as_ref().unwrap().identity(),
+                        connection: operation().0,
+                        server_nonce: Some(operation().0),
+                    },
+                    sequence: 1,
+                    operation: operation(),
+                    message: Message::Request(Command::InsertAfter(InsertAfter { source, target })),
+                };
+                resident_client::seed_indeterminate_insertion(&store, prior, &request).unwrap();
+                let attempts = resident_client::attempts(&store).unwrap();
+                assert_eq!(attempts.len(), 1);
+                assert_eq!(attempts[0].conversation, prior);
+                assert_eq!(attempts[0].reply, Some(Reply::Indeterminate));
+                Some(std::fs::read(&journal).unwrap())
+            } else {
+                assert!(!journal.exists());
+                None
+            };
+            let conversation_state = || {
+                [prior, next]
+                    .map(|id| serde_json::to_value(ledger.inspect(id, false).unwrap()).unwrap())
+            };
+            let original_state = conversation_state();
+            events.borrow_mut().clear();
+            let mut backend = RecognitionProbe::default();
+
+            let outcome = owner
+                .render_answer(
+                    health,
+                    &mut backend,
+                    &ledger,
+                    next,
+                    "answer for the new conversation",
+                    None,
+                    &mut || panic!("unexpected effect callback"),
+                )
+                .unwrap();
+
+            assert!(matches!(outcome, ResidentOutputOutcome::Unresolved));
+            if let Some(bytes) = original_journal {
+                assert_eq!(&*events.borrow(), &["observe"]);
+                assert_eq!(backend.conversation, None);
+                assert_eq!(std::fs::read(journal).unwrap(), bytes);
+            } else {
+                assert_eq!(&*events.borrow(), &["observe", "capture"]);
+                assert_eq!(backend.conversation, Some(next));
+                assert!(!journal.exists());
+            }
+            assert_eq!(conversation_state(), original_state);
+
+            drop(workflow);
+            drop(ledger);
+            drop(store);
+            std::fs::remove_dir_all(base).unwrap();
+        }
+    }
+
     #[test]
     fn resident_selection_refusal_leaves_no_native_insertion_attempt() {
         use crate::conversation::AttemptReason;
