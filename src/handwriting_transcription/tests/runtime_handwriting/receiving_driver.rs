@@ -1,4 +1,5 @@
-//! Synthetic-provider mechanics only. No live engine, CLI or evaluator truth input.
+//! Bounded receiving comparison using actual Writer and explicit confirmation.
+mod live;
 use super::*;
 
 struct Receipt {
@@ -9,13 +10,13 @@ struct Receipt {
 
 fn receive(
     store: &Arc<Store>,
-    local: &Local,
+    dispatch: &mut Dispatch<'_>,
     bytes: &[u8],
-    engine: &mut Calls,
+    engine: &mut impl LLMEngine,
+    evidence: &mut impl FnMut(Value) -> anyhow::Result<()>,
 ) -> anyhow::Result<(Ledger, RequestScope, ImageRef)> {
     let (ledger, scope, image) =
         retained_source_fixture(store.clone(), Mode::Writer, bytes.to_vec());
-    let mut dispatch = Dispatch::local(&local.config, &ledger)?;
     let report = dispatch.writer_source_image(
         &ledger,
         engine,
@@ -23,36 +24,65 @@ fn receive(
             image: image.clone(),
             request: "Write a note".into(),
             guidance: None,
-            model_profile: "fixture-model".into(),
+            model_profile: live::MODEL.into(),
         },
         &scope,
         &mut || Ok(scope.source.clone()),
     );
-    report
-        .result
-        .as_ref()
-        .map_err(|_| anyhow::anyhow!("receiving refused"))?;
-    report.write_to(&mut Vec::new())?;
+    let mut report_bytes = Vec::new();
+    report.write_to(&mut report_bytes)?;
+    let succeeded = report.result.is_ok();
     drop(report);
-    drop(dispatch);
+    let normalized: Vec<_> = ledger
+        .inspect(scope.conversation, false)?
+        .into_iter()
+        .filter_map(|record| match record {
+            Record::NormalizedText(value) => Some(value),
+            _ => None,
+        })
+        .collect();
+    evidence(
+        json!({"operation":scope.operation,"source":image.source,"image_sha256":digest(bytes),
+        "report":serde_json::from_slice::<Value>(&report_bytes)?,"normalized":normalized}),
+    )?;
+    anyhow::ensure!(succeeded, "receiving refused");
     Ok((ledger, scope, image))
 }
 
 fn compare(seed: &[u8], targets: &[Vec<u8>], engine: &mut Calls) -> anyhow::Result<Receipt> {
+    let mut local = Local::ready_notebook(true);
+    enable(&mut local);
+    compare_gated(
+        &local.config,
+        seed,
+        targets,
+        engine,
+        |_| Ok("CONTROLLED_SEED_READING".into()),
+        |_| Ok(()),
+    )
+}
+
+fn compare_gated(
+    config: &Config,
+    seed: &[u8],
+    targets: &[Vec<u8>],
+    engine: &mut impl LLMEngine,
+    review: impl FnOnce(Value) -> anyhow::Result<String>,
+    mut evidence: impl FnMut(Value) -> anyhow::Result<()>,
+) -> anyhow::Result<Receipt> {
     anyhow::ensure!((1..=3).contains(&targets.len()), "target count");
     let mut hashes = BTreeSet::new();
     for bytes in std::iter::once(seed).chain(targets.iter().map(Vec::as_slice)) {
         image::load_from_memory_with_format(bytes, image::ImageFormat::Png)?;
         anyhow::ensure!(hashes.insert(digest(bytes)), "repeated source bytes");
     }
-    let mut local = Local::ready_notebook(true);
-    enable(&mut local);
-    let store = Arc::new(Store::open(local.config.paths.clone())?);
-    // Same Store, enabled empty profile. Every operation/source is freshly bound.
+    let store = Arc::new(Store::open(config.paths.clone())?);
+    let owner = Ledger::new(store.clone());
+    let mut dispatch = Dispatch::local(config, &owner)?;
     for target in targets {
-        receive(&store, &local, target, engine)?;
+        receive(&store, &mut dispatch, target, engine, &mut evidence)?;
     }
-    let (ledger, scope, image) = receive(&store, &local, seed, engine)?;
+    let (ledger, scope, image) = receive(&store, &mut dispatch, seed, engine, &mut evidence)?;
     let normalized = ledger
         .inspect(scope.conversation, false)?
         .into_iter()
@@ -76,35 +106,50 @@ fn compare(seed: &[u8], targets: &[Vec<u8>], engine: &mut Calls) -> anyhow::Resu
         conversation: scope.conversation,
         source: scope.source.clone(),
     };
-    let mut dispatch = Dispatch::local(&local.config, &ledger)?;
+    let reviewed = review(json!({
+        "seed_operation":scope.operation, "confirmation_operation":confirmation_scope.operation,
+        "conversation":scope.conversation, "root_heads":confirmation_scope.root.0,
+        "source":image.source,"source_revision":image.revision,"turn":image.turn,
+        "turn_revision":image.turn_revision,"page":image.page,"image_sha256":digest(seed),
+        "normalized":normalized,"normalized_revision":revision
+    }))?;
     let prepared = dispatch.prepare_handwriting_confirmation(
         &ledger,
         &ConfirmIntent {
             image: image.clone(),
-            corrected_text: "CONTROLLED_SEED_READING".into(),
+            corrected_text: reviewed,
             normalized_source: Some((normalized.id, revision)),
         },
         &confirmation_scope,
         &mut || Ok(scope.source.clone()),
     )?;
+    let frozen: Value = serde_json::from_slice(prepared.frozen_input())?;
+    evidence(json!({"confirmation_prepared":{
+        "sha256":digest(prepared.frozen_input()),"operation":frozen["operation"],
+        "confirmed_ms":frozen["confirmed_ms"],"expected_heads":frozen["expected_heads"]
+    }}))?;
     let confirmed = prepared.execute(&ledger, &mut || Ok(scope.source.clone()))?;
+    let mut receipt = Vec::new();
+    confirmed.write_to(&mut receipt)?;
+    evidence(
+        json!({"confirmation":serde_json::from_slice::<Value>(&receipt)?,
+        "committed":confirmed.report.status == handwriting::Status::Complete}),
+    )?;
     anyhow::ensure!(
         confirmed.report.status == handwriting::Status::Complete,
         "confirmation refused"
     );
     let value = confirmed.report.facts[0].value.as_ref().unwrap();
-    assert_eq!(value.original_text, "café x²");
+
     assert_eq!(
         value.provenance.source,
         Some([scope.conversation, image.turn, image.source])
     );
     let confirmation = confirmed.report.facts[0].record;
     let confirmed_revision = confirmed.report.facts[0].revision;
-    confirmed.write_to(&mut Vec::new())?;
     drop(confirmed);
-    drop(dispatch);
     for target in targets {
-        receive(&store, &local, target, engine)?;
+        receive(&store, &mut dispatch, target, engine, &mut evidence)?;
     }
     assert_eq!(
         store
@@ -127,6 +172,29 @@ fn sample(size: u32) -> Vec<u8> {
         .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
         .unwrap();
     bytes
+}
+
+#[test]
+fn review_refusal_stops_after_seed_and_never_starts_context() {
+    let mut local = Local::ready_notebook(true);
+    enable(&mut local);
+    let mut engine = engine(7);
+    let mut observed = false;
+    let result = compare_gated(
+        &local.config,
+        &sample(2),
+        &[sample(3), sample(4), sample(5)],
+        &mut engine,
+        |gate| {
+            observed = true;
+            assert!(gate["normalized"].is_object());
+            assert!(gate["source_revision"].is_string());
+            anyhow::bail!("review refused")
+        },
+        |_| Ok(()),
+    );
+    assert!(result.is_err() && observed);
+    assert_eq!(engine.calls.len(), 8);
 }
 fn engine(operations: usize) -> Calls {
     Calls {

@@ -260,6 +260,10 @@ pub(crate) struct ConfirmationReport {
     frozen_input: Vec<u8>,
 }
 impl PreparedConfirmation {
+    #[cfg(test)]
+    pub(crate) fn frozen_input(&self) -> &[u8] {
+        &self.input
+    }
     pub(crate) fn execute(
         self,
         ledger: &Ledger,
