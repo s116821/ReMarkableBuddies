@@ -1805,4 +1805,46 @@ fn mixed_abstention_context_uses_frozen_identity_and_descriptors() {
         expected["profile_json"]
     );
     assert_eq!(result.document.extractor_revision, expected["extractor"]);
+    for (name, policy, instruction_index) in [
+        ("partial", TranscriptionPolicy::Partial, 2),
+        ("partial-math", TranscriptionPolicy::PartialMath, 3),
+        ("structured-math", TranscriptionPolicy::StructuredMath, 2),
+    ] {
+        engine.reply = json!({"pages":[{"page":7,"status":"partial",
+            "spans":[{"kind":"known","text":"A "},{"kind":"uncertain"},{"kind":"known","text":" B"}]}]})
+            .to_string();
+        let (outcome, called) = notebook::normalize_admitted(
+            Uuid::new_v4(),
+            &target,
+            "fixture",
+            Some(&context),
+            policy,
+            &mut engine,
+            &mut |_| Ok(()),
+        );
+        assert!(called);
+        let Normalized::Partial(result) = outcome.unwrap() else {
+            panic!("expected partial result for {name}");
+        };
+        assert_eq!(
+            engine.captured[instruction_index]["text"],
+            vectors["instruction_part"]
+        );
+        assert_eq!(
+            engine.captured[instruction_index + 1]["text"],
+            vectors["notebook_descriptor_parts"][0]
+        );
+        assert_eq!(
+            engine.captured[instruction_index + 3]["text"],
+            vectors["notebook_descriptor_parts"][1]
+        );
+        assert_eq!(
+            serde_json::to_string(&result.profile).unwrap(),
+            vectors["profiles"][name]["profile_json"]
+        );
+        assert_eq!(
+            result.extractor_revision,
+            vectors["profiles"][name]["extractor"]
+        );
+    }
 }
