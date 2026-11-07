@@ -497,4 +497,128 @@ mod tests {
         });
         assert!(journal.validate().is_err());
     }
+
+    #[cfg(unix)]
+    mod unix {
+        use super::*;
+        use std::{
+            fs,
+            os::unix::fs::{symlink, DirBuilderExt, PermissionsExt},
+        };
+
+        struct Scratch(PathBuf);
+
+        impl Scratch {
+            fn new() -> Self {
+                let root = std::env::temp_dir()
+                    .canonicalize()
+                    .unwrap()
+                    .join(format!("buddy-drive-ledger-{}", Uuid::new_v4()));
+                fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+                Self(root)
+            }
+        }
+
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                for name in [
+                    "qualification.lock",
+                    "frozen.json",
+                    "journal.json",
+                    "browser.json",
+                    "synthetic.json",
+                ] {
+                    let _ = fs::remove_file(self.0.join(name));
+                }
+                let _ = fs::remove_dir(&self.0);
+            }
+        }
+
+        #[test]
+        fn private_directory_excludes_a_second_owner_until_release() {
+            let scratch = Scratch::new();
+            fs::set_permissions(&scratch.0, fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(Directory::open(&scratch.0).is_err());
+            assert!(!scratch.0.join("qualification.lock").exists());
+
+            fs::set_permissions(&scratch.0, fs::Permissions::from_mode(0o700)).unwrap();
+            let owner = Directory::open(&scratch.0).unwrap();
+            let second = Directory::open(&scratch.0).err().unwrap();
+            assert!(matches!(
+                second.downcast_ref::<fs::TryLockError>(),
+                Some(fs::TryLockError::WouldBlock)
+            ));
+            drop(owner);
+            assert!(Directory::open(&scratch.0).is_ok());
+        }
+
+        #[test]
+        fn frozen_ledger_reopens_with_original_hashes_and_refuses_a_consumed_run() {
+            let scratch = Scratch::new();
+            let owner = Directory::open(&scratch.0).unwrap();
+            let frozen = Frozen {
+                plan: Plan {
+                    version: 1,
+                    run: Uuid::from_u128(1),
+                    group: Uuid::from_u128(2),
+                    buddy_revision: "1".repeat(40),
+                    docs_revision: "2".repeat(40),
+                    expires_unix: 0,
+                    request_seconds: 10,
+                    rendezvous_millis: 100,
+                    grants: std::array::from_fn(|_| Grant {
+                        binding_sha256: "3".repeat(64),
+                        stimulate_refresh: false,
+                    }),
+                },
+                ids: (0..IDS).map(|index| format!("synthetic-{index}")).collect(),
+                allocator_refreshed: false,
+            };
+            let mut journal = Journal::default();
+            journal.admit_run().unwrap();
+            journal.started = true;
+            journal.add(0, Action::Original, 100).unwrap();
+            let frozen_bytes = serde_json::to_vec(&frozen).unwrap();
+            let journal_bytes = serde_json::to_vec(&journal).unwrap();
+            owner.save("frozen.json", &frozen).unwrap();
+            owner.save("journal.json", &journal).unwrap();
+            drop(owner);
+
+            let reopened = Directory::open(&scratch.0).unwrap();
+            let (saved_frozen, frozen_sha) = reopened.frozen().unwrap();
+            let (saved_journal, journal_sha) = reopened.journal().unwrap();
+            assert_eq!(frozen_sha, digest(&frozen_bytes));
+            assert_eq!(journal_sha, digest(&journal_bytes));
+            assert_eq!(saved_frozen.ids, frozen.ids);
+            assert_eq!(saved_journal.sends.len(), 1);
+            assert!(!saved_journal.sends[0].returned);
+            assert!(saved_journal.admit_run().is_err());
+            assert_eq!(reopened.journal().unwrap().1, journal_sha);
+        }
+
+        #[test]
+        fn grant_path_requires_a_private_dedicated_regular_file() {
+            let scratch = Scratch::new();
+            let owner = Directory::open(&scratch.0).unwrap();
+            let target = scratch.0.join("synthetic.json");
+            let grant = scratch.0.join("browser.json");
+            owner
+                .save("synthetic.json", &"synthetic test bytes")
+                .unwrap();
+
+            symlink(&target, &grant).unwrap();
+            assert!(owner.grant(0).is_err());
+            fs::remove_file(&grant).unwrap();
+
+            fs::hard_link(&target, &grant).unwrap();
+            assert!(owner.grant(0).is_err());
+            fs::remove_file(&grant).unwrap();
+
+            fs::rename(&target, &grant).unwrap();
+            fs::set_permissions(&grant, fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(owner.grant(0).is_err());
+            fs::set_permissions(&grant, fs::Permissions::from_mode(0o600)).unwrap();
+            assert_eq!(owner.grant(0).unwrap(), grant);
+        }
+    }
 }

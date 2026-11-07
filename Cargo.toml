@@ -56,6 +56,7 @@ installed-resident-output = ["development-resident-bootstrap", "development-inpu
 name = "drive_slot_qualification"
 path = "docs/examples/drive_slot_qualification.rs"
 required-features = ["drive-slot-qualification"]
+test = true
 
 [[example]]
 name = "resident_bootstrap_control"
