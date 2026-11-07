@@ -896,3 +896,5 @@ fn constructor_reload_allowance_exhaustion_precedes_the_first_provider_observati
     );
     assert_eq!(posts(&wire), 0);
 }
+
+mod consumers;

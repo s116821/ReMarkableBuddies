@@ -36,6 +36,76 @@ pub fn run<E: LLMEngine>(
     memory: Option<&dyn crate::memory::Provider>,
     canceled: &mut dyn FnMut() -> bool,
 ) -> SelectedReport {
+    run_inner(
+        writer,
+        selection,
+        engine,
+        request,
+        Preferences {
+            personalization,
+            shared: None,
+        },
+        memory,
+        canceled,
+    )
+}
+pub(crate) fn run_with_preferences<E: LLMEngine>(
+    writer: &SelectedAdmission,
+    selection: &Selection,
+    engine: &mut E,
+    request: &Request,
+    preferences: crate::storage::sync::selected::RequestPreferences,
+    memory: Option<&dyn crate::memory::Provider>,
+    canceled: &mut dyn FnMut() -> bool,
+) -> SelectedReport {
+    if !engine
+        .guarded_timeout()
+        .is_some_and(|timeout| !timeout.is_zero() && timeout <= crate::llm::openai::DEFAULT_TIMEOUT)
+    {
+        return result(Report::refused(request, Failure::Unsupported));
+    }
+    if preferences.require_writer(writer).is_err() {
+        return result(Report::refused(request, Failure::Unsupported));
+    }
+    if preferences.config().memory.enabled != memory.is_some() {
+        return result(Report::refused(request, Failure::Unsupported));
+    }
+    let Ok(personalization) = preferences.config().personalization_snapshot() else {
+        return result(Report::refused(request, Failure::Storage));
+    };
+    run_inner(
+        writer,
+        selection,
+        engine,
+        request,
+        Preferences {
+            personalization: &personalization,
+            shared: Some(&preferences),
+        },
+        memory,
+        canceled,
+    )
+}
+struct Preferences<'a> {
+    personalization: &'a PersonalizationSnapshot,
+    shared: Option<&'a crate::storage::sync::selected::RequestPreferences>,
+}
+fn run_inner<E: LLMEngine>(
+    writer: &SelectedAdmission,
+    selection: &Selection,
+    engine: &mut E,
+    request: &Request,
+    preferences: Preferences<'_>,
+    memory: Option<&dyn crate::memory::Provider>,
+    canceled: &mut dyn FnMut() -> bool,
+) -> SelectedReport {
+    let personalization = preferences.personalization;
+    if preferences
+        .shared
+        .is_some_and(|p| !p.config().admits_writer(false))
+    {
+        return result(Report::refused(request, Failure::Unsupported));
+    }
     if let Err(failure) = request.preflight() {
         return result(Report::refused(request, failure));
     }
@@ -207,6 +277,9 @@ pub fn run<E: LLMEngine>(
                 was_canceled = true;
                 anyhow::bail!("selected Writer canceled");
             }
+            if let Some(preferences) = preferences.shared {
+                preferences.check_progress()?;
+            }
             writer.writer_input(&prepared).map(|_| ())
         };
         progress()?;
@@ -223,7 +296,15 @@ pub fn run<E: LLMEngine>(
         if let (Some(provider), Some(view)) = (memory, memory_view.as_ref()) {
             provider.check_selected_writer(view, writer)?;
         }
-        let output = content.0.execute_with_progress(&mut progress);
+        let output = if let Some(preferences) = preferences.shared {
+            content
+                .0
+                .execute_with_handoff(&mut progress, &mut |submit| {
+                    preferences.handoff(writer, &prepared, memory, memory_view.as_ref(), submit)
+                })
+        } else {
+            content.0.execute_with_progress(&mut progress)
+        };
         progress()?;
         output
     })();
@@ -256,7 +337,9 @@ pub fn run<E: LLMEngine>(
         text: body,
         updated_ms: now(),
     };
-    let publication = if outcome == Outcome::Generated {
+    let publication = if let Some(preferences) = preferences.shared {
+        preferences.finish(writer, finish, memory, memory_view.as_ref())
+    } else if outcome == Outcome::Generated {
         if let (Some(provider), Some(view)) = (memory, memory_view.as_ref()) {
             provider.publish_selected_writer(view, writer, finish)
         } else {

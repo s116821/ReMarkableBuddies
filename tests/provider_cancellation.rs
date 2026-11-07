@@ -67,6 +67,13 @@ fn request(stream: &mut TcpStream) -> serde_json::Value {
 }
 #[test]
 fn canceled_client_returns_before_withheld_provider_reply() {
+    canceled_request(false);
+}
+#[test]
+fn guarded_handoff_cancellation_joins_before_withheld_provider_reply() {
+    canceled_request(true);
+}
+fn canceled_request(guarded: bool) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap();
@@ -107,14 +114,19 @@ fn canceled_client_returns_before_withheld_provider_reply() {
         .with_timeout(Duration::from_secs(5));
         engine.add_text_content("owned synthetic request");
         let mut witnessed = false;
-        let result = engine.execute_with_progress(&mut || {
+        let mut progress = || {
             if !witnessed && accepted_rx.try_recv().is_ok() {
                 witnessed = true;
                 cancel_tx.send(Instant::now()).unwrap();
                 anyhow::bail!("owned cancellation witness");
             }
             Ok(())
-        });
+        };
+        let result = if guarded {
+            engine.execute_with_handoff(&mut progress, &mut |submit| submit())
+        } else {
+            engine.execute_with_progress(&mut progress)
+        };
         result_tx.send((Instant::now(), result)).unwrap();
     });
     let mut threads = OwnedThreads {
@@ -256,6 +268,29 @@ fn initial_rejection_sends_no_http_request() {
         .execute_with_progress(&mut || anyhow::bail!("owned predispatch refusal"))
         .unwrap_err();
     assert_eq!(error.to_string(), "owned predispatch refusal");
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+}
+#[test]
+fn owned_handoff_rejection_sends_no_http_request() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let mut engine = OpenAI::new(
+        "owned-fixture".into(),
+        "owned-not-a-credential".into(),
+        Some(format!("http://{}", listener.local_addr().unwrap())),
+    );
+    let mut handoffs = 0;
+    let error = engine
+        .execute_with_handoff(&mut || Ok(()), &mut |_submit| {
+            handoffs += 1;
+            anyhow::bail!("owned handoff refusal")
+        })
+        .unwrap_err();
+    assert_eq!(handoffs, 1);
+    assert_eq!(error.to_string(), "owned handoff refusal");
     assert_eq!(
         listener.accept().unwrap_err().kind(),
         std::io::ErrorKind::WouldBlock

@@ -1,0 +1,399 @@
+//! Private request snapshots; saved conditions are correspondence, never permits.
+use super::preference_command::{self as command, Capture, ReadContext, Readiness};
+use super::*;
+use crate::config::{portable::record, Config};
+use crate::storage::selection::{SelectedReadBudget, SelectionToken};
+use std::{path::PathBuf, sync::Mutex};
+
+pub(crate) struct RequestPreferences {
+    store: Arc<Store>,
+    admission: SelectedAdmission,
+    mode: mode::SyncModeLease,
+    binding: Binding,
+    capture: Capture,
+    guard: record::Condition,
+    selected: Option<SelectionToken>,
+    absence: Option<(String, String, String)>,
+    effective: Config,
+    admission_deadline: Instant,
+    deadline: Instant,
+    reads: RequestReads,
+    handoff_used: AtomicBool,
+    submitted: AtomicBool,
+}
+
+// One cumulative request allowance, irrevocably partitioned once. Progress
+// cannot spend the full-history verification reserved for handoff/completion.
+struct RequestReads {
+    admission: Mutex<SelectedReadBudget>,
+    handoff: Mutex<SelectedReadBudget>,
+    progress: Mutex<SelectedReadBudget>,
+    finish: Mutex<SelectedReadBudget>,
+    _reservations: SelectedReadBudget,
+}
+impl RequestReads {
+    fn new() -> Result<Self> {
+        let phase_bytes = 8 * (3 * MAX_METADATA as u64 + 64 * 1024);
+        let lifetime =
+            Duration::from_secs(60) + crate::llm::openai::DEFAULT_TIMEOUT + Duration::from_secs(60);
+        let cadence = crate::workflow::indicator::CADENCE;
+        // Entire original operation lifetime, including scheduling/completion
+        // overhead, plus the guarded adapter boundary checks.
+        let pulses = u64::try_from(lifetime.as_nanos().div_ceil(cadence.as_nanos()))? + 4;
+        let progress_bytes = pulses * (MAX_RECORD as u64 + MAX_METADATA as u64);
+        let mut reservations = SelectedReadBudget::new(
+            64 * 3,
+            MAX_ITEMS as u64 * 3 + pulses * 2,
+            phase_bytes * 3 + progress_bytes,
+            0,
+        );
+        let admission = reservations.reserve(64, MAX_ITEMS as u64, phase_bytes, 0)?;
+        let handoff = reservations.reserve(64, MAX_ITEMS as u64, phase_bytes, 0)?;
+        let finish = reservations.reserve(64, MAX_ITEMS as u64, phase_bytes, 0)?;
+        let progress = reservations.reserve(0, pulses * 2, progress_bytes, 0)?;
+        Ok(Self {
+            admission: Mutex::new(admission),
+            handoff: Mutex::new(handoff),
+            progress: Mutex::new(progress),
+            finish: Mutex::new(finish),
+            _reservations: reservations,
+        })
+    }
+}
+
+impl RequestPreferences {
+    /// Ordinary families retain their delivered local preference path. Only the
+    /// actual qualified format5 source can construct a shared request snapshot.
+    pub(crate) fn open(store: Arc<Store>, path: PathBuf) -> Result<Option<Self>> {
+        if store.ordinary_reader_family()? {
+            return Ok(None);
+        }
+        let current = store.sync_mode_snapshot()?;
+        let chosen = current
+            .mode
+            .as_ref()
+            .context("shared preference mode absent")?;
+        let binding = Binding::qualified(chosen)?;
+        Self::from_binding(store, path, binding, |store| {
+            GoogleDrive::open(store.paths.credentials.join("drive.json"))
+        })
+        .map(Some)
+    }
+    pub(super) fn from_binding(
+        store: Arc<Store>,
+        path: PathBuf,
+        binding: Binding,
+        transport: impl FnOnce(&Store) -> Result<GoogleDrive>,
+    ) -> Result<Self> {
+        let started = Instant::now();
+        let admission_deadline = started + Duration::from_secs(60);
+        // Reserve the existing bounded admission, supported model wait and a
+        // bounded completion window from the original request start. No reset.
+        let deadline =
+            admission_deadline + crate::llm::openai::DEFAULT_TIMEOUT + Duration::from_secs(60);
+        let budgets = RequestReads::new()?;
+        let mut reads = budgets
+            .admission
+            .lock()
+            .map_err(|_| anyhow::anyhow!("preference admission allowance unavailable"))?;
+        let capture = Capture::read(path, &mut reads)?;
+        let paths = &capture.local.base_config().paths;
+        ensure!(
+            paths.data == store.paths.data
+                && paths.cache == store.paths.cache
+                && paths.credentials == store.paths.credentials,
+            "preference Config Store differs"
+        );
+        let current = store.sync_mode_snapshot()?;
+        require_mode(&current, &binding)?;
+        let epoch = current.epoch.context("shared preference epoch absent")?;
+        let mode = store.sync_mode_lease(&current.token)?;
+        let scope = SelectionScope {
+            group: binding.group,
+            key_sha256: record::key_sha256(),
+            binding_sha256: binding.digest.clone(),
+        };
+        mode.require_shared_scope(&scope)?;
+        let admission = SelectedAdmission::new(store.clone(), scope)?;
+        let view =
+            SelectedAdmission::with_gates(&[&admission], |_| match command::read_current_locked(
+                &store,
+                &capture,
+                ReadContext {
+                    binding: binding.clone(),
+                    epoch,
+                    deadline: admission_deadline,
+                    expected: None,
+                },
+                &mut reads,
+                || transport(&store),
+            )? {
+                Readiness::Current(view) => Ok(*view),
+                _ => anyhow::bail!("shared preferences joining or unresolved"),
+            })?;
+        let effective = capture
+            .local
+            .effective(view.prior.as_ref().map(|p| p.artifact()))
+            .map_err(|_| anyhow::anyhow!("effective preferences unavailable"))?;
+        if effective.memory.enabled {
+            let selected = effective
+                .memory
+                .selection
+                .as_ref()
+                .context("shared Writer requires selected memory")?;
+            ensure!(
+                effective.memory.profile == Some(view.profile)
+                    && selected.profile == view.profile
+                    && selected.group == binding.group
+                    && selected.binding_sha256 == binding.digest,
+                "shared Writer memory root differs"
+            );
+        }
+        drop(reads);
+        Ok(Self {
+            store,
+            admission,
+            mode,
+            binding,
+            capture,
+            guard: view.guard,
+            selected: view.read.map(|r| r.snapshot.token),
+            absence: view.absence.map(|(base, slot)| (view.root_sha, base, slot)),
+            effective,
+            admission_deadline,
+            deadline,
+            reads: budgets,
+            handoff_used: AtomicBool::new(false),
+            submitted: AtomicBool::new(false),
+        })
+    }
+    pub(crate) fn require_writer(&self, writer: &SelectedAdmission) -> Result<()> {
+        ensure!(
+            writer.uses_store(&self.store)
+                && writer.scope().group == self.guard.group
+                && writer.scope().binding_sha256 == self.guard.binding_sha256,
+            "foreign Writer preference snapshot"
+        );
+        Ok(())
+    }
+    pub(crate) fn config(&self) -> &Config {
+        &self.effective
+    }
+    /// Called only inside the complete ordered consuming admission set.
+    fn verify_locked(&self, store: &Store, reads: &mut SelectedReadBudget) -> Result<()> {
+        ensure!(
+            std::ptr::eq(store, self.store.as_ref()),
+            "foreign preference Store"
+        );
+        ensure!(Instant::now() < self.deadline, "preference request expired");
+        let current = store.sync_mode_snapshot()?;
+        require_mode(&current, &self.binding)?;
+        ensure!(
+            current.token == self.mode.snapshot().token
+                && current.epoch == Some(self.guard.mode_epoch)
+                && catalog::current_generation(store)? == self.guard.store_generation,
+            "preference mode or generation changed"
+        );
+        self.mode.require_shared_scope(self.admission.scope())?;
+        self.capture.check(reads)?;
+        let current =
+            store.selected_snapshot_with_budget(self.admission.scope(), MAX_ITEMS, reads)?;
+        match (&self.selected, current) {
+            (Some(expected), Some(read)) => ensure!(
+                read.snapshot.token == *expected,
+                "preference selection changed"
+            ),
+            (None, None) => {
+                let (root, base, slot) = self
+                    .absence
+                    .as_ref()
+                    .context("qualified preference absence absent")?;
+                let cp = command::checkpoint(store, &self.binding, self.guard.mode_epoch, reads)?
+                    .context("preference root custody absent")?;
+                let view = catalog_view(&self.binding, &cp)?.context("preference root absent")?;
+                ensure!(
+                    !cp.catalog.is_empty()
+                        && view.root_sha == *root
+                        && view.base == *base
+                        && view.slot == *slot
+                        && !view.entries.contains_key(&record::key_sha256())
+                        && cp
+                            .catalog_pending
+                            .as_ref()
+                            .map(CatalogPending::key)
+                            .transpose()?
+                            .as_deref()
+                            != Some(record::key_sha256().as_str())
+                        && !cp.scopes.contains_key(&record::key_sha256())
+                        && !cp
+                            .retired_catalog
+                            .iter()
+                            .any(|p| p.key == record::key_sha256()),
+                    "qualified preference absence changed"
+                );
+            }
+            _ => anyhow::bail!("preference selection or absence changed"),
+        }
+        Ok(())
+    }
+    pub(crate) fn check_current(&self) -> Result<()> {
+        ensure!(
+            Instant::now() < self.admission_deadline,
+            "Writer admission window expired"
+        );
+        let mut reads = self
+            .reads
+            .admission
+            .lock()
+            .map_err(|_| anyhow::anyhow!("preference admission allowance unavailable"))?;
+        SelectedAdmission::with_gates(&[&self.admission], |store| {
+            self.verify_locked(store, &mut reads)
+        })
+    }
+    pub(crate) fn check_progress(&self) -> Result<()> {
+        ensure!(Instant::now() < self.deadline, "preference request expired");
+        let mut reads = self
+            .reads
+            .progress
+            .lock()
+            .map_err(|_| anyhow::anyhow!("preference progress allowance unavailable"))?;
+        SelectedAdmission::with_gates(&[&self.admission], |store| {
+            ensure!(
+                catalog::current_generation(store)? == self.guard.store_generation,
+                "preference generation changed"
+            );
+            reads.charge(0, 1, 0, 0)?;
+            self.capture.check(&mut reads)?;
+            ensure!(
+                store.selection_unchanged_for_progress(
+                    self.admission.scope(),
+                    self.selected.as_ref(),
+                    &mut reads
+                )?,
+                "preference progress selection changed"
+            );
+            Ok(())
+        })
+    }
+    pub(crate) fn handoff(
+        &self,
+        writer: &SelectedAdmission,
+        prepared: &crate::conversation::SelectedWriterPrepared,
+        memory: Option<&dyn crate::memory::Provider>,
+        view: Option<&crate::memory::QueryResult>,
+        submit: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        self.require_writer(writer)?;
+        ensure!(
+            !self.handoff_used.swap(true, Ordering::AcqRel),
+            "preference model handoff already consumed"
+        );
+        ensure!(
+            Instant::now() < self.admission_deadline,
+            "Writer admission window expired"
+        );
+        let mut reads = self
+            .reads
+            .handoff
+            .lock()
+            .map_err(|_| anyhow::anyhow!("preference handoff allowance unavailable"))?;
+        let mut verify = |store: &Store| {
+            self.verify_locked(store, &mut reads)?;
+            writer.writer_input_locked(store, prepared)?;
+            Ok(())
+        };
+        let mut submit_once = || {
+            ensure!(
+                !self.submitted.load(Ordering::Acquire),
+                "preference model already submitted"
+            );
+            submit()?;
+            self.submitted.store(true, Ordering::Release);
+            Ok(())
+        };
+        match (memory, view) {
+            (Some(memory), Some(view)) => memory.with_selected_writer_handoff(
+                view,
+                writer,
+                &[&self.admission],
+                &mut verify,
+                &mut submit_once,
+            ),
+            (None, None) => {
+                SelectedAdmission::with_ready_gate_set(&[writer, &self.admission], |store| {
+                    verify(store)?;
+                    submit_once()
+                })
+            }
+            _ => anyhow::bail!("selected Writer memory handoff absent"),
+        }
+    }
+    pub(crate) fn finish(
+        &self,
+        writer: &SelectedAdmission,
+        finish: crate::conversation::SelectedWriterFinish,
+        memory: Option<&dyn crate::memory::Provider>,
+        view: Option<&crate::memory::QueryResult>,
+    ) -> Result<crate::conversation::SelectedWriterPublication> {
+        self.require_writer(writer)?;
+        ensure!(
+            finish.outcome != crate::conversation::Outcome::Generated
+                || self.submitted.load(Ordering::Acquire),
+            "model result has no guarded submission"
+        );
+        let mut reads = self
+            .reads
+            .finish
+            .lock()
+            .map_err(|_| anyhow::anyhow!("preference completion allowance unavailable"))?;
+        if let (Some(memory), Some(view)) = (memory, view) {
+            memory.publish_selected_writer_joined(
+                view,
+                writer,
+                finish,
+                &[&self.admission],
+                &mut |store| self.verify_locked(store, &mut reads),
+            )
+        } else {
+            ensure!(
+                memory.is_none() || finish.outcome != crate::conversation::Outcome::Generated,
+                "selected Writer memory publication absent"
+            );
+            writer.finish_selected_writer_joined(finish, &[&self.admission], |store| {
+                self.verify_locked(store, &mut reads)
+            })
+        }
+    }
+}
+
+#[cfg(test)]
+mod request_budget_tests {
+    use super::*;
+    #[test]
+    fn progress_exhaustion_cannot_spend_or_replenish_completion_verification() {
+        let mut reads = RequestReads::new().unwrap();
+        let pulses = u64::try_from(
+            (Duration::from_secs(120) + crate::llm::openai::DEFAULT_TIMEOUT)
+                .as_nanos()
+                .div_ceil(crate::workflow::indicator::CADENCE.as_nanos()),
+        )
+        .unwrap()
+            + 4;
+        let mut progress = reads.progress.lock().unwrap();
+        progress.charge(0, pulses * 2, 0, 0).unwrap();
+        assert!(progress.charge(0, 1, 0, 0).is_err());
+        drop(progress);
+        reads
+            .finish
+            .lock()
+            .unwrap()
+            .charge(
+                64,
+                MAX_ITEMS as u64,
+                8 * (3 * MAX_METADATA as u64 + 64 * 1024),
+                0,
+            )
+            .unwrap();
+        assert!(reads._reservations.reserve(0, 1, 0, 0).is_err());
+    }
+}

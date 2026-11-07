@@ -291,7 +291,7 @@ impl SelectedAdmission {
     ) -> Result<T> {
         Self::with_ready_gate_set(&[self], operation)
     }
-    pub(super) fn with_ready_gate_set<T>(
+    pub(crate) fn with_ready_gate_set<T>(
         admissions: &[&Self],
         operation: impl FnOnce(&Store) -> Result<T>,
     ) -> Result<T> {

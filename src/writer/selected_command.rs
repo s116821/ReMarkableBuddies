@@ -350,11 +350,8 @@ pub fn run(
         None
     };
     let result = (|| -> Result<Report> {
-        let config = Config::load(config_path)?;
-        ensure!(
-            config.admits_writer(false) && !config.sync.enabled,
-            "Writer configuration unsupported"
-        );
+        let mut config = Config::load(config_path.clone())?;
+        ensure!(!config.sync.enabled, "Writer configuration unsupported");
         crate::memory::maintenance::preflight(&config, false)
             .map_err(|_| anyhow::anyhow!("Writer Store unavailable"))?;
         let store = Arc::new(Store::open(config.paths.clone())?);
@@ -396,6 +393,19 @@ pub fn run(
             report.mode = Some(mode);
             return Ok(report);
         }
+        let preferences = crate::storage::sync::selected::RequestPreferences::open(
+            store.clone(),
+            config_path
+                .clone()
+                .unwrap_or_else(|| "/home/root/.config/remarkable-buddies/config.json".into()),
+        )?;
+        if let Some(preferences) = &preferences {
+            config = preferences.config().clone();
+        }
+        ensure!(
+            config.admits_writer(false) && !config.sync.enabled,
+            "Writer configuration unsupported"
+        );
         let accepted = SelectedAdmission::with_gates(&[&writer], |s| {
             let mut b = allowance();
             let read = s
@@ -419,6 +429,9 @@ pub fn run(
         } else {
             None
         };
+        if let Some(preferences) = &preferences {
+            preferences.check_current()?;
+        }
         let effective = config::resolve(
             &config,
             config::Overrides::default(),
@@ -430,7 +443,8 @@ pub fn run(
             effective.model,
             effective.key.into_string(),
             effective.base_url,
-        );
+        )
+        .with_single_request();
         let selection = selected::Selection {
             accepted,
             root: i.root.clone(),
@@ -443,7 +457,10 @@ pub fn run(
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
-        let received=runtime.block_on(async move{let mut worker=tokio::task::spawn_blocking(move||selected::run(&worker_writer,&selection,&mut engine,&i.request,&preference,memory.as_deref(),&mut||canceled.load(Ordering::Acquire)));tokio::select!{r=&mut worker=>r,_=tokio::signal::ctrl_c()=>{flag.store(true,Ordering::Release);worker.await}}})?;
+        let received=runtime.block_on(async move{let mut worker=tokio::task::spawn_blocking(move||match preferences {
+            Some(preferences)=>selected::run_with_preferences(&worker_writer,&selection,&mut engine,&i.request,preferences,memory.as_deref(),&mut||canceled.load(Ordering::Acquire)),
+            None=>selected::run(&worker_writer,&selection,&mut engine,&i.request,&preference,memory.as_deref(),&mut||canceled.load(Ordering::Acquire)),
+        });tokio::select!{r=&mut worker=>r,_=tokio::signal::ctrl_c()=>{flag.store(true,Ordering::Release);worker.await}}})?;
         let mut report = Report::new(
             op,
             match received.report.status {

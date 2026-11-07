@@ -589,6 +589,67 @@ impl Pins {
     }
 }
 impl Provider for SelectedMemory {
+    fn with_selected_writer_handoff(
+        &self,
+        result: &QueryResult,
+        writer: &SelectedAdmission,
+        additional: &[&SelectedAdmission],
+        verify: &mut dyn FnMut(&Store) -> Result<()>,
+        submit: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        self.require_selected_writer(writer)?;
+        let mut pins = result
+            .pins
+            .as_ref()
+            .context("Writer memory pins absent")?
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Writer memory pins unavailable"))?;
+        ensure!(
+            pins.instance == self.instance
+                && pins.result_sha256.as_deref() == Some(result_identity(result)?.as_str()),
+            "foreign or changed Writer memory view"
+        );
+        let admissions = pins.admissions.clone();
+        let mut handles: Vec<_> = admissions.iter().collect();
+        handles.push(writer);
+        handles.extend_from_slice(additional);
+        SelectedAdmission::with_ready_gate_set(&handles, |store| {
+            pins.validate_current(store)?;
+            verify(store)?;
+            submit()
+        })
+    }
+    fn publish_selected_writer_joined(
+        &self,
+        result: &QueryResult,
+        writer: &SelectedAdmission,
+        finish: crate::conversation::SelectedWriterFinish,
+        additional: &[&SelectedAdmission],
+        verify: &mut dyn FnMut(&Store) -> Result<()>,
+    ) -> Result<crate::conversation::SelectedWriterPublication> {
+        self.require_selected_writer(writer)?;
+        let mut pins = result
+            .pins
+            .as_ref()
+            .context("Writer memory pins absent")?
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Writer memory pins unavailable"))?;
+        ensure!(
+            pins.instance == self.instance
+                && pins.result_sha256.as_deref() == Some(result_identity(result)?.as_str()),
+            "foreign or changed Writer memory view"
+        );
+        let admissions = pins.admissions.clone();
+        let mut handles: Vec<_> = admissions.iter().collect();
+        handles.extend_from_slice(additional);
+        writer.finish_selected_writer_joined(finish, &handles, |store| {
+            let valid = pins.validate_current(store).and_then(|_| verify(store));
+            pins.consumed = true;
+            #[cfg(test)]
+            witness_composed_panic(valid.is_ok());
+            valid
+        })
+    }
     fn require_selected_writer(&self, writer: &SelectedAdmission) -> Result<()> {
         self.require_selected_reader(writer)
     }

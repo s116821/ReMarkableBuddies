@@ -175,13 +175,13 @@ impl Report {
             .map_err(|_| anyhow::anyhow!("preference output failed"))
     }
 }
-struct Capture {
-    path: PathBuf,
-    sha: String,
-    local: LocalConfigSnapshot,
+pub(super) struct Capture {
+    pub(super) path: PathBuf,
+    pub(super) sha: String,
+    pub(super) local: LocalConfigSnapshot,
 }
 impl Capture {
-    fn read(path: PathBuf, reads: &mut SelectedReadBudget) -> Result<Self> {
+    pub(super) fn read(path: PathBuf, reads: &mut SelectedReadBudget) -> Result<Self> {
         ensure!(path.is_absolute(), "preference config path unavailable");
         let bytes = files::read_with_budget(&path, MAX_RECORD as u64, Some(reads))?;
         let local = LocalConfigSnapshot::parse(&bytes)
@@ -193,7 +193,7 @@ impl Capture {
             local,
         })
     }
-    fn check(&self, reads: &mut SelectedReadBudget) -> Result<()> {
+    pub(super) fn check(&self, reads: &mut SelectedReadBudget) -> Result<()> {
         ensure!(
             digest(&files::read_with_budget(
                 &self.path,
@@ -205,7 +205,7 @@ impl Capture {
         Ok(())
     }
 }
-fn budget() -> SelectedReadBudget {
+pub(super) fn budget() -> SelectedReadBudget {
     // Eight worst-case agreed-slot observations, with one shared allowance for
     // Config/checkpoint/selected original reads. Exhaustion never proves absence.
     SelectedReadBudget::new(
@@ -296,7 +296,7 @@ fn original_status(
     Ok(true)
 }
 
-fn checkpoint(
+pub(super) fn checkpoint(
     store: &Store,
     binding: &Binding,
     epoch: Uuid,
@@ -448,121 +448,41 @@ fn admitted(
     lease.require_shared_scope(&scope)?;
     let admission = SelectedAdmission::new(store.clone(), scope.clone())?;
     let mut report = SelectedAdmission::with_gates(&[&admission], |_| {
-        ensure!(Instant::now() < deadline, "preference request expired");
-        let generation = catalog::current_generation(&store)?;
-        crate::storage::compound_generation::validate_ready(
-            &store.paths,
-            store.actor_id,
-            generation,
-        )?;
-        capture.check(reads)?;
-        let read = store.selected_snapshot_with_budget(&scope, MAX_ITEMS, reads)?;
-        if let Request::Edit(_, expected, _) = &request {
-            if expected.group != scope.group
-                || expected.mode_epoch != epoch
-                || expected.binding_sha256 != scope.binding_sha256
-                || expected.store_generation != generation
-                || expected.local_config_sha256 != capture.sha
-                || matches!(
-                    (&expected.selection, &read),
-                    (SelectionCondition::Selected { .. }, None)
-                )
-            {
-                return Ok(Report::new(Operation::Edit, "conflict", "not-dispatched"));
-            }
-        }
-        let prior = read
-            .as_ref()
-            .map(|r| preferences::project(&store, &scope, &r.snapshot.transaction.selected, reads))
-            .transpose()?;
-        let (root_sha, condition) = if let Some(read) = &read {
-            // Established selection uses only immutable local custody. No
-            // credential file, refresh, or provider GET is a prerequisite.
-            let cp = checkpoint(&store, &binding, epoch, reads)?
-                .context("preference root custody absent")?;
-            let view = catalog_view(&binding, &cp)?.context("preference root absent")?;
-            ensure!(!cp.catalog.is_empty(), "preference bootstrap absent");
-            if let Some(entry) = view.entries.get(&scope.key_sha256) {
-                ensure!(
-                    entry.owner == Owner::preferences(),
-                    "preference owner differs"
-                );
-            } else {
-                preferences::require_initial_publication(&store, &scope, &view.root_sha, reads)?;
-            }
-            (
-                view.root_sha,
-                selection(
-                    &read.snapshot,
-                    prior.as_ref().context("preference projection absent")?,
-                ),
-            )
-        } else {
-            if let Some(cp) = checkpoint(&store, &binding, epoch, reads)? {
-                let pending = cp
-                    .catalog_pending
-                    .as_ref()
-                    .map(CatalogPending::key)
-                    .transpose()?;
-                let historical = cp.scopes.get(&scope.key_sha256).is_some_and(|p| {
-                    !p.chain.is_empty()
-                        || p.pending.is_some()
-                        || p.receive.is_some()
-                        || p.applied.is_some()
-                        || !p.receipts.is_empty()
-                        || !p.retired_pending.is_empty()
-                });
-                if pending.as_ref() == Some(&scope.key_sha256)
-                    || historical
-                    || cp.retired_catalog.iter().any(|p| p.key == scope.key_sha256)
-                {
-                    // Missing selected data does not erase an original attempt
-                    // or prove fresh absence after partial recovery.
-                    return Ok(Report::new(request.operation(), "joining", "not-admitted"));
-                }
-            }
-            // Engine reloads its original bounded state, independently of the
-            // local uncertainty inspection above. Reserve that second read in
-            // this same request allowance before even opening credentials.
-            reads.charge(0, 1, MAX_METADATA as u64, 0)?;
-            let mut engine = Engine::new(
-                store.clone(),
-                capture.local.base_config().sync.clone(),
-                transport()?,
+        let expected = match &request {
+            Request::Edit(_, expected, _) => Some(expected),
+            _ => None,
+        };
+        let view = match read_current_locked(
+            &store,
+            &capture,
+            ReadContext {
                 binding,
-                Arc::new(AtomicBool::new(false)),
-            )?;
-            engine
-                .transport
-                .set_request_window(Some(deadline), Some(engine.cancel.clone()));
-            let mut items = MAX_ITEMS;
-            let refreshed = engine.refresh_root_catalog_bounded(&mut items, Some(reads));
-            engine.transport.set_request_window(None, None);
-            let Some(view) = refreshed? else {
-                return Ok(Report::new(request.operation(), "joining", "not-admitted"));
-            };
-            if !view.complete
-                || engine.checkpoint.catalog.is_empty()
-                || view.entries.contains_key(&scope.key_sha256)
-            {
-                return Ok(Report::new(request.operation(), "joining", "not-admitted"));
+                epoch,
+                deadline,
+                expected,
+            },
+            reads,
+            transport,
+        )? {
+            Readiness::Current(view) => *view,
+            Readiness::Joining => {
+                return Ok(Report::new(request.operation(), "joining", "not-admitted"))
             }
-            (view.root_sha, SelectionCondition::Absent {})
+            Readiness::Conflict => {
+                return Ok(Report::new(
+                    request.operation(),
+                    "conflict",
+                    "not-dispatched",
+                ))
+            }
         };
-        let guard = Condition {
-            group: scope.group,
-            mode_epoch: epoch,
-            binding_sha256: scope.binding_sha256.clone(),
-            store_generation: generation,
-            local_config_sha256: capture.sha.clone(),
-            selection: condition,
-        };
-        guard.validate()?;
-        capture.check(reads)?;
-        ensure!(
-            Instant::now() < deadline && catalog::current_generation(&store)? == generation,
-            "preference request expired or generation changed"
-        );
+        let CurrentView {
+            guard,
+            read,
+            prior,
+            root_sha,
+            ..
+        } = view;
         let mut report = Report::new(request.operation(), "ok", "read-only");
         report.correspondence(&request);
         match &request {
@@ -660,6 +580,183 @@ impl Request {
             Self::Status(_) => Operation::Status,
         }
     }
+}
+
+/// Private typed capture only. It must still be revalidated at every consuming
+/// handoff/publication; serializable Condition values cannot construct it.
+pub(super) struct CurrentView {
+    pub(super) guard: Condition,
+    pub(super) read: Option<crate::storage::selection::SelectedReadSnapshot>,
+    pub(super) prior: Option<record::Projection>,
+    pub(super) root_sha: String,
+    pub(super) profile: Uuid,
+    pub(super) absence: Option<(String, String)>,
+}
+pub(super) enum Readiness {
+    Current(Box<CurrentView>),
+    Joining,
+    Conflict,
+}
+pub(super) struct ReadContext<'a> {
+    pub(super) binding: Binding,
+    pub(super) epoch: Uuid,
+    pub(super) deadline: Instant,
+    pub(super) expected: Option<&'a Condition>,
+}
+/// Caller retains actual current mode and the ordered preference gate. This is
+/// shared by the command and request-scoped product consumers, not a second
+/// readiness engine or a constructor from saved JSON.
+pub(super) fn read_current_locked(
+    store: &Arc<Store>,
+    capture: &Capture,
+    context: ReadContext<'_>,
+    reads: &mut SelectedReadBudget,
+    transport: impl FnOnce() -> Result<GoogleDrive>,
+) -> Result<Readiness> {
+    let ReadContext {
+        binding,
+        epoch,
+        deadline,
+        expected,
+    } = context;
+    let current = store.sync_mode_snapshot()?;
+    require_mode(&current, &binding)?;
+    ensure!(
+        current.epoch == Some(epoch),
+        "preference mode epoch changed"
+    );
+    let scope = SelectionScope {
+        group: binding.group,
+        key_sha256: record::key_sha256(),
+        binding_sha256: binding.digest.clone(),
+    };
+    ensure!(Instant::now() < deadline, "preference request expired");
+    let generation = catalog::current_generation(store)?;
+    crate::storage::compound_generation::validate_ready(&store.paths, store.actor_id, generation)?;
+    capture.check(reads)?;
+    let read = store.selected_snapshot_with_budget(&scope, MAX_ITEMS, reads)?;
+    if let Some(expected) = expected {
+        if expected.group != scope.group
+            || expected.mode_epoch != epoch
+            || expected.binding_sha256 != scope.binding_sha256
+            || expected.store_generation != generation
+            || expected.local_config_sha256 != capture.sha
+            || matches!(
+                (&expected.selection, &read),
+                (SelectionCondition::Selected { .. }, None)
+            )
+        {
+            return Ok(Readiness::Conflict);
+        }
+    }
+    let prior = read
+        .as_ref()
+        .map(|r| preferences::project(store, &scope, &r.snapshot.transaction.selected, reads))
+        .transpose()?;
+    let (root_sha, condition, absence, profile) = if let Some(read) = &read {
+        // Established selection uses only immutable local custody. No
+        // credential file, refresh, or provider GET is a prerequisite.
+        let cp =
+            checkpoint(store, &binding, epoch, reads)?.context("preference root custody absent")?;
+        let view = catalog_view(&binding, &cp)?.context("preference root absent")?;
+        ensure!(!cp.catalog.is_empty(), "preference bootstrap absent");
+        if let Some(entry) = view.entries.get(&scope.key_sha256) {
+            ensure!(
+                entry.owner == Owner::preferences(),
+                "preference owner differs"
+            );
+        } else {
+            preferences::require_initial_publication(store, &scope, &view.root_sha, reads)?;
+        }
+        (
+            view.root_sha,
+            selection(
+                &read.snapshot,
+                prior.as_ref().context("preference projection absent")?,
+            ),
+            None,
+            view.root.profile,
+        )
+    } else {
+        if let Some(cp) = checkpoint(store, &binding, epoch, reads)? {
+            let pending = cp
+                .catalog_pending
+                .as_ref()
+                .map(CatalogPending::key)
+                .transpose()?;
+            let historical = cp.scopes.get(&scope.key_sha256).is_some_and(|p| {
+                !p.chain.is_empty()
+                    || p.pending.is_some()
+                    || p.receive.is_some()
+                    || p.applied.is_some()
+                    || !p.receipts.is_empty()
+                    || !p.retired_pending.is_empty()
+            });
+            if pending.as_ref() == Some(&scope.key_sha256)
+                || historical
+                || cp.retired_catalog.iter().any(|p| p.key == scope.key_sha256)
+            {
+                // Missing selected data does not erase an original attempt
+                // or prove fresh absence after partial recovery.
+                return Ok(Readiness::Joining);
+            }
+        }
+        // Engine reloads its original bounded state, independently of the
+        // local uncertainty inspection above. Reserve that second read in
+        // this same request allowance before even opening credentials.
+        reads.charge(0, 1, MAX_METADATA as u64, 0)?;
+        let mut engine = Engine::new(
+            store.clone(),
+            capture.local.base_config().sync.clone(),
+            transport()?,
+            binding,
+            Arc::new(AtomicBool::new(false)),
+        )?;
+        engine
+            .transport
+            .set_request_window(Some(deadline), Some(engine.cancel.clone()));
+        let mut items = MAX_ITEMS;
+        let refreshed = engine.refresh_root_catalog_bounded(&mut items, Some(reads));
+        engine.transport.set_request_window(None, None);
+        let Some(view) = refreshed? else {
+            return Ok(Readiness::Joining);
+        };
+        if !view.complete
+            || engine.checkpoint.catalog.is_empty()
+            || view.entries.contains_key(&scope.key_sha256)
+        {
+            return Ok(Readiness::Joining);
+        }
+        (
+            view.root_sha,
+            SelectionCondition::Absent {},
+            Some((view.base, view.slot)),
+            view.root.profile,
+        )
+    };
+    let guard = Condition {
+        group: scope.group,
+        mode_epoch: epoch,
+        binding_sha256: scope.binding_sha256.clone(),
+        store_generation: generation,
+        local_config_sha256: capture.sha.clone(),
+        selection: condition,
+    };
+    guard.validate()?;
+    capture.check(reads)?;
+    ensure!(
+        Instant::now() < deadline && catalog::current_generation(store)? == generation,
+        "preference request expired or generation changed"
+    );
+
+    Ok(Readiness::Current(Box::new(CurrentView {
+        guard,
+        read,
+        prior,
+        root_sha,
+        profile,
+        absence,
+    })))
 }
 
 #[cfg(test)]

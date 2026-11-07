@@ -5,6 +5,7 @@ use serde_json::json;
 use serde_json::Value as JsonValue;
 
 pub const DEFAULT_MODEL: &str = "gpt-5.6-terra";
+pub(crate) const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 
 pub struct OpenAI {
     timeout: std::time::Duration,
@@ -20,7 +21,7 @@ impl OpenAI {
         let base_url = base_url.unwrap_or_else(|| "https://api.openai.com".to_string());
 
         Self {
-            timeout: std::time::Duration::from_secs(90),
+            timeout: DEFAULT_TIMEOUT,
             model,
             base_url,
             api_key,
@@ -57,6 +58,9 @@ impl OpenAI {
 }
 
 impl LLMEngine for OpenAI {
+    fn guarded_timeout(&self) -> Option<std::time::Duration> {
+        Some(self.timeout)
+    }
     fn add_text_content(&mut self, text: &str) {
         self.add_content(json!({
             "type": "text",
@@ -86,6 +90,23 @@ impl LLMEngine for OpenAI {
         &mut self,
         progress: &mut dyn FnMut() -> Result<()>,
     ) -> Result<String> {
+        self.execute_guarded(progress, &mut |submit| submit())
+    }
+    fn execute_with_handoff(
+        &mut self,
+        progress: &mut dyn FnMut() -> Result<()>,
+        handoff: &mut super::ModelHandoff<'_>,
+    ) -> Result<String> {
+        self.execute_guarded(progress, handoff)
+    }
+}
+
+impl OpenAI {
+    fn execute_guarded(
+        &mut self,
+        progress: &mut dyn FnMut() -> Result<()>,
+        handoff: &mut super::ModelHandoff<'_>,
+    ) -> Result<String> {
         // Refuse before dispatch if the caller has already canceled/lost admission.
         let preflight = std::time::Instant::now();
         progress()?;
@@ -107,37 +128,63 @@ impl LLMEngine for OpenAI {
         let single_request = self.single_request;
         let (cancel, mut canceled) = tokio::sync::watch::channel(false);
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-        let worker = std::thread::Builder::new().name("buddy-provider-request".into()).spawn(move || {
+        let mut task = Some(move || {
             let _run = crate::measurement::Run::enter(run);
             let result = (|| -> Result<String> {
-                let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
                     .context("Create provider runtime")?;
                 runtime.block_on(async {
                     let request = async {
                         let _timing = crate::measurement::Span::new("provider.request");
-                        let client = reqwest::Client::builder().timeout(timeout).hickory_dns(true);
+                        let client = reqwest::Client::builder()
+                            .timeout(timeout)
+                            .hickory_dns(true);
                         let client = if single_request {
-                            client.redirect(reqwest::redirect::Policy::none())
+                            client
+                                .redirect(reqwest::redirect::Policy::none())
                                 .retry(reqwest::retry::never())
                         } else {
                             client
                         };
                         #[cfg(test)]
-                        let client = if single_request { client.no_proxy() } else { client };
-                        let client = client.build()
+                        let client = if single_request {
+                            client.no_proxy()
+                        } else {
+                            client
+                        };
+                        let client = client
+                            .build()
                             .context("Create asynchronous provider transport")?;
-                        let mut response = client.post(endpoint).bearer_auth(api_key).json(&body).send().await
+                        let mut response = client
+                            .post(endpoint)
+                            .bearer_auth(api_key)
+                            .json(&body)
+                            .send()
+                            .await
                             .map_err(provider_error)?
-                            .error_for_status().map_err(|error| error.without_url()).context("Model response status")?;
+                            .error_for_status()
+                            .map_err(|error| error.without_url())
+                            .context("Model response status")?;
                         // Preserve the previous bounded response behavior, including unknown lengths.
                         const MAX_RESPONSE: usize = 10 * 1024 * 1024;
-                        anyhow::ensure!(response.content_length().is_none_or(|size| size <= MAX_RESPONSE as u64), "Model response exceeds bound");
+                        anyhow::ensure!(
+                            response
+                                .content_length()
+                                .is_none_or(|size| size <= MAX_RESPONSE as u64),
+                            "Model response exceeds bound"
+                        );
                         let mut bytes = Vec::new();
                         while let Some(chunk) = response.chunk().await.map_err(provider_error)? {
-                            anyhow::ensure!(chunk.len() <= MAX_RESPONSE.saturating_sub(bytes.len()), "Model response exceeds bound");
+                            anyhow::ensure!(
+                                chunk.len() <= MAX_RESPONSE.saturating_sub(bytes.len()),
+                                "Model response exceeds bound"
+                            );
                             bytes.extend_from_slice(&chunk);
                         }
-                        let text = String::from_utf8(bytes).context("Decode model response text")?;
+                        let text =
+                            String::from_utf8(bytes).context("Decode model response text")?;
                         parse_response(&text)
                     };
                     tokio::pin!(request);
@@ -151,11 +198,24 @@ impl LLMEngine for OpenAI {
                 // is spawned or leaked via a shutdown timeout/background escape.
             })();
             let _ = sender.send(result);
-        }).context("Start provider request")?;
-        let mut owned = OwnedRequest {
-            cancel,
-            worker: Some(worker),
+        });
+        let mut owned = None;
+        let mut submit = || {
+            let task = task
+                .take()
+                .context("model request was already handed off")?;
+            let worker = std::thread::Builder::new()
+                .name("buddy-provider-request".into())
+                .spawn(task)
+                .context("Start provider request")?;
+            owned = Some(OwnedRequest {
+                cancel: cancel.clone(),
+                worker: Some(worker),
+            });
+            Ok(())
         };
+        handoff(&mut submit)?;
+        let mut owned = owned.context("model request was not handed off")?;
         let mut due = preflight
             + crate::workflow::indicator::next_deadline(
                 std::time::Duration::ZERO,

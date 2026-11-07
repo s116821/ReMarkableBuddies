@@ -355,6 +355,28 @@ pub trait Provider: Send + Sync {
     ) -> Result<crate::conversation::SelectedWriterPublication> {
         anyhow::bail!("memory provider does not support selected Writer publication")
     }
+    /// Join every participating domain at the actual owned model submission.
+    /// The callback does not wait for a model response or reacquire these gates.
+    fn with_selected_writer_handoff(
+        &self,
+        _result: &QueryResult,
+        _writer: &crate::conversation::SelectedAdmission,
+        _additional: &[&crate::conversation::SelectedAdmission],
+        _verify: &mut dyn FnMut(&Store) -> Result<()>,
+        _submit: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        anyhow::bail!("memory provider does not support joined Writer handoff")
+    }
+    fn publish_selected_writer_joined(
+        &self,
+        _result: &QueryResult,
+        _writer: &crate::conversation::SelectedAdmission,
+        _finish: crate::conversation::SelectedWriterFinish,
+        _additional: &[&crate::conversation::SelectedAdmission],
+        _verify: &mut dyn FnMut(&Store) -> Result<()>,
+    ) -> Result<crate::conversation::SelectedWriterPublication> {
+        anyhow::bail!("memory provider does not support joined Writer publication")
+    }
     /// Opt in to ordinary Writer snapshots from this exact receiving Store.
     /// Selected providers need a separate consuming publication contract.
     fn admit_ordinary_writer(&self, _store: &Store) -> Result<()> {

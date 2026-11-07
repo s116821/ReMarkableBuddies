@@ -279,6 +279,42 @@ pub(super) fn replay(
 }
 
 impl Store {
+    /// Lightweight cancellation evidence only. It issues no new token and does
+    /// not validate object history or authorize a handoff/publication. Those
+    /// effects still require their complete current snapshot under domain gates.
+    pub(crate) fn selection_unchanged_for_progress(
+        &self,
+        scope: &SelectionScope,
+        expected: Option<&SelectionToken>,
+        budget: &mut SelectedReadBudget,
+    ) -> Result<bool> {
+        scope.validate()?;
+        ensure!(
+            expected.is_none_or(|t| t.scope() == scope),
+            "foreign progress selection"
+        );
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        let root = self.generation(inner.generation);
+        let path = path(&root, scope)?;
+        files::safe_path(&path)?;
+        budget.charge(0, 1, 0, 0)?;
+        if !path.exists() {
+            return Ok(expected.is_none());
+        }
+        let bytes = files::read_with_budget(&path, MAX_METADATA as u64, Some(budget))?;
+        let transaction: SelectionTransaction = serde_json::from_slice(&bytes)
+            .map_err(|_| anyhow::anyhow!("invalid progress selection"))?;
+        transaction.validate(MAX_ITEMS)?;
+        ensure!(
+            transaction.scope == *scope && transaction.store_generation == inner.generation,
+            "progress selection scope/generation differs"
+        );
+        Ok(expected
+            .is_some_and(|expected| token(&transaction).is_ok_and(|actual| actual == *expected)))
+    }
     /// Read accepted publication evidence after process restart. This does not
     /// mint a live token or publish a mutation. Persisted intent pins are compared
     /// by the domain owner; an unaccepted operation returns None, not permission.

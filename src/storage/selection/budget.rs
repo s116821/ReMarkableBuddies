@@ -42,6 +42,23 @@ impl SelectedReadBudget {
     pub fn exhausted(&self) -> bool {
         self.exhausted
     }
+    /// Irrevocably reserve a finite child allowance. Parent usage keeps the full
+    /// reservation; callers cannot replenish it by dropping or replacing a child.
+    pub(crate) fn reserve(
+        &mut self,
+        aggregates: u64,
+        work_items: u64,
+        metadata_bytes: u64,
+        media_bytes: u64,
+    ) -> Result<Self> {
+        self.charge(aggregates, work_items, metadata_bytes, media_bytes)?;
+        Ok(Self::new(
+            aggregates,
+            work_items,
+            metadata_bytes,
+            media_bytes,
+        ))
+    }
     pub(crate) fn charge(
         &mut self,
         aggregates: u64,
@@ -84,5 +101,21 @@ impl SelectedReadBudget {
             self.exhausted = true;
             anyhow::bail!("selected read budget exhausted")
         }
+    }
+}
+
+#[cfg(test)]
+mod reservation_tests {
+    use super::*;
+    #[test]
+    fn dropped_child_does_not_replenish_the_parent_allowance() {
+        let mut parent = SelectedReadBudget::new(1, 2, 3, 0);
+        {
+            let mut child = parent.reserve(1, 2, 3, 0).unwrap();
+            child.charge(1, 2, 3, 0).unwrap();
+        }
+        assert!(parent.reserve(1, 0, 0, 0).is_err());
+        assert!(parent.exhausted());
+        assert!(parent.reserve(0, 0, 0, 0).is_err());
     }
 }

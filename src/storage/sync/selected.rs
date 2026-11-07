@@ -12,6 +12,8 @@ mod control;
 mod protocol;
 pub(crate) use control::{create_group, CreateGroupRequest, GroupOutcome};
 mod preference_command;
+mod preference_consumer;
+pub(crate) use preference_consumer::RequestPreferences;
 mod preferences;
 pub use preference_command::{
     run as run_preferences, Operation as PreferenceOperation, Report as PreferenceReport,
@@ -24,6 +26,7 @@ use protocol::*;
 
 /// Cannot be deserialized from Config or an operator payload. Production
 /// construction awaits separately accepted actual provider qualification.
+#[derive(Clone)]
 pub(super) struct Binding {
     group: Uuid,
     root_id: String,

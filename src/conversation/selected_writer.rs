@@ -575,6 +575,27 @@ impl SelectedAdmission {
             )
         })
     }
+    /// The caller holds this Writer's complete ordered ready gate set. Keep
+    /// locked validation separate so joined handoff never reacquires its gate.
+    pub(crate) fn writer_input_locked(
+        &self,
+        store: &Store,
+        prepared: &SelectedWriterPrepared,
+    ) -> Result<SelectedWriterInput> {
+        ensure!(
+            std::ptr::eq(store, self.writer_store().as_ref())
+                && prepared.accepted.scope() == self.scope(),
+            "foreign locked Writer input"
+        );
+        let read = store
+            .selected_snapshot(self.scope(), MAX_ITEMS)?
+            .context("Writer selection absent")?;
+        ensure!(
+            read.token == prepared.accepted,
+            "Writer preparation replaced"
+        );
+        prepared_input(&SelectedDomainProjection::from_snapshot(&read)?, prepared)
+    }
 }
 fn recover_completed(
     store: &Store,
