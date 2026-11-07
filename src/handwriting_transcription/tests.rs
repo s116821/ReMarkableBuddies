@@ -12,6 +12,22 @@ struct Local {
     config: Config,
 }
 impl Local {
+    fn ready_notebook(explicit_local: bool) -> Self {
+        let local = Self::new();
+        let store = Store::open(local.config.paths.clone()).unwrap();
+        if explicit_local {
+            store
+                .set_sync_mode(
+                    &store.sync_mode_snapshot().unwrap().token,
+                    Uuid::new_v4(),
+                    crate::storage::sync::mode::SyncModeChoice::LocalOnly,
+                )
+                .unwrap();
+        }
+        drop(store);
+        drop(Store::prepare_notebook(local.config.paths.clone()).unwrap());
+        local
+    }
     fn new() -> Self {
         let root = std::env::temp_dir().join(format!("rmb-transcription-{}", Uuid::new_v4()));
         std::fs::create_dir(&root).unwrap();
@@ -220,7 +236,9 @@ fn default_normalizer_and_admitted_no_context_keep_frozen_payload_and_identity()
 }
 #[test]
 fn six_literal_vectors_exercise_production_context_payload_and_profile_recipes() {
-    let local = Local::new();
+    exercise_literal_vectors(&Local::new());
+}
+fn exercise_literal_vectors(local: &Local) {
     let vector = fixture();
     let partial = partial_vectors();
     let math = math_vectors();
@@ -345,6 +363,8 @@ fn six_literal_vectors_exercise_production_context_payload_and_profile_recipes()
         }
     }
 }
+
+mod ready_notebook;
 #[test]
 fn real_current_capture_is_owned_through_provider_report_write_failure_and_drop() {
     let local = Local::new();

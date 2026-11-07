@@ -63,6 +63,7 @@ enum NotebookAdmission {
     Restore,
     Preferences,
     ReadyOrdinary,
+    Handwriting,
 }
 
 // A definite empty regular directory or definite absence; never follow links.
@@ -166,7 +167,13 @@ impl Store {
     /// ordinary/local-domain leases can refuse selected state, never initialize,
     /// repair, clean staging, publish capabilities or acquire mutation authority.
     pub(crate) fn open_existing_for_handwriting(paths: StorePaths) -> Result<Self, Refusal> {
-        Self::open_existing_inner(paths, true)
+        Self::open_existing_using(
+            paths,
+            true,
+            NotebookAdmission::Handwriting,
+            |_, _| Ok(()),
+            |store, generation| store.recover(generation),
+        )
     }
     /// Opt-in mode maintenance only. Preserve legacy callers' format refusal.
     pub(crate) fn open_existing_for_mode(paths: StorePaths) -> Result<Self, Refusal> {
@@ -323,7 +330,9 @@ impl Store {
         let notebook_preferences = notebook
             && matches!(
                 admission,
-                NotebookAdmission::Preferences | NotebookAdmission::ReadyOrdinary
+                NotebookAdmission::Preferences
+                    | NotebookAdmission::ReadyOrdinary
+                    | NotebookAdmission::Handwriting
             );
         if notebook_preferences {
             empty_if_present(&generation_root.join("selections"))?;

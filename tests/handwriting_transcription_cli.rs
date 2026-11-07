@@ -7,6 +7,134 @@ use std::{
     io::Write,
     process::{Command, Stdio},
 };
+
+#[test]
+fn ready_notebook_cli_confirms_reopens_and_captures_before_recognition_resolution() {
+    use remarkable_reader_buddy::storage::{sync::mode::SyncModeChoice, Store};
+    fn invoke(flag: &str, config: &std::path::Path, input: &Value) -> Value {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_reader-buddy"))
+            .arg(flag)
+            .env("REMARKABLE_BUDDIES_CONFIG", config)
+            .env_remove("OPENAI_API_KEY")
+            .env_remove("OPENAI_BASE_URL")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(&serde_json::to_vec(input).unwrap())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(out.status.success(), flag == "--handwriting");
+        assert!(!String::from_utf8_lossy(&out.stderr).contains("PRIVATE_READY4"));
+        serde_json::from_slice(&out.stdout).unwrap()
+    }
+    fn inventory(
+        root: &std::path::Path,
+    ) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+        fn walk(
+            root: &std::path::Path,
+            path: &std::path::Path,
+            out: &mut std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
+        ) {
+            for entry in std::fs::read_dir(path).unwrap() {
+                let p = entry.unwrap().path();
+                if p.is_dir() {
+                    out.insert(p.strip_prefix(root).unwrap().to_owned(), vec![]);
+                    walk(root, &p, out);
+                } else {
+                    out.insert(
+                        p.strip_prefix(root).unwrap().to_owned(),
+                        std::fs::read(&p).unwrap(),
+                    );
+                }
+            }
+        }
+        let mut out = Default::default();
+        walk(root, root, &mut out);
+        out
+    }
+    for explicit in [false, true] {
+        let root =
+            std::env::temp_dir().join(format!("rmb-transcription-ready4-cli-{}", Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let config = Config {
+            paths: StorePaths {
+                data: root.join("data"),
+                cache: root.join("cache"),
+                credentials: root.join("credentials"),
+            },
+            ..Config::default()
+        };
+        let store = Store::open(config.paths.clone()).unwrap();
+        if explicit {
+            store
+                .set_sync_mode(
+                    &store.sync_mode_snapshot().unwrap().token,
+                    Uuid::new_v4(),
+                    SyncModeChoice::LocalOnly,
+                )
+                .unwrap();
+        }
+        drop(store);
+        drop(Store::prepare_notebook(config.paths.clone()).unwrap());
+        let path = root.join("config.json");
+        std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+        let fixture: Value =
+            serde_json::from_str(include_str!("fixtures/handwriting-transcription-v1.json"))
+                .unwrap();
+        let profile = Uuid::new_v4();
+        let correction = Uuid::new_v4();
+        let confirmed = invoke(
+            "--handwriting",
+            &path,
+            &json!({"handwriting_version":1,"command":"confirm","profile":profile,"correction":correction,"operation":Uuid::new_v4(),"expected_heads":[],"confirmation":"user-confirmed","original_text":"PRIVATE_READY4 original","corrected_text":"PRIVATE_READY4 corrected","confirmed_ms":1,"provenance":{"kind":"caller-confirmed-sample","description":"Synthetic prepared-store CLI mechanics","source":null},"sample_png_base64":fixture["target_png"]}),
+        );
+        let revision = confirmed["facts"][0]["revision"].clone();
+        let record = confirmed["facts"][0]["record"].clone();
+        let inspected = invoke(
+            "--handwriting",
+            &path,
+            &json!({"handwriting_version":1,"command":"inspect","profile":profile,"correction":correction}),
+        );
+        assert_eq!(inspected["facts"][0]["revision"], revision);
+        std::fs::write(
+            config.paths.data.join(".stage-preserve"),
+            b"preserved stage bytes",
+        )
+        .unwrap();
+        let before = inventory(&root);
+        let input = json!({"transcription_version":1,"invocation":Uuid::new_v4(),"document":Uuid::new_v4(),"page":7,"target_png":fixture["target_png"],"context":{"profile":profile,"examples":[{"correction":correction,"revision":revision}]}});
+        let captured = invoke("--handwriting-transcription", &path, &input);
+        assert_eq!(captured["failure"], "credentials-unavailable");
+        assert_eq!(captured["provider_attempt"], "not-called");
+        assert_eq!(captured["context"]["examples"][0]["record"], record);
+        assert_eq!(captured["context"]["examples"][0]["revision"], revision);
+        assert_eq!(captured["confirmed"], false);
+        assert!(captured["result"].is_null());
+        assert_eq!(
+            captured["context"]["examples"][0]["sample_sha256"],
+            confirmed["facts"][0]["value"]["sample"]["sha256"]
+        );
+        let mut stale = input;
+        stale["context"]["examples"][0]["revision"] = json!(Uuid::new_v4());
+        let refused = invoke("--handwriting-transcription", &path, &stale);
+        assert_eq!(refused["failure"], "context-stale");
+        assert!(refused["context"].is_null());
+        assert_eq!(refused["provider_attempt"], "not-called");
+        assert_eq!(inventory(&root), before);
+        let resolved = root.canonicalize().unwrap();
+        assert_eq!(
+            resolved.parent().unwrap(),
+            std::env::temp_dir().canonicalize().unwrap()
+        );
+        std::fs::remove_dir_all(resolved).unwrap();
+    }
+}
 #[test]
 fn actual_cli_refuses_strict_input_and_credentials_before_store_provider_or_content_logs() {
     let root = std::env::temp_dir().join(format!("rmb-transcription-cli-{}", Uuid::new_v4()));
