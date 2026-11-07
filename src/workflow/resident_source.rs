@@ -1452,6 +1452,12 @@ mod tests {
             owner.begin(released(Instant::now()), health).unwrap();
             owner.acquire(health).unwrap();
             owner.deliver(health).unwrap();
+            let runtime = owner.session.as_ref().unwrap().identity();
+            owner.selection = InstalledReaderSelection::fixture_for_output(
+                &base.join("output-recovery"),
+                &runtime,
+            )
+            .unwrap();
 
             let ledger = Ledger::new(store.clone());
             let prior = ConversationId::new_v4();
@@ -1468,7 +1474,7 @@ mod tests {
                 assert!(!source.order().contains(&target));
                 let request = Frame {
                     scope: ConnectionIdentity {
-                        runtime: owner.session.as_ref().unwrap().identity(),
+                        runtime,
                         connection: operation().0,
                         server_nonce: Some(operation().0),
                     },
