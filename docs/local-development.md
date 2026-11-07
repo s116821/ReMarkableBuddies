@@ -1,5 +1,8 @@
 # Local live-model development
 
+For the isolated historical-text diagnostic and its separate developer SDK/lock,
+see [development pre-Enter](development-pre-enter.md).
+
 The default simulator is offline. To call the configured provider, explicitly use
 an `llm` object with `mode: live`, as in
 [the live Reader example](simulator/live/reader.json). This sends the scenario's
