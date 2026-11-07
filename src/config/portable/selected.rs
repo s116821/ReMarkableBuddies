@@ -90,6 +90,64 @@ impl LocalConfigSnapshot {
         let bytes = serde_json::to_vec(&raw).map_err(|_| Status::InvalidInput)?;
         inspection::document(&bytes).map(|(config, _)| config)
     }
+
+    /// A closed display view; private text is disclosed only by explicit request.
+    /// Origins follow the same sparse parent replacement as effective().
+    pub(crate) fn view(&self, artifact: Option<&Artifact>, reveal_text: bool) -> Result<Value> {
+        let effective = self.effective(artifact)?;
+        let product = effective.product_settings.as_ref().and_then(Option::as_ref);
+        let policy = effective.research_policy.flatten().unwrap_or_default();
+        let mut view = json!({
+            "reader_enabled": effective.reader_enabled(),
+            "writer_enabled": product.is_none_or(|p| p.writer_enabled),
+            "export_destination": product.map(|p| p.export_destination).unwrap_or(super::super::product::ExportDestination::Mem),
+            "personalization_enabled": effective.personalization.enabled,
+            "personalization_text_present": !effective.personalization.text.is_empty(),
+            "research_policy": policy,
+        });
+        if reveal_text {
+            view["personalization_text"] = if effective.personalization.text.is_empty() {
+                Value::Null
+            } else {
+                Value::String(effective.personalization.text.clone())
+            };
+        }
+        let mut origins = Map::new();
+        for (field, parent, child) in [
+            ("reader_enabled", "product_settings", Some("reader_enabled")),
+            ("writer_enabled", "product_settings", Some("writer_enabled")),
+            (
+                "export_destination",
+                "product_settings",
+                Some("export_destination"),
+            ),
+            (
+                "personalization_enabled",
+                "personalization",
+                Some("enabled"),
+            ),
+            ("personalization_text", "personalization", Some("text")),
+            ("research_policy", "research_policy", None),
+        ] {
+            let local = self.raw.get(parent);
+            let shared = artifact.and_then(|a| a.settings().get(parent));
+            let declares = |value: Option<&Value>| {
+                value.is_some_and(|v| child.is_none_or(|c| !v.is_object() || v.get(c).is_some()))
+            };
+            let origin = if declares(shared) {
+                "shared"
+            } else if shared.is_some_and(Value::is_object) && local.is_none_or(|v| !v.is_object()) {
+                "default"
+            } else if declares(local) {
+                "local"
+            } else {
+                "default"
+            };
+            origins.insert(field.into(), Value::String(origin.into()));
+        }
+        view["origins"] = Value::Object(origins);
+        Ok(view)
+    }
 }
 
 #[cfg(test)]

@@ -11,7 +11,11 @@ mod catalog;
 mod control;
 mod protocol;
 pub(crate) use control::{create_group, CreateGroupRequest, GroupOutcome};
+mod preference_command;
 mod preferences;
+pub use preference_command::{
+    run as run_preferences, Operation as PreferenceOperation, Report as PreferenceReport,
+};
 mod publication;
 mod receiving;
 #[cfg(test)]
@@ -413,38 +417,34 @@ impl Engine {
         }
     }
     fn view(&self) -> Result<Option<CatalogView>> {
-        let Some(recorded) = &self.checkpoint.root else {
-            return Ok(None);
-        };
-        recorded.check(&self.binding.root_id)?;
-        let root: Root = serde_json::from_slice(&recorded.bytes)?;
-        root.validate(&self.binding)?;
-        let root_sha = recorded.sha256.clone();
-        let mut base = root_sha.clone();
-        let mut slot = root.catalog_slot.clone();
-        let mut entries = BTreeMap::new();
-        let mut slots = BTreeSet::new();
-        for recorded in &self.checkpoint.catalog {
-            ensure!(slots.insert(slot.clone()), "catalog slot cycle");
-            recorded.check(&slot)?;
-            let catalog: Catalog = serde_json::from_slice(&recorded.bytes)?;
-            catalog.validate(&root, &root_sha, &slot, &base, &entries)?;
-            entries = catalog.entries;
-            base = recorded.sha256.clone();
-            slot = catalog.next_slot;
-        }
-        Ok(Some(CatalogView {
-            root,
-            root_sha,
-            entries,
-            base,
-            slot,
-            complete: false,
-        }))
+        catalog_view(&self.binding, &self.checkpoint)
     }
     fn refresh_root_catalog(&mut self, budget: &mut usize) -> Result<Option<CatalogView>> {
-        let Some(root) =
-            self.observe(root_key(self.binding.group), self.binding.root_id.clone())?
+        self.refresh_root_catalog_bounded(budget, None)
+    }
+    fn observe_bounded(
+        &mut self,
+        key: String,
+        slot: String,
+        reads: &mut Option<&mut crate::storage::selection::SelectedReadBudget>,
+    ) -> Result<Option<Recorded>> {
+        if let Some(reads) = reads {
+            // Account identity and two metadata responses plus the 64 KiB descriptor. Charge
+            // their worst case before any GET, including failed observations.
+            reads.charge(0, 1, 3 * MAX_METADATA as u64 + 64 * 1024, 0)?;
+        }
+        self.observe(key, slot)
+    }
+    fn refresh_root_catalog_bounded(
+        &mut self,
+        budget: &mut usize,
+        mut reads: Option<&mut crate::storage::selection::SelectedReadBudget>,
+    ) -> Result<Option<CatalogView>> {
+        let Some(root) = self.observe_bounded(
+            root_key(self.binding.group),
+            self.binding.root_id.clone(),
+            &mut reads,
+        )?
         else {
             return Ok(None);
         };
@@ -462,7 +462,11 @@ impl Engine {
         let mut view = self.view()?.context("validated root absent")?;
         if let Some(previous) = self.checkpoint.catalog.last().cloned() {
             let current = self
-                .observe(catalog_key(self.binding.group), previous.slot.clone())?
+                .observe_bounded(
+                    catalog_key(self.binding.group),
+                    previous.slot.clone(),
+                    &mut reads,
+                )?
                 .context("accepted catalog pointer not visible")?;
             ensure!(
                 current.sha256 == previous.sha256 && current.bytes == previous.bytes,
@@ -470,8 +474,11 @@ impl Engine {
             );
         }
         while *budget > 0 {
-            let Some(recorded) =
-                self.observe(catalog_key(self.binding.group), view.slot.clone())?
+            let Some(recorded) = self.observe_bounded(
+                catalog_key(self.binding.group),
+                view.slot.clone(),
+                &mut reads,
+            )?
             else {
                 view.complete = true;
                 break;
@@ -499,4 +506,35 @@ fn require_mode(snapshot: &mode::SyncModeSnapshot, binding: &Binding) -> Result<
         "shared mode context differs"
     );
     Ok(())
+}
+
+fn catalog_view(binding: &Binding, checkpoint: &Checkpoint) -> Result<Option<CatalogView>> {
+    let Some(recorded) = &checkpoint.root else {
+        return Ok(None);
+    };
+    recorded.check(&binding.root_id)?;
+    let root: Root = serde_json::from_slice(&recorded.bytes)?;
+    root.validate(binding)?;
+    let root_sha = recorded.sha256.clone();
+    let mut base = root_sha.clone();
+    let mut slot = root.catalog_slot.clone();
+    let mut entries = BTreeMap::new();
+    let mut slots = BTreeSet::new();
+    for recorded in &checkpoint.catalog {
+        ensure!(slots.insert(slot.clone()), "catalog slot cycle");
+        recorded.check(&slot)?;
+        let catalog: Catalog = serde_json::from_slice(&recorded.bytes)?;
+        catalog.validate(&root, &root_sha, &slot, &base, &entries)?;
+        entries = catalog.entries;
+        base = recorded.sha256.clone();
+        slot = catalog.next_slot;
+    }
+    Ok(Some(CatalogView {
+        root,
+        root_sha,
+        entries,
+        base,
+        slot,
+        complete: false,
+    }))
 }

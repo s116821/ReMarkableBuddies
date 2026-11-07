@@ -230,19 +230,13 @@ pub fn prepare(
         return Ok(None);
     }
     let record = record_id(original.group)?;
-    let name = serde_json::to_vec(&(
-        "remarkable-buddies:portable-preference-edit:v1",
-        operation,
-        original,
-        patch.sha256(),
-        result.sha256(),
-    ))?;
+    let revision_id = original_revision(operation, original, &patch.sha256(), &result.sha256())?;
     let envelope = Envelope {
         envelope_version: 1,
         namespace: Namespace::PortableConfiguration,
         domain_schema_version: 1,
         record_id: record,
-        revision_id: Uuid::new_v5(&record, &name),
+        revision_id,
         parents: previous
             .map(|p| BTreeSet::from([p.revision()]))
             .unwrap_or_default(),
@@ -254,6 +248,48 @@ pub fn prepare(
     };
     envelope.validate()?;
     Ok(Some(envelope))
+}
+
+fn original_revision(
+    operation: Uuid,
+    original: &Condition,
+    patch_sha256: &str,
+    result_sha256: &str,
+) -> Result<Uuid> {
+    original.validate()?;
+    ensure!(
+        !operation.is_nil() && valid_digest(patch_sha256) && valid_digest(result_sha256),
+        "invalid portable original identity"
+    );
+    let name = serde_json::to_vec(&(
+        "remarkable-buddies:portable-preference-edit:v1",
+        operation,
+        original,
+        patch_sha256,
+        result_sha256,
+    ))?;
+    Ok(Uuid::new_v5(&record_id(original.group)?, &name))
+}
+
+/// Original result correspondence only. The caller must independently prove the
+/// local Initialize/Commit receipt and exact original predecessor. No patch text
+/// or current effect authority is recovered from this comparison.
+pub(crate) fn verify_original(
+    result: &Projection,
+    actor: Uuid,
+    operation: Uuid,
+    original: &Condition,
+    patch_sha256: &str,
+) -> Result<()> {
+    ensure!(
+        result.head.actor_id == actor
+            && result.head.operation_id == operation
+            && result.head.record_id == record_id(original.group)?
+            && result.head.revision_id
+                == original_revision(operation, original, patch_sha256, &result.artifact.sha256())?,
+        "portable original result differs"
+    );
+    Ok(())
 }
 
 #[cfg(test)]

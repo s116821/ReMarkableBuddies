@@ -17,6 +17,7 @@ pub mod outbox_status;
 pub mod reader_runtime;
 pub mod restore_maintenance;
 pub mod retrieval;
+pub mod shared_preferences;
 pub mod simulator;
 pub mod storage;
 pub mod util;

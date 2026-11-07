@@ -228,6 +228,11 @@ pub struct Args {
     /// Generate/refine an unrendered Writer draft or prepare export; bounded JSON stdin
     #[arg(long, conflicts_with_all=["research_settings_operation","research_settings_input","inspect_conversations","conversation_operation","conversation_input","inspect_source_cache","source_cache_operation","source_cache_input","credential_reference_operation","credential_reference_input","model_credential_operation","model_credential_input","memory_settings_operation","memory_settings_input","ordinary_export_operation","ordinary_export_input","model_settings_operation","model_settings_input","restore_operation","restore_input","basic_settings_operation","basic_settings_input","configuration_operation","simulate","inspect_owned_data","api_key","model","base_url","trigger_corner","log_level","debug_dump","memory_operation","memory_input","sync_mode_operation","sync_mode_input","archive_operation","archive_input","personalization_operation","export_note"])]
     writer_note: bool,
+    /// Inspect, explicitly edit, or observe an original shared preference operation
+    #[arg(long, value_enum, requires="shared_preferences_input", conflicts_with_all=["inspect_owned_data_v3","inspect_selected_outbox","configuration_schema","export_portable_configuration","inspect_portable_configuration","portable_configuration_operation","portable_configuration_input","resident_stock_recovery","handwriting","product_settings_operation","product_settings_input","research_settings_operation","research_settings_input","inspect_conversations","conversation_operation","conversation_input","inspect_source_cache","source_cache_operation","source_cache_input","credential_reference_operation","credential_reference_input","model_credential_operation","model_credential_input","memory_settings_operation","memory_settings_input","ordinary_export_operation","ordinary_export_input","model_settings_operation","model_settings_input","restore_operation","restore_input","basic_settings_operation","basic_settings_input","configuration_operation","simulate","inspect_owned_data","api_key","model","base_url","trigger_corner","log_level","debug_dump","memory_operation","memory_input","sync_mode_operation","sync_mode_input","archive_operation","archive_input","personalization_operation","export_note","writer_note"])]
+    shared_preferences_operation: Option<remarkable_reader_buddy::shared_preferences::Operation>,
+    #[arg(long, requires="shared_preferences_operation", conflicts_with_all=["inspect_owned_data_v3","inspect_selected_outbox","configuration_schema","export_portable_configuration","inspect_portable_configuration","portable_configuration_operation","portable_configuration_input","resident_stock_recovery","handwriting","product_settings_operation","product_settings_input","research_settings_operation","research_settings_input","inspect_conversations","conversation_operation","conversation_input","inspect_source_cache","source_cache_operation","source_cache_input","credential_reference_operation","credential_reference_input","model_credential_operation","model_credential_input","memory_settings_operation","memory_settings_input","ordinary_export_operation","ordinary_export_input","model_settings_operation","model_settings_input","restore_operation","restore_input","basic_settings_operation","basic_settings_input","configuration_operation","simulate","inspect_owned_data","api_key","model","base_url","trigger_corner","log_level","debug_dump","memory_operation","memory_input","sync_mode_operation","sync_mode_input","archive_operation","archive_input","personalization_operation","export_note","writer_note"])]
+    shared_preferences_input: Option<std::path::PathBuf>,
 }
 
 fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_logger::Builder {
@@ -248,6 +253,18 @@ fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_lo
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    if let Some(operation) = args.shared_preferences_operation {
+        let report = remarkable_reader_buddy::shared_preferences::run(
+            operation,
+            args.shared_preferences_input
+                .as_deref()
+                .expect("required preference input"),
+            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+            &mut std::io::stdin().lock(),
+        );
+        report.write_to(&mut std::io::stdout().lock())?;
+        return Ok(());
+    }
     if let Some(operation) = args.portable_configuration_operation {
         use config::portable::import;
         let path = std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into);
@@ -1079,6 +1096,8 @@ mod tests {
                 "resident-stock-recovery",
                 "restore-input",
                 "restore-operation",
+                "shared-preferences-input",
+                "shared-preferences-operation",
                 "simulate",
                 "source-cache-input",
                 "source-cache-operation",
@@ -1106,6 +1125,8 @@ mod tests {
         assert!(args.inspect_portable_configuration.is_none());
         assert!(args.portable_configuration_operation.is_none());
         assert!(args.portable_configuration_input.is_none());
+        assert!(args.shared_preferences_operation.is_none());
+        assert!(args.shared_preferences_input.is_none());
         assert!(args.research_settings_operation.is_none());
         assert!(args.research_settings_input.is_none());
         assert!(args.model.is_none());
