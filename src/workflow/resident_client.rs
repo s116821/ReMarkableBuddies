@@ -561,6 +561,27 @@ mod linux {
                 )
                 .map_err(|error| self.transport_failure(error).into())
         }
+        /// Historical raw units only: no current-draft or edit authority, journal,
+        /// renewed deadline, automatic reconnect or replay.
+        #[cfg(buddy_development_native_pre_enter)]
+        pub fn capture_pre_enter_with_progress(
+            &mut self,
+            operation: OperationId,
+            offset: u32,
+            count: u16,
+            deadline: Instant,
+            progress: &mut dyn FnMut() -> Result<()>,
+        ) -> Result<Reply> {
+            self.client
+                .execute_with_progress(
+                    operation,
+                    Command::CapturePreEnter { offset, count },
+                    deadline,
+                    |_, _| Ok(()),
+                    &mut || progress().map_err(progress_error),
+                )
+                .map_err(|error| self.transport_failure(error).into())
+        }
         /// Visual-only evidence cannot enter the mutation journal or establish
         /// Reader identity. Earlier unresolved effects remain untouched.
         pub fn capture_visual_with_progress(

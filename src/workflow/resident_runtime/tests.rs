@@ -4,6 +4,8 @@ use remarkable_open_sdk::native_adapter::{Rejection, Reply};
 
 mod capture;
 mod companion;
+#[cfg(buddy_development_native_pre_enter)]
+mod pre_enter;
 mod requests;
 mod shutdown;
 

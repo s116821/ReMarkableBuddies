@@ -1,3 +1,5 @@
+include!("development_pre_enter_guard.rs");
+
 use anyhow::Result;
 use clap::Parser;
 use dotenv::dotenv;
