@@ -195,7 +195,7 @@ fn output(report: &Report) -> Value {
     serde_json::from_slice(&bytes).unwrap()
 }
 #[test]
-fn default_normalizer_and_admitted_no_context_keep_frozen_payload_and_identity() {
+fn whole_page_limits_match_default_notebook_and_narrow_receiving() {
     let local = Local::new();
     let vector = fixture();
     let mut engine = Engine::new();
@@ -212,11 +212,10 @@ fn default_normalizer_and_admitted_no_context_keep_frozen_payload_and_identity()
         &mut |_| Ok(()),
     )
     .unwrap();
-    assert_eq!(
-        serde_json::to_value(&engine.captured).unwrap(),
-        vector["cases"][0]["prompt_parts"]
-    );
-    assert_eq!(original.prompt_sha256, vector["cases"][0]["prompt_sha256"]);
+    let text = engine.captured[0]["text"].as_str().unwrap();
+    assert!(text.contains("32768 UTF-8 bytes per page"));
+    assert!(text.contains("sum of page text must be at most 131072 UTF-8 bytes"));
+    assert!(text.contains("JSON response must be at most 131072 UTF-8 bytes"));
     assert_eq!(original.document.source_sha256, vector["source_sha256"]);
     assert_eq!(
         serde_json::to_string(&original.profile).unwrap(),
@@ -226,13 +225,41 @@ fn default_normalizer_and_admitted_no_context_keep_frozen_payload_and_identity()
     input["document"] = json!(original.document.document);
     let report = run(&local, &input, &mut engine);
     assert_eq!(report.status, Status::Normalized);
+    let result = report.result.as_ref().unwrap();
+    assert_eq!(result.document, original.document);
     assert_eq!(
-        serde_json::to_value(report.result.as_ref().unwrap()).unwrap(),
-        serde_json::to_value(original).unwrap()
+        engine.captured,
+        vector["cases"][0]["prompt_parts"]
+            .as_array()
+            .unwrap()
+            .clone()
     );
+    assert_eq!(result.prompt_sha256, vector["cases"][0]["prompt_sha256"]);
+    assert_ne!(result.prompt_sha256, original.prompt_sha256);
     assert!(!local.config.paths.data.exists());
     assert!(engine.parts.is_empty());
     assert!(!report.confirmed);
+
+    for (size, accepted) in [(4096, true), (4097, false)] {
+        engine.reply = json!({"pages":[{"page":7,"status":"transcribed","text":"x".repeat(size)}]})
+            .to_string();
+        let target = notebook::admit_target(7, png(), &mut |_| Ok(())).unwrap();
+        let (result, called) = notebook::normalize_admitted(
+            Uuid::new_v4(),
+            &target,
+            "model-é/v1",
+            None,
+            TranscriptionPolicy::WholePage,
+            &mut engine,
+            &mut |_| Ok(()),
+        );
+        assert!(called);
+        assert_eq!(matches!(result, Ok(Normalized::Page(_))), accepted);
+        let text = engine.captured[0]["text"].as_str().unwrap();
+        assert!(text.contains("4096 UTF-8 bytes per page"));
+        assert!(text.contains("sum of page text must be at most 4096 UTF-8 bytes"));
+        assert!(text.contains("JSON response must be at most 16384 UTF-8 bytes"));
+    }
 }
 #[test]
 fn six_literal_vectors_exercise_production_context_payload_and_profile_recipes() {
