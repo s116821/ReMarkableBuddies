@@ -53,11 +53,11 @@ struct Review {
     selection: Value,
 }
 
-fn approve(raw: &[u8], expected: &str) -> anyhow::Result<Review> {
+fn approve(raw: &[u8], expected: &str, decision: &str) -> anyhow::Result<Review> {
     let value: Review = serde_json::from_slice(raw)?;
     anyhow::ensure!(
         value.seed_gate_sha256 == expected
-            && value.decision == "confirm-supported-controlled-seed"
+            && value.decision == decision
             && selection(&value.selection),
         "confirmation refused"
     );
@@ -154,7 +154,7 @@ fn inputs(root: &Path, pages: &[u32]) -> anyhow::Result<(Vec<Vec<u8>>, String)> 
     Ok((images, digest(&raw_map)))
 }
 
-fn run(root: &Path, pages: &[u32]) -> anyhow::Result<()> {
+fn run(root: &Path, pages: &[u32], seed_enrollment: bool) -> anyhow::Result<()> {
     let manifest = read(&root.join("runtime.json"), 16384)?;
     let pin: Value = serde_json::from_slice(&manifest)?;
     let authority: Admission =
@@ -162,6 +162,7 @@ fn run(root: &Path, pages: &[u32]) -> anyhow::Result<()> {
     anyhow::ensure!(
         authority.manifest_sha256 == digest(&manifest)
             && selection(&authority.selection)
+            && (!seed_enrollment || pin["seed_mode"] == "explicit-abstention-enrollment")
             && pin["model"] == MODEL
             && pin["endpoint"] == ENDPOINT
             && pin["executable_sha256"] == digest(&fs::read(std::env::current_exe()?)?),
@@ -224,7 +225,13 @@ fn run(root: &Path, pages: &[u32]) -> anyhow::Result<()> {
             let until = Instant::now() + Duration::from_secs(600);
             while Instant::now() < until {
                 if root.join("review.json").exists() {
-                    let review = approve(&read(&root.join("review.json"), 4096)?, &gate_sha)?;
+                    let decision = if seed_enrollment {
+                        "enroll-supported-controlled-seed-after-abstention"
+                    } else {
+                        "confirm-supported-controlled-seed"
+                    };
+                    let review =
+                        approve(&read(&root.join("review.json"), 4096)?, &gate_sha, decision)?;
                     let text = read(&root.join("seed-supported.txt"), 4096)?;
                     anyhow::ensure!(pin["seed_sha256"] == digest(&text), "seed text pin");
                     save(
@@ -250,6 +257,7 @@ fn run(root: &Path, pages: &[u32]) -> anyhow::Result<()> {
                 save(root, &format!("cell-{cell}.json"), &value)
             }
         },
+        seed_enrollment,
     );
     save(
         root,
@@ -270,7 +278,7 @@ fn live_barton_receiving() -> anyhow::Result<()> {
         root.is_absolute() && root.canonicalize()?.is_dir(),
         "fixture root"
     );
-    run(&root, &BARTON_PAGES)
+    run(&root, &BARTON_PAGES, false)
 }
 
 #[test]
@@ -284,10 +292,9 @@ fn check_barton_inputs() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn lincoln_root() -> anyhow::Result<PathBuf> {
+fn lincoln_root(variable: &str) -> anyhow::Result<PathBuf> {
     let root = PathBuf::from(
-        std::env::var_os("RMB_LINCOLN_ROOT")
-            .ok_or_else(|| anyhow::anyhow!("fixture root absent"))?,
+        std::env::var_os(variable).ok_or_else(|| anyhow::anyhow!("fixture root absent"))?,
     );
     anyhow::ensure!(
         root.is_absolute() && root.canonicalize()?.is_dir(),
@@ -299,14 +306,24 @@ fn lincoln_root() -> anyhow::Result<PathBuf> {
 #[test]
 #[ignore = "requires exact reviewed live admission"]
 fn live_lincoln_receiving() -> anyhow::Result<()> {
-    run(&lincoln_root()?, &LINCOLN_PAGES)
+    run(&lincoln_root("RMB_LINCOLN_ROOT")?, &LINCOLN_PAGES, false)
 }
 
 #[test]
 #[ignore = "requires local frozen Lincoln inputs"]
 fn check_lincoln_inputs() -> anyhow::Result<()> {
-    inputs(&lincoln_root()?, &LINCOLN_PAGES)?;
+    inputs(&lincoln_root("RMB_LINCOLN_ROOT")?, &LINCOLN_PAGES)?;
     Ok(())
+}
+
+#[test]
+#[ignore = "requires fresh explicit enrollment admission"]
+fn live_lincoln_abstention_enrollment() -> anyhow::Result<()> {
+    run(
+        &lincoln_root("RMB_LINCOLN_ENROLLMENT_ROOT")?,
+        &LINCOLN_PAGES,
+        true,
+    )
 }
 
 #[test]
@@ -314,9 +331,9 @@ fn review_rejects_unknown_or_stale_gate() {
     let valid = json!({"decision":"confirm-supported-controlled-seed","seed_gate_sha256":"exact",
         "selection":"https://linear.app/magentumdragon/issue/REM-26#comment-11111111-1111-1111-1111-111111111111"});
     let bytes = serde_json::to_vec(&valid).unwrap();
-    assert!(approve(&bytes, "exact").is_ok());
-    assert!(approve(&bytes, "stale").is_err());
-    assert!(approve(b"{}", "exact").is_err());
+    assert!(approve(&bytes, "exact", "confirm-supported-controlled-seed").is_ok());
+    assert!(approve(&bytes, "stale", "confirm-supported-controlled-seed").is_err());
+    assert!(approve(b"{}", "exact", "confirm-supported-controlled-seed").is_err());
 }
 
 #[test]
@@ -374,6 +391,7 @@ fn metered_responses_and_refusals_survive_actual_receiving() {
                 evidence = Some(value);
                 Ok(())
             },
+            false,
         );
         assert_eq!(result.is_ok(), succeeds);
         assert_eq!(evidence.unwrap()["diagnostic"], expected);

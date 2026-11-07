@@ -8,16 +8,24 @@ struct Receipt {
     source: [Uuid; 3],
 }
 
+struct Received {
+    ledger: Ledger,
+    scope: RequestScope,
+    image: ImageRef,
+    abstention: Option<crate::workflow::conversation_dispatch::handwriting::WriterAbstention>,
+}
+
 fn receive(
     store: &Arc<Store>,
     dispatch: &mut Dispatch<'_>,
     bytes: &[u8],
     engine: &mut impl LLMEngine,
     evidence: &mut impl FnMut(Value) -> anyhow::Result<()>,
-) -> anyhow::Result<(Ledger, RequestScope, ImageRef)> {
+    seed_enrollment: bool,
+) -> anyhow::Result<Received> {
     let (ledger, scope, image) =
         retained_source_fixture(store.clone(), Mode::Writer, bytes.to_vec());
-    let report = dispatch.writer_source_image(
+    let mut report = dispatch.writer_source_image(
         &ledger,
         engine,
         &WriterImageRequest {
@@ -38,6 +46,7 @@ fn receive(
         ) && result.failure.is_none()
     });
     let diagnostic = report.diagnostic;
+    let abstention = report.abstention.take();
     drop(report);
     let normalized: Vec<_> = ledger
         .inspect(scope.conversation, false)?
@@ -52,8 +61,16 @@ fn receive(
         "report":serde_json::from_slice::<Value>(&report_bytes)?,"normalized":normalized,
         "diagnostic":diagnostic}),
     )?;
-    anyhow::ensure!(succeeded, "receiving refused");
-    Ok((ledger, scope, image))
+    anyhow::ensure!(
+        succeeded || (seed_enrollment && abstention.is_some()),
+        "receiving refused"
+    );
+    Ok(Received {
+        ledger,
+        scope,
+        image,
+        abstention,
+    })
 }
 
 fn compare(seed: &[u8], targets: &[Vec<u8>], engine: &mut Calls) -> anyhow::Result<Receipt> {
@@ -66,6 +83,7 @@ fn compare(seed: &[u8], targets: &[Vec<u8>], engine: &mut Calls) -> anyhow::Resu
         engine,
         |_| Ok("CONTROLLED_SEED_READING".into()),
         |_| Ok(()),
+        false,
     )
 }
 
@@ -76,6 +94,7 @@ fn compare_gated(
     engine: &mut impl LLMEngine,
     review: impl FnOnce(Value) -> anyhow::Result<String>,
     mut evidence: impl FnMut(Value) -> anyhow::Result<()>,
+    seed_enrollment: bool,
 ) -> anyhow::Result<Receipt> {
     anyhow::ensure!((1..=3).contains(&targets.len()), "target count");
     let mut hashes = BTreeSet::new();
@@ -87,49 +106,91 @@ fn compare_gated(
     let owner = Ledger::new(store.clone());
     let mut dispatch = Dispatch::local(config, &owner)?;
     for target in targets {
-        receive(&store, &mut dispatch, target, engine, &mut evidence)?;
+        receive(&store, &mut dispatch, target, engine, &mut evidence, false)?;
     }
-    let (ledger, scope, image) = receive(&store, &mut dispatch, seed, engine, &mut evidence)?;
+    let Received {
+        ledger,
+        scope,
+        image,
+        abstention,
+    } = receive(
+        &store,
+        &mut dispatch,
+        seed,
+        engine,
+        &mut evidence,
+        seed_enrollment,
+    )?;
+    anyhow::ensure!(
+        !seed_enrollment || abstention.is_some(),
+        "seed did not abstain"
+    );
     let normalized = ledger
         .inspect(scope.conversation, false)?
         .into_iter()
-        .find_map(|r| {
-            if let Record::NormalizedText(value) = r {
+        .find_map(|record| {
+            if let Record::NormalizedText(value) = record {
                 Some(value)
             } else {
                 None
             }
-        })
-        .ok_or_else(|| anyhow::anyhow!("normalized seed absent"))?;
-    let revision = *ledger
-        .expected(Namespace::Source, normalized.id)?
-        .0
-        .iter()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("normalized seed revision absent"))?;
+        });
+    let revision = if let Some(value) = &normalized {
+        Some(
+            *ledger
+                .expected(Namespace::Source, value.id)?
+                .0
+                .iter()
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("normalized seed revision absent"))?,
+        )
+    } else {
+        anyhow::ensure!(
+            seed_enrollment && abstention.is_some(),
+            "normalized seed absent"
+        );
+        None
+    };
     let confirmation_scope = RequestScope {
         operation: Uuid::new_v4(),
         root: ledger.expected(Namespace::Conversation, scope.conversation)?,
         conversation: scope.conversation,
         source: scope.source.clone(),
     };
-    let reviewed = review(json!({
+    let mut gate = json!({
         "seed_operation":scope.operation, "confirmation_operation":confirmation_scope.operation,
         "conversation":scope.conversation, "root_heads":confirmation_scope.root.0,
         "source":image.source,"source_revision":image.revision,"turn":image.turn,
         "turn_revision":image.turn_revision,"page":image.page,"image_sha256":digest(seed),
         "normalized":normalized,"normalized_revision":revision
-    }))?;
-    let prepared = dispatch.prepare_handwriting_confirmation(
-        &ledger,
-        &ConfirmIntent {
-            image: image.clone(),
-            corrected_text: reviewed,
-            normalized_source: Some((normalized.id, revision)),
-        },
-        &confirmation_scope,
-        &mut || Ok(scope.source.clone()),
-    )?;
+    });
+    if abstention.is_some() {
+        gate["seed_outcome"] = json!("valid-whole-page-abstention");
+        gate["intent_owner"] = json!("controlled-fixture");
+    }
+    let reviewed = review(gate)?;
+    let prepared = if let Some(abstention) = &abstention {
+        dispatch.prepare_writer_enrollment(
+            &ledger,
+            abstention,
+            reviewed,
+            &confirmation_scope,
+            &mut || Ok(scope.source.clone()),
+        )?
+    } else {
+        dispatch.prepare_handwriting_confirmation(
+            &ledger,
+            &ConfirmIntent {
+                image: image.clone(),
+                corrected_text: reviewed,
+                normalized_source: normalized
+                    .zip(revision)
+                    .map(|(value, revision)| (value.id, revision)),
+            },
+            &confirmation_scope,
+            &mut || Ok(scope.source.clone()),
+        )?
+    };
     let frozen: Value = serde_json::from_slice(prepared.frozen_input())?;
     evidence(json!({"confirmation_prepared":{
         "sha256":digest(prepared.frozen_input()),"operation":frozen["operation"],
@@ -156,7 +217,7 @@ fn compare_gated(
     let confirmed_revision = confirmed.report.facts[0].revision;
     drop(confirmed);
     for target in targets {
-        receive(&store, &mut dispatch, target, engine, &mut evidence)?;
+        receive(&store, &mut dispatch, target, engine, &mut evidence, false)?;
     }
     assert_eq!(
         store
@@ -199,6 +260,7 @@ fn review_refusal_stops_after_seed_and_never_starts_context() {
             anyhow::bail!("review refused")
         },
         |_| Ok(()),
+        false,
     );
     assert!(result.is_err() && observed);
     assert_eq!(engine.calls.len(), 8);
@@ -260,4 +322,47 @@ fn first_receiving_failure_does_not_retry_or_reach_confirmation() {
     assert!(!serde_json::to_string(&engine.calls)
         .unwrap()
         .contains("CONTROLLED_SEED_READING"));
+}
+
+#[test]
+fn valid_seed_abstention_enrolls_only_after_explicit_fixture_review() {
+    for approve in [false, true] {
+        let mut local = Local::ready_notebook(true);
+        enable(&mut local);
+        let mut engine = engine(3);
+        engine.replies[2] = r#"{"pages":[{"page":7,"status":"unreadable","text":""}]}"#.into();
+        engine.replies.remove(3);
+        let mut committed = false;
+        let receipt = compare_gated(
+            &local.config,
+            &sample(2),
+            &[sample(3)],
+            &mut engine,
+            |gate| {
+                assert_eq!(gate["seed_outcome"], "valid-whole-page-abstention");
+                assert_eq!(gate["intent_owner"], "controlled-fixture");
+                assert!(gate["normalized"].is_null());
+                anyhow::ensure!(approve, "fixture review refused");
+                Ok("CONTROLLED_ENROLLED_READING".into())
+            },
+            |evidence| {
+                if evidence["committed"] == true {
+                    committed = true;
+                }
+                Ok(())
+            },
+            true,
+        );
+        assert_eq!(receipt.is_ok(), approve);
+        assert_eq!(committed, approve);
+        assert_eq!(engine.calls.len(), if approve { 5 } else { 3 });
+        for (index, call) in engine.calls.iter().enumerate() {
+            let text = serde_json::to_string(call).unwrap();
+            assert_eq!(text.contains("CONTROLLED_ENROLLED_READING"), index == 3);
+            if index == 3 {
+                assert!(text.contains("null original_text means no machine reading"));
+                assert!(text.contains(&STANDARD.encode(sample(2))));
+            }
+        }
+    }
 }
