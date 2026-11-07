@@ -377,7 +377,7 @@ fn ordinary_memory_admits_ready_notebook_without_relaxing_legacy() {
 
 #[test]
 fn ready_receiving_refuses_remote_mode_and_retained_selection_without_repair() {
-    for variant in 0..3 {
+    for variant in 0..5 {
         let fixture = Fixture::new();
         let mode = if variant < 2 {
             let legacy = fixture.store();
@@ -407,9 +407,15 @@ fn ready_receiving_refuses_remote_mode_and_retained_selection_without_repair() {
             fs::create_dir_all(generation.join("selection-history")).unwrap();
             fs::write(generation.join("selection-history/held.json"), b"{}").unwrap();
         }
+        if variant == 3 {
+            fs::write(generation.join("notebook-feature.json"), b"{}").unwrap();
+        }
+        if variant == 4 {
+            fs::remove_file(generation.join("notebook-feature.json")).unwrap();
+        }
         let current = fs::read(store.paths.data.join("CURRENT")).unwrap();
         let format = fs::read(generation.join("format.json")).unwrap();
-        let marker = fs::read(generation.join("notebook-feature.json")).unwrap();
+        let marker = fs::read(generation.join("notebook-feature.json")).ok();
         drop(store);
         assert!(Store::open_existing_for_ready_notebook_receiving(fixture.paths()).is_err());
         assert_eq!(
@@ -418,7 +424,7 @@ fn ready_receiving_refuses_remote_mode_and_retained_selection_without_repair() {
         );
         assert_eq!(fs::read(generation.join("format.json")).unwrap(), format);
         assert_eq!(
-            fs::read(generation.join("notebook-feature.json")).unwrap(),
+            fs::read(generation.join("notebook-feature.json")).ok(),
             marker
         );
         if variant == 2 {
