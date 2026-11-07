@@ -219,7 +219,11 @@ impl SelectedAdmission {
     /// Recover the original publication before allocating new preparation IDs.
     /// Replacement membership and lost acknowledgments never refresh authority.
     pub fn recover_original_intent(&self, operation: Uuid) -> Result<Option<HistoricalIntent>> {
-        self.mutate(|store| recover_original(store, &self.scope, operation))
+        // Original receipt custody is readable after departure/replacement.
+        // It returns no live token, readiness witness or dispatch permission.
+        Self::with_gates(&[self], |store| {
+            recover_original(store, &self.scope, operation)
+        })
     }
     pub fn new(store: Arc<Store>, scope: SelectionScope) -> Result<Self> {
         scope.validate()?;

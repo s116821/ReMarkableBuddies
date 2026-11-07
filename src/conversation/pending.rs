@@ -158,7 +158,11 @@ impl SelectedAdmission {
         request: &PendingIntentRequest,
     ) -> Result<Option<HistoricalIntent>> {
         request.validate_input()?;
-        self.mutate(|store| recover_pending_request(store, self.scope(), request))
+        // Custody recovery must survive departure and even unreadable current
+        // mode state. No live token or current product authority escapes.
+        Self::with_gates(&[self], |store| {
+            recover_pending_request(store, self.scope(), request)
+        })
     }
     /// Only this controlled new publication can mint an executable context.
     #[cfg(test)]

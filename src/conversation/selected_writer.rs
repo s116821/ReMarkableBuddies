@@ -431,7 +431,9 @@ impl SelectedAdmission {
             crate::storage::valid_digest(raw_head),
             "invalid original raw head"
         );
-        Self::with_ready_gate_set(&[self], |store| {
+        // Historical custody never mints a model permit or current readiness.
+        // Keep original-only recovery readable across mode/readiness changes.
+        Self::with_gates(&[self], |store| {
             if store
                 .selected_receipt(self.scope(), req.operation)?
                 .is_none()
