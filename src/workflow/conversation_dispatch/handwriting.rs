@@ -28,6 +28,8 @@ pub(crate) struct WriterImageRequest {
 pub(crate) struct SourceReport {
     pub result: Result<(writer::Report, Option<PendingOutput>)>,
     _capture: Option<runtime::Capture>,
+    #[cfg(test)]
+    pub diagnostic: &'static str,
 }
 impl SourceReport {
     pub(crate) fn write_to(&self, output: &mut impl Write) -> Result<()> {
@@ -103,6 +105,8 @@ impl Dispatch<'_> {
         let mut report = SourceReport {
             result: Err(anyhow::anyhow!("source not admitted")),
             _capture: None,
+            #[cfg(test)]
+            diagnostic: "source-admission",
         };
         report.result = (|| {
             self.require_ledger(ledger)?;
@@ -215,6 +219,20 @@ impl Dispatch<'_> {
                 engine,
                 &mut |_| receiving.check(ledger, observe),
             );
+            #[cfg(test)]
+            {
+                use notebook::{NormalizeFailure as Failure, Normalized};
+                report.diagnostic = match &normalized {
+                    Err(Failure::Canceled) => "normalization-canceled",
+                    Err(Failure::InvalidInput) => "normalization-invalid-input",
+                    Err(Failure::PromptLimit) => "normalization-prompt-limit",
+                    Err(Failure::ProviderFailed) => "normalization-provider-failed",
+                    Err(Failure::InvalidResponse) => "normalization-invalid-response",
+                    Ok(Normalized::Unreadable) => "normalization-unreadable",
+                    Ok(Normalized::Page(_)) => "normalized-source-revalidation",
+                    Ok(_) => "normalization-incomplete-page",
+                };
+            }
             let notebook::Normalized::Page(page) =
                 normalized.map_err(|_| anyhow::anyhow!("source normalization refused"))?
             else {
@@ -232,9 +250,17 @@ impl Dispatch<'_> {
                 },
                 guidance: input.guidance.clone(),
             };
+            #[cfg(test)]
+            {
+                report.diagnostic = "normalized-writer-preflight";
+            }
             request
                 .preflight()
                 .map_err(|_| anyhow::anyhow!("normalized Writer request refused"))?;
+            #[cfg(test)]
+            {
+                report.diagnostic = "writer-receiving";
+            }
             self.writer(ledger, engine, &request, &receiving, observe)
         })();
         report

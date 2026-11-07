@@ -31,7 +31,13 @@ fn receive(
     );
     let mut report_bytes = Vec::new();
     report.write_to(&mut report_bytes)?;
-    let succeeded = report.result.is_ok();
+    let succeeded = report.result.as_ref().is_ok_and(|(result, _)| {
+        matches!(
+            result.status,
+            crate::writer::Status::Generated | crate::writer::Status::HistoricalGenerated
+        ) && result.failure.is_none()
+    });
+    let diagnostic = report.diagnostic;
     drop(report);
     let normalized: Vec<_> = ledger
         .inspect(scope.conversation, false)?
@@ -43,7 +49,8 @@ fn receive(
         .collect();
     evidence(
         json!({"operation":scope.operation,"source":image.source,"image_sha256":digest(bytes),
-        "report":serde_json::from_slice::<Value>(&report_bytes)?,"normalized":normalized}),
+        "report":serde_json::from_slice::<Value>(&report_bytes)?,"normalized":normalized,
+        "diagnostic":diagnostic}),
     )?;
     anyhow::ensure!(succeeded, "receiving refused");
     Ok((ledger, scope, image))

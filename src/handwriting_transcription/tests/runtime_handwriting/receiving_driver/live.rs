@@ -63,14 +63,14 @@ fn approve(raw: &[u8], expected: &str) -> anyhow::Result<Review> {
     Ok(value)
 }
 
-struct Meter<'a> {
-    inner: crate::OpenAI,
+struct Meter<'a, E> {
+    inner: E,
     root: &'a Path,
     calls: usize,
     committed: &'a std::cell::Cell<bool>,
 }
 
-impl LLMEngine for Meter<'_> {
+impl<E: LLMEngine> LLMEngine for Meter<'_, E> {
     fn add_text_content(&mut self, text: &str) {
         self.inner.add_text_content(text);
     }
@@ -98,10 +98,25 @@ impl LLMEngine for Meter<'_> {
             &json!({"call":self.calls}),
         )?;
         let result = self.inner.execute_with_progress(progress);
+        let response = match &result {
+            Ok(text) => {
+                let retained = text.len() <= 65536;
+                if retained {
+                    let mut file = OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(self.root.join(format!("call-{}-response.txt", self.calls)))?;
+                    file.write_all(text.as_bytes())?;
+                    file.sync_all()?;
+                }
+                json!({"bytes":text.len(),"sha256":digest(text.as_bytes()),"retained":retained})
+            }
+            Err(_) => Value::Null,
+        };
         save(
             self.root,
             &format!("call-{}-ended.json", self.calls),
-            &json!({"call":self.calls,"returned":result.is_ok()}),
+            &json!({"call":self.calls,"returned":result.is_ok(),"response":response}),
         )?;
         result
     }
@@ -270,4 +285,81 @@ fn review_rejects_unknown_or_stale_gate() {
     assert!(approve(&bytes, "exact").is_ok());
     assert!(approve(&bytes, "stale").is_err());
     assert!(approve(b"{}", "exact").is_err());
+}
+
+#[test]
+fn metered_responses_and_refusals_survive_actual_receiving() {
+    for (reply, generate, expected, succeeds) in [
+        (
+            good_reply(),
+            "# Title\n\nA note.".to_string(),
+            "writer-receiving",
+            true,
+        ),
+        (
+            "{}".into(),
+            String::new(),
+            "normalization-invalid-response",
+            false,
+        ),
+        (
+            "x".repeat(65537),
+            String::new(),
+            "normalization-invalid-response",
+            false,
+        ),
+        (
+            r#"{"pages":[{"page":7,"status":"unreadable","text":""}]}"#.into(),
+            String::new(),
+            "normalization-unreadable",
+            false,
+        ),
+        (good_reply(), String::new(), "writer-receiving", false),
+    ] {
+        let mut local = Local::ready_notebook(true);
+        enable(&mut local);
+        let store = Arc::new(Store::open(local.config.paths.clone()).unwrap());
+        let ledger = Ledger::new(store.clone());
+        let mut dispatch = Dispatch::local(&local.config, &ledger).unwrap();
+        let committed = std::cell::Cell::new(false);
+        let mut fake = engine(1);
+        fake.replies = [reply.clone(), generate].into();
+        let mut meter = Meter {
+            inner: fake,
+            root: &local.root,
+            calls: 0,
+            committed: &committed,
+        };
+        let mut evidence = None;
+        let result = receive(
+            &store,
+            &mut dispatch,
+            &sample(3),
+            &mut meter,
+            &mut |value| {
+                evidence = Some(value);
+                Ok(())
+            },
+        );
+        assert_eq!(result.is_ok(), succeeds);
+        assert_eq!(evidence.unwrap()["diagnostic"], expected);
+        let ended: Value =
+            serde_json::from_slice(&fs::read(local.root.join("call-1-ended.json")).unwrap())
+                .unwrap();
+        assert_eq!(ended["response"]["bytes"], reply.len());
+        assert_eq!(ended["response"]["sha256"], digest(reply.as_bytes()));
+        if reply.len() <= 65536 {
+            assert_eq!(
+                fs::read(local.root.join("call-1-response.txt")).unwrap(),
+                reply.as_bytes()
+            );
+        } else {
+            assert_eq!(ended["response"]["retained"], false);
+            assert!(!local.root.join("call-1-response.txt").exists());
+        }
+        assert_eq!(
+            meter.calls,
+            if expected == "writer-receiving" { 2 } else { 1 }
+        );
+    }
 }
