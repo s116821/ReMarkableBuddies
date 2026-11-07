@@ -521,6 +521,10 @@ fn admitted(
                     return Ok(Report::new(request.operation(), "joining", "not-admitted"));
                 }
             }
+            // Engine reloads its original bounded state, independently of the
+            // local uncertainty inspection above. Reserve that second read in
+            // this same request allowance before even opening credentials.
+            reads.charge(0, 1, MAX_METADATA as u64, 0)?;
             let mut engine = Engine::new(
                 store.clone(),
                 capture.local.base_config().sync.clone(),

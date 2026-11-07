@@ -681,3 +681,47 @@ fn changed_config_at_output_invalidates_inspection_and_leaves_a_committed_edit_u
         .unwrap()
         .is_none());
 }
+
+#[test]
+fn constructor_reload_allowance_exhaustion_precedes_the_first_provider_observation() {
+    let wire = Wire::new();
+    let fixture = Fixture::new(&wire);
+    fixture.bootstrap(&wire);
+    let _ = fixture.inspect(&wire, true);
+    assert!(fixture.store.paths.data.join("sync/state.json").exists());
+    // Enough for caller-local reads and the first slot observation, but not
+    // also Engine's independently bounded MAX_METADATA checkpoint reload.
+    let mut reads = SelectedReadBudget::new(
+        64,
+        MAX_ITEMS as u64,
+        3 * MAX_METADATA as u64 + 64 * 1024 + 4 * MAX_RECORD as u64,
+        0,
+    );
+    let capture = Capture::read(fixture.config.clone(), &mut reads).unwrap();
+    let before = wire.requests().len();
+    let result = admitted(
+        fixture.store.clone(),
+        capture,
+        Request::Inspect(false),
+        Binding {
+            group: fixture.group,
+            root_id: "command-root".into(),
+            digest: fixture.binding.clone(),
+        },
+        Instant::now() + Duration::from_secs(60),
+        &mut reads,
+        || {
+            Ok(wire.client(
+                fixture.store.paths.credentials.join("drive.json"),
+                fixture.group,
+            ))
+        },
+    );
+    assert!(result.is_err());
+    assert_eq!(
+        wire.requests().len(),
+        before,
+        "constructor and observer must share the original allowance"
+    );
+    assert_eq!(posts(&wire), 0);
+}
