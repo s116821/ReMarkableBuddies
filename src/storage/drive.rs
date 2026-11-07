@@ -192,8 +192,17 @@ fn now() -> u64 {
         .unwrap_or_default()
         .as_secs()
 }
+#[derive(Debug)]
+struct InvalidRemoteData;
+impl std::fmt::Display for InvalidRemoteData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("invalid Drive response")
+    }
+}
+impl std::error::Error for InvalidRemoteData {}
+
 fn parse<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
-    serde_json::from_slice(bytes).map_err(|_| anyhow::anyhow!("invalid Drive response"))
+    serde_json::from_slice(bytes).map_err(|_| InvalidRemoteData.into())
 }
 pub(crate) fn id(value: &str) -> Result<()> {
     ensure!(
@@ -330,7 +339,7 @@ impl GoogleDrive {
                 .call()
                 .map_err(|_| anyhow::anyhow!("Drive metadata transport failed"))?,
         )?;
-        serde_json::from_value(value).map_err(|_| anyhow::anyhow!("invalid Drive metadata"))
+        serde_json::from_value(value).map_err(|_| InvalidRemoteData.into())
     }
     fn verify_existing(&mut self, id: &str, tag: &Tag, bytes: &files::Source) -> Result<()> {
         let existing = self.metadata(id)?;
