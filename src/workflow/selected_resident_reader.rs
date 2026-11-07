@@ -21,6 +21,21 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+pub(super) fn finish_selected_request(workflow: &mut Workflow) -> Result<()> {
+    let result = workflow.finish_request();
+    if workflow.runtime_failed() {
+        return result.and_then(|_| {
+            Err(anyhow::anyhow!(
+                "selected Reader runtime lost during finalization"
+            ))
+        });
+    }
+    match result {
+        Err(error) if error.is::<resident_source::FinalizedCancellation>() => Ok(()),
+        result => result.context("selected Reader request finalization failed"),
+    }
+}
+
 pub(crate) fn run(
     store: Arc<Store>,
     reader: Arc<SelectedAdmission>,
@@ -207,9 +222,7 @@ pub(crate) fn run(
             return result.and_then(|_| Err(anyhow::anyhow!("selected Reader runtime lost")));
         }
         if began {
-            workflow
-                .finish_request()
-                .context("selected Reader request finalization failed")?;
+            finish_selected_request(&mut workflow)?;
         }
         if result.is_err() {
             log::info!("Selected Reader request ended without further output");

@@ -894,7 +894,18 @@ pub(crate) mod tests {
                 )
             };
             let mut exhausted = SelectedReadBudget::new(0, 0, 0, 0);
+            assert!(admission
+                .recover_reader_text(&token, &interpretation, &mut exhausted)
+                .is_err());
             assert!(publish(&token, interpretation.clone(), &mut exhausted).is_err());
+            assert_eq!(
+                store
+                    .selected_snapshot(admission.scope(), crate::storage::MAX_ITEMS)
+                    .unwrap()
+                    .unwrap()
+                    .token,
+                token
+            );
             let crate::conversation::SelectedReaderPublication::Published {
                 publication,
                 acknowledgment,
@@ -920,7 +931,10 @@ pub(crate) mod tests {
             };
             assert_eq!(acknowledgment.written.outcome, Outcome::Generated);
             assert!(admission
-                .recover_reader_text(&token, &interpretation)
+                .recover_reader_text(&token, &interpretation, &mut exhausted)
+                .is_err());
+            assert!(admission
+                .recover_reader_text(&token, &interpretation, &mut reads)
                 .unwrap());
             assert_eq!(
                 ordinary_ids(&store.manifests().unwrap()),

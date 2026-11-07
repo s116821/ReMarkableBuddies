@@ -25,6 +25,17 @@ use std::{
 };
 
 pub(super) const ACQUISITION: Duration = Duration::from_secs(90);
+
+#[derive(Debug)]
+pub(super) struct FinalizedCancellation;
+
+impl std::fmt::Display for FinalizedCancellation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Resident source request canceled")
+    }
+}
+
+impl std::error::Error for FinalizedCancellation {}
 fn operation() -> OperationId {
     OperationId(Uuid::parse(&uuid::Uuid::new_v4().to_string()).expect("OS UUID"))
 }
@@ -534,6 +545,7 @@ impl ResidentSourceOwner {
     }
     pub(super) fn finish(&mut self, health: &mut ServiceHealth) -> Result<()> {
         let result = self.progress(health);
+        let canceled = result.is_err() && self.canceled && !self.fatal && !health.failed();
         if let Some(session) = &mut self.session {
             session.finish();
             self.reconnect = true;
@@ -545,7 +557,11 @@ impl ResidentSourceOwner {
         self.canceled = false;
         // The old guard is gone, never renewed. Cancellation stayed sticky
         // throughout its request; only a distinct release can begin another.
-        result
+        if canceled {
+            Err(FinalizedCancellation.into())
+        } else {
+            result
+        }
     }
 }
 
@@ -1704,8 +1720,7 @@ mod tests {
         std::fs::remove_dir_all(base).unwrap();
     }
     #[test]
-    fn selected_workflow_canceled_request_then_new_release_reconnects_same_child_without_reactivation(
-    ) {
+    fn selected_service_finalization_allows_new_release_after_clean_cancellation() {
         use crate::device::interaction::Interaction;
         let mut polls = (0..5).map(|_| Ok(vec![])).collect::<Vec<_>>();
         polls.push(Ok(vec![Interaction::Invalidated]));
@@ -1733,7 +1748,7 @@ mod tests {
         assert!(workflow.acquire_reader_evidence().is_err());
         assert!(workflow.input_failed());
         assert!(!workflow.runtime_failed());
-        assert!(workflow.finish_request().is_err());
+        crate::workflow::selected_resident_reader::finish_selected_request(&mut workflow).unwrap();
         workflow.wait_for_reader().unwrap();
         let acquisition = workflow.acquire_reader_evidence().unwrap();
         let ledger = Ledger::new(store.clone());
@@ -1742,7 +1757,7 @@ mod tests {
         let images = attempt.images(&ledger).unwrap();
         assert_eq!(images.len(), 4);
         workflow.deliver_reader_acquisition().unwrap();
-        workflow.finish_request().unwrap();
+        crate::workflow::selected_resident_reader::finish_selected_request(&mut workflow).unwrap();
         assert_eq!(
             workflow
                 .resident_source
@@ -1773,6 +1788,28 @@ mod tests {
         drop(ledger);
         drop(workflow);
         drop(store);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn selected_service_finalization_stops_when_input_is_lost_during_cleanup() {
+        let (mut workflow, store, base, _, _notify) = workflow(
+            "reconnect-source-handoff",
+            vec![released(Instant::now())],
+            Duration::ZERO,
+        );
+        workflow.wait_for_reader().unwrap();
+        assert!(!workflow.runtime_failed());
+        workflow.resident_source.as_mut().unwrap().input = Some(RequestInput::scripted(vec![Err(
+            anyhow::anyhow!("fixture input lost"),
+        )]));
+        let error =
+            crate::workflow::selected_resident_reader::finish_selected_request(&mut workflow)
+                .unwrap_err();
+        assert!(!error.is::<FinalizedCancellation>());
+        assert!(workflow.runtime_failed());
+        assert!(workflow.resident_source.as_ref().unwrap().input.is_none());
+        drop((workflow, store));
         std::fs::remove_dir_all(base).unwrap();
     }
     #[test]

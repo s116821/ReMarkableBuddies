@@ -380,20 +380,23 @@ impl SelectedAdmission {
         &self,
         accepted: &SelectionToken,
         request: &SelectedReaderWrite,
+        reads: &mut SelectedReadBudget,
     ) -> Result<bool> {
         input(request)?;
         ensure!(
             accepted.scope() == self.scope(),
             "foreign selected Reader scope"
         );
-        Ok(recover(
-            self.writer_store(),
-            accepted,
-            request,
-            &fingerprint(accepted, request)?,
-            None,
-        )?
-        .is_some())
+        Self::with_gates(&[self], |store| {
+            Ok(recover(
+                store,
+                accepted,
+                request,
+                &fingerprint(accepted, request)?,
+                Some(reads),
+            )?
+            .is_some())
+        })
     }
 
     pub fn publish_reader_text(

@@ -402,17 +402,19 @@ impl Selected {
         .unwrap();
         #[cfg(target_os = "linux")]
         let guarded = if let Some(policy) = &self.resident {
+            let mut reads = policy.reads(ReaderPhase::Result)?;
             anyhow::ensure!(
-                !self
-                    .admission
-                    .recover_reader_text(&frozen.accepted, &frozen.request)?,
+                !self.admission.recover_reader_text(
+                    &frozen.accepted,
+                    &frozen.request,
+                    &mut reads
+                )?,
                 "selected Reader text is already historical"
             );
             anyhow::ensure!(
                 self.model_stage.get() >= 2,
                 "selected Reader verification not submitted"
             );
-            let mut reads = policy.reads(ReaderPhase::Result)?;
             let mut verify =
                 |store: &Store, reads: &mut crate::storage::selection::SelectedReadBudget| {
                     policy.verify_locked(store, &self.admission, &frozen.accepted, reads)?;
