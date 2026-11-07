@@ -6,6 +6,7 @@ pub mod memory_settings;
 pub mod model_credential;
 pub mod model_settings;
 pub mod personalization;
+pub mod portable;
 pub mod product;
 pub mod product_settings;
 pub mod research_settings;
@@ -421,3 +422,6 @@ pub fn resolve(config: &Config, cli: Overrides, env: Environment) -> Result<Effe
         sources,
     })
 }
+
+#[cfg(test)]
+mod notebook_preferences_tests;

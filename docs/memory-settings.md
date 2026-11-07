@@ -11,3 +11,11 @@ Reports disclose enabled's origin/value and profile's origin/presence, never pro
 Every report, including verified apply, keeps runtime activation `unverified`. Saving false does not disable existing explicit maintenance commands; saving true/profile does not activate automatic Reader memory or prove profile membership. Desired-file-observed proves current bytes, not historical publication or runtime state. Partial/missing output and possible publication failures remain unknown; do not retry automatically or infer rollback.
 
 The exact coordinated contract is the central `edit-saved-memory-settings` change. Host UI and automatic Reader memory remain separate work.
+
+Apply also supports an already-ready ordinary notebook store (format 4) under the
+existing preference admission gate: complete owned history, no selected or retained
+selected history, and absent or LocalOnly mode. Unsupported/interrupted notebook
+state refuses without repair. Supported legacy formats 1/2/3 retain their existing
+mode rules. Only saved configuration changes; notebook data/media and credential
+files remain untouched. Generic configuration and credential writers retain their
+separate notebook refusal. This does not activate a provider or running service.

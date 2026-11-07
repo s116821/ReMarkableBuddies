@@ -1,5 +1,43 @@
 # Local Reader simulator
 
+### Combined receiving qualification
+
+`mode: "combined-qualification"` is a separate explicit receiving check through
+the production Dispatch Reader/Writer and notebook map/reduce paths. The maintained
+`scenarios/combined-qualification.json` runs the same seven-stage sequence with
+scripted replies and no credential resolution. It records original text parts,
+image identities, returned replies, exact-history checks, retained Writer drafts
+and notebook reducer input digests in a fresh `report.json`. Existing scripted
+combined multi-image/deduplication, cancellation and stale-operation scenarios
+remain separate regression controls. An existing output directory refuses so
+failed evidence is not overwritten.
+
+The explicit future `live/combined-qualification.json` uses exactly seven calls,
+at most4000 completion tokens and90s per call, and a12min overall deadline. Only
+that opt-in mode resolves a protected credential from the explicit saved Config.
+Before dispatch, supply the reviewed absolute `REMARKABLE_BUDDIES_CONFIG` path
+and these nonsecret original-condition pins in the process environment:
+
+- `RMB_COMBINED_QUALIFICATION_CONFIG_SHA256`: exact saved Config bytes.
+- `RMB_COMBINED_QUALIFICATION_MODEL`: exact reviewed model matching Config.
+- `RMB_COMBINED_QUALIFICATION_HTTPS_ORIGIN`: exact HTTPS origin matching Config.
+
+The Config must contain a protected `model_credential` reference. Ambient API-key
+overrides are ignored by this qualification route. The existing OpenAI adapter's
+single-request option disables retries and redirects; any model failure stops
+the sequence without another dispatch. The resulting report retains safe HTTP
+status metadata when available and never includes credential values.
+
+Use the maintained synthetic printed physics image, checked by its literal SHA256,
+for both historical-source conversations. Initial Reader and notebook-map payloads
+do not contain its numeric answers. Supplied comparison text is separately labeled
+Source B. Writer visibility uses simulated completion observation only; no export
+destination or native effect is invoked. Optional subject memory remains disabled
+by the current dispatcher and is not silently added by this entry. The exact
+request sequence, expected facts and pre-dispatch review are documented in the
+central active change `unify-ordinary-conversation-dispatch/qualification-plan.md`.
+Scripted/loopback success is not live, handwriting, native or runtime qualification.
+
 Writer host scenarios also execute through `--simulate` with `mode: "writer"`.
 They use the separate strict Writer schema: scripted string `replies`, `steps`,
 `conversation`, `expect` and `output`. `run` steps use existing inline/export
@@ -340,3 +378,18 @@ gates. Do not quote virtual-clock values as tablet performance.
 returns that page's pixels without changing the modeled active page. The full
 workflow regression combines it with `next: no_move`: conflicting fresh pixels
 must stop before classification, further navigation, answer text or failure ink.
+
+### Ordinary receiving memory fixture
+
+`docs/simulator/scenarios/combined-qualification-memory.json` enables the closed
+`local-fixture-v1` selector on the maintained seven-stage qualification sequence.
+It seeds two synthetic assertions on each scratch Store: compatible global SI
+context and a deliberately stale/hostile original-document assertion. The saved
+live model configuration supplies transport identity only. The default scenario
+keeps memory disabled. Reader and Writer use the actual ordinary receivers;
+notebook maps receive no memory and the reducer receives one frozen snapshot.
+The report retains actual labeled context/payloads and query counts (four ordinary,
+two notebook sequence queries). Scripted replies demonstrate payload wiring and
+ownership assertions; they do not demonstrate model semantics or native effects.
+A live enabled run requires separate exact-source/fixture selection and retains
+the existing seven-call, no-retry and time/token bounds.

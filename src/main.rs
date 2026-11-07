@@ -73,6 +73,23 @@ pub struct Args {
     /// Emit the embedded canonical-object schema without reading saved configuration
     #[arg(long, exclusive = true)]
     configuration_schema: bool,
+    /// Export explicit private portable preferences; no runtime/configuration changes
+    #[arg(long, exclusive = true, value_name = "CONFIG_FILE")]
+    export_portable_configuration: Option<std::path::PathBuf>,
+    /// Validate an explicit portable preference artifact without exposing its text
+    #[arg(long, exclusive = true, value_name = "ARTIFACT_FILE")]
+    inspect_portable_configuration: Option<std::path::PathBuf>,
+    /// Private conditional import of explicit portable preference declarations
+    #[arg(long,value_enum,conflicts_with_all=["product_settings_operation","product_settings_input","research_settings_operation","research_settings_input","inspect_conversations","conversation_operation","conversation_input","inspect_source_cache","source_cache_operation","source_cache_input","credential_reference_operation","credential_reference_input","model_credential_operation","model_credential_input","memory_settings_operation","memory_settings_input","ordinary_export_operation","ordinary_export_input","model_settings_operation","model_settings_input","restore_operation","restore_input","basic_settings_operation","basic_settings_input","configuration_operation","simulate","inspect_owned_data","api_key","model","base_url","trigger_corner","log_level","debug_dump","memory_operation","memory_input","sync_mode_operation","sync_mode_input","archive_operation","archive_input","personalization_operation","export_note","writer_note"])]
+    portable_configuration_operation: Option<config::portable::import::Operation>,
+    /// Exact-dash private JSON stdin only; no input-file fallback
+    #[arg(
+        long,
+        value_name = "INPUT",
+        requires = "portable_configuration_operation",
+        conflicts_with_all=["product_settings_operation","product_settings_input","research_settings_operation","research_settings_input","inspect_conversations","conversation_operation","conversation_input","inspect_source_cache","source_cache_operation","source_cache_input","credential_reference_operation","credential_reference_input","model_credential_operation","model_credential_input","memory_settings_operation","memory_settings_input","ordinary_export_operation","ordinary_export_input","model_settings_operation","model_settings_input","restore_operation","restore_input","basic_settings_operation","basic_settings_input","configuration_operation","simulate","inspect_owned_data","api_key","model","base_url","trigger_corner","log_level","debug_dump","memory_operation","memory_input","sync_mode_operation","sync_mode_input","archive_operation","archive_input","personalization_operation","export_note","writer_note"]
+    )]
+    portable_configuration_input: Option<std::path::PathBuf>,
     /// Fixed installed stock recovery; never starts ordinary application services
     #[arg(long, exclusive = true)]
     resident_stock_recovery: bool,
@@ -232,6 +249,32 @@ fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_lo
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    if let Some(operation) = args.portable_configuration_operation {
+        use config::portable::import;
+        let path = std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into);
+        let report = if operation == import::Operation::Inspect {
+            if args.portable_configuration_input.is_some() {
+                import::invalid_input(operation)
+            } else {
+                import::inspect(path)
+            }
+        } else if args
+            .portable_configuration_input
+            .as_ref()
+            .is_some_and(|p| p.as_os_str() == std::ffi::OsStr::new("-"))
+        {
+            import::run_stdin(operation, path, &mut std::io::stdin().lock())
+        } else {
+            import::unsupported_input(operation)
+        };
+        return report.write_to(&mut std::io::stdout().lock());
+    }
+    if let Some(path) = args.export_portable_configuration {
+        return config::portable::export(path).write_to(&mut std::io::stdout().lock());
+    }
+    if let Some(path) = args.inspect_portable_configuration {
+        return config::portable::inspect(path).write_to(&mut std::io::stdout().lock());
+    }
     if args.inspect_selected_outbox {
         return remarkable_reader_buddy::outbox_status::run(
             std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
@@ -624,11 +667,17 @@ fn main() -> Result<()> {
         return Ok(());
     }
     let config = Config::load(std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into))?;
+    use remarkable_reader_buddy::workflow::conversation_dispatch::{Dispatch, RuntimeRoute};
+    let route = RuntimeRoute::for_config(&config);
+    anyhow::ensure!(
+        route.admits_startup(&config),
+        "Reader is disabled in saved settings and no Writer route is available"
+    );
     anyhow::ensure!(
         config.reader_enabled(),
-        "Reader is disabled in saved settings"
+        "Reader is disabled in saved settings and native Writer input is unavailable"
     );
-    if config.reader.selection.is_none() {
+    if config.reader_enabled() && config.reader.selection.is_none() {
         remarkable_reader_buddy::memory::context::admit_ordinary(&config.memory)?;
     }
     let admitted_store = match remarkable_reader_buddy::reader_runtime::startup(&config) {
@@ -668,8 +717,17 @@ fn main() -> Result<()> {
     info!("=== ReMarkable Reader Buddy Starting ===");
     let store = remarkable_reader_buddy::reader_runtime::ordinary_store(&config, admitted_store)
         .map_err(|report| report.into_ordinary_startup_error())?;
-    let _ordinary_runtime_lifetime =
-        remarkable_reader_buddy::mode_maintenance::admit_ordinary(&store, config.sync.enabled)?;
+    let ledger = remarkable_reader_buddy::conversation::Ledger::new(store.clone());
+    let (dispatch, _ordinary_runtime_lifetime) = match route {
+        RuntimeRoute::OrdinaryLocal => (Some(Dispatch::local(&config, &ledger)?), None),
+        RuntimeRoute::ExistingReader => (
+            None,
+            Some(remarkable_reader_buddy::mode_maintenance::admit_ordinary(
+                &store,
+                config.sync.enabled,
+            )?),
+        ),
+    };
     store.snapshot_config(&config)?;
     files::atomic_json(
         &store.paths.data.join("effective-config.json"),
@@ -682,7 +740,9 @@ fn main() -> Result<()> {
         effective.key.into_string(),
         effective.base_url,
     );
-    let reader_memory = if config.memory.enabled {
+    let reader_memory = if let Some(dispatch) = &dispatch {
+        dispatch.local_memory()
+    } else if config.reader_enabled() && config.memory.enabled {
         Some(Arc::new(
             remarkable_reader_buddy::memory::LocalMemory::new_local(
                 store.clone(),
@@ -702,7 +762,10 @@ fn main() -> Result<()> {
     )?;
     let workflow = Workflow::new(false, effective.trigger_corner, effective.debug_dump)?;
     sleep(Duration::from_millis(1000));
-    let _sync_worker = Worker::google(store.clone(), config.sync)?;
+    let _sync_worker = match route {
+        RuntimeRoute::ExistingReader => Worker::google(store.clone(), config.sync.clone())?,
+        RuntimeRoute::OrdinaryLocal => None,
+    };
     #[cfg(target_os = "linux")]
     let workflow = {
         let mut workflow = workflow;
@@ -735,15 +798,14 @@ fn main() -> Result<()> {
         }
         workflow
     };
-    let mut orchestrator = Orchestrator::new(
-        workflow,
-        llm,
-        remarkable_reader_buddy::conversation::Ledger::new(store.clone()),
-    );
+    let mut orchestrator = Orchestrator::new(workflow, llm, ledger);
     orchestrator.set_personalization(personalization);
     orchestrator.set_subject_memory(reader_memory);
     info!("Initialization complete; starting main loop");
-    orchestrator.run_loop()
+    match dispatch {
+        None => orchestrator.run_loop(),
+        Some(dispatch) => orchestrator.run_local_loop(dispatch),
+    }
 }
 
 fn stock_recovery() -> Result<()> {
@@ -1014,11 +1076,13 @@ mod tests {
                 ))]
                 "development-resident-output-plan",
                 "export-note",
+                "export-portable-configuration",
                 "handwriting",
                 "handwriting-transcription",
                 "inspect-conversations",
                 "inspect-owned-data",
                 "inspect-owned-data-v3",
+                "inspect-portable-configuration",
                 "inspect-selected-outbox",
                 "inspect-source-cache",
                 "log-level",
@@ -1034,6 +1098,8 @@ mod tests {
                 "ordinary-export-input",
                 "ordinary-export-operation",
                 "personalization-operation",
+                "portable-configuration-input",
+                "portable-configuration-operation",
                 "product-settings-input",
                 "product-settings-operation",
                 "research-settings-input",
@@ -1065,6 +1131,10 @@ mod tests {
         assert!(args.basic_settings_operation.is_none());
         assert!(args.basic_settings_input.is_none());
         assert!(args.configuration_operation.is_none());
+        assert!(args.export_portable_configuration.is_none());
+        assert!(args.inspect_portable_configuration.is_none());
+        assert!(args.portable_configuration_operation.is_none());
+        assert!(args.portable_configuration_input.is_none());
         assert!(args.research_settings_operation.is_none());
         assert!(args.research_settings_input.is_none());
         assert!(args.model.is_none());

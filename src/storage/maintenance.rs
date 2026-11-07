@@ -57,6 +57,37 @@ fn read_record<T: DeserializeOwned>(
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NotebookAdmission {
+    Deny,
+    Restore,
+    Preferences,
+    ReadyOrdinary,
+}
+
+// A definite empty regular directory or definite absence; never follow links.
+fn empty_if_present(path: &Path) -> Result<(), Refusal> {
+    files::safe_path(path).map_err(|_| Refusal::Unsupported)?;
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() => {
+            if fs::read_dir(path)
+                .map_err(|_| Refusal::Unsupported)?
+                .next()
+                .transpose()
+                .map_err(|_| Refusal::Unsupported)?
+                .is_none()
+            {
+                Ok(())
+            } else {
+                Err(Refusal::Unsupported)
+            }
+        }
+        Ok(_) => Err(Refusal::Unsupported),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(Refusal::Unsupported),
+    }
+}
+
 pub(crate) struct ExistingCustody {
     pub(super) paths: StorePaths,
     pub(super) actor: Uuid,
@@ -149,28 +180,104 @@ impl Store {
     pub(crate) fn open_existing_for_outbox(paths: StorePaths) -> Result<Self, Refusal> {
         Self::open_existing_inner(paths, true)
     }
-    /// Explicit configuration publication only; never initialize or activate a mode.
-    pub(crate) fn open_existing_for_config(paths: StorePaths) -> Result<Self, Refusal> {
-        Self::open_existing_inner(paths, true)
+    /// Protected Linux credential-file publication only; never initialize or activate a mode.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn open_existing_for_credential_file(paths: StorePaths) -> Result<Self, Refusal> {
+        Self::open_existing_using(
+            paths,
+            true,
+            NotebookAdmission::Preferences,
+            |_, _| Ok(()),
+            |store, generation| store.recover(generation),
+        )
     }
     pub(super) fn open_existing_for_conversation(
         paths: StorePaths,
         admit: impl FnOnce(&StorePaths, &std::fs::File) -> anyhow::Result<()>,
         recover: impl FnOnce(&Store, Uuid) -> anyhow::Result<super::Index>,
     ) -> Result<Self, Refusal> {
-        Self::open_existing_using(paths, false, admit, recover)
+        Self::open_existing_using(paths, false, NotebookAdmission::Deny, admit, recover)
     }
     fn open_existing_inner(paths: StorePaths, selected_aware: bool) -> Result<Self, Refusal> {
         Self::open_existing_using(
             paths,
             selected_aware,
+            NotebookAdmission::Deny,
             |_, _| Ok(()),
             |store, generation| store.recover(generation),
         )
     }
+    pub(crate) fn open_existing_for_notebook_restore(paths: StorePaths) -> Result<Self, Refusal> {
+        Self::open_existing_using(
+            paths,
+            false,
+            NotebookAdmission::Restore,
+            |_, _| Ok(()),
+            |store, generation| store.recover(generation),
+        )
+    }
+    /// Nonsecret basic/model/memory/product/research declaration writers may admit
+    /// a ready ordinary notebook. Other writers use their own scoped entries.
+    pub(crate) fn open_existing_for_preferences(paths: StorePaths) -> Result<Self, Refusal> {
+        Self::open_existing_using(
+            paths,
+            true,
+            NotebookAdmission::Preferences,
+            |_, _| Ok(()),
+            |store, generation| store.recover(generation),
+        )
+    }
+    /// Saved reference declarations only; protected file operations use a separate entry.
+    pub(crate) fn open_existing_for_credential_reference(
+        paths: StorePaths,
+    ) -> Result<Self, Refusal> {
+        Self::open_existing_using(
+            paths,
+            true,
+            NotebookAdmission::Preferences,
+            |_, _| Ok(()),
+            |store, generation| store.recover(generation),
+        )
+    }
+    /// Personalization retains legacy format1-only admission. The ordinary
+    /// notebook gate is shared, without admitting legacy selected/feedback stores.
+    pub(crate) fn open_existing_for_personalization(paths: StorePaths) -> Result<Self, Refusal> {
+        Self::open_existing_using(
+            paths,
+            false,
+            NotebookAdmission::Preferences,
+            |_, _| Ok(()),
+            |store, generation| store.recover(generation),
+        )
+    }
+    /// Portable preferences use the common legacy1/ordinary notebook family only.
+    pub(crate) fn open_existing_for_portable_preferences(
+        paths: StorePaths,
+    ) -> Result<Self, Refusal> {
+        Self::open_existing_using(
+            paths,
+            false,
+            NotebookAdmission::Preferences,
+            |_, _| Ok(()),
+            |store, generation| store.recover(generation),
+        )
+    }
+    pub(crate) fn open_existing_for_ready_notebook_receiving(
+        paths: StorePaths,
+    ) -> Result<Self, Refusal> {
+        Self::open_existing_using(
+            paths,
+            false,
+            NotebookAdmission::ReadyOrdinary,
+            |_, _| Ok(()),
+            |store, generation| store.recover(generation),
+        )
+    }
+
     fn open_existing_using(
         paths: StorePaths,
         selected_aware: bool,
+        admission: NotebookAdmission,
         admit: impl FnOnce(&StorePaths, &std::fs::File) -> anyhow::Result<()>,
         recover: impl FnOnce(&Store, Uuid) -> anyhow::Result<super::Index>,
     ) -> Result<Self, Refusal> {
@@ -183,12 +290,16 @@ impl Store {
         let generation_root = paths.data.join("generations").join(generation.to_string());
         files::safe_path(&generation_root.join(super::notebook_generation::MARKER))
             .map_err(|_| Refusal::Unsupported)?;
-        if record::<u32>(&generation_root.join("format.json"), 64)?
-            == super::notebook_generation::VERSION
+        let notebook = admission == NotebookAdmission::Restore
+            || record::<u32>(&generation_root.join("format.json"), 64)?
+                == super::notebook_generation::VERSION
             || generation_root
                 .join(super::notebook_generation::MARKER)
-                .exists()
-        {
+                .exists();
+        if admission == NotebookAdmission::ReadyOrdinary && !notebook {
+            return Err(Refusal::Unsupported);
+        }
+        if admission == NotebookAdmission::Deny && notebook {
             // These are legacy maintenance admissions. Explicit notebook
             // preparation/history/backup use their separately validated APIs.
             return Err(Refusal::Unsupported);
@@ -200,11 +311,23 @@ impl Store {
         ] {
             directory(path)?;
         }
-        if selected_aware {
+        if notebook {
+            super::notebook_generation::validate_ready(&paths, actor, generation)
+                .map_err(|_| Refusal::Unsupported)?;
+        } else if selected_aware {
             super::selection::validate_generation(&generation_root, actor, generation)
                 .map_err(|_| Refusal::Unsupported)?;
         } else if record::<u32>(&generation_root.join("format.json"), 64)? != FORMAT {
             return Err(Refusal::Unsupported);
+        }
+        let notebook_preferences = notebook
+            && matches!(
+                admission,
+                NotebookAdmission::Preferences | NotebookAdmission::ReadyOrdinary
+            );
+        if notebook_preferences {
+            empty_if_present(&generation_root.join("selections"))?;
+            empty_if_present(&generation_root.join("selection-history"))?;
         }
         let store = Self {
             paths,
@@ -224,10 +347,21 @@ impl Store {
             writer_active: std::sync::atomic::AtomicBool::new(false),
         };
         let index = recover(&store, generation).map_err(|_| Refusal::Unsupported)?;
-        if index.unavailable != 0 {
+        if index.unavailable != 0
+            || (notebook_preferences
+                && index
+                    .manifests
+                    .values()
+                    .any(|manifest| manifest.scope != super::Scope::LocalTransaction))
+        {
             return Err(Refusal::Unsupported);
         }
         store.inner.lock().map_err(|_| Refusal::Unavailable)?.index = index;
+        if notebook_preferences
+            && !super::sync::mode::ordinary_local(&store).map_err(|_| Refusal::Unsupported)?
+        {
+            return Err(Refusal::Unsupported);
+        }
         Ok(store)
     }
 }

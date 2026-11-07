@@ -1,5 +1,6 @@
 //! Immutable ordinary historical data, never selected/native or model admission.
 pub mod answer;
+pub(crate) mod images;
 pub mod memory;
 use super::{
     resolution::{self, SourceDirective},

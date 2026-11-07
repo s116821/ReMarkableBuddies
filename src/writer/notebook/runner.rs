@@ -157,6 +157,7 @@ pub(crate) fn run_owned<E: LLMEngine>(
                     NotebookStageKind::Map,
                     ordinal,
                     payloads.map_parts(ordinal)?,
+                    &[],
                 )?
                 else {
                     return Ok(None);
@@ -165,7 +166,14 @@ pub(crate) fn run_owned<E: LLMEngine>(
             }
             let outputs = cursor.map_outputs()?;
             let parts = payloads.reducer_parts(&outputs)?;
-            let Some(next) = runner.step(cursor, NotebookStageKind::Reduce, 0, &parts)? else {
+            let Some(next) = runner.step(
+                cursor,
+                NotebookStageKind::Reduce,
+                0,
+                &parts,
+                &payloads.reducer_images.attachments,
+            )?
+            else {
                 return Ok(None);
             };
             cursor = next;
@@ -218,6 +226,7 @@ impl<E: LLMEngine> Runner<'_, E> {
         kind: NotebookStageKind,
         ordinal: usize,
         parts: &[String],
+        images: &[String],
     ) -> Result<Option<NotebookRunCursor>> {
         let revision = match kind {
             NotebookStageKind::Map => MAP_PROMPT,
@@ -267,6 +276,9 @@ impl<E: LLMEngine> Runner<'_, E> {
             } else {
                 for part in parts {
                     content.0.add_text_content(part);
+                }
+                for image in images {
+                    content.0.add_image_content(image);
                 }
                 invoked = true;
                 self.report.local_invocations += 1;

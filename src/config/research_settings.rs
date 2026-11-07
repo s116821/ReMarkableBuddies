@@ -502,7 +502,7 @@ fn apply_with(
     if doc.config.validate().is_err() {
         return Report::refusal(operation, Status::Unsupported);
     }
-    let store = match Store::open_existing_for_config(doc.config.paths.clone()) {
+    let store = match Store::open_existing_for_preferences(doc.config.paths.clone()) {
         Ok(v) => Arc::new(v),
         Err(refusal) => {
             return Report::refusal(

@@ -1,0 +1,6 @@
+{
+  "mode": "combined-qualification",
+  "memory": "local-fixture-v1",
+  "llm": {"mode": "scripted"},
+  "output": "../../../target/simulator/combined-qualification-memory-offline"
+}

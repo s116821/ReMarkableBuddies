@@ -61,7 +61,8 @@ SOURCE_PROBE_EVENT=re.compile(
 def run(argv,cwd,env=None,timeout=120,stdout_limit=16384,combined_limit=16384,return_streams=False,private_diagnostics=None,source_probe_lines=None):
  if private_diagnostics is not None:
   private_diagnostics=Path(private_diagnostics)
-  require(combined_limit in {8192,16384},'private compiler diagnostic bound')
+  require(combined_limit in {8192,16384} or (type(stdout_limit) is int and stdout_limit==65536 and combined_limit is None),
+          'private compiler diagnostic bound')
   private_diagnostics.mkdir(exist_ok=False)
  guard=OwnedProcess(argv,cwd=cwd,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
  process=guard.process
@@ -137,14 +138,14 @@ def plain_git(repo):
 def source_git(repo,*args):
  return run(['git','--no-optional-locks',*args],repo,stdout_limit=SOURCE_LIST_LIMIT,combined_limit=None)
 
-def source_snapshot(repo,tag):
+def source_snapshot(repo,tag,repository=REPOSITORY):
  info=(repo/'.git').lstat()
  require(stat.S_ISDIR(info.st_mode) and not getattr(info,'st_file_attributes',0)&0x400,'standalone source Git directory')
  plain_git(repo)
  require(Path(source_git(repo,'rev-parse','--show-toplevel')).resolve()==repo,'actual source Git root')
  require(Path(source_git(repo,'rev-parse','--absolute-git-dir')).resolve()==repo/'.git','actual source Git directory')
  require(not source_git(repo,'for-each-ref','refs/replace/'),'source Git replacement refs')
- source=source_identity(repo,tag)
+ source=source_identity(repo,tag,repository)
  entries=source_git(repo,'ls-tree','-r','--full-tree','HEAD').splitlines()
  index=source_git(repo,'ls-files','-v').splitlines()
  require(not source_git(repo,'diff','--cached','--name-only','HEAD','--'),'tracked source index differs from HEAD')
@@ -267,7 +268,8 @@ def cross_source_mapping(repo,cross):
   mount='/mnt/'+repo.drive[0].lower()+repo.as_posix()[2:]
   user='1000:1000'
  else:
-  require(run([str(cross),'--version'],repo).startswith('cross 0.2.5 (49cd054 '),'unreviewed Cross source mapping')
+  banner=run([str(cross),'--version'],repo)
+  require(any(banner.startswith('cross 0.2.5 ('+revision+' ') for revision in ('49cd054','8c1a8aa')),'unreviewed Cross source mapping')
   mount=repo.as_posix()
   user=f'{os.getuid()}:{os.getgid()}'
  require(',' not in str(repo) and ',' not in mount,'unsupported source bind path')
@@ -355,14 +357,56 @@ def cargo_configuration(repo):
   records.append(dict(path=str(path),sha256=hashlib.sha256(raw).hexdigest()))
  return records
 
-def source_identity(repo,tag):
+def source_identity(repo,tag,repository=REPOSITORY):
  require(stable(tag),'stable existing tag required')
- require(git(repo,'remote','get-url','origin') in {REPOSITORY,REPOSITORY+'.git','git@github.com:s116821/ReMarkableBuddies.git','ssh://git@github.com/s116821/ReMarkableBuddies.git'},'canonical source repository origin')
+ require(repository in {REPOSITORY,SDK_REPOSITORY},'supported source repository')
+ path=repository.removeprefix('https://github.com/')
+ require(git(repo,'remote','get-url','origin') in {repository,repository+'.git','git@github.com:'+path+'.git','ssh://git@github.com/'+path+'.git'},'canonical source repository origin')
  require(git(repo,'rev-parse','--is-shallow-repository')=='false','complete source')
  require(not git(repo,'--no-optional-locks','status','--porcelain','--untracked-files=normal'),'clean exact source')
  head=git(repo,'rev-parse','HEAD')
  require(git(repo,'rev-parse',f'refs/tags/{tag}^{{commit}}')==head,'tag/source mismatch')
- return dict(repository=REPOSITORY,tag=tag,sha=head,epoch=int(git(repo,'show','-s','--format=%ct',head)))
+ return dict(repository=repository,tag=tag,sha=head,epoch=int(git(repo,'show','-s','--format=%ct',head)))
+
+def sdk_release_source(proof_root,tag,fragment,manifest_sha):
+ """Read independent release Git/tag proof. Never fetch or write cache refs."""
+ require(proof_root is not None,'--sdk-tag requires --sdk-tag-source (independent SDK release Git source)')
+ require(stable(tag),'SDK release proof requires an exact stable tag')
+ root=Path(proof_root).resolve();ref='refs/tags/'+tag
+ def locations():
+  result=[]
+  for path in (root,root/'.git'):
+   info=path.lstat()
+   require(stat.S_ISDIR(info.st_mode) and not getattr(info,'st_file_attributes',0)&0x400,'SDK release proof requires regular source/Git directories')
+   result.append((info.st_dev,info.st_ino,info.st_mode,info.st_ctime_ns))
+  return result
+ def remote():
+  require(run(['git','ls-remote','--get-url',SDK_REPOSITORY],root,timeout=30)==SDK_REPOSITORY,'SDK canonical remote URL was rewritten')
+  raw=run(['git','ls-remote','--exit-code','--tags',SDK_REPOSITORY,ref,ref+'^{}'],root,timeout=30,stdout_limit=8192,combined_limit=8192)
+  entries={}
+  for line in raw.splitlines():
+   fields=line.split('\t')
+   require(len(fields)==2 and fields[1] in {ref,ref+'^{}'} and re.fullmatch('[0-9a-f]{40}',fields[0]) and fields[1] not in entries,'malformed SDK remote tag proof')
+   entries[fields[1]]=fields[0]
+  require(ref in entries and entries.get(ref+'^{}',entries[ref])==fragment,'SDK remote tag/commit mismatch')
+  return entries
+ try:
+  location=locations()
+  require(source_git(root,'for-each-ref','--format=%(objectname)','refs/tags/'+tag),'SDK release proof is missing the requested tag')
+  before=source_snapshot(root,tag,SDK_REPOSITORY)
+  require(before['source']['sha']==fragment,'SDK release proof/Cargo commit mismatch')
+  require(source_git(root,'ls-files','--error-unmatch','--','Cargo.toml')=='Cargo.toml','SDK release proof requires tracked root manifest')
+  require(sha(root/'Cargo.toml')==manifest_sha,'SDK release proof/Cargo manifest mismatch')
+  # Local Git already has the real tag object; match its identity to canonical
+  # remote observations instead of fetching into Cargo's generated checkout.
+  observed=remote()
+  require(observed[ref]==before['tag_oid'],'SDK remote/local tag object mismatch')
+  after=source_snapshot(root,tag,SDK_REPOSITORY)
+  require(after==before and locations()==location and sha(root/'Cargo.toml')==manifest_sha,'SDK release proof changed during observation')
+  require(remote()==observed,'SDK remote tag changed during observation')
+  return dict(root=str(root),location_identity=location,snapshot=before,manifest_sha256=manifest_sha,remote_tag=observed)
+ except (OSError,Refusal) as error:
+  raise Refusal('SDK release source proof refused: '+str(error)) from None
 
 def clean_sdk_checkout(root,fragment):
  root=root.resolve()
@@ -378,7 +422,10 @@ def clean_sdk_checkout(root,fragment):
  require(not git(root,'status','--porcelain=v1','--untracked-files=all','--','.',':(top,exclude,literal).cargo-ok'),'clean actual SDK checkout')
  require(marker_identity()==before,'SDK completion marker changed')
 
-def cargo_identity(repo,target,sdk_tag=None,private_observations=None,rm2_resident=False):
+def cargo_identity(repo,target,sdk_tag=None,private_observations=None,rm2_resident=False,sdk_tag_source=None):
+ require(sdk_tag_source is None or sdk_tag is not None,'--sdk-tag-source requires --sdk-tag')
+ require(sdk_tag is None or sdk_tag_source is not None,'--sdk-tag requires --sdk-tag-source (independent SDK release Git source)')
+ require(sdk_tag is None or stable(sdk_tag),'SDK release proof requires an exact stable tag')
  feature_args=['--features',RM2_FEATURE] if rm2_resident else []
  data=json.loads(run(['cargo','metadata','--locked','--format-version','1','--filter-platform',target,*feature_args],repo,stdout_limit=16*1024*1024,combined_limit=None))
  if private_observations is not None: private_observations.append(data)
@@ -393,7 +440,7 @@ def cargo_identity(repo,target,sdk_tag=None,private_observations=None,rm2_reside
   reachable.add(identity);pending.extend(by_id[identity]['dependencies'])
  packages=[p for p in data['packages'] if p['name']=='remarkable-open-sdk' and p['id'] in reachable]
  require(len(packages)<=1,'ambiguous SDK package')
- sdk=None
+ sdk=None;proof=None
  if packages:
   package=packages[0];source=package.get('source','')
   require(source.split('?',1)[0].split('#',1)[0]=='git+'+SDK_REPOSITORY,'canonical SDK git source')
@@ -403,7 +450,8 @@ def cargo_identity(repo,target,sdk_tag=None,private_observations=None,rm2_reside
   clean_sdk_checkout(root,fragment)
   sdk=dict(ref_kind='commit-pinned',repository=SDK_REPOSITORY,sha=fragment,tag=None,manifest_sha256=sha(manifest))
   if sdk_tag:
-   require(stable(sdk_tag) and git(root,'rev-parse',f'refs/tags/{sdk_tag}^{{commit}}')==fragment,'actual SDK tag resolution')
+   require(Path(sdk_tag_source).resolve()!=root.resolve(),'SDK release source must be independent of Cargo checkout')
+   proof=sdk_release_source(sdk_tag_source,sdk_tag,fragment,sdk['manifest_sha256'])
    sdk.update(ref_kind='tagged-git',tag=sdk_tag)
  else: require(sdk_tag is None,'SDK tag for absent SDK')
  nodes=[n for n in resolve.get('nodes',[]) if n['id']==root_id]
@@ -425,8 +473,12 @@ def cargo_identity(repo,target,sdk_tag=None,private_observations=None,rm2_reside
   node['id']=node['id'].replace('path+'+root_uri+'#','path+SOURCE_ROOT#')
   node['dependencies']=[dep.replace('path+'+root_uri+'#','path+SOURCE_ROOT#') for dep in node['dependencies']]
  normalized=dict(sdk=sdk,features=features,packages=sorted(identities,key=lambda p:(p['name'],p['version'],p['source'])),graph=sorted(graph,key=lambda n:n['id']),lock_sha256=lock,target=target)
+ if proof is not None:
+  normalized['sdk_release_tag_object']=proof['snapshot']['tag_oid']
  digest=hashlib.sha256(json.dumps(normalized,sort_keys=True,separators=(',',':')).encode()).hexdigest()
- return dict(sdk=sdk,features=features,lock_sha256=lock,metadata_identity_sha256=digest)
+ result=dict(sdk=sdk,features=features,lock_sha256=lock,metadata_identity_sha256=digest)
+ if proof is not None:result['sdk_release_source']=proof
+ return result
 
 def elf_header(path):
  with path.open('rb') as source: raw=source.read(64)
@@ -435,7 +487,7 @@ def elf_header(path):
  require((cls,machine) in [(32,40),(64,183)],'supported actual ELF')
  return cls,'ARM' if machine==40 else 'AArch64'
 
-def build(repo,tag,target,target_dir,cross_configuration,sdk_tag=None,rm2_resident=False):
+def build(repo,tag,target,target_dir,cross_configuration,sdk_tag=None,rm2_resident=False,sdk_tag_source=None,diagnostics=None):
  from apk_compiler import identity as compiler_identity
  from docker_owned import cross_phase
  from abi import qualify
@@ -456,9 +508,14 @@ def build(repo,tag,target,target_dir,cross_configuration,sdk_tag=None,rm2_reside
  before_host=source_snapshot(repo,tag)
  before_source=before_host['source']
  mapping=cross_source_mapping(repo,cross)
- before_conversion=container_source_snapshot(repo,image,mapping,before_host)
+ if diagnostics is not None:
+  diagnostics=Path(diagnostics).resolve()
+  require(not diagnostics.exists() and not diagnostics.is_relative_to(repo),'fresh external build diagnostics required')
+  diagnostics.mkdir()
+ before_conversion=container_source_snapshot(repo,image,mapping,before_host,
+  None if diagnostics is None else diagnostics/'source-before.json')
  private_cargo=[];license_id=source_license(repo)
- configurations=cargo_configuration(repo);before_cargo=cargo_identity(repo,target,sdk_tag,private_cargo,rm2_resident)
+ configurations=cargo_configuration(repo);before_cargo=cargo_identity(repo,target,sdk_tag,private_cargo,rm2_resident,sdk_tag_source)
  if rm2_resident:
   sdk=before_cargo['sdk']
   require(sdk is not None and sdk['sha']==RM2_SDK_SHA and RM2_FEATURE in before_cargo['features'],'approved resident Cargo selection')
@@ -491,7 +548,8 @@ def build(repo,tag,target,target_dir,cross_configuration,sdk_tag=None,rm2_reside
   after_host=source_snapshot(repo,tag)
   require(after_host==before_host,'source Git admission identity changed')
   require(cross_source_mapping(repo,cross)==mapping,'Cross source mapping changed')
-  require(container_source_snapshot(repo,image,mapping,after_host)==before_conversion,'container Git admission identity changed')
+  require(container_source_snapshot(repo,image,mapping,after_host,
+   None if diagnostics is None else diagnostics/'source-after.json')==before_conversion,'container Git admission identity changed')
   checked.seek(0)
   frozen_dir=target_dir/'verified-input';frozen_dir.mkdir(exist_ok=False);frozen=frozen_dir/'reader-buddy'
   with frozen.open('xb') as destination:
@@ -506,7 +564,7 @@ def build(repo,tag,target,target_dir,cross_configuration,sdk_tag=None,rm2_reside
  actual_elf=qualify(frozen,target,lambda command:run(command,repo,stdout_limit=65536,combined_limit=None))
  after_compiler=compiler_identity(repo,target,image,cross,run,sha)
  require(after_compiler==before_compiler,'actual Cross compiler/image identity changed')
- require(cargo_identity(repo,target,sdk_tag,private_cargo,rm2_resident)==before_cargo,'build inputs changed')
+ require(cargo_identity(repo,target,sdk_tag,private_cargo,rm2_resident,sdk_tag_source)==before_cargo,'build inputs changed')
  require(cargo_configuration(repo)==configurations and source_license(repo)==license_id,'source configuration/license changed')
  require(sha(configuration)==configuration_hash and sha(Path(__file__))==helper_hash,'build helper/configuration changed')
  fields=before_compiler['rustc_fields'];sdk=before_cargo['sdk']
@@ -529,4 +587,5 @@ def build(repo,tag,target,target_dir,cross_configuration,sdk_tag=None,rm2_reside
   committed_inventory_sha256=hashlib.sha256(''.join(before_host['committed']).encode()).hexdigest())
  private_evidence['container_git_conversion']=before_conversion
  private_evidence['runtime_observations']=runtime_evidence
+ if 'sdk_release_source' in before_cargo:private_evidence['sdk_release_source']=before_cargo['sdk_release_source']
  return frozen,metadata,private_evidence

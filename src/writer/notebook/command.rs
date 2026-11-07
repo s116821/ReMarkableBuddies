@@ -287,6 +287,44 @@ pub(crate) fn prepare_frozen(
     preference: &PersonalizationSnapshot,
     frozen: Option<ValidatedNotebook>,
 ) -> Result<Prepared> {
+    prepare_inner(ledger, request, preference, frozen, None, None)
+}
+
+pub(crate) fn prepare_receiving(
+    ledger: &Ledger,
+    request: &Request,
+    preference: &PersonalizationSnapshot,
+    frozen: Option<ValidatedNotebook>,
+    expected: &crate::conversation::ExpectedHeads,
+    document: Uuid,
+    memory: Option<&crate::memory::LocalMemory>,
+) -> Result<runner::Input> {
+    ensure!(
+        request.joined().is_none()
+            && matches!(request, Request::GenerateNotebook(_)) == frozen.is_some(),
+        "routed notebook requires an explicit frozen source and separate export admission"
+    );
+    match prepare_inner(
+        ledger,
+        request,
+        preference,
+        frozen,
+        Some((expected, document)),
+        memory,
+    )? {
+        Prepared::Fresh(input) => Ok(*input),
+        Prepared::Replay(_) => anyhow::bail!("routed notebook operation consumed"),
+    }
+}
+
+fn prepare_inner(
+    ledger: &Ledger,
+    request: &Request,
+    preference: &PersonalizationSnapshot,
+    frozen: Option<ValidatedNotebook>,
+    routed: Option<(&crate::conversation::ExpectedHeads, Uuid)>,
+    memory: Option<&crate::memory::LocalMemory>,
+) -> Result<Prepared> {
     request.preflight()?;
     ensure!(
         ledger.store().unavailable_commits()? == 0,
@@ -295,6 +333,7 @@ pub(crate) fn prepare_frozen(
     let (text, calls, range) = request.fields()?;
     let plan_id = NotebookPlan::identity(request.operation());
     if let Some(envelope) = ledger.store().value(Namespace::Conversation, plan_id)? {
+        ensure!(routed.is_none(), "routed notebook operation consumed");
         let Record::NotebookPlan(plan) = Ledger::decode(&envelope)? else {
             anyhow::bail!("notebook operation identity changed")
         };
@@ -361,6 +400,10 @@ pub(crate) fn prepare_frozen(
     }
     // This snapshot is captured before all related reads, then carried through adoption.
     let expected = ledger.expected(Namespace::Conversation, request.conversation())?;
+    ensure!(
+        routed.is_none_or(|(admitted, _)| *admitted == expected),
+        "routed notebook history changed"
+    );
     let context = ledger.context_range(
         request.conversation(),
         range,
@@ -430,7 +473,31 @@ pub(crate) fn prepare_frozen(
         }
         _ => unreachable!(),
     };
-    let payloads = FrozenNotebookPayloads::new(
+    let images = if let Some((_, document)) = routed {
+        ensure!(
+            archive.document == document,
+            "routed notebook source document changed"
+        );
+        crate::conversation::receiving::images::resolve(ledger, &context)?
+    } else {
+        Default::default()
+    };
+    let memory = memory
+        .map(|provider| {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_millis()
+                .try_into()?;
+            crate::memory::receiving::OrdinarySnapshot::query(
+                provider,
+                ledger.store(),
+                text,
+                Some(archive.document),
+                now,
+            )
+        })
+        .transpose()?;
+    let payloads = FrozenNotebookPayloads::new_with_memory(
         &source,
         &archive,
         PayloadContext {
@@ -444,6 +511,8 @@ pub(crate) fn prepare_frozen(
                 .map(|(turn, revision, _)| (turn, revision.clone())),
             max_model_calls: calls,
         },
+        images,
+        memory,
     )?;
     let mut guards = Vec::new();
     for turn in &context.turns {
@@ -543,18 +612,24 @@ pub fn run(config_path: Option<PathBuf>, request: Request) -> Report {
         let preference = config
             .personalization_snapshot()
             .map_err(|_| runner::Failure::Storage)?;
-        let effective = config::resolve(
-            &config,
-            config::Overrides::default(),
-            config::Environment::current(),
-        )
-        .map_err(|_| runner::Failure::MissingCredentials)?;
-        let mut model = crate::OpenAI::new(
-            effective.model,
-            effective.key.into_string(),
-            effective.base_url,
-        );
-        let destination = if request.joined().is_some() {
+        config
+            .memory
+            .validate()
+            .map_err(|_| runner::Failure::Storage)?;
+        // Preserve disabled command credential admission before explicit preparation.
+        let effective = if !config.memory.enabled {
+            Some(
+                config::resolve(
+                    &config,
+                    config::Overrides::default(),
+                    config::Environment::current(),
+                )
+                .map_err(|_| runner::Failure::MissingCredentials)?,
+            )
+        } else {
+            None
+        };
+        let mut destination = if !config.memory.enabled && request.joined().is_some() {
             Some(
                 crate::note_export::mem::MemDestination::new(
                     &std::env::var("MEM_API_KEY")
@@ -565,15 +640,54 @@ pub fn run(config_path: Option<PathBuf>, request: Request) -> Report {
         } else {
             None
         };
-        let (store, prepared) = Store::prepare_notebook_validated(config.paths, |ledger| {
-            prepare(ledger, &request, &preference)
-        })
-        .map_err(|error| match error.downcast_ref::<InputRefusal>() {
-            Some(InputRefusal::Unsupported) => runner::Failure::Unsupported,
-            Some(InputRefusal::InvalidInput) => runner::Failure::InvalidInput,
-            _ => runner::Failure::Storage,
-        })?;
-        let ledger = Ledger::new(Arc::new(store));
+        let (ledger, prepared, memory) = if config.memory.enabled {
+            if crate::workflow::conversation_dispatch::RuntimeRoute::for_config(&config)
+                != crate::workflow::conversation_dispatch::RuntimeRoute::OrdinaryLocal
+            {
+                return Err(runner::Failure::Unsupported);
+            }
+            crate::memory::context::admit_ordinary(&config.memory)
+                .map_err(|_| runner::Failure::Unsupported)?;
+            let store = Arc::new(
+                Store::open_existing_for_ready_notebook_receiving(config.paths.clone())
+                    .map_err(|_| runner::Failure::Storage)?,
+            );
+            let lifetime = Arc::new(
+                crate::mode_maintenance::admit_local_dispatch(&store)
+                    .map_err(|_| runner::Failure::Storage)?,
+            );
+            let provider = Arc::new(
+                crate::memory::LocalMemory::admitted_local(
+                    store.clone(),
+                    config.memory.profile.ok_or(runner::Failure::Storage)?,
+                    lifetime,
+                )
+                .map_err(|_| runner::Failure::Storage)?,
+            );
+            let ledger = Ledger::new(store);
+            let prepared = prepare_inner(
+                &ledger,
+                &request,
+                &preference,
+                None,
+                None,
+                Some(provider.as_ref()),
+            )
+            .map_err(|_| runner::Failure::Storage)?;
+            (ledger, prepared, Some(provider))
+        } else {
+            let (store, prepared) =
+                Store::prepare_notebook_validated(config.paths.clone(), |ledger| {
+                    prepare(ledger, &request, &preference)
+                })
+                .map_err(|error| match error.downcast_ref::<InputRefusal>() {
+                    Some(InputRefusal::Unsupported) => runner::Failure::Unsupported,
+                    Some(InputRefusal::InvalidInput) => runner::Failure::InvalidInput,
+                    _ => runner::Failure::Storage,
+                })?;
+            let ledger = Ledger::new(Arc::new(store));
+            (ledger, prepared, None)
+        };
         if let Prepared::Replay(replay) = prepared {
             let mut generation = generation_report(&request, runner::Status::Historical, None);
             generation.draft = replay.draft;
@@ -597,6 +711,29 @@ pub fn run(config_path: Option<PathBuf>, request: Request) -> Report {
         let Prepared::Fresh(input) = prepared else {
             unreachable!()
         };
+        let effective = match effective {
+            Some(effective) => effective,
+            None => config::resolve(
+                &config,
+                config::Overrides::default(),
+                config::Environment::current(),
+            )
+            .map_err(|_| runner::Failure::MissingCredentials)?,
+        };
+        let mut model = crate::OpenAI::new(
+            effective.model,
+            effective.key.into_string(),
+            effective.base_url,
+        );
+        if destination.is_none() && request.joined().is_some() {
+            destination = Some(
+                crate::note_export::mem::MemDestination::new(
+                    &std::env::var("MEM_API_KEY")
+                        .map_err(|_| runner::Failure::MissingCredentials)?,
+                )
+                .map_err(|_| runner::Failure::MissingCredentials)?,
+            );
+        }
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -605,6 +742,7 @@ pub fn run(config_path: Option<PathBuf>, request: Request) -> Report {
         runtime.block_on(async move {
             let (sender,canceled)=tokio::sync::watch::channel(false);
             let mut worker=tokio::task::spawn_blocking(move|| {
+                let _memory = memory;
                 if let (Some(identity),Some(destination))=(identity,destination) {Report::Joined(Box::new(flow::run(&ledger,&mut model,&destination,*input,identity,canceled)))}
                 else {Report::Generation(runner::run(&ledger,&mut model,*input,&mut||*canceled.borrow()).report)}
             });

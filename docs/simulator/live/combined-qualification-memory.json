@@ -1,0 +1,6 @@
+{
+  "mode": "combined-qualification",
+  "memory": "local-fixture-v1",
+  "llm": {"mode": "live", "max_calls": 7, "timeout_seconds": 90},
+  "output": "../../../target/simulator/combined-qualification-memory-live"
+}

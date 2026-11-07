@@ -117,7 +117,7 @@ fn decode(encoded: &str) -> Result<HistoricalFrame> {
     );
     Ok(frame)
 }
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", test, feature = "development-native-close"))]
 fn encode(frame: &Frame) -> Result<String> {
     Ok(STANDARD.encode(
         frame
@@ -125,7 +125,7 @@ fn encode(frame: &Frame) -> Result<String> {
             .map_err(|_| anyhow::anyhow!("invalid native frame"))?,
     ))
 }
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", test, feature = "development-native-close"))]
 fn digest(frame: &Frame) -> Result<String> {
     Ok(crate::storage::digest(
         &frame

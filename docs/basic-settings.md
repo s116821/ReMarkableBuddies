@@ -52,3 +52,11 @@ Config::load is outside that narrow correction.
 The complete [versioned contract](https://github.com/s116821/ReMarkableBuddiesDocs/blob/82717f481005bfd403ec35c149dfbbf28805d156/openspec/changes/edit-saved-basic-settings/contract.md)
 defines shapes, hashes, phases and shared-host lifetime. Consumer implementation,
 release publication and real-device qualification are separate evidence gates.
+
+Apply also supports an already-ready ordinary notebook store (format 4) under the
+existing preference admission gate: complete owned history, no selected or retained
+selected history, and absent or LocalOnly mode. Unsupported/interrupted notebook
+state refuses without repair. Supported legacy formats 1/2/3 retain their existing
+mode rules. Only saved configuration changes; notebook data/media and credential
+files remain untouched. Generic configuration and credential writers retain their
+separate notebook refusal. This does not activate a provider or running service.

@@ -342,6 +342,27 @@ pub struct OrdinaryLifetime {
     _mode: OrdinaryModeLease,
     _data: storage::LegacySyncLease,
 }
+
+pub(crate) struct LocalDispatchLifetime {
+    store: Arc<Store>,
+    _mode: OrdinaryModeLease,
+    _data: storage::LocalDomainLease,
+}
+
+impl LocalDispatchLifetime {
+    pub(crate) fn admits_store(&self, store: &Arc<Store>) -> bool {
+        Arc::ptr_eq(&self.store, store)
+    }
+}
+
+pub(crate) fn admit_local_dispatch(store: &Arc<Store>) -> Result<LocalDispatchLifetime> {
+    let current = store.sync_mode_snapshot()?;
+    Ok(LocalDispatchLifetime {
+        store: store.clone(),
+        _mode: store.ordinary_mode_lease(&current.token)?,
+        _data: store.local_domain_lease()?,
+    })
+}
 pub fn admit_ordinary(store: &Arc<Store>, legacy_sync_enabled: bool) -> Result<OrdinaryLifetime> {
     let current = store.sync_mode_snapshot()?;
     let lease = store.ordinary_mode_lease(&current.token)?;

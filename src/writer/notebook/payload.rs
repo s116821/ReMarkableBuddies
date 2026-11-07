@@ -36,8 +36,10 @@ pub struct NotebookMapOutput {
 pub struct FrozenNotebookPayloads {
     pub(crate) plan: NotebookPlan,
     maps: Vec<Vec<String>>,
+    memory: Option<crate::memory::receiving::OrdinarySnapshot>,
     base: Value,
     preference: Option<String>,
+    pub(super) reducer_images: crate::conversation::receiving::images::Images,
 }
 impl FrozenNotebookPayloads {
     pub fn plan(&self) -> &NotebookPlan {
@@ -47,6 +49,25 @@ impl FrozenNotebookPayloads {
         source: &ValidatedNotebook,
         archive: &ArchivedNormalizedSource,
         context: PayloadContext<'_>,
+    ) -> Result<Self> {
+        Self::new_with_images(source, archive, context, Default::default())
+    }
+
+    pub(super) fn new_with_images(
+        source: &ValidatedNotebook,
+        archive: &ArchivedNormalizedSource,
+        context: PayloadContext<'_>,
+        reducer_images: crate::conversation::receiving::images::Images,
+    ) -> Result<Self> {
+        Self::new_with_memory(source, archive, context, reducer_images, None)
+    }
+
+    pub(crate) fn new_with_memory(
+        source: &ValidatedNotebook,
+        archive: &ArchivedNormalizedSource,
+        context: PayloadContext<'_>,
+        reducer_images: crate::conversation::receiving::images::Images,
+        memory: Option<crate::memory::receiving::OrdinarySnapshot>,
     ) -> Result<Self> {
         archive.validate_bytes(source.canonical_bytes())?;
         ensure!(
@@ -148,6 +169,8 @@ impl FrozenNotebookPayloads {
             maps,
             base,
             preference,
+            reducer_images,
+            memory,
         };
         let prefix = frozen.reducer_parts_unchecked(&[])?;
         frozen.plan.reducer_prefix_digest = notebook_input_digest(REDUCE_PROMPT, &prefix)?;
@@ -190,7 +213,20 @@ impl FrozenNotebookPayloads {
     fn reducer_parts_unchecked(&self, outputs: &[NotebookMapOutput]) -> Result<Vec<String>> {
         let mut payload = self.base.clone();
         payload["ordered_map_results"] = serde_json::to_value(outputs)?;
-        Self::parts(REDUCE_INSTRUCTION, self.preference.as_deref(), &payload)
+        if !self.reducer_images.attachments.is_empty() {
+            payload["historical_images"] = serde_json::to_value(&self.reducer_images.associations)?;
+            payload["historical_png_base64_sha256"] = json!(self
+                .reducer_images
+                .attachments
+                .iter()
+                .map(|encoded| digest(encoded.as_bytes()))
+                .collect::<Vec<_>>());
+        }
+        let mut parts = Self::parts(REDUCE_INSTRUCTION, self.preference.as_deref(), &payload)?;
+        if let Some(part) = self.memory.as_ref().and_then(|snapshot| snapshot.part()) {
+            parts.push(part.to_owned());
+        }
+        Ok(parts)
     }
     pub fn reducer_parts(&self, outputs: &[NotebookMapOutput]) -> Result<Vec<String>> {
         ensure!(

@@ -36,6 +36,10 @@ struct NotebookSelection {
     _fresh: Option<Box<notebook::NotebookFinalized>>,
 }
 impl WriterSelection {
+    pub(crate) fn draft_revision(&self) -> Uuid {
+        self.draft.revision_id
+    }
+
     pub(crate) fn published(root: &Envelope, draft: &Envelope, source: &Envelope) -> Result<Self> {
         let value = Self {
             root: ExpectedHeads(BTreeSet::from([root.revision_id])),

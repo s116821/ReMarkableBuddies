@@ -528,7 +528,7 @@ fn apply_with(
     if doc.config.validate().is_err() {
         return Report::refusal(operation, Status::Unsupported);
     }
-    let store = match Store::open_existing_for_config(doc.config.paths.clone()) {
+    let store = match Store::open_existing_for_preferences(doc.config.paths.clone()) {
         Ok(v) => Arc::new(v),
         Err(refusal) => {
             return Report::refusal(
@@ -752,83 +752,103 @@ mod tests {
 
     #[test]
     fn actual_atomic_faults_and_changed_readback_are_unknown_not_rollback() {
-        for fault in [
-            ConfigFault::AtomicCall,
-            ConfigFault::AfterPublication,
-            ConfigFault::ChangedReadback,
-        ] {
-            let f = Fixture::new();
-            let intent = f.prepare(json!({"debug_dump":{"action":"set","value":true}}));
-            let old = fs::read(&f.config).unwrap();
-            let doc = Document::load(Some(f.config.clone())).unwrap();
-            let result = apply_with(doc, intent.clone(), |store, path, expected, bytes| {
-                store.replace_config_document_fault(path, expected, bytes, fault)
-            });
-            assert_eq!(result.status, Status::Failed);
-            assert!(matches!(result.outcome, Outcome::Unknown));
-            assert!(!result.disk_readback_verified);
-            let result = finish(result);
-            assert_eq!(result["data"], Value::Null);
-            let observed = fs::read(&f.config).unwrap();
-            let status = finish(f.run(Operation::Status, &json!({"intent":intent})));
-            if digest(&observed) == intent.target_sha256 {
-                assert_ne!(observed, old);
-                assert_eq!(status["outcome"], "desired-file-observed");
-            } else {
-                assert_eq!(status["outcome"], "unresolved");
+        for notebook in [false, true] {
+            for fault in [
+                ConfigFault::AtomicCall,
+                ConfigFault::AfterPublication,
+                ConfigFault::ChangedReadback,
+            ] {
+                let f = Fixture::new();
+                if notebook {
+                    crate::config::notebook_preferences_tests::seed(&f.paths);
+                }
+                let inventory = crate::config::notebook_preferences_tests::inventory(&f.paths.data);
+                let intent = f.prepare(json!({"debug_dump":{"action":"set","value":true}}));
+                let old = fs::read(&f.config).unwrap();
+                let doc = Document::load(Some(f.config.clone())).unwrap();
+                let result = apply_with(doc, intent.clone(), |store, path, expected, bytes| {
+                    store.replace_config_document_fault(path, expected, bytes, fault)
+                });
+                assert_eq!(result.status, Status::Failed);
+                assert!(matches!(result.outcome, Outcome::Unknown));
+                assert!(!result.disk_readback_verified);
+                let result = finish(result);
+                assert_eq!(result["data"], Value::Null);
+                let observed = fs::read(&f.config).unwrap();
+                let status = finish(f.run(Operation::Status, &json!({"intent":intent})));
+                if digest(&observed) == intent.target_sha256 {
+                    assert_ne!(observed, old);
+                    assert_eq!(status["outcome"], "desired-file-observed");
+                } else {
+                    assert_eq!(status["outcome"], "unresolved");
+                }
+                assert_eq!(status["runtime_activation"], "unverified");
+                assert_eq!(fs::read(&f.config).unwrap(), observed);
+                assert_eq!(
+                    crate::config::notebook_preferences_tests::inventory(&f.paths.data),
+                    inventory
+                );
             }
-            assert_eq!(status["runtime_activation"], "unverified");
-            assert_eq!(fs::read(&f.config).unwrap(), observed);
         }
     }
 
     #[test]
     fn report_prefix_failure_releases_custody_after_no_second_report() {
-        let f = Fixture::new();
-        let intent = f.prepare(json!({"debug_dump":{"action":"set","value":true}}));
-        let report = f.run(Operation::Apply, &json!({"intent":intent}));
-        assert_eq!(report.status, Status::Ok);
-        assert!(matches!(
-            Store::open_existing(f.paths.clone()),
-            Err(Refusal::Busy)
-        ));
-        let custody = report._custody.as_ref().unwrap();
-        let snapshot = custody._store.sync_mode_snapshot().unwrap();
-        assert!(custody
-            ._store
-            .set_sync_mode(
-                &snapshot.token,
-                Uuid::new_v4(),
-                crate::storage::sync::mode::SyncModeChoice::LocalOnly
-            )
-            .is_err());
-        struct Prefix {
-            bytes: Vec<u8>,
-            calls: usize,
-        }
-        impl Write for Prefix {
-            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-                self.calls += 1;
-                if self.calls > 1 {
-                    return Err(io::Error::other("prefix stopped"));
+        for notebook in [false, true] {
+            let f = Fixture::new();
+            if notebook {
+                crate::config::notebook_preferences_tests::seed(&f.paths);
+            }
+            let inventory = crate::config::notebook_preferences_tests::inventory(&f.paths.data);
+            let intent = f.prepare(json!({"debug_dump":{"action":"set","value":true}}));
+            let report = f.run(Operation::Apply, &json!({"intent":intent}));
+            assert_eq!(report.status, Status::Ok);
+            assert!(matches!(
+                Store::open_existing_for_preferences(f.paths.clone()),
+                Err(Refusal::Busy)
+            ));
+            let custody = report._custody.as_ref().unwrap();
+            let snapshot = custody._store.sync_mode_snapshot().unwrap();
+            assert!(custody
+                ._store
+                .set_sync_mode(
+                    &snapshot.token,
+                    Uuid::new_v4(),
+                    crate::storage::sync::mode::SyncModeChoice::LocalOnly
+                )
+                .is_err());
+            struct Prefix {
+                bytes: Vec<u8>,
+                calls: usize,
+            }
+            impl Write for Prefix {
+                fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                    self.calls += 1;
+                    if self.calls > 1 {
+                        return Err(io::Error::other("prefix stopped"));
+                    }
+                    self.bytes.extend_from_slice(&bytes[..17]);
+                    Ok(17)
                 }
-                self.bytes.extend_from_slice(&bytes[..17]);
-                Ok(17)
+                fn flush(&mut self) -> io::Result<()> {
+                    Ok(())
+                }
             }
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
+            let mut output = Prefix {
+                bytes: Vec::new(),
+                calls: 0,
+            };
+            assert!(report.write_to(&mut output).is_err());
+            assert_eq!(output.calls, 2);
+            assert_eq!(output.bytes.len(), 17);
+            assert!(serde_json::from_slice::<Value>(&output.bytes).is_err());
+            drop(Store::open_existing_for_preferences(f.paths.clone()).unwrap());
+            assert_eq!(digest(&fs::read(&f.config).unwrap()), intent.target_sha256);
+            assert_eq!(
+                crate::config::notebook_preferences_tests::inventory(&f.paths.data),
+                inventory
+            );
         }
-        let mut output = Prefix {
-            bytes: Vec::new(),
-            calls: 0,
-        };
-        assert!(report.write_to(&mut output).is_err());
-        assert_eq!(output.calls, 2);
-        assert_eq!(output.bytes.len(), 17);
-        assert!(serde_json::from_slice::<Value>(&output.bytes).is_err());
-        drop(Store::open_existing(f.paths.clone()).unwrap());
-        assert_eq!(digest(&fs::read(&f.config).unwrap()), intent.target_sha256);
     }
 
     #[test]
