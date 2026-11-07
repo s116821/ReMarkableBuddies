@@ -227,6 +227,49 @@ pub struct SelectedReadSnapshot {
 }
 
 impl Store {
+    /// Historical immutable staging; no selection/admission is minted. The full
+    /// exact closure is validated independently of the all-history index.
+    pub(crate) fn stage_selected_candidate(
+        &self,
+        manifest: &Manifest,
+        objects: &BTreeMap<String, Vec<u8>>,
+    ) -> Result<Vec<Envelope>> {
+        manifest.validate()?;
+        let required: BTreeMap<_, _> = manifest
+            .records
+            .iter()
+            .chain(&manifest.media)
+            .map(|r| (r.sha256.as_str(), r.bytes))
+            .collect();
+        ensure!(
+            objects.len() == required.len()
+                && objects.iter().all(|(hash, bytes)| {
+                    required.get(hash.as_str()) == Some(&(bytes.len() as u64))
+                        && digest(bytes) == *hash
+                }),
+            "candidate object closure differs"
+        );
+        let media_bytes = manifest.media.iter().try_fold(0u64, |n, r| {
+            n.checked_add(r.bytes).context("candidate media overflow")
+        })?;
+        ensure!(
+            media_bytes <= MAX_MEDIA,
+            "candidate media exceeds receiving bound"
+        );
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        let root = self.generation(inner.generation);
+        for (hash, bytes) in objects {
+            files::object(&root.join("objects").join(hash), hash, bytes)?;
+        }
+        let records = Self::validate_objects(&root, manifest)?;
+        publication::closure_index(&records, true)?;
+        notebook_generation::validate_records(&root, &Index::default(), &records)?;
+        Ok(records.into_iter().map(|(envelope, _)| envelope).collect())
+    }
+
     /// Read an existing complete selection. Absence is not an empty winner or
     /// permission to bootstrap/publish. Bootstrap is a separate explicit call.
     /// Reachable accepted history and required historical closures must remain
@@ -398,6 +441,16 @@ impl Store {
 }
 
 pub(crate) const SELECTED_STORE_FORMAT: u32 = 2;
+pub(crate) const COMPOUND_STORE_FORMAT: u32 = 5;
+
+#[derive(Debug)]
+pub(crate) struct LocalOperationConflict;
+impl std::fmt::Display for LocalOperationConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("local selected operation already has a publication receipt")
+    }
+}
+impl std::error::Error for LocalOperationConflict {}
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct SelectionFeature {
@@ -525,7 +578,11 @@ pub(crate) fn recover_selected(root: &Path, generation: Uuid) -> Result<Vec<Vali
         );
         let scope = current.scope.clone();
         for transaction in publication::history(root, generation, &scope, current)? {
-            pending.extend(publication::validate_closure(root, &transaction)?);
+            let parts = publication::validate_closure(root, &transaction)?;
+            for (_, records) in &parts {
+                notebook_generation::validate_records(root, &Index::default(), records)?;
+            }
+            pending.extend(parts);
         }
     }
     Ok(pending)

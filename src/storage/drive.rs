@@ -10,6 +10,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(test)]
+pub(in crate::storage) mod shared_fixture;
 /// Experimental REM-52 pointer transport; not connected to the sync worker.
 pub mod slot;
 
@@ -185,6 +187,8 @@ pub struct GoogleDrive {
     api: String,
     upload_api: String,
     token_url: String,
+    request_deadline: Option<std::time::Instant>,
+    request_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 fn now() -> u64 {
     SystemTime::now()
@@ -265,6 +269,18 @@ fn check(response: &mut ureq::http::Response<ureq::Body>) -> Result<()> {
     Ok(())
 }
 impl GoogleDrive {
+    pub(in crate::storage) fn binding_digest(&self) -> String {
+        // Internal comparison only; raw application/account identifiers are
+        // never included in worker status or portable objects.
+        digest(
+            &serde_json::to_vec(&(
+                &self.credentials.client_id,
+                &self.credentials.account_permission_id,
+                self.credentials.collection,
+            ))
+            .expect("string tuple serialization"),
+        )
+    }
     pub fn open(credential_path: PathBuf) -> Result<Self> {
         let credentials: Credentials = parse(&read_secret_file(&credential_path)?)?;
         credentials.validate()?;
@@ -281,7 +297,41 @@ impl GoogleDrive {
             api: "https://www.googleapis.com/drive/v3".into(),
             upload_api: "https://www.googleapis.com/upload/drive/v3".into(),
             token_url: "https://oauth2.googleapis.com/token".into(),
+            request_deadline: None,
+            request_cancel: None,
         })
+    }
+    pub(in crate::storage) fn set_request_window(
+        &mut self,
+        deadline: Option<std::time::Instant>,
+        cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) {
+        self.request_deadline = deadline;
+        self.request_cancel = cancel;
+    }
+    fn bounded<B>(&self, request: ureq::RequestBuilder<B>) -> Result<ureq::RequestBuilder<B>> {
+        ensure!(
+            !self
+                .request_cancel
+                .as_ref()
+                .is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed)),
+            "Drive step canceled"
+        );
+        let Some(deadline) = self.request_deadline else {
+            return Ok(request);
+        };
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        ensure!(!remaining.is_zero(), "Drive step deadline");
+        let ordinary = self
+            .agent
+            .config()
+            .timeouts()
+            .global
+            .unwrap_or(Duration::from_secs(10));
+        Ok(request
+            .config()
+            .timeout_global(Some(remaining.min(ordinary)))
+            .build())
     }
     fn token(&mut self) -> Result<String> {
         if self.credentials.expires_at <= now() + 60 {
@@ -298,8 +348,7 @@ impl GoogleDrive {
                 fields.push(("client_secret", secret));
             }
             let response = self
-                .agent
-                .post(&self.token_url)
+                .bounded(self.agent.post(&self.token_url))?
                 .send_form(fields)
                 .map_err(|_| anyhow::anyhow!("Drive token transport failed"))?;
             let value = json_response(response)?;
@@ -332,8 +381,7 @@ impl GoogleDrive {
         id(id_value)?;
         let token = self.token()?;
         let value = json_response(
-            self.agent
-                .get(format!("{}/files/{}", self.api, id_value))
+            self.bounded(self.agent.get(format!("{}/files/{}", self.api, id_value)))?
                 .query("fields", "id,appProperties,trashed")
                 .header("Authorization", token)
                 .call()
@@ -387,8 +435,7 @@ impl DriveTransport for GoogleDrive {
         );
         let token = self.token()?;
         let value = json_response(
-            self.agent
-                .get(format!("{}/about", self.api))
+            self.bounded(self.agent.get(format!("{}/about", self.api)))?
                 .query("fields", "user(permissionId)")
                 .header("Authorization", token)
                 .call()
@@ -404,11 +451,13 @@ impl DriveTransport for GoogleDrive {
     fn start_token(&mut self) -> Result<String> {
         let token = self.token()?;
         let value = json_response(
-            self.agent
-                .get(format!("{}/changes/startPageToken", self.api))
-                .header("Authorization", token)
-                .call()
-                .map_err(|_| anyhow::anyhow!("Drive token discovery failed"))?,
+            self.bounded(
+                self.agent
+                    .get(format!("{}/changes/startPageToken", self.api)),
+            )?
+            .header("Authorization", token)
+            .call()
+            .map_err(|_| anyhow::anyhow!("Drive token discovery failed"))?,
         )?;
         value["startPageToken"]
             .as_str()
@@ -418,8 +467,7 @@ impl DriveTransport for GoogleDrive {
     fn list(&mut self, page: Option<&str>) -> Result<Page<RemoteFile>> {
         let token = self.token()?;
         let mut request = self
-            .agent
-            .get(format!("{}/files", self.api))
+            .bounded(self.agent.get(format!("{}/files", self.api)))?
             .query("spaces", "appDataFolder")
             .query("pageSize", "100")
             .query(
@@ -449,7 +497,7 @@ impl DriveTransport for GoogleDrive {
     }
     fn changes(&mut self, page: &str) -> Result<Page<Change>> {
         let token = self.token()?;
-        let value=json_response(self.agent.get(format!("{}/changes",self.api)).query("spaces","appDataFolder").query("pageToken",page).query("includeRemoved","true").query("pageSize","100").query("fields","changes(fileId,removed,file(id,appProperties,trashed)),nextPageToken,newStartPageToken").header("Authorization",token).call().map_err(|_|anyhow::anyhow!("Drive changes failed"))?)?;
+        let value=json_response(self.bounded(self.agent.get(format!("{}/changes",self.api)))?.query("spaces","appDataFolder").query("pageToken",page).query("includeRemoved","true").query("pageSize","100").query("fields","changes(fileId,removed,file(id,appProperties,trashed)),nextPageToken,newStartPageToken").header("Authorization",token).call().map_err(|_|anyhow::anyhow!("Drive changes failed"))?)?;
         Ok(Page {
             items: serde_json::from_value(value["changes"].clone())
                 .map_err(|_| anyhow::anyhow!("invalid Drive change page"))?,
@@ -462,19 +510,26 @@ impl DriveTransport for GoogleDrive {
         ensure!(limit <= MAX_MEDIA, "Drive download exceeds supported bound");
         let token = self.token()?;
         let mut response = self
-            .agent
-            .get(format!("{}/files/{}", self.api, id_value))
+            .bounded(self.agent.get(format!("{}/files/{}", self.api, id_value)))?
             .query("alt", "media")
             .header("Authorization", token)
             .call()
             .map_err(|_| anyhow::anyhow!("Drive download failed"))?;
         check(&mut response)?;
-        response
+        let bytes = response
             .body_mut()
             .with_config()
-            .limit(limit)
+            // ureq's LimitReader refuses the next EOF read once its allowance
+            // is exhausted. Permit one probe byte, then enforce our real bound
+            // so an exactly-sized object succeeds and an oversized one fails.
+            .limit(limit + 1)
             .read_to_vec()
-            .map_err(|_| anyhow::anyhow!("Drive bounded download failed"))
+            .map_err(|_| anyhow::anyhow!("Drive bounded download failed"))?;
+        ensure!(
+            bytes.len() as u64 <= limit,
+            "Drive download exceeds requested bound"
+        );
+        Ok(bytes)
     }
     fn download_to(
         &mut self,
@@ -485,8 +540,7 @@ impl DriveTransport for GoogleDrive {
         id(id_value)?;
         let token = self.token()?;
         let mut response = self
-            .agent
-            .get(format!("{}/files/{}", self.api, id_value))
+            .bounded(self.agent.get(format!("{}/files/{}", self.api, id_value)))?
             .query("alt", "media")
             .header("Authorization", token)
             .call()
@@ -498,8 +552,7 @@ impl DriveTransport for GoogleDrive {
         id(id_value)?;
         let token = self.token()?;
         let mut response = self
-            .agent
-            .get(format!("{}/files/{}", self.api, id_value))
+            .bounded(self.agent.get(format!("{}/files/{}", self.api, id_value)))?
             .query("alt", "media")
             .header("Authorization", token)
             .call()
@@ -510,8 +563,7 @@ impl DriveTransport for GoogleDrive {
     fn allocate(&mut self) -> Result<String> {
         let token = self.token()?;
         let value = json_response(
-            self.agent
-                .get(format!("{}/files/generateIds", self.api))
+            self.bounded(self.agent.get(format!("{}/files/generateIds", self.api)))?
                 .query("count", "1")
                 .query("space", "appDataFolder")
                 .query("type", "files")
@@ -547,8 +599,7 @@ impl DriveTransport for GoogleDrive {
             body.extend_from_slice(&bytes.chunk(0, bytes.len())?);
             body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
             let mut response = self
-                .agent
-                .post(format!("{}/files", self.upload_api))
+                .bounded(self.agent.post(format!("{}/files", self.upload_api)))?
                 .query("uploadType", "multipart")
                 .header("Authorization", token)
                 .header(
@@ -565,8 +616,7 @@ impl DriveTransport for GoogleDrive {
         }
         if session.uri.is_none() {
             let mut response = self
-                .agent
-                .post(format!("{}/files", self.upload_api))
+                .bounded(self.agent.post(format!("{}/files", self.upload_api)))?
                 .query("uploadType", "resumable")
                 .header("Authorization", token)
                 .header("X-Upload-Content-Type", "application/octet-stream")
@@ -592,8 +642,7 @@ impl DriveTransport for GoogleDrive {
         let uri = session.uri.as_ref().unwrap();
         self.safe_session(uri)?;
         let mut response = self
-            .agent
-            .put(uri)
+            .bounded(self.agent.put(uri))?
             .header("Authorization", &token)
             .header("Content-Range", format!("bytes */{}", bytes.len()))
             .send_empty()
@@ -623,8 +672,7 @@ impl DriveTransport for GoogleDrive {
         ensure!(offset < bytes.len(), "invalid upload progress");
         let end = (offset + CHUNK).min(bytes.len());
         let mut response = self
-            .agent
-            .put(uri)
+            .bounded(self.agent.put(uri))?
             .header("Authorization", token)
             .header(
                 "Content-Range",

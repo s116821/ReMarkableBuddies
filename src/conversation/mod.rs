@@ -27,6 +27,7 @@ pub mod resolution;
 mod selected;
 mod selected_reader_write;
 mod selected_writer;
+pub(crate) mod shared;
 pub use selected_reader_write::{
     SelectedReaderAcknowledgment, SelectedReaderPublication, SelectedReaderText,
     SelectedReaderWrite,

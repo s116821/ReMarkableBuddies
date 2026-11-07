@@ -221,6 +221,48 @@ pub(super) fn request(
         value,
     ))?))
 }
+
+/// Format5 local publication identity is Store-wide, not only target-chain-wide.
+/// Read existing accepted transaction evidence while holding the same Store
+/// mutex that will publish. Remote envelope operation IDs are deliberately absent.
+fn claim_local_operation(root: &Path, generation: Uuid, operation: Uuid) -> Result<()> {
+    if feedback_generation::version(root)? != COMPOUND_STORE_FORMAT {
+        return Ok(());
+    }
+    let directory = root.join("selections");
+    files::safe_path(&directory)?;
+    if !directory.exists() {
+        return Ok(());
+    }
+    let mut budget =
+        SelectedReadBudget::new(MAX_ITEMS as u64, MAX_ITEMS as u64, MAX_METADATA as u64, 0);
+    for item in fs::read_dir(directory)? {
+        let path = item?.path();
+        // Atomic staging is never a published receipt and is not deleted here.
+        if path
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with(".stage-"))
+        {
+            continue;
+        }
+        budget.charge(1, 1, 0, 0)?;
+        let bytes = files::read_with_budget(&path, MAX_METADATA as u64, Some(&mut budget))?;
+        let current: SelectionTransaction = serde_json::from_slice(&bytes)?;
+        current.validate(MAX_ITEMS)?;
+        ensure!(
+            current.store_generation == generation
+                && path.file_name().and_then(|n| n.to_str()) == Some(&current.scope.filename()?),
+            "local operation inventory identity differs"
+        );
+        let scope = current.scope.clone();
+        for accepted in history_with_budget(root, generation, &scope, current, Some(&mut budget))? {
+            if accepted.operation == operation {
+                return Err(LocalOperationConflict.into());
+            }
+        }
+    }
+    Ok(())
+}
 pub(super) fn replay(
     chain: &[SelectionTransaction],
     operation: Uuid,
@@ -436,6 +478,9 @@ impl Store {
         objects: BTreeMap<String, Vec<u8>>,
         chain: &[SelectionTransaction],
     ) -> Result<SelectionPublication> {
+        // Replay was resolved by the target method before entering this new
+        // publication boundary. Independent scope gates still serialize here.
+        claim_local_operation(root, inner.generation, transaction.operation)?;
         ensure!(
             inner.legacy_sync_handles == 0,
             "stop all legacy sync handles before selected publication"
@@ -469,6 +514,11 @@ impl Store {
         }
         Self::trip(inner, Fault::AfterObjects)?;
         let parts = validate_closure(root, &transaction)?;
+        // Live publication and reopen validate identical notebook closure
+        // semantics. A retained original is its own complete historical graph.
+        for (_, records) in &parts {
+            notebook_generation::validate_records(root, &Index::default(), records)?;
+        }
         let records: Vec<_> = parts
             .iter()
             .flat_map(|(_, rs)| rs.iter().cloned())
@@ -510,6 +560,7 @@ impl Store {
         for (manifest, records) in parts {
             Self::apply_index(&mut inner.index, manifest, records);
         }
+        self.notify_commit();
         Self::trip(inner, Fault::AfterCommit)?;
         Self::trip(inner, Fault::AfterActivation)?;
         receipt(transaction, false)

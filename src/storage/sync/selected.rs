@@ -1,0 +1,451 @@
+//! Selected branch of the existing worker; fixed-slot custody, not another loop.
+use super::*;
+use crate::conversation::{shared, SelectedAdmission};
+use crate::storage::drive::slot::{AgreedSlotObservation, AgreedSlotValue, SlotBinding};
+use crate::storage::selection::{
+    SelectedAttemptRequest, SelectedAttemptState, SelectionScope, SelectionToken,
+};
+use serde::{Deserialize, Serialize};
+use std::time::Instant;
+mod protocol;
+mod publication;
+mod receiving;
+#[cfg(test)]
+mod tests;
+use protocol::*;
+
+/// Cannot be deserialized from Config or an operator payload. Production
+/// construction awaits separately accepted actual provider qualification.
+pub(super) struct Binding {
+    group: Uuid,
+    root_id: String,
+    digest: String,
+}
+impl Binding {
+    pub(super) fn qualified(_mode: &mode::SyncMode) -> Result<Self> {
+        anyhow::bail!("shared provider application binding is not qualified")
+    }
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SelectedState {
+    pub format: u32,
+    pub epochs: BTreeMap<Uuid, Checkpoint>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Checkpoint {
+    format: u32,
+    actor: Uuid,
+    epoch: Uuid,
+    group: Uuid,
+    root_id: String,
+    binding: String,
+    root: Option<Recorded>,
+    catalog: Vec<Recorded>,
+    scopes: BTreeMap<String, Progress>,
+    uploads: BTreeMap<String, Upload>,
+    catalog_pending: Option<CatalogPending>,
+    retired_catalog: Vec<CatalogPending>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Recorded {
+    slot: String,
+    descriptor_id: String,
+    sha256: String,
+    bytes: Vec<u8>,
+}
+impl Recorded {
+    fn from(value: AgreedSlotValue) -> Result<Self> {
+        ensure!(
+            digest(&value.descriptor) == value.pointer.descriptor_sha256,
+            "recorded pointer digest differs"
+        );
+        Ok(Self {
+            slot: value.pointer.binding.slot_id,
+            descriptor_id: value.pointer.descriptor_id,
+            sha256: value.pointer.descriptor_sha256,
+            bytes: value.descriptor,
+        })
+    }
+    fn check(&self, slot: &str) -> Result<()> {
+        ensure!(
+            self.slot == slot
+                && !self.bytes.is_empty()
+                && self.bytes.len() <= 64 * 1024
+                && digest(&self.bytes) == self.sha256,
+            "checkpoint descriptor identity differs"
+        );
+        drive::id(&self.descriptor_id)
+    }
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CatalogPending {
+    operation: Uuid,
+    key: Option<String>,
+    descriptor: Recorded,
+}
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Progress {
+    chain: Vec<Recorded>,
+    pending: Option<Pending>,
+    receive: Option<Receive>,
+    applied: Option<Applied>,
+    receipts: Vec<Receive>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Pins {
+    store: Uuid,
+    aggregate: Uuid,
+    selection: String,
+    base: String,
+}
+impl Pins {
+    fn from(token: &SelectionToken) -> Self {
+        Self {
+            store: token.store_generation(),
+            aggregate: token.aggregate_generation(),
+            selection: token.selection_sha256().into(),
+            base: token.accepted_base_sha256().into(),
+        }
+    }
+    fn matches(&self, token: &SelectionToken) -> bool {
+        self.store == token.store_generation()
+            && self.aggregate == token.aggregate_generation()
+            && self.selection == token.selection_sha256()
+            && self.base == token.accepted_base_sha256()
+    }
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Pending {
+    operation: Uuid,
+    selection_operation: Uuid,
+    pins: Pins,
+    slot: String,
+    next_slot: Option<String>,
+    descriptor: Option<Recorded>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Receive {
+    operation: Uuid,
+    expected: Option<Pins>,
+    descriptor: Recorded,
+    manifest: Option<Manifest>,
+    original_attempt: Option<Uuid>,
+    applied: bool,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Applied {
+    descriptor: String,
+    operation: Uuid,
+    membership: String,
+}
+
+pub(super) struct Engine {
+    store: Arc<Store>,
+    policy: SyncPolicy,
+    transport: GoogleDrive,
+    binding: Binding,
+    cancel: Arc<AtomicBool>,
+    state: State,
+    checkpoint: Checkpoint,
+}
+struct CatalogView {
+    root: Root,
+    root_sha: String,
+    entries: BTreeMap<String, Entry>,
+    base: String,
+    slot: String,
+    complete: bool,
+}
+impl Engine {
+    pub(super) fn step(&mut self) -> Result<Status> {
+        let _mode = self.current_lease()?;
+        self.transport.set_request_window(
+            Some(Instant::now() + Duration::from_secs(60)),
+            Some(self.cancel.clone()),
+        );
+        let result = self.step_inner();
+        self.transport.set_request_window(None, None);
+        result
+    }
+    fn step_inner(&mut self) -> Result<Status> {
+        let mut budget = self.policy.batch_items;
+        let Some(view) = self.refresh_root_catalog(&mut budget)? else {
+            return Ok(Status::Joining);
+        };
+        if self.checkpoint.catalog.is_empty() {
+            return Ok(Status::Joining);
+        }
+        if !view.complete {
+            return Ok(Status::Pending);
+        }
+        let mut status = Status::Current;
+        for (key, entry) in &view.entries {
+            if budget == 0 {
+                return Ok(Status::Pending);
+            }
+            self.checkpoint.scopes.entry(key.clone()).or_default();
+            let next = self.scope_step(key, entry, &view, &mut budget)?;
+            if next != Status::Current {
+                status = next;
+            }
+        }
+        self.save()?;
+        Ok(status)
+    }
+    pub(super) fn health(&self, status: Status) -> serde_json::Value {
+        let scopes: Vec<_> = self
+            .checkpoint
+            .scopes
+            .iter()
+            .map(|(key, p)| {
+                json!({
+                    "key":key, "committed":p.chain.last().map(|r| &r.sha256),
+                    "applied":p.applied.as_ref().map(|p| &p.descriptor),
+                    "pending_original":p.pending.as_ref().map(|p| p.operation),
+                    "receiving_original":p.receive.as_ref().map(|p| p.operation),
+                })
+            })
+            .collect();
+        json!({"report_version":1,"status":status,"mode":"shared-group","group":self.binding.group,
+            "root":self.binding.root_id,"binding_sha256":self.binding.digest,"scopes":scopes,
+            "production_qualification":"unexecuted"})
+    }
+    pub(super) fn new(
+        store: Arc<Store>,
+        policy: SyncPolicy,
+        transport: GoogleDrive,
+        binding: Binding,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<Self> {
+        policy.validate()?;
+        ensure!(
+            transport.binding_digest() == binding.digest,
+            "selected provider context differs"
+        );
+        let current = store.sync_mode_snapshot()?;
+        let epoch = current.epoch.context("shared mode epoch absent")?;
+        require_mode(&current, &binding)?;
+        let path = store.paths.data.join("sync/state.json");
+        let state: State = if path.exists() {
+            files::json(&path, MAX_METADATA as u64)?
+        } else {
+            State {
+                format: FORMAT,
+                ..Default::default()
+            }
+        };
+        ensure!(state.format == FORMAT, "worker checkpoint format differs");
+        if let Some(selected) = &state.selected {
+            ensure!(
+                selected.format == 1 && selected.epochs.len() <= MAX_ITEMS,
+                "selected checkpoint bounds differ"
+            );
+        }
+        let checkpoint = state
+            .selected
+            .as_ref()
+            .and_then(|s| s.epochs.get(&epoch))
+            .cloned()
+            .unwrap_or_else(|| Checkpoint {
+                format: 1,
+                actor: store.actor_id,
+                epoch,
+                group: binding.group,
+                root_id: binding.root_id.clone(),
+                binding: binding.digest.clone(),
+                root: None,
+                catalog: vec![],
+                scopes: BTreeMap::new(),
+                uploads: BTreeMap::new(),
+                catalog_pending: None,
+                retired_catalog: vec![],
+            });
+        ensure!(
+            checkpoint.format == 1
+                && checkpoint.actor == store.actor_id
+                && checkpoint.epoch == epoch
+                && checkpoint.group == binding.group
+                && checkpoint.root_id == binding.root_id
+                && checkpoint.binding == binding.digest,
+            "selected checkpoint binding differs"
+        );
+        let engine = Self {
+            store,
+            policy,
+            transport,
+            binding,
+            cancel,
+            state,
+            checkpoint,
+        };
+        engine.check_bounds()?;
+        Ok(engine)
+    }
+    fn check_bounds(&self) -> Result<()> {
+        ensure!(
+            self.checkpoint.scopes.len() <= crate::memory::catalog::MAX_AGGREGATES
+                && self.checkpoint.uploads.len() <= MAX_ITEMS
+                && self.checkpoint.catalog.len() <= MAX_ITEMS
+                && self.checkpoint.retired_catalog.len() <= MAX_ITEMS
+                && self
+                    .checkpoint
+                    .scopes
+                    .values()
+                    .all(|p| p.chain.len() <= MAX_ITEMS),
+            "selected checkpoint item bound"
+        );
+        ensure!(
+            serde_json::to_vec(&self.checkpoint)?.len() <= MAX_METADATA,
+            "selected checkpoint byte bound"
+        );
+        Ok(())
+    }
+    fn save(&mut self) -> Result<()> {
+        self.check_bounds()?;
+        let selected = self.state.selected.get_or_insert_with(|| SelectedState {
+            format: 1,
+            epochs: BTreeMap::new(),
+        });
+        ensure!(
+            selected.epochs.len() < MAX_ITEMS
+                || selected.epochs.contains_key(&self.checkpoint.epoch),
+            "selected checkpoint epoch bound"
+        );
+        selected
+            .epochs
+            .insert(self.checkpoint.epoch, self.checkpoint.clone());
+        ensure!(
+            serde_json::to_vec(&self.state)?.len() <= MAX_METADATA,
+            "worker checkpoint byte bound"
+        );
+        files::atomic_json(&self.store.paths.data.join("sync/state.json"), &self.state)
+    }
+    fn current_lease(&self) -> Result<mode::SyncModeLease> {
+        ensure!(
+            !self.cancel.load(Ordering::Relaxed),
+            "selected worker canceled"
+        );
+        let snapshot = self.store.sync_mode_snapshot()?;
+        require_mode(&snapshot, &self.binding)?;
+        ensure!(
+            snapshot.epoch == Some(self.checkpoint.epoch),
+            "selected epoch changed"
+        );
+        ensure!(
+            self.transport.binding_digest() == self.binding.digest,
+            "selected provider changed"
+        );
+        self.store.sync_mode_lease(&snapshot.token)
+    }
+    fn slot(&self, key: String, slot: String) -> SlotBinding {
+        SlotBinding {
+            group: self.binding.group,
+            scope_sha256: key,
+            slot_id: slot,
+        }
+    }
+    fn observe(&mut self, key: String, slot: String) -> Result<Option<Recorded>> {
+        match self.transport.observe_agreed_slot(&self.slot(key, slot))? {
+            AgreedSlotObservation::Present(value) => Ok(Some(Recorded::from(value)?)),
+            AgreedSlotObservation::Absent => Ok(None),
+            AgreedSlotObservation::Invalid(_) => anyhow::bail!("agreed occupied slot is invalid"),
+        }
+    }
+    fn view(&self) -> Result<Option<CatalogView>> {
+        let Some(recorded) = &self.checkpoint.root else {
+            return Ok(None);
+        };
+        recorded.check(&self.binding.root_id)?;
+        let root: Root = serde_json::from_slice(&recorded.bytes)?;
+        root.validate(&self.binding)?;
+        let root_sha = recorded.sha256.clone();
+        let mut base = root_sha.clone();
+        let mut slot = root.catalog_slot.clone();
+        let mut entries = BTreeMap::new();
+        let mut slots = BTreeSet::new();
+        for recorded in &self.checkpoint.catalog {
+            ensure!(slots.insert(slot.clone()), "catalog slot cycle");
+            recorded.check(&slot)?;
+            let catalog: Catalog = serde_json::from_slice(&recorded.bytes)?;
+            catalog.validate(&root, &root_sha, &slot, &base, &entries)?;
+            entries = catalog.entries;
+            base = recorded.sha256.clone();
+            slot = catalog.next_slot;
+        }
+        Ok(Some(CatalogView {
+            root,
+            root_sha,
+            entries,
+            base,
+            slot,
+            complete: false,
+        }))
+    }
+    fn refresh_root_catalog(&mut self, budget: &mut usize) -> Result<Option<CatalogView>> {
+        let Some(root) =
+            self.observe(root_key(self.binding.group), self.binding.root_id.clone())?
+        else {
+            return Ok(None);
+        };
+        let parsed: Root = serde_json::from_slice(&root.bytes)?;
+        parsed.validate(&self.binding)?;
+        if let Some(prior) = &self.checkpoint.root {
+            ensure!(
+                prior.sha256 == root.sha256 && prior.bytes == root.bytes,
+                "selected root changed"
+            );
+        } else {
+            self.checkpoint.root = Some(root);
+            self.save()?;
+        }
+        let mut view = self.view()?.context("validated root absent")?;
+        if let Some(previous) = self.checkpoint.catalog.last().cloned() {
+            let current = self
+                .observe(catalog_key(self.binding.group), previous.slot.clone())?
+                .context("accepted catalog pointer not visible")?;
+            ensure!(
+                current.sha256 == previous.sha256 && current.bytes == previous.bytes,
+                "accepted catalog changed"
+            );
+        }
+        while *budget > 0 {
+            let Some(recorded) =
+                self.observe(catalog_key(self.binding.group), view.slot.clone())?
+            else {
+                view.complete = true;
+                break;
+            };
+            *budget -= 1;
+            let catalog: Catalog = serde_json::from_slice(&recorded.bytes)?;
+            catalog.validate(
+                &view.root,
+                &view.root_sha,
+                &view.slot,
+                &view.base,
+                &view.entries,
+            )?;
+            self.checkpoint.catalog.push(recorded);
+            self.save()?;
+            view = self.view()?.context("catalog view absent")?;
+        }
+        Ok(Some(view))
+    }
+}
+fn require_mode(snapshot: &mode::SyncModeSnapshot, binding: &Binding) -> Result<()> {
+    ensure!(
+        matches!(&snapshot.mode, Some(mode::SyncMode::SharedGroup { group, binding_sha256, root_id })
+        if *group == binding.group && *binding_sha256 == binding.digest && *root_id == binding.root_id),
+        "shared mode context differs"
+    );
+    Ok(())
+}

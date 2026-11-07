@@ -1,5 +1,26 @@
 use super::*;
 use crate::storage::drive::slot::{AgreedSlotObservation, SlotInvalid};
+
+#[test]
+fn agreed_read_expired_or_canceled_step_cannot_refresh_or_request() {
+    for refresh in [false, true] {
+        for canceled in [false, true] {
+            let mut f = Fixture::new(|_| vec![]);
+            if refresh {
+                f.client.credentials.expires_at = 0;
+            }
+            let deadline = if canceled {
+                std::time::Instant::now() + Duration::from_secs(60)
+            } else {
+                std::time::Instant::now()
+            };
+            let cancel = Arc::new(std::sync::atomic::AtomicBool::new(canceled));
+            f.client.set_request_window(Some(deadline), Some(cancel));
+            assert!(f.client.observe_agreed_slot(&binding()).is_err());
+            assert!(f.finish().is_empty());
+        }
+    }
+}
 use crate::storage::drive::slot::{PointerMatch, SlotBinding, SlotPointer};
 
 #[test]

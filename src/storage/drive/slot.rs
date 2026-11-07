@@ -295,8 +295,7 @@ impl GoogleDrive {
         );
         let token = self.token()?;
         if let Ok(mut response) = self
-            .agent
-            .post(format!("{}/files", self.api))
+            .bounded(self.agent.post(format!("{}/files", self.api)))?
             .query("fields", "id")
             .header("Authorization", token)
             .header("Content-Type", "application/json")
