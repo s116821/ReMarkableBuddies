@@ -15,7 +15,7 @@ pub struct LocalCorrections {
     _local: storage::LocalDomainLease,
 }
 impl LocalCorrections {
-    fn lineage(envelope: &Envelope, history: &[Envelope]) -> Result<Option<Correction>> {
+    pub(super) fn lineage(envelope: &Envelope, history: &[Envelope]) -> Result<Option<Correction>> {
         let original = decode(envelope)?;
         let mut anchor = original.clone();
         let mut pending = vec![(envelope.revision_id, false)];
@@ -204,59 +204,16 @@ impl LocalCorrections {
         Ok(())
     }
     fn mutate(&self, input: &ValidatedInput, report: &mut Report) -> Result<()> {
-        let (action, operation, expected) = match &input.request {
-            Request::Confirm(v) => (
-                Action::Confirm,
-                v.operation,
-                v.expected_heads.iter().copied().collect(),
-            ),
-            Request::Update(v) => (
-                Action::Update,
-                v.operation,
-                v.expected_heads.iter().copied().collect(),
-            ),
-            Request::Forget(v) => (
-                Action::Forget,
-                v.operation,
-                v.expected_heads.iter().copied().collect(),
-            ),
-            _ => return Err(Failure::InvalidJson),
-        };
+        let (action, operation, expected) = input.mutation()?;
         let record = report.record.ok_or(Failure::InvalidIdentity)?;
-        let value_hash = input
-            .correction
-            .as_ref()
-            .map(Correction::value_digest)
-            .transpose()?;
-        let (_, revision) =
-            mutation_identity(action, operation, record, &expected, value_hash.as_deref())?;
-        let mut envelope = Envelope {
-            envelope_version: 1,
-            namespace: Namespace::Handwriting,
-            domain_schema_version: 1,
-            record_id: record,
-            revision_id: revision,
-            parents: expected,
-            operation_id: operation,
-            actor_id: self.store.actor_id,
-            kind: if action == Action::Forget {
-                Kind::Tombstone
-            } else {
-                Kind::Value
-            },
-            payload: input
-                .correction
-                .as_ref()
-                .map(serde_json::to_value)
-                .transpose()
-                .map_err(|_| Failure::StorageFailure)?
-                .unwrap_or(serde_json::Value::Null),
-            media_descriptors: input
-                .correction
-                .as_ref()
-                .map(|v| vec![v.sample.clone()])
-                .unwrap_or_default(),
-        };
+        let (_, mut envelope) = mutation_envelope(
+            action,
+            operation,
+            record,
+            expected,
+            input.correction.as_ref(),
+            self.store.actor_id,
+        )?;
         let prior = self.operations(operation)?;
         report.diagnostics.scanned += prior.len() as u64;
         if !prior.is_empty() {

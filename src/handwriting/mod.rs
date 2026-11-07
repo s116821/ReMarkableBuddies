@@ -2,6 +2,7 @@
 pub mod command;
 mod provider;
 mod report;
+pub mod selected;
 use crate::storage::{digest, valid_digest, Envelope, Kind, Media, Namespace, Uuid};
 use base64::{engine::general_purpose::STANDARD, Engine};
 pub use provider::{LocalCorrections, Provider};
@@ -244,6 +245,43 @@ pub fn mutation_identity(
     Ok((fingerprint, revision))
 }
 
+fn mutation_envelope(
+    action: Action,
+    operation: Uuid,
+    record: Uuid,
+    expected: BTreeSet<Uuid>,
+    correction: Option<&Correction>,
+    actor: Uuid,
+) -> Result<(String, Envelope)> {
+    let value_hash = correction.map(Correction::value_digest).transpose()?;
+    let (fingerprint, revision) =
+        mutation_identity(action, operation, record, &expected, value_hash.as_deref())?;
+    let envelope = Envelope {
+        envelope_version: 1,
+        namespace: Namespace::Handwriting,
+        domain_schema_version: 1,
+        record_id: record,
+        revision_id: revision,
+        parents: expected,
+        operation_id: operation,
+        actor_id: actor,
+        kind: if action == Action::Forget {
+            Kind::Tombstone
+        } else {
+            Kind::Value
+        },
+        payload: correction
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|_| Failure::StorageFailure)?
+            .unwrap_or(serde_json::Value::Null),
+        media_descriptors: correction
+            .map(|value| vec![value.sample.clone()])
+            .unwrap_or_default(),
+    };
+    Ok((fingerprint, envelope))
+}
+
 /// Strict metadata only; sample usability must be verified separately.
 pub fn decode(envelope: &Envelope) -> Result<Option<Correction>> {
     envelope
@@ -404,6 +442,16 @@ pub struct ValidatedInput {
     sample: Option<Vec<u8>>,
 }
 impl ValidatedInput {
+    fn mutation(&self) -> Result<(Action, Uuid, BTreeSet<Uuid>)> {
+        let (action, operation, heads) = match &self.request {
+            Request::Confirm(v) => (Action::Confirm, v.operation, &v.expected_heads),
+            Request::Update(v) => (Action::Update, v.operation, &v.expected_heads),
+            Request::Forget(v) => (Action::Forget, v.operation, &v.expected_heads),
+            _ => return Err(Failure::InvalidJson),
+        };
+        Ok((action, operation, heads.iter().copied().collect()))
+    }
+
     pub fn request(&self) -> &Request {
         &self.request
     }
