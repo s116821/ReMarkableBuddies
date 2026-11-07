@@ -560,3 +560,103 @@ fn joined_export_rechecks_archive_bytes_at_both_destination_poll_boundaries() {
         assert_ne!(result.status, crate::writer_flow::Status::Exported);
     }
 }
+
+#[test]
+#[cfg(target_os = "linux")]
+fn ordinary_memory_reducer_binding_and_spent_operation_query_count() {
+    use crate::memory::Provider;
+    let fixture = Fixture::new();
+    let ledger = &fixture.ledger;
+    let profile = Uuid::new_v4();
+    let lifetime = Arc::new(crate::mode_maintenance::admit_local_dispatch(ledger.store()).unwrap());
+    let provider =
+        crate::memory::LocalMemory::admitted_local(ledger.store().clone(), profile, lifetime)
+            .unwrap();
+    let preference = Personalization::default().snapshot().unwrap();
+    let disabled = fixture.input(&fixture.request);
+    let empty = prepare_inner(
+        ledger,
+        &fixture.request,
+        &preference,
+        None,
+        None,
+        Some(&provider),
+    )
+    .unwrap();
+    let Prepared::Fresh(empty) = empty else {
+        panic!("fresh")
+    };
+    assert_eq!(
+        empty.payloads.plan().reducer_prefix_digest,
+        disabled.payloads.plan().reducer_prefix_digest
+    );
+    let document = disabled.admission.archive.document;
+    provider
+        .put(crate::memory::Mutation {
+            operation: Uuid::new_v4(),
+            expected: Default::default(),
+            fact: crate::memory::Fact {
+                key: crate::memory::Key {
+                    profile,
+                    scope: crate::memory::Scope::Document { document },
+                    fact: Uuid::new_v4(),
+                },
+                claim: "study units".into(),
+                value: "Use SI units".into(),
+                subject: "study notes".into(),
+                tags: vec!["study".into()],
+                provenance: crate::memory::Provenance {
+                    basis: crate::memory::Basis::UserConfirmed,
+                    description: "Synthetic test assertion".into(),
+                    conversation: None,
+                    turn: None,
+                    source: None,
+                },
+                confidence_basis_points: 1000,
+                observed_ms: 1,
+                expires_ms: None,
+            },
+        })
+        .unwrap();
+    let Prepared::Fresh(enabled) = prepare_inner(
+        ledger,
+        &fixture.request,
+        &preference,
+        None,
+        None,
+        Some(&provider),
+    )
+    .unwrap() else {
+        panic!("fresh")
+    };
+    assert_eq!(
+        enabled.payloads.map_parts(0).unwrap(),
+        disabled.payloads.map_parts(0).unwrap()
+    );
+    assert_ne!(
+        enabled.payloads.plan().reducer_prefix_digest,
+        disabled.payloads.plan().reducer_prefix_digest
+    );
+    assert!(
+        enabled.payloads.plan().reducer_reserved_bytes
+            > disabled.payloads.plan().reducer_reserved_bytes
+    );
+    let mut model = Model::default();
+    let generated = runner::run(ledger, &mut model, *enabled, &mut || false);
+    assert_eq!(generated.report.status, runner::Status::Generated);
+    let queries = provider.query_count();
+    assert!(matches!(
+        prepare_inner(
+            ledger,
+            &fixture.request,
+            &preference,
+            None,
+            None,
+            Some(&provider)
+        )
+        .unwrap(),
+        Prepared::Replay(_)
+    ));
+    assert_eq!(provider.query_count(), queries);
+    assert_eq!(model.calls, 2);
+}

@@ -358,7 +358,7 @@ pub(crate) fn run_receiving<E: LLMEngine>(
     )
 }
 
-fn run_receiving_with_memory<E: LLMEngine>(
+pub(crate) fn run_receiving_with_memory<E: LLMEngine>(
     ledger: &Ledger,
     engine: &mut E,
     request: &Request,

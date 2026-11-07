@@ -34,7 +34,8 @@ impl RuntimeRoute {
 pub struct Dispatch<'a> {
     config: &'a Config,
     store: Arc<crate::storage::Store>,
-    _local: crate::mode_maintenance::LocalDispatchLifetime,
+    _local: Arc<crate::mode_maintenance::LocalDispatchLifetime>,
+    memory: Option<Arc<crate::memory::LocalMemory>>,
     blank_events: std::collections::BTreeSet<Uuid>,
 }
 
@@ -45,12 +46,33 @@ impl<'a> Dispatch<'a> {
                 && config.memory.selection.is_none(),
             "unified dispatch requires ordinary local configuration"
         );
+        config.memory.validate()?;
+        let local = Arc::new(crate::mode_maintenance::admit_local_dispatch(
+            ledger.store(),
+        )?);
+        let memory = if config.memory.enabled {
+            Some(Arc::new(crate::memory::LocalMemory::admitted_local(
+                ledger.store().clone(),
+                config
+                    .memory
+                    .profile
+                    .ok_or_else(|| anyhow::anyhow!("memory profile absent"))?,
+                local.clone(),
+            )?))
+        } else {
+            None
+        };
         Ok(Self {
             config,
             store: ledger.store().clone(),
-            _local: crate::mode_maintenance::admit_local_dispatch(ledger.store())?,
+            _local: local,
+            memory,
             blank_events: Default::default(),
         })
+    }
+
+    pub fn local_memory(&self) -> Option<Arc<crate::memory::LocalMemory>> {
+        self.memory.clone()
     }
 
     pub(super) fn require_ledger(&self, ledger: &Ledger) -> Result<()> {
@@ -175,14 +197,27 @@ impl<'a> Dispatch<'a> {
         }
         admitted.check(ledger, observe)?;
         let preference = self.config.personalization_snapshot()?;
-        let (report, selection) = writer::run_receiving(
-            ledger,
-            engine,
-            request,
-            &preference,
-            &mut || !observe().is_ok_and(|current| current == admitted.source),
-            Some(admitted.root.clone()),
-        );
+        let mut canceled = || !observe().is_ok_and(|current| current == admitted.source);
+        let (report, selection) = if let Some(provider) = self.memory.as_deref() {
+            writer::run_receiving_with_memory(
+                ledger,
+                engine,
+                request,
+                &preference,
+                Some(provider),
+                &mut canceled,
+                Some(admitted.root.clone()),
+            )
+        } else {
+            writer::run_receiving(
+                ledger,
+                engine,
+                request,
+                &preference,
+                &mut canceled,
+                Some(admitted.root.clone()),
+            )
+        };
         let output = selection
             .zip(report.draft)
             .map(|(selection, id)| PendingOutput {
@@ -268,6 +303,18 @@ impl<'a> Dispatch<'a> {
                 .map(|value| value.revision_id)
                 .collect(),
         );
+        let user_envelope = ledger
+            .store()
+            .value(Namespace::Conversation, user.id)?
+            .ok_or_else(|| anyhow::anyhow!("Reader request absent"))?;
+        let user_heads =
+            ExpectedHeads(std::collections::BTreeSet::from(
+                [user_envelope.revision_id],
+            ));
+        let crate::conversation::Record::Turn(persisted_user) = Ledger::decode(&user_envelope)?
+        else {
+            anyhow::bail!("Reader request changed");
+        };
         let mut progress = || {
             ensure!(observe()? == admitted.source, "request visit changed");
             ensure!(
@@ -282,8 +329,37 @@ impl<'a> Dispatch<'a> {
             &context,
             request,
             &self.config.personalization_snapshot()?,
+            self.memory
+                .as_deref()
+                .map(|provider| (provider, Some(admitted.source.document), timestamp)),
             &mut progress,
-        )?;
+        );
+        let answer = match answer {
+            Ok(answer) => answer,
+            Err(error) if self.memory.is_none() => return Err(error),
+            Err(error) => {
+                let canceled = progress().is_err();
+                let mut failed = persisted_user.clone();
+                failed.outcome = if canceled {
+                    Outcome::Canceled
+                } else {
+                    Outcome::Failed
+                };
+                let reason = if canceled {
+                    crate::conversation::AttemptReason::Canceled
+                } else {
+                    crate::conversation::AttemptReason::ProviderFailure
+                };
+                ledger.record_attempt_outcome(
+                    writer::stage(admitted.operation, "reader-failure"),
+                    root.clone(),
+                    user_heads,
+                    failed,
+                    reason,
+                )?;
+                return Err(error);
+            }
+        };
         let draft = Turn {
             id: writer::stage(admitted.operation, "reader-draft"),
             role: Role::Assistant,
@@ -338,6 +414,7 @@ impl<'a> Dispatch<'a> {
             frozen,
             &admitted.root,
             admitted.source.document,
+            self.memory.as_deref(),
         )?;
         admitted.check(ledger, observe)?;
         let result = runner::run(ledger, engine, input, &mut || {

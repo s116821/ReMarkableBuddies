@@ -123,7 +123,7 @@ impl FrozenSourceMemoryContext {
     }
 }
 
-fn validate_result(
+pub(crate) fn validate_result(
     result: &memory::QueryResult,
     profile: Uuid,
     query: &memory::Query,

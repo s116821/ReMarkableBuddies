@@ -62,6 +62,7 @@ enum NotebookAdmission {
     Deny,
     Restore,
     Preferences,
+    ReadyOrdinary,
 }
 
 // A definite empty regular directory or definite absence; never follow links.
@@ -255,6 +256,18 @@ impl Store {
             |store, generation| store.recover(generation),
         )
     }
+    pub(crate) fn open_existing_for_ready_notebook_receiving(
+        paths: StorePaths,
+    ) -> Result<Self, Refusal> {
+        Self::open_existing_using(
+            paths,
+            false,
+            NotebookAdmission::ReadyOrdinary,
+            |_, _| Ok(()),
+            |store, generation| store.recover(generation),
+        )
+    }
+
     fn open_existing_using(
         paths: StorePaths,
         selected_aware: bool,
@@ -277,6 +290,9 @@ impl Store {
             || generation_root
                 .join(super::notebook_generation::MARKER)
                 .exists();
+        if admission == NotebookAdmission::ReadyOrdinary && !notebook {
+            return Err(Refusal::Unsupported);
+        }
         if admission == NotebookAdmission::Deny && notebook {
             // These are legacy maintenance admissions. Explicit notebook
             // preparation/history/backup use their separately validated APIs.
@@ -298,7 +314,11 @@ impl Store {
         } else if record::<u32>(&generation_root.join("format.json"), 64)? != FORMAT {
             return Err(Refusal::Unsupported);
         }
-        let notebook_preferences = notebook && admission == NotebookAdmission::Preferences;
+        let notebook_preferences = notebook
+            && matches!(
+                admission,
+                NotebookAdmission::Preferences | NotebookAdmission::ReadyOrdinary
+            );
         if notebook_preferences {
             empty_if_present(&generation_root.join("selections"))?;
             empty_if_present(&generation_root.join("selection-history"))?;

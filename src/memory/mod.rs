@@ -4,6 +4,7 @@ pub mod catalog;
 pub mod context;
 pub mod maintenance;
 pub(crate) mod prepared;
+pub(crate) mod receiving;
 pub mod selected;
 
 use crate::storage::{Envelope, Kind, Namespace, Store, Uuid, MAX_ITEMS};
@@ -398,7 +399,17 @@ pub trait Provider: Send + Sync {
 pub struct LocalMemory {
     store: Arc<Store>,
     profile: Uuid,
-    _local_only_lease: crate::storage::LegacySyncLease,
+    _lifetime: LocalLifetime,
+    queries: std::sync::atomic::AtomicUsize,
+}
+
+enum LocalLifetime {
+    Legacy {
+        _lease: crate::storage::LegacySyncLease,
+    },
+    Ordinary {
+        _lease: Arc<crate::mode_maintenance::LocalDispatchLifetime>,
+    },
 }
 pub fn configured(store: Arc<Store>, configuration: &Configuration) -> Result<Arc<dyn Provider>> {
     configuration.validate()?;
@@ -420,8 +431,29 @@ impl LocalMemory {
         Ok(Self {
             store,
             profile,
-            _local_only_lease: lease,
+            _lifetime: LocalLifetime::Legacy { _lease: lease },
+            queries: Default::default(),
         })
+    }
+    pub(crate) fn admitted_local(
+        store: Arc<Store>,
+        profile: Uuid,
+        lifetime: Arc<crate::mode_maintenance::LocalDispatchLifetime>,
+    ) -> Result<Self> {
+        ensure!(!profile.is_nil(), "invalid memory profile");
+        ensure!(
+            lifetime.admits_store(&store),
+            "foreign memory lifetime Store"
+        );
+        Ok(Self {
+            store,
+            profile,
+            _lifetime: LocalLifetime::Ordinary { _lease: lifetime },
+            queries: Default::default(),
+        })
+    }
+    pub(crate) fn query_count(&self) -> usize {
+        self.queries.load(std::sync::atomic::Ordering::Relaxed)
     }
     fn own(&self, key: &Key) -> Result<()> {
         key.validate()?;
@@ -526,6 +558,8 @@ impl Provider for LocalMemory {
             })
     }
     fn query(&self, query: &Query) -> Result<QueryResult> {
+        self.queries
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         query.validate()?;
         let mut result = QueryResult::empty(Status::CompleteEmpty);
         if self.available().is_err() {
