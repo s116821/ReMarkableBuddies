@@ -25,11 +25,42 @@ const ACTIVATION: Duration = Duration::from_secs(60);
 /// This value does not advertise native capability; no approved profile is shipped.
 pub struct InstalledReaderSelection {
     digest: [u8; 32],
+    #[cfg(test)]
+    fixture_profile: Option<FixtureRecoveryProfile>,
     #[cfg(all(
         feature = "development-resident-bootstrap",
         feature = "development-input-diagnostics"
     ))]
     installed_output: bool,
+}
+
+#[cfg(test)]
+struct FixtureRecoveryProfile {
+    directory: File,
+    original: Metadata,
+}
+
+#[cfg(test)]
+impl FixtureRecoveryProfile {
+    const NAME: &str = "resident-recovery.json";
+
+    fn current_digest(&self, deadline: Instant) -> Result<[u8; 32]> {
+        let mut file = open_at(&self.directory, Self::NAME, false, false)?;
+        ensure!(
+            metadata_equal(&self.original, &file.metadata()?),
+            "fixture recovery profile changed"
+        );
+        let bytes = bounded_bytes(&mut file, 32 * 1024, deadline)?;
+        ensure!(
+            metadata_equal(
+                &self.original,
+                &open_at(&self.directory, Self::NAME, false, false)?.metadata()?
+            ),
+            "fixture recovery profile changed while reading"
+        );
+        parse_profile(&bytes)?;
+        Ok(sha256(&bytes))
+    }
 }
 
 #[cfg(all(
@@ -96,6 +127,8 @@ impl InstalledReaderSelection {
     fn from_profile(profile: &Profile, digest: [u8; 32]) -> Option<Self> {
         profile.source_mode.as_ref().map(|_| Self {
             digest,
+            #[cfg(test)]
+            fixture_profile: None,
             #[cfg(all(
                 feature = "development-resident-bootstrap",
                 feature = "development-input-diagnostics"
@@ -181,6 +214,10 @@ impl InstalledReaderSelection {
         Self::validate_native(&installation, deadline)
     }
     pub(crate) fn current(&self, deadline: Instant) -> Result<()> {
+        #[cfg(test)]
+        if let Some(profile) = &self.fixture_profile {
+            return self.require_digest(profile.current_digest(deadline)?);
+        }
         let installation = Installation::load(deadline)?;
         self.require_digest(installation.digest)?;
         Self::validate_native(&installation, deadline)
@@ -189,12 +226,42 @@ impl InstalledReaderSelection {
     pub(crate) fn fixture() -> Self {
         Self {
             digest: [17; 32],
+            fixture_profile: None,
             #[cfg(all(
                 feature = "development-resident-bootstrap",
                 feature = "development-input-diagnostics"
             ))]
             installed_output: false,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixture_for_output(path: &Path, runtime: &RuntimeIdentity) -> Result<Self> {
+        use std::{io::Write, os::unix::fs::DirBuilderExt};
+
+        let lease = super::super::tests::Fixture::new().record();
+        let mut profile = super::tests::profile(&lease);
+        profile.version = 3;
+        profile.companion = Some(service::vendor::PROFILE_ID.to_owned());
+        profile.source_mode = Some("resident-source-v1".to_owned());
+        profile.native_profile_sha256 = runtime.profile_sha256;
+        profile.adapter_sha256 = runtime.adapter_sha256;
+        profile.stock_executable_sha256 = runtime.executable_sha256;
+        let bytes = serde_json::to_vec(&profile)?;
+        let mut selection = Self::declared(&bytes)?.context("fixture source mode absent")?;
+
+        // The owned synthetic runtime separately pins its executable, profile and
+        // adapter. Keep the recovery declaration private to this output fixture.
+        fs::DirBuilder::new().mode(0o700).create(path)?;
+        let directory = super::super::private_directory(path)?;
+        let mut file = open_at(&directory, FixtureRecoveryProfile::NAME, false, true)?;
+        file.write_all(&bytes)?;
+        let original = file.metadata()?;
+        selection.fixture_profile = Some(FixtureRecoveryProfile {
+            directory,
+            original,
+        });
+        Ok(selection)
     }
 }
 
