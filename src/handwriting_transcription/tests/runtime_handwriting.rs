@@ -223,6 +223,13 @@ fn runtime_foreign_store_disabled_and_cancellation_do_not_capture() {
 }
 fn source_fixture(local: &Local, mode: Mode) -> (Ledger, RequestScope, ImageRef) {
     let store = Arc::new(Store::open(local.config.paths.clone()).unwrap());
+    retained_source_fixture(store, mode, png())
+}
+fn retained_source_fixture(
+    store: Arc<Store>,
+    mode: Mode,
+    bytes: Vec<u8>,
+) -> (Ledger, RequestScope, ImageRef) {
     let ledger = Ledger::new(store);
     let conversation = Uuid::new_v4();
     ledger.create(conversation, Uuid::new_v4(), 1).unwrap();
@@ -238,7 +245,6 @@ fn source_fixture(local: &Local, mode: Mode) -> (Ledger, RequestScope, ImageRef)
         capability_revision: "fixture-capability".into(),
         evidence_procedure: "synthetic receiving fixture, no native authority".into(),
     };
-    let bytes = png();
     let decoded = image::load_from_memory(&bytes).unwrap();
     let image = ImageUse {
         id: source,
@@ -322,6 +328,7 @@ struct Calls {
     calls: Vec<Vec<Value>>,
     replies: std::collections::VecDeque<String>,
 }
+mod receiving_driver;
 impl LLMEngine for Calls {
     fn add_text_content(&mut self, text: &str) {
         self.parts.push(json!({"type":"text","text":text}));
