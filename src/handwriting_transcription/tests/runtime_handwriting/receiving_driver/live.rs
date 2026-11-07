@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 
 pub(super) const MODEL: &str = "gpt-6.1-sol";
 const ENDPOINT: &str = "https://api.openai.com";
-const PAGES: [u32; 4] = [24, 35, 168, 170];
+const LINCOLN_PAGES: [u32; 2] = [1, 2];
+const BARTON_PAGES: [u32; 4] = [24, 35, 168, 170];
 
 fn read(path: &Path, maximum: usize) -> anyhow::Result<Vec<u8>> {
     let mut bytes = Vec::new();
@@ -67,6 +68,8 @@ struct Meter<'a, E> {
     inner: E,
     root: &'a Path,
     calls: usize,
+    before_review: usize,
+    after_review: usize,
     committed: &'a std::cell::Cell<bool>,
 }
 
@@ -88,7 +91,12 @@ impl<E: LLMEngine> LLMEngine for Meter<'_, E> {
         progress: &mut dyn FnMut() -> anyhow::Result<()>,
     ) -> anyhow::Result<String> {
         anyhow::ensure!(
-            self.calls < if self.committed.get() { 14 } else { 8 },
+            self.calls
+                < if self.committed.get() {
+                    self.after_review
+                } else {
+                    self.before_review
+                },
             "provider call budget"
         );
         self.calls += 1;
@@ -122,14 +130,15 @@ impl<E: LLMEngine> LLMEngine for Meter<'_, E> {
     }
 }
 
-fn inputs(root: &Path) -> anyhow::Result<([Vec<u8>; 4], String)> {
-    let map: Value = serde_json::from_slice(&read(&root.join("png-map.json"), 8192)?)?;
+fn inputs(root: &Path, pages: &[u32]) -> anyhow::Result<(Vec<Vec<u8>>, String)> {
+    let raw_map = read(&root.join("png-map.json"), 8192)?;
+    let map: Value = serde_json::from_slice(&raw_map)?;
     let map = map
         .as_array()
         .ok_or_else(|| anyhow::anyhow!("invalid image map"))?;
-    anyhow::ensure!(map.len() == PAGES.len(), "image count");
+    anyhow::ensure!(map.len() == pages.len(), "image count");
     let mut images = Vec::new();
-    for (page, fact) in PAGES.into_iter().zip(map) {
+    for (page, fact) in pages.iter().copied().zip(map) {
         let png = read(&root.join(format!("{page}.png")), 8 * 1024 * 1024)?;
         anyhow::ensure!(
             fact["page"] == page
@@ -142,15 +151,10 @@ fn inputs(root: &Path) -> anyhow::Result<([Vec<u8>; 4], String)> {
     }
     crate::handwriting::png_dimensions(&images[0])
         .map_err(|_| anyhow::anyhow!("seed correction PNG refused"))?;
-    Ok((
-        images
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("image count"))?,
-        digest(&read(&root.join("png-map.json"), 8192)?),
-    ))
+    Ok((images, digest(&raw_map)))
 }
 
-fn run(root: &Path) -> anyhow::Result<()> {
+fn run(root: &Path, pages: &[u32]) -> anyhow::Result<()> {
     let manifest = read(&root.join("runtime.json"), 16384)?;
     let pin: Value = serde_json::from_slice(&manifest)?;
     let authority: Admission =
@@ -163,7 +167,8 @@ fn run(root: &Path) -> anyhow::Result<()> {
             && pin["executable_sha256"] == digest(&fs::read(std::env::current_exe()?)?),
         "live admission"
     );
-    let ([seed, first, second, third], map_sha) = inputs(root)?;
+    let (images, map_sha) = inputs(root, pages)?;
+    let (seed, targets) = images.split_first().expect("fixture has a seed");
     anyhow::ensure!(
         pin["png_map_sha256"] == map_sha
             && !root.join("review.json").exists()
@@ -203,13 +208,15 @@ fn run(root: &Path) -> anyhow::Result<()> {
         inner: crate::OpenAI::new(MODEL.into(), key, Some(ENDPOINT.into())).with_single_request(),
         root,
         calls: 0,
+        before_review: 2 * images.len(),
+        after_review: 2 * (images.len() + targets.len()),
         committed: &committed,
     };
     let mut cell = 0;
     let result = compare_gated(
         &config,
-        &seed,
-        &[first, second, third],
+        seed,
+        targets,
         &mut engine,
         |gate| {
             save(root, "seed-gate.json", &gate)?;
@@ -263,7 +270,7 @@ fn live_barton_receiving() -> anyhow::Result<()> {
         root.is_absolute() && root.canonicalize()?.is_dir(),
         "fixture root"
     );
-    run(&root)
+    run(&root, &BARTON_PAGES)
 }
 
 #[test]
@@ -273,7 +280,32 @@ fn check_barton_inputs() -> anyhow::Result<()> {
         std::env::var_os("RMB_BARTON_ROOT")
             .ok_or_else(|| anyhow::anyhow!("fixture root absent"))?,
     );
-    inputs(&root)?;
+    inputs(&root, &BARTON_PAGES)?;
+    Ok(())
+}
+
+fn lincoln_root() -> anyhow::Result<PathBuf> {
+    let root = PathBuf::from(
+        std::env::var_os("RMB_LINCOLN_ROOT")
+            .ok_or_else(|| anyhow::anyhow!("fixture root absent"))?,
+    );
+    anyhow::ensure!(
+        root.is_absolute() && root.canonicalize()?.is_dir(),
+        "fixture root"
+    );
+    Ok(root)
+}
+
+#[test]
+#[ignore = "requires exact reviewed live admission"]
+fn live_lincoln_receiving() -> anyhow::Result<()> {
+    run(&lincoln_root()?, &LINCOLN_PAGES)
+}
+
+#[test]
+#[ignore = "requires local frozen Lincoln inputs"]
+fn check_lincoln_inputs() -> anyhow::Result<()> {
+    inputs(&lincoln_root()?, &LINCOLN_PAGES)?;
     Ok(())
 }
 
@@ -328,6 +360,8 @@ fn metered_responses_and_refusals_survive_actual_receiving() {
             inner: fake,
             root: &local.root,
             calls: 0,
+            before_review: 4,
+            after_review: 6,
             committed: &committed,
         };
         let mut evidence = None;
