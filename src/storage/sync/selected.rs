@@ -7,7 +7,9 @@ use crate::storage::selection::{
 };
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
+mod control;
 mod protocol;
+pub(crate) use control::{create_group, CreateGroupRequest, GroupOutcome};
 mod publication;
 mod receiving;
 #[cfg(test)]
@@ -32,6 +34,8 @@ impl Binding {
 pub(super) struct SelectedState {
     pub format: u32,
     pub epochs: BTreeMap<Uuid, Checkpoint>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub controls: BTreeMap<Uuid, control::GroupControl>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -246,10 +250,7 @@ impl Engine {
         };
         ensure!(state.format == FORMAT, "worker checkpoint format differs");
         if let Some(selected) = &state.selected {
-            ensure!(
-                selected.format == 1 && selected.epochs.len() <= MAX_ITEMS,
-                "selected checkpoint bounds differ"
-            );
+            control::validate_controls(selected, store.actor_id)?;
         }
         let checkpoint = state
             .selected
@@ -314,7 +315,7 @@ impl Engine {
         self.check_bounds()?;
         let selected = self.state.selected.get_or_insert_with(|| SelectedState {
             format: 1,
-            epochs: BTreeMap::new(),
+            ..Default::default()
         });
         ensure!(
             selected.epochs.len() < MAX_ITEMS

@@ -1,4 +1,4 @@
-//! Explicit local mode intent. No worker, provider or native activation.
+//! Explicit mode intent and separately qualified first-group control.
 use crate::{
     config::Config,
     storage::{
@@ -28,6 +28,7 @@ pub enum Operation {
     Initialize,
     Inspect,
     Choose,
+    CreateGroup,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -128,6 +129,8 @@ struct Data {
     current_snapshot: Current,
     receipt: Option<SyncModeReceipt>,
     receipt_status: Option<ReceiptStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    control: Option<storage::sync::selected::GroupOutcome>,
 }
 
 struct OutputLease {
@@ -259,6 +262,7 @@ fn finish(
         },
         receipt,
         receipt_status,
+        control: None,
     });
     report
 }
@@ -276,7 +280,36 @@ pub fn run(
     config_path: Option<PathBuf>,
     stdin: &mut impl Read,
 ) -> Report {
+    let group_request = if operation == Operation::CreateGroup {
+        let Some(path) = input else {
+            return Report::new(operation, Status::InvalidInput);
+        };
+        if path.as_os_str() != std::ffi::OsStr::new("-") {
+            return Report::new(operation, Status::InvalidInput);
+        }
+        let mut bytes = Vec::new();
+        if stdin
+            .take((MAX_INPUT + 1) as u64)
+            .read_to_end(&mut bytes)
+            .is_err()
+            || bytes.len() > MAX_INPUT
+        {
+            return Report::new(operation, Status::InvalidInput);
+        }
+        let request: storage::sync::selected::CreateGroupRequest =
+            match serde_json::from_slice(&bytes) {
+                Ok(request) => request,
+                Err(_) => return Report::new(operation, Status::InvalidInput),
+            };
+        if request.validate().is_err() {
+            return Report::new(operation, Status::InvalidInput);
+        }
+        Some(request)
+    } else {
+        None
+    };
     let request = match (operation, input) {
+        (Operation::CreateGroup, _) => None,
         (Operation::Choose, Some(path)) => match read_request(path, stdin) {
             Ok(request) => Some(request),
             Err(_) => return Report::new(operation, Status::InvalidInput),
@@ -330,7 +363,34 @@ pub fn run(
         report._store = Some(store);
         return report;
     }
-    if let Some(request) = request {
+    if let Some(request) = group_request {
+        // Production qualification is deliberately closed. Keep the actual
+        // control dispatch, but refuse before any credential read or mutation.
+        match storage::sync::selected::create_group(store.clone(), request) {
+            Ok(outcome) => {
+                let mut report = finish(
+                    operation,
+                    Status::Ok,
+                    store,
+                    Some(outcome.mode_receipt.clone()),
+                );
+                if let Some(data) = &mut report.data {
+                    data.control = Some(outcome);
+                }
+                report
+            }
+            Err(error) => finish(
+                operation,
+                if error.to_string() == "shared provider application binding is not qualified" {
+                    Status::Unsupported
+                } else {
+                    mutation_status(&error)
+                },
+                store,
+                None,
+            ),
+        }
+    } else if let Some(request) = request {
         choose(store, request)
     } else {
         finish(operation, Status::Ok, store, None)

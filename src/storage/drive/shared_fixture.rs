@@ -21,6 +21,7 @@ struct Uploading {
     total: usize,
     bytes: Vec<u8>,
 }
+type RequestObserver = Arc<dyn Fn(&str) + Send + Sync>;
 #[derive(Default)]
 struct Model {
     files: BTreeMap<String, File>,
@@ -28,6 +29,7 @@ struct Model {
     next: u64,
     requests: Vec<String>,
     lose_create: Option<String>,
+    observer: Option<RequestObserver>,
 }
 pub(in crate::storage) struct Wire {
     base: String,
@@ -126,6 +128,9 @@ impl Wire {
     pub fn lose_create(&self, id: &str) {
         self.model.lock().unwrap().lose_create = Some(id.into());
     }
+    pub fn observe_requests(&self, observer: impl Fn(&str) + Send + Sync + 'static) {
+        self.model.lock().unwrap().observer = Some(Arc::new(observer));
+    }
 }
 impl Drop for Wire {
     fn drop(&mut self) {
@@ -181,6 +186,10 @@ fn serve(mut stream: TcpStream, base: &str, model: &Arc<Mutex<Model>>) {
     let target = request.next().unwrap();
     let path = target.split('?').next().unwrap();
     let body = &bytes[end..end + length];
+    let observer = model.lock().unwrap().observer.clone();
+    if let Some(observer) = observer {
+        observer(first);
+    }
     let mut model = model.lock().unwrap();
     model.requests.push(first.into());
     let mut extra = Vec::<(String, String)>::new();
