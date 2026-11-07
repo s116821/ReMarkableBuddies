@@ -17,7 +17,7 @@ bytes and12 times the SDK original-pixel limit, checked before object I/O.
 reviewed live run using the existing pinned protected configuration admission,
 seven calls,4000 completion tokens,90 seconds per call/720 seconds total and sticky
 stop-on-error. It is opt-in and is not run by the offline case. Never substitute
-an old ImageUse result or a held handwriting packet for this evidence. Both cases
+an old ImageUse result for this resident-route evidence. Both cases
 model historical correspondence and page completion; they qualify neither native
 acquisition/landscape input, currentness, tablet output nor handwriting recognition.
 
