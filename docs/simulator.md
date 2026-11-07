@@ -2,6 +2,26 @@
 
 ### Combined receiving qualification
 
+The resident-history case `scenarios/combined-qualification-resident.json` selects
+`historical_source: "resident-fixture-v1"`. It stores explicitly synthetic
+ResidentHistoricalUnqualified evidence for the same original printed fixture and
+runs the existing seven-stage receivers. Each non-map request receives the four
+recipe-validated overview/strip derivatives with original source associations;
+the original PNG remains provenance. The map still receives no historical images.
+Original/derivative/proof failure refuses before model work. The resolver keeps
+its twelve-attachment/16 MiB/256-association limits and additionally admits one
+cumulative resident proof: at most12 captures,64 MiB declared original+derivative
+bytes and12 times the SDK original-pixel limit, checked before object I/O.
+
+`live/combined-qualification-resident.json` prepares that same route for a later
+reviewed live run using the existing pinned protected configuration admission,
+seven calls,4000 completion tokens,90 seconds per call/720 seconds total and sticky
+stop-on-error. It is opt-in and is not run by the offline case. Never substitute
+an old ImageUse result or a held handwriting packet for this evidence. Both cases
+model historical correspondence and page completion; they qualify neither native
+acquisition/landscape input, currentness, tablet output nor handwriting recognition.
+
+
 `mode: "combined-qualification"` is a separate explicit receiving check through
 the production Dispatch Reader/Writer and notebook map/reduce paths. The maintained
 `scenarios/combined-qualification.json` runs the same seven-stage sequence with
