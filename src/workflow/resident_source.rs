@@ -1441,8 +1441,8 @@ mod tests {
 
     #[test]
     fn resident_output_fences_a_different_conversation_after_indeterminate_insertion() {
-        // R103 observed an indeterminate low-space insertion with unchanged saved
-        // page order. A later conversation is a synthetic follow-on to that run.
+        // R103 observed an indeterminate insertion with unchanged saved page
+        // order. A later conversation is a synthetic follow-on to that run.
         // https://linear.app/magentumdragon/issue/REM-25#comment-ac409995-98cd-4235-887b-afb43cf85904
         for seed_insertion in [false, true] {
             let (mut workflow, store, base, events, _notify) =
