@@ -154,15 +154,20 @@ fn inputs(root: &Path, pages: &[u32]) -> anyhow::Result<(Vec<Vec<u8>>, String)> 
     Ok((images, digest(&raw_map)))
 }
 
-fn run(root: &Path, pages: &[u32], seed_enrollment: bool) -> anyhow::Result<()> {
+fn run(root: &Path, pages: &[u32], seed_mode: SeedMode) -> anyhow::Result<()> {
     let manifest = read(&root.join("runtime.json"), 16384)?;
     let pin: Value = serde_json::from_slice(&manifest)?;
     let authority: Admission =
         serde_json::from_slice(&read(&root.join("live-admission.json"), 4096)?)?;
+    let pinned_seed_mode = match seed_mode {
+        SeedMode::CompletePage => None,
+        SeedMode::Abstention => Some("explicit-abstention-enrollment"),
+        SeedMode::EitherValidOutcome => Some("two-valid-seed-outcomes"),
+    };
     anyhow::ensure!(
         authority.manifest_sha256 == digest(&manifest)
             && selection(&authority.selection)
-            && (!seed_enrollment || pin["seed_mode"] == "explicit-abstention-enrollment")
+            && pin["seed_mode"].as_str() == pinned_seed_mode
             && pin["model"] == MODEL
             && pin["endpoint"] == ENDPOINT
             && pin["executable_sha256"] == digest(&fs::read(std::env::current_exe()?)?),
@@ -225,11 +230,7 @@ fn run(root: &Path, pages: &[u32], seed_enrollment: bool) -> anyhow::Result<()> 
             let until = Instant::now() + Duration::from_secs(600);
             while Instant::now() < until {
                 if root.join("review.json").exists() {
-                    let decision = if seed_enrollment {
-                        "enroll-supported-controlled-seed-after-abstention"
-                    } else {
-                        "confirm-supported-controlled-seed"
-                    };
+                    let decision = gate_decision(&gate);
                     let review =
                         approve(&read(&root.join("review.json"), 4096)?, &gate_sha, decision)?;
                     let text = read(&root.join("seed-supported.txt"), 4096)?;
@@ -257,7 +258,7 @@ fn run(root: &Path, pages: &[u32], seed_enrollment: bool) -> anyhow::Result<()> 
                 save(root, &format!("cell-{cell}.json"), &value)
             }
         },
-        seed_enrollment,
+        seed_mode,
     );
     save(
         root,
@@ -278,7 +279,7 @@ fn live_barton_receiving() -> anyhow::Result<()> {
         root.is_absolute() && root.canonicalize()?.is_dir(),
         "fixture root"
     );
-    run(&root, &BARTON_PAGES, false)
+    run(&root, &BARTON_PAGES, SeedMode::CompletePage)
 }
 
 #[test]
@@ -306,7 +307,11 @@ fn lincoln_root(variable: &str) -> anyhow::Result<PathBuf> {
 #[test]
 #[ignore = "requires exact reviewed live admission"]
 fn live_lincoln_receiving() -> anyhow::Result<()> {
-    run(&lincoln_root("RMB_LINCOLN_ROOT")?, &LINCOLN_PAGES, false)
+    run(
+        &lincoln_root("RMB_LINCOLN_ROOT")?,
+        &LINCOLN_PAGES,
+        SeedMode::CompletePage,
+    )
 }
 
 #[test]
@@ -322,8 +327,26 @@ fn live_lincoln_abstention_enrollment() -> anyhow::Result<()> {
     run(
         &lincoln_root("RMB_LINCOLN_ENROLLMENT_ROOT")?,
         &LINCOLN_PAGES,
-        true,
+        SeedMode::Abstention,
     )
+}
+
+#[test]
+#[ignore = "requires fresh two-outcome seed admission"]
+fn live_lincoln_two_seed_outcomes() -> anyhow::Result<()> {
+    run(
+        &lincoln_root("RMB_LINCOLN_TWO_OUTCOME_ROOT")?,
+        &LINCOLN_PAGES,
+        SeedMode::EitherValidOutcome,
+    )
+}
+
+fn gate_decision(gate: &Value) -> &'static str {
+    if gate["seed_outcome"] == "valid-whole-page-abstention" {
+        "enroll-supported-controlled-seed-after-abstention"
+    } else {
+        "confirm-supported-controlled-seed"
+    }
 }
 
 #[test]
@@ -413,5 +436,95 @@ fn metered_responses_and_refusals_survive_actual_receiving() {
             meter.calls,
             if expected == "writer-receiving" { 2 } else { 1 }
         );
+    }
+}
+
+#[test]
+fn two_outcome_gate_requires_the_decision_for_the_actual_valid_seed() {
+    for (seed_reply, seed_generate, outcome, decision, wrong_decision, seed_calls) in [
+        (
+            good_reply(),
+            "# Seed\n\nSynthetic reading.",
+            "valid-whole-page-reading",
+            "confirm-supported-controlled-seed",
+            "enroll-supported-controlled-seed-after-abstention",
+            2,
+        ),
+        (
+            r#"{"pages":[{"page":7,"status":"unreadable","text":""}]}"#.into(),
+            "",
+            "valid-whole-page-abstention",
+            "enroll-supported-controlled-seed-after-abstention",
+            "confirm-supported-controlled-seed",
+            1,
+        ),
+    ] {
+        for submitted in [decision, wrong_decision] {
+            let mut local = Local::ready_notebook(true);
+            enable(&mut local);
+            let mut model = engine(3);
+            model.replies[2] = seed_reply.clone();
+            if seed_calls == 1 {
+                model.replies.remove(3);
+            } else {
+                model.replies[3] = seed_generate.into();
+            }
+            let mut committed = false;
+            let result = compare_gated(
+                &local.config,
+                &sample(2),
+                &[sample(3)],
+                &mut model,
+                |gate| {
+                    assert_eq!(gate["seed_outcome"], outcome);
+                    assert_eq!(gate["intent_owner"], "controlled-fixture");
+                    assert_eq!(gate["normalized"].is_null(), seed_calls == 1);
+                    let review = json!({"decision":submitted,"seed_gate_sha256":"exact",
+                        "selection":"https://linear.app/magentumdragon/issue/REM-26#comment-11111111-1111-1111-1111-111111111111"});
+                    approve(&serde_json::to_vec(&review)?, "exact", gate_decision(&gate))?;
+                    Ok("CONTROLLED_TWO_OUTCOME_READING".into())
+                },
+                |event| {
+                    if event["committed"] == true {
+                        committed = true;
+                    }
+                    Ok(())
+                },
+                SeedMode::EitherValidOutcome,
+            );
+            let accepted = submitted == decision;
+            assert_eq!(result.is_ok(), accepted);
+            assert_eq!(committed, accepted);
+            assert_eq!(
+                model.calls.len(),
+                2 + seed_calls + 2 * usize::from(accepted)
+            );
+            for (index, call) in model.calls.iter().enumerate() {
+                let text = serde_json::to_string(call).unwrap();
+                assert_eq!(
+                    text.contains("CONTROLLED_TWO_OUTCOME_READING"),
+                    index == 2 + seed_calls
+                );
+            }
+        }
+    }
+
+    for (seed_reply, seed_generate, calls) in [("{}".into(), "", 3), (good_reply(), "", 4)] {
+        let mut local = Local::ready_notebook(true);
+        enable(&mut local);
+        let mut model = engine(3);
+        model.replies[2] = seed_reply;
+        model.replies[3] = seed_generate.into();
+        assert!(compare_gated(
+            &local.config,
+            &sample(2),
+            &[sample(3)],
+            &mut model,
+            |_| panic!("invalid seed reached review"),
+            |_| Ok(()),
+            SeedMode::EitherValidOutcome,
+        )
+        .is_err());
+        assert_eq!(model.calls.len(), calls);
     }
 }

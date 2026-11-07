@@ -8,6 +8,13 @@ struct Receipt {
     source: [Uuid; 3],
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SeedMode {
+    CompletePage,
+    Abstention,
+    EitherValidOutcome,
+}
+
 struct Received {
     ledger: Ledger,
     scope: RequestScope,
@@ -83,7 +90,7 @@ fn compare(seed: &[u8], targets: &[Vec<u8>], engine: &mut Calls) -> anyhow::Resu
         engine,
         |_| Ok("CONTROLLED_SEED_READING".into()),
         |_| Ok(()),
-        false,
+        SeedMode::CompletePage,
     )
 }
 
@@ -94,7 +101,7 @@ fn compare_gated(
     engine: &mut impl LLMEngine,
     review: impl FnOnce(Value) -> anyhow::Result<String>,
     mut evidence: impl FnMut(Value) -> anyhow::Result<()>,
-    seed_enrollment: bool,
+    seed_mode: SeedMode,
 ) -> anyhow::Result<Receipt> {
     anyhow::ensure!((1..=3).contains(&targets.len()), "target count");
     let mut hashes = BTreeSet::new();
@@ -119,10 +126,10 @@ fn compare_gated(
         seed,
         engine,
         &mut evidence,
-        seed_enrollment,
+        seed_mode != SeedMode::CompletePage,
     )?;
     anyhow::ensure!(
-        !seed_enrollment || abstention.is_some(),
+        seed_mode != SeedMode::Abstention || abstention.is_some(),
         "seed did not abstain"
     );
     let normalized = ledger
@@ -146,7 +153,7 @@ fn compare_gated(
         )
     } else {
         anyhow::ensure!(
-            seed_enrollment && abstention.is_some(),
+            seed_mode != SeedMode::CompletePage && abstention.is_some(),
             "normalized seed absent"
         );
         None
@@ -166,6 +173,9 @@ fn compare_gated(
     });
     if abstention.is_some() {
         gate["seed_outcome"] = json!("valid-whole-page-abstention");
+        gate["intent_owner"] = json!("controlled-fixture");
+    } else if seed_mode == SeedMode::EitherValidOutcome {
+        gate["seed_outcome"] = json!("valid-whole-page-reading");
         gate["intent_owner"] = json!("controlled-fixture");
     }
     let reviewed = review(gate)?;
@@ -260,7 +270,7 @@ fn review_refusal_stops_after_seed_and_never_starts_context() {
             anyhow::bail!("review refused")
         },
         |_| Ok(()),
-        false,
+        SeedMode::CompletePage,
     );
     assert!(result.is_err() && observed);
     assert_eq!(engine.calls.len(), 8);
@@ -351,7 +361,7 @@ fn valid_seed_abstention_enrolls_only_after_explicit_fixture_review() {
                 }
                 Ok(())
             },
-            true,
+            SeedMode::Abstention,
         );
         assert_eq!(receipt.is_ok(), approve);
         assert_eq!(committed, approve);
