@@ -302,37 +302,42 @@ impl SelectedAdmission {
             .iter()
             .map(|a| a.reader_mode_lease())
             .collect::<Result<Vec<_>>>()?;
-        let mut identities = Vec::new();
+        let mut discoveries = Vec::new();
         let mut catalogs = Vec::new();
         for admission in admissions {
             ensure!(admission.same_store(first), "foreign ready Store");
-            let identity = first
-                .store
-                .selected_snapshot(&admission.scope, MAX_ITEMS)?
-                .as_ref()
-                .map(crate::memory::selected::mixed_identity)
-                .transpose()?
-                .flatten();
-            if let Some(identity) = &identity {
-                catalogs.push(Self::new(first.store.clone(), identity.scope()?)?);
+            let mixed = match first.store.selected_snapshot(&admission.scope, MAX_ITEMS)? {
+                Some(snapshot) => crate::memory::selected::mixed_identity(&first.store, &snapshot)?
+                    .map(|identities| (snapshot.token, identities)),
+                None => None,
+            };
+            if let Some((_, identities)) = &mixed {
+                for identity in identities {
+                    catalogs.push(Self::new(first.store.clone(), identity.scope()?)?);
+                }
             }
-            identities.push(identity);
+            discoveries.push(mixed);
         }
         let mut combined = admissions.to_vec();
         combined.extend(catalogs.iter());
         Self::with_gates(&combined, |store| {
-            for (admission, identity) in admissions.iter().zip(&identities) {
-                if let Some(snapshot) = store.selected_snapshot(&admission.scope, MAX_ITEMS)? {
-                    let current = crate::memory::selected::mixed_identity(&snapshot)?;
-                    ensure!(
-                        &current == identity,
-                        "mixed readiness changed during discovery"
-                    );
-                    if let Some(identity) = &current {
-                        crate::memory::selected::require_mixed_ready(store, &snapshot, identity)?;
-                    }
-                } else {
-                    ensure!(identity.is_none(), "mixed selection disappeared");
+            for (admission, discovered) in admissions.iter().zip(&discoveries) {
+                let snapshot = store.selected_snapshot(&admission.scope, MAX_ITEMS)?;
+                let current = match &snapshot {
+                    Some(snapshot) => crate::memory::selected::mixed_identity(store, snapshot)?
+                        .map(|identities| (snapshot.token.clone(), identities)),
+                    None => None,
+                };
+                ensure!(
+                    &current == discovered,
+                    "mixed readiness changed during discovery"
+                );
+                if let Some((_, identities)) = &current {
+                    crate::memory::selected::require_mixed_ready(
+                        store,
+                        snapshot.as_ref().context("mixed selection disappeared")?,
+                        identities,
+                    )?;
                 }
             }
             operation(store)
