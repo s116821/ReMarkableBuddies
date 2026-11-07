@@ -136,6 +136,8 @@ fn runtime_handwriting_actual_reader_two_passes_none_compatibility_and_failures(
         }
         if (2..6).contains(&case) {
             for call in calls.iter() {
+                let fixed_addendum = call[1]["text"].as_str().unwrap();
+                assert!(fixed_addendum.ends_with('\n') && !fixed_addendum.contains('\r'));
                 assert!(call.iter().any(|p| p["text"]
                     .as_str()
                     .is_some_and(|s| s.contains("EXAMPLE_CONFIRMED"))));

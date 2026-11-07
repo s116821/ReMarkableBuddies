@@ -8,3 +8,6 @@ src/handwriting_transcription/context-instructions-structured-math-v1.txt text e
 
 # The RM2 recovery profile pins the exact deployed systemd unit bytes.
 cicd/deploy/rm2-resident/*.service text eol=lf
+
+src/handwriting/runtime-analysis-instructions.txt text eol=lf
+src/handwriting/runtime-verification-instructions.txt text eol=lf
