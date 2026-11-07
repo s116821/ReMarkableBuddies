@@ -431,7 +431,7 @@ impl SelectedAdmission {
             crate::storage::valid_digest(raw_head),
             "invalid original raw head"
         );
-        Self::with_gates(&[self], |store| {
+        Self::with_ready_gate_set(&[self], |store| {
             if store
                 .selected_receipt(self.scope(), req.operation)?
                 .is_none()
@@ -496,7 +496,7 @@ impl SelectedAdmission {
             IntentSelectionEvidence::from_token(accepted),
             &req,
         ))?;
-        Self::with_gates(&[self], |store| {
+        Self::with_ready_gate_set(&[self], |store| {
             if let Some(history) = historical_preparation(store, accepted, &req, &fingerprint)? {
                 return Ok(history);
             }
@@ -821,7 +821,7 @@ impl SelectedAdmission {
         let fingerprint = finish_fingerprint(&f)?;
         let mut admissions = vec![self];
         admissions.extend_from_slice(additional);
-        Self::with_gates(&admissions, |store| {
+        Self::with_ready_gate_set(&admissions, |store| {
             let recover = |store: &Store| -> Result<
                 Option<(SelectionTransaction, SelectedWriterAcknowledgment)>,
             > {

@@ -1,5 +1,6 @@
 //! Receiving selected memory over existing storage and admission, never a sync engine.
 mod prepared;
+mod readiness;
 use super::{
     aggregate::Aggregate,
     catalog::{Catalog, Identity, Owner, Record, Registration, MAX_AGGREGATES},
@@ -14,6 +15,7 @@ use crate::{
     },
 };
 use anyhow::{ensure, Context, Result};
+pub(crate) use readiness::{mixed_identity, require_mixed_ready};
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},

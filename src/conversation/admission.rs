@@ -262,31 +262,77 @@ impl SelectedAdmission {
         accepted: &SelectionToken,
         operation: impl FnOnce(&Store, &SelectedSnapshot) -> Result<T>,
     ) -> Result<T> {
-        let _admission = self
-            .gate
-            .lock()
-            .map_err(|_| anyhow::anyhow!("domain admission unavailable"))?;
         ensure!(
             accepted.scope() == &self.scope,
             "foreign selected admission scope"
         );
-        let snapshot = self
-            .store
-            .selected_snapshot(&self.scope, MAX_ITEMS)?
-            .context("selected admission absent")?;
-        ensure!(
-            &snapshot.token == accepted,
-            "selected admission replaced or stale"
-        );
-        operation(&self.store, &snapshot)
+        self.with_ready_gates(|store| {
+            let snapshot = store
+                .selected_snapshot(&self.scope, MAX_ITEMS)?
+                .context("selected admission absent")?;
+            ensure!(
+                &snapshot.token == accepted,
+                "selected admission replaced or stale"
+            );
+            operation(store, &snapshot)
+        })
     }
     /// Publication/activation must use the same gate as synchronous handoff.
     pub(super) fn mutate<T>(&self, operation: impl FnOnce(&Store) -> Result<T>) -> Result<T> {
-        let _admission = self
-            .gate
-            .lock()
-            .map_err(|_| anyhow::anyhow!("domain admission unavailable"))?;
-        operation(&self.store)
+        self.with_ready_gates(operation)
+    }
+    pub(super) fn with_ready_gates<T>(
+        &self,
+        operation: impl FnOnce(&Store) -> Result<T>,
+    ) -> Result<T> {
+        Self::with_ready_gate_set(&[self], operation)
+    }
+    pub(super) fn with_ready_gate_set<T>(
+        admissions: &[&Self],
+        operation: impl FnOnce(&Store) -> Result<T>,
+    ) -> Result<T> {
+        let first = admissions.first().context("empty ready admission set")?;
+        // Mode lifetime precedes the entire ordered domain gate set. Discovery
+        // reads supply only pins; exact mixed registration is checked inside.
+        let _modes = admissions
+            .iter()
+            .map(|a| a.reader_mode_lease())
+            .collect::<Result<Vec<_>>>()?;
+        let mut identities = Vec::new();
+        let mut catalogs = Vec::new();
+        for admission in admissions {
+            ensure!(admission.same_store(first), "foreign ready Store");
+            let identity = first
+                .store
+                .selected_snapshot(&admission.scope, MAX_ITEMS)?
+                .as_ref()
+                .map(crate::memory::selected::mixed_identity)
+                .transpose()?
+                .flatten();
+            if let Some(identity) = &identity {
+                catalogs.push(Self::new(first.store.clone(), identity.scope()?)?);
+            }
+            identities.push(identity);
+        }
+        let mut combined = admissions.to_vec();
+        combined.extend(catalogs.iter());
+        Self::with_gates(&combined, |store| {
+            for (admission, identity) in admissions.iter().zip(&identities) {
+                if let Some(snapshot) = store.selected_snapshot(&admission.scope, MAX_ITEMS)? {
+                    let current = crate::memory::selected::mixed_identity(&snapshot)?;
+                    ensure!(
+                        &current == identity,
+                        "mixed readiness changed during discovery"
+                    );
+                    if let Some(identity) = &current {
+                        crate::memory::selected::require_mixed_ready(store, &snapshot, identity)?;
+                    }
+                } else {
+                    ensure!(identity.is_none(), "mixed selection disappeared");
+                }
+            }
+            operation(store)
+        })
     }
     pub(crate) fn scope(&self) -> &SelectionScope {
         &self.scope
@@ -296,7 +342,11 @@ impl SelectedAdmission {
         change: SelectionChange,
         objects: BTreeMap<String, Vec<u8>>,
     ) -> Result<SelectionPublication> {
-        self.mutate(|store| store.initialize_selected(&self.scope, change, objects))
+        // Explicit genesis can be staged before its exact local registration.
+        // Product reads/sends remain fenced by with_ready_gates above.
+        Self::with_gates(&[self], |store| {
+            store.initialize_selected(&self.scope, change, objects)
+        })
     }
     pub fn activate(
         &self,

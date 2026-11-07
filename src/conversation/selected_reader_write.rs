@@ -383,7 +383,7 @@ impl SelectedAdmission {
         let mut admissions = Vec::with_capacity(additional.len() + 1);
         admissions.push(self);
         admissions.extend_from_slice(additional);
-        Self::with_gates(&admissions, |store| {
+        Self::with_ready_gate_set(&admissions, |store| {
             if let Some((transaction, acknowledgment)) =
                 recover(store, accepted, &request, &fingerprint)?
             {
