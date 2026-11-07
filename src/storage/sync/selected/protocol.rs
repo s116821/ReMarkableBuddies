@@ -4,7 +4,6 @@ use crate::memory::catalog::Owner as MemoryOwner;
 use serde::{Deserialize, Serialize};
 
 pub(super) const WIRE: u32 = 1;
-const PREFERENCE_NAME: &str = "urn:remarkable-buddies:global-record:v1:portable-configuration";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -26,7 +25,7 @@ impl Owner {
     pub fn key_sha256(&self) -> Result<String> {
         match self {
             Self::Memory(owner) => owner.key_sha256(),
-            Self::Preferences(_) => Ok(digest(PREFERENCE_NAME.as_bytes())),
+            Self::Preferences(_) => Ok(crate::config::portable::record::key_sha256()),
         }
     }
 }

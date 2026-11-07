@@ -261,6 +261,7 @@ impl Store {
             .lock()
             .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
         let root = self.generation(inner.generation);
+        Self::validate_namespace_family(&root, manifest)?;
         if feedback_generation::version(&root)? == compound_generation::VERSION {
             compound_generation::validate_ready(&self.paths, self.actor_id, inner.generation)?;
         }

@@ -7,6 +7,7 @@ use serde_json::{json, Map, Value};
 use std::{io::Write, path::PathBuf};
 
 pub mod import;
+pub mod record;
 pub mod selected;
 
 pub const MAX_IO: usize = 128 * 1024;

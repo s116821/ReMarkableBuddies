@@ -553,6 +553,21 @@ impl Store {
     fn validate_objects(root: &Path, manifest: &Manifest) -> Result<Vec<(Envelope, String)>> {
         Self::validate_objects_with_budget(root, manifest, None)
     }
+    fn validate_namespace_family(root: &Path, manifest: &Manifest) -> Result<()> {
+        if manifest
+            .record_namespaces
+            .values()
+            .any(|n| *n == Namespace::PortableConfiguration)
+        {
+            ensure!(
+                manifest.scope == Scope::SelectedRecords
+                    && feedback_generation::version(root)? == compound_generation::VERSION,
+                "portable configuration requires compound selected storage"
+            );
+            compound_generation::validate_portable_generation(root)?;
+        }
+        Ok(())
+    }
     fn validate_objects_with_budget(
         root: &Path,
         manifest: &Manifest,
@@ -567,6 +582,7 @@ impl Store {
         notebook_archive_actor: Option<Uuid>,
     ) -> Result<Vec<(Envelope, String)>> {
         manifest.validate()?;
+        Self::validate_namespace_family(root, manifest)?;
         for (item, media) in manifest
             .records
             .iter()
@@ -599,6 +615,17 @@ impl Store {
             let envelope: Envelope = serde_json::from_slice(&encoded)
                 .map_err(|_| anyhow::anyhow!("invalid or unsupported stored JSON"))?;
             envelope.validate()?;
+            if envelope.namespace == Namespace::PortableConfiguration {
+                ensure!(
+                    manifest.scope == Scope::SelectedRecords
+                        && feedback_generation::version(root)? == compound_generation::VERSION,
+                    "portable configuration requires compound selected storage"
+                );
+                compound_generation::validate_portable_generation(root)?;
+                crate::config::inspection::strict_json(&encoded)?;
+                crate::config::portable::selected::Artifact::from_value(envelope.payload.clone())
+                    .map_err(|_| anyhow::anyhow!("invalid portable configuration declaration"))?;
+            }
             if envelope.domain_schema_version == 3 {
                 if let Some(actor) = notebook_archive_actor {
                     ensure!(
@@ -1020,6 +1047,7 @@ impl Store {
             feedback_generation::version(&root)? != compound_generation::VERSION,
             "compound storage requires selected publication"
         );
+        Self::validate_namespace_family(&root, &manifest)?;
         for reference in &manifest.records {
             if let Some(bytes) = objects.get(&reference.sha256) {
                 if let Ok(envelope) = serde_json::from_slice::<Envelope>(bytes) {

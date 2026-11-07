@@ -41,7 +41,8 @@
             "export-association",
             "subject-memory",
             "handwriting",
-            "unassociated-feedback"
+            "unassociated-feedback",
+            "portable-configuration"
           ]
         },
         "domain_schema_version": {
@@ -199,6 +200,31 @@
                 }
               }
             ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "namespace": {
+                "const": "portable-configuration"
+              }
+            },
+            "required": [
+              "namespace"
+            ]
+          },
+          "then": {
+            "properties": {
+              "domain_schema_version": {
+                "const": 1
+              },
+              "kind": {
+                "const": "value"
+              },
+              "media_descriptors": {
+                "maxItems": 0
+              }
+            }
           }
         }
       ]
@@ -406,7 +432,8 @@
               "export-association",
               "subject-memory",
               "handwriting",
-              "unassociated-feedback"
+              "unassociated-feedback",
+              "portable-configuration"
             ]
           }
         },

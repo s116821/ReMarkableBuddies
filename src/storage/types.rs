@@ -31,6 +31,7 @@ pub enum Namespace {
     SubjectMemory,
     Handwriting,
     UnassociatedFeedback,
+    PortableConfiguration,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -119,6 +120,14 @@ impl Envelope {
             self.media_descriptors.len() <= MAX_ITEMS,
             "too many media descriptors"
         );
+        if self.namespace == Namespace::PortableConfiguration {
+            ensure!(
+                self.domain_schema_version == 1
+                    && self.kind == Kind::Value
+                    && self.media_descriptors.is_empty(),
+                "unsupported portable configuration envelope"
+            );
+        }
         let mut seen = BTreeSet::new();
         for media in &self.media_descriptors {
             media.validate()?;

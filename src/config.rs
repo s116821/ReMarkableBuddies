@@ -61,6 +61,10 @@ impl SyncPolicy {
             !self.namespaces.contains(&Namespace::UnassociatedFeedback),
             "unassociated feedback live sync unsupported"
         );
+        ensure!(
+            !self.namespaces.contains(&Namespace::PortableConfiguration),
+            "portable configuration uses selected shared sync only"
+        );
         ensure!(self.max_media_bytes <= MAX_MEDIA, "invalid media limit");
         ensure!(
             self.collection.is_none_or(|c| !c.is_nil()),

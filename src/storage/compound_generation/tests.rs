@@ -662,6 +662,84 @@ fn abrupt_preparation_death_releases_custody_and_original_operation_recovers() {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires an explicitly built pre-portable format5 host reader"]
+fn pre_portable_format5_reader_accepts_its_control_and_refuses_new_contract_without_mutation() {
+    use std::process::Command;
+    let executable = PathBuf::from(
+        std::env::var_os("BUDDY_TEST_PRE_PORTABLE_FORMAT5_READER")
+            .expect("supply a trusted pre-portable format5 host reader"),
+    );
+    assert!(executable.is_file());
+    let old_contract = include_bytes!("fixtures/pre-portable-contract-v4.json");
+    assert_eq!(
+        digest(old_contract),
+        "14417dc53bf35ead00701737256f4f11dc28fc49645f2c7e4f3db3c0dfef24aa"
+    );
+    assert_ne!(digest(old_contract), digest(CONTRACT.as_bytes()));
+    for old_control in [true, false] {
+        let fixture = Fixture::new();
+        let request = fixture.request();
+        drop(Store::prepare_shared_notebook(fixture.paths(), request).unwrap());
+        let root = fixture
+            .paths()
+            .data
+            .join("generations")
+            .join(fixture.current().to_string());
+        if old_control {
+            // Build the exact prior draft contract/feature combination in a
+            // disposable store. It contains no new namespace or user data.
+            // The unmodified older executable supplies the positive control.
+            let mut feature: Preparation =
+                files::json(&root.join(MARKER), MAX_RECORD as u64).unwrap();
+            feature.contract_sha256 = digest(old_contract);
+            files::atomic_json(&root.join(MARKER), &feature).unwrap();
+            files::atomic_json(&fixture.paths().data.join(PREPARATION), &feature).unwrap();
+            files::atomic(&fixture.paths().data.join("contract-v4.json"), old_contract).unwrap();
+        }
+        let config = fixture.0.join("config.json");
+        files::atomic_json(&config, &serde_json::json!({"paths":fixture.paths()})).unwrap();
+        let critical = [
+            fixture.paths().data.join("CURRENT"),
+            fixture.paths().data.join("identity.json"),
+            fixture.paths().data.join("capabilities.json"),
+            fixture.paths().data.join("contract-v4.json"),
+            fixture.paths().data.join(PREPARATION),
+            root.join("format.json"),
+            root.join(MARKER),
+            root.join(notebook_generation::MARKER),
+            root.join("selection-feature.json"),
+        ];
+        let before: Vec<_> = critical
+            .iter()
+            .map(|path| fs::read(path).unwrap())
+            .collect();
+        let output = Command::new(&executable)
+            .env_clear()
+            .env("REMARKABLE_BUDDIES_CONFIG", &config)
+            .args(["--sync-mode-operation", "inspect"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            report["status"],
+            if old_control { "ok" } else { "unsupported" }
+        );
+        assert_eq!(report["activation_performed"], false);
+        assert!(!fixture.paths().data.join("sync/mode.json").exists());
+        assert!(!fixture.paths().data.join("sync/state.json").exists());
+        for (path, bytes) in critical.iter().zip(before) {
+            assert_eq!(fs::read(path).unwrap(), bytes);
+        }
+        if !old_control {
+            drop(Store::open_existing_for_mode(fixture.paths()).unwrap());
+        }
+    }
+}
+
 #[cfg(unix)]
 #[test]
 #[ignore = "owned subprocess crash witness"]
