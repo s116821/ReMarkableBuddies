@@ -208,6 +208,7 @@ enum OrdinaryModeRefusal {
     Unavailable,
     Nonordinary,
     LegacySync,
+    SelectedFamily,
 }
 impl OrdinaryModeRefusal {
     fn report(self) -> Report {
@@ -221,6 +222,10 @@ impl OrdinaryModeRefusal {
                 Status::Unsupported,
                 "explicit local mode requires legacy sync disabled",
             ),
+            Self::SelectedFamily => (
+                Status::Unsupported,
+                "compound notebook storage requires an explicit selected Reader route",
+            ),
         };
         let mut report = Report::new("startup", status);
         report.ordinary_startup_error = Some(reason);
@@ -228,6 +233,12 @@ impl OrdinaryModeRefusal {
     }
 }
 fn ordinary_mode(store: &Store, config: &Config) -> std::result::Result<(), OrdinaryModeRefusal> {
+    if !store
+        .ordinary_reader_family()
+        .map_err(|_| OrdinaryModeRefusal::Unavailable)?
+    {
+        return Err(OrdinaryModeRefusal::SelectedFamily);
+    }
     let mode = store
         .sync_mode_snapshot()
         .map_err(|_| OrdinaryModeRefusal::Unavailable)?;

@@ -63,6 +63,7 @@ enum NotebookAdmission {
     Restore,
     Preferences,
     ReadyOrdinary,
+    SelectedMode,
 }
 
 // A definite empty regular directory or definite absence; never follow links.
@@ -92,7 +93,7 @@ pub(crate) struct ExistingCustody {
     pub(super) paths: StorePaths,
     pub(super) actor: Uuid,
     pub(super) generation: Uuid,
-    lease: Lease,
+    pub(super) lease: Lease,
 }
 
 impl ExistingCustody {
@@ -164,7 +165,13 @@ impl Store {
     }
     /// Opt-in mode maintenance only. Preserve legacy callers' format refusal.
     pub(crate) fn open_existing_for_mode(paths: StorePaths) -> Result<Self, Refusal> {
-        Self::open_existing_inner(paths, true)
+        Self::open_existing_using(
+            paths,
+            true,
+            NotebookAdmission::SelectedMode,
+            |_, _| Ok(()),
+            |store, generation| store.recover(generation),
+        )
     }
     /// Selected archive custody only; no initialization or restore admission.
     pub(crate) fn open_existing_for_archive(paths: StorePaths) -> Result<Self, Refusal> {
@@ -298,6 +305,13 @@ impl Store {
             // preparation/history/backup use their separately validated APIs.
             return Err(Refusal::Unsupported);
         }
+        if admission == NotebookAdmission::SelectedMode
+            && notebook
+            && record::<u32>(&generation_root.join("format.json"), 64)?
+                != super::compound_generation::VERSION
+        {
+            return Err(Refusal::Unsupported);
+        }
         for path in [
             &generation_root,
             &generation_root.join("objects"),
@@ -305,7 +319,15 @@ impl Store {
         ] {
             directory(path)?;
         }
-        if notebook {
+        if record::<u32>(&generation_root.join("format.json"), 64)?
+            == super::compound_generation::VERSION
+        {
+            if admission != NotebookAdmission::SelectedMode {
+                return Err(Refusal::Unsupported);
+            }
+            super::compound_generation::validate_ready(&paths, actor, generation)
+                .map_err(|_| Refusal::Unsupported)?;
+        } else if notebook {
             super::notebook_generation::validate_ready(&paths, actor, generation)
                 .map_err(|_| Refusal::Unsupported)?;
         } else if selected_aware {

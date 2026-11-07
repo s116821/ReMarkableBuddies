@@ -481,6 +481,9 @@ impl Store {
         // Replay was resolved by the target method before entering this new
         // publication boundary. Independent scope gates still serialize here.
         claim_local_operation(root, inner.generation, transaction.operation)?;
+        if feedback_generation::version(root)? == compound_generation::VERSION {
+            compound_generation::validate_ready(&self.paths, self.actor_id, inner.generation)?;
+        }
         ensure!(
             inner.legacy_sync_handles == 0,
             "stop all legacy sync handles before selected publication"

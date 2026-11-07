@@ -261,6 +261,9 @@ impl Store {
             .lock()
             .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
         let root = self.generation(inner.generation);
+        if feedback_generation::version(&root)? == compound_generation::VERSION {
+            compound_generation::validate_ready(&self.paths, self.actor_id, inner.generation)?;
+        }
         for (hash, bytes) in objects {
             files::object(&root.join("objects").join(hash), hash, bytes)?;
         }
@@ -316,6 +319,9 @@ impl Store {
             .lock()
             .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
         let root = self.generation(inner.generation);
+        if feedback_generation::version(&root)? == compound_generation::VERSION {
+            compound_generation::validate_ready(&self.paths, self.actor_id, inner.generation)?;
+        }
         let path = root.join("selections").join(scope.filename()?);
         files::safe_path(&path)?;
         if !path.exists() {
@@ -494,6 +500,7 @@ fn validate_generation_policy(
                 | SELECTED_STORE_FORMAT
                 | feedback_generation::VERSION
                 | notebook_generation::VERSION
+                | compound_generation::VERSION
         ),
         "unsupported generation format"
     );
@@ -507,7 +514,10 @@ fn validate_generation_policy(
     }
     let feature = root.join("selection-feature.json");
     files::safe_path(&feature)?;
-    if version == SELECTED_STORE_FORMAT || feature.exists() {
+    if version == SELECTED_STORE_FORMAT
+        || version == compound_generation::VERSION
+        || feature.exists()
+    {
         ensure!(
             files::json::<SelectionFeature>(&feature, MAX_RECORD as u64)?
                 == SelectionFeature {
@@ -544,6 +554,18 @@ pub(crate) fn prepare_generation(root: &Path, actor: Uuid, generation: Uuid) -> 
         }
     }
     Ok(())
+}
+
+pub(super) fn stage_compound_feature(root: &Path, actor: Uuid, generation: Uuid) -> Result<()> {
+    compound_generation::validate_owned_staging(root, actor, generation)?;
+    files::atomic_json(
+        &root.join("selection-feature.json"),
+        &SelectionFeature {
+            format: FORMAT,
+            actor,
+            generation,
+        },
+    )
 }
 
 pub(crate) fn has_selected(root: &Path) -> Result<bool> {

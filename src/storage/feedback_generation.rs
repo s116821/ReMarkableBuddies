@@ -48,7 +48,9 @@ pub(crate) fn validate_version(
                     && notebook_generation::validate_version(
                         root, actor, generation, version, false
                     )
-                    .is_ok()),
+                    .is_ok())
+                || (version == compound_generation::VERSION
+                    && compound_generation::validate_feature(root, actor, generation).is_ok()),
             "interrupted feedback preparation"
         );
     }
@@ -145,7 +147,10 @@ pub(super) fn admit(
         "feedback is not selected/group data"
     );
     ensure!(
-        matches!(version(root)?, VERSION | notebook_generation::VERSION) && index.unavailable == 0,
+        matches!(
+            version(root)?,
+            VERSION | notebook_generation::VERSION | compound_generation::VERSION
+        ) && index.unavailable == 0,
         "feedback requires prepared complete generation"
     );
     validate(root, actor, generation, false)?;

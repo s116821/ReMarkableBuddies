@@ -51,7 +51,7 @@ pub(crate) fn validate_version(
 ) -> Result<()> {
     let path = root.join(MARKER);
     files::safe_path(&path)?;
-    if version == VERSION || path.exists() {
+    if version == VERSION || version == compound_generation::VERSION || path.exists() {
         ensure!(
             files::json::<Feature>(&path, MAX_RECORD as u64)?
                 == Feature {
@@ -62,11 +62,26 @@ pub(crate) fn validate_version(
             "unsupported notebook feature"
         );
         ensure!(
-            version == VERSION || preparing,
+            version == VERSION
+                || preparing
+                || (version == compound_generation::VERSION
+                    && compound_generation::validate_feature(root, actor, generation).is_ok()),
             "interrupted notebook preparation"
         );
     }
     Ok(())
+}
+
+pub(super) fn stage_compound_feature(root: &Path, actor: Uuid, generation: Uuid) -> Result<()> {
+    compound_generation::validate_owned_staging(root, actor, generation)?;
+    files::atomic_json(
+        &root.join(MARKER),
+        &Feature {
+            format: 1,
+            actor,
+            generation,
+        },
+    )
 }
 
 pub(crate) fn capabilities(paths: &StorePaths, actor: Uuid, generation: Uuid) -> serde_json::Value {

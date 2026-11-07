@@ -360,11 +360,16 @@ impl Store {
             .lock()
             .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
         let root = self.generation(inner.generation);
+        let version = feedback_generation::version(&root)?;
         ensure!(
-            feedback_generation::version(&root)? != notebook_generation::VERSION
-                && !root.join(notebook_generation::MARKER).exists(),
+            version != notebook_generation::VERSION
+                && (!root.join(notebook_generation::MARKER).exists()
+                    || version == compound_generation::VERSION),
             "notebook storage does not support sync mode transitions"
         );
+        if version == compound_generation::VERSION {
+            compound_generation::validate_ready(&self.paths, self.actor_id, inner.generation)?;
+        }
         let original = load(self)?;
         let fingerprint = digest(&serde_json::to_vec(&(
             self.actor_id,

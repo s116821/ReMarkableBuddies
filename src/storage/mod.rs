@@ -1,5 +1,6 @@
 //! Versioned local persistence, independent of Reader/Writer domain semantics.
 pub(crate) mod captured;
+pub mod compound_generation;
 pub(crate) mod conditional;
 pub(crate) mod conversation_cleanup;
 pub mod drive;
@@ -248,6 +249,10 @@ impl Store {
             .lock()
             .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
         let root = self.generation(inner.generation);
+        ensure!(
+            feedback_generation::version(&root)? != compound_generation::VERSION,
+            "compound storage requires its selected producer/worker"
+        );
         if feedback_generation::version(&root)? == notebook_generation::VERSION {
             ensure!(
                 local_notebook,
@@ -380,6 +385,11 @@ impl Store {
                 generation,
             )?;
         }
+        if feedback_generation::version(&store.generation(generation))?
+            == compound_generation::VERSION
+        {
+            compound_generation::validate_ready(&store.paths, store.actor_id, generation)?;
+        }
         if preparation != OpenPreparation::Notebook
             && feedback_generation::version(&store.generation(generation))?
                 == notebook_generation::VERSION
@@ -413,6 +423,15 @@ impl Store {
         Ok(store)
     }
     fn publish_capabilities(&self, root: &Path) -> Result<()> {
+        if feedback_generation::version(root)? == compound_generation::VERSION {
+            let generation = Uuid::parse_str(
+                root.file_name()
+                    .and_then(|n| n.to_str())
+                    .context("invalid compound generation path")?,
+            )?;
+            // Normal open validates; only the exact original preparation repairs.
+            return compound_generation::validate_ready(&self.paths, self.actor_id, generation);
+        }
         if feedback_generation::version(root)? == notebook_generation::VERSION {
             let generation = Uuid::parse_str(
                 root.file_name()
@@ -578,6 +597,8 @@ impl Store {
                         envelope.actor_id == actor,
                         "notebook archive actor mismatch"
                     );
+                } else if feedback_generation::version(root)? == compound_generation::VERSION {
+                    compound_generation::validate_portable_generation(root)?;
                 } else {
                     ensure!(
                         feedback_generation::version(root)? == notebook_generation::VERSION,
@@ -987,6 +1008,10 @@ impl Store {
         local: bool,
     ) -> Result<(Uuid, bool)> {
         let root = self.generation(inner.generation);
+        ensure!(
+            feedback_generation::version(&root)? != compound_generation::VERSION,
+            "compound storage requires selected publication"
+        );
         for reference in &manifest.records {
             if let Some(bytes) = objects.get(&reference.sha256) {
                 if let Ok(envelope) = serde_json::from_slice::<Envelope>(bytes) {

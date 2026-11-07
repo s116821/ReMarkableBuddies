@@ -171,20 +171,44 @@ fn existing_group(
 
 #[test]
 fn selected_memory_edit_crosses_existing_worker_http_and_receiving_local_catalog() {
-    transfer(false, false);
+    transfer(false, false, false);
 }
 
 #[test]
 fn selected_worker_lost_create_ack_and_passive_restart_keep_original_custody() {
-    transfer(true, false);
+    transfer(true, false, false);
 }
 
 #[test]
 fn selected_passive_activation_before_checkpoint_resumes_exact_original_receipt() {
-    transfer(false, true);
+    transfer(false, true, false);
 }
 
-fn transfer(lost_ack: bool, activation_fault: bool) {
+#[test]
+fn compound_stores_use_the_existing_worker_and_original_activation_recovery() {
+    transfer(true, true, true);
+}
+
+fn compound(store: Arc<Store>, group: Uuid, binding: &str) -> Arc<Store> {
+    use crate::storage::compound_generation::{ModeEvidence, Request};
+    let token = serde_json::to_value(&store.sync_mode_snapshot().unwrap().token).unwrap();
+    let request = Request {
+        operation: Uuid::new_v4(),
+        actor: store.actor_id,
+        source_generation: files::json(&store.paths.data.join("CURRENT"), 128).unwrap(),
+        group,
+        binding_sha256: binding.into(),
+        expected_mode: ModeEvidence {
+            actor: store.actor_id,
+            sha256: token["sha256"].as_str().unwrap().into(),
+        },
+    };
+    let paths = store.paths.clone();
+    drop(store);
+    Arc::new(Store::prepare_shared_notebook(paths, request).unwrap())
+}
+
+fn transfer(lost_ack: bool, activation_fault: bool, use_compound: bool) {
     let fixture = Fixture::new();
     let wire = Wire::new();
     let group = Uuid::new_v4();
@@ -193,6 +217,14 @@ fn transfer(lost_ack: bool, activation_fault: bool) {
     let binding = wire
         .client(first.paths.credentials.join("drive.json"), group)
         .binding_digest();
+    let (first, second) = if use_compound {
+        (
+            compound(first, group, &binding),
+            compound(second, group, &binding),
+        )
+    } else {
+        (first, second)
+    };
     choose(&first, group, &binding);
     choose(&second, group, &binding);
     let profile = Uuid::new_v4();
