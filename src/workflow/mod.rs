@@ -4,6 +4,13 @@ pub mod history;
 pub mod indicator;
 mod navigation;
 pub mod orchestrator;
+#[cfg(all(
+    test,
+    target_os = "linux",
+    feature = "development-resident-bootstrap",
+    feature = "development-input-diagnostics"
+))]
+pub(crate) use resident_source::tests::assert_selected_policy_boundaries;
 mod reader_attempt;
 pub mod resident_client;
 #[cfg(target_os = "linux")]

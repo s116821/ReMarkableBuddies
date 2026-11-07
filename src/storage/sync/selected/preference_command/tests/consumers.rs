@@ -141,37 +141,7 @@ fn healthy_guarded_writer_response_beyond_command_deadline_keeps_final_verificat
                 Err(_) => panic!("guarded model was not submitted within the bound"),
             }
         };
-        stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
-            .unwrap();
-        let mut bytes = Vec::new();
-        let mut chunk = [0u8; 4096];
-        let header_end = loop {
-            let n = stream.read(&mut chunk).unwrap();
-            assert!(n > 0 && bytes.len() + n <= 131072);
-            bytes.extend_from_slice(&chunk[..n]);
-            if let Some(at) = bytes.windows(4).position(|p| p == b"\r\n\r\n") {
-                break at + 4;
-            }
-        };
-        let headers = std::str::from_utf8(&bytes[..header_end]).unwrap();
-        assert!(headers.starts_with("POST /v1/chat/completions "));
-        let length = headers
-            .lines()
-            .find_map(|line| {
-                line.split_once(':')
-                    .filter(|(key, _)| key.eq_ignore_ascii_case("content-length"))
-                    .map(|(_, value)| value.trim().parse::<usize>().unwrap())
-            })
-            .unwrap();
-        assert!(length <= 131072);
-        while bytes.len() - header_end < length {
-            let n = stream.read(&mut chunk).unwrap();
-            assert!(n > 0);
-            bytes.extend_from_slice(&chunk[..n]);
-        }
-        let body: serde_json::Value =
-            serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap();
+        let body = read_fixture_model_request(&mut stream, 131072);
         assert!(body.to_string().contains("SHARED MODEL PREFERENCE"));
         assert!(body.to_string().contains("x = 7"));
         // Deliberate bounded model latency, not a readiness assumption: this

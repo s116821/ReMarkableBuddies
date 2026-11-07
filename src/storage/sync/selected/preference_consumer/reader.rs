@@ -24,6 +24,16 @@ pub(crate) enum ReaderPhase {
 }
 
 impl ReaderPreferences {
+    #[cfg(test)]
+    pub(crate) fn cap_fixture_windows(&mut self, acquisition: Duration, parent: Duration) {
+        let now = Instant::now();
+        self.inner.deadline = self.inner.deadline.min(now + parent);
+        self.inner.admission_deadline = self
+            .inner
+            .admission_deadline
+            .min(now + acquisition)
+            .min(self.inner.deadline);
+    }
     pub(crate) fn open(
         store: Arc<Store>,
         path: PathBuf,

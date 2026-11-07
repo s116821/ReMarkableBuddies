@@ -269,6 +269,25 @@ impl ResidentSourceOwner {
         deadline: Option<Instant>,
         check: impl FnOnce() -> Result<()>,
     ) -> Result<()> {
+        self.activate_at_startup_with_input(
+            health,
+            deadline,
+            || RequestInput::new(corner, None),
+            check,
+        )
+    }
+
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    fn activate_at_startup_with_input(
+        &mut self,
+        health: &mut ServiceHealth,
+        deadline: Option<Instant>,
+        input: impl FnOnce() -> Result<RequestInput>,
+        check: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
         ensure!(
             !self.fatal && self.session.is_none() && self.input.is_none(),
             "resident startup activation requires an unused owner"
@@ -277,7 +296,7 @@ impl ResidentSourceOwner {
             before(deadline)?;
         }
         // Startup observes quiet input without creating a released Reader request.
-        let mut input = RequestInput::new(corner, None)?;
+        let mut input = input()?;
         input.require_quiet()?;
         check()?;
         let mut session = self.factory.activate(
@@ -1088,7 +1107,7 @@ impl DevelopmentTargetLease<'_> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::workflow::resident_runtime::{tests::Fixture, ResidentRuntime};
     use crate::workflow::{
@@ -1307,6 +1326,58 @@ mod tests {
             delay,
         });
         (workflow, store, base, events, receiver)
+    }
+
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    pub(crate) fn assert_selected_policy_boundaries(mut verify: impl FnMut(bool) -> Result<()>) {
+        let expected: [&[&str]; 4] = [
+            &[],
+            &[],
+            &["activate", "spawn"],
+            &["activate", "spawn", "observe"],
+        ];
+        for (boundary, events_expected) in expected.into_iter().enumerate() {
+            verify(false).unwrap();
+            let (mut workflow, store, base, events, _notify) =
+                workflow("reconnect-source-handoff", vec![], Duration::ZERO);
+            let owner = workflow.resident_source.as_mut().unwrap();
+            let health = workflow.service_health.as_mut().unwrap();
+            let result = match boundary {
+                0 => owner.activate_at_startup_with_input(
+                    health,
+                    Some(Instant::now() + Duration::from_secs(10)),
+                    || Ok(quiet_guard()),
+                    || verify(true),
+                ),
+                1 => owner.begin_with_check(released(Instant::now()), health, || verify(true)),
+                _ => {
+                    owner
+                        .begin_with_check(released(Instant::now()), health, || verify(false))
+                        .unwrap();
+                    owner
+                        .acquire_with_check(health, |observed| {
+                            verify((boundary == 3) == observed.is_some())
+                        })
+                        .map(|_| ())
+                }
+            };
+            assert!(result.is_err(), "policy boundary {boundary} accepted");
+            assert_eq!(
+                &*events.borrow(),
+                events_expected,
+                "policy boundary {boundary}"
+            );
+            if boundary > 0 {
+                crate::workflow::selected_resident_reader::finish_selected_request(&mut workflow)
+                    .unwrap();
+            }
+            drop((workflow, store));
+            std::fs::remove_dir_all(base).unwrap();
+        }
+        verify(false).unwrap();
     }
     struct Provider {
         calls: Rc<Cell<usize>>,

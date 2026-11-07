@@ -5,6 +5,7 @@ use crate::{
     conversation::{selected_reader_prepare::ResidentPrepared, Ledger, SelectedAdmission},
     device::{request_input::RequestInput, touch::TriggerCorner},
     storage::{
+        selection::SelectionToken,
         sync::{
             selected::{ReaderPhase, ReaderPreferences},
             Worker,
@@ -36,6 +37,19 @@ pub(super) fn finish_selected_request(workflow: &mut Workflow) -> Result<()> {
     }
 }
 
+pub(crate) fn verify_acquisition(
+    policy: &ReaderPreferences,
+    reader: &SelectedAdmission,
+    token: &SelectionToken,
+) -> Result<()> {
+    let mut reads = policy.reads(ReaderPhase::Acquisition)?;
+    let [catalog, preference] = policy.gates();
+    SelectedAdmission::with_gates(&[reader, catalog, preference], |store| {
+        policy.verify_locked(store, reader, token, &mut reads)?;
+        policy.require_acquisition_time()
+    })
+}
+
 pub(crate) fn run(
     store: Arc<Store>,
     reader: Arc<SelectedAdmission>,
@@ -43,7 +57,7 @@ pub(crate) fn run(
     installation: InstalledReaderSelection,
     health: ServiceHealth,
     startup: ReaderPreferences,
-    startup_token: crate::storage::selection::SelectionToken,
+    startup_token: SelectionToken,
 ) -> Result<()> {
     let corner =
         TriggerCorner::from_string(startup.config().trigger_corner.as_deref().unwrap_or("LL"))
@@ -54,14 +68,7 @@ pub(crate) fn run(
     ))]
     let preactivate = installation.has_installed_output();
     let mut workflow = Workflow::selected_runtime(reader.clone(), false);
-    let verify_startup = || {
-        let mut reads = startup.reads(ReaderPhase::Acquisition)?;
-        let [catalog, preference] = startup.gates();
-        SelectedAdmission::with_gates(&[reader.as_ref(), catalog, preference], |store| {
-            startup.verify_locked(store, &reader, &startup_token, &mut reads)?;
-            startup.require_acquisition_time()
-        })
-    };
+    let verify_startup = || verify_acquisition(&startup, &reader, &startup_token);
     verify_startup()?;
     workflow.enable_service_health(health)?;
     workflow.configure_resident_source(installation, store.clone())?;
@@ -123,14 +130,7 @@ pub(crate) fn run(
 
         let mut began = false;
         let result = (|| -> Result<_> {
-            let check = |expected: &crate::storage::selection::SelectionToken| -> Result<()> {
-                let mut reads = policy.reads(ReaderPhase::Acquisition)?;
-                let [catalog, preference] = policy.gates();
-                SelectedAdmission::with_gates(&[reader.as_ref(), catalog, preference], |store| {
-                    policy.verify_locked(store, &reader, expected, &mut reads)?;
-                    policy.require_acquisition_time()
-                })
-            };
+            let check = |expected| verify_acquisition(&policy, &reader, expected);
             check(&token)?;
             began = true;
             workflow

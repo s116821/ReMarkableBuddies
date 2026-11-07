@@ -761,3 +761,79 @@ pub(super) fn read_current_locked(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(super) fn read_fixture_model_request(
+    stream: &mut std::net::TcpStream,
+    bound: usize,
+) -> serde_json::Value {
+    use std::io::Read;
+
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let header_end = loop {
+        let n = stream.read(&mut chunk).unwrap();
+        assert!(n > 0 && bytes.len() + n <= bound);
+        bytes.extend_from_slice(&chunk[..n]);
+        if let Some(at) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+            break at + 4;
+        }
+    };
+    let headers = std::str::from_utf8(&bytes[..header_end]).unwrap();
+    assert!(headers.starts_with("POST /v1/chat/completions "));
+    let length = headers
+        .lines()
+        .find_map(|line| {
+            line.split_once(':')
+                .filter(|(key, _)| key.eq_ignore_ascii_case("content-length"))
+                .map(|(_, value)| value.trim().parse::<usize>().unwrap())
+        })
+        .unwrap();
+    assert!(header_end + length <= bound);
+    while bytes.len() - header_end < length {
+        let n = stream.read(&mut chunk).unwrap();
+        assert!(n > 0);
+        bytes.extend_from_slice(&chunk[..n]);
+    }
+    serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap()
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub(super) fn set_fixture_reader_preference(
+    store: Arc<Store>,
+    path: &std::path::Path,
+    binding: Binding,
+    wire: &crate::storage::drive::shared_fixture::Wire,
+    enabled: bool,
+) -> Result<()> {
+    let run = |request| {
+        let mut reads = budget();
+        let capture = Capture::read(path.to_owned(), &mut reads)?;
+        admitted(
+            store.clone(),
+            capture,
+            request,
+            binding.clone(),
+            Instant::now() + Duration::from_secs(60),
+            &mut reads,
+            || Ok(wire.client(store.paths.credentials.join("drive.json"), binding.group)),
+        )
+    };
+    let guard = run(Request::Inspect(false))?
+        .guard
+        .context("fixture preference guard absent")?;
+    let artifact = Artifact::from_value(serde_json::json!({
+        "portable_configuration_version": 1,
+        "settings": { "product_settings": { "reader_enabled": enabled } }
+    }))
+    .map_err(|_| anyhow::anyhow!("invalid fixture preference artifact"))?;
+    let report = run(Request::Edit(Uuid::new_v4(), guard, artifact))?;
+    ensure!(
+        report.disposition == "local-committed",
+        "fixture preference edit refused"
+    );
+    Ok(())
+}

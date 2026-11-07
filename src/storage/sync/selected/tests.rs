@@ -503,7 +503,14 @@ fn transfer_writer_document(ready_reader: bool) {
     let conversation = Uuid::new_v4();
     let owner = catalog::Owner::Document { document };
     let scope = identity.aggregate_scope(&owner).unwrap();
-    let root_sha = existing_group(&wire, group, binding.clone(), profile, &scope, owner);
+    let root_sha = existing_group(
+        &wire,
+        group,
+        binding.clone(),
+        profile,
+        &scope,
+        owner.clone(),
+    );
     // Seed an ordinary conversation before explicit group selection. The actual
     // selected Writer below creates its Source2/turn/receipt through its real
     // model handoff; this does not stand in for the Source3 notebook runner.
@@ -515,6 +522,11 @@ fn transfer_writer_document(ready_reader: bool) {
         .unwrap()
         .pop()
         .unwrap();
+    let first = if ready_reader {
+        compound(first, group, &binding)
+    } else {
+        first
+    };
     choose(&first, group, &binding);
     choose(&second, group, &binding);
     let bytes = serde_json::to_vec(&root).unwrap();
@@ -548,7 +560,7 @@ fn transfer_writer_document(ready_reader: bool) {
         .unwrap();
     let writer = SelectedAdmission::new(first.clone(), scope.clone()).unwrap();
     let selected = writer::selected::Selection {
-        accepted: initialized.token,
+        accepted: initialized.token.clone(),
         root: IntentRecordRef {
             namespace: root.namespace,
             record_id: root.record_id,
@@ -592,6 +604,60 @@ fn transfer_writer_document(ready_reader: bool) {
         generated.publication,
         Some(SelectedWriterPublication::Published { .. })
     ));
+    if ready_reader {
+        selected_memory::SelectedMemory::new(first.clone(), identity.clone())
+            .unwrap()
+            .initialize_selection(selected_memory::InitializeSelection {
+                operation: Uuid::new_v4(),
+                accepted_base_sha256: root_sha.clone(),
+                registrations: vec![catalog::Registration {
+                    format: FORMAT,
+                    catalog: identity.record_id().unwrap(),
+                    key_sha256: scope.key_sha256.clone(),
+                    owner,
+                    genesis_operation: initialized.transaction.operation,
+                    genesis_sha256: initialized.token.selection_sha256().into(),
+                }],
+            })
+            .unwrap();
+    }
+    #[cfg(target_os = "linux")]
+    let path = fixture.0.join("reader-config.json");
+    #[cfg(target_os = "linux")]
+    let config = |store: &Store, scope: &SelectionScope, enabled| {
+        serde_json::json!({
+            "paths": store.paths,
+            "reader": { "selection": scope },
+            "product_settings": { "reader_enabled": enabled }
+        })
+    };
+    #[cfg(target_os = "linux")]
+    let fixture_binding = super::Binding {
+        group,
+        root_id: "shared-root".into(),
+        digest: identity.binding_sha256.clone(),
+    };
+    #[cfg(target_os = "linux")]
+    let open = |store: &Arc<Store>, reader: &SelectedAdmission| {
+        ReaderPreferences::from_binding(
+            store.clone(),
+            path.clone(),
+            reader,
+            Instant::now(),
+            fixture_binding.clone(),
+            |store| Ok(wire.client(store.paths.credentials.join("drive.json"), group)),
+        )
+    };
+    #[cfg(target_os = "linux")]
+    if ready_reader {
+        files::atomic_json(&path, &config(&first, writer.scope(), true)).unwrap();
+        let (local, local_token) = open(&first, &writer).unwrap();
+        assert_eq!(
+            local_token.accepted_base_sha256(),
+            genesis_base(&root_sha, &writer.scope().key_sha256)
+        );
+        local.check_progress(&writer, &local_token).unwrap();
+    }
     let sent = first.selected_snapshot(&scope, MAX_ITEMS).unwrap().unwrap();
     let publisher = launch(&wire, first.clone(), group, 1);
     until(&publisher, || {
@@ -640,32 +706,40 @@ fn transfer_writer_document(ready_reader: bool) {
 
     #[cfg(target_os = "linux")]
     if ready_reader {
-        let path = fixture.0.join("reader-config.json");
-        let config = |scope: &SelectionScope, enabled| {
-            serde_json::json!({
-                "paths": second.paths,
-                "reader": { "selection": scope },
-                "product_settings": { "reader_enabled": enabled }
-            })
-        };
-        let open = |reader: &SelectedAdmission| {
-            ReaderPreferences::from_binding(
-                second.clone(),
-                path.clone(),
-                reader,
-                Instant::now(),
-                super::Binding {
-                    group,
-                    root_id: "shared-root".into(),
-                    digest: identity.binding_sha256.clone(),
-                },
-                |store| Ok(wire.client(store.paths.credentials.join("drive.json"), group)),
-            )
-        };
-        files::atomic_json(&path, &config(reader.scope(), true)).unwrap();
-        let (policy, token) = open(&reader).unwrap();
+        files::atomic_json(&path, &config(&second, reader.scope(), true)).unwrap();
+        let (policy, token) = open(&second, &reader).unwrap();
         assert_eq!(token, received.token);
         policy.check_progress(&reader, &token).unwrap();
+        #[cfg(all(
+            feature = "development-resident-bootstrap",
+            feature = "development-input-diagnostics"
+        ))]
+        {
+            let mut changed = false;
+            crate::workflow::assert_selected_policy_boundaries(|lose_policy| {
+                if changed != lose_policy {
+                    files::atomic_json(&path, &config(&second, reader.scope(), !lose_policy))?;
+                    changed = lose_policy;
+                }
+                let result = crate::workflow::selected_resident_reader::verify_acquisition(
+                    &policy, &reader, &token,
+                );
+                if lose_policy {
+                    assert!(result.is_err());
+                }
+                result
+            });
+        }
+        let pure = resident_reader_fixture_generated(
+            &second,
+            &reader,
+            policy,
+            token,
+            document,
+            ReaderTiming::Immediate,
+        );
+        let (policy, token) = open(&second, &reader).unwrap();
+        assert_eq!(token, pure);
 
         let mut document_fact = fact(profile);
         document_fact.key.scope = memory::Scope::Document { document };
@@ -678,93 +752,100 @@ fn transfer_writer_document(ready_reader: bool) {
             })
             .unwrap();
         assert!(policy.check_progress(&reader, &token).is_err());
-        let (policy, token) = open(&reader).unwrap();
-        assert_ne!(token, received.token);
+        let (policy, token) = open(&second, &reader).unwrap();
+        assert_ne!(token, pure);
         assert_eq!(
             token.accepted_base_sha256(),
             received.token.accepted_base_sha256()
         );
         policy.check_progress(&reader, &token).unwrap();
 
-        let mut active = config(reader.scope(), true);
+        let mut active = config(&second, reader.scope(), true);
         active["personalization"] =
             serde_json::json!({"enabled": true, "text": "Keep the answer concise."});
         active["memory"] =
             serde_json::json!({"enabled": true, "profile": profile, "selection": identity});
         files::atomic_json(&path, &active).unwrap();
-        let (policy, token) = open(&reader).unwrap();
-        resident_reader_fixture_generated(&second, &reader, policy, token, document);
+        let (policy, token) = open(&second, &reader).unwrap();
+        resident_reader_fixture_generated(
+            &second,
+            &reader,
+            policy,
+            token,
+            document,
+            ReaderTiming::CrossAcquisition,
+        );
+        let (policy, token) = open(&second, &reader).unwrap();
+        resident_reader_fixture_generated(
+            &second,
+            &reader,
+            policy,
+            token,
+            document,
+            ReaderTiming::ExpireParent,
+        );
 
-        let (policy, token) = open(&reader).unwrap();
-        files::atomic_json(&path, &config(reader.scope(), false)).unwrap();
+        let (policy, token) = open(&second, &reader).unwrap();
+        files::atomic_json(&path, &config(&second, reader.scope(), true)).unwrap();
         assert!(policy.check_progress(&reader, &token).is_err());
-        assert!(open(&reader).is_err());
+        let (policy, token) = open(&second, &reader).unwrap();
+        preference_command::set_fixture_reader_preference(
+            second.clone(),
+            &path,
+            fixture_binding.clone(),
+            &wire,
+            false,
+        )
+        .unwrap();
+        assert!(policy.check_progress(&reader, &token).is_err());
+        assert!(open(&second, &reader)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("effective selected Reader disabled"));
+        files::atomic_json(&path, &config(&second, reader.scope(), false)).unwrap();
+        preference_command::set_fixture_reader_preference(
+            second.clone(),
+            &path,
+            fixture_binding.clone(),
+            &wire,
+            true,
+        )
+        .unwrap();
+        assert!(open(&second, &reader).unwrap().0.config().reader_enabled());
         let foreign = SelectionScope {
             key_sha256: digest(b"unregistered Reader fixture"),
             ..reader.scope().clone()
         };
-        files::atomic_json(&path, &config(&foreign, true)).unwrap();
+        files::atomic_json(&path, &config(&second, &foreign, true)).unwrap();
         let unregistered = SelectedAdmission::new(second.clone(), foreign).unwrap();
-        assert!(open(&unregistered).is_err());
+        assert!(open(&second, &unregistered).is_err());
     }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy)]
+enum ReaderTiming {
+    Immediate,
+    CrossAcquisition,
+    ExpireParent,
 }
 
 #[cfg(target_os = "linux")]
 fn resident_reader_fixture_generated(
     store: &Arc<Store>,
     reader: &SelectedAdmission,
-    policy: ReaderPreferences,
+    mut policy: ReaderPreferences,
     token: SelectionToken,
     document: Uuid,
-) {
+    timing: ReaderTiming,
+) -> SelectionToken {
     use crate::conversation::{
         resident_capture::tests::capture_for, selected_reader_prepare::ResidentPrepared, Ledger,
         Outcome, Record, SelectedDomainProjection,
     };
-    use crate::llm::ModelHandoff;
     use crate::workflow::{orchestrator::Orchestrator, Workflow};
-    use std::sync::Mutex;
-
-    struct Model {
-        images: Vec<String>,
-        submitted: Arc<Mutex<Vec<Vec<String>>>>,
-    }
-    impl crate::LLMEngine for Model {
-        fn guarded_timeout(&self) -> Option<Duration> {
-            Some(Duration::from_secs(1))
-        }
-        fn add_text_content(&mut self, _: &str) {}
-        fn add_image_content(&mut self, image: &str) {
-            self.images.push(image.into());
-        }
-        fn clear_content(&mut self) {
-            self.images.clear();
-        }
-        fn execute(&mut self) -> Result<String> {
-            panic!("resident Reader bypassed owned model submission");
-        }
-        fn execute_with_handoff(
-            &mut self,
-            progress: &mut dyn FnMut() -> Result<()>,
-            handoff: &mut ModelHandoff<'_>,
-        ) -> Result<String> {
-            progress()?;
-            let mut stage = 0;
-            handoff(&mut || {
-                let mut requests = self.submitted.lock().unwrap();
-                requests.push(self.images.clone());
-                stage = requests.len();
-                Ok(())
-            })?;
-            progress()?;
-            Ok(match stage {
-                1 => "QUESTION: What is x?\nQUESTION_BOX: 10,10,100,100\nSELECTION_CENTER: 100,100\n---\nANSWER: proposed",
-                2 => "TRANSCRIPTION: What is x?",
-                3 => "ANSWER: x = 7",
-                _ => panic!("resident Reader exceeded its three model calls"),
-            }.into())
-        }
-    }
+    use std::{io::Write, net::TcpListener};
 
     let capture = capture_for(document);
     let prepared = ResidentPrepared::new(store, &token, &capture, Uuid::new_v4(), 1).unwrap();
@@ -778,31 +859,104 @@ fn resident_reader_fixture_generated(
         .unwrap()
     };
     let root = acknowledgment.root.record_id;
-    let submitted = Arc::new(Mutex::new(vec![]));
-    let workflow = Workflow::selected_owned_reader_fixture(Arc::new(reader.clone()));
-    let model = Model {
-        images: vec![],
-        submitted: submitted.clone(),
+    let enriched = policy.config().memory.enabled;
+    let expires = matches!(timing, ReaderTiming::ExpireParent);
+    let requests_expected = if expires {
+        1
+    } else if enriched {
+        3
+    } else {
+        2
     };
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let stop = Instant::now() + Duration::from_secs(40);
+        let responses = [
+            "QUESTION: What is x?\nQUESTION_BOX: 10,10,100,100\nSELECTION_CENTER: 100,100\n---\nANSWER: x = 7",
+            "TRANSCRIPTION: What is x?",
+            "ANSWER: x = 7",
+        ];
+        responses.into_iter().take(requests_expected).enumerate().map(|(stage, content)| {
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < stop => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("fixture model submission unavailable: {error}"),
+                }
+            };
+            let body = preference_command::read_fixture_model_request(&mut stream, 8 * 1024 * 1024);
+            let submitted = Instant::now();
+            if stage == 0 && !matches!(timing, ReaderTiming::Immediate) {
+                std::thread::sleep(Duration::from_secs(7));
+            }
+            let reply = serde_json::to_vec(&serde_json::json!({"choices":[{"message":{"content":content}}]})).unwrap();
+            let header = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", reply.len());
+            let written = stream.write_all(header.as_bytes()).and_then(|_| stream.write_all(&reply));
+            if !expires {
+                written.unwrap();
+            }
+            let images = body["messages"][0]["content"].as_array().unwrap().iter()
+                .filter_map(|part| part["image_url"]["url"].as_str().map(str::to_owned))
+                .collect::<Vec<_>>();
+            (submitted, images)
+        }).collect::<Vec<_>>()
+    });
+    let workflow = Workflow::selected_owned_reader_fixture(Arc::new(reader.clone()));
+    let model = crate::OpenAI::new(
+        "fixture".into(),
+        "fixture".into(),
+        Some(format!("http://{address}")),
+    )
+    .with_timeout(Duration::from_secs(20))
+    .with_single_request();
     let mut receiver = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
     receiver.set_personalization(policy.config().personalization_snapshot().unwrap());
-    receiver.set_selected_subject_memory(
-        memory::configured(store.clone(), &policy.config().memory).unwrap(),
-    );
-    receiver
-        .receive_resident_prepared(token, acknowledgment, policy)
-        .unwrap();
-
-    let requests = submitted.lock().unwrap();
-    assert_eq!(requests.len(), 3);
-    assert_eq!(requests[0].len(), 4);
-    assert!(requests.iter().all(|images| images == &requests[0]));
+    if enriched {
+        receiver.set_selected_subject_memory(
+            memory::configured(store.clone(), &policy.config().memory).unwrap(),
+        );
+    }
+    match timing {
+        ReaderTiming::Immediate => {}
+        ReaderTiming::CrossAcquisition => {
+            policy.cap_fixture_windows(Duration::from_secs(5), Duration::from_secs(30))
+        }
+        ReaderTiming::ExpireParent => {
+            policy.cap_fixture_windows(Duration::from_secs(5), Duration::from_secs(5))
+        }
+    }
+    let acquisition = policy.acquisition_deadline();
+    let parent = policy.deadline();
+    let result = receiver.receive_resident_prepared(token, acknowledgment, policy);
+    let finished = Instant::now();
+    if expires {
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains("expired") || error.contains("timeout"),
+            "{error}"
+        );
+        assert!(finished >= parent);
+    } else {
+        result.unwrap();
+    }
+    let requests = server.join().unwrap();
+    assert_eq!(requests.len(), requests_expected);
+    assert_eq!(requests[0].1.len(), 4);
+    assert!(requests.iter().all(|(_, images)| images == &requests[0].1));
+    if matches!(timing, ReaderTiming::CrossAcquisition) {
+        assert!(requests[0].0 < acquisition && requests[1].0 > acquisition);
+    }
     let selected = store
         .selected_snapshot(reader.scope(), MAX_ITEMS)
         .unwrap()
         .unwrap();
     let projection = SelectedDomainProjection::from_snapshot(&selected).unwrap();
-    assert!(projection.inspect(root).unwrap().iter().any(|record| {
+    assert_eq!(projection.inspect(root).unwrap().iter().any(|record| {
         matches!(record, Record::Turn(turn) if turn.outcome == Outcome::Generated && turn.text.as_ref().is_some_and(|text| text.contains("x = 7")))
-    }));
+    }), !expires);
+    selected.token
 }
