@@ -1,7 +1,8 @@
 //! Selected text publication. Acknowledgment and historical evidence are not effects.
 use super::*;
 use crate::storage::selection::{
-    SelectionMutation, SelectionPublication, SelectionToken, SelectionTransaction,
+    SelectedReadBudget, SelectionMutation, SelectionPublication, SelectionToken,
+    SelectionTransaction,
 };
 use crate::storage::{MAX_METADATA, MAX_RECORD};
 use serde::Serialize;
@@ -111,12 +112,16 @@ fn record(
 fn projection(
     store: &Store,
     transaction: &SelectionTransaction,
+    mut reads: Option<&mut SelectedReadBudget>,
 ) -> Result<SelectedDomainProjection> {
     let records = transaction
         .selected
         .records
         .iter()
         .map(|reference| {
+            if let Some(reads) = reads.as_deref_mut() {
+                reads.charge(0, 1, reference.bytes, 0)?;
+            }
             serde_json::from_slice::<Envelope>(&store.read_object(reference)?).map_err(Into::into)
         })
         .collect::<Result<Vec<_>>>()?;
@@ -150,8 +155,9 @@ fn prepare(
     transaction: &SelectionTransaction,
     request: &SelectedReaderWrite,
     actor: Uuid,
+    reads: Option<&mut SelectedReadBudget>,
 ) -> Result<(Vec<Envelope>, Turn, Turn)> {
-    let projection = projection(store, transaction)?;
+    let projection = projection(store, transaction, reads)?;
     let (_, Record::Root(root)) = current(&projection, &request.root)? else {
         bail!("selected Reader root variant")
     };
@@ -279,8 +285,15 @@ fn recover(
     accepted: &SelectionToken,
     request: &SelectedReaderWrite,
     expected_fingerprint: &str,
+    mut reads: Option<&mut SelectedReadBudget>,
 ) -> Result<Option<(SelectionTransaction, SelectedReaderAcknowledgment)>> {
-    let Some(transaction) = store.selected_receipt(accepted.scope(), request.operation)? else {
+    let transaction = match reads.as_deref_mut() {
+        Some(reads) => {
+            store.selected_receipt_with_budget(accepted.scope(), request.operation, reads)
+        }
+        None => store.selected_receipt(accepted.scope(), request.operation),
+    }?;
+    let Some(transaction) = transaction else {
         return Ok(None);
     };
     ensure!(
@@ -288,9 +301,13 @@ fn recover(
             && transaction.previous_sha256.as_deref() == Some(accepted.selection_sha256()),
         "selected Reader original publication differs"
     );
-    let predecessor = store
-        .selected_predecessor(accepted.scope(), request.operation)?
-        .context("selected Reader predecessor absent")?;
+    let predecessor = match reads.as_deref_mut() {
+        Some(reads) => {
+            store.selected_predecessor_with_budget(accepted.scope(), request.operation, reads)
+        }
+        None => store.selected_predecessor(accepted.scope(), request.operation),
+    }?
+    .context("selected Reader predecessor absent")?;
     ensure!(
         predecessor.store_generation == accepted.store_generation()
             && predecessor.aggregate_generation == accepted.aggregate_generation()
@@ -298,7 +315,7 @@ fn recover(
             && predecessor.scope == *accepted.scope(),
         "selected Reader original token differs"
     );
-    let actual = projection(store, &transaction)?;
+    let actual = projection(store, &transaction, reads.as_deref_mut())?;
     let (receipt_envelope, Some(Record::Receipt(original_receipt))) = actual
         .head(
             Namespace::Conversation,
@@ -315,7 +332,7 @@ fn recover(
         "selected Reader original fingerprint differs"
     );
     let actor = receipt_envelope.actor_id;
-    let (mut expected, user, written) = prepare(store, &predecessor, request, actor)?;
+    let (mut expected, user, written) = prepare(store, &predecessor, request, actor, reads)?;
     let root = pending::pin(&expected[0])?;
     let turn = pending::pin(&expected[1])?;
     let receipt = Receipt {
@@ -358,6 +375,27 @@ fn recover(
     )))
 }
 impl SelectedAdmission {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn recover_reader_text(
+        &self,
+        accepted: &SelectionToken,
+        request: &SelectedReaderWrite,
+    ) -> Result<bool> {
+        input(request)?;
+        ensure!(
+            accepted.scope() == self.scope(),
+            "foreign selected Reader scope"
+        );
+        Ok(recover(
+            self.writer_store(),
+            accepted,
+            request,
+            &fingerprint(accepted, request)?,
+            None,
+        )?
+        .is_some())
+    }
+
     pub fn publish_reader_text(
         &self,
         accepted: &SelectionToken,
@@ -374,6 +412,37 @@ impl SelectedAdmission {
         additional: &[&SelectedAdmission],
         verify_new: impl FnOnce(&Store) -> Result<()>,
     ) -> Result<SelectedReaderPublication> {
+        self.publish_reader_text_with_reads(accepted, request, additional, None, |store, _| {
+            verify_new(store)
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn publish_resident_reader_text_joined(
+        &self,
+        accepted: &SelectionToken,
+        request: SelectedReaderWrite,
+        additional: &[&SelectedAdmission],
+        reads: &mut SelectedReadBudget,
+        verify_new: impl FnOnce(&Store, &mut SelectedReadBudget) -> Result<()>,
+    ) -> Result<SelectedReaderPublication> {
+        self.publish_reader_text_with_reads(
+            accepted,
+            request,
+            additional,
+            Some(reads),
+            |store, reads| verify_new(store, reads.context("resident Reader allowance absent")?),
+        )
+    }
+
+    fn publish_reader_text_with_reads(
+        &self,
+        accepted: &SelectionToken,
+        request: SelectedReaderWrite,
+        additional: &[&SelectedAdmission],
+        mut reads: Option<&mut SelectedReadBudget>,
+        verify_new: impl FnOnce(&Store, Option<&mut SelectedReadBudget>) -> Result<()>,
+    ) -> Result<SelectedReaderPublication> {
         input(&request)?;
         ensure!(
             accepted.scope() == self.scope(),
@@ -383,30 +452,51 @@ impl SelectedAdmission {
         let mut admissions = Vec::with_capacity(additional.len() + 1);
         admissions.push(self);
         admissions.extend_from_slice(additional);
-        Self::with_ready_gate_set(&admissions, |store| {
-            if let Some((transaction, acknowledgment)) =
-                recover(store, accepted, &request, &fingerprint)?
-            {
+        let resident = reads.is_some();
+        let publish = |store: &Store| {
+            let mut verify = Some(verify_new);
+            if let Some((transaction, acknowledgment)) = recover(
+                store,
+                accepted,
+                &request,
+                &fingerprint,
+                reads.as_deref_mut(),
+            )? {
                 return Ok(SelectedReaderPublication::Historical {
                     transaction,
                     acknowledgment: Box::new(acknowledgment),
                 });
             }
-            verify_new(store)?;
+            if !resident {
+                verify.take().unwrap()(store, reads.as_deref_mut())?;
+            }
             ensure!(
                 store.unavailable_commits()? == 0,
                 "selected Reader store incomplete"
             );
-            let _mode_lease = self.reader_mode_lease()?;
-            let snapshot = store
-                .selected_snapshot(self.scope(), MAX_ITEMS)?
-                .context("selected Reader scope absent")?;
+            let _mode_lease = if resident {
+                None
+            } else {
+                self.reader_mode_lease()?
+            };
+            let snapshot = match reads.as_deref_mut() {
+                Some(reads) => store
+                    .selected_snapshot_with_budget(self.scope(), MAX_ITEMS, reads)?
+                    .map(|read| read.snapshot),
+                None => store.selected_snapshot(self.scope(), MAX_ITEMS)?,
+            }
+            .context("selected Reader scope absent")?;
             ensure!(
                 snapshot.token == *accepted,
                 "selected Reader selection replaced"
             );
-            let (mut records, _, written) =
-                prepare(store, &snapshot.transaction, &request, store.actor_id)?;
+            let (mut records, _, written) = prepare(
+                store,
+                &snapshot.transaction,
+                &request,
+                store.actor_id,
+                reads.as_deref_mut(),
+            )?;
             let receipt = Receipt {
                 fingerprint: fingerprint.clone(),
                 acknowledgment: Acknowledgment {
@@ -437,9 +527,12 @@ impl SelectedAdmission {
                     <= MAX_METADATA,
                 "selected Reader publication exceeds bound"
             );
+            if let Some(verify) = verify {
+                verify(store, reads.as_deref_mut())?;
+            }
             let publication =
                 store.commit_selected(accepted, request.operation, records, BTreeMap::new());
-            let recovered = recover(store, accepted, &request, &fingerprint)?;
+            let recovered = recover(store, accepted, &request, &fingerprint, reads)?;
             match (publication, recovered) {
                 (Ok(publication), Some((_, acknowledgment))) if !publication.replayed => {
                     Ok(SelectedReaderPublication::Published {
@@ -456,6 +549,11 @@ impl SelectedAdmission {
                 (Err(error), None) => Err(error),
                 (Ok(_), None) => bail!("selected Reader acknowledgment unavailable"),
             }
-        })
+        };
+        if resident {
+            Self::with_gates(&admissions, publish)
+        } else {
+            Self::with_ready_gate_set(&admissions, publish)
+        }
     }
 }

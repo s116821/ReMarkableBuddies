@@ -165,7 +165,16 @@ impl Attempt {
     ) -> Result<Self> {
         let (selected, user) =
             selected::Selected::new(ledger, workflow, token, root, user, capture)?;
-        Ok(Self {
+        Ok(Self::selected_input(workflow, selected, user, capture))
+    }
+
+    fn selected_input(
+        workflow: &super::Workflow,
+        selected: selected::Selected,
+        user: Turn,
+        capture: Uuid,
+    ) -> Self {
+        Self {
             user,
             assistant: None,
             evidence: capture,
@@ -178,12 +187,80 @@ impl Attempt {
             #[cfg(test)]
             reader_preparation: None,
             selected: Some(selected),
-        })
+        }
     }
     pub(super) fn check_selected(&self) -> Result<()> {
         self.selected
             .as_ref()
             .map_or(Ok(()), |selected| selected.check())
+    }
+    #[cfg(target_os = "linux")]
+    pub(super) fn prepare_resident(
+        ledger: &Ledger,
+        workflow: &super::Workflow,
+        token: crate::storage::selection::SelectionToken,
+        acknowledgment: crate::conversation::selected_reader_prepare::ResidentPreparedAcknowledgment,
+        policy: crate::storage::sync::selected::ReaderPreferences,
+    ) -> Result<Self> {
+        let capture = acknowledgment.capture.record_id;
+        let (selected, user) =
+            selected::Selected::new_resident(ledger, workflow, token, acknowledgment, policy)?;
+        Ok(Self::selected_input(workflow, selected, user, capture))
+    }
+
+    pub(super) fn selected_resident(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        return self
+            .selected
+            .as_ref()
+            .is_some_and(selected::Selected::is_resident);
+        #[cfg(not(target_os = "linux"))]
+        false
+    }
+
+    pub(super) fn model_progress(&self) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        if let Some(selected) = &self.selected {
+            return selected.progress();
+        }
+        self.check_selected()
+    }
+
+    pub(super) fn query_memory(
+        &self,
+        memory: &dyn crate::memory::Provider,
+        query: &crate::memory::Query,
+    ) -> Result<crate::memory::QueryResult> {
+        #[cfg(target_os = "linux")]
+        if let Some(selected) = &self.selected {
+            return selected.query_memory(memory, query);
+        }
+        memory.query(query)
+    }
+
+    pub(super) fn execute_model(
+        &self,
+        engine: &mut dyn crate::LLMEngine,
+        progress: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<String> {
+        #[cfg(target_os = "linux")]
+        if let Some(selected) = &self.selected {
+            return selected.execute_model(engine, progress, None);
+        }
+        engine.execute_with_progress(progress)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn execute_enrichment(
+        &self,
+        engine: &mut dyn crate::LLMEngine,
+        progress: &mut dyn FnMut() -> Result<()>,
+        memory: Option<(&dyn crate::memory::Provider, &crate::memory::QueryResult)>,
+    ) -> Result<String> {
+        self.selected
+            .as_ref()
+            .context("selected Reader attempt absent")?
+            .execute_model(engine, progress, memory)
     }
     pub(super) fn is_selected(&self) -> bool {
         self.selected.is_some()
@@ -484,6 +561,11 @@ impl Attempt {
         outcome: Outcome,
         reason: AttemptReason,
     ) -> Result<()> {
+        if self.selected_resident() && matches!(outcome, Outcome::Failed | Outcome::Canceled) {
+            // A refused input-only request leaves its last accepted selected
+            // stage intact. The caller owns reporting and finalization.
+            return Ok(());
+        }
         anyhow::ensure!(
             self.selected.is_none(),
             "selected terminal publication requires controlled settlement; no ordinary fallback"

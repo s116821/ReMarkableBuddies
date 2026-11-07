@@ -44,7 +44,15 @@ pub fn answer_with_preference(
         memory.is_none_or(|value| !value.selected()),
         "selected memory requires separately admitted answer context"
     );
-    answer_payload(model, question, images, memory, preference, progress)
+    answer_payload(
+        model,
+        question,
+        images,
+        memory,
+        preference,
+        progress,
+        &mut |model, progress| model.execute_with_progress(progress),
+    )
 }
 
 /// Explicit selected-provider candidate used only by guarded Reader publication.
@@ -60,7 +68,44 @@ pub(crate) fn answer_with_selected_view(
 ) -> Result<String> {
     ensure!(memory.selected(), "selected memory view required");
     super::selected::validate_answer_view(memory, store)?;
-    answer_payload(model, question, images, Some(memory), preference, progress)
+    answer_payload(
+        model,
+        question,
+        images,
+        Some(memory),
+        preference,
+        progress,
+        &mut |model, progress| model.execute_with_progress(progress),
+    )
+}
+
+type AnswerExecution<'a> =
+    dyn FnMut(&mut dyn LLMEngine, &mut dyn FnMut() -> Result<()>) -> Result<String> + 'a;
+
+/// The selected resident receiver owns the joined submission for this payload.
+#[cfg(target_os = "linux")]
+pub(crate) fn answer_with_resident_handoff(
+    model: &mut dyn LLMEngine,
+    question: &str,
+    images: &[String],
+    memory: Option<&QueryResult>,
+    preference: &crate::config::PersonalizationSnapshot,
+    progress: &mut dyn FnMut() -> Result<()>,
+    execute: &mut AnswerExecution<'_>,
+) -> Result<String> {
+    ensure!(
+        memory.is_none_or(QueryResult::selected),
+        "selected Reader memory required"
+    );
+    answer_payload(
+        model,
+        question,
+        images,
+        memory,
+        Some(preference),
+        progress,
+        execute,
+    )
 }
 
 fn answer_payload(
@@ -70,6 +115,7 @@ fn answer_payload(
     memory: Option<&QueryResult>,
     preference: Option<&crate::config::PersonalizationSnapshot>,
     progress: &mut dyn FnMut() -> Result<()>,
+    execute: &mut AnswerExecution<'_>,
 ) -> Result<String> {
     ensure!(
         !question.trim().is_empty() && question.len() <= 2048,
@@ -126,8 +172,7 @@ fn answer_payload(
     for image in images {
         model.add_image_content(image);
     }
-    let answer = model
-        .execute_with_progress(progress)
+    let answer = execute(model, progress)
         .map_err(|_| anyhow::anyhow!("subject memory enrichment provider or progress failed"))?;
     progress()?;
     let answer = answer

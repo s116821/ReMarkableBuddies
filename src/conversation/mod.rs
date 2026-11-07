@@ -25,6 +25,8 @@ mod reader_uncertainty;
 pub mod receiving;
 pub mod resolution;
 mod selected;
+#[cfg(any(target_os = "linux", test))]
+pub(crate) mod selected_reader_prepare;
 mod selected_reader_write;
 mod selected_writer;
 pub(crate) mod shared;

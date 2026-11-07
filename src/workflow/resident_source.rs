@@ -255,20 +255,26 @@ impl ResidentSourceOwner {
         &mut self,
         corner: crate::device::touch::TriggerCorner,
         health: &mut ServiceHealth,
+        deadline: Option<Instant>,
+        check: impl FnOnce() -> Result<()>,
     ) -> Result<()> {
         ensure!(
             !self.fatal && self.session.is_none() && self.input.is_none(),
             "resident startup activation requires an unused owner"
         );
+        if let Some(deadline) = deadline {
+            before(deadline)?;
+        }
         // Startup observes quiet input without creating a released Reader request.
         let mut input = RequestInput::new(corner, None)?;
         input.require_quiet()?;
+        check()?;
         let mut session = self.factory.activate(
             &self.selection,
             self.store.clone(),
             health,
             &mut input,
-            Instant::now() + ACQUISITION,
+            deadline.unwrap_or_else(|| Instant::now() + ACQUISITION),
         )?;
         session.finish();
         self.session = Some(session);
@@ -319,6 +325,15 @@ impl ResidentSourceOwner {
         released: ReleasedReaderInput,
         health: &mut ServiceHealth,
     ) -> Result<()> {
+        self.begin_with_check(released, health, || Ok(()))
+    }
+
+    pub(super) fn begin_with_check(
+        &mut self,
+        released: ReleasedReaderInput,
+        health: &mut ServiceHealth,
+        check: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
         ensure!(
             !self.fatal && self.input.is_none(),
             "Resident source request cannot restart"
@@ -329,6 +344,7 @@ impl ResidentSourceOwner {
         self.canceled = false;
         self.captured_source = None;
         self.progress(health)?;
+        check()?;
         let deadline = self.deadline.unwrap();
         before(deadline)?;
         let input = self.input.as_mut().unwrap();
@@ -400,7 +416,16 @@ impl ResidentSourceOwner {
         admitted_progress(deadline, || self.progress(health))
     }
     pub(super) fn acquire(&mut self, health: &mut ServiceHealth) -> Result<ResidentSourceCapture> {
+        self.acquire_with_check(health, |_| Ok(()))
+    }
+
+    pub(super) fn acquire_with_check(
+        &mut self,
+        health: &mut ServiceHealth,
+        mut check: impl FnMut(Option<&remarkable_open_sdk::native_adapter::ReaderFacts>) -> Result<()>,
+    ) -> Result<ResidentSourceCapture> {
         self.acquisition_current(health)?;
+        check(None)?;
         let deadline = self.deadline.unwrap();
         let observation = operation();
         let capture = operation();
@@ -457,6 +482,7 @@ impl ResidentSourceOwner {
                 return self.failure(health, error);
             }
         };
+        check(Some(&facts))?;
         before(deadline)?;
         let reply = session.request(
             health,

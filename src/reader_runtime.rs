@@ -383,6 +383,65 @@ pub fn startup(config: &Config) -> StartupDecision {
     StartupDecision::Report(Box::new(report))
 }
 
+/// The installed selected service route uses only the explicitly trusted
+/// configuration path, before dotenv or ordinary startup can resolve secrets.
+#[cfg(target_os = "linux")]
+pub fn run_installed_selected(
+    config_path: PathBuf,
+    initialize_logging: impl FnOnce(),
+) -> Result<bool> {
+    use crate::{
+        storage::sync::selected::ReaderPreferences,
+        workflow::resident_supervisor::{
+            health::NotificationEnvironment, recovery::activation::InstalledReaderSelection,
+        },
+    };
+    use std::time::{Duration, Instant};
+
+    let config = Config::load(Some(config_path.clone()))?;
+    let Some(scope) = config.reader.selection.as_ref() else {
+        return Ok(false);
+    };
+    initialize_logging();
+    let started = Instant::now();
+    let Some(installation) = InstalledReaderSelection::load(started + Duration::from_secs(10))?
+    else {
+        if let StartupDecision::Report(mut report) = startup(&config) {
+            report.write_to(&mut std::io::stdout().lock())?;
+        }
+        return Ok(true);
+    };
+    let admitted = (|| -> Result<_> {
+        let store =
+            open(&config).map_err(|_| anyhow::anyhow!("selected Reader Store unavailable"))?;
+        let reader = Arc::new(SelectedAdmission::new(store.clone(), scope.clone())?);
+        let (policy, token) = ReaderPreferences::open(
+            store.clone(),
+            config_path.as_path().to_owned(),
+            &reader,
+            started,
+        )?;
+        let health = NotificationEnvironment::capture()
+            .connect()?
+            .context("selected Reader service health unavailable")?;
+        Ok((store, reader, health, policy, token))
+    })();
+    let Ok((store, reader, health, policy, token)) = admitted else {
+        Report::new("startup", Status::Unavailable).write_to(&mut std::io::stdout().lock())?;
+        return Ok(true);
+    };
+    crate::workflow::selected_resident_reader::run(
+        store,
+        reader,
+        &config_path,
+        installation,
+        health,
+        policy,
+        token,
+    )?;
+    Ok(true)
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct InspectInput {

@@ -45,7 +45,26 @@ fn witness_composed_panic(valid: bool) {
 }
 
 fn budget() -> SelectedReadBudget {
-    SelectedReadBudget::new(64, 4096, 8 * 1024 * 1024, 32 * 1024 * 1024)
+    SelectedReadBudget::new(
+        MEMORY_READ_AGGREGATES,
+        MEMORY_READ_ITEMS,
+        MEMORY_READ_METADATA,
+        MEMORY_READ_MEDIA,
+    )
+}
+const MEMORY_READ_AGGREGATES: u64 = 64;
+const MEMORY_READ_ITEMS: u64 = 4096;
+const MEMORY_READ_METADATA: u64 = 8 * 1024 * 1024;
+const MEMORY_READ_MEDIA: u64 = 32 * 1024 * 1024;
+
+#[cfg(target_os = "linux")]
+pub(crate) fn reserve_reader_query(parent: &mut SelectedReadBudget) -> Result<SelectedReadBudget> {
+    parent.reserve(
+        MEMORY_READ_AGGREGATES,
+        MEMORY_READ_ITEMS,
+        MEMORY_READ_METADATA,
+        MEMORY_READ_MEDIA,
+    )
 }
 #[derive(Clone, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -346,7 +365,14 @@ impl SelectedMemory {
         self.read_extra(None)
     }
     fn read_extra(&self, extra: Option<&Registration>) -> Result<View> {
-        let mut budget = budget();
+        self.read_extra_with_budget(extra, budget())
+    }
+
+    fn read_extra_with_budget(
+        &self,
+        extra: Option<&Registration>,
+        mut budget: SelectedReadBudget,
+    ) -> Result<View> {
         let catalog = SelectedAdmission::with_gates(&[&self.catalog], |store| {
             available(store)?;
             let read = store
@@ -588,14 +614,88 @@ impl Pins {
         })
     }
 }
-impl Provider for SelectedMemory {
-    fn with_selected_writer_handoff(
+impl SelectedMemory {
+    fn query_with_budget(&self, query: &Query, budget: SelectedReadBudget) -> Result<QueryResult> {
+        query.validate()?;
+        let mut view = match self.read_extra_with_budget(None, budget) {
+            Ok(view) => view,
+            Err(_) => {
+                let mut result = QueryResult::empty(Status::Unavailable);
+                result.diagnostics.snapshot_unavailable = true;
+                return Ok(result);
+            }
+        };
+        let heads = view
+            .aggregates
+            .values()
+            .flat_map(|aggregate| &aggregate.heads)
+            .cloned()
+            .collect();
+        let mut result = query_heads(self.identity.profile, query, heads)?;
+        view.pins.result_sha256 = Some(result_identity(&result)?);
+        result.pins = Some(Arc::new(Mutex::new(view.pins)));
+        Ok(result)
+    }
+
+    fn publish_reader_joined(
+        &self,
+        result: &QueryResult,
+        reader: &SelectedAdmission,
+        accepted: &SelectionToken,
+        request: crate::conversation::SelectedReaderWrite,
+        admission: (&[&SelectedAdmission], Option<&mut SelectedReadBudget>),
+        verify: &mut dyn FnMut(&Store, Option<&mut SelectedReadBudget>) -> Result<()>,
+    ) -> Result<crate::conversation::SelectedReaderPublication> {
+        self.require_selected_reader(reader)?;
+        let mut pins = result
+            .pins
+            .as_ref()
+            .context("selected memory pins absent")?
+            .lock()
+            .map_err(|_| anyhow::anyhow!("selected memory pins unavailable"))?;
+        ensure!(
+            pins.instance == self.instance,
+            "foreign selected memory result"
+        );
+        ensure!(
+            pins.result_sha256.as_deref() == Some(result_identity(result)?.as_str()),
+            "selected memory result payload changed"
+        );
+        let admissions = pins.admissions.clone();
+        let mut handles: Vec<_> = admissions.iter().collect();
+        handles.extend_from_slice(admission.0);
+        let mut check = |store: &Store, reads: Option<&mut SelectedReadBudget>| {
+            let validation = pins
+                .validate_current(store)
+                .and_then(|_| verify(store, reads));
+            // A fresh attempt consumes its receiving view even on refusal or a
+            // later failure. Historical recovery never invokes this callback.
+            pins.consumed = true;
+            #[cfg(test)]
+            witness_composed_panic(validation.is_ok());
+            validation
+        };
+        #[cfg(target_os = "linux")]
+        if let Some(reads) = admission.1 {
+            return reader.publish_resident_reader_text_joined(
+                accepted,
+                request,
+                &handles,
+                reads,
+                |store, reads| check(store, Some(reads)),
+            );
+        }
+        reader.publish_reader_text_joined(accepted, request, &handles, |store| check(store, None))
+    }
+
+    fn with_memory_handoff(
         &self,
         result: &QueryResult,
         writer: &SelectedAdmission,
         additional: &[&SelectedAdmission],
         verify: &mut dyn FnMut(&Store) -> Result<()>,
         submit: &mut dyn FnMut() -> Result<()>,
+        resident: bool,
     ) -> Result<()> {
         self.require_selected_writer(writer)?;
         let mut pins = result
@@ -613,11 +713,28 @@ impl Provider for SelectedMemory {
         let mut handles: Vec<_> = admissions.iter().collect();
         handles.push(writer);
         handles.extend_from_slice(additional);
-        SelectedAdmission::with_ready_gate_set(&handles, |store| {
+        let handoff = |store: &Store| {
             pins.validate_current(store)?;
             verify(store)?;
             submit()
-        })
+        };
+        if resident {
+            SelectedAdmission::with_gates(&handles, handoff)
+        } else {
+            SelectedAdmission::with_ready_gate_set(&handles, handoff)
+        }
+    }
+}
+impl Provider for SelectedMemory {
+    fn with_selected_writer_handoff(
+        &self,
+        result: &QueryResult,
+        writer: &SelectedAdmission,
+        additional: &[&SelectedAdmission],
+        verify: &mut dyn FnMut(&Store) -> Result<()>,
+        submit: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        self.with_memory_handoff(result, writer, additional, verify, submit, false)
     }
     fn publish_selected_writer_joined(
         &self,
@@ -716,32 +833,49 @@ impl Provider for SelectedMemory {
         accepted: &SelectionToken,
         request: crate::conversation::SelectedReaderWrite,
     ) -> Result<crate::conversation::SelectedReaderPublication> {
-        self.require_selected_reader(reader)?;
-        let mut pins = result
-            .pins
-            .as_ref()
-            .context("selected memory pins absent")?
-            .lock()
-            .map_err(|_| anyhow::anyhow!("selected memory pins unavailable"))?;
-        ensure!(
-            pins.instance == self.instance,
-            "foreign selected memory result"
-        );
-        ensure!(
-            pins.result_sha256.as_deref() == Some(result_identity(result)?.as_str()),
-            "selected memory result payload changed"
-        );
-        let admissions = pins.admissions.clone();
-        let handles: Vec<_> = admissions.iter().collect();
-        reader.publish_reader_text_joined(accepted, request, &handles, |store| {
-            let validation = pins.validate_current(store);
-            // A fresh attempt consumes its receiving view even on refusal or a
-            // later failure. Historical recovery never invokes this callback.
-            pins.consumed = true;
-            #[cfg(test)]
-            witness_composed_panic(validation.is_ok());
-            validation
-        })
+        self.publish_reader_joined(
+            result,
+            reader,
+            accepted,
+            request,
+            (&[], None),
+            &mut |_, _| Ok(()),
+        )
+    }
+    #[cfg(target_os = "linux")]
+    fn with_selected_reader_handoff(
+        &self,
+        result: &QueryResult,
+        reader: &SelectedAdmission,
+        additional: &[&SelectedAdmission],
+        verify: &mut dyn FnMut(&Store) -> Result<()>,
+        submit: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        self.with_memory_handoff(result, reader, additional, verify, submit, true)
+    }
+    #[cfg(target_os = "linux")]
+    fn publish_selected_reader_text_joined(
+        &self,
+        result: &QueryResult,
+        reader: &SelectedAdmission,
+        accepted: &SelectionToken,
+        request: crate::conversation::SelectedReaderWrite,
+        (additional, reads): (&[&SelectedAdmission], &mut SelectedReadBudget),
+        verify: &mut dyn FnMut(&Store, &mut SelectedReadBudget) -> Result<()>,
+    ) -> Result<crate::conversation::SelectedReaderPublication> {
+        self.publish_reader_joined(
+            result,
+            reader,
+            accepted,
+            request,
+            (additional, Some(reads)),
+            &mut |store, reads| {
+                verify(
+                    store,
+                    reads.context("resident Reader memory allowance absent")?,
+                )
+            },
+        )
     }
     fn put(&self, mutation: Mutation) -> Result<Uuid> {
         mutation.fact.validate()?;
@@ -777,25 +911,15 @@ impl Provider for SelectedMemory {
         super::Inspection::new(heads, Some(admission))
     }
     fn query(&self, query: &Query) -> Result<QueryResult> {
-        query.validate()?;
-        let mut view = match self.read() {
-            Ok(view) => view,
-            Err(_) => {
-                let mut result = QueryResult::empty(Status::Unavailable);
-                result.diagnostics.snapshot_unavailable = true;
-                return Ok(result);
-            }
-        };
-        let heads = view
-            .aggregates
-            .values()
-            .flat_map(|aggregate| &aggregate.heads)
-            .cloned()
-            .collect();
-        let mut result = query_heads(self.identity.profile, query, heads)?;
-        view.pins.result_sha256 = Some(result_identity(&result)?);
-        result.pins = Some(Arc::new(Mutex::new(view.pins)));
-        Ok(result)
+        self.query_with_budget(query, budget())
+    }
+    #[cfg(target_os = "linux")]
+    fn query_selected_reader(
+        &self,
+        query: &Query,
+        reads: SelectedReadBudget,
+    ) -> Result<QueryResult> {
+        self.query_with_budget(query, reads)
     }
     fn with_current(
         &self,

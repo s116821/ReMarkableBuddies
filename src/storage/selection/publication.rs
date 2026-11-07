@@ -41,12 +41,26 @@ pub(super) fn current(
     generation: Uuid,
     scope: &SelectionScope,
 ) -> Result<Option<SelectionTransaction>> {
+    current_with_budget(root, generation, scope, None)
+}
+
+fn current_with_budget(
+    root: &Path,
+    generation: Uuid,
+    scope: &SelectionScope,
+    mut budget: Option<&mut SelectedReadBudget>,
+) -> Result<Option<SelectionTransaction>> {
     let path = path(root, scope)?;
     files::safe_path(&path)?;
     if !path.exists() {
         return Ok(None);
     }
-    let transaction: SelectionTransaction = files::json(&path, MAX_METADATA as u64)?;
+    if let Some(budget) = budget.as_deref_mut() {
+        budget.charge(0, 1, 0, 0)?;
+    }
+    let bytes = files::read_with_budget(&path, MAX_METADATA as u64, budget)?;
+    let transaction: SelectionTransaction = serde_json::from_slice(&bytes)
+        .map_err(|_| anyhow::anyhow!("invalid or unsupported stored JSON"))?;
     transaction.validate(MAX_ITEMS)?;
     ensure!(
         transaction.store_generation == generation && &transaction.scope == scope,
@@ -323,6 +337,24 @@ impl Store {
         scope: &SelectionScope,
         operation: Uuid,
     ) -> Result<Option<SelectionTransaction>> {
+        self.selected_receipt_inner(scope, operation, None)
+    }
+
+    pub(crate) fn selected_receipt_with_budget(
+        &self,
+        scope: &SelectionScope,
+        operation: Uuid,
+        budget: &mut SelectedReadBudget,
+    ) -> Result<Option<SelectionTransaction>> {
+        self.selected_receipt_inner(scope, operation, Some(budget))
+    }
+
+    fn selected_receipt_inner(
+        &self,
+        scope: &SelectionScope,
+        operation: Uuid,
+        mut budget: Option<&mut SelectedReadBudget>,
+    ) -> Result<Option<SelectionTransaction>> {
         scope.validate()?;
         ensure!(!operation.is_nil(), "nil selection operation");
         let inner = self
@@ -330,13 +362,21 @@ impl Store {
             .lock()
             .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
         let root = self.generation(inner.generation);
-        let Some(current) = current(&root, inner.generation, scope)? else {
+        let Some(current) =
+            current_with_budget(&root, inner.generation, scope, budget.as_deref_mut())?
+        else {
             return Ok(None);
         };
-        let chain = history(&root, inner.generation, scope, current)?;
+        let chain = history_with_budget(
+            &root,
+            inner.generation,
+            scope,
+            current,
+            budget.as_deref_mut(),
+        )?;
         let original = chain.into_iter().find(|t| t.operation == operation);
         if let Some(transaction) = &original {
-            validate_closure(&root, transaction)?;
+            validate_closure_with_budget(&root, transaction, budget)?;
         }
         Ok(original)
     }
@@ -350,6 +390,24 @@ impl Store {
         scope: &SelectionScope,
         original_operation: Uuid,
     ) -> Result<Option<SelectionTransaction>> {
+        self.selected_predecessor_inner(scope, original_operation, None)
+    }
+
+    pub(crate) fn selected_predecessor_with_budget(
+        &self,
+        scope: &SelectionScope,
+        original_operation: Uuid,
+        budget: &mut SelectedReadBudget,
+    ) -> Result<Option<SelectionTransaction>> {
+        self.selected_predecessor_inner(scope, original_operation, Some(budget))
+    }
+
+    fn selected_predecessor_inner(
+        &self,
+        scope: &SelectionScope,
+        original_operation: Uuid,
+        mut budget: Option<&mut SelectedReadBudget>,
+    ) -> Result<Option<SelectionTransaction>> {
         scope.validate()?;
         ensure!(
             !original_operation.is_nil(),
@@ -360,10 +418,18 @@ impl Store {
             .lock()
             .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
         let root = self.generation(inner.generation);
-        let Some(current) = current(&root, inner.generation, scope)? else {
+        let Some(current) =
+            current_with_budget(&root, inner.generation, scope, budget.as_deref_mut())?
+        else {
             return Ok(None);
         };
-        let chain = history(&root, inner.generation, scope, current)?;
+        let chain = history_with_budget(
+            &root,
+            inner.generation,
+            scope,
+            current,
+            budget.as_deref_mut(),
+        )?;
         let Some(position) = chain.iter().position(|t| t.operation == original_operation) else {
             return Ok(None);
         };
@@ -375,8 +441,8 @@ impl Store {
         let predecessor = chain
             .get(position + 1)
             .context("original predecessor missing")?;
-        validate_closure(&root, original)?;
-        validate_closure(&root, predecessor)?;
+        validate_closure_with_budget(&root, original, budget.as_deref_mut())?;
+        validate_closure_with_budget(&root, predecessor, budget)?;
         Ok(Some(predecessor.clone()))
     }
     /// Explicit bootstrap only. Snapshot absence does not authorize this call;

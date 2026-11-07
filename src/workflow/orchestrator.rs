@@ -75,6 +75,23 @@ enum RenderOutcome {
 }
 
 impl<M: LLMEngine> Orchestrator<M> {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn receive_resident_prepared(
+        &mut self,
+        token: crate::storage::selection::SelectionToken,
+        acknowledgment: crate::conversation::selected_reader_prepare::ResidentPreparedAcknowledgment,
+        policy: crate::storage::sync::selected::ReaderPreferences,
+    ) -> Result<()> {
+        let mut attempt =
+            Attempt::prepare_resident(&self.ledger, &self.workflow, token, acknowledgment, policy)?;
+        self.run_prepared(&mut attempt)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn into_workflow(self) -> Workflow {
+        self.workflow
+    }
+
     /// Continue an explicitly acknowledged selected input. This consumes current
     /// stored data only; installed acquisition and native output remain separate.
     pub fn run_selected_prepared(
@@ -564,6 +581,9 @@ impl<M: LLMEngine> Orchestrator<M> {
             memory,
         )?;
         if attempt.is_selected() {
+            if attempt.selected_resident() {
+                return Ok(());
+            }
             anyhow::bail!("Selected Generated draft acknowledged; qualified Pending/native output unavailable");
         }
         if !allow_native {
@@ -736,9 +756,9 @@ impl<M: LLMEngine> Orchestrator<M> {
         // payload assembly all consume the original acquisition budget. Retire
         // that deadline only at the actual first provider-admission boundary.
         self.workflow.deliver_reader_acquisition()?;
-        let response = match self.llm.execute_with_progress(&mut || {
+        let response = match attempt.execute_model(&mut self.llm, &mut || {
             let result = attempt
-                .check_selected()
+                .model_progress()
                 .and_then(|_| self.workflow.check_request_progress());
             progress_failed |= result.is_err();
             result
@@ -844,9 +864,9 @@ impl<M: LLMEngine> Orchestrator<M> {
             self.llm.add_image_content(image);
         }
         let mut progress_failed = false;
-        let reading = match self.llm.execute_with_progress(&mut || {
+        let reading = match attempt.execute_model(&mut self.llm, &mut || {
             let result = attempt
-                .check_selected()
+                .model_progress()
                 .and_then(|_| self.workflow.check_request_progress());
             progress_failed |= result.is_err();
             result
@@ -950,8 +970,8 @@ impl<M: LLMEngine> Orchestrator<M> {
                 // native authority. Ordinary capture supplies no association.
                 let mut query = crate::memory::Query::new(result.question.clone(), now);
                 query.document = attempt.memory_document()?;
-                memory
-                    .query(&query)
+                attempt
+                    .query_memory(memory.as_ref(), &query)
                     .map_err(|_| anyhow::anyhow!("subject memory retrieval failed"))
             })
             .transpose()?;
@@ -977,6 +997,26 @@ impl<M: LLMEngine> Orchestrator<M> {
                 && !view.context.facts.is_empty()
         });
         let workflow = &mut self.workflow;
+        #[cfg(target_os = "linux")]
+        if attempt.selected_resident() {
+            let joined = self.memory.as_deref().zip(retrieved.as_ref());
+            result.answer = crate::memory::context::answer_with_resident_handoff(
+                &mut self.llm,
+                &result.question,
+                images,
+                usable,
+                preference,
+                &mut || {
+                    attempt
+                        .model_progress()
+                        .and_then(|_| workflow.check_request_progress())
+                },
+                &mut |engine, progress| attempt.execute_enrichment(engine, progress, joined),
+            )?;
+            attempt.check_selected()?;
+            self.workflow.check_request_progress()?;
+            return Ok(retrieved);
+        }
         result.answer = if let Some(view) = usable.filter(|view| view.selected()) {
             crate::memory::context::answer_with_selected_view(
                 &mut self.llm,

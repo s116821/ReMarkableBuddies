@@ -19,6 +19,8 @@ pub mod resident_supervisor;
 pub mod sdk_acquisition;
 pub mod sdk_buddy_decision;
 pub mod selected_buddy;
+#[cfg(target_os = "linux")]
+pub(crate) mod selected_resident_reader;
 #[cfg(test)]
 pub(crate) use reader_attempt::assert_attachment_behavior;
 #[cfg(test)]
@@ -98,6 +100,17 @@ impl Workflow {
             Box::new(selected_backend::RefusingBackend::new()),
         );
         Self::with_selected(facade, debug_dump)
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn selected_owned_reader_fixture(
+        admission: std::sync::Arc<crate::conversation::SelectedAdmission>,
+    ) -> Self {
+        let mut workflow = Self::selected_runtime(admission, false);
+        workflow.device = Box::new(selected_backend::RefusingBackend::with_resident_releases(
+            vec![],
+        ));
+        workflow
     }
     pub fn new(
         no_draw: bool,
@@ -234,7 +247,7 @@ impl Workflow {
                 .as_mut()
                 .context("resident health owner absent")?;
             let corner = self.device.configure_installed_resident_output(pin)?;
-            owner.activate_at_startup(corner, health)?;
+            owner.activate_at_startup(corner, health, None, || Ok(()))?;
         }
         Ok(())
     }
@@ -257,7 +270,7 @@ impl Workflow {
             .context("development output requires the supervised health owner")?;
         owner.require_development_output(plan)?;
         if let Some(corner) = self.device.configure_development_resident_output(plan)? {
-            owner.activate_at_startup(corner, health)?;
+            owner.activate_at_startup(corner, health, None, || Ok(()))?;
         }
         Ok(())
     }

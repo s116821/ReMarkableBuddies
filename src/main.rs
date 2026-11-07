@@ -660,6 +660,16 @@ fn main() -> Result<()> {
     #[cfg(target_os = "linux")]
     remarkable_reader_buddy::workflow::resident_supervisor::recovery::refuse_occupied_activation()?;
     #[cfg(target_os = "linux")]
+    if args.simulate.is_none() {
+        if let Some(path) = std::env::var_os("REMARKABLE_BUDDIES_CONFIG") {
+            if remarkable_reader_buddy::reader_runtime::run_installed_selected(path.into(), || {
+                logging(args.log_level, std::env::var("RUST_LOG").ok().as_deref()).init();
+            })? {
+                return Ok(());
+            }
+        }
+    }
+    #[cfg(target_os = "linux")]
     let notification_environment = if args.simulate.is_none() {
         Some(remarkable_reader_buddy::workflow::resident_supervisor::health::NotificationEnvironment::capture())
     } else {

@@ -31,4 +31,19 @@ pub trait LLMEngine {
     ) -> Result<String> {
         anyhow::bail!("model adapter does not support guarded submission")
     }
+    #[cfg(target_os = "linux")]
+    fn execute_with_deadline(
+        &mut self,
+        progress: &mut dyn FnMut() -> Result<()>,
+        handoff: &mut ModelHandoff<'_>,
+        deadline: std::time::Instant,
+    ) -> Result<String> {
+        anyhow::ensure!(
+            self.guarded_timeout()
+                .is_some_and(|timeout| timeout
+                    <= deadline.saturating_duration_since(std::time::Instant::now())),
+            "model adapter cannot honor the original request deadline"
+        );
+        self.execute_with_handoff(progress, handoff)
+    }
 }

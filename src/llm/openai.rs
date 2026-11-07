@@ -90,14 +90,23 @@ impl LLMEngine for OpenAI {
         &mut self,
         progress: &mut dyn FnMut() -> Result<()>,
     ) -> Result<String> {
-        self.execute_guarded(progress, &mut |submit| submit())
+        self.execute_guarded(progress, &mut |submit| submit(), None)
     }
     fn execute_with_handoff(
         &mut self,
         progress: &mut dyn FnMut() -> Result<()>,
         handoff: &mut super::ModelHandoff<'_>,
     ) -> Result<String> {
-        self.execute_guarded(progress, handoff)
+        self.execute_guarded(progress, handoff, None)
+    }
+    #[cfg(target_os = "linux")]
+    fn execute_with_deadline(
+        &mut self,
+        progress: &mut dyn FnMut() -> Result<()>,
+        handoff: &mut super::ModelHandoff<'_>,
+        deadline: std::time::Instant,
+    ) -> Result<String> {
+        self.execute_guarded(progress, handoff, Some(deadline))
     }
 }
 
@@ -106,6 +115,7 @@ impl OpenAI {
         &mut self,
         progress: &mut dyn FnMut() -> Result<()>,
         handoff: &mut super::ModelHandoff<'_>,
+        deadline: Option<std::time::Instant>,
     ) -> Result<String> {
         // Refuse before dispatch if the caller has already canceled/lost admission.
         let preflight = std::time::Instant::now();
@@ -137,6 +147,15 @@ impl OpenAI {
                     .context("Create provider runtime")?;
                 runtime.block_on(async {
                     let request = async {
+                        let timeout = match deadline {
+                            Some(deadline) => timeout
+                                .min(deadline.saturating_duration_since(std::time::Instant::now())),
+                            None => timeout,
+                        };
+                        anyhow::ensure!(
+                            !timeout.is_zero(),
+                            "model request expired before dispatch"
+                        );
                         let _timing = crate::measurement::Span::new("provider.request");
                         let client = reqwest::Client::builder()
                             .timeout(timeout)

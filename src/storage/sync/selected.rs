@@ -14,6 +14,8 @@ pub(crate) use control::{create_group, CreateGroupRequest, GroupOutcome};
 mod preference_command;
 mod preference_consumer;
 pub(crate) use preference_consumer::RequestPreferences;
+#[cfg(target_os = "linux")]
+pub(crate) use preference_consumer::{ReaderPhase, ReaderPreferences};
 mod preferences;
 pub use preference_command::{
     run as run_preferences, Operation as PreferenceOperation, Report as PreferenceReport,

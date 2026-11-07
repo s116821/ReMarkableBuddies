@@ -104,13 +104,79 @@ impl ResidentSourceCapture {
         self.correspondence.expected.document
     }
 
-    #[cfg(all(
-        target_os = "linux",
-        feature = "development-resident-bootstrap",
-        feature = "development-input-diagnostics"
-    ))]
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn page(&self) -> Uuid {
         self.correspondence.expected.page
+    }
+
+    pub(super) fn prepare_history(
+        &self,
+        conversation: Uuid,
+        turn: Uuid,
+        evidence_id: Uuid,
+    ) -> Result<PreparedResidentCapture> {
+        let provider_images = crate::device::screenshot::Screenshot::reader_images_from_owned_png(
+            self.capture.png(),
+        )?;
+        let [w, h] = self.capture.dimensions();
+        let th = h * 2 / 5;
+        let crops = [
+            [0, 0, w, h],
+            [0, 0, w, th],
+            [0, (h - th) / 2, w, th],
+            [0, h - th, w, th],
+        ];
+        let evidence = ResidentCaptureHistory {
+            schema: 1,
+            sdk_source: RESIDENT_SDK_SOURCE.into(),
+            id: evidence_id,
+            conversation: conversation,
+            turn: turn,
+            origin: ResidentOrigin::ResidentHistoricalUnqualified,
+            qualification: (),
+            correspondence: self.correspondence.clone(),
+            before: self.capture.before().into(),
+            after: self.capture.after().into(),
+            dpr_bits: ExactU64::try_from(self.capture.device_pixel_ratio().to_bits().to_string())
+                .map_err(anyhow::Error::msg)?,
+            procedure: self.capture.procedure().into(),
+            original_png: Media {
+                sha256: digest(self.capture.png()),
+                bytes: self.capture.png().len() as u64,
+                media_type: "image/png".into(),
+            },
+            original_dimensions: self.capture.dimensions(),
+            provider_procedure: "reader-nearest-overview-overlapping-strips-v1".into(),
+            images: provider_images
+                .iter()
+                .enumerate()
+                .map(|(ordinal, bytes)| ResidentImage {
+                    media: Media {
+                        sha256: digest(bytes),
+                        bytes: bytes.len() as u64,
+                        media_type: "image/png".into(),
+                    },
+                    dimensions: if ordinal == 0 { [768, 1024] } else { [w, th] },
+                    provider_ordinal: ordinal as u32,
+                    parent_crop: crops[ordinal],
+                })
+                .collect(),
+        };
+        evidence.validate()?;
+        Ledger::validate_image_bytes(&evidence.original_png, self.capture.png(), w, h)?;
+        for (image, bytes) in evidence.images.iter().zip(&provider_images) {
+            Ledger::validate_image_bytes(
+                &image.media,
+                bytes,
+                image.dimensions[0],
+                image.dimensions[1],
+            )?;
+        }
+        Ok(PreparedResidentCapture {
+            evidence,
+            original_png: self.capture.png().to_vec(),
+            images: provider_images,
+        })
     }
 
     pub(crate) fn from_session(
@@ -347,56 +413,11 @@ impl Ledger {
             "invalid resident request"
         );
         Self::validate_turn(&turn)?;
-        let provider_images = crate::device::screenshot::Screenshot::reader_images_from_owned_png(
-            capture.capture.png(),
-        )?;
-        let [w, h] = capture.capture.dimensions();
-        let th = h * 2 / 5;
-        let crops = [
-            [0, 0, w, h],
-            [0, 0, w, th],
-            [0, (h - th) / 2, w, th],
-            [0, h - th, w, th],
-        ];
-        let evidence = ResidentCaptureHistory {
-            schema: 1,
-            sdk_source: RESIDENT_SDK_SOURCE.into(),
-            id: evidence_id,
-            conversation: turn.conversation,
-            turn: turn.id,
-            origin: ResidentOrigin::ResidentHistoricalUnqualified,
-            qualification: (),
-            correspondence: capture.correspondence.clone(),
-            before: capture.capture.before().into(),
-            after: capture.capture.after().into(),
-            dpr_bits: ExactU64::try_from(
-                capture.capture.device_pixel_ratio().to_bits().to_string(),
-            )
-            .map_err(anyhow::Error::msg)?,
-            procedure: capture.capture.procedure().into(),
-            original_png: Media {
-                sha256: digest(capture.capture.png()),
-                bytes: capture.capture.png().len() as u64,
-                media_type: "image/png".into(),
-            },
-            original_dimensions: capture.capture.dimensions(),
-            provider_procedure: "reader-nearest-overview-overlapping-strips-v1".into(),
-            images: provider_images
-                .iter()
-                .enumerate()
-                .map(|(ordinal, bytes)| ResidentImage {
-                    media: Media {
-                        sha256: digest(bytes),
-                        bytes: bytes.len() as u64,
-                        media_type: "image/png".into(),
-                    },
-                    dimensions: if ordinal == 0 { [768, 1024] } else { [w, th] },
-                    provider_ordinal: ordinal as u32,
-                    parent_crop: crops[ordinal],
-                })
-                .collect(),
-        };
-        evidence.validate()?;
+        let PreparedResidentCapture {
+            evidence,
+            original_png,
+            images: provider_images,
+        } = capture.prepare_history(turn.conversation, turn.id, evidence_id)?;
         turn.sources = vec![evidence.id];
         let fingerprint = Self::fingerprint(&("prepare-resident", &turn, &evidence))?;
         if self.replay(operation, &fingerprint)?.is_some() {
@@ -417,16 +438,7 @@ impl Ledger {
             );
         }
         self.validate_correction_target(&turn)?;
-        Self::validate_image_bytes(&evidence.original_png, capture.capture.png(), w, h)?;
-        for (image, bytes) in evidence.images.iter().zip(&provider_images) {
-            Self::validate_image_bytes(
-                &image.media,
-                bytes,
-                image.dimensions[0],
-                image.dimensions[1],
-            )?;
-        }
-        self.stage_image(&evidence.original_png, capture.capture.png())?;
+        self.stage_image(&evidence.original_png, original_png.as_slice())?;
         for (image, bytes) in evidence.images.iter().zip(&provider_images) {
             self.stage_image(&image.media, bytes.as_slice())?;
         }
@@ -538,7 +550,7 @@ impl Ledger {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::storage::StorePaths;
     use std::{
@@ -551,8 +563,12 @@ mod tests {
         SdkUuid::parse(&Uuid::new_v4().to_string()).unwrap()
     }
     fn capture() -> ResidentSourceCapture {
+        capture_for(Uuid::new_v4())
+    }
+
+    pub(crate) fn capture_for(document: Uuid) -> ResidentSourceCapture {
         let page = PageKey {
-            document: id(),
+            document: SdkUuid::parse(&document.to_string()).unwrap(),
             page: id(),
         };
         let facts = ReaderFacts::new(page, vec![page.page]).unwrap();
@@ -767,6 +783,154 @@ mod tests {
         drop(store);
         fs::remove_dir_all(base).unwrap();
     }
+    #[test]
+    fn selected_resident_prepare_publishes_once_and_recovers_only_original() {
+        use crate::conversation::selected_reader_prepare::ResidentPrepared;
+        use crate::storage::selection::{SelectedReadBudget, SelectionChange, SelectionScope};
+        use crate::storage::{Manifest, Scope};
+
+        let (base, store, ledger, _, captured) = fixture();
+        let ordinary = store.manifests().unwrap();
+        let seed = &ordinary[0];
+        let objects = seed
+            .records
+            .iter()
+            .map(|reference| {
+                (
+                    reference.sha256.clone(),
+                    store.read_object(reference).unwrap(),
+                )
+            })
+            .collect();
+        let admission = SelectedAdmission::new(
+            store.clone(),
+            SelectionScope {
+                group: Uuid::new_v4(),
+                key_sha256: crate::memory::catalog::document_key(captured.document()).unwrap(),
+                binding_sha256: digest(b"selected resident fixture"),
+            },
+        )
+        .unwrap();
+        let predecessor = admission
+            .initialize(
+                SelectionChange {
+                    operation: Uuid::new_v4(),
+                    accepted_base_sha256: digest(b"selected resident base"),
+                    selected: Manifest {
+                        transaction_id: Uuid::new_v4(),
+                        scope: Scope::SelectedRecords,
+                        ..seed.clone()
+                    },
+                    retained: vec![],
+                },
+                objects,
+            )
+            .unwrap()
+            .token;
+        let operation = Uuid::new_v4();
+        let prepare = || ResidentPrepared::new(&store, &predecessor, &captured, operation, 10);
+        let mut reads = SelectedReadBudget::new(64, 4096, 64 * 1024 * 1024, 128 * 1024 * 1024);
+        let (token, ack) = SelectedAdmission::with_gates(&[&admission], |store| {
+            prepare()?.publish_locked(store, &predecessor, &mut reads)
+        })
+        .unwrap();
+        let SelectedCaptureImages::Resident(images) = admission
+            .capture_images(&token, ack.capture.record_id)
+            .unwrap()
+        else {
+            panic!("selected Prepared lost resident image custody");
+        };
+        assert_eq!(images.original_png, captured.capture.png());
+        assert!(prepare()
+            .unwrap()
+            .original(&store, &predecessor, &mut reads)
+            .unwrap());
+        let replay = SelectedAdmission::with_gates(&[&admission], |store| {
+            prepare()?.publish_locked(store, &predecessor, &mut reads)
+        });
+        assert!(replay
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("already historical"));
+        assert_eq!(
+            store
+                .selected_snapshot(admission.scope(), crate::storage::MAX_ITEMS)
+                .unwrap()
+                .unwrap()
+                .token,
+            token
+        );
+        let ordinary_ids = |manifests: &[Manifest]| {
+            manifests
+                .iter()
+                .filter(|manifest| manifest.scope != Scope::SelectedRecords)
+                .map(|manifest| manifest.transaction_id)
+                .collect::<BTreeSet<_>>()
+        };
+        assert_eq!(
+            ordinary_ids(&store.manifests().unwrap()),
+            ordinary_ids(&ordinary)
+        );
+        #[cfg(target_os = "linux")]
+        {
+            let interpretation = crate::conversation::SelectedReaderWrite {
+                operation: Uuid::new_v4(),
+                root: ack.root,
+                user: ack.user,
+                updated_ms: 11,
+                text: "What is x?".into(),
+                kind: crate::conversation::SelectedReaderText::Interpret,
+            };
+            let publish = |accepted: &crate::storage::selection::SelectionToken,
+                           request,
+                           reads: &mut SelectedReadBudget| {
+                admission.publish_resident_reader_text_joined(
+                    accepted,
+                    request,
+                    &[],
+                    reads,
+                    |_, _| Ok(()),
+                )
+            };
+            let mut exhausted = SelectedReadBudget::new(0, 0, 0, 0);
+            assert!(publish(&token, interpretation.clone(), &mut exhausted).is_err());
+            let crate::conversation::SelectedReaderPublication::Published {
+                publication,
+                acknowledgment,
+            } = publish(&token, interpretation.clone(), &mut reads).unwrap()
+            else {
+                panic!("fresh Reader interpretation was not published");
+            };
+            let generation = crate::conversation::SelectedReaderWrite {
+                operation: Uuid::new_v4(),
+                root: acknowledgment.root,
+                user: acknowledgment.turn,
+                updated_ms: 12,
+                text: "x = 7".into(),
+                kind: crate::conversation::SelectedReaderText::Generate {
+                    assistant: Uuid::new_v4(),
+                },
+            };
+            let crate::conversation::SelectedReaderPublication::Published {
+                acknowledgment, ..
+            } = publish(&publication.token, generation, &mut reads).unwrap()
+            else {
+                panic!("fresh Reader draft was not published");
+            };
+            assert_eq!(acknowledgment.written.outcome, Outcome::Generated);
+            assert!(admission
+                .recover_reader_text(&token, &interpretation)
+                .unwrap());
+            assert_eq!(
+                ordinary_ids(&store.manifests().unwrap()),
+                ordinary_ids(&ordinary)
+            );
+        }
+        drop((admission, ledger, store));
+        fs::remove_dir_all(base).unwrap();
+    }
+
     #[test]
     fn resident_selected_snapshot_readback_and_omitted_media_remain_historical() {
         use crate::storage::selection::{SelectionChange, SelectionScope};

@@ -399,10 +399,47 @@ pub trait Provider: Send + Sync {
     ) -> Result<crate::conversation::SelectedReaderPublication> {
         anyhow::bail!("subject memory provider does not support selected Reader publication")
     }
+    #[cfg(target_os = "linux")]
+    fn with_selected_reader_handoff(
+        &self,
+        _result: &QueryResult,
+        _reader: &crate::conversation::SelectedAdmission,
+        _additional: &[&crate::conversation::SelectedAdmission],
+        _verify: &mut dyn FnMut(&Store) -> Result<()>,
+        _submit: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        anyhow::bail!("memory provider does not support guarded Reader submission")
+    }
+    #[cfg(target_os = "linux")]
+    fn publish_selected_reader_text_joined(
+        &self,
+        _result: &QueryResult,
+        _reader: &crate::conversation::SelectedAdmission,
+        _accepted: &crate::storage::selection::SelectionToken,
+        _request: crate::conversation::SelectedReaderWrite,
+        _admission: (
+            &[&crate::conversation::SelectedAdmission],
+            &mut crate::storage::selection::SelectedReadBudget,
+        ),
+        _verify: &mut dyn FnMut(
+            &Store,
+            &mut crate::storage::selection::SelectedReadBudget,
+        ) -> Result<()>,
+    ) -> Result<crate::conversation::SelectedReaderPublication> {
+        anyhow::bail!("memory provider does not support guarded Reader publication")
+    }
     fn put(&self, mutation: Mutation) -> Result<Uuid>;
     fn forget(&self, mutation: Forget) -> Result<Uuid>;
     fn inspect(&self, key: &Key) -> Result<Vec<Envelope>>;
     fn query(&self, query: &Query) -> Result<QueryResult>;
+    #[cfg(target_os = "linux")]
+    fn query_selected_reader(
+        &self,
+        _query: &Query,
+        _reads: crate::storage::selection::SelectedReadBudget,
+    ) -> Result<QueryResult> {
+        anyhow::bail!("memory provider does not support guarded Reader query")
+    }
     /// Current CLI inspection keeps its admission through the consuming writer.
     /// Plain inspect returns a historical read and does not grant handoff authority.
     fn inspect_for_handoff(&self, key: &Key) -> Result<Inspection> {

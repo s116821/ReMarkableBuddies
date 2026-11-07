@@ -5,6 +5,11 @@ use crate::config::{portable::record, Config};
 use crate::storage::selection::{SelectedReadBudget, SelectionToken};
 use std::{path::PathBuf, sync::Mutex};
 
+#[cfg(target_os = "linux")]
+mod reader;
+#[cfg(target_os = "linux")]
+pub(crate) use reader::{ReaderPhase, ReaderPreferences};
+
 pub(crate) struct RequestPreferences {
     store: Arc<Store>,
     admission: SelectedAdmission,
@@ -33,24 +38,37 @@ struct RequestReads {
 }
 impl RequestReads {
     fn new() -> Result<Self> {
-        let phase_bytes = 8 * (3 * MAX_METADATA as u64 + 64 * 1024);
         let lifetime =
             Duration::from_secs(60) + crate::llm::openai::DEFAULT_TIMEOUT + Duration::from_secs(60);
+        Self::for_lifetime(lifetime, 1, 0, false)
+    }
+
+    fn for_lifetime(
+        lifetime: Duration,
+        phases: u64,
+        media: u64,
+        track_document: bool,
+    ) -> Result<Self> {
+        let phase_bytes = 8 * (3 * MAX_METADATA as u64 + 64 * 1024) * phases;
+        let aggregates = 64 * phases;
+        let objects = MAX_ITEMS as u64 * phases;
         let cadence = crate::workflow::indicator::CADENCE;
         // Entire original operation lifetime, including scheduling/completion
         // overhead, plus the guarded adapter boundary checks.
-        let pulses = u64::try_from(lifetime.as_nanos().div_ceil(cadence.as_nanos()))? + 4;
-        let progress_bytes = pulses * (MAX_RECORD as u64 + MAX_METADATA as u64);
+        let pulses = u64::try_from(lifetime.as_nanos().div_ceil(cadence.as_nanos()))? + 4 * phases;
+        let selection_headers = 1 + u64::from(track_document);
+        let progress_items = pulses * (1 + selection_headers);
+        let progress_bytes = pulses * (MAX_RECORD as u64 + selection_headers * MAX_METADATA as u64);
         let mut reservations = SelectedReadBudget::new(
-            64 * 3,
-            MAX_ITEMS as u64 * 3 + pulses * 2,
+            aggregates * 3,
+            objects * 3 + progress_items,
             phase_bytes * 3 + progress_bytes,
-            0,
+            media * 3,
         );
-        let admission = reservations.reserve(64, MAX_ITEMS as u64, phase_bytes, 0)?;
-        let handoff = reservations.reserve(64, MAX_ITEMS as u64, phase_bytes, 0)?;
-        let finish = reservations.reserve(64, MAX_ITEMS as u64, phase_bytes, 0)?;
-        let progress = reservations.reserve(0, pulses * 2, progress_bytes, 0)?;
+        let admission = reservations.reserve(aggregates, objects, phase_bytes, media)?;
+        let handoff = reservations.reserve(aggregates, objects, phase_bytes, media)?;
+        let finish = reservations.reserve(aggregates, objects, phase_bytes, media)?;
+        let progress = reservations.reserve(0, progress_items, progress_bytes, 0)?;
         Ok(Self {
             admission: Mutex::new(admission),
             handoff: Mutex::new(handoff),
@@ -92,6 +110,24 @@ impl RequestPreferences {
         let deadline =
             admission_deadline + crate::llm::openai::DEFAULT_TIMEOUT + Duration::from_secs(60);
         let budgets = RequestReads::new()?;
+        Self::from_binding_at(
+            store,
+            path,
+            binding,
+            transport,
+            (admission_deadline, deadline),
+            budgets,
+        )
+    }
+
+    fn from_binding_at(
+        store: Arc<Store>,
+        path: PathBuf,
+        binding: Binding,
+        transport: impl FnOnce(&Store) -> Result<GoogleDrive>,
+        (admission_deadline, deadline): (Instant, Instant),
+        budgets: RequestReads,
+    ) -> Result<Self> {
         let mut reads = budgets
             .admission
             .lock()
@@ -140,13 +176,13 @@ impl RequestPreferences {
                 .memory
                 .selection
                 .as_ref()
-                .context("shared Writer requires selected memory")?;
+                .context("shared preferences require selected memory")?;
             ensure!(
                 effective.memory.profile == Some(view.profile)
                     && selected.profile == view.profile
                     && selected.group == binding.group
                     && selected.binding_sha256 == binding.digest,
-                "shared Writer memory root differs"
+                "shared preference memory root differs"
             );
         }
         drop(reads);
@@ -251,13 +287,24 @@ impl RequestPreferences {
         })
     }
     pub(crate) fn check_progress(&self) -> Result<()> {
+        self.check_joined_progress(None)
+    }
+
+    fn check_joined_progress(
+        &self,
+        reader: Option<(&SelectedAdmission, &SelectionToken)>,
+    ) -> Result<()> {
         ensure!(Instant::now() < self.deadline, "preference request expired");
         let mut reads = self
             .reads
             .progress
             .lock()
             .map_err(|_| anyhow::anyhow!("preference progress allowance unavailable"))?;
-        SelectedAdmission::with_gates(&[&self.admission], |store| {
+        let mut gates = vec![&self.admission];
+        if let Some((admission, _)) = reader {
+            gates.push(admission);
+        }
+        SelectedAdmission::with_gates(&gates, |store| {
             ensure!(
                 catalog::current_generation(store)? == self.guard.store_generation,
                 "preference generation changed"
@@ -272,6 +319,16 @@ impl RequestPreferences {
                 )?,
                 "preference progress selection changed"
             );
+            if let Some((admission, expected)) = reader {
+                ensure!(
+                    store.selection_unchanged_for_progress(
+                        admission.scope(),
+                        Some(expected),
+                        &mut reads
+                    )?,
+                    "Reader progress selection changed"
+                );
+            }
             Ok(())
         })
     }

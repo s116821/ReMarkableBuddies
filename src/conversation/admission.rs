@@ -127,94 +127,123 @@ impl SelectedAdmission {
         capture_id: Uuid,
     ) -> Result<super::SelectedCaptureImages> {
         self.with_current(accepted, |snapshot| {
-            let projection = SelectedDomainProjection::from_snapshot(snapshot)?;
-            let (_, Some(evidence)) = projection
-                .head(Namespace::Source, capture_id)
-                .context("selected capture absent")?
-            else {
-                anyhow::bail!("selected capture unavailable")
-            };
-            let (conversation, turn_id) = match evidence {
-                Record::Capture(c) => (c.conversation, c.turn),
-                Record::LegacyCapture(c) => (c.conversation, c.turn),
-                Record::DevelopmentCapture(c) => (c.conversation, c.turn),
-                Record::ResidentCapture(c) => (c.conversation, c.turn),
-                _ => anyhow::bail!("not selected capture evidence"),
-            };
-            let records = projection.inspect(conversation)?;
-            let turn = records
-                .iter()
-                .find_map(|r| match r {
-                    Record::Turn(t) if t.id == turn_id => Some(t),
-                    _ => None,
-                })
-                .context("selected capture turn absent")?;
-            ensure!(
-                turn.sources.contains(&capture_id),
-                "selected capture link mismatch"
-            );
-            // Combined snapshot handles include retained media; enforce selected
-            // inclusion before taking a handle, then consume that pinned handle.
-            let mut load = |media: &crate::storage::Media| -> Result<Vec<u8>> {
-                let reference = snapshot
-                    .transaction
-                    .selected
-                    .media
-                    .iter()
-                    .find(|r| r.sha256 == media.sha256 && r.bytes == media.bytes)
-                    .context("selected capture media omitted or unavailable")?;
-                let source = snapshot
-                    .media
-                    .get(&reference.sha256)
-                    .context("selected capture media handle absent")?;
-                // File handles are immutable snapshot pins. Clone their file
-                // descriptor to read without looking up CURRENT or object paths.
-                let bytes = match source {
-                    crate::storage::files::Source::Memory(bytes) => (*bytes).clone(),
-                    crate::storage::files::Source::File { file, .. } => {
-                        use std::io::{Read, Seek, SeekFrom};
-                        let mut pinned = file.try_clone()?;
-                        pinned.seek(SeekFrom::Start(0))?;
-                        let mut bytes = Vec::new();
-                        pinned.take(reference.bytes + 1).read_to_end(&mut bytes)?;
-                        bytes
-                    }
-                };
-                ensure!(
-                    bytes.len() as u64 == reference.bytes
-                        && crate::storage::digest(&bytes) == reference.sha256,
-                    "selected capture media integrity mismatch"
-                );
-                Ok(bytes)
-            };
-            match evidence {
-                Record::Capture(c) => {
-                    ensure!(
-                        turn.role == super::Role::User
-                            && matches!(
-                                turn.outcome,
-                                super::Outcome::Prepared | super::Outcome::Interpreted
-                            ),
-                        "capture request is unavailable or terminal"
-                    );
-                    Ok(super::SelectedCaptureImages::Sdk(
-                        Ledger::sdk_images_from_evidence((**c).clone(), &mut load)?,
-                    ))
-                }
-                Record::LegacyCapture(c) => Ok(super::SelectedCaptureImages::Legacy(
-                    Ledger::legacy_images_from_evidence(c.clone(), &mut load)?,
-                )),
-                Record::DevelopmentCapture(c) => {
-                    Ok(super::SelectedCaptureImages::Development(Box::new(
-                        Ledger::development_images_from_evidence((**c).clone(), &mut load)?,
-                    )))
-                }
-                Record::ResidentCapture(c) => Ok(super::SelectedCaptureImages::Resident(Box::new(
-                    Ledger::resident_images_from_evidence((**c).clone(), &mut load)?,
-                ))),
-                _ => unreachable!(),
-            }
+            Self::capture_images_from_snapshot(snapshot, capture_id, None)
         })
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn capture_images_locked(
+        store: &Store,
+        accepted: &SelectionToken,
+        capture_id: Uuid,
+        reads: &mut crate::storage::selection::SelectedReadBudget,
+    ) -> Result<super::SelectedCaptureImages> {
+        let snapshot = store
+            .selected_snapshot_with_budget(accepted.scope(), MAX_ITEMS, reads)?
+            .context("selected Reader capture unavailable")?
+            .snapshot;
+        ensure!(
+            snapshot.token == *accepted,
+            "selected Reader capture changed"
+        );
+        Self::capture_images_from_snapshot(&snapshot, capture_id, Some(reads))
+    }
+
+    fn capture_images_from_snapshot(
+        snapshot: &crate::storage::selection::SelectedSnapshot,
+        capture_id: Uuid,
+        mut reads: Option<&mut crate::storage::selection::SelectedReadBudget>,
+    ) -> Result<super::SelectedCaptureImages> {
+        let projection = SelectedDomainProjection::from_snapshot(snapshot)?;
+        let (_, Some(evidence)) = projection
+            .head(Namespace::Source, capture_id)
+            .context("selected capture absent")?
+        else {
+            anyhow::bail!("selected capture unavailable")
+        };
+        let (conversation, turn_id) = match evidence {
+            Record::Capture(c) => (c.conversation, c.turn),
+            Record::LegacyCapture(c) => (c.conversation, c.turn),
+            Record::DevelopmentCapture(c) => (c.conversation, c.turn),
+            Record::ResidentCapture(c) => (c.conversation, c.turn),
+            _ => anyhow::bail!("not selected capture evidence"),
+        };
+        let records = projection.inspect(conversation)?;
+        let turn = records
+            .iter()
+            .find_map(|r| match r {
+                Record::Turn(t) if t.id == turn_id => Some(t),
+                _ => None,
+            })
+            .context("selected capture turn absent")?;
+        ensure!(
+            turn.sources.contains(&capture_id),
+            "selected capture link mismatch"
+        );
+        // Combined snapshot handles include retained media; enforce selected
+        // inclusion before taking a handle, then consume that pinned handle.
+        let mut load = |media: &crate::storage::Media| -> Result<Vec<u8>> {
+            if let Some(reads) = reads.as_deref_mut() {
+                reads.charge(0, 1, 0, media.bytes)?;
+            }
+            let reference = snapshot
+                .transaction
+                .selected
+                .media
+                .iter()
+                .find(|r| r.sha256 == media.sha256 && r.bytes == media.bytes)
+                .context("selected capture media omitted or unavailable")?;
+            let source = snapshot
+                .media
+                .get(&reference.sha256)
+                .context("selected capture media handle absent")?;
+            // File handles are immutable snapshot pins. Clone their file
+            // descriptor to read without looking up CURRENT or object paths.
+            let bytes = match source {
+                crate::storage::files::Source::Memory(bytes) => (*bytes).clone(),
+                crate::storage::files::Source::File { file, .. } => {
+                    use std::io::{Read, Seek, SeekFrom};
+                    let mut pinned = file.try_clone()?;
+                    pinned.seek(SeekFrom::Start(0))?;
+                    let mut bytes = Vec::new();
+                    pinned.take(reference.bytes + 1).read_to_end(&mut bytes)?;
+                    bytes
+                }
+            };
+            ensure!(
+                bytes.len() as u64 == reference.bytes
+                    && crate::storage::digest(&bytes) == reference.sha256,
+                "selected capture media integrity mismatch"
+            );
+            Ok(bytes)
+        };
+        match evidence {
+            Record::Capture(c) => {
+                ensure!(
+                    turn.role == super::Role::User
+                        && matches!(
+                            turn.outcome,
+                            super::Outcome::Prepared | super::Outcome::Interpreted
+                        ),
+                    "capture request is unavailable or terminal"
+                );
+                Ok(super::SelectedCaptureImages::Sdk(
+                    Ledger::sdk_images_from_evidence((**c).clone(), &mut load)?,
+                ))
+            }
+            Record::LegacyCapture(c) => Ok(super::SelectedCaptureImages::Legacy(
+                Ledger::legacy_images_from_evidence(c.clone(), &mut load)?,
+            )),
+            Record::DevelopmentCapture(c) => {
+                Ok(super::SelectedCaptureImages::Development(Box::new(
+                    Ledger::development_images_from_evidence((**c).clone(), &mut load)?,
+                )))
+            }
+            Record::ResidentCapture(c) => Ok(super::SelectedCaptureImages::Resident(Box::new(
+                Ledger::resident_images_from_evidence((**c).clone(), &mut load)?,
+            ))),
+            _ => unreachable!(),
+        }
     }
     /// Recover the original publication before allocating new preparation IDs.
     /// Replacement membership and lost acknowledgments never refresh authority.
