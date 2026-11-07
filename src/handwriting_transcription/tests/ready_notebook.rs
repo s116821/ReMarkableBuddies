@@ -56,8 +56,8 @@ fn prepared_confirm_reopen_query_inspect_and_selected_capture_preserve_bytes() {
         assert_eq!(fact.record, record);
         assert_eq!(fact.revision, revision);
         assert_eq!(
-            fact.value.as_ref().unwrap().original_text,
-            "PRIVATE_ORIGINAL"
+            fact.value.as_ref().unwrap().original_text.as_deref(),
+            Some("PRIVATE_ORIGINAL")
         );
         assert_eq!(
             fact.value.as_ref().unwrap().corrected_text,

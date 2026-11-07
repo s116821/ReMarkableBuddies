@@ -288,15 +288,15 @@ fn exercise_literal_vectors(local: &Local) {
                             record: serde_json::from_value(e["record"].clone()).unwrap(),
                             revision: serde_json::from_value(e["revision"].clone()).unwrap(),
                             sample_sha256: digest(&raw),
-                            original_text_sha256: digest(
+                            original_text_sha256: Some(digest(
                                 e["original_text"].as_str().unwrap().as_bytes(),
-                            ),
+                            )),
                             corrected_text_sha256: digest(
                                 e["corrected_text"].as_str().unwrap().as_bytes(),
                             ),
                         },
                         png: raw,
-                        original_text: e["original_text"].as_str().unwrap().into(),
+                        original_text: Some(e["original_text"].as_str().unwrap().into()),
                         corrected_text: e["corrected_text"].as_str().unwrap().into(),
                     }
                 })
@@ -1723,3 +1723,86 @@ fn structured_version_keeps_all_existing_whole_page_outcomes() {
 }
 
 mod runtime_handwriting;
+
+#[test]
+fn mixed_abstention_context_uses_frozen_identity_and_descriptors() {
+    let vectors: Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/writer-abstention-mixed-vectors.json"
+    ))
+    .unwrap();
+    let identity: Value = serde_json::from_str(vectors["identity_json"].as_str().unwrap()).unwrap();
+    let examples = identity["examples"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip([(Some("A1"), "Al"), (None, "B2")])
+        .map(|(value, (original, corrected))| ConfirmedExample {
+            identity: ExampleIdentity {
+                correction: serde_json::from_value(value["correction"].clone()).unwrap(),
+                record: serde_json::from_value(value["record"].clone()).unwrap(),
+                revision: serde_json::from_value(value["revision"].clone()).unwrap(),
+                sample_sha256: value["sample_sha256"].as_str().unwrap().into(),
+                original_text_sha256: original.map(|text| digest(text.as_bytes())),
+                corrected_text_sha256: digest(corrected.as_bytes()),
+            },
+            png: png(),
+            original_text: original.map(str::to_owned),
+            corrected_text: corrected.into(),
+        })
+        .collect::<Vec<_>>();
+    let local = Local::new();
+    let owner = LocalCorrections::new(
+        Arc::new(Store::open(local.config.paths.clone()).unwrap()),
+        &local.config,
+    )
+    .unwrap();
+    let context = ConfirmedContext {
+        identity: ContextIdentity {
+            profile: serde_json::from_value(identity["profile"].clone()).unwrap(),
+            examples: examples.iter().map(|e| e.identity.clone()).collect(),
+        },
+        examples,
+        _owner: owner,
+    };
+    let context_json = serde_json::to_string(context.identity()).unwrap();
+    assert_eq!(context_json, vectors["identity_json"].as_str().unwrap());
+    assert_eq!(digest(context_json.as_bytes()), vectors["identity_sha256"]);
+    for verification in [false, true] {
+        let reader =
+            crate::handwriting::runtime::reader_payload("fixture", verification, &[], &context)
+                .unwrap();
+        assert_eq!(reader[2]["text"], vectors["instruction_part"]);
+        assert_eq!(reader[3]["text"], vectors["reader_descriptor_parts"][0]);
+        assert_eq!(reader[5]["text"], vectors["reader_descriptor_parts"][1]);
+    }
+    let target = notebook::admit_target(7, png(), &mut |_| Ok(())).unwrap();
+    let mut engine = Engine::new();
+    let (result, called) = notebook::normalize_admitted(
+        Uuid::new_v4(),
+        &target,
+        "fixture",
+        Some(&context),
+        TranscriptionPolicy::WholePage,
+        &mut engine,
+        &mut |_| Ok(()),
+    );
+    assert!(called);
+    let Normalized::Page(result) = result.unwrap() else {
+        panic!("expected page");
+    };
+    assert_eq!(engine.captured[2]["text"], vectors["instruction_part"]);
+    assert_eq!(
+        engine.captured[3]["text"],
+        vectors["notebook_descriptor_parts"][0]
+    );
+    assert_eq!(
+        engine.captured[5]["text"],
+        vectors["notebook_descriptor_parts"][1]
+    );
+    let expected = &vectors["profiles"]["whole-page"];
+    assert_eq!(
+        serde_json::to_string(&result.profile).unwrap(),
+        expected["profile_json"]
+    );
+    assert_eq!(result.document.extractor_revision, expected["extractor"]);
+}

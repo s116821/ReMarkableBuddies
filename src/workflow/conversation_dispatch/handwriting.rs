@@ -5,10 +5,7 @@ use crate::{
     handwriting::{self, runtime},
     retrieval::notebook,
 };
-use std::{
-    collections::BTreeSet,
-    io::{Cursor, Write},
-};
+use std::{collections::BTreeSet, io::Write};
 
 #[derive(Clone)]
 pub(crate) struct ImageRef {
@@ -25,7 +22,16 @@ pub(crate) struct WriterImageRequest {
     pub guidance: Option<String>,
     pub model_profile: String,
 }
+pub(crate) struct WriterAbstention {
+    store: Arc<crate::storage::Store>,
+    scope: RequestScope,
+    image: ImageRef,
+    sample_sha256: String,
+    profile: Uuid,
+}
+
 pub(crate) struct SourceReport {
+    pub(crate) abstention: Option<WriterAbstention>,
     pub result: Result<(writer::Report, Option<PendingOutput>)>,
     _capture: Option<runtime::Capture>,
     #[cfg(test)]
@@ -105,6 +111,7 @@ impl Dispatch<'_> {
         let mut report = SourceReport {
             result: Err(anyhow::anyhow!("source not admitted")),
             _capture: None,
+            abstention: None,
             #[cfg(test)]
             diagnostic: "source-admission",
         };
@@ -175,6 +182,7 @@ impl Dispatch<'_> {
                 .duration_since(std::time::UNIX_EPOCH)?
                 .as_millis()
                 .try_into()?;
+            let sample_sha256 = original_source.image.sha256.clone();
             let copied_source = crate::conversation::ImageUse {
                 id: source_id,
                 turn: stage,
@@ -233,6 +241,23 @@ impl Dispatch<'_> {
                     Ok(_) => "normalization-incomplete-page",
                 };
             }
+            if matches!(&normalized, Ok(notebook::Normalized::Unreadable)) {
+                receiving.check(ledger, observe)?;
+                resolve(ledger, admitted, &input.image)?;
+                if let (true, Some(profile)) = (
+                    self.config.handwriting.enabled,
+                    self.config.handwriting.profile,
+                ) {
+                    report.abstention = Some(WriterAbstention {
+                        store: ledger.store().clone(),
+                        scope: receiving,
+                        image: input.image.clone(),
+                        sample_sha256,
+                        profile,
+                    });
+                }
+                anyhow::bail!("source not a complete normalized page");
+            }
             let notebook::Normalized::Page(page) =
                 normalized.map_err(|_| anyhow::anyhow!("source normalization refused"))?
             else {
@@ -274,7 +299,9 @@ pub(crate) struct ConfirmIntent {
     pub normalized_source: Option<(Uuid, Uuid)>,
 }
 pub(crate) struct PreparedConfirmation {
+    #[cfg(test)]
     input: Vec<u8>,
+    validated: handwriting::ValidatedInput,
     owner: handwriting::LocalCorrections,
     store: Arc<crate::storage::Store>,
     scope: RequestScope,
@@ -283,6 +310,7 @@ pub(crate) struct PreparedConfirmation {
 }
 pub(crate) struct ConfirmationReport {
     pub report: handwriting::Report,
+    #[cfg(test)]
     frozen_input: Vec<u8>,
 }
 impl PreparedConfirmation {
@@ -308,15 +336,15 @@ impl PreparedConfirmation {
             );
         }
         use handwriting::Provider;
-        let validated = handwriting::parse(&mut Cursor::new(&self.input))
-            .map_err(|_| anyhow::anyhow!("invalid confirmed correction"))?;
         Ok(ConfirmationReport {
-            report: self.owner.execute(validated),
+            report: self.owner.execute(self.validated),
+            #[cfg(test)]
             frozen_input: self.input,
         })
     }
 }
 impl ConfirmationReport {
+    #[cfg(test)]
     pub(crate) fn frozen_input(&self) -> &[u8] {
         &self.frozen_input
     }
@@ -334,14 +362,13 @@ impl Dispatch<'_> {
         admitted: &RequestScope,
         observe: &mut dyn FnMut() -> Result<SourceObservation>,
     ) -> Result<PreparedConfirmation> {
-        use base64::{engine::general_purpose::STANDARD, Engine};
         self.require_ledger(ledger)?;
         ensure!(
             self.config.handwriting.enabled,
             "handwriting profile disabled"
         );
         admitted.check(ledger, observe)?;
-        let (source, turn, png) = resolve(ledger, admitted, &intent.image)?;
+        let (_, turn, png) = resolve(ledger, admitted, &intent.image)?;
         ensure!(
             png.len() <= handwriting::MAX_SAMPLE,
             "retained sample exceeds correction bound"
@@ -404,6 +431,57 @@ impl Dispatch<'_> {
             ensure!(units.len() == 1, "ambiguous normalized page interpretation");
             units[0].text.clone()
         };
+        self.prepare_confirmed_sample(ledger, admitted, intent, Some(original), &png, observe)
+    }
+
+    /// An input owner must supply the explicit save action and the exact abstention it presented.
+    #[allow(dead_code)]
+    pub(crate) fn prepare_writer_enrollment(
+        &mut self,
+        ledger: &Ledger,
+        abstention: &WriterAbstention,
+        corrected_text: String,
+        admitted: &RequestScope,
+        observe: &mut dyn FnMut() -> Result<SourceObservation>,
+    ) -> Result<PreparedConfirmation> {
+        self.require_ledger(ledger)?;
+        ensure!(
+            Arc::ptr_eq(&abstention.store, ledger.store())
+                && admitted.conversation == abstention.scope.conversation
+                && admitted.operation != abstention.scope.operation
+                && admitted.root.0 == abstention.scope.root.0
+                && admitted.source == abstention.scope.source
+                && self.config.handwriting.enabled
+                && self.config.handwriting.profile == Some(abstention.profile)
+                && self.admits(Mode::Writer, false),
+            "Writer abstention custody changed"
+        );
+        admitted.check(ledger, observe)?;
+        let (source, turn, png) = resolve(ledger, admitted, &abstention.image)?;
+        ensure!(
+            turn.mode == Mode::Writer && source.image.sha256 == abstention.sample_sha256,
+            "Writer abstention image changed"
+        );
+        notebook::static_png(&png)?;
+        let intent = ConfirmIntent {
+            image: abstention.image.clone(),
+            corrected_text,
+            normalized_source: None,
+        };
+        self.prepare_confirmed_sample(ledger, admitted, &intent, None, &png, observe)
+    }
+
+    fn prepare_confirmed_sample(
+        &mut self,
+        ledger: &Ledger,
+        admitted: &RequestScope,
+        intent: &ConfirmIntent,
+        original: Option<String>,
+        png: &[u8],
+        observe: &mut dyn FnMut() -> Result<SourceObservation>,
+    ) -> Result<PreparedConfirmation> {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let (source, turn, _) = resolve(ledger, admitted, &intent.image)?;
         let profile = self
             .config
             .handwriting
@@ -426,11 +504,47 @@ impl Dispatch<'_> {
             .duration_since(std::time::UNIX_EPOCH)?
             .as_millis()
             .try_into()?;
-        let input = serde_json::to_vec(
-            &serde_json::json!({"handwriting_version":1,"command":if expected.is_empty(){"confirm"}else{"update"},"profile":profile,"correction":correction,"operation":admitted.operation,"expected_heads":expected,"confirmation":"user-confirmed","original_text":original,"corrected_text":intent.corrected_text,"confirmed_ms":confirmed_ms,"provenance":{"kind":"caller-confirmed-sample","description":"Explicit runtime handwriting confirmation; source IDs are caller assertions, not native revision authority.","source":[admitted.conversation,turn.id,source.id]},"sample_png_base64":STANDARD.encode(&png)}),
-        )?;
-        handwriting::parse(&mut Cursor::new(&input))
-            .map_err(|_| anyhow::anyhow!("confirmed correction validation refused"))?;
+        let kind = if original.is_some() {
+            handwriting::ProvenanceKind::CallerConfirmedSample
+        } else {
+            handwriting::ProvenanceKind::CallerConfirmedAfterAbstention
+        };
+        let enrollment = original.is_none();
+        let first = expected.is_empty();
+        let confirm = Box::new(handwriting::ConfirmInput {
+            handwriting_version: 1,
+            profile,
+            correction,
+            operation: admitted.operation,
+            expected_heads: expected,
+            confirmation: "user-confirmed".into(),
+            original_text: original,
+            corrected_text: intent.corrected_text.clone(),
+            confirmed_ms,
+            provenance: handwriting::Provenance {
+                kind,
+                description: "Explicit runtime handwriting confirmation; source IDs are caller assertions, not native revision authority.".into(),
+                source: Some([admitted.conversation, turn.id, source.id]),
+            },
+            sample_png_base64: STANDARD.encode(png),
+        });
+        #[cfg(test)]
+        let input = {
+            let mut value = serde_json::to_value(&confirm)?;
+            value["command"] = serde_json::json!(if first { "confirm" } else { "update" });
+            serde_json::to_vec(&value)?
+        };
+        let request = if first {
+            handwriting::Request::Confirm(confirm)
+        } else {
+            handwriting::Request::Update(confirm)
+        };
+        let validated = if enrollment {
+            handwriting::validate_enrollment_request(request)
+        } else {
+            handwriting::validate_request(request)
+        }
+        .map_err(|_| anyhow::anyhow!("confirmed correction validation refused"))?;
         admitted.check(ledger, observe)?;
         resolve(ledger, admitted, &intent.image)?;
         // Reuse Dispatch's bounded event admission; unknown effects cannot be re-prepared.
@@ -457,7 +571,9 @@ impl Dispatch<'_> {
         let owner = handwriting::LocalCorrections::new(ledger.store().clone(), self.config)
             .map_err(|_| anyhow::anyhow!("correction ownership unavailable"))?;
         Ok(PreparedConfirmation {
+            #[cfg(test)]
             input,
+            validated,
             owner,
             store: ledger.store().clone(),
             scope: RequestScope {

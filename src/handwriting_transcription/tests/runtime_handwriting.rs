@@ -438,8 +438,9 @@ fn runtime_writer_normalizes_before_receiving_and_replay_never_calls_again() {
             .value
             .as_ref()
             .unwrap()
-            .original_text,
-        "café x²"
+            .original_text
+            .as_deref(),
+        Some("café x²")
     );
     assert_eq!(
         confirmed.report.facts[0]
@@ -610,4 +611,120 @@ fn runtime_writer_invalid_intent_and_changed_source_refuse_before_recognition() 
             .unwrap(),
         scope.root
     );
+}
+
+#[test]
+fn runtime_writer_enrolls_explicit_text_only_after_valid_abstention() {
+    for response in [
+        "{}",
+        r#"{"pages":[{"page":7,"status":"unreadable","text":""}]}"#,
+    ] {
+        let mut local = Local::ready_notebook(true);
+        enable(&mut local);
+        let (ledger, scope, image) = source_fixture(&local, Mode::Writer);
+        let mut dispatch = Dispatch::local(&local.config, &ledger).unwrap();
+        let input = WriterImageRequest {
+            image: image.clone(),
+            request: "Generate".into(),
+            guidance: None,
+            model_profile: "fixture".into(),
+        };
+        let mut engine = Calls {
+            parts: vec![],
+            calls: vec![],
+            replies: [response.into()].into(),
+        };
+        let mut observe = || Ok(scope.source.clone());
+        let mut report =
+            dispatch.writer_source_image(&ledger, &mut engine, &input, &scope, &mut observe);
+        assert!(report.result.is_err());
+        assert_eq!(engine.calls.len(), 1);
+        assert!(ledger
+            .inspect(scope.conversation, false)
+            .unwrap()
+            .iter()
+            .all(|record| !matches!(record, Record::NormalizedText(_))));
+        let corrections = || {
+            ledger
+                .store()
+                .snapshot_revisions_matching(&[Namespace::Handwriting], 4096, |_| true)
+                .unwrap()
+        };
+        assert!(corrections().is_empty());
+        let Some(abstention) = report.abstention.take() else {
+            assert_eq!(response, "{}");
+            continue;
+        };
+        assert_ne!(response, "{}");
+        let mut enrollment = RequestScope {
+            conversation: scope.conversation,
+            operation: scope.operation,
+            root: ledger
+                .expected(Namespace::Conversation, scope.conversation)
+                .unwrap(),
+            source: scope.source.clone(),
+        };
+        assert!(dispatch
+            .prepare_writer_enrollment(
+                &ledger,
+                &abstention,
+                "user text".into(),
+                &enrollment,
+                &mut observe,
+            )
+            .is_err());
+        enrollment.operation = Uuid::new_v4();
+        assert!(dispatch
+            .prepare_writer_enrollment(&ledger, &abstention, " ".into(), &enrollment, &mut observe,)
+            .is_err());
+        let prepared = dispatch
+            .prepare_writer_enrollment(
+                &ledger,
+                &abstention,
+                "user text".into(),
+                &enrollment,
+                &mut observe,
+            )
+            .unwrap();
+        assert!(handwriting::parse(&mut Cursor::new(prepared.frozen_input())).is_err());
+        let result = prepared.execute(&ledger, &mut observe).unwrap();
+        assert_eq!(result.report.status, handwriting::Status::Complete);
+        let value = result.report.facts[0].value.as_ref().unwrap();
+        assert_eq!(value.original_text, None);
+        assert_eq!(value.corrected_text, "user text");
+        assert!(matches!(
+            value.provenance.kind,
+            handwriting::ProvenanceKind::CallerConfirmedAfterAbstention
+        ));
+        assert_eq!(
+            value.provenance.source,
+            Some([scope.conversation, image.turn, image.source])
+        );
+        assert_eq!(
+            value.sample.sha256,
+            digest(&ledger.image(image.source).unwrap())
+        );
+        assert!(dispatch
+            .prepare_writer_enrollment(
+                &ledger,
+                &abstention,
+                "user text".into(),
+                &enrollment,
+                &mut observe,
+            )
+            .is_err());
+        assert_eq!(corrections().len(), 1);
+        let before = corrections();
+        drop(result);
+        drop(report);
+        drop(dispatch);
+        let archive = local.root.join("abstention-backup");
+        ledger.store().export_notebook_backup(&archive).unwrap();
+        ledger.store().restore_notebook_backup(&archive).unwrap();
+        assert!(corrections() == before);
+        assert_eq!(
+            digest(&ledger.image(image.source).unwrap()),
+            before[0].media_descriptors[0].sha256
+        );
+    }
 }

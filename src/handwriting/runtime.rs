@@ -125,18 +125,22 @@ pub(crate) fn reader_payload(
         json!({"type":"text","text":prompt}),
         json!({"type":"text","text":addendum}),
     ];
+    let absent_original = context.has_absent_original();
+    if absent_original {
+        parts.push(json!({"type":"text","text":super::context::ABSENT_ORIGINAL_INSTRUCTION}));
+    }
     for (i, e) in context.examples.iter().enumerate() {
         #[derive(serde::Serialize)]
         struct ExampleData<'a> {
             kind: &'static str,
             index: usize,
-            original_text: &'a str,
+            original_text: Option<&'a str>,
             corrected_text: &'a str,
         }
         let descriptor = serde_json::to_string(&ExampleData {
             kind: "confirmed-example",
             index: i + 1,
-            original_text: &e.original_text,
+            original_text: e.original_text.as_deref(),
             corrected_text: &e.corrected_text,
         })?;
 
@@ -156,7 +160,11 @@ pub(crate) fn reader_payload(
             && serde_json::to_vec(&parts)?.len() <= 24 * 1024 * 1024,
         "handwriting Reader payload exceeds bound"
     );
-    let task = if verification {
+    let task = if absent_original && verification {
+        "reader-verification-confirmed-v1-nullable-original-v1"
+    } else if absent_original {
+        "reader-analysis-confirmed-v1-nullable-original-v1"
+    } else if verification {
         "reader-verification-confirmed-v1"
     } else {
         "reader-analysis-confirmed-v1"

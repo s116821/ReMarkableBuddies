@@ -572,7 +572,29 @@ fn normalize_inner(
         TranscriptionPolicy::Partial | TranscriptionPolicy::PartialMath
     );
     let structured = policy == TranscriptionPolicy::StructuredMath;
+    let absent_original =
+        context.is_some_and(crate::handwriting::ConfirmedContext::has_absent_original);
     let (protocol, prompt_revision, extractor_prefix) = match (policy, context.is_some()) {
+        (TranscriptionPolicy::StructuredMath, true) if absent_original => (
+            4,
+            "transcribe-structured-math-confirmed-examples-v1-nullable-original-v1",
+            "notebook-ocr-structured-math-v1-nullable-original-v1:",
+        ),
+        (TranscriptionPolicy::PartialMath, true) if absent_original => (
+            3,
+            "transcribe-partial-math-confirmed-examples-v1-nullable-original-v1",
+            "notebook-ocr-partial-math-v1-nullable-original-v1:",
+        ),
+        (TranscriptionPolicy::Partial, true) if absent_original => (
+            3,
+            "transcribe-partial-confirmed-examples-v2-nullable-original-v1",
+            "notebook-ocr-partial-v2-nullable-original-v1:",
+        ),
+        (TranscriptionPolicy::WholePage, true) if absent_original => (
+            2,
+            "transcribe-confirmed-examples-v2-nullable-original-v1",
+            "notebook-ocr-confirmed-v2-nullable-original-v1:",
+        ),
         (TranscriptionPolicy::StructuredMath, true) => (
             4,
             "transcribe-structured-math-confirmed-examples-v1",
@@ -648,6 +670,11 @@ fn normalize_inner(
             include_str!("../handwriting/context-instructions.txt")
         };
         parts.push(json!({"type":"text","text":addendum}));
+        if absent_original {
+            parts.push(
+                json!({"type":"text","text":crate::handwriting::ABSENT_ORIGINAL_INSTRUCTION}),
+            );
+        }
         for (i, e) in context.examples.iter().enumerate() {
             let descriptor = json!({"kind":"confirmed-example", "index":i+1,
                 "original_text":e.original_text,"corrected_text":e.corrected_text})

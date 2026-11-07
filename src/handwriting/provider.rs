@@ -191,7 +191,10 @@ impl LocalCorrections {
                         record,
                         revision: selection.revision,
                         sample_sha256: value.sample.sha256.clone(),
-                        original_text_sha256: digest(value.original_text.as_bytes()),
+                        original_text_sha256: value
+                            .original_text
+                            .as_ref()
+                            .map(|original| digest(original.as_bytes())),
                         corrected_text_sha256: digest(value.corrected_text.as_bytes()),
                     },
                     png,
@@ -618,8 +621,12 @@ impl LocalCorrections {
             .collect::<Vec<_>>();
         let mut selected = Vec::new();
         for (envelope, value) in candidates {
-            let haystack =
-                format!("{}\n{}", value.original_text, value.corrected_text).to_lowercase();
+            let haystack = format!(
+                "{}\n{}",
+                value.original_text.as_deref().unwrap_or_default(),
+                value.corrected_text
+            )
+            .to_lowercase();
             if !words.iter().all(|w| haystack.contains(w)) {
                 continue;
             }

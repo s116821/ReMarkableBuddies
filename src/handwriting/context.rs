@@ -15,7 +15,7 @@ pub struct ExampleIdentity {
     pub record: Uuid,
     pub revision: Uuid,
     pub sample_sha256: String,
-    pub original_text_sha256: String,
+    pub original_text_sha256: Option<String>,
     pub corrected_text_sha256: String,
 }
 #[derive(Clone, Serialize)]
@@ -26,7 +26,7 @@ pub struct ContextIdentity {
 pub(crate) struct ConfirmedExample {
     pub identity: ExampleIdentity,
     pub png: Vec<u8>,
-    pub original_text: String,
+    pub original_text: Option<String>,
     pub corrected_text: String,
 }
 /// Private fields prevent unchecked text/images from impersonating a retained capture.
@@ -48,4 +48,13 @@ pub enum ContextFailure {
     Conflict,
     Unavailable,
     Storage,
+}
+
+pub(crate) const ABSENT_ORIGINAL_INSTRUCTION: &str = "A null original_text means no machine reading exists. The corrected_text is the transcription explicitly supplied by the user for that example image.";
+impl ConfirmedContext {
+    pub(crate) fn has_absent_original(&self) -> bool {
+        self.examples
+            .iter()
+            .any(|example| example.original_text.is_none())
+    }
 }
