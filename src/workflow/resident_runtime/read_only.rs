@@ -4,6 +4,11 @@ use remarkable_open_sdk::native_adapter::{ReaderFacts, Reply};
 
 pub enum ReadOnlyRequest {
     Observe,
+    #[cfg(buddy_development_native_pre_enter)]
+    CapturePreEnter {
+        offset: u32,
+        count: u16,
+    },
     #[cfg(feature = "development-native-close")]
     ObserveClosed,
     CaptureSource(ReaderFacts),
@@ -136,6 +141,11 @@ impl ResidentRuntime {
                     .context("resident connection absent; reconnect explicitly")?;
                 invoked = true;
                 match request {
+                    #[cfg(buddy_development_native_pre_enter)]
+                    ReadOnlyRequest::CapturePreEnter { offset, count } => connection
+                        .capture_pre_enter_with_progress(
+                            operation, offset, count, deadline, &mut pulse,
+                        ),
                     ReadOnlyRequest::Observe => {
                         connection.observe_with_progress(operation, deadline, &mut pulse)
                     }

@@ -131,6 +131,40 @@ while True:
                 with (root / "commands").open("ab") as commands:
                     commands.write(request[202:204])
             digest = hashlib.sha256(struct.pack(">I", len(request)) + request).digest()
+            if mode.startswith("reconnect-pre-enter") and request[202:204] == b"\x02\x0a":
+                # Wire fixture only. No native handle, arming marker or input model.
+                assert len(request) == 210
+                offset, units_count = struct.unpack(">IH", request[204:])
+                assert units_count <= 4096 and offset + units_count < 2147483647
+                with (root / "pre-enter-requests").open("ab") as log:
+                    log.write(request[186:202] + request[204:])
+                if mode.endswith(("-wait", "-progress")):
+                    assert peer.recv(1) == b""  # original deadline/cancellation retires client
+                    break
+                if mode.endswith("-refused"):
+                    payload = b"\x0c\x01"
+                elif mode.endswith("-unsupported"):
+                    payload = b"\x03\x00"
+                elif mode.endswith("-capacity"):
+                    payload = b"\x03\x04"
+                elif mode.endswith("-wrong-type"):
+                    payload = b"\x03\x01"  # rejection not allowed for this command
+                else:
+                    raw = [0x0041, 0x0000, 0x2029, 0xD800, 0xDC00, 0xDFFF]
+                    copied = units_count + (1 if mode.endswith("-wrong-count") else 0)
+                    payload = b"\x0c\x00" + struct.pack(">H", copied)
+                    payload += b"".join(struct.pack(">H", raw[i % len(raw)]) for i in range(copied))
+                response = bytearray(request[:202] + b"\x03" + digest + payload)
+                if mode.endswith("-wrong-digest"):
+                    response[203] ^= 1
+                elif mode.endswith("-wrong-operation"):
+                    response[186] ^= 1
+                elif mode.endswith("-wrong-sequence"):
+                    response[185] ^= 1
+                elif mode.endswith("-wrong-scope"):
+                    response[146] ^= 1
+                send(response)
+                continue
             if mode.startswith("reconnect-source-handoff") and request[202:204] == b"\x02\x00":
                 send(request[:202] + b"\x03" + digest + b"\x00" + source_facts)
                 continue
