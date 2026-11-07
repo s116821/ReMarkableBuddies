@@ -11,6 +11,9 @@ struct Fixture {
 }
 impl Fixture {
     fn new(wire: &Wire) -> Self {
+        Self::in_group(wire, Uuid::new_v4())
+    }
+    fn in_group(wire: &Wire, group: Uuid) -> Self {
         let root =
             std::env::temp_dir().join(format!("buddy-preference-command-{}", Uuid::new_v4()));
         let paths = StorePaths {
@@ -18,7 +21,6 @@ impl Fixture {
             cache: root.join("cache"),
             credentials: root.join("credentials"),
         };
-        let group = Uuid::new_v4();
         let binding = wire
             .client(root.join("provider/drive.json"), group)
             .binding_digest();
@@ -680,6 +682,175 @@ fn changed_config_at_output_invalidates_inspection_and_leaves_a_committed_edit_u
         .selected_receipt(&scope(&guard), noop)
         .unwrap()
         .is_none());
+}
+
+#[test]
+fn actual_command_producer_worker_second_store_and_reverse_edit_keep_original_custody() {
+    let wire = Wire::new();
+    let a = Fixture::new(&wire);
+    a.bootstrap(&wire);
+    let b = Fixture::in_group(&wire, a.group);
+    assert_eq!(a.binding, b.binding);
+    let guard = a.inspect(&wire, true);
+    let operation = Uuid::new_v4();
+    let edit = patch(json!({"product_settings":{"writer_enabled":false},"research_policy":null}));
+    let hash = edit.sha256();
+    drop(
+        a.command(&wire, Request::Edit(operation, guard.clone(), edit), true)
+            .unwrap(),
+    );
+    assert_eq!(posts(&wire), 0);
+    let make_worker = |fixture: &Fixture| {
+        Engine::new(
+            fixture.store.clone(),
+            SyncPolicy {
+                batch_items: 1,
+                ..Default::default()
+            },
+            wire.client(
+                fixture.store.paths.credentials.join("drive.json"),
+                fixture.group,
+            ),
+            Binding {
+                group: fixture.group,
+                root_id: "command-root".into(),
+                digest: fixture.binding.clone(),
+            },
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap()
+    };
+    let current_manifest = |fixture: &Fixture| {
+        fixture
+            .store
+            .selected_snapshot(
+                &SelectionScope {
+                    group: fixture.group,
+                    key_sha256: record::key_sha256(),
+                    binding_sha256: fixture.binding.clone(),
+                },
+                MAX_ITEMS,
+            )
+            .unwrap()
+            .map(|r| r.transaction.selected)
+    };
+    let applied = |engine: &Engine, manifest: &Manifest| {
+        engine
+            .checkpoint
+            .scopes
+            .get(&record::key_sha256())
+            .and_then(|p| p.applied.as_ref())
+            .is_some_and(|p| p.membership == receiving::membership(manifest).unwrap())
+    };
+    let original = current_manifest(&a).unwrap();
+    let mut sender = make_worker(&a);
+    for _ in 0..150 {
+        if applied(&sender, &original) {
+            break;
+        }
+        sender.step().unwrap();
+    }
+    assert!(applied(&sender, &original));
+    let before = posts(&wire);
+    let joining = b.command(&wire, Request::Inspect(false), true).unwrap();
+    assert_eq!(joining.status, "joining");
+    assert!(joining.guard.is_none());
+    drop(joining);
+    assert!(current_manifest(&b).is_none());
+    assert_eq!(posts(&wire), before);
+    let mut receiver = make_worker(&b);
+    for _ in 0..150 {
+        if applied(&receiver, &original) {
+            break;
+        }
+        receiver.step().unwrap();
+    }
+    assert!(applied(&receiver, &original));
+    assert_eq!(posts(&wire), before);
+    assert!(shared::same_membership(
+        &original,
+        &current_manifest(&b).unwrap()
+    ));
+    let inspected = b.command(&wire, Request::Inspect(false), false).unwrap();
+    assert_eq!(inspected.view.as_ref().unwrap()["writer_enabled"], false);
+    assert_eq!(
+        inspected.view.as_ref().unwrap()["origins"]["writer_enabled"],
+        "shared"
+    );
+    let b_guard = inspected.guard.clone().unwrap();
+    drop(inspected);
+    assert!(!original_status(
+        &b.store,
+        &Query {
+            shared_preferences_version: 1,
+            operation,
+            guard: guard.clone(),
+            patch_sha256: hash.clone()
+        },
+        &mut budget()
+    )
+    .unwrap());
+    let back_operation = Uuid::new_v4();
+    let back = patch(json!({"personalization":{"enabled":true,"text":"EXPLICIT SHARED TEXT"}}));
+    let back_hash = back.sha256();
+    drop(
+        b.command(
+            &wire,
+            Request::Edit(back_operation, b_guard.clone(), back),
+            false,
+        )
+        .unwrap(),
+    );
+    let revised = current_manifest(&b).unwrap();
+    for _ in 0..150 {
+        if applied(&receiver, &revised) {
+            break;
+        }
+        receiver.step().unwrap();
+    }
+    assert!(applied(&receiver, &revised));
+    let before = posts(&wire);
+    for _ in 0..150 {
+        if applied(&sender, &revised) {
+            break;
+        }
+        sender.step().unwrap();
+    }
+    assert!(applied(&sender, &revised));
+    assert_eq!(posts(&wire), before);
+    assert!(shared::same_membership(
+        &revised,
+        &current_manifest(&a).unwrap()
+    ));
+    let disclosed = a.command(&wire, Request::Inspect(true), false).unwrap();
+    assert_eq!(
+        disclosed.view.as_ref().unwrap()["personalization_text"],
+        "EXPLICIT SHARED TEXT"
+    );
+    assert_eq!(disclosed.view.as_ref().unwrap()["writer_enabled"], false);
+    drop(disclosed);
+    assert!(original_status(
+        &a.store,
+        &Query {
+            shared_preferences_version: 1,
+            operation,
+            guard,
+            patch_sha256: hash
+        },
+        &mut budget()
+    )
+    .unwrap());
+    assert!(original_status(
+        &b.store,
+        &Query {
+            shared_preferences_version: 1,
+            operation: back_operation,
+            guard: b_guard,
+            patch_sha256: back_hash
+        },
+        &mut budget()
+    )
+    .unwrap());
 }
 
 #[test]
