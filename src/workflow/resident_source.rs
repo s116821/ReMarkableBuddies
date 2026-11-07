@@ -1513,12 +1513,14 @@ mod tests {
                 .unwrap();
 
             assert!(matches!(outcome, ResidentOutputOutcome::Unresolved));
+            // Acquisition retired its socket, so output must reconnect before
+            // observing the unchanged source on the same owned peer.
             if let Some(bytes) = original_journal {
-                assert_eq!(&*events.borrow(), &["observe"]);
+                assert_eq!(&*events.borrow(), &["reconnect", "observe"]);
                 assert_eq!(backend.conversation, None);
                 assert_eq!(std::fs::read(journal).unwrap(), bytes);
             } else {
-                assert_eq!(&*events.borrow(), &["observe", "capture"]);
+                assert_eq!(&*events.borrow(), &["reconnect", "observe", "capture"]);
                 assert_eq!(backend.conversation, Some(next));
                 assert!(!journal.exists());
             }
