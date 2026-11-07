@@ -1694,3 +1694,5 @@ fn structured_version_keeps_all_existing_whole_page_outcomes() {
         assert_eq!(wire["confirmed"], false);
     }
 }
+
+mod runtime_handwriting;

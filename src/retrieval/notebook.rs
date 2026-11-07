@@ -392,6 +392,9 @@ pub(crate) struct AdmittedTarget {
     source_sha256: String,
 }
 impl AdmittedTarget {
+    pub(crate) fn source_sha256(&self) -> &str {
+        &self.source_sha256
+    }
     pub(crate) fn sha256(&self) -> &str {
         &self.identity.png_sha256
     }

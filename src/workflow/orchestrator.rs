@@ -68,7 +68,16 @@ pub struct Orchestrator<M: LLMEngine = OpenAI> {
     ledger: Ledger,
     memory: Option<std::sync::Arc<dyn crate::memory::Provider>>,
     personalization: crate::config::PersonalizationSnapshot,
+    handwriting: Option<crate::handwriting::runtime::Runtime>,
+    handwriting_operation: Option<crate::handwriting::runtime::Capture>,
 }
+struct ModelContent<'a, M: LLMEngine>(&'a mut M);
+impl<M: LLMEngine> Drop for ModelContent<'_, M> {
+    fn drop(&mut self) {
+        self.0.clear_content();
+    }
+}
+
 enum RenderOutcome {
     NoOutput(AttemptReason),
     SubmittedUnverified,
@@ -84,6 +93,10 @@ impl<M: LLMEngine> Orchestrator<M> {
         user: crate::conversation::IntentRecordRef,
         capture: crate::storage::Uuid,
     ) -> Result<()> {
+        anyhow::ensure!(
+            self.handwriting.is_none(),
+            "confirmed handwriting requires ordinary local Reader"
+        );
         if let Some(memory) = &self.memory {
             let admission = self.workflow.selected_admission()?;
             memory.require_selected_reader(admission.as_ref())?;
@@ -101,6 +114,8 @@ impl<M: LLMEngine> Orchestrator<M> {
             trigger_enabled: true,
             ledger,
             memory: None,
+            handwriting: None,
+            handwriting_operation: None,
             personalization: crate::config::Personalization::default()
                 .snapshot()
                 .expect("valid default preference"),
@@ -152,22 +167,31 @@ impl<M: LLMEngine> Orchestrator<M> {
     }
 
     fn run_iteration_with_trigger(&mut self, wait_for_trigger: bool) -> Result<()> {
-        let _timing = crate::measurement::Span::new("reader.iteration");
-        self.workflow.begin_iteration()?;
-        let result = self.run_iteration_inner(wait_for_trigger);
-        // A failed input guard or service health cannot be cleared by cleanup.
-        if self.workflow.runtime_failed() {
-            return result.and(Err(anyhow::anyhow!(
-                "Runtime health or input lost; further activity stopped"
-            )));
-        }
-        if let Err(error) = self.workflow.finish_request() {
-            log::warn!("Request finalization failed: {error:#}");
-            return result.and(Err(error));
-        }
-        if result.is_err() {
-            self.workflow.report_failure(Failure::Device)?;
-        }
+        anyhow::ensure!(
+            self.handwriting_operation.is_none(),
+            "prior handwriting operation unsettled"
+        );
+        let result = (|| -> Result<()> {
+            let _timing = crate::measurement::Span::new("reader.iteration");
+            self.workflow.begin_iteration()?;
+            let result = self.run_iteration_inner(wait_for_trigger);
+            // A failed input guard or service health cannot be cleared by cleanup.
+            if self.workflow.runtime_failed() {
+                return result.and(Err(anyhow::anyhow!(
+                    "Runtime health or input lost; further activity stopped"
+                )));
+            }
+            if let Err(error) = self.workflow.finish_request() {
+                log::warn!("Request finalization failed: {error:#}");
+                return result.and(Err(error));
+            }
+            if result.is_err() {
+                self.workflow.report_failure(Failure::Device)?;
+            }
+            result
+        })();
+        // Keep successful/refused capture ownership through finalization and failure output.
+        self.handwriting_operation = None;
         result
     }
 
@@ -420,6 +444,10 @@ impl<M: LLMEngine> Orchestrator<M> {
     }
 
     fn run_prepared(&mut self, attempt: &mut Attempt) -> Result<()> {
+        anyhow::ensure!(
+            self.handwriting_operation.is_none(),
+            "handwriting context already captured for this operation"
+        );
         let personalization = self.personalization.clone();
         let images = attempt.images(&self.ledger)?;
         let screenshot_png_data = images
@@ -428,6 +456,30 @@ impl<M: LLMEngine> Orchestrator<M> {
             .clone();
         let encoded: Vec<String> = images.iter().map(|bytes| STANDARD.encode(bytes)).collect();
         let screenshot_base64 = &encoded[0];
+        let handwriting = self.handwriting.as_ref().map(|runtime| {
+            let targets = images
+                .iter()
+                .map(|image| crate::storage::digest(image))
+                .collect();
+            runtime.capture(self.ledger.store(), &targets, &mut || {
+                attempt
+                    .check_selected()
+                    .and_then(|_| self.workflow.check_request_progress())
+                    .map_err(|_| crate::handwriting::ContextFailure::Canceled)
+            })
+        });
+
+        if let Some(capture) = &handwriting {
+            log::debug!("Handwriting selection {}", capture.diagnostic());
+        }
+        let confirmed_context = handwriting.as_ref().and_then(|c| c.context.clone());
+        self.handwriting_operation = handwriting;
+        anyhow::ensure!(
+            self.handwriting_operation
+                .as_ref()
+                .is_none_or(|c| c.failure.is_none()),
+            "handwriting context unavailable"
+        );
 
         self.workflow.check_request_progress()?;
 
@@ -441,6 +493,7 @@ impl<M: LLMEngine> Orchestrator<M> {
             screenshot_base64,
             screenshot_png_data,
             &encoded[1..],
+            confirmed_context.as_deref(),
         )?;
 
         match result {
@@ -463,7 +516,12 @@ impl<M: LLMEngine> Orchestrator<M> {
                     .iter()
                     .map(|bytes| STANDARD.encode(bytes))
                     .collect();
-                if let Some(failure) = self.verify_question(attempt, &result, &verification)? {
+                if let Some(failure) = self.verify_question(
+                    attempt,
+                    &result,
+                    &verification,
+                    confirmed_context.as_deref(),
+                )? {
                     info!(
                         "Independent question reading disagreed or was uncertain; no answer written"
                     );
@@ -720,15 +778,34 @@ impl<M: LLMEngine> Orchestrator<M> {
         screenshot_base64: &str,
         screenshot_png_data: Vec<u8>,
         details: &[String],
+        context: Option<&crate::handwriting::ConfirmedContext>,
     ) -> Result<Option<AnalysisResult>> {
         attempt.check_selected()?;
         info!("Sending analysis + answer proposal");
 
-        self.llm.clear_content();
-        self.llm.add_text_content(ANALYSIS_PROMPT);
-        self.llm.add_image_content(screenshot_base64);
-        for detail in details {
-            self.llm.add_image_content(detail);
+        let payload = context
+            .map(|context| {
+                let targets = std::iter::once(screenshot_base64.to_owned())
+                    .chain(details.iter().cloned())
+                    .collect::<Vec<_>>();
+                crate::handwriting::runtime::reader_payload(
+                    ANALYSIS_PROMPT,
+                    false,
+                    &targets,
+                    context,
+                )
+            })
+            .transpose()?;
+        let owned = ModelContent(&mut self.llm);
+        owned.0.clear_content();
+        if let Some(parts) = payload {
+            crate::handwriting::runtime::send_parts(owned.0, &parts);
+        } else {
+            owned.0.add_text_content(ANALYSIS_PROMPT);
+            owned.0.add_image_content(screenshot_base64);
+            for detail in details {
+                owned.0.add_image_content(detail);
+            }
         }
 
         let mut progress_failed = false;
@@ -736,7 +813,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         // payload assembly all consume the original acquisition budget. Retire
         // that deadline only at the actual first provider-admission boundary.
         self.workflow.deliver_reader_acquisition()?;
-        let response = match self.llm.execute_with_progress(&mut || {
+        let response = match owned.0.execute_with_progress(&mut || {
             let result = attempt
                 .check_selected()
                 .and_then(|_| self.workflow.check_request_progress());
@@ -821,6 +898,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         attempt: &Attempt,
         result: &AnalysisResult,
         images: &[String],
+        context: Option<&crate::handwriting::ConfirmedContext>,
     ) -> Result<Option<Failure>> {
         attempt.check_selected()?;
         let Some(bounds) = &result._question_box else {
@@ -829,8 +907,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         if !(0..1024).contains(&bounds.y) || bounds.height <= 0 {
             return Ok(Some(Failure::Transcription));
         }
-        self.llm.clear_content();
-        self.llm.add_text_content(
+        let prompt =
             "Transcribe only the handwritten question annotation in these images of the same page. Typeset \
              document text is not a handwritten question. Preserve the visible words and \
              abbreviations; shorthand and fragments are valid annotations and need not form \
@@ -838,13 +915,22 @@ impl<M: LLMEngine> Orchestrator<M> {
              meaning. Do not expand or guess them from printed context. Do not answer \
              the question. If an essential handwritten word is uncertain, overstruck or \
              unreadable, or there is no handwritten question, return only NONE. Otherwise \
-             return one line: TRANSCRIPTION: [exact handwritten text].",
-        );
-        for image in images {
-            self.llm.add_image_content(image);
+             return one line: TRANSCRIPTION: [exact handwritten text].";
+        let payload = context
+            .map(|c| crate::handwriting::runtime::reader_payload(prompt, true, images, c))
+            .transpose()?;
+        let owned = ModelContent(&mut self.llm);
+        owned.0.clear_content();
+        if let Some(parts) = payload {
+            crate::handwriting::runtime::send_parts(owned.0, &parts);
+        } else {
+            owned.0.add_text_content(prompt);
+            for image in images {
+                owned.0.add_image_content(image);
+            }
         }
         let mut progress_failed = false;
-        let reading = match self.llm.execute_with_progress(&mut || {
+        let reading = match owned.0.execute_with_progress(&mut || {
             let result = attempt
                 .check_selected()
                 .and_then(|_| self.workflow.check_request_progress());
@@ -1122,6 +1208,18 @@ impl<M: LLMEngine> Orchestrator<M> {
         Ok(RenderOutcome::SubmittedUnverified)
     }
 
+    pub(crate) fn set_local_handwriting(
+        &mut self,
+        dispatch: &super::conversation_dispatch::Dispatch<'_>,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.handwriting_operation.is_none(),
+            "handwriting operation still active"
+        );
+        self.handwriting = dispatch.handwriting_runtime(&self.ledger)?;
+        Ok(())
+    }
+
     /// Run the main loop
     pub fn run_loop(&mut self) -> Result<()> {
         self.run_loop_with_dispatch(None)
@@ -1132,6 +1230,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         dispatch: super::conversation_dispatch::Dispatch<'_>,
     ) -> Result<()> {
         dispatch.require_ledger(&self.ledger)?;
+        self.set_local_handwriting(&dispatch)?;
         self.run_loop_with_dispatch(Some(dispatch))
     }
 

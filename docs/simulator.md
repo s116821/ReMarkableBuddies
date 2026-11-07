@@ -393,3 +393,14 @@ two notebook sequence queries). Scripted replies demonstrate payload wiring and
 ownership assertions; they do not demonstrate model semantics or native effects.
 A live enabled run requires separate exact-source/fixture selection and retains
 the existing seven-call, no-retry and time/token bounds.
+
+
+Confirmed-handwriting runtime controls live in `src/simulator/handwriting_tests.rs`
+and the real-Store transcription runtime tests. They run the production Reader
+orchestrator with synthetic confirmed PNGs and declared replies, checking both
+actual payloads, disabled/empty compatibility, output suppression, cancellation,
+provider failure and context-byte refusal. Writer receiving controls exercise the
+real normalizer then normalized-source generation and source-bound confirmation.
+These controls prove plumbing/custody, not recognition, learning efficacy, native
+Writer image ingress or composer confirmation authority. No model/tablet access is
+needed to run the focused Cargo handwriting group.

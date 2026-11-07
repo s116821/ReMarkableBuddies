@@ -1,7 +1,7 @@
 //! Owned, explicitly selected confirmed examples; no implicit search or mutation.
 use super::*;
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExampleSelection {
     #[serde(deserialize_with = "id")]

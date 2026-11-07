@@ -1,6 +1,9 @@
 //! Explicit confirmed sample data. No recognition, native authority or model training.
 pub mod command;
+mod configuration;
+pub use configuration::Configuration;
 mod context;
+pub(crate) mod runtime;
 pub(crate) use context::ConfirmedExample;
 pub use context::{
     ConfirmedContext, ContextFailure, ContextIdentity, ExampleIdentity, ExampleSelection,
