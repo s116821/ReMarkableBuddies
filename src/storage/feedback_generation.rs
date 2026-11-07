@@ -100,6 +100,13 @@ pub(crate) fn prepare(
     );
     let generation = inner.generation;
     let root = store.generation(generation);
+    ensure!(
+        matches!(
+            version(&root)?,
+            FORMAT | selection::SELECTED_STORE_FORMAT | VERSION | notebook_generation::VERSION
+        ),
+        "feedback preparation does not support compound storage"
+    );
     selection::validate_generation_preparing(&root, store.actor_id, generation)?;
     if version(&root)? == notebook_generation::VERSION {
         ensure!(

@@ -191,6 +191,13 @@ pub(crate) fn prepare(
         "notebook current changed"
     );
     let root = store.generation(generation);
+    ensure!(
+        matches!(
+            feedback_generation::version(&root)?,
+            FORMAT | selection::SELECTED_STORE_FORMAT | feedback_generation::VERSION | VERSION
+        ),
+        "ordinary notebook preparation does not support compound storage"
+    );
     selection::validate_generation_preparing_notebook(&root, store.actor_id, generation)?;
     selection::refuse_selected_maintenance(&root)?;
     let retained = root.join("selection-history");

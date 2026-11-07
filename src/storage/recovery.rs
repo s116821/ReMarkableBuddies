@@ -316,7 +316,7 @@ impl Store {
                 version == feedback_generation::VERSION
                     && !root.join("selection-feature.json").exists()
             } else {
-                version != feedback_generation::VERSION && version != notebook_generation::VERSION
+                matches!(version, FORMAT | selection::SELECTED_STORE_FORMAT)
             },
             "unsupported backup generation policy"
         );
@@ -506,7 +506,10 @@ impl Store {
         );
         let root = self.generation(inner.generation);
         ensure!(
-            !matches!(feedback_generation::version(&root)?, 3 | 4),
+            matches!(
+                feedback_generation::version(&root)?,
+                FORMAT | selection::SELECTED_STORE_FORMAT
+            ),
             "selected feature backup unsupported"
         );
         let selected = selection::portable::collect(&root, self.actor_id, inner.generation)?;
@@ -675,7 +678,10 @@ impl Store {
     ) -> Result<()> {
         let current_root = self.generation(inner.generation);
         ensure!(
-            feedback_generation::version(&current_root)? != notebook_generation::VERSION,
+            matches!(
+                feedback_generation::version(&current_root)?,
+                FORMAT | selection::SELECTED_STORE_FORMAT | feedback_generation::VERSION
+            ),
             "legacy restore does not support notebook generation"
         );
         if exclusive {

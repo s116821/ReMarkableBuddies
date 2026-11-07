@@ -467,6 +467,81 @@ fn ready_compound_never_enters_ordinary_reader_startup_or_fallback() {
 }
 
 #[test]
+fn legacy_generation_entrypoints_refuse_compound_without_export_or_downgrade() {
+    let source_fixture = Fixture::new();
+    let source = Store::open(source_fixture.paths()).unwrap();
+    let archive = source_fixture.0.join("ordinary-archive");
+    source.export(&archive).unwrap();
+    drop(source);
+    for operation in [
+        "ordinary-export",
+        "selected-export",
+        "ordinary-restore",
+        "feedback-prepare",
+        "notebook-prepare",
+    ] {
+        let fixture = Fixture::new();
+        let request = fixture.request();
+        let mut store = Some(Store::prepare_shared_notebook(fixture.paths(), request).unwrap());
+        let root = store.as_ref().unwrap().generation(fixture.current());
+        let staged = root.join("objects/.stage-preserved-owner-artifact");
+        fs::write(
+            &staged,
+            b"unsupported maintenance must not clean original staging",
+        )
+        .unwrap();
+        let files = [
+            fixture.paths().data.join("CURRENT"),
+            fixture.paths().data.join("capabilities.json"),
+            root.join("format.json"),
+            root.join(MARKER),
+            root.join(notebook_generation::MARKER),
+            root.join("selection-feature.json"),
+            staged,
+        ];
+        let before: Vec<_> = files.iter().map(|p| fs::read(p).unwrap()).collect();
+        let generations = fs::read_dir(fixture.paths().data.join("generations"))
+            .unwrap()
+            .count();
+        let destination = fixture.0.join("unsupported-export");
+        let result = match operation {
+            "ordinary-export" => store.as_ref().unwrap().export(&destination).map(|_| ()),
+            "selected-export" => store
+                .as_ref()
+                .unwrap()
+                .export_selected(&destination)
+                .map(|_| ()),
+            "ordinary-restore" => store.as_ref().unwrap().restore(&archive),
+            "feedback-prepare" => {
+                drop(store.take());
+                crate::unassociated_feedback::Feedback::prepare(fixture.paths()).map(|_| ())
+            }
+            "notebook-prepare" => {
+                drop(store.take());
+                Store::prepare_notebook(fixture.paths()).map(|_| ())
+            }
+            _ => unreachable!(),
+        };
+        drop(store);
+        assert!(
+            result.is_err(),
+            "legacy {operation} must not admit compound storage"
+        );
+        assert!(!destination.exists());
+        assert_eq!(
+            fs::read_dir(fixture.paths().data.join("generations"))
+                .unwrap()
+                .count(),
+            generations
+        );
+        for (path, raw) in files.iter().zip(before) {
+            assert_eq!(fs::read(path).unwrap(), raw, "{operation} changed metadata");
+        }
+        drop(Store::open(fixture.paths()).unwrap());
+    }
+}
+
+#[test]
 fn original_reconciliation_never_repairs_missing_published_feature_markers() {
     for marker in [
         MARKER,

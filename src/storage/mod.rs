@@ -312,6 +312,14 @@ impl Store {
             .try_lock()
             .map_err(|_| anyhow::anyhow!("store is owned by another process"))?;
         let lease = Lease(lease);
+        if preparation != OpenPreparation::None && paths.data.join("CURRENT").exists() {
+            let generation: Uuid = files::json(&paths.data.join("CURRENT"), 128)?;
+            let root = paths.data.join("generations").join(generation.to_string());
+            ensure!(
+                feedback_generation::version(&root)? != compound_generation::VERSION,
+                "legacy preparation does not support compound storage"
+            );
+        }
         for root in [&paths.cache, &paths.credentials] {
             if root.exists() && !root.join("owner.json").exists() {
                 ensure!(
