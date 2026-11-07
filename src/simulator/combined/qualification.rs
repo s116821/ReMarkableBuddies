@@ -756,6 +756,106 @@ mod tests {
     }
 
     #[test]
+    fn enabled_reader_cancellation_and_intervening_root_never_overwrite_a_winner() -> Result<()> {
+        for move_root in [false, true] {
+            let fixture = SimulatorLedger::new();
+            let ledger = fixture.open()?;
+            let conversation = Uuid::new_v4();
+            ledger.create(conversation, Uuid::new_v4(), 1)?;
+            let source = fixture_source(Uuid::new_v4());
+            let config = memory_config(&ledger, source.document, true)?;
+            let mut dispatch = Dispatch::local(&config, &ledger)?;
+            let admitted = scope(&ledger, conversation, &source)?;
+            let mut model = Model::default();
+            let mut observations = 0;
+            let winner_id = Uuid::new_v4();
+            let mut winner_root = None;
+            let result = dispatch.reader(
+                &ledger,
+                &mut model,
+                "source physics",
+                None,
+                &admitted,
+                &mut || {
+                    observations += 1;
+                    if observations > 1 {
+                        if !move_root {
+                            anyhow::bail!("synthetic visit cancellation");
+                        }
+                        if winner_root.is_none() {
+                            let turn = crate::conversation::Turn {
+                                id: winner_id,
+                                conversation,
+                                exchange: Uuid::new_v4(),
+                                sequence: 0,
+                                role: Role::User,
+                                mode: Mode::Reader,
+                                outcome: Outcome::Interpreted,
+                                text: Some("intervening winner".into()),
+                                sources: vec![],
+                                correction_of: None,
+                                created_ms: 1,
+                                updated_ms: 1,
+                                completion: None,
+                            };
+                            ledger.append(
+                                Uuid::new_v4(),
+                                ledger.expected(
+                                    crate::storage::Namespace::Conversation,
+                                    conversation,
+                                )?,
+                                turn,
+                                vec![],
+                            )?;
+                            winner_root =
+                                Some(ledger.expected(
+                                    crate::storage::Namespace::Conversation,
+                                    conversation,
+                                )?);
+                        }
+                    }
+                    Ok(source.clone())
+                },
+            );
+            ensure!(
+                result.is_err() && model.seen.is_empty(),
+                "lost owner reached model"
+            );
+            ensure!(
+                dispatch.local_memory().unwrap().query_count() == 0,
+                "lost owner queried memory"
+            );
+            let envelope = ledger
+                .store()
+                .value(
+                    crate::storage::Namespace::Conversation,
+                    writer::stage(admitted.operation, "reader-user"),
+                )?
+                .context("original absent")?;
+            let Record::Turn(turn) = Ledger::decode(&envelope)? else {
+                anyhow::bail!("not turn")
+            };
+            ensure!(
+                turn.outcome
+                    == if move_root {
+                        Outcome::Interpreted
+                    } else {
+                        Outcome::Canceled
+                    },
+                "invalid ownership settlement"
+            );
+            if let Some(winner_root) = winner_root {
+                ensure!(
+                    ledger.expected(crate::storage::Namespace::Conversation, conversation)?
+                        == winner_root,
+                    "winner overwritten"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn enabled_fixture_reaches_six_receivers_but_never_maps() -> Result<()> {
         let image = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("docs/validation/images/selected-memory/source-page.png");
