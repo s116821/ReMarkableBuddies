@@ -612,6 +612,7 @@ impl Store {
                 encoded.len() as u64 == item.bytes && digest(&encoded) == item.sha256,
                 "record changed after verification"
             );
+            crate::config::portable::record::validate_raw_if_portable(&encoded)?;
             let envelope: Envelope = serde_json::from_slice(&encoded)
                 .map_err(|_| anyhow::anyhow!("invalid or unsupported stored JSON"))?;
             envelope.validate()?;
@@ -622,7 +623,6 @@ impl Store {
                     "portable configuration requires compound selected storage"
                 );
                 compound_generation::validate_portable_generation(root)?;
-                crate::config::inspection::strict_json(&encoded)?;
                 crate::config::portable::selected::Artifact::from_value(envelope.payload.clone())
                     .map_err(|_| anyhow::anyhow!("invalid portable configuration declaration"))?;
             }

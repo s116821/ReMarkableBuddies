@@ -71,6 +71,27 @@ pub struct Projection {
     head: Envelope,
     artifact: Artifact,
 }
+/// Inspect original arrays before Envelope's set representation can normalize
+/// them. Non-portable envelopes retain their existing decoding policy.
+pub(crate) fn validate_raw_if_portable(bytes: &[u8]) -> Result<bool> {
+    let probe: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|_| anyhow::anyhow!("invalid or unsupported stored JSON"))?;
+    if probe.get("namespace").and_then(serde_json::Value::as_str) != Some("portable-configuration")
+    {
+        return Ok(false);
+    }
+    let original = crate::config::inspection::strict_json(bytes)
+        .map_err(|_| anyhow::anyhow!("invalid portable original JSON"))?;
+    let parents = original
+        .get("parents")
+        .and_then(serde_json::Value::as_array)
+        .context("invalid portable original parents")?;
+    ensure!(
+        parents.len() <= 1,
+        "portable original parents must be unique and unbranched"
+    );
+    Ok(true)
+}
 impl Projection {
     pub fn artifact(&self) -> &Artifact {
         &self.artifact
@@ -87,7 +108,10 @@ fn decode(group: Uuid, reference: &ObjectRef, bytes: &[u8]) -> Result<Envelope> 
         bytes.len() as u64 == reference.bytes && digest(bytes) == reference.sha256,
         "portable original object differs"
     );
-    crate::config::inspection::strict_json(bytes)?;
+    ensure!(
+        validate_raw_if_portable(bytes)?,
+        "portable original namespace differs"
+    );
     let envelope: Envelope = serde_json::from_slice(bytes)?;
     envelope.validate()?;
     ensure!(

@@ -368,3 +368,105 @@ fn legacy_families_refuse_portable_namespace_without_generation_or_object_change
             .is_none());
     }
 }
+
+#[test]
+fn raw_duplicate_parent_refuses_before_set_normalization_in_projection_and_store() {
+    for duplicate in [false, true] {
+        let fixture = Fixture::new();
+        let mut original = condition(Uuid::new_v4());
+        let store = fixture.prepare(&original);
+        original.store_generation = fixture.generation();
+        let first_operation = Uuid::new_v4();
+        let first = prepare(
+            store.actor_id,
+            first_operation,
+            &original,
+            None,
+            &patch(json!({"product_settings":{"writer_enabled":false}})),
+        )
+        .unwrap()
+        .unwrap();
+        let (initial, objects) = bundle(std::slice::from_ref(&first));
+        let published = store
+            .initialize_selected(
+                &scope(&original),
+                SelectionChange {
+                    operation: first_operation,
+                    accepted_base_sha256: digest(b"raw parent genesis fixture"),
+                    selected: initial,
+                    retained: vec![],
+                },
+                objects,
+            )
+            .unwrap();
+        let previous = project(
+            &scope(&original),
+            &published.transaction.selected,
+            |reference| store.read_object(reference),
+        )
+        .unwrap();
+        original.selection = SelectionCondition::Selected {
+            aggregate_generation: published.token.aggregate_generation(),
+            accepted_base_sha256: published.token.accepted_base_sha256().into(),
+            selection_sha256: published.token.selection_sha256().into(),
+            revision: previous.revision(),
+        };
+        let child = prepare(
+            store.actor_id,
+            Uuid::new_v4(),
+            &original,
+            Some(&previous),
+            &patch(json!({"product_settings":{"writer_enabled":true}})),
+        )
+        .unwrap()
+        .unwrap();
+        let parent = first.revision_id;
+        let (mut manifest, mut objects) = bundle(&[first, child]);
+        if duplicate {
+            let old = manifest.records[1].sha256.clone();
+            let mut raw: serde_json::Value =
+                serde_json::from_slice(&objects.remove(&old).unwrap()).unwrap();
+            raw["parents"] = json!([parent, parent]);
+            let bytes = serde_json::to_vec_pretty(&raw).unwrap();
+            let hash = digest(&bytes);
+            manifest.records[1] = ObjectRef {
+                sha256: hash.clone(),
+                bytes: bytes.len() as u64,
+            };
+            manifest.record_namespaces.remove(&old);
+            manifest
+                .record_namespaces
+                .insert(hash.clone(), Namespace::PortableConfiguration);
+            objects.insert(hash, bytes);
+        }
+        let projected = project(&scope(&original), &manifest, |reference| {
+            Ok(objects[&reference.sha256].clone())
+        })
+        .is_ok();
+        let accepted = store
+            .activate_selected(
+                &published.token,
+                SelectionChange {
+                    operation: Uuid::new_v4(),
+                    accepted_base_sha256: digest(b"raw parent candidate fixture"),
+                    selected: manifest,
+                    retained: vec![],
+                },
+                objects,
+            )
+            .is_ok();
+        assert_eq!(
+            (projected, accepted),
+            (!duplicate, !duplicate),
+            "raw duplicate parents={duplicate}: projection/Store admission"
+        );
+        if duplicate {
+            let current = store
+                .selected_snapshot(&scope(&original), MAX_ITEMS)
+                .unwrap()
+                .unwrap();
+            assert_eq!(current.token, published.token);
+            assert!(current.transaction.selected == published.transaction.selected);
+        }
+    }
+}
