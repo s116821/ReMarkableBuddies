@@ -11,6 +11,7 @@ mod catalog;
 mod control;
 mod protocol;
 pub(crate) use control::{create_group, CreateGroupRequest, GroupOutcome};
+mod preferences;
 mod publication;
 mod receiving;
 #[cfg(test)]
@@ -91,9 +92,36 @@ impl Recorded {
 struct CatalogPending {
     operation: Uuid,
     source_generation: Uuid,
-    registration: crate::memory::catalog::Registration,
+    registration: Option<crate::memory::catalog::Registration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    portable: Option<PortableRegistration>,
     genesis_slot: Option<String>,
     proposal: Option<CatalogProposal>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PortableRegistration {
+    genesis_operation: Uuid,
+    genesis_sha256: String,
+}
+impl CatalogPending {
+    fn owner(&self) -> Result<Owner> {
+        match (&self.registration, &self.portable) {
+            (Some(memory), None) => Ok(Owner::Memory(memory.owner.clone())),
+            (None, Some(_)) => Ok(Owner::preferences()),
+            _ => anyhow::bail!("catalog original source is ambiguous"),
+        }
+    }
+    fn key(&self) -> Result<String> {
+        self.owner()?.key_sha256()
+    }
+    fn genesis_operation(&self) -> Result<Uuid> {
+        match (&self.registration, &self.portable) {
+            (Some(memory), None) => Ok(memory.genesis_operation),
+            (None, Some(portable)) => Ok(portable.genesis_operation),
+            _ => anyhow::bail!("catalog original source is ambiguous"),
+        }
+    }
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

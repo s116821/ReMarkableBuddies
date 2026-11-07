@@ -244,19 +244,32 @@ impl Engine {
             };
             objects.insert(reference.sha256.clone(), bytes);
         }
-        let Owner::Memory(owner) = &entry.owner else {
-            return Ok(Status::UnsupportedOrCorrupt);
+        let adoption = match &entry.owner {
+            Owner::Memory(owner) => {
+                let winner = shared::SharedWinner::validate(
+                    &self.store,
+                    scope,
+                    owner.clone(),
+                    view.root.profile,
+                    receive.descriptor.sha256.clone(),
+                    manifest.clone(),
+                    objects,
+                )?;
+                winner.apply(&self.store, receive.operation, expected.as_ref())?
+            }
+            Owner::Preferences(_) => {
+                let publication = preferences::Winner::validate(
+                    &self.store,
+                    scope,
+                    receive.descriptor.sha256.clone(),
+                    manifest.clone(),
+                    objects,
+                )?
+                .apply(&self.store, receive.operation, expected.as_ref())?;
+                shared::SharedAdoption::Applied(Box::new(publication.transaction))
+            }
         };
-        let winner = shared::SharedWinner::validate(
-            &self.store,
-            scope,
-            owner.clone(),
-            view.root.profile,
-            receive.descriptor.sha256.clone(),
-            manifest.clone(),
-            objects,
-        )?;
-        match winner.apply(&self.store, receive.operation, expected.as_ref())? {
+        match adoption {
             shared::SharedAdoption::CommittedNotApplied => Ok(Status::CommittedNotApplied),
             shared::SharedAdoption::Applied(transaction) => {
                 ensure!(

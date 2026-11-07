@@ -83,16 +83,40 @@ impl Engine {
             return Ok(Status::Joining);
         };
         let admission = SelectedAdmission::new(self.store.clone(), scope.clone())?;
-        let Owner::Memory(owner) = &entry.owner else {
-            return Ok(Status::UnsupportedOrCorrupt);
-        };
         // Even an unchanged applied membership is not product readiness when
         // its exact local registration or typed ownership is unavailable.
         admission.with_current(&snapshot.token, |current| {
-            ensure!(
-                shared::shared_owner(current, view.root.profile)? == *owner,
-                "local producer owner differs"
-            );
+            match &entry.owner {
+                Owner::Memory(owner) => {
+                    ensure!(
+                        shared::shared_owner(current, view.root.profile)? == *owner,
+                        "local producer owner differs"
+                    );
+                }
+                Owner::Preferences(_) => {
+                    let mut budget = crate::storage::selection::SelectedReadBudget::new(
+                        64,
+                        MAX_ITEMS as u64,
+                        MAX_METADATA as u64,
+                        MAX_MEDIA,
+                    );
+                    if self.checkpoint.scopes[key].applied.is_none() {
+                        preferences::require_initial_publication(
+                            &self.store,
+                            &scope,
+                            &view.root_sha,
+                            &mut budget,
+                        )?;
+                    } else {
+                        preferences::project(
+                            &self.store,
+                            &scope,
+                            &current.transaction.selected,
+                            &mut budget,
+                        )?;
+                    }
+                }
+            }
             Ok(())
         })?;
         if self.checkpoint.scopes[key].pending.is_none() {

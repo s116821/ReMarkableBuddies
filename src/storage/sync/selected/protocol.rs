@@ -22,6 +22,11 @@ enum PreferenceKind {
     PortablePreferences,
 }
 impl Owner {
+    pub(super) fn preferences() -> Self {
+        Self::Preferences(PreferenceOwner {
+            kind: PreferenceKind::PortablePreferences,
+        })
+    }
     pub fn key_sha256(&self) -> Result<String> {
         match self {
             Self::Memory(owner) => owner.key_sha256(),

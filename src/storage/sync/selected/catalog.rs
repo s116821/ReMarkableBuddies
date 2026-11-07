@@ -13,7 +13,7 @@ fn identity(binding: &Binding, view: &CatalogView) -> Identity {
         binding_sha256: binding.digest.clone(),
     }
 }
-fn current_generation(store: &Store) -> Result<Uuid> {
+pub(super) fn current_generation(store: &Store) -> Result<Uuid> {
     Ok(store
         .inner
         .lock()
@@ -78,6 +78,58 @@ fn admissions(
 ) -> Result<(SelectedAdmission, SelectedAdmission)> {
     crate::memory::selected::receiving_gates(store, identity, &registration.owner)
 }
+fn source_admissions(
+    store: &Arc<Store>,
+    identity: &Identity,
+    pending: &CatalogPending,
+) -> Result<Vec<SelectedAdmission>> {
+    match (&pending.registration, &pending.portable) {
+        (Some(registration), None) => {
+            let (catalog, aggregate) = admissions(store, identity, registration)?;
+            Ok(vec![catalog, aggregate])
+        }
+        (None, Some(_)) => Ok(vec![SelectedAdmission::new(
+            store.clone(),
+            SelectionScope {
+                group: identity.group,
+                key_sha256: crate::config::portable::record::key_sha256(),
+                binding_sha256: identity.binding_sha256.clone(),
+            },
+        )?]),
+        _ => anyhow::bail!("catalog original source is ambiguous"),
+    }
+}
+fn require_source(
+    store: &Store,
+    identity: &Identity,
+    pending: &CatalogPending,
+    root: &str,
+    budget: &mut SelectedReadBudget,
+) -> Result<()> {
+    ensure!(
+        current_generation(store)? == pending.source_generation,
+        "catalog source generation changed"
+    );
+    match (&pending.registration, &pending.portable) {
+        (Some(registration), None) => require_registration(
+            store,
+            identity,
+            registration,
+            root,
+            pending.source_generation,
+            budget,
+        ),
+        (None, Some(portable)) => preferences::require_registration(
+            store,
+            identity.group,
+            &identity.binding_sha256,
+            portable,
+            root,
+            budget,
+        ),
+        _ => anyhow::bail!("catalog original source is ambiguous"),
+    }
+}
 
 impl Engine {
     fn discover_registration(
@@ -118,12 +170,13 @@ impl Engine {
                     format!("shared-catalog-register:v1:{key}").as_bytes(),
                 ),
                 source_generation: generation,
-                registration,
+                registration: Some(registration),
+                portable: None,
                 genesis_slot: None,
                 proposal: None,
             }));
         }
-        Ok(None)
+        preferences::discover_registration(&self.store, &self.binding, view, budget)
     }
     /// One bounded step in the existing worker. A missing initial catalog is
     /// handled by the caller as Joining, never as permission to seed emptiness.
@@ -147,14 +200,14 @@ impl Engine {
             .context("catalog original absent")?;
         let identity = identity(&self.binding, view);
         validate_pending(&pending, &identity)?;
-        let (catalog, aggregate) = admissions(&self.store, &identity, &pending.registration)?;
-        SelectedAdmission::with_gates(&[&catalog, &aggregate], |store| {
-            require_registration(
+        let gates = source_admissions(&self.store, &identity, &pending)?;
+        let handles: Vec<_> = gates.iter().collect();
+        SelectedAdmission::with_gates(&handles, |store| {
+            require_source(
                 store,
                 &identity,
-                &pending.registration,
+                &pending,
                 &view.root_sha,
-                pending.source_generation,
                 &mut local_budget,
             )
         })?;
@@ -166,9 +219,9 @@ impl Engine {
                 .find(|record| record.slot == proposal.slot)
             {
                 let accepted: Catalog = serde_json::from_slice(&winner.bytes)?;
-                if let Some(entry) = accepted.entries.get(&pending.registration.key_sha256) {
+                if let Some(entry) = accepted.entries.get(&pending.key()?) {
                     ensure!(
-                        entry.owner == Owner::Memory(pending.registration.owner.clone()),
+                        entry.owner == pending.owner()?,
                         "catalog winning owner differs"
                     );
                     self.retire_catalog_proposal(pending.proposal.take().unwrap())?;
@@ -188,9 +241,9 @@ impl Engine {
                 );
             }
         }
-        if let Some(entry) = view.entries.get(&pending.registration.key_sha256) {
+        if let Some(entry) = view.entries.get(&pending.key()?) {
             ensure!(
-                entry.owner == Owner::Memory(pending.registration.owner.clone()),
+                entry.owner == pending.owner()?,
                 "catalog accepted owner differs"
             );
             self.checkpoint.catalog_pending = None;
@@ -214,9 +267,9 @@ impl Engine {
             let next_slot = self.transport.allocate()?;
             let mut entries = view.entries.clone();
             entries.insert(
-                pending.registration.key_sha256.clone(),
+                pending.key()?,
                 Entry {
-                    owner: Owner::Memory(pending.registration.owner.clone()),
+                    owner: pending.owner()?,
                     genesis_slot: pending
                         .genesis_slot
                         .clone()
@@ -244,7 +297,7 @@ impl Engine {
             let bytes = serde_json::to_vec(&proposed)?;
             ensure!(bytes.len() <= 64 * 1024, "catalog descriptor byte bound");
             pending.proposal = Some(CatalogProposal {
-                key: pending.registration.key_sha256.clone(),
+                key: pending.key()?,
                 slot: view.slot.clone(),
                 base: view.base.clone(),
                 bytes,
@@ -264,9 +317,9 @@ impl Engine {
         )?;
         let mut expected_entries = view.entries.clone();
         expected_entries.insert(
-            pending.registration.key_sha256.clone(),
+            pending.key()?,
             Entry {
-                owner: Owner::Memory(pending.registration.owner.clone()),
+                owner: pending.owner()?,
                 genesis_slot: pending
                     .genesis_slot
                     .clone()
@@ -306,13 +359,12 @@ impl Engine {
                 bytes: recorded.bytes.len() as u64,
             },
         )?;
-        SelectedAdmission::with_gates(&[&catalog, &aggregate], |store| {
-            require_registration(
+        SelectedAdmission::with_gates(&handles, |store| {
+            require_source(
                 store,
                 &identity,
-                &pending.registration,
+                &pending,
                 &view.root_sha,
-                pending.source_generation,
                 &mut local_budget,
             )?;
             // Mode lease belongs to step(), ordered domain gates span this real
@@ -333,17 +385,20 @@ impl Engine {
     }
 }
 fn validate_pending(pending: &CatalogPending, identity: &Identity) -> Result<()> {
-    pending.registration.validate(identity)?;
+    match (&pending.registration, &pending.portable) {
+        (Some(registration), None) => registration.validate(identity)?,
+        (None, Some(portable)) => ensure!(
+            !portable.genesis_operation.is_nil() && valid_digest(&portable.genesis_sha256),
+            "invalid portable catalog original"
+        ),
+        _ => anyhow::bail!("catalog original source is ambiguous"),
+    }
     ensure!(
         !pending.source_generation.is_nil()
             && pending.operation
                 == Uuid::new_v5(
-                    &pending.registration.genesis_operation,
-                    format!(
-                        "shared-catalog-register:v1:{}",
-                        pending.registration.key_sha256
-                    )
-                    .as_bytes()
+                    &pending.genesis_operation()?,
+                    format!("shared-catalog-register:v1:{}", pending.key()?).as_bytes()
                 ),
         "catalog original identity differs"
     );
@@ -352,7 +407,7 @@ fn validate_pending(pending: &CatalogPending, identity: &Identity) -> Result<()>
     }
     if let Some(proposal) = &pending.proposal {
         ensure!(
-            pending.genesis_slot.is_some() && proposal.key == pending.registration.key_sha256,
+            pending.genesis_slot.is_some() && proposal.key == pending.key()?,
             "catalog proposal precedes original genesis"
         );
         let body: Catalog = serde_json::from_slice(&proposal.bytes)?;
@@ -360,7 +415,7 @@ fn validate_pending(pending: &CatalogPending, identity: &Identity) -> Result<()>
             body.operation == Uuid::new_v5(&pending.operation, proposal.base.as_bytes())
                 && body.entries.get(&proposal.key)
                     == Some(&Entry {
-                        owner: Owner::Memory(pending.registration.owner.clone()),
+                        owner: pending.owner()?,
                         genesis_slot: pending.genesis_slot.clone().unwrap()
                     }),
             "catalog original mapping differs"
