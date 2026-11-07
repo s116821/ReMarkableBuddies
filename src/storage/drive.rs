@@ -10,6 +10,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(feature = "drive-slot-qualification")]
+pub mod qualification;
 #[cfg(test)]
 pub(in crate::storage) mod shared_fixture;
 /// Experimental REM-52 pointer transport; not connected to the sync worker.
@@ -269,6 +271,28 @@ fn check(response: &mut ureq::http::Response<ureq::Body>) -> Result<()> {
     Ok(())
 }
 impl GoogleDrive {
+    fn small_upload_request(metadata: &Value, bytes: &[u8]) -> (String, Vec<u8>) {
+        let boundary = format!("buddy-{}", Uuid::new_v4());
+        let mut body = format!("--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{metadata}\r\n--{boundary}\r\nContent-Type: application/octet-stream\r\n\r\n").into_bytes();
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        (format!("multipart/related; boundary={boundary}"), body)
+    }
+
+    fn send_small_upload(
+        &self,
+        token: &str,
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> Result<ureq::http::Response<ureq::Body>> {
+        self.bounded(self.agent.post(format!("{}/files", self.upload_api)))?
+            .query("uploadType", "multipart")
+            .header("Authorization", token)
+            .header("Content-Type", content_type)
+            .send(body)
+            .map_err(|_| anyhow::anyhow!("Drive upload outcome unknown"))
+    }
+
     pub(in crate::storage) fn binding_digest(&self) -> String {
         // Internal comparison only; raw application/account identifiers are
         // never included in worker status or portable objects.
@@ -594,20 +618,9 @@ impl DriveTransport for GoogleDrive {
         let token = self.token()?;
         let metadata = json!({"id":id_value,"name":tag.sha256,"parents":["appDataFolder"],"appProperties":tag.properties()});
         if bytes.len() <= CHUNK {
-            let boundary = format!("buddy-{}", Uuid::new_v4());
-            let mut body=format!("--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{metadata}\r\n--{boundary}\r\nContent-Type: application/octet-stream\r\n\r\n").into_bytes();
-            body.extend_from_slice(&bytes.chunk(0, bytes.len())?);
-            body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
-            let mut response = self
-                .bounded(self.agent.post(format!("{}/files", self.upload_api)))?
-                .query("uploadType", "multipart")
-                .header("Authorization", token)
-                .header(
-                    "Content-Type",
-                    format!("multipart/related; boundary={boundary}"),
-                )
-                .send(body)
-                .map_err(|_| anyhow::anyhow!("Drive upload outcome unknown"))?;
+            let (content_type, body) =
+                Self::small_upload_request(&metadata, &bytes.chunk(0, bytes.len())?);
+            let mut response = self.send_small_upload(&token, &content_type, body)?;
             if response.status().as_u16() != 409 {
                 check(&mut response)?;
             }

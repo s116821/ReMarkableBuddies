@@ -33,7 +33,7 @@ impl SlotPointer {
     pub(crate) fn validate(&self) -> Result<()> {
         self.properties().map(|_| ())
     }
-    fn properties(&self) -> Result<BTreeMap<String, String>> {
+    pub(super) fn properties(&self) -> Result<BTreeMap<String, String>> {
         self.binding.validate()?;
         id(&self.descriptor_id)?;
         ensure!(
@@ -268,6 +268,15 @@ impl GoogleDrive {
     /// On an uncertain outcome, errors never mean "slot is free". Retry/read the
     /// same pinned ID; this method does not allocate, overwrite, delete or rebase.
     pub fn create_or_read_slot(&mut self, prepared: &PreparedSlot) -> Result<SlotObservation> {
+        self.create_or_read_slot_with(prepared, |_| Ok(()), |_| Ok(()))
+    }
+
+    pub(super) fn create_or_read_slot_with(
+        &mut self,
+        prepared: &PreparedSlot,
+        before_send: impl FnOnce(usize) -> Result<()>,
+        after_send: impl FnOnce(Option<u16>) -> Result<()>,
+    ) -> Result<SlotObservation> {
         ensure!(
             prepared.application == self.credentials.client_id
                 && prepared.account == self.credentials.account_permission_id,
@@ -282,25 +291,12 @@ impl GoogleDrive {
             bytes.len() as u64 == prepared.reference.bytes,
             "slot descriptor size mismatch"
         );
-        let request = serde_json::to_vec(&json!({
-            "id": pointer.binding.slot_id,
-            "name": "buddy-commit-slot",
-            "mimeType": "application/octet-stream",
-            "parents": ["appDataFolder"],
-            "appProperties": properties,
-        }))?;
-        ensure!(
-            request.len() <= MAX_REQUEST,
-            "slot request exceeds supported bound"
-        );
+        let request = slot_request(&pointer.binding.slot_id, properties)?;
         let token = self.token()?;
-        if let Ok(mut response) = self
-            .bounded(self.agent.post(format!("{}/files", self.api)))?
-            .query("fields", "id")
-            .header("Authorization", token)
-            .header("Content-Type", "application/json")
-            .send(request)
-        {
+        before_send(request.len())?;
+        let response = self.send_slot_request(&token, request)?;
+        after_send(response.as_ref().map(|r| r.status().as_u16()))?;
+        if let Some(mut response) = response {
             let status = response.status().as_u16();
             if status != 409 && !(500..600).contains(&status) {
                 check(&mut response)?;
@@ -310,6 +306,35 @@ impl GoogleDrive {
         // observation below is the only acknowledgement. Never log that error.
         self.observe_pointer(pointer)
     }
+
+    pub(super) fn send_slot_request(
+        &self,
+        token: &str,
+        request: Vec<u8>,
+    ) -> Result<Option<ureq::http::Response<ureq::Body>>> {
+        Ok(self
+            .bounded(self.agent.post(format!("{}/files", self.api)))?
+            .query("fields", "id")
+            .header("Authorization", token)
+            .header("Content-Type", "application/json")
+            .send(request)
+            .ok())
+    }
+}
+
+pub(super) fn slot_request(id: &str, properties: BTreeMap<String, String>) -> Result<Vec<u8>> {
+    let request = serde_json::to_vec(&json!({
+        "id": id,
+        "name": "buddy-commit-slot",
+        "mimeType": "application/octet-stream",
+        "parents": ["appDataFolder"],
+        "appProperties": properties,
+    }))?;
+    ensure!(
+        request.len() <= MAX_REQUEST,
+        "slot request exceeds supported bound"
+    );
+    Ok(request)
 }
 
 fn missing(error: &anyhow::Error) -> bool {
