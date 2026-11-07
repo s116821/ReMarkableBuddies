@@ -386,6 +386,27 @@ fn finish(store: &Store, request: &Frame, outcome: Outcome) -> Result<()> {
     })
 }
 
+#[cfg(all(test, target_os = "linux"))]
+pub(super) fn seed_indeterminate_insertion(
+    store: &Store,
+    conversation: Uuid,
+    request: &Frame,
+) -> Result<()> {
+    let request_sha256 = request
+        .fingerprint()
+        .map_err(|_| anyhow::anyhow!("invalid fixture insertion frame"))?;
+    let response = Frame {
+        message: Message::Response {
+            request_sha256,
+            reply: Reply::Indeterminate,
+        },
+        ..request.clone()
+    };
+    let frame = encode(&response)?;
+    reserve(store, conversation, request, request_sha256)?;
+    finish(store, request, Outcome::HistoricalReply { frame })
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;
