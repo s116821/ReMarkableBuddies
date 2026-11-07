@@ -7,6 +7,7 @@ use crate::storage::selection::{
 };
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
+mod catalog;
 mod control;
 mod protocol;
 pub(crate) use control::{create_group, CreateGroupRequest, GroupOutcome};
@@ -51,7 +52,7 @@ pub(super) struct Checkpoint {
     scopes: BTreeMap<String, Progress>,
     uploads: BTreeMap<String, Upload>,
     catalog_pending: Option<CatalogPending>,
-    retired_catalog: Vec<CatalogPending>,
+    retired_catalog: Vec<CatalogProposal>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -89,8 +90,19 @@ impl Recorded {
 #[serde(deny_unknown_fields)]
 struct CatalogPending {
     operation: Uuid,
-    key: Option<String>,
-    descriptor: Recorded,
+    source_generation: Uuid,
+    registration: crate::memory::catalog::Registration,
+    genesis_slot: Option<String>,
+    proposal: Option<CatalogProposal>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CatalogProposal {
+    key: String,
+    slot: String,
+    base: String,
+    bytes: Vec<u8>,
+    descriptor: Option<Recorded>,
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -100,6 +112,8 @@ struct Progress {
     receive: Option<Receive>,
     applied: Option<Applied>,
     receipts: Vec<Receive>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    retired_pending: Vec<Pending>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -134,6 +148,10 @@ struct Pending {
     slot: String,
     next_slot: Option<String>,
     descriptor: Option<Recorded>,
+    // None is entered-but-unacknowledged preparation or legacy unknown; neither
+    // proves no submission. Only persisted Some(false) means never entered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    outbox_prepared: Option<bool>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -190,6 +208,9 @@ impl Engine {
             return Ok(Status::Joining);
         }
         if !view.complete {
+            return Ok(Status::Pending);
+        }
+        if self.catalog_step(&view, &mut budget)? {
             return Ok(Status::Pending);
         }
         let mut status = Status::Current;
@@ -302,13 +323,14 @@ impl Engine {
                     .checkpoint
                     .scopes
                     .values()
-                    .all(|p| p.chain.len() <= MAX_ITEMS),
+                    .all(|p| p.chain.len() <= MAX_ITEMS && p.retired_pending.len() <= MAX_ITEMS),
             "selected checkpoint item bound"
         );
         ensure!(
             serde_json::to_vec(&self.checkpoint)?.len() <= MAX_METADATA,
             "selected checkpoint byte bound"
         );
+        catalog::validate_checkpoint(&self.checkpoint, &self.binding)?;
         Ok(())
     }
     fn save(&mut self) -> Result<()> {

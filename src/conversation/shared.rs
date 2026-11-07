@@ -44,12 +44,23 @@ pub(crate) fn shared_owner(snapshot: &SelectedSnapshot, profile: Uuid) -> Result
             .context("shared global fact absent")?;
         let fact: crate::memory::Fact = serde_json::from_value(first.payload.clone())?;
         fact.validate()?;
-        ensure!(
-            fact.key.profile == profile && fact.key.scope == crate::memory::Scope::Global,
-            "shared global profile or scope differs"
-        );
-        crate::memory::aggregate::validate_global_partition(&snapshot.selected_records, &fact.key)?;
-        Owner::GlobalFact { key: fact.key }
+        match fact.key.scope {
+            crate::memory::Scope::Global => {
+                ensure!(fact.key.profile == profile, "shared global profile differs");
+                crate::memory::aggregate::validate_global_partition(
+                    &snapshot.selected_records,
+                    &fact.key,
+                )?;
+                Owner::GlobalFact { key: fact.key }
+            }
+            crate::memory::Scope::Document { document } => {
+                crate::memory::aggregate::validate_document_partition(
+                    &snapshot.selected_records,
+                    document,
+                )?;
+                Owner::Document { document }
+            }
+        }
     };
     ensure!(
         owner.key_sha256()? == scope.key_sha256,
@@ -85,22 +96,33 @@ impl SharedWinner {
         let records = store.stage_selected_candidate(&manifest, &objects)?;
         match &owner {
             Owner::Document { document } => {
-                let projection = SelectedDomainProjection::from_mixed_records(
-                    &records,
-                    &manifest.records,
-                    &scope,
-                )?;
-                let owners = projection.document_ownership()?;
-                ensure!(
-                    !owners.is_empty()
-                        && owners
-                            .values()
-                            .all(|o| *o == DocumentOwnership::Document(*document)),
-                    "winning document partition differs"
-                );
-                // A document key is profile-independent. The mixed projector
-                // validates every fact's document and immutable identity; foreign
-                // profiles remain exact custody and do not require local catalogs.
+                if records
+                    .iter()
+                    .all(|record| record.namespace == Namespace::SubjectMemory)
+                {
+                    // A document fact can precede its first conversation. The
+                    // Store already verified its complete causal closure; this
+                    // branch grants memory custody only, no conversation/native
+                    // projection or effect permission.
+                    crate::memory::aggregate::validate_document_partition(&records, *document)?;
+                } else {
+                    let projection = SelectedDomainProjection::from_mixed_records(
+                        &records,
+                        &manifest.records,
+                        &scope,
+                    )?;
+                    let owners = projection.document_ownership()?;
+                    ensure!(
+                        !owners.is_empty()
+                            && owners
+                                .values()
+                                .all(|o| *o == DocumentOwnership::Document(*document)),
+                        "winning document partition differs"
+                    );
+                    // A document key is profile-independent. The mixed projector
+                    // validates every fact's document and immutable identity; foreign
+                    // profiles remain exact custody and do not require local catalogs.
+                }
             }
             Owner::GlobalFact { key } => {
                 ensure!(key.profile == profile, "winning global profile differs");
@@ -190,7 +212,6 @@ impl SharedWinner {
                         }
                     }
                 }
-                let mut preserve_active = false;
                 for original in originals {
                     let original = admission::recover_original(store, &self.scope, original)?
                         .context("local admitted original lineage unavailable")?;
@@ -200,7 +221,6 @@ impl SharedWinner {
                         if self.manifest.records.contains(pin) {
                             return Ok(SharedAdoption::CommittedNotApplied);
                         }
-                        preserve_active = true;
                     } else if settlement::retained_uncertainty_in_store(store, snapshot, &original)?
                         == IntentUncertainty::Unresolved
                         && self.manifest.records.contains(pin)
@@ -209,10 +229,20 @@ impl SharedWinner {
                     }
                 }
                 retained.extend(snapshot.transaction.retained.clone());
-                if preserve_active {
-                    retained.push(snapshot.transaction.selected.clone());
-                }
-                retained.retain(|m| m.records.iter().any(|r| !self.manifest.records.contains(r)));
+                // A losing explicit fact or draft needs custody even without
+                // a model/native receipt. Retention grants inspection only.
+                retained.push(snapshot.transaction.selected.clone());
+                retained.retain(|prior| {
+                    prior
+                        .records
+                        .iter()
+                        .any(|r| !self.manifest.records.contains(r))
+                        || prior.media.iter().any(|r| !self.manifest.media.contains(r))
+                        || prior
+                            .media_coverage
+                            .iter()
+                            .any(|c| !self.manifest.media_coverage.contains(c))
+                });
                 let mut seen = BTreeSet::new();
                 let mut unique = Vec::new();
                 for manifest in retained {

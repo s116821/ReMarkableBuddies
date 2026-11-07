@@ -331,7 +331,58 @@ impl Engine {
             "applied receiving checkpoint differs from original receipt"
         );
         if let Some(original) = receive.original_attempt {
-            self.store.withdraw_selected_attempt(original)?;
+            let pending = self.checkpoint.scopes[key]
+                .pending
+                .as_ref()
+                .context("receiving original staging absent")?
+                .clone();
+            ensure!(
+                pending.operation == original && pending.slot == receive.descriptor.slot,
+                "receiving original staging differs"
+            );
+            let token = self
+                .store
+                .historical_selection_token(&scope, pending.selection_operation)?
+                .context("receiving original selection receipt absent")?;
+            ensure!(
+                pending.pins.matches(&token),
+                "receiving original staged pins differ"
+            );
+            if let Some(attempt) = self.store.inspect_selected_attempt(original)? {
+                let selected = self
+                    .store
+                    .selected_receipt(&scope, pending.selection_operation)?
+                    .context("receiving original selected receipt absent")?;
+                let descriptor = pending
+                    .descriptor
+                    .as_ref()
+                    .context("receiving original descriptor absent")?;
+                ensure!(
+                    serde_json::to_vec(&attempt.selection)? == serde_json::to_vec(&selected)?
+                        && attempt.mode_epoch == Some(self.checkpoint.epoch)
+                        && attempt.request.slot_id == pending.slot
+                        && attempt.request.descriptor_id == descriptor.descriptor_id
+                        && attempt.request.descriptor.sha256 == descriptor.sha256
+                        && attempt.request.descriptor.bytes == descriptor.bytes.len() as u64,
+                    "receiving original outbox differs"
+                );
+                self.store.withdraw_selected_attempt(original)?;
+            } else {
+                ensure!(
+                    pending.outbox_prepared == Some(false),
+                    "receiving original outbox missing or preparation unknown"
+                );
+            }
+            ensure!(
+                self.checkpoint.scopes[key].retired_pending.len() < MAX_ITEMS,
+                "retired original staging bound"
+            );
+            self.checkpoint
+                .scopes
+                .get_mut(key)
+                .unwrap()
+                .retired_pending
+                .push(pending);
         }
         let progress = self.checkpoint.scopes.get_mut(key).unwrap();
         progress.pending = None;

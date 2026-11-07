@@ -2,7 +2,7 @@ use super::*;
 use crate::storage::drive::slot::AgreedSlotValue;
 
 impl Engine {
-    fn upload(
+    pub(super) fn upload(
         &mut self,
         bytes: Vec<u8>,
         budget: &mut usize,
@@ -136,6 +136,7 @@ impl Engine {
                 slot: slot.clone(),
                 next_slot: None,
                 descriptor: None,
+                outbox_prepared: Some(false),
             });
             self.save()?;
         }
@@ -278,10 +279,46 @@ impl Engine {
         };
         // Durable original preparation precedes any possible commit create.
         admission.with_current(&snapshot.token, |_| {
+            let phase = self.checkpoint.scopes[key]
+                .pending
+                .as_ref()
+                .unwrap()
+                .outbox_prepared;
+            if phase != Some(false) {
+                ensure!(
+                    self.store
+                        .inspect_selected_attempt(pending.operation)?
+                        .is_some(),
+                    "prepared original outbox missing"
+                );
+            }
+            if phase == Some(false) {
+                // Conservative intent is durable BEFORE entering Store's write.
+                // An interrupted write can never leave a false claim that
+                // preparation was never attempted. None includes legacy unknown.
+                self.checkpoint
+                    .scopes
+                    .get_mut(key)
+                    .unwrap()
+                    .pending
+                    .as_mut()
+                    .unwrap()
+                    .outbox_prepared = None;
+                self.save()?;
+            }
             self.store
                 .prepare_selected_attempt(&snapshot.token, request.clone())
                 .map(|_| ())
         })?;
+        self.checkpoint
+            .scopes
+            .get_mut(key)
+            .unwrap()
+            .pending
+            .as_mut()
+            .unwrap()
+            .outbox_prepared = Some(true);
+        self.save()?;
         let prepared = self.transport.prepare_slot(
             self.slot(key.into(), slot.clone()),
             request.descriptor_id,
