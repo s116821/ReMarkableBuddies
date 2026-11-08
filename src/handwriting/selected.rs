@@ -93,6 +93,9 @@ impl Projection {
         if original.profile != owner.profile || original.correction != owner.correction {
             return Err(Failure::UnsupportedRecord);
         }
+        if original.original_text.is_none() {
+            return Err(Failure::UnsupportedRecord);
+        }
 
         let [coverage] = manifest.media_coverage.as_slice() else {
             return Err(Failure::UnsupportedRecord);
@@ -199,6 +202,13 @@ impl Mutation {
         }
         if expected.len() > 1 {
             return Err(Failure::HeadsConflict);
+        }
+        if input
+            .correction
+            .as_ref()
+            .is_some_and(|value| value.original_text.is_none())
+        {
+            return Err(Failure::InvalidText);
         }
         let (fingerprint, envelope) = mutation_envelope(
             action,

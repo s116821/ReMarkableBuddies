@@ -143,6 +143,33 @@ fn typed_mutation_preserves_original_across_tombstone_and_rollback() {
     canceled["confirmation"] = json!("user-confirmed");
     canceled["original_text"] = Value::Null;
     assert!(prepare(actor, &canceled).is_err());
+    let mut enrollment =
+        read_request(&mut Cursor::new(serde_json::to_vec(&input).unwrap())).unwrap();
+    let Request::Confirm(confirmation) = &mut enrollment else {
+        unreachable!("expected confirmation fixture");
+    };
+    confirmation.original_text = None;
+    confirmation.provenance.kind = ProvenanceKind::CallerConfirmedAfterAbstention;
+    let ordinary = validate_enrollment_request(enrollment).unwrap();
+    let (action, operation, expected) = ordinary.mutation().unwrap();
+    let (_, abstention) = mutation_envelope(
+        action,
+        operation,
+        owner().record_id(),
+        expected,
+        ordinary.correction(),
+        actor,
+    )
+    .unwrap();
+    assert_eq!(
+        Mutation::prepare(owner(), actor, ordinary).err(),
+        Some(Failure::InvalidText)
+    );
+    let (manifest, objects) = closure(&[&abstention], included());
+    assert_eq!(
+        read(owner(), &manifest, &objects).err(),
+        Some(Failure::UnsupportedRecord)
+    );
 
     let forget = prepare(actor, &request("forget", Some(first))).unwrap();
     assert_eq!(forget.check_predecessor(None), Err(Failure::HeadsConflict));

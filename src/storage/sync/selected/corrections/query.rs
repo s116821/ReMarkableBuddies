@@ -225,7 +225,12 @@ fn fit(query: &QueryInput, report: &mut Report, facts: Vec<Fact>) -> handwriting
     candidate.diagnostics.missing_media = u64::MAX;
     for fact in facts {
         let value = fact.value.as_ref().ok_or(Failure::UnsupportedRecord)?;
-        let text = format!("{}\n{}", value.original_text, value.corrected_text).to_lowercase();
+        let text = format!(
+            "{}\n{}",
+            value.original_text.as_deref().unwrap_or_default(),
+            value.corrected_text
+        )
+        .to_lowercase();
         if !words.iter().all(|word| text.contains(word)) {
             continue;
         }
