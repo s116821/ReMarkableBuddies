@@ -1,6 +1,6 @@
 //! Reader retains one preference snapshot across multiple guarded stages.
 use super::*;
-use crate::memory::catalog::{Catalog, Identity, Owner as DocumentOwner, Registration};
+use crate::memory::catalog::{Identity, Registration};
 use std::cell::Cell;
 
 const RESULT_WINDOW: Duration = Duration::from_secs(60);
@@ -132,77 +132,7 @@ impl ReaderPreferences {
         root: &str,
         reads: &mut SelectedReadBudget,
     ) -> Result<(Registration, Entry, SelectionToken)> {
-        let key = &reader.scope().key_sha256;
-        let checkpoint = command::checkpoint(store, &inner.binding, inner.guard.mode_epoch, reads)?
-            .context("Reader accepted catalog absent")?;
-        let view =
-            catalog_view(&inner.binding, &checkpoint)?.context("Reader catalog root absent")?;
-        ensure!(
-            view.root_sha == root && view.root.profile == identity.profile,
-            "Reader catalog root changed"
-        );
-        let entry = view
-            .entries
-            .get(key)
-            .context("Reader document is not registered")?;
-        let Owner::Memory(owner @ DocumentOwner::Document { .. }) = &entry.owner else {
-            anyhow::bail!("selected Reader owner is not a document");
-        };
-        ensure!(
-            identity.aggregate_scope(owner)? == *reader.scope(),
-            "selected Reader owner differs"
-        );
-        let local = store
-            .selected_snapshot_with_budget(&identity.scope()?, MAX_ITEMS, reads)?
-            .context("Reader local registration absent")?;
-        let catalog = Catalog::project(identity, &local.snapshot, &local.accepted_history)?;
-        let registration = catalog
-            .registrations
-            .get(key)
-            .context("Reader local document registration absent")?;
-        ensure!(
-            &registration.owner == owner,
-            "Reader local registration owner differs"
-        );
-        let read = store
-            .selected_snapshot_with_budget(reader.scope(), MAX_ITEMS, reads)?
-            .context("Reader registered document is unreceived")?;
-        crate::memory::aggregate::Aggregate::project(
-            identity,
-            registration,
-            &read.snapshot,
-            &read.accepted_history,
-        )?;
-        let genesis = read
-            .accepted_history
-            .last()
-            .context("Reader local genesis absent")?;
-        let token = read.snapshot.token;
-        if let Some(applied) = checkpoint.scopes.get(key).and_then(|p| p.applied.as_ref()) {
-            ensure!(
-                token.accepted_base_sha256() == applied.descriptor
-                    && read.accepted_history.iter().any(|original| {
-                        let transaction = &original.transaction;
-                        transaction.operation == applied.operation
-                            && transaction.accepted_base_sha256 == applied.descriptor
-                            && super::super::receiving::membership(&transaction.selected)
-                                .is_ok_and(|membership| membership == applied.membership)
-                            && matches!(
-                                transaction.mutation,
-                                crate::storage::selection::SelectionMutation::Initialize
-                                    | crate::storage::selection::SelectionMutation::Activate
-                            )
-                    }),
-                "Reader applied custody differs"
-            );
-        } else {
-            ensure!(
-                genesis.transaction.accepted_base_sha256 == genesis_base(root, key)
-                    && token.accepted_base_sha256() == genesis.transaction.accepted_base_sha256,
-                "Reader original genesis differs"
-            );
-        }
-        Ok((registration.clone(), entry.clone(), token))
+        inner.registered_document(identity, reader, store, root, reads)
     }
 
     pub(crate) fn config(&self) -> &Config {

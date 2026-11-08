@@ -567,12 +567,22 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn capture_for(document: Uuid) -> ResidentSourceCapture {
+        capture_with_pixels(
+            document,
+            image::RgbaImage::from_pixel(12, 20, image::Rgba([17, 29, 41, 255])),
+        )
+    }
+
+    pub(crate) fn capture_with_pixels(
+        document: Uuid,
+        pixels: image::RgbaImage,
+    ) -> ResidentSourceCapture {
         let page = PageKey {
             document: SdkUuid::parse(&document.to_string()).unwrap(),
             page: id(),
         };
         let facts = ReaderFacts::new(page, vec![page.page]).unwrap();
-        let pixels = image::RgbaImage::from_pixel(12, 20, image::Rgba([17, 29, 41, 255]));
+        let dimensions = [pixels.width(), pixels.height()];
         let mut output = Cursor::new(Vec::new());
         pixels
             .write_to(&mut output, image::ImageFormat::Png)
@@ -592,7 +602,7 @@ pub(crate) mod tests {
             OperationId(id()),
             OperationId(id()),
             facts.clone(),
-            HistoricalCapture::new(facts.clone(), facts, [12, 20], 1.0, png, hash).unwrap(),
+            HistoricalCapture::new(facts.clone(), facts, dimensions, 1.0, png, hash).unwrap(),
         )
         .unwrap()
     }

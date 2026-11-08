@@ -1,5 +1,16 @@
 use super::*;
 
+#[derive(Debug)]
+struct MissingSharedObject;
+
+impl std::fmt::Display for MissingSharedObject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("promised shared object not visible")
+    }
+}
+
+impl std::error::Error for MissingSharedObject {}
+
 impl Engine {
     fn incoming(&self, key: &str) -> PathBuf {
         self.store
@@ -75,9 +86,7 @@ impl Engine {
         *budget -= 1;
         let id = match id {
             Some(id) => id.into(),
-            None => self
-                .content_id(reference)?
-                .context("promised shared object not visible")?,
+            None => self.content_id(reference)?.ok_or(MissingSharedObject)?,
         };
         let bytes = self.transport.download(&id, reference.bytes)?;
         ensure!(
@@ -238,11 +247,47 @@ impl Engine {
         })?;
         ensure!(media_total <= MAX_MEDIA, "receiving media bound");
         let mut objects = BTreeMap::new();
-        for reference in manifest.records.iter().chain(&manifest.media) {
+        let mut notebook_media = BTreeSet::new();
+        for reference in &manifest.records {
             let Some(bytes) = self.fetch(key, reference, None, budget)? else {
                 return Ok(Status::Pending);
             };
+            if manifest.record_namespaces.get(&reference.sha256) == Some(&Namespace::Source) {
+                let envelope: Envelope = serde_json::from_slice(&bytes)?;
+                if envelope.domain_schema_version
+                    == crate::conversation::notebook::NOTEBOOK_SOURCE_SCHEMA
+                {
+                    let crate::conversation::Record::ArchivedNormalizedSource(source) =
+                        crate::conversation::Ledger::decode(&envelope)?
+                    else {
+                        anyhow::bail!("invalid shared notebook archive");
+                    };
+                    let required = ObjectRef {
+                        sha256: source.media.sha256.clone(),
+                        bytes: source.media.bytes,
+                    };
+                    if !manifest.media.contains(&required) {
+                        return Ok(Status::IncompleteMedia);
+                    }
+                    notebook_media.insert(required.sha256);
+                }
+            }
             objects.insert(reference.sha256.clone(), bytes);
+        }
+        for reference in &manifest.media {
+            match self.fetch(key, reference, None, budget) {
+                Ok(Some(bytes)) => {
+                    objects.insert(reference.sha256.clone(), bytes);
+                }
+                Ok(None) => return Ok(Status::Pending),
+                Err(error)
+                    if notebook_media.contains(&reference.sha256)
+                        && error.is::<MissingSharedObject>() =>
+                {
+                    return Ok(Status::IncompleteMedia);
+                }
+                Err(error) => return Err(error),
+            }
         }
         let adoption = match &entry.owner {
             Owner::Memory(owner) => {

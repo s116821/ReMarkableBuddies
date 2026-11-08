@@ -30,6 +30,13 @@ pub(crate) struct Association {
 }
 
 pub(crate) fn resolve(ledger: &Ledger, context: &ContextView) -> Result<Images> {
+    resolve_with(context, |reference| ledger.store().read_object(reference))
+}
+
+pub(crate) fn resolve_with(
+    context: &ContextView,
+    mut read: impl FnMut(&ObjectRef) -> Result<Vec<u8>>,
+) -> Result<Images> {
     ensure!(
         context.missing_media.is_empty(),
         "historical evidence unavailable"
@@ -182,7 +189,7 @@ pub(crate) fn resolve(ledger: &Ledger, context: &ContextView) -> Result<Images> 
     let mut verified_resident = BTreeMap::new();
     for capture in resident_proofs {
         let verified = Ledger::resident_images_from_evidence(capture.clone(), |media| {
-            ledger.store().read_object(&ObjectRef {
+            read(&ObjectRef {
                 sha256: media.sha256.clone(),
                 bytes: media.bytes,
             })
@@ -200,7 +207,7 @@ pub(crate) fn resolve(ledger: &Ledger, context: &ContextView) -> Result<Images> 
         .map(|(media, [width, height])| {
             let bytes = match verified_resident.remove(&media.sha256) {
                 Some(bytes) => bytes,
-                None => ledger.store().read_object(&ObjectRef {
+                None => read(&ObjectRef {
                     sha256: media.sha256.clone(),
                     bytes: media.bytes,
                 })?,

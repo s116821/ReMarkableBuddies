@@ -13,7 +13,7 @@ mod protocol;
 pub(crate) use control::{create_group, CreateGroupRequest, GroupOutcome};
 mod preference_command;
 mod preference_consumer;
-pub(crate) use preference_consumer::RequestPreferences;
+pub(crate) use preference_consumer::{NotebookPhase, NotebookSelectionChanged, RequestPreferences};
 #[cfg(target_os = "linux")]
 pub(crate) use preference_consumer::{ReaderPhase, ReaderPreferences};
 mod preferences;

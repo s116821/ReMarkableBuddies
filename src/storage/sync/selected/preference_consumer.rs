@@ -10,6 +10,24 @@ mod reader;
 #[cfg(target_os = "linux")]
 pub(crate) use reader::{ReaderPhase, ReaderPreferences};
 
+#[derive(Clone, Copy)]
+pub(crate) enum NotebookPhase {
+    Admission,
+    Handoff,
+    Publication,
+}
+
+#[derive(Debug)]
+pub(crate) struct NotebookSelectionChanged;
+
+impl std::fmt::Display for NotebookSelectionChanged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("selected notebook winner changed")
+    }
+}
+
+impl std::error::Error for NotebookSelectionChanged {}
+
 pub(crate) struct RequestPreferences {
     store: Arc<Store>,
     admission: SelectedAdmission,
@@ -17,6 +35,8 @@ pub(crate) struct RequestPreferences {
     binding: Binding,
     capture: Capture,
     guard: record::Condition,
+    catalog_root: String,
+    profile: Uuid,
     selected: Option<SelectionToken>,
     absence: Option<(String, String, String)>,
     effective: Config,
@@ -193,6 +213,8 @@ impl RequestPreferences {
             binding,
             capture,
             guard: view.guard,
+            catalog_root: view.root_sha.clone(),
+            profile: view.profile,
             selected: view.read.map(|r| r.snapshot.token),
             absence: view.absence.map(|(base, slot)| (view.root_sha, base, slot)),
             effective,
@@ -203,6 +225,221 @@ impl RequestPreferences {
             submitted: AtomicBool::new(false),
         })
     }
+    pub(crate) fn open_notebook(
+        store: Arc<Store>,
+        path: PathBuf,
+        started: Instant,
+        calls: usize,
+    ) -> Result<Self> {
+        ensure!(
+            (1..=crate::writer::notebook::MAX_CALLS).contains(&calls)
+                && !store.ordinary_reader_family()?,
+            "unsupported selected notebook admission"
+        );
+        let mode = store.sync_mode_snapshot()?;
+        let binding = Binding::qualified(mode.mode.as_ref().context("shared mode absent")?)?;
+        Self::notebook_from_binding(store, path, binding, started, calls, |store| {
+            GoogleDrive::open(store.paths.credentials.join("drive.json"))
+        })
+    }
+
+    pub(super) fn notebook_from_binding(
+        store: Arc<Store>,
+        path: PathBuf,
+        binding: Binding,
+        started: Instant,
+        calls: usize,
+        transport: impl FnOnce(&Store) -> Result<GoogleDrive>,
+    ) -> Result<Self> {
+        ensure!(
+            (1..=crate::writer::notebook::MAX_CALLS).contains(&calls),
+            "notebook stage budget out of bounds"
+        );
+        let lifetime = Duration::from_secs(600);
+        let phases = u64::try_from(calls * 2 + 3)?;
+        Self::from_binding_at(
+            store,
+            path,
+            binding,
+            transport,
+            (started + Duration::from_secs(60), started + lifetime),
+            RequestReads::for_lifetime(
+                lifetime,
+                phases,
+                crate::writer::notebook::MAX_CANONICAL_BYTES as u64 * phases * (phases + 2),
+                true,
+            )?,
+        )
+    }
+
+    fn registered_document(
+        &self,
+        identity: &crate::memory::catalog::Identity,
+        document: &SelectedAdmission,
+        store: &Store,
+        root: &str,
+        reads: &mut SelectedReadBudget,
+    ) -> Result<(crate::memory::catalog::Registration, Entry, SelectionToken)> {
+        use crate::memory::catalog::{Catalog, Owner as DocumentOwner};
+        let key = &document.scope().key_sha256;
+        let checkpoint = command::checkpoint(store, &self.binding, self.guard.mode_epoch, reads)?
+            .context("selected document accepted catalog absent")?;
+        let view = catalog_view(&self.binding, &checkpoint)?
+            .context("selected document catalog root absent")?;
+        ensure!(
+            view.root_sha == root && view.root.profile == identity.profile,
+            "selected document catalog root changed"
+        );
+        let entry = view
+            .entries
+            .get(key)
+            .context("selected document document is not registered")?;
+        let Owner::Memory(owner @ DocumentOwner::Document { .. }) = &entry.owner else {
+            anyhow::bail!("selected selected document owner is not a document");
+        };
+        ensure!(
+            identity.aggregate_scope(owner)? == *document.scope(),
+            "selected selected document owner differs"
+        );
+        let local = store
+            .selected_snapshot_with_budget(&identity.scope()?, MAX_ITEMS, reads)?
+            .context("selected document local registration absent")?;
+        let catalog = Catalog::project(identity, &local.snapshot, &local.accepted_history)?;
+        let registration = catalog
+            .registrations
+            .get(key)
+            .context("selected document local document registration absent")?;
+        ensure!(
+            &registration.owner == owner,
+            "selected document local registration owner differs"
+        );
+        let read = store
+            .selected_snapshot_with_budget(document.scope(), MAX_ITEMS, reads)?
+            .context("selected document registered document is unreceived")?;
+        crate::memory::aggregate::Aggregate::project(
+            identity,
+            registration,
+            &read.snapshot,
+            &read.accepted_history,
+        )?;
+        let genesis = read
+            .accepted_history
+            .last()
+            .context("selected document local genesis absent")?;
+        let token = read.snapshot.token;
+        if let Some(applied) = checkpoint.scopes.get(key).and_then(|p| p.applied.as_ref()) {
+            ensure!(
+                token.accepted_base_sha256() == applied.descriptor
+                    && read.accepted_history.iter().any(|original| {
+                        let transaction = &original.transaction;
+                        transaction.operation == applied.operation
+                            && transaction.accepted_base_sha256 == applied.descriptor
+                            && super::receiving::membership(&transaction.selected)
+                                .is_ok_and(|membership| membership == applied.membership)
+                            && matches!(
+                                transaction.mutation,
+                                crate::storage::selection::SelectionMutation::Initialize
+                                    | crate::storage::selection::SelectionMutation::Activate
+                            )
+                    }),
+                "selected document applied custody differs"
+            );
+        } else {
+            ensure!(
+                genesis.transaction.accepted_base_sha256 == genesis_base(root, key)
+                    && token.accepted_base_sha256() == genesis.transaction.accepted_base_sha256,
+                "selected document original genesis differs"
+            );
+        }
+        Ok((registration.clone(), entry.clone(), token))
+    }
+
+    pub(crate) fn notebook_progress(
+        &self,
+        writer: &SelectedAdmission,
+        token: &SelectionToken,
+    ) -> Result<()> {
+        self.check_joined_progress(Some((writer, token)))
+    }
+
+    /// Consume this phase's original read allowance while holding the complete
+    /// document/preference/memory gate set. The callback may synchronously
+    /// submit or publish, but must never wait for a model response.
+    pub(crate) fn with_notebook_phase<T>(
+        &self,
+        writer: &SelectedAdmission,
+        expected: Option<&SelectionToken>,
+        phase: NotebookPhase,
+        memory: Option<(
+            &dyn crate::memory::Provider,
+            &crate::memory::QueryResult,
+            &SelectionToken,
+        )>,
+        operation: impl FnOnce(&Store, &mut SelectedReadBudget) -> Result<T>,
+    ) -> Result<T> {
+        self.require_writer(writer)?;
+        let budget = match phase {
+            NotebookPhase::Admission => {
+                ensure!(
+                    Instant::now() < self.admission_deadline,
+                    "notebook admission expired"
+                );
+                &self.reads.admission
+            }
+            NotebookPhase::Handoff => &self.reads.handoff,
+            NotebookPhase::Publication => &self.reads.finish,
+        };
+        let mut reads = budget
+            .lock()
+            .map_err(|_| anyhow::anyhow!("notebook read allowance unavailable"))?;
+        let identity = crate::memory::catalog::Identity {
+            group: self.binding.group,
+            profile: self.profile,
+            binding_sha256: self.binding.digest.clone(),
+        };
+        let catalog = SelectedAdmission::new(self.store.clone(), identity.scope()?)?;
+        let mut operation = Some(operation);
+        let mut run = |store: &Store| -> Result<T> {
+            self.verify_locked(store, &mut reads)?;
+            if let Some(expected) = expected {
+                if !store.selection_unchanged_for_progress(
+                    writer.scope(),
+                    Some(expected),
+                    &mut reads,
+                )? {
+                    return Err(NotebookSelectionChanged.into());
+                }
+            }
+            let (_, _, current) =
+                self.registered_document(&identity, writer, store, &self.catalog_root, &mut reads)?;
+            if expected.is_some_and(|expected| current != *expected) {
+                return Err(NotebookSelectionChanged.into());
+            }
+            operation
+                .take()
+                .context("notebook phase already consumed")?(store, &mut reads)
+        };
+        if let Some((memory, view, original)) = memory {
+            let mut result = None;
+            memory.with_selected_notebook_phase(
+                view,
+                writer,
+                &[&self.admission, &catalog],
+                crate::memory::NotebookMemorySelection {
+                    original,
+                    current: expected.context("notebook memory requires a document selection")?,
+                },
+                &mut |store| {
+                    result = Some(run(store)?);
+                    Ok(())
+                },
+            )?;
+            result.context("notebook memory guard did not execute")
+        } else {
+            SelectedAdmission::with_ready_gate_set(&[writer, &self.admission, &catalog], run)
+        }
+    }
+
     pub(crate) fn require_writer(&self, writer: &SelectedAdmission) -> Result<()> {
         ensure!(
             writer.uses_store(&self.store)

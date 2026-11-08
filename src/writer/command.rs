@@ -155,6 +155,7 @@ enum CommandRequest {
         feature = "development-input-diagnostics"
     ))]
     Resident(crate::workflow::resident_supervisor::writer_request::Submission),
+    SelectedNotebook(Box<notebook::selected::Input>),
     Notebook(Box<notebook::command::Request>),
 }
 /// Parse bounded stdin once; each strict variant rejects duplicates and unknown fields.
@@ -199,6 +200,9 @@ pub fn dispatch(config_path: Option<PathBuf>, input: &mut impl Read) -> CommandR
                 failure: result.err().map(|_| "tablet-request-unavailable"),
             })
         }
+        Ok(CommandRequest::SelectedNotebook(request)) => CommandReport::Notebook(Box::new(
+            notebook::command::Report::Generation(notebook::selected::run(config_path, *request)),
+        )),
         Ok(CommandRequest::Notebook(request)) => {
             CommandReport::Notebook(Box::new(notebook::command::run(config_path, *request)))
         }

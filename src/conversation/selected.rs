@@ -137,6 +137,7 @@ impl SelectedDomainProjection {
                         "selected notebook archive origin relationship missing"
                     );
                     // Historical document metadata never grants native ownership.
+                    document = Some(source.document);
                 }
                 Record::NotebookPlan(plan) => {
                     ensure!(

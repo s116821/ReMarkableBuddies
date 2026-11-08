@@ -333,7 +333,26 @@ impl Inspection {
         self.admission.is_some()
     }
 }
+/// Only the selected notebook's positively observed document token may advance.
+pub struct NotebookMemorySelection<'a> {
+    pub(crate) original: &'a crate::storage::selection::SelectionToken,
+    pub(crate) current: &'a crate::storage::selection::SelectionToken,
+}
+
 pub trait Provider: Send + Sync {
+    fn query_selected_notebook(&self, _query: &Query, _calls: usize) -> Result<QueryResult> {
+        anyhow::bail!("memory provider does not support selected notebook")
+    }
+    fn with_selected_notebook_phase(
+        &self,
+        _result: &QueryResult,
+        _writer: &crate::conversation::SelectedAdmission,
+        _additional: &[&crate::conversation::SelectedAdmission],
+        _selection: NotebookMemorySelection<'_>,
+        _consume: &mut dyn FnMut(&Store) -> Result<()>,
+    ) -> Result<()> {
+        anyhow::bail!("memory provider does not support guarded notebook phases")
+    }
     fn require_selected_writer(
         &self,
         _writer: &crate::conversation::SelectedAdmission,

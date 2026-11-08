@@ -376,7 +376,10 @@ fn run_inner<E: LLMEngine>(
         }
     }
 }
-fn encode_memory(view: &crate::memory::QueryResult, document: Uuid) -> Result<Option<String>> {
+pub(super) fn encode_memory(
+    view: &crate::memory::QueryResult,
+    document: Uuid,
+) -> Result<Option<String>> {
     use crate::memory::Status as S;
     ensure!(
         !matches!(view.status, S::Unavailable | S::Disabled),

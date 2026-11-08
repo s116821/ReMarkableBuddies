@@ -726,6 +726,89 @@ impl SelectedMemory {
     }
 }
 impl Provider for SelectedMemory {
+    fn query_selected_notebook(&self, query: &Query, calls: usize) -> Result<QueryResult> {
+        ensure!(
+            (1..=crate::writer::notebook::MAX_CALLS).contains(&calls),
+            "invalid notebook memory reservation"
+        );
+        // Discovery plus initial commit, each prepare/handoff/result, and final commit.
+        let phases = u64::try_from(3 * calls + 4)?;
+        self.query_with_budget(
+            query,
+            SelectedReadBudget::new(
+                MEMORY_READ_AGGREGATES * phases,
+                MEMORY_READ_ITEMS * phases,
+                MEMORY_READ_METADATA * phases,
+                MEMORY_READ_MEDIA * phases,
+            ),
+        )
+    }
+
+    fn with_selected_notebook_phase(
+        &self,
+        result: &QueryResult,
+        writer: &SelectedAdmission,
+        additional: &[&SelectedAdmission],
+        selection: super::NotebookMemorySelection<'_>,
+        consume: &mut dyn FnMut(&Store) -> Result<()>,
+    ) -> Result<()> {
+        self.require_selected_writer(writer)?;
+        ensure!(
+            selection.original.scope() == writer.scope()
+                && selection.current.scope() == writer.scope()
+                && selection.original.store_generation() == selection.current.store_generation()
+                && selection.original.accepted_base_sha256()
+                    == selection.current.accepted_base_sha256(),
+            "notebook document selection identity changed"
+        );
+        let mut pins = result
+            .pins
+            .as_ref()
+            .context("notebook memory pins absent")?
+            .lock()
+            .map_err(|_| anyhow::anyhow!("notebook memory pins unavailable"))?;
+        ensure!(
+            !pins.consumed
+                && pins.instance == self.instance
+                && pins.result_sha256.as_deref() == Some(result_identity(result)?.as_str()),
+            "foreign or changed notebook memory view"
+        );
+        let admissions = pins.admissions.clone();
+        let mut gates: Vec<_> = admissions.iter().collect();
+        gates.push(writer);
+        gates.extend_from_slice(additional);
+        SelectedAdmission::with_ready_gate_set(&gates, |store| {
+            available(store)?;
+            let pins = &mut *pins;
+            for (token, raw_head) in pins.tokens.iter().zip(&pins.raw_heads) {
+                let (expected, raw_head) = if token.scope() == writer.scope() {
+                    ensure!(
+                        token == selection.original,
+                        "notebook original memory document changed"
+                    );
+                    let raw_head = if selection.current == selection.original {
+                        raw_head.as_str()
+                    } else {
+                        // Only fresh Store commits from the private notebook cursor
+                        // can reach this branch. They encode the canonical token bytes.
+                        selection.current.selection_sha256()
+                    };
+                    (selection.current, raw_head)
+                } else {
+                    (token, raw_head.as_str())
+                };
+                let read = store
+                    .selected_snapshot_with_budget(expected.scope(), MAX_ITEMS, &mut pins.budget)?
+                    .context("notebook memory membership absent")?;
+                ensure!(
+                    read.snapshot.token == *expected && read.accepted_history[0].sha256 == raw_head,
+                    "notebook memory membership replaced"
+                );
+            }
+            consume(store)
+        })
+    }
+
     fn with_selected_writer_handoff(
         &self,
         result: &QueryResult,

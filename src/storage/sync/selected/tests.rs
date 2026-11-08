@@ -1099,3 +1099,5 @@ fn resident_reader_fixture_generated(
     }), !expires);
     (selected.token, capture_id)
 }
+
+mod notebook;
