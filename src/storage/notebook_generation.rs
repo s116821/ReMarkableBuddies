@@ -49,6 +49,11 @@ pub(crate) fn validate_version(
     version: u32,
     preparing: bool,
 ) -> Result<()> {
+    let version = if version == target_generation::VERSION {
+        target_generation::base_version(root)?
+    } else {
+        version
+    };
     let path = root.join(MARKER);
     files::safe_path(&path)?;
     if version == VERSION || version == compound_generation::VERSION || path.exists() {
@@ -135,6 +140,10 @@ pub(crate) fn publish_capabilities(store: &Store, generation: Uuid) -> Result<()
 }
 
 pub(crate) fn validate_ready(paths: &StorePaths, actor: Uuid, generation: Uuid) -> Result<()> {
+    let target_root = paths.data.join("generations").join(generation.to_string());
+    if target_generation::is_target(&target_root)? {
+        return target_generation::validate_ready(paths, actor, generation);
+    }
     ensure!(
         files::json::<Uuid>(&paths.data.join("CURRENT"), 128)? == generation,
         "notebook current changed"

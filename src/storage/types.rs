@@ -98,6 +98,19 @@ impl Envelope {
                             Some("notebook-plan" | "notebook-stage")
                         ),
                         _ => false,
+                    })
+                || (self.domain_schema_version == 4
+                    && self.kind == Kind::Value
+                    && match self.namespace {
+                        Namespace::Source => matches!(
+                            self.payload["record_kind"].as_str(),
+                            Some("source-target" | "region-source")
+                        ),
+                        Namespace::Conversation => matches!(
+                            self.payload["record_kind"].as_str(),
+                            Some("target-use" | "target-state")
+                        ),
+                        _ => false,
                     }),
             "unsupported domain schema version for namespace"
         );

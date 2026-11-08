@@ -58,6 +58,8 @@ struct AnalysisResult {
     _question_box: Option<BoundingBox>,
     selection_center: SelectionCenter,
     _screenshot_data: Vec<u8>, // PNG data for downstream processing (reserved for future use)
+    target: Option<crate::conversation::target::Candidate>,
+    about: Option<String>,
 }
 
 /// High-level orchestrator for the complete workflow
@@ -557,7 +559,17 @@ impl<M: LLMEngine> Orchestrator<M> {
                 }
                 info!("Got verified Q&A");
 
-                attempt.interpret(&self.ledger, &result.question)?;
+                attempt.interpret_source_target(
+                    &self.ledger,
+                    &result.question,
+                    result.target.as_ref(),
+                )?;
+                if attempt.source_target_enabled() {
+                    result.about = Some(match result.target.as_ref() {
+                        Some(candidate) => candidate.about()?,
+                        None => "About: Uncertain - Selected source could not be localized".into(),
+                    });
+                }
                 let mut memory_view = None;
                 if self.memory.is_some() || personalization.effective_text().is_some() {
                     let enriched =
@@ -624,6 +636,13 @@ impl<M: LLMEngine> Orchestrator<M> {
         Ok(())
     }
 
+    fn compose_result(result: &AnalysisResult) -> String {
+        let body = Workflow::compose_qa(&result.question, &result.answer, result.selection_center);
+        result
+            .about
+            .as_ref()
+            .map_or(body.clone(), |about| format!("{about}\n{body}"))
+    }
     fn publish_answer(
         &mut self,
         attempt: &mut Attempt,
@@ -633,11 +652,7 @@ impl<M: LLMEngine> Orchestrator<M> {
     ) -> Result<()> {
         self.workflow.check_request_progress()?;
         attempt.check_selected()?;
-        attempt.generated_with_memory(
-            &self.ledger,
-            Workflow::compose_qa(&result.question, &result.answer, result.selection_center),
-            memory,
-        )?;
+        attempt.generated_with_memory(&self.ledger, Self::compose_result(result), memory)?;
         if attempt.is_selected() {
             if attempt.selected_resident() {
                 return Ok(());
@@ -655,8 +670,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         }
         #[cfg(target_os = "linux")]
         if attempt.resident_output() {
-            let text =
-                Workflow::compose_qa(&result.question, &result.answer, result.selection_center);
+            let text = Self::compose_result(result);
             let conversation = attempt.user.conversation;
             let association = attempt.resident_answer.clone();
             let mut output_started = false;
@@ -828,6 +842,9 @@ impl<M: LLMEngine> Orchestrator<M> {
             }
         }
 
+        if attempt.source_target_enabled() {
+            owned.0.add_text_content("Also emit one TARGET_JSON: line before --- with strict JSON {\"subject\":\"concise selected concept\",\"geometry\":{\"components\":[[[0,0],[1000000,0],[1000000,1000000],[0,1000000]]]},\"understanding\":{\"status\":\"interpreted\"}}. Replace the example polygon with the actual selected-content boundary; coordinates are integers on the full-page original image, top-left origin, normalized edge scale 1000000. The overview is a full-frame resize, so normalized coordinates map directly to the original. Exclude the handwritten instruction/question. At most 8 simple polygons, 3..64 vertices each, 512 total; canonical positive image-axis shoelace orientation, lexicographically first start and sorted components. Do not expand a point into a guessed rectangle. Subject is one line <=512 UTF-8 bytes. If the target is ambiguous return geometry:null and understanding:{\"status\":\"uncertain\",\"reason\":\"brief uncertainty\"}. The subject is inference, not confirmed transcription.");
+        }
         let mut progress_failed = false;
         // Stored source readback, recipe verification, base64 encoding and model
         // payload assembly all consume the original acquisition budget. Retire
@@ -857,6 +874,17 @@ impl<M: LLMEngine> Orchestrator<M> {
         ))
     }
 
+    fn parse_target_candidate(raw: &str) -> Option<crate::conversation::target::Candidate> {
+        let mut candidate: crate::conversation::target::Candidate =
+            serde_json::from_str(raw).ok()?;
+        candidate.geometry = candidate
+            .geometry
+            .map(|geometry| geometry.canonicalize())
+            .transpose()
+            .ok()?;
+        candidate.validate().ok()?;
+        Some(candidate)
+    }
     fn parse_analysis_response(
         response: &str,
         screenshot_png_data: Vec<u8>,
@@ -910,6 +938,8 @@ impl<M: LLMEngine> Orchestrator<M> {
             _question_box: question_box,
             selection_center,
             _screenshot_data: screenshot_png_data,
+            target: Self::parse_target_candidate(&Self::extract_field(header, "TARGET_JSON:")),
+            about: None,
         })
     }
 
@@ -1239,8 +1269,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         }
 
         // Render the Q&A
-        let formatted_output =
-            Workflow::compose_qa(&result.question, &result.answer, result.selection_center);
+        let formatted_output = Self::compose_result(result);
 
         self.workflow.render_qa(&formatted_output)?;
 

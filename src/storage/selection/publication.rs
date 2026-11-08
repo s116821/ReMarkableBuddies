@@ -624,8 +624,9 @@ impl Store {
         let parts = validate_closure(root, &transaction)?;
         // Live publication and reopen validate identical notebook closure
         // semantics. A retained original is its own complete historical graph.
-        for (_, records) in &parts {
+        for (manifest, records) in &parts {
             notebook_generation::validate_records(root, &Index::default(), records)?;
+            target_generation::validate_records(&Index::default(), records, &manifest.records)?;
         }
         let records: Vec<_> = parts
             .iter()

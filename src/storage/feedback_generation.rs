@@ -28,6 +28,11 @@ pub(crate) fn validate_version(
     version: u32,
     allow_pending: bool,
 ) -> Result<()> {
+    let version = if version == target_generation::VERSION {
+        target_generation::base_version(root)?
+    } else {
+        version
+    };
     let marker = root.join(MARKER);
     files::safe_path(&marker)?;
     if version == VERSION || marker.exists() {

@@ -37,6 +37,39 @@ impl SelectedDomainProjection {
             owners.entry(conversation).or_default();
             let mut document = None;
             match record {
+                Record::SourceTarget(_)
+                | Record::RegionSource(_)
+                | Record::TargetUse(_)
+                | Record::TargetState(_) => {
+                    document = super::target::validate_links(
+                        record,
+                        &|reference| {
+                            let envelope = self
+                                .ancestors
+                                .get(&reference.revision)
+                                .context("target included revision absent")?;
+                            ensure!(
+                                envelope.namespace == reference.namespace
+                                    && envelope.record_id == reference.record
+                                    && self.objects.get(&reference.revision)
+                                        == Some(&reference.object),
+                                "target selected exact reference differs"
+                            );
+                            self.records
+                                .get(&reference.revision)
+                                .cloned()
+                                .context("target selected value absent")
+                        },
+                        &|id| {
+                            let Some((_, Some(Record::Turn(turn)))) =
+                                self.head(Namespace::Conversation, id)
+                            else {
+                                anyhow::bail!("target selected user absent")
+                            };
+                            Ok(turn.clone())
+                        },
+                    )?;
+                }
                 Record::Root(root) => {
                     if let Some(binding) = root.binding {
                         self.require_binding(binding, conversation)?;
@@ -643,6 +676,10 @@ impl SelectedDomainProjection {
 pub(super) fn conversation_id(record: &Record) -> Uuid {
     match record {
         Record::Root(r) => r.id,
+        Record::SourceTarget(r) => r.conversation,
+        Record::RegionSource(r) => r.conversation,
+        Record::TargetUse(r) => r.conversation,
+        Record::TargetState(r) => r.conversation,
         Record::RequestEvidence(r) => r.conversation,
         Record::Turn(r) => r.conversation,
         Record::Source(r) => r.conversation,

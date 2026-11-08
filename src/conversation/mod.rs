@@ -38,6 +38,8 @@ pub use selected_writer::*;
 #[cfg(test)]
 mod selected_context_tests;
 mod settlement;
+pub mod target;
+pub(crate) mod target_source;
 mod types;
 mod writer;
 mod writer_flow;
@@ -132,6 +134,10 @@ impl Ledger {
             envelope_version: FORMAT,
             namespace,
             domain_schema_version: match &record {
+                Record::SourceTarget(_)
+                | Record::RegionSource(_)
+                | Record::TargetUse(_)
+                | Record::TargetState(_) => target::SCHEMA,
                 Record::Receipt(receipt) if receipt.admitted_intent.is_some() => INTENT_SCHEMA,
                 Record::OutcomeFact(fact) if fact.settlement.is_some() => INTENT_SCHEMA,
                 Record::Export(export) if export.attempt.is_some() => EXPORT_SCHEMA,
@@ -163,12 +169,23 @@ impl Ledger {
         ensure!(
             matches!(
                 envelope.domain_schema_version,
-                SCHEMA | INTENT_SCHEMA | notebook::NOTEBOOK_SOURCE_SCHEMA
+                SCHEMA | INTENT_SCHEMA | notebook::NOTEBOOK_SOURCE_SCHEMA | target::SCHEMA
             ),
             "unsupported conversation schema"
         );
         ensure!(envelope.kind == Kind::Value, "deleted conversation record");
         let record: Record = serde_json::from_value(envelope.payload.clone())?;
+        let target_record = matches!(
+            &record,
+            Record::SourceTarget(_)
+                | Record::RegionSource(_)
+                | Record::TargetUse(_)
+                | Record::TargetState(_)
+        );
+        ensure!(
+            (envelope.domain_schema_version == target::SCHEMA) == target_record,
+            "target schema/shape mismatch"
+        );
         if envelope.domain_schema_version == notebook::NOTEBOOK_SOURCE_SCHEMA {
             ensure!(
                 matches!(
@@ -231,6 +248,22 @@ impl Ledger {
         }
         let (id, namespace, conversation) = match &record {
             Record::Root(root) => (root.id, Namespace::Conversation, root.id),
+            Record::SourceTarget(value) => {
+                value.validate()?;
+                (value.id, Namespace::Source, value.conversation)
+            }
+            Record::RegionSource(value) => {
+                value.validate()?;
+                (value.id, Namespace::Source, value.conversation)
+            }
+            Record::TargetUse(value) => {
+                value.validate()?;
+                (value.id, Namespace::Conversation, value.conversation)
+            }
+            Record::TargetState(value) => {
+                value.validate()?;
+                (value.id, Namespace::Conversation, value.conversation)
+            }
             Record::RequestEvidence(fact) => {
                 fact.validate_shape()?;
                 (fact.id, Namespace::Conversation, fact.conversation)
@@ -333,6 +366,8 @@ impl Ledger {
             "domain envelope identity mismatch"
         );
         let mut media = match &record {
+            Record::SourceTarget(value) => value.media(),
+            Record::RegionSource(value) => value.media(),
             Record::ArchivedNormalizedSource(source) => vec![source.media.clone()],
             Record::Source(source) => vec![source.image.clone()],
             Record::Capture(capture) => capture.facts.media()?,
@@ -444,6 +479,25 @@ impl Ledger {
         mut records: Vec<Envelope>,
         binding: Option<Uuid>,
     ) -> Result<(WriteResult, bool)> {
+        if self.store.source_target_generation()?.is_some() {
+            let users = records
+                .iter()
+                .filter_map(|e| match Self::decode(e) {
+                    Ok(Record::Turn(user))
+                        if user.role == Role::User
+                            && user.mode == Mode::Reader
+                            && user.outcome == Outcome::Prepared
+                            && !user.sources.is_empty() =>
+                    {
+                        Some(user)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            for user in users {
+                records.extend(self.target_pending_records(&user)?);
+            }
+        }
         let ack = Acknowledgment {
             operation,
             conversation: root.record_id,
@@ -530,9 +584,20 @@ impl Ledger {
         &self,
         operation: Uuid,
         expected: ExpectedHeads,
+        turn: Turn,
+        sources: Vec<ImageUse>,
+        fingerprint: String,
+    ) -> Result<WriteResult> {
+        self.append_unreplayed_target(operation, expected, turn, sources, fingerprint, None)
+    }
+    fn append_unreplayed_target(
+        &self,
+        operation: Uuid,
+        expected: ExpectedHeads,
         mut turn: Turn,
         sources: Vec<ImageUse>,
         fingerprint: String,
+        about_user: Option<Uuid>,
     ) -> Result<WriteResult> {
         ensure!(
             !turn.id.is_nil() && !turn.exchange.is_nil(),
@@ -541,6 +606,7 @@ impl Ledger {
         ensure!(sources.len() <= MAX_ITEMS, "too many source uses");
         ensure!(turn.sequence == 0, "caller must not allocate chronology");
         Self::validate_turn(&turn)?;
+        let turn_text = turn.text.clone();
         let (_, mut root) = match self.live_root(turn.conversation, Some(&expected)) {
             Ok(root) => root,
             Err(error) => {
@@ -631,6 +697,12 @@ impl Ledger {
             Record::Root(root),
             vec![],
         )?;
+        if let Some(user) = about_user {
+            records.extend(self.target_presentation_records(
+                user,
+                turn_text.as_deref().context("target answer text absent")?,
+            )?);
+        }
         self.publish(operation, fingerprint, envelope, records, binding)
     }
     /// Prepare explicitly synthetic SDK fixture evidence; never grants native authority.
@@ -1115,7 +1187,26 @@ impl Ledger {
         turn: Turn,
         reason: Option<AttemptReason>,
     ) -> Result<WriteResult> {
-        let fingerprint = if let Some(reason) = &reason {
+        self.advance_fact_target(operation, expected_root, expected_turn, turn, reason, None)
+    }
+    fn advance_fact_target(
+        &self,
+        operation: Uuid,
+        expected_root: ExpectedHeads,
+        expected_turn: ExpectedHeads,
+        turn: Turn,
+        reason: Option<AttemptReason>,
+        target: Option<(&target_source::SourceFrame, &target::Candidate)>,
+    ) -> Result<WriteResult> {
+        let fingerprint = if let Some((frame, candidate)) = target {
+            frame.check(self)?;
+            Self::fingerprint(&(
+                "interpret-source-target-v1",
+                &turn,
+                frame.source(),
+                candidate,
+            ))?
+        } else if let Some(reason) = &reason {
             Self::fingerprint(&("attempt-outcome", &turn, reason))?
         } else {
             Self::fingerprint(&("advance", &turn))?
@@ -1197,6 +1288,9 @@ impl Ledger {
         ) {
             ensure!(original.text == turn.text, "generated draft text changed");
         }
+        let target_records = target
+            .map(|(frame, candidate)| self.target_interpretation_records(&turn, frame, candidate))
+            .transpose()?;
         let outcome = turn.outcome.clone();
         let turn_id = turn.id;
         root.updated_ms = turn.updated_ms;
@@ -1216,6 +1310,9 @@ impl Ledger {
             vec![],
         )?;
         let mut records = vec![updated];
+        if let Some(target_records) = target_records {
+            records.extend(target_records);
+        }
         if let Some(reason) = reason {
             let id = Uuid::new_v5(
                 &Uuid::NAMESPACE_URL,
@@ -1236,7 +1333,17 @@ impl Ledger {
                 vec![],
             )?);
         }
-        self.publish(operation, fingerprint, root, records, binding)
+        if target.is_some() {
+            let (result, fresh) =
+                self.publish_observed(operation, fingerprint, root, records, binding)?;
+            ensure!(
+                fresh,
+                "target interpretation is historical; no continuation admitted"
+            );
+            Ok(result)
+        } else {
+            self.publish(operation, fingerprint, root, records, binding)
+        }
     }
     /// Historical receipt semantics shared by writes and selected inspection.
     /// Successful validation never reconstructs native qualification.

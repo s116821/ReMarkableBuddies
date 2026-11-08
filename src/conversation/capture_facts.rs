@@ -221,6 +221,15 @@ impl From<&ImageFacts> for HistoricalImage {
     }
 }
 impl HistoricalImage {
+    pub(crate) fn full_frame_of(&self, parent: &Self) -> bool {
+        self.media() == parent.media() && self.dimensions == parent.dimensions
+            || self.derivation.as_ref().is_some_and(|d| {
+                d.parent_digest == parent.sha256
+                    && d.parent_dimensions == parent.dimensions
+                    && d.crop == [0, 0, parent.dimensions[0], parent.dimensions[1]]
+                    && d.output_dimensions == self.dimensions
+            })
+    }
     pub fn media(&self) -> Media {
         Media {
             sha256: self.sha256.clone(),

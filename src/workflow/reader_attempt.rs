@@ -25,6 +25,7 @@ pub(super) struct Attempt {
     #[cfg(test)]
     reader_preparation: Option<ReaderPreparation>,
     selected: Option<selected::Selected>,
+    target_frame: Option<crate::conversation::target_source::SourceFrame>,
 }
 fn now() -> Result<u64> {
     SystemTime::now()
@@ -133,6 +134,7 @@ pub(crate) fn assert_attachment_behavior(
         resident_answer: None,
         reader_preparation: None,
         selected: None,
+        target_frame: None,
     };
     assert!(attempt
         .dispatch_selected(workflow, 0, &ReaderHandoff::NextPage)
@@ -187,9 +189,13 @@ impl Attempt {
             #[cfg(test)]
             reader_preparation: None,
             selected: Some(selected),
+            target_frame: None,
         }
     }
     pub(super) fn check_selected(&self) -> Result<()> {
+        if let Some(frame) = &self.target_frame {
+            frame.check_current()?;
+        }
         self.selected
             .as_ref()
             .map_or(Ok(()), |selected| selected.check())
@@ -382,8 +388,13 @@ impl Attempt {
             #[cfg(test)]
             reader_preparation: None,
             selected: None,
+            target_frame: None,
         };
         attempt.user = attempt.load_turn(ledger, attempt.user.id)?;
+        if ledger.store().source_target_generation()?.is_some() {
+            attempt.target_frame =
+                Some(ledger.target_source_frame(attempt.user.conversation, attempt.evidence)?);
+        }
         Ok(attempt)
     }
     /// A live context arrives only from the controlled new Pending branch.
@@ -483,6 +494,42 @@ impl Attempt {
     pub(super) fn legacy_output(&self) -> bool {
         self.kind == EvidenceKind::Legacy
     }
+    pub(super) fn source_target_enabled(&self) -> bool {
+        self.target_frame.is_some()
+    }
+    pub(super) fn interpret_source_target(
+        &mut self,
+        ledger: &Ledger,
+        text: &str,
+        candidate: Option<&crate::conversation::target::Candidate>,
+    ) -> Result<()> {
+        let Some(frame) = self.target_frame.as_mut() else {
+            return self.interpret(ledger, text);
+        };
+        let unresolved = crate::conversation::target::Candidate {
+            subject: "Selected source could not be localized".into(),
+            geometry: None,
+            understanding: crate::conversation::target::Understanding::Uncertain {
+                reason: "missing or invalid explicit target geometry".into(),
+            },
+        };
+        let candidate = candidate.unwrap_or(&unresolved);
+        let mut user = self.user.clone();
+        user.text = Some(text.into());
+        user.outcome = Outcome::Interpreted;
+        user.updated_ms = now()?;
+        let result = ledger.advance_with_source_target(
+            Uuid::new_v4(),
+            frame.expected_root(),
+            ledger.expected(Namespace::Conversation, user.id)?,
+            user.clone(),
+            frame,
+            candidate,
+        )?;
+        frame.acknowledge(ledger, &result)?;
+        self.user = user;
+        Ok(())
+    }
     pub fn interpret(&mut self, ledger: &Ledger, text: &str) -> Result<()> {
         if let Some(selected) = &mut self.selected {
             let acknowledgment = selected.write(text, false, None)?;
@@ -545,12 +592,23 @@ impl Attempt {
             updated_ms: timestamp,
             completion: None,
         };
-        ledger.append(
-            Uuid::new_v4(),
-            ledger.expected(Namespace::Conversation, turn.conversation)?,
-            turn.clone(),
-            vec![],
-        )?;
+        if let Some(frame) = self.target_frame.as_mut() {
+            frame.check(ledger)?;
+            let result = ledger.append_target_answer(
+                Uuid::new_v4(),
+                frame.expected_root(),
+                turn.clone(),
+                self.user.id,
+            )?;
+            frame.acknowledge(ledger, &result)?;
+        } else {
+            ledger.append(
+                Uuid::new_v4(),
+                ledger.expected(Namespace::Conversation, turn.conversation)?,
+                turn.clone(),
+                vec![],
+            )?;
+        }
         self.assistant = Some(self.load_turn(ledger, turn.id)?);
         Ok(())
     }

@@ -298,6 +298,10 @@ pub struct Receipt {
 )]
 pub enum Record {
     Root(Root),
+    SourceTarget(Box<super::target::SourceTarget>),
+    RegionSource(Box<super::target::RegionSource>),
+    TargetUse(Box<super::target::TargetUse>),
+    TargetState(Box<super::target::TargetState>),
     RequestEvidence(Box<super::evidence::RequestEvidence>),
     Turn(Turn),
     Source(ImageUse),

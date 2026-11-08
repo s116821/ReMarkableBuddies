@@ -21,6 +21,7 @@ pub mod selection;
 #[cfg(test)]
 mod snapshot_status_tests;
 pub mod sync;
+pub(crate) mod target_generation;
 pub mod types;
 use anyhow::{ensure, Context, Result};
 pub(crate) use recovery::ordinary_restore;
@@ -138,6 +139,7 @@ enum OpenPreparation {
     None,
     Feedback,
     Notebook,
+    Targets,
 }
 
 impl Drop for Lease {
@@ -312,7 +314,11 @@ impl Store {
             .try_lock()
             .map_err(|_| anyhow::anyhow!("store is owned by another process"))?;
         let lease = Lease(lease);
-        if preparation != OpenPreparation::None && paths.data.join("CURRENT").exists() {
+        if matches!(
+            preparation,
+            OpenPreparation::Feedback | OpenPreparation::Notebook
+        ) && paths.data.join("CURRENT").exists()
+        {
             let generation: Uuid = files::json(&paths.data.join("CURRENT"), 128)?;
             let root = paths.data.join("generations").join(generation.to_string());
             ensure!(
@@ -374,7 +380,13 @@ impl Store {
             export_active: std::sync::atomic::AtomicBool::new(false),
             writer_active: std::sync::atomic::AtomicBool::new(false),
         };
-        if preparation == OpenPreparation::Notebook {
+        if preparation == OpenPreparation::Targets {
+            selection::validate_generation_preparing_targets(
+                &store.generation(generation),
+                store.actor_id,
+                generation,
+            )?;
+        } else if preparation == OpenPreparation::Notebook {
             selection::validate_generation_preparing_notebook(
                 &store.generation(generation),
                 store.actor_id,
@@ -393,16 +405,24 @@ impl Store {
                 generation,
             )?;
         }
-        if feedback_generation::version(&store.generation(generation))?
-            == compound_generation::VERSION
+        if preparation != OpenPreparation::Targets
+            && feedback_generation::version(&store.generation(generation))?
+                == compound_generation::VERSION
         {
             compound_generation::validate_ready(&store.paths, store.actor_id, generation)?;
         }
-        if preparation != OpenPreparation::Notebook
-            && feedback_generation::version(&store.generation(generation))?
-                == notebook_generation::VERSION
+        if !matches!(
+            preparation,
+            OpenPreparation::Notebook | OpenPreparation::Targets
+        ) && feedback_generation::version(&store.generation(generation))?
+            == notebook_generation::VERSION
         {
             notebook_generation::validate_ready(&store.paths, store.actor_id, generation)?;
+        }
+        if preparation != OpenPreparation::Targets
+            && target_generation::is_target(&store.generation(generation))?
+        {
+            target_generation::validate_ready(&store.paths, store.actor_id, generation)?;
         }
         for directory in [
             store.paths.data.clone(),
@@ -416,7 +436,9 @@ impl Store {
             store.generation(generation).join("selections"),
             store.generation(generation).join("selection-history"),
         ] {
-            files::cleanup_staging(&directory)?;
+            if preparation != OpenPreparation::Targets {
+                files::cleanup_staging(&directory)?;
+            }
         }
         {
             let mut inner = store
@@ -425,12 +447,23 @@ impl Store {
                 .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
             inner.index = store.recover(generation)?;
         }
-        if preparation != OpenPreparation::Notebook {
+        if !matches!(
+            preparation,
+            OpenPreparation::Notebook | OpenPreparation::Targets
+        ) {
             store.publish_capabilities(&store.generation(generation))?;
         }
         Ok(store)
     }
     fn publish_capabilities(&self, root: &Path) -> Result<()> {
+        if target_generation::is_target(root)? {
+            let generation = Uuid::parse_str(
+                root.file_name()
+                    .and_then(|n| n.to_str())
+                    .context("invalid target generation path")?,
+            )?;
+            return target_generation::validate_ready(&self.paths, self.actor_id, generation);
+        }
         if feedback_generation::version(root)? == compound_generation::VERSION {
             let generation = Uuid::parse_str(
                 root.file_name()
@@ -536,6 +569,8 @@ impl Store {
                 .is_ok()
                     && Self::can_apply(&index, records).is_ok()
                     && notebook_generation::validate_records(&root, &index, records).is_ok()
+                    && target_generation::validate_records(&index, records, &manifest.records)
+                        .is_ok()
                 {
                     Self::apply_index(&mut index, manifest.clone(), records.clone());
                     false
@@ -561,7 +596,7 @@ impl Store {
         {
             ensure!(
                 manifest.scope == Scope::SelectedRecords
-                    && feedback_generation::version(root)? == compound_generation::VERSION,
+                    && target_generation::base_version(root)? == compound_generation::VERSION,
                 "portable configuration requires compound selected storage"
             );
             compound_generation::validate_portable_generation(root)?;
@@ -616,10 +651,13 @@ impl Store {
             let envelope: Envelope = serde_json::from_slice(&encoded)
                 .map_err(|_| anyhow::anyhow!("invalid or unsupported stored JSON"))?;
             envelope.validate()?;
+            if envelope.domain_schema_version == crate::conversation::target::SCHEMA {
+                target_generation::validate_ready_root(root)?;
+            }
             if envelope.namespace == Namespace::PortableConfiguration {
                 ensure!(
                     manifest.scope == Scope::SelectedRecords
-                        && feedback_generation::version(root)? == compound_generation::VERSION,
+                        && target_generation::base_version(root)? == compound_generation::VERSION,
                     "portable configuration requires compound selected storage"
                 );
                 compound_generation::validate_portable_generation(root)?;
@@ -632,11 +670,11 @@ impl Store {
                         envelope.actor_id == actor,
                         "notebook archive actor mismatch"
                     );
-                } else if feedback_generation::version(root)? == compound_generation::VERSION {
+                } else if target_generation::base_version(root)? == compound_generation::VERSION {
                     compound_generation::validate_portable_generation(root)?;
                 } else {
                     ensure!(
-                        feedback_generation::version(root)? == notebook_generation::VERSION,
+                        target_generation::base_version(root)? == notebook_generation::VERSION,
                         "notebook records require adopted generation4"
                     );
                     let generation = Uuid::parse_str(
@@ -1044,23 +1082,30 @@ impl Store {
     ) -> Result<(Uuid, bool)> {
         let root = self.generation(inner.generation);
         ensure!(
-            feedback_generation::version(&root)? != compound_generation::VERSION,
+            target_generation::base_version(&root)? != compound_generation::VERSION,
             "compound storage requires selected publication"
         );
         Self::validate_namespace_family(&root, &manifest)?;
         for reference in &manifest.records {
             if let Some(bytes) = objects.get(&reference.sha256) {
                 if let Ok(envelope) = serde_json::from_slice::<Envelope>(bytes) {
+                    if envelope.domain_schema_version == crate::conversation::target::SCHEMA {
+                        target_generation::validate_ready(
+                            &self.paths,
+                            self.actor_id,
+                            inner.generation,
+                        )?;
+                    }
                     if envelope.domain_schema_version == 3 {
                         ensure!(
-                            feedback_generation::version(&root)? == notebook_generation::VERSION,
+                            target_generation::base_version(&root)? == notebook_generation::VERSION,
                             "notebook records require adopted generation4"
                         );
                     }
                 }
             }
         }
-        if feedback_generation::version(&root)? == notebook_generation::VERSION {
+        if target_generation::base_version(&root)? == notebook_generation::VERSION {
             notebook_generation::validate_ready(&self.paths, self.actor_id, inner.generation)?;
             ensure!(
                 inner.index.unavailable == 0
@@ -1091,7 +1136,7 @@ impl Store {
             .any(|(e, _)| e.namespace == Namespace::UnassociatedFeedback)
         {
             ensure!(
-                if feedback_generation::version(&root)? == notebook_generation::VERSION {
+                if target_generation::base_version(&root)? == notebook_generation::VERSION {
                     sync::mode::ordinary_local(self)?
                 } else {
                     inner.mode_handles == 0 && sync::mode::load(self)?.is_none()
@@ -1109,6 +1154,7 @@ impl Store {
         )?;
         Self::can_apply(&inner.index, &records)?;
         notebook_generation::validate_records(&root, &inner.index, &records)?;
+        target_generation::validate_records(&inner.index, &records, &manifest.records)?;
         if local {
             for (e, hash) in &records {
                 if inner.index.operations.get(&e.operation_id) == Some(hash) {
