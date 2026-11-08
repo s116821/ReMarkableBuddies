@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 use std::{collections::VecDeque, io::Cursor};
 
 pub(super) mod qualification;
+mod resident;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
