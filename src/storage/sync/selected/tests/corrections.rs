@@ -102,28 +102,29 @@ impl CorrectionFixture {
             let Some(progress) = engine.checkpoint.scopes.get(&self.scope.key_sha256) else {
                 continue;
             };
-            if progress.applied.is_some()
-                && progress.pending.is_none()
-                && progress.receive.is_none()
-            {
-                let snapshot = engine
-                    .store
-                    .selected_snapshot(&self.scope, MAX_ITEMS)
-                    .unwrap()
-                    .unwrap();
-                let projection = route::project(
-                    &engine.store,
-                    self.owner,
-                    &snapshot.transaction.selected,
-                    &mut route::allowance(),
-                )
+            let Some(applied) = &progress.applied else {
+                continue;
+            };
+            if progress.pending.is_some() || progress.receive.is_some() {
+                continue;
+            }
+            let snapshot = engine
+                .store
+                .selected_snapshot(&self.scope, MAX_ITEMS)
+                .unwrap()
                 .unwrap();
-                if projection.head() == revision
-                    && progress.applied.as_ref().unwrap().membership
-                        == receiving::membership(&snapshot.transaction.selected).unwrap()
-                {
-                    return;
-                }
+            let projection = route::project(
+                &engine.store,
+                self.owner,
+                &snapshot.transaction.selected,
+                &mut route::allowance(),
+            )
+            .unwrap();
+            if projection.head() == revision
+                && applied.membership
+                    == receiving::membership(&snapshot.transaction.selected).unwrap()
+            {
+                return;
             }
         }
         panic!("correction {revision} did not settle");
