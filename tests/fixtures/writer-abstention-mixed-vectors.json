@@ -1,0 +1,35 @@
+{
+  "instruction_part": "A null original_text means no machine reading exists. The corrected_text is the transcription explicitly supplied by the user for that example image.",
+  "reader_tasks": [
+    "reader-analysis-confirmed-v1-nullable-original-v1",
+    "reader-verification-confirmed-v1-nullable-original-v1"
+  ],
+  "identity_json": "{\"profile\":\"00000000-0000-0000-0000-000000000007\",\"examples\":[{\"correction\":\"00000000-0000-0000-0000-000000000001\",\"record\":\"00000000-0000-0000-0000-000000000003\",\"revision\":\"00000000-0000-0000-0000-000000000005\",\"sample_sha256\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"original_text_sha256\":\"16a36e86f6fed5d465ff332511a0ce1a863b55d364b25a7cdaa25db19abf9648\",\"corrected_text_sha256\":\"1af8ffa2785e9493acb0c9157f3f8b9fc194f7c5a756621882c1f04e11fb6eb1\"},{\"correction\":\"00000000-0000-0000-0000-000000000002\",\"record\":\"00000000-0000-0000-0000-000000000004\",\"revision\":\"00000000-0000-0000-0000-000000000006\",\"sample_sha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"original_text_sha256\":null,\"corrected_text_sha256\":\"abdbc2b5cc2c7a519b72bf7a164c58ebf892ab0c2df6468213705cc2f0da8561\"}]}",
+  "identity_sha256": "39b640c877aacd2584037e86e89a6a8b0735dc1a6a1dbc7b8bcc403adbcb5218",
+  "notebook_descriptor_parts": [
+    "{\"corrected_text\":\"Al\",\"index\":1,\"kind\":\"confirmed-example\",\"original_text\":\"A1\"}",
+    "{\"corrected_text\":\"B2\",\"index\":2,\"kind\":\"confirmed-example\",\"original_text\":null}"
+  ],
+  "reader_descriptor_parts": [
+    "{\"kind\":\"confirmed-example\",\"index\":1,\"original_text\":\"A1\",\"corrected_text\":\"Al\"}",
+    "{\"kind\":\"confirmed-example\",\"index\":2,\"original_text\":null,\"corrected_text\":\"B2\"}"
+  ],
+  "profiles": {
+    "whole-page": {
+      "profile_json": "{\"protocol\":2,\"prompt_revision\":\"transcribe-confirmed-examples-v2-nullable-original-v1\",\"caller_model_profile\":\"fixture\",\"confirmed_context\":{\"profile\":\"00000000-0000-0000-0000-000000000007\",\"examples\":[{\"correction\":\"00000000-0000-0000-0000-000000000001\",\"record\":\"00000000-0000-0000-0000-000000000003\",\"revision\":\"00000000-0000-0000-0000-000000000005\",\"sample_sha256\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"original_text_sha256\":\"16a36e86f6fed5d465ff332511a0ce1a863b55d364b25a7cdaa25db19abf9648\",\"corrected_text_sha256\":\"1af8ffa2785e9493acb0c9157f3f8b9fc194f7c5a756621882c1f04e11fb6eb1\"},{\"correction\":\"00000000-0000-0000-0000-000000000002\",\"record\":\"00000000-0000-0000-0000-000000000004\",\"revision\":\"00000000-0000-0000-0000-000000000006\",\"sample_sha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"original_text_sha256\":null,\"corrected_text_sha256\":\"abdbc2b5cc2c7a519b72bf7a164c58ebf892ab0c2df6468213705cc2f0da8561\"}]}}",
+      "extractor": "notebook-ocr-confirmed-v2-nullable-original-v1:1e8b8735ea45d1a99eb17b0e7a85a66e25ea4a8b01d453a8c2609b13e4a907c7"
+    },
+    "partial": {
+      "profile_json": "{\"protocol\":3,\"prompt_revision\":\"transcribe-partial-confirmed-examples-v2-nullable-original-v1\",\"caller_model_profile\":\"fixture\",\"confirmed_context\":{\"profile\":\"00000000-0000-0000-0000-000000000007\",\"examples\":[{\"correction\":\"00000000-0000-0000-0000-000000000001\",\"record\":\"00000000-0000-0000-0000-000000000003\",\"revision\":\"00000000-0000-0000-0000-000000000005\",\"sample_sha256\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"original_text_sha256\":\"16a36e86f6fed5d465ff332511a0ce1a863b55d364b25a7cdaa25db19abf9648\",\"corrected_text_sha256\":\"1af8ffa2785e9493acb0c9157f3f8b9fc194f7c5a756621882c1f04e11fb6eb1\"},{\"correction\":\"00000000-0000-0000-0000-000000000002\",\"record\":\"00000000-0000-0000-0000-000000000004\",\"revision\":\"00000000-0000-0000-0000-000000000006\",\"sample_sha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"original_text_sha256\":null,\"corrected_text_sha256\":\"abdbc2b5cc2c7a519b72bf7a164c58ebf892ab0c2df6468213705cc2f0da8561\"}]}}",
+      "extractor": "notebook-ocr-partial-v2-nullable-original-v1:db218d221fc351685ff9ca75a278e263d7995f40710d82626034c9a3d402bc47"
+    },
+    "partial-math": {
+      "profile_json": "{\"protocol\":3,\"prompt_revision\":\"transcribe-partial-math-confirmed-examples-v1-nullable-original-v1\",\"caller_model_profile\":\"fixture\",\"confirmed_context\":{\"profile\":\"00000000-0000-0000-0000-000000000007\",\"examples\":[{\"correction\":\"00000000-0000-0000-0000-000000000001\",\"record\":\"00000000-0000-0000-0000-000000000003\",\"revision\":\"00000000-0000-0000-0000-000000000005\",\"sample_sha256\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"original_text_sha256\":\"16a36e86f6fed5d465ff332511a0ce1a863b55d364b25a7cdaa25db19abf9648\",\"corrected_text_sha256\":\"1af8ffa2785e9493acb0c9157f3f8b9fc194f7c5a756621882c1f04e11fb6eb1\"},{\"correction\":\"00000000-0000-0000-0000-000000000002\",\"record\":\"00000000-0000-0000-0000-000000000004\",\"revision\":\"00000000-0000-0000-0000-000000000006\",\"sample_sha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"original_text_sha256\":null,\"corrected_text_sha256\":\"abdbc2b5cc2c7a519b72bf7a164c58ebf892ab0c2df6468213705cc2f0da8561\"}]}}",
+      "extractor": "notebook-ocr-partial-math-v1-nullable-original-v1:20dff3099ef00443c13c1c28794ecd522c0da7c6568847e6fccd985a89df69c2"
+    },
+    "structured-math": {
+      "profile_json": "{\"protocol\":4,\"prompt_revision\":\"transcribe-structured-math-confirmed-examples-v1-nullable-original-v1\",\"caller_model_profile\":\"fixture\",\"confirmed_context\":{\"profile\":\"00000000-0000-0000-0000-000000000007\",\"examples\":[{\"correction\":\"00000000-0000-0000-0000-000000000001\",\"record\":\"00000000-0000-0000-0000-000000000003\",\"revision\":\"00000000-0000-0000-0000-000000000005\",\"sample_sha256\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"original_text_sha256\":\"16a36e86f6fed5d465ff332511a0ce1a863b55d364b25a7cdaa25db19abf9648\",\"corrected_text_sha256\":\"1af8ffa2785e9493acb0c9157f3f8b9fc194f7c5a756621882c1f04e11fb6eb1\"},{\"correction\":\"00000000-0000-0000-0000-000000000002\",\"record\":\"00000000-0000-0000-0000-000000000004\",\"revision\":\"00000000-0000-0000-0000-000000000006\",\"sample_sha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"original_text_sha256\":null,\"corrected_text_sha256\":\"abdbc2b5cc2c7a519b72bf7a164c58ebf892ab0c2df6468213705cc2f0da8561\"}]}}",
+      "extractor": "notebook-ocr-structured-math-v1-nullable-original-v1:2bf886370a6368c990d65747475735688fd698cfe452102b45c52545e2e38b97"
+    }
+  }
+}
