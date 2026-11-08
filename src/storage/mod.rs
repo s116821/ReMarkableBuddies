@@ -252,10 +252,10 @@ impl Store {
             .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
         let root = self.generation(inner.generation);
         ensure!(
-            feedback_generation::version(&root)? != compound_generation::VERSION,
+            target_generation::base_version(&root)? != compound_generation::VERSION,
             "compound storage requires its selected producer/worker"
         );
-        if feedback_generation::version(&root)? == notebook_generation::VERSION {
+        if target_generation::base_version(&root)? == notebook_generation::VERSION {
             ensure!(
                 local_notebook,
                 "notebook storage does not support legacy sync"

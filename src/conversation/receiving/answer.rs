@@ -161,16 +161,21 @@ pub(crate) fn follow_up(
     progress: &mut dyn FnMut() -> Result<()>,
 ) -> Result<String> {
     let images = super::images::resolve(ledger, context)?;
-    let payload = super::encoded(
-        &serde_json::json!({
-            "request":request,
-            "history":context.turns,
-            "normalized_text":context.normalized_text,
-            "archived_sources":context.archived_sources,
-            "historical_images":images.associations,
-        }),
-        96 * 1024,
-    )?;
+    let mut payload = serde_json::json!({
+        "request":request,
+        "history":context.turns,
+        "normalized_text":context.normalized_text,
+        "archived_sources":context.archived_sources,
+        "historical_images":images.associations,
+    });
+    if !context.region_sources.is_empty() {
+        payload["regional_sources"] = serde_json::to_value(&context.region_sources)?;
+    }
+    if !context.target_uses.is_empty() {
+        payload["target_uses"] = serde_json::to_value(&context.target_uses)?;
+        payload["targets"] = serde_json::to_value(&context.targets)?;
+    }
+    let payload = super::encoded(&payload, 96 * 1024)?;
     progress()?;
     let snapshot = memory
         .map(|(provider, document, now)| {

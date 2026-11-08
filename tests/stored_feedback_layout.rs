@@ -119,6 +119,9 @@ fn edit(store: &Store, old: &Envelope, change: impl FnOnce(&mut Envelope)) {
 
 fn context(turns: Vec<Turn>) -> ContextView {
     ContextView {
+        target_uses: vec![],
+        region_sources: vec![],
+        targets: vec![],
         turns,
         sources: vec![],
         captures: vec![],

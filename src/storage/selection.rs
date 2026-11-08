@@ -1,5 +1,6 @@
 //! Domain-opaque atomic selected references. No domain/native admission or worker.
 mod budget;
+pub(crate) use budget::SelectedReadCheckpoint;
 pub use budget::{SelectedReadBudget, SelectedReadUsage};
 mod outbox;
 pub(crate) mod portable;

@@ -1,5 +1,6 @@
 //! Reader retains one preference snapshot across multiple guarded stages.
 use super::*;
+mod target_startup;
 use crate::memory::catalog::{Catalog, Identity, Owner as DocumentOwner, Registration};
 use std::cell::Cell;
 
@@ -132,11 +133,29 @@ impl ReaderPreferences {
         root: &str,
         reads: &mut SelectedReadBudget,
     ) -> Result<(Registration, Entry, SelectionToken)> {
-        let key = &reader.scope().key_sha256;
-        let checkpoint = command::checkpoint(store, &inner.binding, inner.guard.mode_epoch, reads)?
+        Self::registered_bound(
+            &inner.binding,
+            inner.guard.mode_epoch,
+            identity,
+            reader.scope(),
+            store,
+            root,
+            reads,
+        )
+    }
+    fn registered_bound(
+        binding: &Binding,
+        epoch: Uuid,
+        identity: &Identity,
+        scope: &SelectionScope,
+        store: &Store,
+        root: &str,
+        reads: &mut SelectedReadBudget,
+    ) -> Result<(Registration, Entry, SelectionToken)> {
+        let key = &scope.key_sha256;
+        let checkpoint = command::checkpoint(store, binding, epoch, reads)?
             .context("Reader accepted catalog absent")?;
-        let view =
-            catalog_view(&inner.binding, &checkpoint)?.context("Reader catalog root absent")?;
+        let view = catalog_view(binding, &checkpoint)?.context("Reader catalog root absent")?;
         ensure!(
             view.root_sha == root && view.root.profile == identity.profile,
             "Reader catalog root changed"
@@ -149,7 +168,7 @@ impl ReaderPreferences {
             anyhow::bail!("selected Reader owner is not a document");
         };
         ensure!(
-            identity.aggregate_scope(owner)? == *reader.scope(),
+            identity.aggregate_scope(owner)? == *scope,
             "selected Reader owner differs"
         );
         let local = store
@@ -165,7 +184,7 @@ impl ReaderPreferences {
             "Reader local registration owner differs"
         );
         let read = store
-            .selected_snapshot_with_budget(reader.scope(), MAX_ITEMS, reads)?
+            .selected_snapshot_with_budget(scope, MAX_ITEMS, reads)?
             .context("Reader registered document is unreceived")?;
         crate::memory::aggregate::Aggregate::project(
             identity,
@@ -315,5 +334,133 @@ impl ReaderPreferences {
         expected: &SelectionToken,
     ) -> Result<()> {
         self.inner.check_joined_progress(Some((reader, expected)))
+    }
+}
+
+impl ReaderPreferences {
+    /// Retain the original OS lease while temporary policy/mode/domain owners
+    /// are removed. This consumes the qualified witness and every remaining
+    /// request allowance; it never opens another ReaderPreferences or does GET.
+    pub(crate) fn promote_targets(
+        self,
+        store: Arc<Store>,
+        reader: Arc<SelectedAdmission>,
+        token: SelectionToken,
+    ) -> Result<(Arc<Store>, Arc<SelectedAdmission>, Self, SelectionToken)> {
+        self.promote_targets_with_hook(store, reader, token, |_| Ok(()))
+    }
+    pub(crate) fn promote_targets_with_hook(
+        self,
+        store: Arc<Store>,
+        reader: Arc<SelectedAdmission>,
+        token: SelectionToken,
+        mut hook: impl FnMut(crate::storage::target_generation::Stage) -> Result<()>,
+    ) -> Result<(Arc<Store>, Arc<SelectedAdmission>, Self, SelectionToken)> {
+        ensure!(reader.uses_store(&store), "target startup Store differs");
+        if store.source_target_generation()?.is_some() {
+            return Ok((store, reader, self, token));
+        }
+        let Self {
+            inner,
+            catalog,
+            identity,
+            registration,
+            entry,
+            root,
+            publication_elapsed,
+            response_at,
+        } = self;
+        ensure!(
+            !inner.handoff_used.load(Ordering::Acquire) && !inner.submitted.load(Ordering::Acquire),
+            "target startup already submitted"
+        );
+        let scope = reader.scope().clone();
+        let detached = inner.detach();
+        drop(catalog);
+        drop(reader);
+        let mut store = Arc::try_unwrap(store)
+            .map_err(|_| anyhow::anyhow!("target startup requires unique Store ownership"))?;
+        {
+            let mut reads =
+                detached.reads.admission.lock().map_err(|_| {
+                    anyhow::anyhow!("original target startup allowance unavailable")
+                })?;
+            let verify = |reads: &mut SelectedReadBudget| -> Result<()> {
+                detached.verify_locked(&store, reads)?;
+                let (r, e, t) = Self::registered_bound(
+                    &detached.binding,
+                    detached.guard.mode_epoch,
+                    &identity,
+                    &scope,
+                    &store,
+                    &root,
+                    reads,
+                )?;
+                ensure!(
+                    r == registration && e == entry && t == token,
+                    "target startup catalog/registration/token changed"
+                );
+                Ok(())
+            };
+            verify(&mut reads)?;
+        }
+        let (pin, operation) = target_startup::freeze(
+            &store,
+            &detached,
+            &identity,
+            &registration,
+            &entry,
+            &root,
+            &token,
+        )?;
+        hook(crate::storage::target_generation::Stage::Policy)?;
+        crate::storage::target_generation::prepare_selected_original(
+            &mut store, &pin, operation, hook,
+        )?;
+        {
+            let mut reads =
+                detached.reads.admission.lock().map_err(|_| {
+                    anyhow::anyhow!("original target startup allowance unavailable")
+                })?;
+            detached.verify_locked(&store, &mut reads)?;
+            let (r, e, t) = Self::registered_bound(
+                &detached.binding,
+                detached.guard.mode_epoch,
+                &identity,
+                &scope,
+                &store,
+                &root,
+                &mut reads,
+            )?;
+            ensure!(
+                r == registration && e == entry && t == token,
+                "target promotion changed original custody"
+            );
+        }
+        let store = Arc::new(store);
+        let reader = Arc::new(SelectedAdmission::new(store.clone(), scope)?);
+        let inner = detached.attach(store.clone())?;
+        let catalog = SelectedAdmission::new(store.clone(), identity.scope()?)?;
+        Ok((
+            store,
+            reader,
+            Self {
+                inner,
+                catalog,
+                identity,
+                registration,
+                entry,
+                root,
+                publication_elapsed,
+                response_at,
+            },
+            token,
+        ))
+    }
+}
+
+impl ReaderPreferences {
+    pub(crate) fn resume_target_preparation(store: &mut Store, config: &Config) -> Result<bool> {
+        target_startup::resume(store, config)
     }
 }

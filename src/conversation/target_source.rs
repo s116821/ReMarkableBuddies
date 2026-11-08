@@ -11,7 +11,10 @@ pub(crate) struct SourceFrame {
     pub(super) original: Vec<u8>,
     pub(super) conversation: Uuid,
 }
-fn descriptor(reference: RecordRef, record: &Record) -> Result<(RetainedSourceRef, Uuid)> {
+pub(crate) fn descriptor(
+    reference: RecordRef,
+    record: &Record,
+) -> Result<(RetainedSourceRef, Uuid)> {
     let (kind, conversation, turn, original, dimensions, overview, overview_dimensions) =
         match record {
             Record::Source(v) => {
@@ -121,6 +124,11 @@ impl SourceFrame {
             .map(|e| e.revision_id)
             .collect::<BTreeSet<_>>();
         ensure!(heads == self.root.0, "target root changed");
+        let sources = store.heads(Namespace::Source, self.source.record.record)?;
+        ensure!(
+            sources.len() == 1 && sources[0].revision_id == self.source.record.revision,
+            "target original source changed"
+        );
         let state = store
             .heads(Namespace::Conversation, TargetState::id(self.conversation))?
             .iter()
@@ -146,6 +154,9 @@ impl SourceFrame {
     }
     pub(crate) fn expected_root(&self) -> ExpectedHeads {
         self.root.clone()
+    }
+    pub(crate) fn original(&self) -> &[u8] {
+        &self.original
     }
     pub(crate) fn source(&self) -> &RetainedSourceRef {
         &self.source
@@ -434,5 +445,608 @@ impl Ledger {
             return Ok(prior);
         }
         self.append_unreplayed_target(operation, expected, turn, vec![], fingerprint, Some(user))
+    }
+}
+impl Ledger {
+    pub(crate) fn target_inherited_records(&self, user: &Turn) -> Result<Vec<Envelope>> {
+        let Some(state) = self
+            .store
+            .value(Namespace::Conversation, TargetState::id(user.conversation))?
+        else {
+            return Ok(vec![]);
+        };
+        let Record::TargetState(state) = Self::decode(&state)? else {
+            bail!("target state unavailable")
+        };
+        let original = &state.use_reference;
+        let bytes = self.store.read_object(&original.object)?;
+        let envelope: Envelope = serde_json::from_slice(&bytes)?;
+        ensure!(
+            envelope.namespace == original.namespace
+                && envelope.record_id == original.record
+                && envelope.revision_id == original.revision,
+            "target state's exact use differs"
+        );
+        let Record::TargetUse(prior) = Self::decode(&envelope)? else {
+            bail!("target state's use variant")
+        };
+        let Some(target) = prior.target else {
+            return Ok(vec![]);
+        };
+        ensure!(
+            prior.conversation == user.conversation,
+            "foreign current target"
+        );
+        let used = TargetUse {
+            id: TargetUse::id(user.id),
+            conversation: user.conversation,
+            turn: user.id,
+            action: Action::Inherit,
+            target: Some(target),
+            about: None,
+            inline_body_sha256: None,
+        };
+        Ok(vec![self.envelope(
+            Namespace::Conversation,
+            used.id,
+            ExpectedHeads::default(),
+            Record::TargetUse(Box::new(used)),
+            vec![],
+        )?])
+    }
+}
+impl Ledger {
+    pub(crate) fn target_views(&self, uses: &[TargetUse]) -> Result<Vec<TargetView>> {
+        let mut views = Vec::new();
+        let mut seen = BTreeSet::new();
+        let mut remaining = 8 * 1024 * 1024u64;
+        for used in uses {
+            let Some(reference) = &used.target else {
+                continue;
+            };
+            if !seen.insert(reference.revision) {
+                continue;
+            }
+            let mut exact = |reference: &RecordRef| -> Result<Record> {
+                remaining = remaining
+                    .checked_sub(reference.object.bytes)
+                    .context("target history metadata budget exceeded")?;
+                let encoded = self.store.read_object(&reference.object)?;
+                let envelope: Envelope = serde_json::from_slice(&encoded)?;
+                ensure!(
+                    envelope.namespace == reference.namespace
+                        && envelope.record_id == reference.record
+                        && envelope.revision_id == reference.revision
+                        && self.store.notebook_revision_reference(&envelope)? == reference.object,
+                    "target exact committed reference differs"
+                );
+                Self::decode(&envelope)
+            };
+            let Record::SourceTarget(target) = exact(reference)? else {
+                bail!("target view exact revision absent")
+            };
+            let source = exact(&target.source.record)?;
+            views.push(TargetView::new(reference.clone(), *target, source)?);
+        }
+        Ok(views)
+    }
+    pub(crate) fn complete_target_view(&self, view: &mut ContextView) -> Result<()> {
+        view.targets = self.target_views(&view.target_uses)?;
+        for target in &view.targets {
+            for media in target.media()? {
+                if self
+                    .store
+                    .open_object(&ObjectRef {
+                        sha256: media.sha256.clone(),
+                        bytes: media.bytes,
+                    })
+                    .is_err()
+                    && !view.missing_media.contains(&media)
+                {
+                    view.missing_media.push(media);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use crate::config::Config;
+    use std::io::Cursor;
+    pub(crate) struct Fixture(pub std::path::PathBuf);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    pub(crate) fn fixture() -> (Fixture, Ledger, Uuid, Uuid) {
+        let f = Fixture(std::env::temp_dir().join(format!("rmb-target-{}", Uuid::new_v4())));
+        let mut config = Config::default();
+        config.paths = crate::storage::StorePaths {
+            data: f.0.join("data"),
+            cache: f.0.join("cache"),
+            credentials: f.0.join("secrets"),
+        };
+        let ledger = Ledger::new(Arc::new(
+            Store::open_source_target_startup(&config).unwrap(),
+        ));
+        let c = Uuid::new_v4();
+        ledger.create(c, Uuid::new_v4(), 1).unwrap();
+        let mut user = user(c);
+        user.outcome = Outcome::Prepared;
+        user.text = None;
+        let source = Uuid::new_v4();
+        user.sources.push(source);
+        let png = {
+            let mut b = Cursor::new(Vec::new());
+            image::DynamicImage::new_rgb8(2, 2)
+                .write_to(&mut b, image::ImageFormat::Png)
+                .unwrap();
+            b.into_inner()
+        };
+        let media = Media {
+            sha256: digest(&png),
+            bytes: png.len() as u64,
+            media_type: "image/png".into(),
+        };
+        ledger.stage_image(&media, png.as_slice()).unwrap();
+        let image = ImageUse {
+            id: source,
+            conversation: c,
+            turn: user.id,
+            image: media,
+            observation: SourceObservation {
+                document: Uuid::new_v4(),
+                page: Uuid::new_v4(),
+                session: "synthetic".into(),
+                visit: "synthetic".into(),
+                content_revision: None,
+                order_revision: None,
+                capability_revision: "synthetic".into(),
+                evidence_procedure: "unit-original".into(),
+            },
+            width: 2,
+            height: 2,
+            purpose: "overview".into(),
+            ordinal: 0,
+            parent: None,
+            parent_dimensions: None,
+            crop: None,
+            transform: [0.5, 0., 0., 0.5, 0., 0.],
+            target: None,
+            captured_ms: 1,
+        };
+        ledger
+            .append(
+                Uuid::new_v4(),
+                ledger.expected(Namespace::Conversation, c).unwrap(),
+                user.clone(),
+                vec![image],
+            )
+            .unwrap();
+        let frame = ledger.target_source_frame(c, source).unwrap();
+        user.outcome = Outcome::Interpreted;
+        user.text = Some("Explain this".into());
+        ledger
+            .advance_with_source_target(
+                Uuid::new_v4(),
+                frame.expected_root(),
+                ledger.expected(Namespace::Conversation, user.id).unwrap(),
+                user,
+                &frame,
+                &Candidate {
+                    subject: "Original region".into(),
+                    geometry: Some(geometry::Geometry {
+                        components: vec![vec![
+                            [0, 0],
+                            [1_000_000, 0],
+                            [1_000_000, 1_000_000],
+                            [0, 1_000_000],
+                        ]],
+                    }),
+                    understanding: Understanding::Interpreted,
+                },
+            )
+            .unwrap();
+        (f, ledger, c, source)
+    }
+    pub(crate) fn user(c: Uuid) -> Turn {
+        Turn {
+            id: Uuid::new_v4(),
+            conversation: c,
+            exchange: Uuid::new_v4(),
+            sequence: 0,
+            role: Role::User,
+            mode: Mode::Reader,
+            outcome: Outcome::Interpreted,
+            text: Some("Explain this".into()),
+            sources: vec![],
+            correction_of: None,
+            created_ms: 1,
+            updated_ms: 1,
+            completion: None,
+        }
+    }
+    #[test]
+    fn inherited_target_retains_exact_original_outside_history_range_and_reopen() {
+        let (_f, ledger, c, source) = fixture();
+        let follow = user(c);
+        ledger
+            .append(
+                Uuid::new_v4(),
+                ledger.expected(Namespace::Conversation, c).unwrap(),
+                follow.clone(),
+                vec![],
+            )
+            .unwrap();
+        let paths = ledger.store.paths.clone();
+        drop(ledger);
+        let ledger = Ledger::new(Arc::new(Store::open(paths).unwrap()));
+        let context = ledger
+            .context_range(
+                c,
+                Some(TurnRange {
+                    start: 1,
+                    end_exclusive: 2,
+                }),
+                &ContextBudget {
+                    max_text_bytes: 4096,
+                    max_turns: 4,
+                    provider_token_limit: Some(4096),
+                },
+                |_| Ok(10),
+            )
+            .unwrap();
+        assert_eq!(context.turns.len(), 1);
+        assert_eq!(context.turns[0].id, follow.id);
+        assert!(context.sources.is_empty());
+        assert_eq!(context.target_uses.len(), 1);
+        assert_eq!(context.target_uses[0].action, Action::Inherit);
+        assert_eq!(context.target_uses[0].about, None);
+        assert_eq!(context.targets.len(), 1);
+        assert_eq!(context.targets[0].target.source.record.record, source);
+        let images = crate::conversation::receiving::images::resolve(&ledger, &context).unwrap();
+        assert_eq!(images.attachments.len(), 1);
+        let a = serde_json::to_value(images.associations).unwrap();
+        assert_eq!(a[0]["source"], context.targets[0].target.id.to_string());
+        let mut missing = context;
+        missing.targets.clear();
+        assert!(crate::conversation::receiving::images::resolve(&ledger, &missing).is_err());
+    }
+    #[test]
+    fn explicit_subject_correction_retargets_and_cli_replay_preserve_original_history() {
+        let (f, ledger, c, source) = fixture();
+        let budget = ContextBudget {
+            max_text_bytes: 8192,
+            max_turns: 16,
+            provider_token_limit: Some(8192),
+        };
+        let initial = ledger.context(c, &budget, |_| Ok(1)).unwrap().targets[0].clone();
+        let typed = user(c);
+        let op = Uuid::new_v4();
+        let expected = ledger.expected(Namespace::Conversation, c).unwrap();
+        let correction = TargetChange::CorrectSubject {
+            target: initial.reference.clone(),
+            subject: "Corrected subject".into(),
+        };
+        let ack = ledger
+            .change_target(op, expected.clone(), typed.clone(), &correction)
+            .unwrap();
+        assert_eq!(
+            ledger
+                .change_target(op, expected, typed, &correction)
+                .unwrap()
+                .historical,
+            ack.historical
+        );
+        let context = ledger.context(c, &budget, |_| Ok(1)).unwrap();
+        assert_eq!(context.targets.len(), 2);
+        let corrected = context
+            .targets
+            .iter()
+            .find(|v| v.target.candidate.subject == "Corrected subject")
+            .unwrap();
+        assert_eq!(initial.target.id, corrected.target.id);
+        assert_ne!(initial.reference.revision, corrected.reference.revision);
+        assert_eq!(corrected.target.previous, Some(initial.reference.clone()));
+        let follow = user(c);
+        ledger
+            .append(
+                Uuid::new_v4(),
+                ledger.expected(Namespace::Conversation, c).unwrap(),
+                follow.clone(),
+                vec![],
+            )
+            .unwrap();
+        let context = ledger.context(c, &budget, |_| Ok(1)).unwrap();
+        let inherited = context
+            .target_uses
+            .iter()
+            .find(|u| u.turn == follow.id)
+            .unwrap();
+        assert_eq!(inherited.target, Some(corrected.reference.clone()));
+        assert!(inherited.about.is_none());
+        let config = crate::config::Config {
+            paths: ledger.store().paths.clone(),
+            ..Default::default()
+        };
+        let config_path = f.0.join("config.json");
+        std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+        let change = TargetChange::Retarget {
+            source,
+            candidate: Candidate {
+                subject: "Different region".into(),
+                geometry: Some(geometry::Geometry {
+                    components: vec![vec![
+                        [0, 0],
+                        [500_000, 0],
+                        [500_000, 1_000_000],
+                        [0, 1_000_000],
+                    ]],
+                }),
+                understanding: Understanding::Interpreted,
+            },
+        };
+        let request = serde_json::json!({"operation":Uuid::new_v4(),"conversation":c,"user":Uuid::new_v4(),"expected_root":ledger.expected(Namespace::Conversation,c).unwrap(),"text":"Use this different bounded region", "change":change});
+        let bytes = serde_json::to_vec(&request).unwrap();
+        drop(ledger);
+        let execute = || {
+            serde_json::to_value(super::super::target_command::run(
+                Some(config_path.clone()),
+                std::path::Path::new("-"),
+                &mut &bytes[..],
+            ))
+            .unwrap()
+        };
+        let report = execute();
+        assert_eq!(report["status"], "acknowledged");
+        assert_eq!(report, execute());
+        let ledger = Ledger::new(Arc::new(Store::open(config.paths).unwrap()));
+        let context = ledger.context(c, &budget, |_| Ok(1)).unwrap();
+        let retarget = context
+            .targets
+            .iter()
+            .find(|v| v.target.candidate.subject == "Different region")
+            .unwrap();
+        assert_ne!(retarget.target.id, initial.target.id);
+        assert_eq!(retarget.target.source, initial.target.source);
+        assert_eq!(
+            context
+                .target_uses
+                .iter()
+                .filter(|u| u.action == Action::CorrectSubject)
+                .count(),
+            1
+        );
+        assert_eq!(
+            context
+                .target_uses
+                .iter()
+                .filter(|u| u.action == Action::Retarget)
+                .count(),
+            1
+        );
+        assert!(ledger
+            .store()
+            .snapshot_heads_matching(&[Namespace::Handwriting], 16, |_| true)
+            .unwrap()
+            .is_empty());
+        let images = crate::conversation::receiving::images::resolve(&ledger, &context).unwrap();
+        assert_eq!(images.attachments.len(), 1);
+        assert_eq!(
+            images.associations.len(),
+            3,
+            "original capture and two target scopes retain associations"
+        );
+    }
+}
+
+impl Ledger {
+    pub(crate) fn stored_target_frame(
+        &self,
+        conversation: Uuid,
+        reference: &RecordRef,
+    ) -> Result<(SourceFrame, SourceTarget)> {
+        ensure!(
+            reference.namespace == Namespace::Source,
+            "target namespace differs"
+        );
+        let envelope = self
+            .store
+            .value(Namespace::Source, reference.record)?
+            .context("stored target absent")?;
+        ensure!(
+            envelope.revision_id == reference.revision
+                && self.store.notebook_revision_reference(&envelope)? == reference.object,
+            "stored target changed"
+        );
+        let Record::SourceTarget(target) = Self::decode(&envelope)? else {
+            bail!("not a stored target")
+        };
+        ensure!(target.conversation == conversation, "foreign stored target");
+        let frame = self.target_source_frame(conversation, target.source.record.record)?;
+        ensure!(
+            frame.source == target.source,
+            "stored target original changed"
+        );
+        Ok((frame, *target))
+    }
+    pub(crate) fn target_document(&self, target: &SourceTarget) -> Result<Uuid> {
+        let encoded = self.store.read_object(&target.source.record.object)?;
+        let e: Envelope = serde_json::from_slice(&encoded)?;
+        let record = Self::decode(&e)?;
+        Ok(target
+            .source
+            .validate_record(&record, target.conversation)?
+            .unwrap_or_else(|| {
+                Uuid::new_v5(
+                    &target.conversation,
+                    format!("historical-unbound:{}", target.source.record.record).as_bytes(),
+                )
+            }))
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "action", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum TargetChange {
+    CorrectSubject { target: RecordRef, subject: String },
+    Retarget { source: Uuid, candidate: Candidate },
+}
+impl Ledger {
+    /// Explicit historical intent under root CAS. This never confirms handwriting,
+    /// infers a region from prose or grants a native output lease.
+    pub fn change_target(
+        &self,
+        operation: Uuid,
+        expected: ExpectedHeads,
+        mut user: Turn,
+        change: &TargetChange,
+    ) -> Result<WriteResult> {
+        let fingerprint = Self::fingerprint(&("explicit-target-change-v1", &user, change))?;
+        if let Some(prior) = self.replay(operation, &fingerprint)? {
+            return Ok(prior);
+        }
+        Self::validate_turn(&user)?;
+        ensure!(
+            user.role == Role::User
+                && user.mode == Mode::Reader
+                && user.outcome == Outcome::Interpreted
+                && user.sequence == 0
+                && user.sources.is_empty(),
+            "invalid explicit target user"
+        );
+        let (frame, old, candidate, action) = match change {
+            TargetChange::CorrectSubject { target, subject } => {
+                let (frame, old) = self.stored_target_frame(user.conversation, target)?;
+                let mut candidate = old.candidate.clone();
+                candidate.subject = subject.clone();
+                candidate.validate()?;
+                (
+                    frame,
+                    Some((target.clone(), old)),
+                    candidate,
+                    Action::CorrectSubject,
+                )
+            }
+            TargetChange::Retarget { source, candidate } => {
+                candidate.validate()?;
+                (
+                    self.target_source_frame(user.conversation, *source)?,
+                    None,
+                    candidate.clone(),
+                    Action::Retarget,
+                )
+            }
+        };
+        ensure!(
+            frame.expected_root() == expected,
+            "explicit target root changed"
+        );
+        frame.check(self)?;
+        let (_, mut root) = self.live_root(user.conversation, Some(&expected))?;
+        user.sequence = root.next_sequence;
+        if user.created_ms == 0 {
+            user.created_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_millis()
+                .try_into()?;
+            user.updated_ms = user.created_ms;
+        }
+        root.next_sequence = root
+            .next_sequence
+            .checked_add(1)
+            .context("target sequence exhausted")?;
+        user.updated_ms = user.updated_ms.max(root.updated_ms);
+        root.updated_ms = user.updated_ms;
+        let id = old
+            .as_ref()
+            .map(|(_, t)| t.id)
+            .unwrap_or_else(|| Uuid::new_v5(&user.id, b"urn:rmb:source-target:v1"));
+        let target = SourceTarget {
+            id,
+            conversation: user.conversation,
+            introduced_by: user.id,
+            source: frame.source.clone(),
+            candidate,
+            previous: old.as_ref().map(|(r, _)| r.clone()),
+        };
+        let parents = old
+            .as_ref()
+            .map(|(r, _)| ExpectedHeads(BTreeSet::from([r.revision])))
+            .unwrap_or_default();
+        let about = target.candidate.about()?;
+        let target = self.envelope(
+            Namespace::Source,
+            id,
+            parents,
+            Record::SourceTarget(Box::new(target.clone())),
+            target.media(),
+        )?;
+        let pin = |e: &Envelope| -> Result<RecordRef> {
+            let bytes = serde_json::to_vec(e)?;
+            Ok(RecordRef {
+                namespace: e.namespace,
+                record: e.record_id,
+                revision: e.revision_id,
+                object: ObjectRef {
+                    sha256: digest(&bytes),
+                    bytes: bytes.len() as u64,
+                },
+            })
+        };
+        let used = TargetUse {
+            id: TargetUse::id(user.id),
+            conversation: user.conversation,
+            turn: user.id,
+            action,
+            target: Some(pin(&target)?),
+            about: Some(about),
+            inline_body_sha256: None,
+        };
+        let used = self.envelope(
+            Namespace::Conversation,
+            used.id,
+            ExpectedHeads::default(),
+            Record::TargetUse(Box::new(used)),
+            vec![],
+        )?;
+        let state = TargetState {
+            id: TargetState::id(user.conversation),
+            conversation: user.conversation,
+            use_reference: pin(&used)?,
+        };
+        let state = self.envelope(
+            Namespace::Conversation,
+            state.id,
+            frame.state_heads.clone(),
+            Record::TargetState(Box::new(state)),
+            vec![],
+        )?;
+        let user = self.envelope(
+            Namespace::Conversation,
+            user.id,
+            ExpectedHeads::default(),
+            Record::Turn(user),
+            vec![],
+        )?;
+        let binding = root.binding;
+        let root = self.envelope(
+            Namespace::Conversation,
+            root.id,
+            expected,
+            Record::Root(root),
+            vec![],
+        )?;
+        self.publish(
+            operation,
+            fingerprint,
+            root,
+            vec![user, target, used, state],
+            binding,
+        )
     }
 }

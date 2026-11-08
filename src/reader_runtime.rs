@@ -442,15 +442,11 @@ pub fn run_installed_selected(
         return Ok(true);
     };
     let admitted = (|| -> Result<_> {
-        let store =
-            open(&config).map_err(|_| anyhow::anyhow!("selected Reader Store unavailable"))?;
+        let store = Arc::new(Store::open_selected_target_preparation(&config)?);
         let reader = Arc::new(SelectedAdmission::new(store.clone(), scope.clone())?);
-        let (policy, token) = ReaderPreferences::open(
-            store.clone(),
-            config_path.as_path().to_owned(),
-            &reader,
-            started,
-        )?;
+        let (policy, token) =
+            ReaderPreferences::open(store.clone(), config_path.clone(), &reader, started)?;
+        let (store, reader, policy, token) = policy.promote_targets(store, reader, token)?;
         let health = NotificationEnvironment::capture()
             .connect()?
             .context("selected Reader service health unavailable")?;

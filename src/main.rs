@@ -26,6 +26,7 @@ enum ConversationOperation {
     WriterGenerate,
     WriterRefine,
     WriterRecover,
+    TargetChange,
 }
 impl ConversationOperation {
     fn selected(
@@ -370,6 +371,14 @@ fn main() -> Result<()> {
     }
     if let Some(operation) = args.conversation_operation {
         let input = args.conversation_input.as_deref().expect("required input");
+        if matches!(operation, ConversationOperation::TargetChange) {
+            return remarkable_reader_buddy::conversation::target_command::run(
+                std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+                input,
+                &mut std::io::stdin().lock(),
+            )
+            .write_to(&mut std::io::stdout().lock());
+        }
         use remarkable_reader_buddy::writer::selected_command as selected_writer;
         let writer_operation = match operation {
             ConversationOperation::WriterInspect => Some(selected_writer::Operation::Inspect),

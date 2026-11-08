@@ -139,7 +139,13 @@ pub struct SourceTarget {
 impl SourceTarget {
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            !self.id.is_nil() && !self.conversation.is_nil() && !self.introduced_by.is_nil(),
+            !self.id.is_nil()
+                && !self.conversation.is_nil()
+                && !self.introduced_by.is_nil()
+                && self.id != self.conversation
+                && self.id != self.introduced_by
+                && self.id != self.source.record.record
+                && self.id != self.source.turn,
             "invalid target identity"
         );
         self.source.validate()?;
@@ -246,7 +252,7 @@ impl TargetState {
         reference(&self.use_reference, Namespace::Conversation)
     }
 }
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct RegionSource {
     pub id: Uuid,
@@ -259,6 +265,18 @@ pub struct RegionSource {
     pub recipe: String,
     pub normalization_profile: String,
     pub normalized_sha256: String,
+    pub about: String,
+    pub normalized: super::NormalizedTextSource,
+    pub normalization_proof: NormalizationProof,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct NormalizationProof {
+    pub profile: serde_json::Value,
+    pub prompt_sha256: String,
+    pub response_sha256: String,
+    pub source_sha256: String,
+    pub extractor_revision: String,
 }
 impl RegionSource {
     pub fn validate(&self) -> Result<()> {
@@ -267,6 +285,36 @@ impl RegionSource {
             "region source identity"
         );
         reference(&self.target, Namespace::Source)?;
+        self.normalized.validate()?;
+        ensure!(
+            self.id == self.normalized.id
+                && self.turn == self.normalized.turn
+                && self.conversation == self.normalized.conversation
+                && matches!(
+                    self.normalized.selection,
+                    super::TextScope::Page { page: 1 }
+                )
+                && self.normalized.document.units.len() == 1
+                && self.normalized.document.format == crate::retrieval::SourceFormat::Notebook
+                && self.normalized.document.extractor_revision
+                    == format!(
+                        "region-v1:{}",
+                        crate::storage::digest(&serde_json::to_vec(&(
+                            &self.target,
+                            &self.normalization_proof.extractor_revision
+                        ))?)
+                    )
+                && self.normalized_sha256
+                    == crate::storage::digest(&serde_json::to_vec(
+                        &self.normalized.document.units
+                    )?)
+                && self.normalization_proof.source_sha256 == self.normalized.document.source_sha256
+                && self.normalization_proof.profile.is_object()
+                && serde_json::to_vec(&self.normalization_proof.profile)?.len() <= 4096
+                && valid_digest(&self.normalization_proof.prompt_sha256)
+                && valid_digest(&self.normalization_proof.response_sha256),
+            "region normalized correspondence differs"
+        );
         self.original.validate()?;
         self.derived.validate()?;
         ensure!(
@@ -331,8 +379,8 @@ impl RetainedSourceRef {
                                 1.0 / f64::from(value.width),
                                 0.0,
                                 0.0,
-                                0.0,
                                 1.0 / f64::from(value.height),
+                                0.0,
                                 0.0
                             ],
                         "target image mapping is not full-frame normalized"
@@ -553,11 +601,61 @@ pub(crate) fn validate_links(
                     && target.source.original == value.original
                     && target.source.dimensions == value.dimensions
                     && matches!(target.candidate.understanding, Understanding::Interpreted)
-                    && target.candidate.geometry.is_some(),
+                    && target.candidate.geometry.is_some()
+                    && user.sources.contains(&value.id)
+                    && value.about == target.candidate.about()?,
                 "region original/target custody differs"
             );
             Ok(None)
         }
         _ => Ok(None),
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TargetView {
+    pub reference: RecordRef,
+    pub target: SourceTarget,
+    #[serde(skip)]
+    pub(crate) source: super::Record,
+}
+impl TargetView {
+    pub(crate) fn new(
+        reference: RecordRef,
+        target: SourceTarget,
+        source: super::Record,
+    ) -> Result<Self> {
+        target.validate()?;
+        ensure!(
+            reference.namespace == Namespace::Source && reference.record == target.id,
+            "target view identity differs"
+        );
+        target
+            .source
+            .validate_record(&source, target.conversation)?;
+        Ok(Self {
+            reference,
+            target,
+            source,
+        })
+    }
+    pub(crate) fn media(&self) -> Result<Vec<Media>> {
+        use super::Record;
+        let mut media = self.target.media();
+        media.extend(match &self.source {
+            Record::Source(v) => {
+                let mut m = vec![v.image.clone()];
+                m.extend(v.parent.iter().cloned());
+                m
+            }
+            Record::Capture(v) => v.facts.media()?,
+            Record::ResidentCapture(v) => v.media()?,
+            Record::DevelopmentCapture(v) => v.media()?,
+            Record::LegacyCapture(v) => v.media()?,
+            _ => anyhow::bail!("target view capture variant"),
+        });
+        media.sort_by(|a, b| a.sha256.cmp(&b.sha256));
+        media.dedup();
+        Ok(media)
     }
 }

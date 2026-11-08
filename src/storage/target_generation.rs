@@ -156,7 +156,7 @@ fn mode_pin(store: &Store) -> Result<String> {
         snapshot.mode,
     ))?))
 }
-fn source_pin(store: &Store) -> Result<String> {
+pub(crate) fn source_pin(store: &Store) -> Result<String> {
     let inner = store
         .inner
         .lock()
@@ -178,10 +178,55 @@ fn source_pin(store: &Store) -> Result<String> {
         items.len() <= MAX_ITEMS,
         "target preparation manifest bound"
     );
-    Ok(digest(&serde_json::to_vec(&items)?))
+    // Include every original selected transaction and checkpoint byte. Interrupted
+    // promotion must not bless a changed accepted document or absence witness.
+    let mut selected = Vec::new();
+    let root = store.generation(inner.generation);
+    for dir in [root.join("selections"), root.join("selection-history")] {
+        let mut pending = vec![dir];
+        while let Some(path) = pending.pop() {
+            files::safe_path(&path)?;
+            if !path.exists() {
+                continue;
+            }
+            if path.is_dir() {
+                for entry in fs::read_dir(&path)? {
+                    pending.push(entry?.path());
+                }
+                ensure!(
+                    pending.len() + selected.len() <= MAX_ITEMS,
+                    "target selected source work bound"
+                );
+            } else {
+                let encoded = files::read(&path, MAX_METADATA as u64)?;
+                bytes = bytes
+                    .checked_add(encoded.len() as u64)
+                    .context("target selected pin overflow")?;
+                ensure!(
+                    bytes <= MAX_METADATA as u64,
+                    "target selected source byte bound"
+                );
+                selected.push((path.strip_prefix(&root)?.to_path_buf(), digest(&encoded)));
+            }
+        }
+    }
+    let checkpoint = store.paths.data.join("sync/state.json");
+    let checkpoint = if checkpoint.exists() {
+        let encoded = files::read(&checkpoint, MAX_METADATA as u64)?;
+        bytes = bytes
+            .checked_add(encoded.len() as u64)
+            .context("target checkpoint pin overflow")?;
+        ensure!(bytes <= MAX_METADATA as u64, "target checkpoint pin bound");
+        Some(digest(&encoded))
+    } else {
+        None
+    };
+    selected.sort();
+    Ok(digest(&serde_json::to_vec(&(items, selected, checkpoint))?))
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Stage {
+    Policy,
     Original,
     Notebook,
     Marker,
@@ -193,6 +238,30 @@ pub(crate) fn prepare(
     store: &mut Store,
     config_sha256: &str,
     base_kind: BaseKind,
+    hook: impl FnMut(Stage) -> Result<()>,
+) -> Result<()> {
+    prepare_original(store, config_sha256, base_kind, None, hook)
+}
+pub(crate) fn prepare_selected_original(
+    store: &mut Store,
+    pin: &str,
+    operation: Uuid,
+    hook: impl FnMut(Stage) -> Result<()>,
+) -> Result<()> {
+    ensure!(!operation.is_nil(), "original target operation absent");
+    prepare_original(
+        store,
+        pin,
+        BaseKind::CompoundSelected,
+        Some(operation),
+        hook,
+    )
+}
+fn prepare_original(
+    store: &mut Store,
+    config_sha256: &str,
+    base_kind: BaseKind,
+    operation: Option<Uuid>,
     mut hook: impl FnMut(Stage) -> Result<()>,
 ) -> Result<()> {
     ensure!(valid_digest(config_sha256), "invalid startup Config pin");
@@ -229,7 +298,8 @@ pub(crate) fn prepare(
                 && original.feature.config_sha256 == config_sha256
                 && original.feature.mode_sha256 == mode_sha
                 && original.feature.source_sha256 == pin
-                && original.feature.base_kind == base_kind,
+                && original.feature.base_kind == base_kind
+                && operation.is_none_or(|id| original.feature.operation == id),
             "original target preparation changed"
         );
         original
@@ -257,7 +327,7 @@ pub(crate) fn prepare(
         let original = Preparation {
             feature: Feature {
                 format: 1,
-                operation: Uuid::new_v4(),
+                operation: operation.unwrap_or_else(Uuid::new_v4),
                 actor: store.actor_id,
                 generation,
                 source_family,
@@ -510,4 +580,51 @@ impl Store {
             Ok(None)
         }
     }
+}
+
+impl Store {
+    /// Existing selected generations only. The caller must qualify policy and
+    /// transfer its original witness before calling selected promotion.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn open_selected_target_preparation(config: &crate::config::Config) -> Result<Self> {
+        ensure!(
+            !config.sync.enabled
+                && config.reader.selection.is_some()
+                && config.paths.data.join("identity.json").exists(),
+            "selected target startup requires existing selected policy"
+        );
+        let mut store = Self::open_policy(config.paths.clone(), OpenPreparation::Targets)?;
+        crate::storage::sync::selected::ReaderPreferences::resume_target_preparation(
+            &mut store, config,
+        )?;
+        let generation = store
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("selected target Store unavailable"))?
+            .generation;
+        ensure!(
+            base_version(&store.generation(generation))? == 5,
+            "selected target startup requires compound base"
+        );
+        if !is_target(&store.generation(generation))? {
+            compound_generation::validate_ready(&store.paths, store.actor_id, generation)?;
+        } else {
+            validate_ready(&store.paths, store.actor_id, generation)?;
+        }
+        Ok(store)
+    }
+}
+
+pub(crate) fn selected_preparation_pending(store: &Store) -> Result<bool> {
+    let path = store.paths.data.join(PREPARATION);
+    if !path.exists() {
+        return Ok(store
+            .paths
+            .data
+            .join("source-target-startup-policy.json")
+            .exists());
+    }
+    let original: Preparation = files::json(&path, MAX_RECORD as u64)?;
+    original.feature.validate()?;
+    Ok(!original.complete && original.feature.base_kind == BaseKind::CompoundSelected)
 }

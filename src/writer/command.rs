@@ -156,6 +156,7 @@ enum CommandRequest {
     ))]
     Resident(crate::workflow::resident_supervisor::writer_request::Submission),
     Notebook(Box<notebook::command::Request>),
+    Target(super::target::Request),
 }
 /// Parse bounded stdin once; each strict variant rejects duplicates and unknown fields.
 pub fn dispatch(config_path: Option<PathBuf>, input: &mut impl Read) -> CommandReport {
@@ -202,9 +203,60 @@ pub fn dispatch(config_path: Option<PathBuf>, input: &mut impl Read) -> CommandR
         Ok(CommandRequest::Notebook(request)) => {
             CommandReport::Notebook(Box::new(notebook::command::run(config_path, *request)))
         }
+        Ok(CommandRequest::Target(request)) => {
+            CommandReport::Legacy(run_target(config_path, request))
+        }
         Err(_) => CommandReport::Legacy(run(config_path, &mut &bytes[..])),
     }
 }
+fn run_target(config_path: Option<PathBuf>, request: super::target::Request) -> Report {
+    let identity = request.identities();
+    let result = (|| -> std::result::Result<_, Failure> {
+        request.validate().map_err(|_| Failure::InvalidInput)?;
+        let config = Config::load(config_path).map_err(|_| Failure::Storage)?;
+        if !config.admits_writer(false) || config.sync.enabled || config.reader.selection.is_some()
+        {
+            return Err(Failure::Unsupported);
+        }
+        let effective = config::resolve(
+            &config,
+            config::Overrides::default(),
+            config::Environment::current(),
+        )
+        .map_err(|_| Failure::MissingCredentials)?;
+        let profile = effective.model.clone();
+        let mut engine = crate::OpenAI::new(
+            effective.model,
+            effective.key.into_string(),
+            effective.base_url,
+        );
+        let ledger = Ledger::new(Arc::new(
+            Store::open_source_target_startup(&config).map_err(|_| Failure::Storage)?,
+        ));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|_| Failure::Unsupported)?;
+        runtime.block_on(async move {
+            let flag=Arc::new(AtomicBool::new(false)); let worker_flag=flag.clone();
+            let mut worker=tokio::task::spawn_blocking(move||super::target::run(&ledger,&config,&mut engine,&request,&profile,&mut ||worker_flag.load(Ordering::Acquire)));
+            let joined=tokio::select!{r=&mut worker=>r,_=tokio::signal::ctrl_c()=>{flag.store(true,Ordering::Release);worker.await}};
+            joined.map_err(|_|Failure::Unsupported)
+        })
+    })();
+    result.unwrap_or_else(|failure| {
+        let (conversation, operation) = identity;
+        Report {
+            status: Status::Refused,
+            conversation,
+            operation,
+            draft: None,
+            failure: Some(failure),
+            prepared_note: None,
+        }
+    })
+}
+
 fn run_flow(
     config_path: Option<PathBuf>,
     request: crate::writer_flow::Request,

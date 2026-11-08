@@ -938,7 +938,18 @@ impl<M: LLMEngine> Orchestrator<M> {
             _question_box: question_box,
             selection_center,
             _screenshot_data: screenshot_png_data,
-            target: Self::parse_target_candidate(&Self::extract_field(header, "TARGET_JSON:")),
+            target: {
+                let mut fields = header
+                    .lines()
+                    .filter_map(|line| line.trim().strip_prefix("TARGET_JSON:"));
+                fields.next().and_then(|value| {
+                    if fields.next().is_none() {
+                        Self::parse_target_candidate(value.trim())
+                    } else {
+                        None
+                    }
+                })
+            },
             about: None,
         })
     }

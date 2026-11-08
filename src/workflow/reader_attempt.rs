@@ -496,6 +496,10 @@ impl Attempt {
     }
     pub(super) fn source_target_enabled(&self) -> bool {
         self.target_frame.is_some()
+            || self
+                .selected
+                .as_ref()
+                .is_some_and(|s| s.source_target_enabled())
     }
     pub(super) fn interpret_source_target(
         &mut self,
@@ -503,9 +507,6 @@ impl Attempt {
         text: &str,
         candidate: Option<&crate::conversation::target::Candidate>,
     ) -> Result<()> {
-        let Some(frame) = self.target_frame.as_mut() else {
-            return self.interpret(ledger, text);
-        };
         let unresolved = crate::conversation::target::Candidate {
             subject: "Selected source could not be localized".into(),
             geometry: None,
@@ -514,6 +515,13 @@ impl Attempt {
             },
         };
         let candidate = candidate.unwrap_or(&unresolved);
+        if let Some(selected) = self.selected.as_mut().filter(|s| s.source_target_enabled()) {
+            self.user = selected.write_target(text, candidate)?.written;
+            return Ok(());
+        }
+        let Some(frame) = self.target_frame.as_mut() else {
+            return self.interpret(ledger, text);
+        };
         let mut user = self.user.clone();
         user.text = Some(text.into());
         user.outcome = Outcome::Interpreted;

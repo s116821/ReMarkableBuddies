@@ -90,6 +90,71 @@ impl NormalizedTextSource {
     }
 }
 
+/// Typed regional provenance stays outside the legacy schema-2 wire shape.
+#[derive(Clone)]
+pub(crate) struct WriterSource {
+    pub normalized: NormalizedTextSource,
+    pub region: Option<target::RegionSource>,
+}
+impl Serialize for WriterSource {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        match &self.region {
+            Some(region) => region.serialize(serializer),
+            None => self.normalized.serialize(serializer),
+        }
+    }
+}
+impl std::ops::Deref for WriterSource {
+    type Target = NormalizedTextSource;
+    fn deref(&self) -> &Self::Target {
+        &self.normalized
+    }
+}
+impl WriterSource {
+    pub(crate) fn ordinary(normalized: NormalizedTextSource) -> Self {
+        Self {
+            normalized,
+            region: None,
+        }
+    }
+    pub(crate) fn decode(record: Record) -> Result<Self> {
+        match record {
+            Record::NormalizedText(v) => Ok(Self::ordinary(*v)),
+            Record::RegionSource(v) => {
+                v.validate()?;
+                Ok(Self {
+                    normalized: v.normalized.clone(),
+                    region: Some(*v),
+                })
+            }
+            _ => bail!("not a Writer source"),
+        }
+    }
+    fn record(&self) -> Record {
+        match &self.region {
+            Some(v) => Record::RegionSource(Box::new(v.clone())),
+            None => Record::NormalizedText(Box::new(self.normalized.clone())),
+        }
+    }
+    pub(crate) fn scope(&self) -> String {
+        format!(
+            "normalized-document:{}:{}",
+            self.document.document,
+            if let Some(region) = &self.region {
+                format!("target:{}", region.target.record)
+            } else {
+                match self.selection {
+                    TextScope::Page { page } => format!("page:{page}"),
+                    TextScope::SuppliedNotebook => "supplied-notebook".into(),
+                }
+            }
+        )
+    }
+}
+
 pub(crate) struct WriterPreparation {
     pub fresh: bool,
     pub root: ExpectedHeads,
@@ -148,10 +213,13 @@ impl Ledger {
         operation: Uuid,
         expected: ExpectedHeads,
         mut turn: Turn,
-        source: NormalizedTextSource,
+        source: WriterSource,
         selected: Option<Turn>,
     ) -> Result<WriterPreparation> {
         source.validate()?;
+        if let Some(region) = &source.region {
+            region.validate()?;
+        }
         Self::validate_turn(&turn)?;
         ensure!(
             turn.role == Role::User
@@ -193,7 +261,8 @@ impl Ledger {
                 .value(Namespace::Source, source.id)?
                 .context("source absent")?;
             ensure!(
-                matches!(Self::decode(&current)?, Record::NormalizedText(old) if *old == source),
+                serde_json::to_vec(&WriterSource::decode(Self::decode(&current)?)?)?
+                    == serde_json::to_vec(&source)?,
                 "source changed"
             );
             ExpectedHeads(BTreeSet::from([current.revision_id]))
@@ -202,8 +271,8 @@ impl Ledger {
             Namespace::Source,
             source.id,
             source_parents,
-            Record::NormalizedText(Box::new(source.clone())),
-            vec![],
+            source.record(),
+            source.region.as_ref().map_or_else(Vec::new, |r| r.media()),
         )?);
         if let Some(selected) = selected {
             let id = selected.id;
@@ -234,6 +303,24 @@ impl Ledger {
             .checked_add(1)
             .context("sequence exhausted")?;
         root.updated_ms = turn.updated_ms;
+        if let Some(region) = &source.region {
+            let used = target::TargetUse {
+                id: target::TargetUse::id(turn.id),
+                conversation: turn.conversation,
+                turn: turn.id,
+                action: target::Action::Inherit,
+                target: Some(region.target.clone()),
+                about: None,
+                inline_body_sha256: None,
+            };
+            records.push(self.envelope(
+                Namespace::Conversation,
+                used.id,
+                ExpectedHeads::default(),
+                Record::TargetUse(Box::new(used)),
+                vec![],
+            )?);
+        }
         let guards = records
             .iter()
             .map(|e| {

@@ -99,7 +99,7 @@ impl SelectedAdmission {
         token_count: impl Fn(&[super::Turn]) -> Result<usize>,
     ) -> Result<super::ContextView> {
         Ledger::context_token_limit(selection, budget)?;
-        let (records, media) = self.with_current(accepted, |snapshot| {
+        let (records, media, targets) = self.with_current(accepted, |snapshot| {
             let projection = SelectedDomainProjection::from_snapshot(snapshot)?;
             let records = projection.inspect(conversation)?;
             // The selected inventory alone supplies availability; retained media
@@ -111,13 +111,43 @@ impl SelectedAdmission {
                 .iter()
                 .map(|reference| (reference.sha256.clone(), reference.clone()))
                 .collect();
-            Ok((records, media))
+            let uses = records
+                .iter()
+                .filter_map(|r| match r {
+                    Record::TargetUse(used) => Some((**used).clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let targets = projection.target_views(&uses)?;
+            Ok((records, media, targets))
         })?;
-        Ledger::context_from_records(records, selection, budget, token_count, |item| {
-            media
-                .get(&item.sha256)
-                .is_some_and(|reference| reference.bytes == item.bytes)
-        })
+        let mut context =
+            Ledger::context_from_records(records, selection, budget, token_count, |item| {
+                media
+                    .get(&item.sha256)
+                    .is_some_and(|reference| reference.bytes == item.bytes)
+            })?;
+        let requested = context
+            .target_uses
+            .iter()
+            .filter_map(|used| used.target.as_ref().map(|r| r.revision))
+            .collect::<std::collections::BTreeSet<_>>();
+        context.targets = targets
+            .into_iter()
+            .filter(|target| requested.contains(&target.reference.revision))
+            .collect();
+        for target in &context.targets {
+            for item in target.media()? {
+                if !media
+                    .get(&item.sha256)
+                    .is_some_and(|reference| reference.bytes == item.bytes)
+                    && !context.missing_media.contains(&item)
+                {
+                    context.missing_media.push(item);
+                }
+            }
+        }
+        Ok(context)
     }
     /// Return exact historical capture bytes from one current selected closure.
     /// Saved SDK/development correspondence never reconstructs effect authority.

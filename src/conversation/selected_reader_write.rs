@@ -1,5 +1,6 @@
 //! Selected text publication. Acknowledgment and historical evidence are not effects.
 use super::*;
+mod targets;
 use crate::storage::selection::{
     SelectedReadBudget, SelectionMutation, SelectionPublication, SelectionToken,
     SelectionTransaction,
@@ -10,6 +11,7 @@ use serde::Serialize;
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub enum SelectedReaderText {
     Interpret,
+    InterpretTarget { candidate: target::Candidate },
     Generate { assistant: Uuid },
 }
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -77,6 +79,9 @@ fn record(
     value: Record,
 ) -> Result<Envelope> {
     let id = match &value {
+        Record::SourceTarget(v) => v.id,
+        Record::TargetUse(v) => v.id,
+        Record::TargetState(v) => v.id,
         Record::Root(root) => root.id,
         Record::Turn(turn) => turn.id,
         Record::Receipt(receipt) => Ledger::receipt_id(receipt.acknowledgment.operation),
@@ -84,8 +89,19 @@ fn record(
     };
     let envelope = Envelope {
         envelope_version: FORMAT,
-        namespace: Namespace::Conversation,
-        domain_schema_version: SCHEMA,
+        namespace: if matches!(&value, Record::SourceTarget(_)) {
+            Namespace::Source
+        } else {
+            Namespace::Conversation
+        },
+        domain_schema_version: if matches!(
+            &value,
+            Record::SourceTarget(_) | Record::TargetUse(_) | Record::TargetState(_)
+        ) {
+            target::SCHEMA
+        } else {
+            SCHEMA
+        },
         record_id: id,
         revision_id: Uuid::new_v5(
             &request.operation,
@@ -98,8 +114,12 @@ fn record(
         actor_id: actor,
         parents,
         kind: Kind::Value,
+        media_descriptors: if let Record::SourceTarget(v) = &value {
+            v.media()
+        } else {
+            vec![]
+        },
         payload: serde_json::to_value(value)?,
-        media_descriptors: vec![],
     };
     envelope.validate()?;
     Ledger::decode(&envelope)?;
@@ -228,8 +248,8 @@ fn prepare(
     let mut root = root.clone();
     root.updated_ms = request.updated_ms;
     let mut written = user.clone();
-    let parents = match request.kind {
-        SelectedReaderText::Interpret => {
+    let parents = match &request.kind {
+        SelectedReaderText::Interpret | SelectedReaderText::InterpretTarget { .. } => {
             ensure!(
                 user.outcome == Outcome::Prepared && user.text.is_none(),
                 "selected request already interpreted"
@@ -244,11 +264,11 @@ fn prepare(
             );
             ensure!(
                 projection
-                    .head(Namespace::Conversation, assistant)
+                    .head(Namespace::Conversation, *assistant)
                     .is_none(),
                 "selected assistant already exists"
             );
-            written.id = assistant;
+            written.id = *assistant;
             written.role = Role::Assistant;
             written.outcome = Outcome::Generated;
             written.sequence = root.next_sequence;
@@ -266,19 +286,17 @@ fn prepare(
     written.updated_ms = request.updated_ms;
     written.completion = None;
     Ledger::validate_turn(&written)?;
-    Ok((
-        vec![
-            record(
-                actor,
-                request,
-                BTreeSet::from([request.root.revision_id]),
-                Record::Root(root),
-            )?,
-            record(actor, request, parents, Record::Turn(written.clone()))?,
-        ],
-        user.clone(),
-        written,
-    ))
+    let mut records = vec![
+        record(
+            actor,
+            request,
+            BTreeSet::from([request.root.revision_id]),
+            Record::Root(root),
+        )?,
+        record(actor, request, parents, Record::Turn(written.clone()))?,
+    ];
+    records.extend(targets::records(&projection, request, &written, actor)?);
+    Ok((records, user.clone(), written))
 }
 fn recover(
     store: &Store,

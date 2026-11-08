@@ -352,6 +352,9 @@ pub struct ContextBudget {
 }
 #[derive(Clone, Debug)]
 pub struct ContextView {
+    pub target_uses: Vec<super::target::TargetUse>,
+    pub region_sources: Vec<super::target::RegionSource>,
+    pub targets: Vec<super::target::TargetView>,
     pub turns: Vec<Turn>,
     pub sources: Vec<ImageUse>,
     pub captures: Vec<CaptureEvidence>,

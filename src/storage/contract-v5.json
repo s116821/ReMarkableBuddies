@@ -921,5 +921,20 @@
         }
       }
     }
+  },
+  "source_target_feature": {
+    "generation_format": 6,
+    "marker_file": "source-target-feature.json",
+    "preparation_file": "source-target-preparation.json",
+    "base_kinds": {
+      "ordinary-notebook": 4,
+      "compound-selected": 5
+    },
+    "procedure": "same-generation-original-preparation-v1",
+    "normal_open": "validate-only-never-repair",
+    "recovery": "original-operation-actor-generation-config-mode-source-pins-only",
+    "domain_schema": 4,
+    "legacy_sync": "excluded-from-automatic-promotion",
+    "selected_policy": "qualified-original-witness-and-remaining-allowance-no-repeat-get"
   }
 }

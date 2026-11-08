@@ -320,7 +320,8 @@ impl Store {
         }
         if admission == NotebookAdmission::SelectedMode
             && notebook
-            && record::<u32>(&generation_root.join("format.json"), 64)?
+            && super::target_generation::base_version(&generation_root)
+                .map_err(|_| Refusal::Unsupported)?
                 != super::compound_generation::VERSION
         {
             return Err(Refusal::Unsupported);
@@ -332,7 +333,8 @@ impl Store {
         ] {
             directory(path)?;
         }
-        if record::<u32>(&generation_root.join("format.json"), 64)?
+        if super::target_generation::base_version(&generation_root)
+            .map_err(|_| Refusal::Unsupported)?
             == super::compound_generation::VERSION
         {
             if admission != NotebookAdmission::SelectedMode {

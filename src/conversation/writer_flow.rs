@@ -50,7 +50,7 @@ impl WriterSelection {
         value.values()?;
         Ok(value)
     }
-    pub(crate) fn values(&self) -> Result<(Turn, NormalizedTextSource)> {
+    pub(crate) fn values(&self) -> Result<(Turn, WriterSource)> {
         ensure!(
             self.notebook.is_none(),
             "notebook selection requires its typed export path"
@@ -58,9 +58,7 @@ impl WriterSelection {
         let Record::Turn(draft) = Ledger::decode(&self.draft)? else {
             bail!("not a Writer draft")
         };
-        let Record::NormalizedText(source) = Ledger::decode(&self.source)? else {
-            bail!("not a text source")
-        };
+        let source = WriterSource::decode(Ledger::decode(&self.source)?)?;
         ensure!(
             draft.mode == Mode::Writer
                 && draft.role == Role::Assistant
@@ -70,7 +68,7 @@ impl WriterSelection {
             "invalid Writer selection"
         );
         crate::writer::parse_draft(draft.text.as_deref().context("draft text missing")?)?;
-        Ok((draft, *source))
+        Ok((draft, source))
     }
     pub(crate) fn published_notebook(
         ledger: &Ledger,

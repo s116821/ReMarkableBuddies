@@ -500,22 +500,48 @@ fn transfer(lost_ack: bool, activation_fault: bool, use_compound: bool) {
 
 #[test]
 fn selected_writer_real_model_entry_publishes_exact_text_source_through_worker() {
-    transfer_writer_document(false, false);
+    transfer_writer_document(false, false, false, None);
 }
 
 #[cfg(target_os = "linux")]
 #[test]
 fn resident_reader_policy_requires_received_registration_and_current_config() {
-    transfer_writer_document(true, false);
+    transfer_writer_document(true, false, false, None);
 }
 
 #[cfg(target_os = "linux")]
 #[test]
 fn resident_capture_media_transfers_across_batch_one_worker_steps() {
-    transfer_writer_document(true, true);
+    transfer_writer_document(true, true, false, None);
 }
 
-fn transfer_writer_document(ready_reader: bool, transfer_media: bool) {
+#[cfg(target_os = "linux")]
+#[test]
+fn selected_target_promotion_carries_qualified_absence_without_another_get_or_store_lease() {
+    transfer_writer_document(true, false, true, None);
+}
+#[cfg(target_os = "linux")]
+#[test]
+fn selected_target_original_recovery_keeps_witness_and_budget_without_http() {
+    use crate::storage::target_generation::Stage;
+    for stage in [
+        Stage::Policy,
+        Stage::Original,
+        Stage::Notebook,
+        Stage::Marker,
+        Stage::Contract,
+        Stage::Format,
+        Stage::Capabilities,
+    ] {
+        transfer_writer_document(true, false, true, Some(stage));
+    }
+}
+fn transfer_writer_document(
+    ready_reader: bool,
+    transfer_media: bool,
+    promote_targets: bool,
+    interrupted: Option<crate::storage::target_generation::Stage>,
+) {
     use crate::{
         conversation::*,
         retrieval::{NormalizedDocument, SourceFormat, SourceUnit},
@@ -575,7 +601,7 @@ fn transfer_writer_document(ready_reader: bool, transfer_media: bool) {
         .unwrap()
         .pop()
         .unwrap();
-    let first = if ready_reader {
+    let mut first = if ready_reader {
         compound(first, group, &binding)
     } else {
         first
@@ -611,7 +637,7 @@ fn transfer_writer_document(ready_reader: bool, transfer_media: bool) {
             BTreeMap::from([(reference.sha256.clone(), bytes)]),
         )
         .unwrap();
-    let writer = SelectedAdmission::new(first.clone(), scope.clone()).unwrap();
+    let mut writer = Arc::new(SelectedAdmission::new(first.clone(), scope.clone()).unwrap());
     let selected = writer::selected::Selection {
         accepted: initialized.token.clone(),
         root: IntentRecordRef {
@@ -704,12 +730,119 @@ fn transfer_writer_document(ready_reader: bool, transfer_media: bool) {
     #[cfg(target_os = "linux")]
     let capture = if ready_reader {
         files::atomic_json(&path, &config(&first, writer.scope(), true)).unwrap();
-        let (local, local_token) = open(&first, &writer).unwrap();
+        let (mut local, mut local_token) = open(&first, &writer).unwrap();
+        if promote_targets {
+            let before = wire.requests().len();
+            let actor = first.actor_id;
+            let generation = super::catalog::current_generation(&first).unwrap();
+            let original = local_token.clone();
+            if let Some(stage) = interrupted {
+                let paths = first.paths.clone();
+                let result = local.promote_targets_with_hook(first, writer, local_token, |at| {
+                    if at == stage {
+                        anyhow::bail!("interrupted original selected target preparation")
+                    }
+                    Ok(())
+                });
+                assert!(result.is_err());
+                let config = crate::config::Config::load(Some(path.clone())).unwrap();
+                let resumed = Store::open_selected_target_preparation(&config).unwrap();
+                assert_eq!(
+                    wire.requests().len(),
+                    before,
+                    "interrupted promotion repeated HTTP"
+                );
+                assert_eq!(resumed.actor_id, actor);
+                assert_eq!(
+                    resumed.source_target_generation().unwrap(),
+                    Some(generation)
+                );
+                assert_eq!(
+                    resumed
+                        .selected_snapshot(&scope, MAX_ITEMS)
+                        .unwrap()
+                        .unwrap()
+                        .token,
+                    original
+                );
+                let receipt: serde_json::Value = files::json(
+                    &paths.data.join("source-target-startup-policy.json"),
+                    MAX_RECORD as u64,
+                )
+                .unwrap();
+                assert!(
+                    receipt["remaining"]["usage"]["work_items"]
+                        .as_u64()
+                        .unwrap()
+                        > 0,
+                    "recovery must consume original saved allowance"
+                );
+                drop(resumed);
+                let reopened = Store::open(paths).unwrap();
+                assert_eq!(
+                    reopened.source_target_generation().unwrap(),
+                    Some(generation)
+                );
+                return;
+            }
+            let promoted = local.promote_targets(first, writer, local_token).unwrap();
+            first = promoted.0;
+            writer = promoted.1;
+            local = promoted.2;
+            local_token = promoted.3;
+            assert_eq!(
+                wire.requests().len(),
+                before,
+                "promotion repeated a provider observation"
+            );
+            assert_eq!(first.actor_id, actor);
+            assert_eq!(
+                super::catalog::current_generation(&first).unwrap(),
+                generation
+            );
+            assert_eq!(
+                local_token, original,
+                "promotion replaced selected history/custody"
+            );
+            assert_eq!(first.source_target_generation().unwrap(), Some(generation));
+            assert!(!first.ordinary_reader_family().unwrap());
+        }
+
         assert_eq!(
             local_token.accepted_base_sha256(),
             genesis_base(&root_sha, &writer.scope().key_sha256)
         );
         local.check_progress(&writer, &local_token).unwrap();
+        if promote_targets {
+            let (accepted, capture) = resident_reader_fixture_generated(
+                &first,
+                &writer,
+                local,
+                local_token,
+                document,
+                ReaderTiming::Immediate,
+            );
+            let snapshot = first
+                .selected_snapshot(writer.scope(), MAX_ITEMS)
+                .unwrap()
+                .unwrap();
+            assert_eq!(snapshot.token, accepted);
+            let projection = SelectedDomainProjection::from_snapshot(&snapshot).unwrap();
+            let owned = projection.document_ownership().unwrap();
+            let records = owned
+                .keys()
+                .flat_map(|id| projection.inspect(*id).unwrap())
+                .collect::<Vec<_>>();
+            assert!(records
+                .iter()
+                .any(|r| matches!(r,Record::SourceTarget(v) if v.source.record.record==capture)));
+            assert!(records.iter().any(|r|matches!(r,Record::TargetUse(v) if v.about.as_deref()==Some("About: Selected equation") && v.inline_body_sha256.is_some())));
+            assert!(records.iter().any(|r|matches!(r,Record::Turn(v) if v.outcome==Outcome::Generated && v.text.as_deref().is_some_and(|s|s.starts_with("About: Selected equation\n")))));
+            assert!(!records
+                .iter()
+                .any(|r| serde_json::to_value(r).unwrap()["record_kind"] == "pending-intent"));
+            return;
+        }
         if transfer_media {
             Some(
                 resident_reader_fixture_generated(
@@ -1010,10 +1143,15 @@ fn resident_reader_fixture_generated(
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap();
+    let targets = store.source_target_generation().unwrap().is_some();
     let server = std::thread::spawn(move || {
         let stop = Instant::now() + Duration::from_secs(40);
         let responses = [
-            "QUESTION: What is x?\nQUESTION_BOX: 10,10,100,100\nSELECTION_CENTER: 100,100\n---\nANSWER: x = 7",
+            if targets {
+                "QUESTION: What is x?\nQUESTION_BOX: 10,10,100,100\nSELECTION_CENTER: 100,100\nTARGET_JSON: {\"subject\":\"Selected equation\",\"geometry\":{\"components\":[[[0,0],[1000000,0],[1000000,1000000],[0,1000000]]]},\"understanding\":{\"status\":\"interpreted\"}}\n---\nANSWER: x = 7"
+            } else {
+                "QUESTION: What is x?\nQUESTION_BOX: 10,10,100,100\nSELECTION_CENTER: 100,100\n---\nANSWER: x = 7"
+            },
             "TRANSCRIPTION: What is x?",
             "ANSWER: x = 7",
         ];

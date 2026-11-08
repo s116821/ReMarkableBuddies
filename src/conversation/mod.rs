@@ -39,7 +39,9 @@ pub use selected_writer::*;
 mod selected_context_tests;
 mod settlement;
 pub mod target;
+pub mod target_command;
 pub(crate) mod target_source;
+pub use target_source::TargetChange;
 mod types;
 mod writer;
 mod writer_flow;
@@ -484,10 +486,9 @@ impl Ledger {
                 .iter()
                 .filter_map(|e| match Self::decode(e) {
                     Ok(Record::Turn(user))
-                        if user.role == Role::User
-                            && user.mode == Mode::Reader
-                            && user.outcome == Outcome::Prepared
-                            && !user.sources.is_empty() =>
+                        if e.parents.is_empty()
+                            && user.role == Role::User
+                            && matches!(user.outcome, Outcome::Prepared | Outcome::Interpreted) =>
                     {
                         Some(user)
                     }
@@ -495,7 +496,20 @@ impl Ledger {
                 })
                 .collect::<Vec<_>>();
             for user in users {
-                records.extend(self.target_pending_records(&user)?);
+                if records
+                    .iter()
+                    .any(|e| e.record_id == target::TargetUse::id(user.id))
+                {
+                    continue;
+                }
+                if user.mode == Mode::Reader
+                    && user.outcome == Outcome::Prepared
+                    && !user.sources.is_empty()
+                {
+                    records.extend(self.target_pending_records(&user)?);
+                } else {
+                    records.extend(self.target_inherited_records(&user)?);
+                }
             }
         }
         let ack = Acknowledgment {
@@ -653,6 +667,7 @@ impl Ledger {
                 Record::Source(source) => source.conversation,
                 Record::Capture(capture) => capture.conversation,
                 Record::NormalizedText(source) => source.conversation,
+                Record::RegionSource(source) => source.conversation,
                 Record::ArchivedNormalizedSource(source) => source.conversation,
                 Record::LegacyCapture(capture) => capture.conversation,
                 Record::DevelopmentCapture(capture) => capture.conversation,
@@ -1770,14 +1785,17 @@ impl Ledger {
     ) -> Result<ContextView> {
         Self::context_token_limit(selection, budget)?;
         let records = self.inspect(conversation, false)?;
-        Self::context_from_records(records, selection, budget, token_count, |media| {
-            self.store
-                .open_object(&ObjectRef {
-                    sha256: media.sha256.clone(),
-                    bytes: media.bytes,
-                })
-                .is_ok()
-        })
+        let mut context =
+            Self::context_from_records(records, selection, budget, token_count, |media| {
+                self.store
+                    .open_object(&ObjectRef {
+                        sha256: media.sha256.clone(),
+                        bytes: media.bytes,
+                    })
+                    .is_ok()
+            })?;
+        self.complete_target_view(&mut context)?;
+        Ok(context)
     }
     pub(super) fn context_token_limit(
         selection: Option<TurnRange>,
@@ -1854,6 +1872,22 @@ impl Ledger {
                 .into());
             }
         }
+        let turn_ids = turns.iter().map(|turn| turn.id).collect::<BTreeSet<_>>();
+        let target_uses = records
+            .iter()
+            .filter_map(|record| match record {
+                Record::TargetUse(used) if turn_ids.contains(&used.turn) => Some((**used).clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let about_bytes = target_uses.iter().try_fold(bytes, |sum, used| {
+            sum.checked_add(used.about.as_ref().map_or(0, String::len))
+                .context("target context text overflow")
+        })?;
+        ensure!(
+            target_uses.len() <= budget.max_turns && about_bytes <= budget.max_text_bytes,
+            "target context budget exhausted"
+        );
         let source_ids = turns
             .iter()
             .flat_map(|t| t.sources.iter())
@@ -1861,6 +1895,7 @@ impl Ledger {
         let mut sources = Vec::new();
         let mut captures = Vec::new();
         let mut normalized_text = Vec::new();
+        let mut region_sources = Vec::new();
         let mut archived_sources = Vec::new();
         let mut legacy_captures = Vec::new();
         let mut development_captures = Vec::new();
@@ -1873,6 +1908,9 @@ impl Ledger {
                 }
                 Record::NormalizedText(source) if source_ids.contains(&source.id) => {
                     normalized_text.push(*source)
+                }
+                Record::RegionSource(source) if source_ids.contains(&source.id) => {
+                    region_sources.push(*source);
                 }
                 Record::ArchivedNormalizedSource(source) if source_ids.contains(&source.id) => {
                     archived_sources.push(*source)
@@ -1896,6 +1934,7 @@ impl Ledger {
                 + development_captures.len()
                 + resident_captures.len()
                 + normalized_text.len()
+                + region_sources.len()
                 + archived_sources.len()
                 == source_ids.len(),
             "source reference absent"
@@ -1913,6 +1952,9 @@ impl Ledger {
         }
         for capture in &legacy_captures {
             capture_media.extend(capture.media()?);
+        }
+        for region in &region_sources {
+            capture_media.extend(region.media());
         }
         for media in &capture_media {
             if !media_available(media) && !missing_media.contains(media) {
@@ -1932,6 +1974,9 @@ impl Ledger {
             }
         }
         Ok(ContextView {
+            targets: vec![],
+            target_uses,
+            region_sources,
             turns,
             sources,
             captures,

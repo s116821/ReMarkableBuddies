@@ -19,6 +19,7 @@ pub(super) struct Selected {
     root: IntentRecordRef,
     user: IntentRecordRef,
     capture: Uuid,
+    targets: bool,
     mode: Option<SyncModeLease>,
     interpretation: Option<Frozen>,
     generation: Option<Frozen>,
@@ -76,6 +77,7 @@ impl Selected {
             root,
             user,
             capture,
+            targets: ledger.store().source_target_generation()?.is_some(),
             mode: None,
             interpretation: None,
             generation: None,
@@ -354,11 +356,31 @@ impl Selected {
         policy.finish_model_wait();
         Ok(value)
     }
+    pub(super) fn source_target_enabled(&self) -> bool {
+        self.targets
+    }
+    pub(super) fn write_target(
+        &mut self,
+        text: &str,
+        candidate: &crate::conversation::target::Candidate,
+    ) -> Result<SelectedReaderAcknowledgment> {
+        anyhow::ensure!(self.targets, "selected target family absent");
+        self.write_candidate(text, false, None, Some(candidate))
+    }
     pub(super) fn write(
         &mut self,
         text: &str,
         generated: bool,
         memory: Option<(&dyn crate::memory::Provider, &crate::memory::QueryResult)>,
+    ) -> Result<SelectedReaderAcknowledgment> {
+        self.write_candidate(text, generated, memory, None)
+    }
+    fn write_candidate(
+        &mut self,
+        text: &str,
+        generated: bool,
+        memory: Option<(&dyn crate::memory::Provider, &crate::memory::QueryResult)>,
+        candidate: Option<&crate::conversation::target::Candidate>,
     ) -> Result<SelectedReaderAcknowledgment> {
         let slot = if generated {
             &mut self.generation
@@ -367,7 +389,14 @@ impl Selected {
         };
         if let Some(frozen) = slot.as_ref() {
             anyhow::ensure!(
-                frozen.request.text == text,
+                frozen.request.text == text
+                    && match (&frozen.request.kind, candidate) {
+                        (SelectedReaderText::InterpretTarget { candidate: prior }, Some(now)) =>
+                            prior == now,
+                        (SelectedReaderText::InterpretTarget { .. }, None) => false,
+                        (_, Some(_)) => false,
+                        (_, None) => true,
+                    },
                 "selected Attempt mutation changed"
             );
             if let Some(acknowledgment) = frozen.acknowledged.clone() {
@@ -386,6 +415,10 @@ impl Selected {
                     kind: if generated {
                         SelectedReaderText::Generate {
                             assistant: Uuid::new_v4(),
+                        }
+                    } else if let Some(candidate) = candidate {
+                        SelectedReaderText::InterpretTarget {
+                            candidate: candidate.clone(),
                         }
                     } else {
                         SelectedReaderText::Interpret
