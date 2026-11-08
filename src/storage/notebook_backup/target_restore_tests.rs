@@ -362,3 +362,80 @@ fn target_restore_original_refuses_changed_staged_history_or_configuration() {
         );
     }
 }
+
+#[test]
+fn target_restore_combines_populated_target_history_with_newer_subject_revision() {
+    use crate::conversation::{ContextBudget, Ledger, Record, TargetChange};
+    let (fixture, ledger, conversation, _) = crate::conversation::target_source::tests::fixture();
+    let store = ledger.store().clone();
+    let budget = ContextBudget {
+        max_text_bytes: 8192,
+        max_turns: 16,
+        provider_token_limit: Some(8192),
+    };
+    let target = ledger
+        .context(conversation, &budget, |_| Ok(1))
+        .unwrap()
+        .targets[0]
+        .clone();
+    let archive = fixture.0.join("archive");
+    store.export_notebook_backup(&archive).unwrap();
+    ledger
+        .change_target(
+            Uuid::new_v4(),
+            ledger
+                .expected(Namespace::Conversation, conversation)
+                .unwrap(),
+            crate::conversation::target_source::tests::user(conversation),
+            &TargetChange::CorrectSubject {
+                target: target.reference,
+                subject: "Newer base subject".into(),
+            },
+        )
+        .unwrap();
+    let before = serde_json::to_value(ledger.inspect(conversation, false).unwrap()).unwrap();
+    let mut objects = BTreeMap::new();
+    let root = store.generation(store.inner.lock().unwrap().generation);
+    for entry in fs::read_dir(root.join("objects")).unwrap() {
+        let path = entry.unwrap().path();
+        objects.insert(
+            path.file_name().unwrap().to_owned(),
+            files::read(&path, MAX_MEDIA).unwrap(),
+        );
+    }
+    drop(ledger);
+    let plan = store.prepare_notebook_restore(&archive, || Ok(())).unwrap();
+    assert!(matches!(
+        store
+            .apply_notebook_restore(&archive, &plan.conditions, || Ok(()))
+            .unwrap(),
+        ordinary_restore::Publication::Verified(_)
+    ));
+    let restored_root = store.generation(plan.conditions.target_generation);
+    for (name, bytes) in objects {
+        assert_eq!(
+            files::read(&restored_root.join("objects").join(name), MAX_MEDIA).unwrap(),
+            bytes
+        );
+    }
+    let ledger = Ledger::new(store);
+    let records = ledger.inspect(conversation, false).unwrap();
+    assert_eq!(serde_json::to_value(&records).unwrap(), before);
+    assert_eq!(
+        records
+            .iter()
+            .filter(|r| matches!(r, Record::SourceTarget(_)))
+            .count(),
+        1
+    );
+    let context = ledger.context(conversation, &budget, |_| Ok(1)).unwrap();
+    assert_eq!(context.targets.len(), 2);
+    assert!(context
+        .targets
+        .iter()
+        .any(|view| view.reference.revision == target.reference.revision));
+    assert!(context
+        .targets
+        .iter()
+        .any(|view| view.target.candidate.subject == "Newer base subject"));
+}
