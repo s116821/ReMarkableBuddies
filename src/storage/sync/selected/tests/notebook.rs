@@ -15,14 +15,39 @@ use crate::{
     LLMEngine,
 };
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Boundary {
+    BeforeHandoff,
+    AfterHandoff,
+}
+
+struct Interlock<'a> {
+    ordinal: usize,
+    boundary: Boundary,
+    change: Box<dyn FnOnce() + 'a>,
+}
+
+#[derive(Default)]
 struct Model<'a> {
     calls: usize,
     parts: Vec<String>,
     images: Vec<String>,
-    after_submit: Option<Box<dyn FnOnce() + 'a>>,
+    interlock: Option<Interlock<'a>>,
     invalid_output: bool,
     expected_memory: bool,
 }
+impl Model<'_> {
+    fn reach(&mut self, ordinal: usize, boundary: Boundary) {
+        if self
+            .interlock
+            .as_ref()
+            .is_some_and(|interlock| interlock.ordinal == ordinal && interlock.boundary == boundary)
+        {
+            (self.interlock.take().unwrap().change)();
+        }
+    }
+}
+
 impl LLMEngine for Model<'_> {
     fn guarded_timeout(&self) -> Option<Duration> {
         Some(Duration::from_secs(1))
@@ -45,14 +70,14 @@ impl LLMEngine for Model<'_> {
         progress: &mut dyn FnMut() -> Result<()>,
         handoff: &mut crate::llm::ModelHandoff<'_>,
     ) -> Result<String> {
+        let ordinal = self.calls;
         progress()?;
+        self.reach(ordinal, Boundary::BeforeHandoff);
         handoff(&mut || {
             self.calls += 1;
             Ok(())
         })?;
-        if let Some(action) = self.after_submit.take() {
-            action();
-        }
+        self.reach(ordinal, Boundary::AfterHandoff);
         progress()?;
         let payload: serde_json::Value = serde_json::from_str(
             self.parts
@@ -333,7 +358,7 @@ impl NotebookFixture {
             },
         });
         Self {
-            fixture: fixture,
+            fixture,
             wire,
             first,
             second,
@@ -577,7 +602,7 @@ fn reject_bad_notebook_variants(
         calls: 0,
         parts: Vec::new(),
         images: Vec::new(),
-        after_submit: None,
+        interlock: None,
         invalid_output: false,
         expected_memory: false,
     };
@@ -650,7 +675,7 @@ fn selected_notebook_crosses_real_worker_with_exact_source_and_stage_objects() {
         calls: 0,
         parts: Vec::new(),
         images: Vec::new(),
-        after_submit: None,
+        interlock: None,
         invalid_output: false,
         expected_memory: true,
     };
@@ -752,7 +777,7 @@ fn selected_notebook_crosses_real_worker_with_exact_source_and_stage_objects() {
         calls: 0,
         parts: Vec::new(),
         images: Vec::new(),
-        after_submit: None,
+        interlock: None,
         invalid_output: false,
         expected_memory: false,
     };
@@ -782,26 +807,30 @@ fn selected_notebook_refuses_late_result_after_winner_activation() {
         calls: 0,
         parts: Vec::new(),
         images: Vec::new(),
-        after_submit: Some(Box::new(|| {
-            let prior = fixture
-                .first
-                .selected_snapshot(fixture.writer.scope(), MAX_ITEMS)
-                .unwrap()
-                .unwrap();
-            fixture
-                .first
-                .activate_selected(
-                    &prior.token,
-                    SelectionChange {
-                        operation: Uuid::new_v4(),
-                        accepted_base_sha256: digest(b"other winning descriptor"),
-                        selected: prior.transaction.selected,
-                        retained: prior.transaction.retained,
-                    },
-                    BTreeMap::new(),
-                )
-                .unwrap();
-        })),
+        interlock: Some(Interlock {
+            ordinal: 0,
+            boundary: Boundary::AfterHandoff,
+            change: Box::new(|| {
+                let prior = fixture
+                    .first
+                    .selected_snapshot(fixture.writer.scope(), MAX_ITEMS)
+                    .unwrap()
+                    .unwrap();
+                fixture
+                    .first
+                    .activate_selected(
+                        &prior.token,
+                        SelectionChange {
+                            operation: Uuid::new_v4(),
+                            accepted_base_sha256: digest(b"other winning descriptor"),
+                            selected: prior.transaction.selected,
+                            retained: prior.transaction.retained,
+                        },
+                        BTreeMap::new(),
+                    )
+                    .unwrap();
+            }),
+        }),
         invalid_output: false,
         expected_memory: false,
     };
@@ -834,7 +863,7 @@ fn selected_notebook_initial_ack_loss_is_uncertain_and_reopens_historical_withou
             calls: 0,
             parts: Vec::new(),
             images: Vec::new(),
-            after_submit: None,
+            interlock: None,
             invalid_output: false,
             expected_memory: false,
         };
@@ -885,7 +914,7 @@ fn selected_notebook_invalid_map_is_durable_and_never_reduces() {
         calls: 0,
         parts: Vec::new(),
         images: Vec::new(),
-        after_submit: None,
+        interlock: None,
         invalid_output: true,
         expected_memory: false,
     };
@@ -905,4 +934,147 @@ fn selected_notebook_invalid_map_is_durable_and_never_reduces() {
     assert!(records.iter().any(|record| matches!(record, Record::NotebookStage(stage)
         if stage.kind == NotebookStageKind::Map && stage.outcome == Some(NotebookStageOutcome::Failed))));
     assert!(!records.iter().any(|record| matches!(record, Record::NotebookStage(stage) if stage.kind == NotebookStageKind::Reduce)));
+}
+
+fn assert_interlocked_maps(fixture: &NotebookFixture) -> crate::storage::selection::SelectionToken {
+    let snapshot = fixture
+        .first
+        .selected_snapshot(fixture.writer.scope(), MAX_ITEMS)
+        .unwrap()
+        .unwrap();
+    let records = SelectedDomainProjection::from_snapshot(&snapshot)
+        .unwrap()
+        .inspect(fixture.conversation)
+        .unwrap();
+    let mut stages: Vec<_> = records
+        .into_iter()
+        .filter_map(|record| match record {
+            Record::NotebookStage(stage) => Some((stage.kind, stage.ordinal, stage.outcome)),
+            Record::Turn(turn) => {
+                assert_ne!(turn.outcome, Outcome::Generated);
+                None
+            }
+            _ => None,
+        })
+        .collect();
+    stages.sort_by_key(|(_, ordinal, _)| *ordinal);
+    assert_eq!(
+        stages,
+        [
+            (
+                NotebookStageKind::Map,
+                0,
+                Some(NotebookStageOutcome::Generated)
+            ),
+            (NotebookStageKind::Map, 1, None),
+        ]
+    );
+    snapshot.token
+}
+
+#[test]
+fn selected_notebook_interlock_refuses_next_handoff_after_shared_preference_edit() {
+    let fixture = NotebookFixture::new(false);
+    let binding = super::Binding {
+        group: fixture.identity.group,
+        root_id: "shared-root".into(),
+        digest: fixture.identity.binding_sha256.clone(),
+    };
+    let edit = |enabled| {
+        preference_command::set_fixture_preference(
+            fixture.first.clone(),
+            &fixture.config,
+            binding.clone(),
+            &fixture.wire,
+            serde_json::json!({"product_settings": {"writer_enabled": enabled}}),
+        )
+        .unwrap();
+    };
+    edit(true);
+    let mut model = Model {
+        interlock: Some(Interlock {
+            ordinal: 1,
+            boundary: Boundary::BeforeHandoff,
+            change: Box::new(|| {
+                let token = assert_interlocked_maps(&fixture);
+                edit(false);
+                assert_eq!(assert_interlocked_maps(&fixture), token);
+            }),
+        }),
+        ..Default::default()
+    };
+    let report = fixture.produce(&mut model);
+    assert!(
+        model.interlock.is_none(),
+        "second Map never reached handoff"
+    );
+    assert_eq!(
+        (report.status, report.confirmed_stage_results),
+        (NotebookStatus::Failed, 1)
+    );
+    assert_eq!((model.calls, report.local_invocations), (1, 1));
+    assert!(report.draft.is_none() && !report.unobserved_publication);
+    assert_interlocked_maps(&fixture);
+}
+
+#[test]
+fn selected_notebook_interlock_refuses_next_result_after_independent_memory_edit() {
+    let fixture = NotebookFixture::new(true);
+    let memory =
+        selected_memory::SelectedMemory::new(fixture.first.clone(), fixture.identity.clone())
+            .unwrap();
+    let mut global = fact(fixture.identity.profile);
+    global.claim = "preserve the source facts globally".into();
+    let original = memory
+        .initialize_aggregate(selected_memory::InitializeAggregate {
+            operation: Uuid::new_v4(),
+            accepted_base_sha256: digest(b"independent notebook memory genesis"),
+            fact: global.clone(),
+        })
+        .unwrap()
+        .registration
+        .unwrap();
+    memory
+        .register_selection(selected_memory::RegisterSelection {
+            operation: Uuid::new_v4(),
+            registration: original,
+        })
+        .unwrap();
+
+    let mut model = Model {
+        interlock: Some(Interlock {
+            ordinal: 1,
+            boundary: Boundary::AfterHandoff,
+            change: Box::new(|| {
+                let document = assert_interlocked_maps(&fixture);
+                let mut updated = global.clone();
+                updated.value = "independently edited after the second handoff".into();
+                let expected = memory
+                    .inspect(&updated.key)
+                    .unwrap()
+                    .into_iter()
+                    .map(|record| record.revision_id)
+                    .collect();
+                memory
+                    .put(memory::Mutation {
+                        operation: Uuid::new_v4(),
+                        expected,
+                        fact: updated,
+                    })
+                    .unwrap();
+                assert_eq!(assert_interlocked_maps(&fixture), document);
+            }),
+        }),
+        expected_memory: true,
+        ..Default::default()
+    };
+    let report = fixture.produce(&mut model);
+    assert!(model.interlock.is_none(), "second Map never submitted");
+    assert_eq!(
+        (report.status, report.confirmed_stage_results),
+        (NotebookStatus::Failed, 1)
+    );
+    assert_eq!((model.calls, report.local_invocations), (2, 2));
+    assert!(report.draft.is_none() && !report.unobserved_publication);
+    assert_interlocked_maps(&fixture);
 }

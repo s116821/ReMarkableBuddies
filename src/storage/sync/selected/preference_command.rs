@@ -801,13 +801,13 @@ pub(super) fn read_fixture_model_request(
     serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap()
 }
 
-#[cfg(all(test, target_os = "linux"))]
-pub(super) fn set_fixture_reader_preference(
+#[cfg(test)]
+pub(super) fn set_fixture_preference(
     store: Arc<Store>,
     path: &std::path::Path,
     binding: Binding,
     wire: &crate::storage::drive::shared_fixture::Wire,
-    enabled: bool,
+    settings: serde_json::Value,
 ) -> Result<()> {
     let run = |request| {
         let mut reads = budget();
@@ -827,7 +827,7 @@ pub(super) fn set_fixture_reader_preference(
         .context("fixture preference guard absent")?;
     let artifact = Artifact::from_value(serde_json::json!({
         "portable_configuration_version": 1,
-        "settings": { "product_settings": { "reader_enabled": enabled } }
+        "settings": settings
     }))
     .map_err(|_| anyhow::anyhow!("invalid fixture preference artifact"))?;
     let report = run(Request::Edit(Uuid::new_v4(), guard, artifact))?;
@@ -836,4 +836,21 @@ pub(super) fn set_fixture_reader_preference(
         "fixture preference edit refused"
     );
     Ok(())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub(super) fn set_fixture_reader_preference(
+    store: Arc<Store>,
+    path: &std::path::Path,
+    binding: Binding,
+    wire: &crate::storage::drive::shared_fixture::Wire,
+    enabled: bool,
+) -> Result<()> {
+    set_fixture_preference(
+        store,
+        path,
+        binding,
+        wire,
+        serde_json::json!({ "product_settings": { "reader_enabled": enabled } }),
+    )
 }
