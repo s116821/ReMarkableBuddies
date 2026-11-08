@@ -4,6 +4,7 @@ use crate::handwriting::{self, selected::Projection};
 use crate::memory::catalog::Identity;
 use crate::storage::selection::{SelectedReadBudget, SelectionMutation};
 pub(super) mod command;
+mod query;
 pub(crate) use command::run;
 
 pub(super) fn allowance() -> SelectedReadBudget {

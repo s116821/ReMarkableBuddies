@@ -53,6 +53,22 @@ pub(in crate::storage::sync::selected) fn admitted(
     let mut report = Report::new(Some(input.request()));
     let outcome = (|| -> handwriting::Result<_> {
         let profile = input.request().profile();
+        let current = local(store.sync_mode_snapshot())?;
+        require_mode(&current, &binding).map_err(|_| Failure::UnsupportedMode)?;
+        let epoch = current.epoch.ok_or(Failure::UnsupportedMode)?;
+        let lease = local(store.sync_mode_lease(&current.token))?;
+        if let handwriting::Request::Query(query) = input.request() {
+            super::query::execute(
+                &store,
+                policy,
+                binding,
+                &lease,
+                query,
+                &mut report,
+                transport,
+            )?;
+            return Ok(lease);
+        }
         let owner = HandwritingOwner::new(
             profile,
             input
@@ -64,10 +80,6 @@ pub(in crate::storage::sync::selected) fn admitted(
             .domain()
             .map_err(|_| Failure::InvalidIdentity)?
             .scope(binding.group, binding.digest.clone())?;
-        let current = local(store.sync_mode_snapshot())?;
-        require_mode(&current, &binding).map_err(|_| Failure::UnsupportedMode)?;
-        let epoch = current.epoch.ok_or(Failure::UnsupportedMode)?;
-        let lease = local(store.sync_mode_lease(&current.token))?;
         local(lease.require_shared_scope(&scope))?;
         let catalog_gate = local(catalog_gate(&store, &scope, profile))?;
         let correction_gate = local(SelectedAdmission::new(store.clone(), scope.clone()))?;

@@ -184,7 +184,7 @@ impl Report {
         }
         output.write_all(&bytes)
     }
-    pub(super) fn size(&self) -> usize {
+    pub(crate) fn size(&self) -> usize {
         serde_json::to_vec(self).map_or(usize::MAX, |v| v.len() + 1)
     }
 }

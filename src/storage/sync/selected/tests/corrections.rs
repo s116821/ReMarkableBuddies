@@ -218,6 +218,10 @@ fn selected_handwriting_worker_distinguishes_omitted_and_missing_samples() {
     );
     assert_eq!(files::read(&object_path, sample.bytes).unwrap(), png());
     assert!(peer.read_object(sample).is_err());
+    let query = f.command(&peer, &profile_query(f.owner.profile, None), true);
+    assert_eq!(query.status, handwriting::Status::Partial);
+    assert_eq!(query.diagnostics.missing_media, 1);
+    assert!(query.facts.is_empty());
 }
 
 fn png() -> Vec<u8> {
@@ -239,6 +243,11 @@ fn confirm(owner: HandwritingOwner, operation: Uuid) -> Value {
     })
 }
 
+fn profile_query(profile: Uuid, text: Option<&str>) -> Value {
+    json!({"handwriting_version": 1, "command": "query", "profile": profile,
+        "query_text": text, "max_matches": 16, "max_encoded_bytes": 65536})
+}
+
 fn observed(report: handwriting::Report) -> Uuid {
     assert_eq!(report.failure, None);
     assert_eq!(
@@ -249,11 +258,63 @@ fn observed(report: handwriting::Report) -> Uuid {
 }
 
 #[test]
+fn selected_handwriting_profile_query_applies_match_and_report_limits_across_scopes() {
+    let f = CorrectionFixture::new();
+    let second = HandwritingOwner::new(f.owner.profile, Uuid::new_v4());
+    let second_scope = second
+        .domain()
+        .unwrap()
+        .scope(f.binding.group, f.binding.digest.clone())
+        .unwrap();
+    observed(f.command(&f.a, &confirm(f.owner, Uuid::new_v4()), true));
+    observed(f.command(&f.a, &confirm(second, Uuid::new_v4()), true));
+    let mut sender = f.engine(&f.a);
+    let mut receiver = f.engine(&f.b);
+    for _ in 0..24 {
+        sender.step().unwrap();
+        receiver.step().unwrap();
+        if [&f.scope, &second_scope].into_iter().all(|scope| {
+            receiver
+                .checkpoint
+                .scopes
+                .get(&scope.key_sha256)
+                .is_some_and(|p| p.applied.is_some())
+        }) {
+            break;
+        }
+    }
+    let mut query = profile_query(f.owner.profile, Some("1O"));
+    let both = f.command(&f.b, &query, true);
+    assert_eq!(both.status, handwriting::Status::Complete);
+    assert_eq!(both.diagnostics.matched, 2);
+    assert_eq!(both.facts.len(), 2);
+    assert_ne!(both.facts[0].record, both.facts[1].record);
+    query["max_matches"] = json!(1);
+    let capped = f.command(&f.b, &query, true);
+    assert_eq!(capped.status, handwriting::Status::Partial);
+    assert_eq!(capped.diagnostics.omitted, 1);
+    assert_eq!(capped.facts[0].record, both.facts[0].record);
+    query["max_encoded_bytes"] = json!(512);
+    let bounded = f.command(&f.b, &query, true);
+    assert_eq!(bounded.status, handwriting::Status::Partial);
+    assert!(bounded.facts.is_empty());
+    assert!(serde_json::to_vec(&bounded).unwrap().len() < 512);
+}
+
+#[test]
 fn selected_handwriting_command_transfers_exact_bytes_and_keeps_original_replay() {
     let mut f = CorrectionFixture::new();
     let operation = Uuid::new_v4();
+    let query = profile_query(f.owner.profile, None);
+    assert_eq!(
+        f.command(&f.a, &query, true).status,
+        handwriting::Status::CompleteEmpty
+    );
     let first = confirm(f.owner, operation);
     let revision = observed(f.command(&f.a, &first, true));
+    let pending = f.command(&f.a, &query, true);
+    assert_eq!(pending.status, handwriting::Status::Partial);
+    assert!(pending.facts.is_empty());
     let replay = f.command(&f.a, &first, false);
     assert!(replay.historical);
     assert_eq!(observed(replay), revision);
@@ -306,6 +367,11 @@ fn selected_handwriting_command_transfers_exact_bytes_and_keeps_original_replay(
     ));
     let sample = &received.transaction.selected.media[0];
     assert_eq!(f.b.read_object(sample).unwrap(), png());
+    let matches = f.command(&f.b, &profile_query(f.owner.profile, Some("1o")), true);
+    assert_eq!(matches.status, handwriting::Status::Complete);
+    assert_eq!(matches.facts[0].revision, revision);
+    let no_match = f.command(&f.b, &profile_query(f.owner.profile, Some("other")), true);
+    assert_eq!(no_match.status, handwriting::Status::CompleteEmpty);
     let mut query = json!({"handwriting_version": 1, "command": "status",
         "profile": f.owner.profile, "correction": f.owner.correction, "operation": operation});
     assert_eq!(
@@ -359,6 +425,11 @@ fn selected_handwriting_command_transfers_exact_bytes_and_keeps_original_replay(
     assert_eq!(
         f.command(&f.b, &inspect, false).facts[0].state,
         handwriting::FactState::Tombstone
+    );
+    assert_eq!(
+        f.command(&f.b, &profile_query(f.owner.profile, None), true)
+            .status,
+        handwriting::Status::CompleteEmpty
     );
     let mut rollback = first;
     rollback["command"] = json!("update");
