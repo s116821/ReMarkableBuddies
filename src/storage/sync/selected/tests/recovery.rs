@@ -175,7 +175,10 @@ fn selected_worker_recovery_restores_and_retries_exact_current_original() {
     // No preliminary missing read may consume this injected fault before POST.
     fixture.wire.fail_get_once(&pending.slot);
     assert!(engine.step().is_err());
-    assert_eq!(fixture.wire.slot_posts(), [pending.slot.clone()]);
+    assert_eq!(
+        fixture.wire.slot_posts(),
+        std::slice::from_ref(&pending.slot)
+    );
     assert!(engine.checkpoint.scopes[&key].receive.is_none());
     drop(engine);
     fixture.reopen_publisher();
@@ -475,10 +478,7 @@ fn assert_missing_local_lineage(
         match Ledger::decode(&envelope).unwrap() {
             Record::Receipt(receipt) if receipt.acknowledgment.operation == operation => (),
             Record::OutcomeFact(fact)
-                if fact.reason == crate::conversation::AttemptReason::OutputPending =>
-            {
-                ()
-            }
+                if fact.reason == crate::conversation::AttemptReason::OutputPending => {}
             _ => {
                 objects.insert(
                     reference.sha256.clone(),

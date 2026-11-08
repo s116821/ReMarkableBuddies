@@ -2,6 +2,7 @@
 use super::*;
 use crate::storage::selection::SelectedSnapshot;
 
+#[cfg(test)]
 pub(super) fn validate(
     store: &Store,
     snapshot: &SelectedSnapshot,
@@ -159,7 +160,7 @@ fn collect_pairs<'a>(
         let pair = PendingPair {
             receipt,
             reference,
-            fact: *fact_reference,
+            fact: fact_reference,
             actor,
         };
         if let Some(previous) = pairs.insert(operation, pair) {

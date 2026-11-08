@@ -22,7 +22,6 @@ pub(crate) use pending::tests::fixture_pending_for_worker;
 #[cfg(test)]
 mod reader_dispatch;
 mod reader_plan;
-#[cfg(test)]
 pub(crate) mod reader_uncertainty;
 pub mod receiving;
 pub mod resolution;
