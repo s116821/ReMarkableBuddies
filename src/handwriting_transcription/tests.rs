@@ -1,0 +1,1850 @@
+use super::*;
+use crate::handwriting::{mutation_identity, Action, Correction};
+use crate::handwriting::{ConfirmedExample, ContextIdentity, ExampleIdentity, Provider};
+use crate::storage::{digest, StorePaths};
+use crate::storage::{Envelope, Kind, Namespace};
+use base64::Engine as _;
+use serde_json::{json, Value};
+use std::collections::BTreeSet;
+use std::{io::Cursor, path::PathBuf};
+struct Local {
+    root: PathBuf,
+    config: Config,
+}
+impl Local {
+    fn ready_notebook(explicit_local: bool) -> Self {
+        let local = Self::new();
+        let store = Store::open(local.config.paths.clone()).unwrap();
+        if explicit_local {
+            store
+                .set_sync_mode(
+                    &store.sync_mode_snapshot().unwrap().token,
+                    Uuid::new_v4(),
+                    crate::storage::sync::mode::SyncModeChoice::LocalOnly,
+                )
+                .unwrap();
+        }
+        drop(store);
+        drop(Store::prepare_notebook(local.config.paths.clone()).unwrap());
+        local
+    }
+    fn new() -> Self {
+        let root = std::env::temp_dir().join(format!("rmb-transcription-{}", Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let config = Config {
+            paths: StorePaths {
+                data: root.join("data"),
+                cache: root.join("cache"),
+                credentials: root.join("credentials"),
+            },
+            ..Config::default()
+        };
+        Self { root, config }
+    }
+    fn confirm(
+        &self,
+        correction: Uuid,
+        png: &[u8],
+        original: &str,
+        corrected: &str,
+    ) -> (Uuid, Uuid) {
+        let store = Arc::new(Store::open(self.config.paths.clone()).unwrap());
+        let request = json!({"handwriting_version":1,"command":"confirm","profile":profile(),"correction":correction,
+            "operation":Uuid::new_v4(),"expected_heads":[],"confirmation":"user-confirmed","original_text":original,
+            "corrected_text":corrected,"confirmed_ms":1,"provenance":{"kind":"caller-confirmed-sample","description":"Synthetic consumer test only","source":null},"sample_png_base64":STANDARD.encode(png)});
+        let input =
+            handwriting::parse(&mut Cursor::new(serde_json::to_vec(&request).unwrap())).unwrap();
+        let report = LocalCorrections::new(store.clone(), &self.config)
+            .unwrap()
+            .execute(input);
+        assert_eq!(report.status, handwriting::Status::Complete);
+        let value = (report.facts[0].record, report.facts[0].revision);
+        drop(report);
+        drop(store);
+        value
+    }
+}
+impl Drop for Local {
+    fn drop(&mut self) {
+        let path = self.root.canonicalize().unwrap();
+        assert_eq!(
+            path.parent().unwrap(),
+            std::env::temp_dir().canonicalize().unwrap()
+        );
+        assert!(path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("rmb-transcription-"));
+        std::fs::remove_dir_all(path).unwrap();
+    }
+}
+fn fixture() -> Value {
+    serde_json::from_str(include_str!(
+        "../../tests/fixtures/handwriting-transcription-v1.json"
+    ))
+    .unwrap()
+}
+fn partial_vectors() -> Value {
+    serde_json::from_str(include_str!(
+        "../../tests/fixtures/partial-v2-identity-vectors.json"
+    ))
+    .unwrap()
+}
+fn math_vectors() -> Value {
+    serde_json::from_str(include_str!(
+        "../../tests/fixtures/math-layout-identity-vectors.json"
+    ))
+    .unwrap()
+}
+fn structured_vectors() -> Value {
+    serde_json::from_str(include_str!(
+        "../../tests/fixtures/structured-math-identity-vectors.json"
+    ))
+    .unwrap()
+}
+fn partial_request(context: Value) -> Value {
+    let mut value = request(context);
+    value["transcription_version"] = json!(2);
+    value["policy"] = json!("partial-transcription");
+    value
+}
+fn math_request(context: Value) -> Value {
+    let mut value = partial_request(context);
+    value["policy"] = json!("partial-math-transcription");
+    value
+}
+fn structured_request(context: Value) -> Value {
+    let mut value = request(context);
+    value["transcription_version"] = json!(3);
+    value["policy"] = json!("structured-math-transcription");
+    value
+}
+fn structured_reply() -> String {
+    json!({"pages":[{"page":7,"status":"structured","spans":[{"kind":"math","root":
+        {"tag":"mfrac","children":[{"tag":"unknown"},{"tag":"msub","children":[
+            {"tag":"msqrt","children":[{"tag":"unknown"}]},{"tag":"unknown"}]}]}}]}]})
+    .to_string()
+}
+fn profile() -> Uuid {
+    Uuid::parse_str("00000000-0000-4000-8000-000000000010").unwrap()
+}
+fn png() -> Vec<u8> {
+    STANDARD
+        .decode(fixture()["target_png"].as_str().unwrap())
+        .unwrap()
+}
+fn request(context: Value) -> Value {
+    json!({"transcription_version":1,"invocation":Uuid::new_v4(),"document":Uuid::new_v4(),"page":7,"target_png":STANDARD.encode(png()),"context":context})
+}
+fn context(correction: Uuid, revision: Uuid) -> Value {
+    json!({"profile":profile(),"examples":[{"correction":correction,"revision":revision}]})
+}
+fn good_reply() -> String {
+    json!({"pages":[{"page":7,"status":"transcribed","text":"café x²"}]}).to_string()
+}
+struct Engine {
+    parts: Vec<Value>,
+    captured: Vec<Value>,
+    calls: usize,
+    reply: String,
+    fail: bool,
+}
+impl Engine {
+    fn new() -> Self {
+        Self {
+            parts: vec![],
+            captured: vec![],
+            calls: 0,
+            reply: good_reply(),
+            fail: false,
+        }
+    }
+}
+impl LLMEngine for Engine {
+    fn add_text_content(&mut self, text: &str) {
+        self.parts.push(json!({"type":"text","text":text}));
+    }
+    fn add_image_content(&mut self, png: &str) {
+        self.parts.push(json!({"type":"image_url","image_url":png}));
+    }
+    fn clear_content(&mut self) {
+        self.parts.clear();
+    }
+    fn execute(&mut self) -> anyhow::Result<String> {
+        self.calls += 1;
+        self.captured = self.parts.clone();
+        if self.fail {
+            anyhow::bail!("PRIVATE_PROVIDER_CANARY");
+        }
+        Ok(self.reply.clone())
+    }
+}
+fn run(local: &Local, input: &Value, engine: &mut Engine) -> Report {
+    run_with_engine(
+        &local.config,
+        &serde_json::to_vec(input).unwrap(),
+        "model-é/v1",
+        engine,
+        &mut || Ok(()),
+    )
+}
+fn output(report: &Report) -> Value {
+    let mut bytes = Vec::new();
+    let _ = report.write_to(&mut bytes).unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+#[test]
+fn whole_page_limits_match_default_notebook_and_narrow_receiving() {
+    let local = Local::new();
+    let vector = fixture();
+    let mut engine = Engine::new();
+    let bytes = png();
+    let original = notebook::normalize(
+        Uuid::new_v4(),
+        &[notebook::PageImage {
+            page: 7,
+            png: &bytes,
+        }],
+        "model-é/v1",
+        &mut engine,
+        notebook::Options::default(),
+        &mut |_| Ok(()),
+    )
+    .unwrap();
+    let text = engine.captured[0]["text"].as_str().unwrap();
+    assert!(text.contains("32768 UTF-8 bytes per page"));
+    assert!(text.contains("sum of page text must be at most 131072 UTF-8 bytes"));
+    assert!(text.contains("JSON response must be at most 131072 UTF-8 bytes"));
+    assert_eq!(original.document.source_sha256, vector["source_sha256"]);
+    assert_eq!(
+        serde_json::to_string(&original.profile).unwrap(),
+        vector["cases"][0]["profile_json"]
+    );
+    let mut input = request(Value::Null);
+    input["document"] = json!(original.document.document);
+    let report = run(&local, &input, &mut engine);
+    assert_eq!(report.status, Status::Normalized);
+    let result = report.result.as_ref().unwrap();
+    assert_eq!(result.document, original.document);
+    assert_eq!(
+        engine.captured,
+        vector["cases"][0]["prompt_parts"]
+            .as_array()
+            .unwrap()
+            .clone()
+    );
+    assert_eq!(result.prompt_sha256, vector["cases"][0]["prompt_sha256"]);
+    assert_ne!(result.prompt_sha256, original.prompt_sha256);
+    assert!(!local.config.paths.data.exists());
+    assert!(engine.parts.is_empty());
+    assert!(!report.confirmed);
+
+    for (size, accepted) in [(4096, true), (4097, false)] {
+        engine.reply = json!({"pages":[{"page":7,"status":"transcribed","text":"x".repeat(size)}]})
+            .to_string();
+        let target = notebook::admit_target(7, png(), &mut |_| Ok(())).unwrap();
+        let (result, called) = notebook::normalize_admitted(
+            Uuid::new_v4(),
+            &target,
+            "model-é/v1",
+            None,
+            TranscriptionPolicy::WholePage,
+            &mut engine,
+            &mut |_| Ok(()),
+        );
+        assert!(called);
+        assert_eq!(matches!(result, Ok(Normalized::Page(_))), accepted);
+        let text = engine.captured[0]["text"].as_str().unwrap();
+        assert!(text.contains("4096 UTF-8 bytes per page"));
+        assert!(text.contains("sum of page text must be at most 4096 UTF-8 bytes"));
+        assert!(text.contains("JSON response must be at most 16384 UTF-8 bytes"));
+    }
+}
+#[test]
+fn six_literal_vectors_exercise_production_context_payload_and_profile_recipes() {
+    exercise_literal_vectors(&Local::new());
+}
+fn exercise_literal_vectors(local: &Local) {
+    let vector = fixture();
+    let partial = partial_vectors();
+    let math = math_vectors();
+    let structured = structured_vectors();
+    for case in vector["cases"].as_array().unwrap() {
+        let target = notebook::admit_target(7, png(), &mut |_| Ok(())).unwrap();
+        let examples = case["selected"].as_array().unwrap();
+        let captured = if examples.is_empty() {
+            None
+        } else {
+            let store = Arc::new(Store::open(local.config.paths.clone()).unwrap());
+            let owner = LocalCorrections::new(store, &local.config).unwrap();
+            let values = examples
+                .iter()
+                .map(|e| {
+                    let raw = STANDARD.decode(e["sample_png"].as_str().unwrap()).unwrap();
+                    ConfirmedExample {
+                        identity: ExampleIdentity {
+                            correction: serde_json::from_value(e["correction"].clone()).unwrap(),
+                            record: serde_json::from_value(e["record"].clone()).unwrap(),
+                            revision: serde_json::from_value(e["revision"].clone()).unwrap(),
+                            sample_sha256: digest(&raw),
+                            original_text_sha256: Some(digest(
+                                e["original_text"].as_str().unwrap().as_bytes(),
+                            )),
+                            corrected_text_sha256: digest(
+                                e["corrected_text"].as_str().unwrap().as_bytes(),
+                            ),
+                        },
+                        png: raw,
+                        original_text: Some(e["original_text"].as_str().unwrap().into()),
+                        corrected_text: e["corrected_text"].as_str().unwrap().into(),
+                    }
+                })
+                .collect::<Vec<_>>();
+            // Recipe-only fixtures intentionally bypass current-head capture here;
+            // separate actual-Store controls qualify that production admission.
+            Some(ConfirmedContext {
+                identity: ContextIdentity {
+                    profile: profile(),
+                    examples: values.iter().map(|e| e.identity.clone()).collect(),
+                },
+                examples: values,
+                _owner: owner,
+            })
+        };
+        let mut engine = Engine::new();
+        let (outcome, called) = notebook::normalize_admitted(
+            Uuid::new_v4(),
+            &target,
+            "model-é/v1",
+            captured.as_ref(),
+            TranscriptionPolicy::WholePage,
+            &mut engine,
+            &mut |_| Ok(()),
+        );
+        assert!(called);
+        let Normalized::Page(result) = outcome.unwrap() else {
+            panic!("expected page");
+        };
+        assert_eq!(
+            serde_json::to_value(&engine.captured).unwrap(),
+            case["prompt_parts"]
+        );
+        assert_eq!(result.prompt_sha256, case["prompt_sha256"]);
+        assert_eq!(
+            result.prompt_bytes,
+            case["prompt_bytes"].as_u64().unwrap() as usize
+        );
+        assert_eq!(
+            serde_json::to_string(&result.profile).unwrap(),
+            case["profile_json"]
+        );
+        assert_eq!(
+            result.document.extractor_revision,
+            case["extractor_revision"]
+        );
+        assert_eq!(result.document.source_sha256, vector["source_sha256"]);
+        assert_eq!(result.document.units.len(), 1);
+        assert_eq!(result.document.units[0].page, Some(7));
+        for (policy, vectors) in [
+            (TranscriptionPolicy::Partial, &partial),
+            (TranscriptionPolicy::PartialMath, &math),
+            (TranscriptionPolicy::StructuredMath, &structured),
+        ] {
+            let expected = vectors["cases"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|candidate| candidate["name"] == case["name"])
+                .unwrap();
+            engine.reply = json!({"pages":[{"page":7,"status":"partial",
+            "spans":[{"kind":"known","text":"café "},{"kind":"uncertain"},{"kind":"known","text":" x²"}]}]}).to_string();
+            let (outcome, called) = notebook::normalize_admitted(
+                Uuid::new_v4(),
+                &target,
+                "model-é/v1",
+                captured.as_ref(),
+                policy,
+                &mut engine,
+                &mut |_| Ok(()),
+            );
+            assert!(called);
+            let Normalized::Partial(result) = outcome.unwrap() else {
+                panic!("expected partial");
+            };
+            assert_eq!(
+                serde_json::to_string(&engine.captured).unwrap(),
+                expected["payload_json"]
+            );
+            assert_eq!(
+                serde_json::to_string(&result.profile).unwrap(),
+                expected["profile_json"]
+            );
+            assert_eq!(result.extractor_revision, expected["extractor_revision"]);
+            assert_eq!(result.prompt_sha256, expected["prompt_sha256"]);
+            assert_eq!(
+                result.prompt_bytes as u64,
+                expected["prompt_bytes"].as_u64().unwrap()
+            );
+            assert_eq!(result.source_sha256, vector["source_sha256"]);
+        }
+    }
+}
+
+mod ready_notebook;
+#[test]
+fn real_current_capture_is_owned_through_provider_report_write_failure_and_drop() {
+    let local = Local::new();
+    let correction = Uuid::new_v4();
+    let (_, revision) = local.confirm(correction, &png(), "PRIVATE_ORIGINAL", "PRIVATE_CORRECTED");
+    let mut engine = Engine::new();
+    let input = request(context(correction, revision));
+    let report = run(&local, &input, &mut engine);
+    assert_eq!(report.status, Status::Normalized);
+    assert_eq!(engine.calls, 1);
+    assert_eq!(report.provider_attempt, Attempt::Called);
+    assert!(Store::open(local.config.paths.clone()).is_err());
+    assert!(report
+        ._owner
+        .as_ref()
+        .unwrap()
+        ._owner
+        .publisher_excluded_for_test());
+    let data = output(&report);
+    assert_eq!(data["context"]["examples"][0]["revision"], json!(revision));
+    assert_eq!(data["confirmed"], false);
+    assert!(data["context"]["examples"][0]
+        .get("original_text")
+        .is_none());
+    struct Broken;
+    impl Write for Broken {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("blocked"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    assert!(report.write_to(&mut Broken).is_err());
+    assert!(Store::open(local.config.paths.clone()).is_err());
+    drop(report);
+    let store = Arc::new(Store::open(local.config.paths.clone()).unwrap());
+    assert!(store.legacy_publisher_lease().is_ok());
+}
+#[test]
+fn partial_request_and_report_bytes_match_the_reviewed_vectors() {
+    let local = Local::new();
+    let vectors = partial_vectors();
+    let mut engine = Engine::new();
+    for row in vectors["admission"].as_array().unwrap() {
+        let report = run_with_engine(
+            &local.config,
+            row["request_json"].as_str().unwrap().as_bytes(),
+            "model-é/v1",
+            &mut engine,
+            &mut || Ok(()),
+        );
+        let mut wire = Vec::new();
+        assert!(!report.write_to(&mut wire).unwrap());
+        assert_eq!(
+            wire,
+            row["report_json"].as_str().unwrap().as_bytes(),
+            "{}",
+            row["name"]
+        );
+    }
+    assert_eq!(engine.calls, 0);
+    assert!(!local.config.paths.data.exists());
+    for row in vectors["reports"].as_array().unwrap() {
+        let Some(response) = row["response_json"]
+            .as_str()
+            .filter(|_| row["case"] == "none")
+        else {
+            continue;
+        };
+        let input = if row["version"] == 2 {
+            "v2_request_json"
+        } else {
+            "v1_request_json"
+        };
+        engine.reply = response.into();
+        let report = run_with_engine(
+            &local.config,
+            vectors[input].as_str().unwrap().as_bytes(),
+            "model-é/v1",
+            &mut engine,
+            &mut || Ok(()),
+        );
+        let mut wire = Vec::new();
+        assert!(report.write_to(&mut wire).unwrap());
+        assert_eq!(
+            wire,
+            row["report_json"].as_str().unwrap().as_bytes(),
+            "{}",
+            row["status"]
+        );
+    }
+    assert_eq!(engine.calls, 6);
+    assert!(!local.config.paths.data.exists());
+}
+
+#[test]
+fn math_policy_is_explicit_and_preserves_inert_text_uncertainty_and_store() {
+    let literal = include_str!("prompt-math-layout-v1.txt");
+    assert_eq!(
+        digest(literal.as_bytes()),
+        math_vectors()["math_addendum_sha256"]
+    );
+    let text = "Résumé \\frac{a_{j}}{\\sqrt{b^{2}}} + \\int_{r}^{s} f(x)\\,dx";
+    let spans = json!([
+        {"kind":"known","text":text},
+        {"kind":"uncertain"},
+        {"kind":"known","text":"z_{k}\\neq 0"}
+    ]);
+    for selected in [false, true] {
+        let local = Local::new();
+        let selection = if selected {
+            let correction = Uuid::new_v4();
+            let (_, revision) = local.confirm(correction, &png(), "original", "corrected");
+            context(correction, revision)
+        } else {
+            Value::Null
+        };
+        let before = tree_bytes(&local.root);
+        let mut engine = Engine::new();
+        let previous = run(&local, &partial_request(selection.clone()), &mut engine);
+        let previous_revision = previous
+            .result
+            .as_ref()
+            .unwrap()
+            .document
+            .extractor_revision
+            .clone();
+        let mut expected_payload = engine.captured.clone();
+        expected_payload.insert(1, json!({"type":"text","text":literal}));
+        drop(previous);
+        let input = math_request(selection);
+        for (reply, status, failure) in [
+            (
+                json!({"page":7,"status":"transcribed","text":text}),
+                Status::Normalized,
+                None,
+            ),
+            (
+                json!({"page":7,"status":"partial","spans":spans}),
+                Status::Partial,
+                None,
+            ),
+            (
+                json!({"page":7,"status":"unreadable","text":""}),
+                Status::Unreadable,
+                None,
+            ),
+            (
+                json!({"page":7,"status":"partial","spans":[{"kind":"uncertain"}]}),
+                Status::Refused,
+                Some(Failure::InvalidResponse),
+            ),
+        ] {
+            engine.reply = json!({"pages":[reply]}).to_string();
+            let calls = engine.calls;
+            let report = run(&local, &input, &mut engine);
+            assert_eq!(engine.calls, calls + 1);
+            assert_eq!(report.status, status);
+            assert_eq!(report.failure, failure);
+            assert_eq!(
+                report.target_sha256.as_deref(),
+                Some(digest(&png()).as_str())
+            );
+            assert_eq!(engine.captured, expected_payload);
+            assert!(engine.parts.is_empty());
+            let wire = output(&report);
+            assert_eq!(wire["transcription_version"], 2);
+            assert_eq!(wire["confirmed"], false);
+            assert_eq!(wire["provider_attempt"], "called");
+            if status == Status::Normalized || status == Status::Partial {
+                let (profile, revision, source) = if let Some(result) = report.result.as_ref() {
+                    assert_eq!(wire["result"]["document"]["units"][0]["text"], text);
+                    assert!(wire["partial"].is_null());
+                    (
+                        &result.profile,
+                        &result.document.extractor_revision,
+                        &result.document.source_sha256,
+                    )
+                } else {
+                    assert_eq!(wire["partial"]["spans"], spans);
+                    assert!(wire["result"].is_null());
+                    let result = report.partial().unwrap();
+                    (
+                        &result.profile,
+                        &result.extractor_revision,
+                        &result.source_sha256,
+                    )
+                };
+                assert_eq!(profile.protocol, 3);
+                assert_eq!(
+                    profile.prompt_revision,
+                    if selected {
+                        "transcribe-partial-math-confirmed-examples-v1"
+                    } else {
+                        "transcribe-partial-math-v1"
+                    }
+                );
+                assert_ne!(revision, &previous_revision);
+                assert_eq!(
+                    revision,
+                    &format!(
+                        "notebook-ocr-partial-math-v1:{}",
+                        digest(&serde_json::to_vec(profile).unwrap())
+                    )
+                );
+                assert_eq!(source, fixture()["source_sha256"].as_str().unwrap());
+            } else {
+                assert!(wire["result"].is_null() && wire["partial"].is_null());
+            }
+            if selected {
+                assert!(Store::open(local.config.paths.clone()).is_err());
+            }
+            drop(report);
+            assert_eq!(before, tree_bytes(&local.root));
+        }
+    }
+}
+
+#[test]
+fn math_addendum_alone_can_exceed_the_existing_prompt_budget_before_dispatch() {
+    let local = Local::new();
+    // Tabs are escaped in the example descriptor and again in the text part.
+    // This gives 31,336 legacy text bytes and 33,310 with the math addendum.
+    let text = "x\t".repeat(1200);
+    let mut examples = vec![];
+    for _ in 0..3 {
+        let key = Uuid::new_v4();
+        let (_, revision) = local.confirm(key, &png(), &text, &text);
+        examples.push(json!({"correction":key,"revision":revision}));
+    }
+    let selection = json!({"profile":profile(),"examples":examples});
+    let before = tree_bytes(&local.root);
+    let mut engine = Engine::new();
+    let legacy = run(&local, &partial_request(selection.clone()), &mut engine);
+    assert_eq!(legacy.status, Status::Normalized);
+    assert_eq!(engine.calls, 1);
+    let text_bytes = |parts: &[Value]| {
+        serde_json::to_vec(
+            &parts
+                .iter()
+                .filter(|p| p["type"] == "text")
+                .collect::<Vec<_>>(),
+        )
+        .unwrap()
+        .len()
+    };
+    assert!(text_bytes(&engine.captured) <= 32768);
+    let mut math_parts = engine.captured.clone();
+    math_parts.insert(
+        1,
+        json!({"type":"text","text":include_str!("prompt-math-layout-v1.txt")}),
+    );
+    assert!(text_bytes(&math_parts) > 32768);
+    drop(legacy);
+    assert_eq!(tree_bytes(&local.root), before);
+
+    let report = run(&local, &math_request(selection), &mut engine);
+    assert_eq!(report.failure, Some(Failure::PromptLimit));
+    assert_eq!(report.provider_attempt, Attempt::NotCalled);
+    assert_eq!(engine.calls, 1); // Only the admitted legacy request called.
+    assert!(engine.parts.is_empty());
+    assert!(report.context.is_some());
+    assert!(Store::open(local.config.paths.clone()).is_err());
+    let wire = output(&report);
+    assert!(wire["result"].is_null() && wire["partial"].is_null());
+    drop(report);
+    assert_eq!(tree_bytes(&local.root), before);
+}
+
+#[test]
+fn partial_reply_refuses_bad_variants_and_preserves_the_exact_utf8_page_limit() {
+    let local = Local::new();
+    let vectors = partial_vectors();
+    let mut engine = Engine::new();
+    for request in [partial_request(Value::Null), math_request(Value::Null)] {
+        for (name, wire) in vectors["invalid_v2_response_json"].as_object().unwrap() {
+            engine.reply = wire.as_str().unwrap().into();
+            let report = run(&local, &request, &mut engine);
+            assert_eq!(report.failure, Some(Failure::InvalidResponse), "{name}");
+            assert_eq!(report.provider_attempt, Attempt::Called);
+            assert!(output(&report)["partial"].is_null());
+        }
+        for (characters, expected) in [(2048, Status::Partial), (2049, Status::Refused)] {
+            engine.reply = json!({"pages":[{"page":7,"status":"partial",
+            "spans":[{"kind":"known","text":"é".repeat(characters)},{"kind":"uncertain"}]}]})
+            .to_string();
+            let report = run(&local, &request, &mut engine);
+            assert_eq!(report.status, expected);
+        }
+        for (count, status) in [
+            (1, Status::Refused),
+            (64, Status::Partial),
+            (65, Status::Refused),
+        ] {
+            let spans: Vec<_> = (0..count)
+                .map(|index| {
+                    if index % 2 == 0 {
+                        json!({"kind":"known","text":"x"})
+                    } else {
+                        json!({"kind":"uncertain"})
+                    }
+                })
+                .collect();
+            engine.reply =
+                json!({"pages":[{"page":7,"status":"partial","spans":spans}]}).to_string();
+            let report = run(&local, &request, &mut engine);
+            assert_eq!(report.status, status, "{count} spans");
+            assert_eq!(report.provider_attempt, Attempt::Called);
+            if status == Status::Partial {
+                assert_eq!(report.partial().unwrap().spans.len(), count);
+            } else {
+                assert_eq!(report.failure, Some(Failure::InvalidResponse));
+                assert!(report.partial().is_none() && report.result.is_none());
+            }
+        }
+    }
+    engine.reply = json!({"pages":[{"page":7,"status":"partial",
+        "spans":[{"kind":"known","text":"hello"},{"kind":"uncertain"}]}]})
+    .to_string();
+    let legacy = run(&local, &self::request(Value::Null), &mut engine);
+    assert_eq!(legacy.failure, Some(Failure::InvalidResponse));
+    assert!(output(&legacy).get("partial").is_none());
+}
+
+#[test]
+fn actual_selected_v2_complete_blank_and_unreadable_use_the_same_captured_identity() {
+    let local = Local::new();
+    let correction = Uuid::new_v4();
+    let target = png();
+    let (record, revision) = local.confirm(correction, &target, "original", "corrected");
+    let input = partial_request(context(correction, revision));
+    let before = tree_bytes(&local.root);
+    let expected_example = json!({
+        "correction":correction,"record":record,"revision":revision,"sample_sha256":digest(&target)
+    });
+    let mut engine = Engine::new();
+    let mut first_payload = None;
+    for (index, (reply, text, status)) in [
+        ("transcribed", "visible", Status::Normalized),
+        ("blank", "", Status::Normalized),
+        ("unreadable", "", Status::Unreadable),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        engine.reply = json!({"pages":[{"page":7,"status":reply,"text":text}]}).to_string();
+        let report = run(&local, &input, &mut engine);
+        assert_eq!(engine.calls, index + 1);
+        assert_eq!(report.status, status);
+        assert_eq!(report.failure, None);
+        assert_eq!(report.provider_attempt, Attempt::Called);
+        assert_eq!(
+            report.target_sha256.as_deref(),
+            Some(digest(&target).as_str())
+        );
+        assert!(report.write_to(&mut std::io::sink()).unwrap());
+        let wire = output(&report);
+        assert_eq!(wire["transcription_version"], 2);
+        assert_eq!(
+            wire["context"],
+            json!({"profile":profile(),"examples":[expected_example]})
+        );
+        assert_eq!(wire.get("partial"), Some(&Value::Null));
+        assert_eq!(wire["confirmed"], false);
+        let payload = serde_json::to_vec(&engine.captured).unwrap();
+        assert_eq!(
+            payload.as_slice(),
+            first_payload
+                .get_or_insert_with(|| payload.clone())
+                .as_slice()
+        );
+        if status == Status::Normalized {
+            let normalized = report.result.as_ref().unwrap();
+            let identity = &normalized
+                .profile
+                .confirmed_context
+                .as_ref()
+                .unwrap()
+                .examples[0];
+            assert_eq!(identity.revision, revision);
+            assert_eq!(identity.record, record);
+            assert_eq!(normalized.profile.protocol, 3);
+            assert_eq!(
+                normalized.profile.prompt_revision,
+                "transcribe-partial-confirmed-examples-v2"
+            );
+            assert_eq!(
+                normalized.document.extractor_revision,
+                format!(
+                    "notebook-ocr-partial-v2:{}",
+                    digest(&serde_json::to_vec(&normalized.profile).unwrap())
+                )
+            );
+            assert_eq!(
+                normalized.document.source_sha256,
+                fixture()["source_sha256"]
+            );
+            assert_eq!(normalized.prompt_sha256, digest(&payload));
+            assert_eq!(normalized.response_sha256, digest(engine.reply.as_bytes()));
+            assert_eq!(normalized.document.units[0].text, text);
+            assert_eq!(
+                normalized.blank_pages,
+                if reply == "blank" { vec![7] } else { vec![] }
+            );
+        } else {
+            assert!(report.result.is_none());
+            assert!(wire["result"].is_null());
+        }
+        assert!(Store::open(local.config.paths.clone()).is_err());
+        drop(report);
+        assert_eq!(tree_bytes(&local.root), before);
+    }
+}
+
+#[test]
+fn selected_partial_cancellation_clears_both_results_and_keeps_custody() {
+    let local = Local::new();
+    let correction = Uuid::new_v4();
+    let (_, revision) = local.confirm(correction, &png(), "original", "corrected");
+    let before = tree_bytes(&local.root);
+    for request in [
+        partial_request(context(correction, revision)),
+        math_request(context(correction, revision)),
+    ] {
+        let input = serde_json::to_vec(&request).unwrap();
+        // Prepared::execute forwards BeforeDispatch, the default engine's
+        // EngineProgress, AfterResponse, then the partial path's BeforeReturn.
+        for (cancel_at, attempt, calls) in [(1, Attempt::NotCalled, 0), (4, Attempt::Called, 1)] {
+            let mut prepared = Prepared::admit(&input, &mut || Ok(()));
+            prepared.capture(&local.config, &mut || Ok(()));
+            assert!(prepared.report.context.is_some());
+            let mut engine = Engine::new();
+            engine.reply = json!({"pages":[{"page":7,"status":"partial",
+            "spans":[{"kind":"known","text":"visible"},{"kind":"uncertain"}]}]})
+            .to_string();
+            let mut checkpoints = 0;
+            let report = prepared.execute("model", &mut engine, &mut || {
+                checkpoints += 1;
+                anyhow::ensure!(checkpoints != cancel_at, "cancel at protocol checkpoint");
+                Ok(())
+            });
+            assert_eq!(checkpoints, cancel_at);
+            assert_eq!(engine.calls, calls);
+            assert_eq!(report.status, Status::Canceled);
+            assert_eq!(report.failure, Some(Failure::Canceled));
+            assert_eq!(report.provider_attempt, attempt);
+            assert!(report.partial().is_none() && report.result.is_none());
+            assert!(!report.write_to(&mut std::io::sink()).unwrap());
+            let wire = output(&report);
+            assert_eq!(wire["context"]["examples"][0]["revision"], json!(revision));
+            assert_eq!(wire.get("partial"), Some(&Value::Null));
+            assert_eq!(wire.get("result"), Some(&Value::Null));
+            assert!(Store::open(local.config.paths.clone()).is_err());
+            drop(report);
+            assert_eq!(tree_bytes(&local.root), before);
+        }
+    }
+}
+
+#[test]
+fn actual_selected_partial_keeps_ownership_and_clears_both_slots_on_overflow() {
+    let local = Local::new();
+    let correction = Uuid::new_v4();
+    let (_, revision) = local.confirm(correction, &png(), "original", "corrected");
+    let before = tree_bytes(&local.root);
+    for request in [
+        partial_request(context(correction, revision)),
+        math_request(context(correction, revision)),
+    ] {
+        let mut engine = Engine::new();
+        engine.reply = json!({"pages":[{"page":7,"status":"partial",
+        "spans":[{"kind":"known","text":"visible"},{"kind":"uncertain"}]}]})
+        .to_string();
+        let mut report = run(&local, &request, &mut engine);
+        assert_eq!(report.status, Status::Partial);
+        assert_eq!(engine.calls, 1);
+        assert!(Store::open(local.config.paths.clone()).is_err());
+        assert!(report.write_to(&mut std::io::sink()).unwrap());
+        let wire = output(&report);
+        assert_eq!(wire["partial"]["profile"]["protocol"], 3);
+        assert_eq!(wire["context"]["examples"][0]["revision"], json!(revision));
+        assert!(wire["result"].is_null());
+        assert_eq!(wire["confirmed"], false);
+        assert!(
+            serde_json::from_value::<crate::retrieval::NormalizedDocument>(wire["partial"].clone())
+                .is_err()
+        );
+        assert!(handwriting::parse(&mut Cursor::new(serde_json::to_vec(&wire).unwrap())).is_err());
+        report.partial.as_mut().unwrap().as_mut().unwrap().spans =
+            vec![notebook::PartialSpan::Known {
+                text: "x".repeat(40000),
+            }];
+        let wire = output(&report);
+        assert_eq!(wire["failure"], "output-limit");
+        assert_eq!(wire["provider_attempt"], "called");
+        assert!(wire["result"].is_null() && wire["partial"].is_null());
+        assert!(Store::open(local.config.paths.clone()).is_err());
+        drop(report);
+        assert_eq!(tree_bytes(&local.root), before);
+        assert!(Store::open(local.config.paths.clone()).is_ok());
+    }
+}
+
+#[test]
+fn missing_stale_duplicate_profile_and_unsupported_mode_never_call_or_publish_partial_context() {
+    let local = Local::new();
+    let correction = Uuid::new_v4();
+    let (_, revision) = local.confirm(correction, &png(), "a", "b");
+    let mut cases = vec![
+        (context(correction, Uuid::new_v4()), Failure::ContextStale),
+        (
+            context(Uuid::new_v4(), revision),
+            Failure::ContextUnavailable,
+        ),
+    ];
+    let mut foreign = context(correction, revision);
+    foreign["profile"] = json!(Uuid::new_v4());
+    cases.push((foreign, Failure::ContextUnavailable));
+    let mut duplicate = context(correction, revision);
+    let first = duplicate["examples"][0].clone();
+    duplicate["examples"].as_array_mut().unwrap().push(first);
+    cases.push((duplicate, Failure::ContextInvalid));
+    for (ctx, failure) in cases {
+        let mut engine = Engine::new();
+        let report = run(&local, &request(ctx), &mut engine);
+        assert_eq!(report.failure, Some(failure));
+        assert_eq!(engine.calls, 0);
+        assert!(report.context.is_none());
+        if failure != Failure::ContextInvalid {
+            assert!(report._refused_owner.is_some());
+            assert!(Store::open(local.config.paths.clone()).is_err());
+        }
+    }
+    let mut config = local.config.clone();
+    config.sync.enabled = true;
+    let mut engine = Engine::new();
+    let report = run_with_engine(
+        &config,
+        &serde_json::to_vec(&request(context(correction, revision))).unwrap(),
+        "m",
+        &mut engine,
+        &mut || Ok(()),
+    );
+    assert_eq!(report.failure, Some(Failure::UnsupportedMode));
+    assert_eq!(engine.calls, 0);
+}
+#[test]
+fn retained_trailing_png_is_valid_storage_but_ineligible_for_context_without_rewrite() {
+    let local = Local::new();
+    let correction = Uuid::new_v4();
+    let mut sample = png();
+    sample.extend_from_slice(b"PRIVATE_TRAILING");
+    let (record, revision) = local.confirm(correction, &sample, "old", "correct");
+    let store = Store::open(local.config.paths.clone()).unwrap();
+    let before = store
+        .snapshot_revisions_matching(&[crate::storage::Namespace::Handwriting], 4096, |e| {
+            e.record_id == record
+        })
+        .unwrap();
+    let before = serde_json::to_vec(&before).unwrap();
+    drop(store);
+    let mut engine = Engine::new();
+    let report = run(&local, &request(context(correction, revision)), &mut engine);
+    assert_eq!(report.failure, Some(Failure::ContextUnavailable));
+    assert!(report.context.is_none());
+    assert_eq!(engine.calls, 0);
+    drop(report);
+    let store = Store::open(local.config.paths.clone()).unwrap();
+    let after = store
+        .snapshot_revisions_matching(&[crate::storage::Namespace::Handwriting], 4096, |e| {
+            e.record_id == record
+        })
+        .unwrap();
+    assert_eq!(before, serde_json::to_vec(&after).unwrap());
+    assert_eq!(
+        store
+            .read_object(&crate::storage::ObjectRef {
+                sha256: digest(&sample),
+                bytes: sample.len() as u64
+            })
+            .unwrap(),
+        sample
+    );
+}
+#[test]
+fn exact_reply_shapes_distinguish_blank_unreadable_malformed_and_provider_failure() {
+    let local = Local::new();
+    for (reply, status, failure) in [
+        (
+            r#"{"pages":[{"page":7,"status":"blank","text":""}]}"#,
+            Status::Normalized,
+            None,
+        ),
+        (
+            r#"{"pages":[{"page":7,"status":"unreadable","text":""}]}"#,
+            Status::Unreadable,
+            None,
+        ),
+        (
+            r#"{"pages":[{"page":7,"status":"unreadable","text":"guess"}]}"#,
+            Status::Refused,
+            Some(Failure::InvalidResponse),
+        ),
+        (
+            r#"{"pages":[{"page":8,"status":"transcribed","text":"wrong page"}]}"#,
+            Status::Refused,
+            Some(Failure::InvalidResponse),
+        ),
+        (
+            r#"{"pages":[],"pages":[]}"#,
+            Status::Refused,
+            Some(Failure::InvalidResponse),
+        ),
+        (
+            "PRIVATE_PROSE",
+            Status::Refused,
+            Some(Failure::InvalidResponse),
+        ),
+    ] {
+        let mut engine = Engine::new();
+        engine.reply = reply.into();
+        let report = run(&local, &request(Value::Null), &mut engine);
+        assert_eq!(report.status, status);
+        assert_eq!(report.failure, failure);
+        assert_eq!(report.provider_attempt, Attempt::Called);
+        assert_eq!(engine.calls, 1);
+        assert!(engine.parts.is_empty());
+    }
+    let mut engine = Engine::new();
+    engine.fail = true;
+    let report = run(&local, &request(Value::Null), &mut engine);
+    assert_eq!(report.failure, Some(Failure::ProviderFailed));
+    assert!(!output(&report)
+        .to_string()
+        .contains("PRIVATE_PROVIDER_CANARY"));
+}
+#[test]
+fn strict_envelope_limits_and_required_null_refuse_before_store_or_engine() {
+    let local = Local::new();
+    let mut variants = vec![];
+    let mut bad = request(Value::Null);
+    bad.as_object_mut().unwrap().remove("context");
+    variants.push(bad);
+    let mut bad = request(Value::Null);
+    bad["page"] = json!(0);
+    variants.push(bad);
+    let mut bad = request(Value::Null);
+    bad["extra"] = json!(true);
+    variants.push(bad);
+    let mut bad = request(Value::Null);
+    bad["invocation"] = json!("00000000-0000-0000-0000-000000000000");
+    variants.push(bad);
+    let mut bad = request(Value::Null);
+    bad["target_png"] = json!("not png");
+    variants.push(bad);
+    for input in variants {
+        let mut engine = Engine::new();
+        let report = run(&local, &input, &mut engine);
+        assert!(report.failure.is_some());
+        assert_eq!(report.provider_attempt, Attempt::NotCalled);
+        assert_eq!(engine.calls, 0);
+        assert!(!local.config.paths.data.exists());
+    }
+    assert!(matches!(
+        bounded_input(&mut Cursor::new(vec![b' '; MAX_INPUT + 1])),
+        Err(Failure::InputLimit)
+    ));
+}
+#[test]
+fn noncooperative_default_engine_finishes_but_post_return_cancellation_suppresses_result() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct Ignores {
+        done: Arc<AtomicBool>,
+        reply: String,
+    }
+    impl LLMEngine for Ignores {
+        fn add_text_content(&mut self, _: &str) {}
+        fn add_image_content(&mut self, _: &str) {}
+        fn clear_content(&mut self) {}
+        fn execute(&mut self) -> anyhow::Result<String> {
+            self.done.store(true, Ordering::Release);
+            Ok(self.reply.clone())
+        }
+    }
+    let local = Local::new();
+    for (input, reply) in [
+        (request(Value::Null), good_reply()),
+        (
+            partial_request(Value::Null),
+            json!({"pages":[{"page":7,"status":"partial",
+            "spans":[{"kind":"known","text":"visible"},{"kind":"uncertain"}]}]})
+            .to_string(),
+        ),
+        (
+            math_request(Value::Null),
+            json!({"pages":[{"page":7,"status":"partial",
+            "spans":[{"kind":"known","text":"visible"},{"kind":"uncertain"}]}]})
+            .to_string(),
+        ),
+    ] {
+        let done = Arc::new(AtomicBool::new(false));
+        let mut engine = Ignores {
+            done: done.clone(),
+            reply,
+        };
+        let report = run_with_engine(
+            &local.config,
+            &serde_json::to_vec(&input).unwrap(),
+            "model",
+            &mut engine,
+            &mut || {
+                if done.load(Ordering::Acquire) {
+                    anyhow::bail!("canceled");
+                }
+                Ok(())
+            },
+        );
+        assert!(done.load(Ordering::Acquire));
+        assert_eq!(report.failure, Some(Failure::Canceled));
+        assert_eq!(report.provider_attempt, Attempt::Called);
+        assert!(report.result.is_none());
+        assert!(report.partial().is_none());
+    }
+    let mut engine = Engine::new();
+    let report = run_with_engine(
+        &local.config,
+        &serde_json::to_vec(&request(Value::Null)).unwrap(),
+        "model",
+        &mut engine,
+        &mut || anyhow::bail!("canceled"),
+    );
+    assert_eq!(report.failure, Some(Failure::Canceled));
+    assert_eq!(report.provider_attempt, Attempt::NotCalled);
+    assert_eq!(engine.calls, 0);
+}
+
+#[test]
+fn actual_retained_apng_is_refused_by_static_consumer_before_invocation() {
+    let local = Local::new();
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/handwriting-consumer-png.json"
+    ))
+    .unwrap();
+    let image = STANDARD.decode(fixture["apng"].as_str().unwrap()).unwrap();
+    assert!(handwriting::png_dimensions(&image).is_ok());
+    let correction = Uuid::new_v4();
+    let (_, revision) = local.confirm(correction, &image, "a", "b");
+    let mut engine = Engine::new();
+    let report = run(&local, &request(context(correction, revision)), &mut engine);
+    assert_eq!(report.failure, Some(Failure::ContextUnavailable));
+    assert_eq!(report.provider_attempt, Attempt::NotCalled);
+    assert!(report.context.is_none());
+    assert_eq!(engine.calls, 0);
+    drop(report);
+    let store = Arc::new(Store::open(local.config.paths.clone()).unwrap());
+    let check = json!({"handwriting_version":1,"command":"inspect","profile":profile(),"correction":correction});
+    let report = LocalCorrections::new(store, &local.config)
+        .unwrap()
+        .execute(
+            handwriting::parse(&mut Cursor::new(serde_json::to_vec(&check).unwrap())).unwrap(),
+        );
+    assert_eq!(report.status, handwriting::Status::Complete);
+    assert_eq!(report.facts[0].revision, revision);
+}
+#[test]
+fn prompt_budget_refuses_all_context_and_whole_report_overflow_never_truncates_success() {
+    let local = Local::new();
+    let mut examples = vec![];
+    for _ in 0..3 {
+        let key = Uuid::new_v4();
+        let text = "x\t".repeat(2048);
+        let (_, revision) = local.confirm(key, &png(), &text, &text);
+        examples.push(json!({"correction":key,"revision":revision}));
+    }
+    let mut engine = Engine::new();
+    let report = run(
+        &local,
+        &request(json!({"profile":profile(),"examples":examples})),
+        &mut engine,
+    );
+    assert_eq!(report.failure, Some(Failure::PromptLimit));
+    assert_eq!(engine.calls, 0);
+    assert!(report.context.is_some());
+    drop(report);
+    let mut report = run(&local, &request(Value::Null), &mut engine);
+    report.result.as_mut().unwrap().document.units[0].text = "x".repeat(40000);
+    let mut bytes = vec![];
+    assert!(!report.write_to(&mut bytes).unwrap());
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["failure"], "output-limit");
+    assert!(result["result"].is_null());
+    assert!(bytes.len() <= 32768);
+    assert_eq!(engine.calls, 1);
+}
+
+fn envelope(store: &Store, value: &Correction, parents: BTreeSet<Uuid>) -> Envelope {
+    let operation = Uuid::new_v4();
+    let record = value.record_id().unwrap();
+    let action = if parents.is_empty() {
+        Action::Confirm
+    } else {
+        Action::Update
+    };
+    let (_, revision) = mutation_identity(
+        action,
+        operation,
+        record,
+        &parents,
+        Some(&value.value_digest().unwrap()),
+    )
+    .unwrap();
+    Envelope {
+        envelope_version: 1,
+        namespace: Namespace::Handwriting,
+        domain_schema_version: 1,
+        record_id: record,
+        revision_id: revision,
+        parents,
+        operation_id: operation,
+        actor_id: store.actor_id,
+        kind: Kind::Value,
+        payload: serde_json::to_value(value).unwrap(),
+        media_descriptors: vec![value.sample.clone()],
+    }
+}
+fn import(store: &Store, envelope: Envelope, sample: Option<&[u8]>) {
+    use crate::storage::{Coverage, Manifest, ObjectRef, Omission, Scope};
+    let bytes = serde_json::to_vec(&envelope).unwrap();
+    let hash = digest(&bytes);
+    let descriptor = &envelope.media_descriptors[0];
+    let mut objects = std::collections::BTreeMap::from([(hash.clone(), bytes.clone())]);
+    let (media, coverage) = if let Some(sample) = sample {
+        objects.insert(descriptor.sha256.clone(), sample.to_vec());
+        (
+            vec![ObjectRef {
+                sha256: descriptor.sha256.clone(),
+                bytes: descriptor.bytes,
+            }],
+            Coverage::Included {
+                sha256: descriptor.sha256.clone(),
+            },
+        )
+    } else {
+        (
+            vec![],
+            Coverage::Omitted {
+                sha256: descriptor.sha256.clone(),
+                reason: Omission::UnavailableAtSource,
+            },
+        )
+    };
+    let manifest = Manifest {
+        format: 1,
+        transaction_id: Uuid::new_v4(),
+        scope: Scope::LocalTransaction,
+        records: vec![ObjectRef {
+            sha256: hash.clone(),
+            bytes: bytes.len() as u64,
+        }],
+        record_namespaces: std::collections::BTreeMap::from([(hash, Namespace::Handwriting)]),
+        media,
+        media_coverage: vec![coverage],
+    };
+    store.import(manifest, objects).unwrap();
+}
+
+#[test]
+fn real_forked_import_conflicts_and_declared_missing_media_do_not_become_context() {
+    let local = Local::new();
+    let key = Uuid::new_v4();
+    let (record, root_revision) = local.confirm(key, &png(), "old", "correct");
+    let store = Store::open(local.config.paths.clone()).unwrap();
+    let root = store
+        .snapshot_revisions_matching(&[Namespace::Handwriting], 4096, |e| e.record_id == record)
+        .unwrap()
+        .remove(0);
+    let mut value: Correction = serde_json::from_value(root.payload).unwrap();
+    let mut selected = root_revision;
+    for text in ["fork A", "fork B"] {
+        value.corrected_text = text.into();
+        value.confirmed_ms += 1;
+        let fork = envelope(&store, &value, BTreeSet::from([root_revision]));
+        selected = fork.revision_id;
+        import(&store, fork, Some(&png()));
+    }
+    drop(store);
+    let mut engine = Engine::new();
+    let report = run(&local, &request(context(key, selected)), &mut engine);
+    assert_eq!(report.failure, Some(Failure::ContextConflict));
+    assert_eq!(engine.calls, 0);
+    assert!(report.context.is_none());
+    drop(report);
+    let missing = Local::new();
+    let store = Store::open(missing.config.paths.clone()).unwrap();
+    let absent = envelope(&store, &value, BTreeSet::new());
+    let revision = absent.revision_id;
+    import(&store, absent, None);
+    drop(store);
+    let report = run(&missing, &request(context(key, revision)), &mut engine);
+    assert_eq!(report.failure, Some(Failure::ContextUnavailable));
+    assert_eq!(engine.calls, 0);
+}
+
+#[test]
+fn actual_revision_only_update_changes_extractor_but_not_transmitted_prompt() {
+    let local = Local::new();
+    let key = Uuid::new_v4();
+    let (_, revision) = local.confirm(key, &png(), "old", "correct");
+    let mut engine = Engine::new();
+    let report = run(&local, &request(context(key, revision)), &mut engine);
+    let original = report.result.as_ref().unwrap();
+    let first = (
+        original.prompt_sha256.clone(),
+        original.document.extractor_revision.clone(),
+    );
+    drop(report);
+    let store = Arc::new(Store::open(local.config.paths.clone()).unwrap());
+    let update = json!({"handwriting_version":1,"command":"update","profile":profile(),"correction":key,
+        "operation":Uuid::new_v4(),"expected_heads":[revision],"confirmation":"user-confirmed","original_text":"old","corrected_text":"correct","confirmed_ms":2,
+        "provenance":{"kind":"caller-confirmed-sample","description":"Synthetic consumer test only","source":null},"sample_png_base64":STANDARD.encode(png())});
+    let accepted = LocalCorrections::new(store.clone(), &local.config)
+        .unwrap()
+        .execute(
+            handwriting::parse(&mut Cursor::new(serde_json::to_vec(&update).unwrap())).unwrap(),
+        );
+    assert_eq!(accepted.status, handwriting::Status::Complete);
+    let next = accepted.facts[0].revision;
+    assert_ne!(next, revision);
+    drop(accepted);
+    drop(store);
+    let report = run(&local, &request(context(key, next)), &mut engine);
+    let result = report.result.as_ref().unwrap();
+    assert_eq!(result.prompt_sha256, first.0);
+    assert_ne!(result.document.extractor_revision, first.1);
+    assert_eq!(engine.calls, 2);
+}
+
+#[test]
+fn entered_engine_method_is_called_even_when_its_preflight_prevents_execute() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct Cooperative {
+        entered: Arc<AtomicBool>,
+    }
+    impl LLMEngine for Cooperative {
+        fn add_text_content(&mut self, _: &str) {}
+        fn add_image_content(&mut self, _: &str) {}
+        fn clear_content(&mut self) {}
+        fn execute(&mut self) -> anyhow::Result<String> {
+            panic!("execute must not be reached");
+        }
+        fn execute_with_progress(
+            &mut self,
+            progress: &mut dyn FnMut() -> anyhow::Result<()>,
+        ) -> anyhow::Result<String> {
+            self.entered.store(true, Ordering::Release);
+            progress()?;
+            self.execute()
+        }
+    }
+    let local = Local::new();
+    let entered = Arc::new(AtomicBool::new(false));
+    let mut engine = Cooperative {
+        entered: entered.clone(),
+    };
+    let report = run_with_engine(
+        &local.config,
+        &serde_json::to_vec(&request(Value::Null)).unwrap(),
+        "m",
+        &mut engine,
+        &mut || {
+            if entered.load(Ordering::Acquire) {
+                anyhow::bail!("canceled");
+            }
+            Ok(())
+        },
+    );
+    assert!(entered.load(Ordering::Acquire));
+    assert_eq!(report.provider_attempt, Attempt::Called);
+    assert_eq!(report.failure, Some(Failure::Canceled));
+    assert!(report.result.is_none());
+}
+#[test]
+fn repeating_an_explicit_invocation_is_a_new_call_without_a_store_receipt() {
+    let local = Local::new();
+    let input = request(Value::Null);
+    let mut engine = Engine::new();
+    let first = run(&local, &input, &mut engine);
+    let second = run(&local, &input, &mut engine);
+    assert_eq!(first.invocation, second.invocation);
+    assert_eq!(engine.calls, 2);
+    assert_eq!(first.status, Status::Normalized);
+    assert_eq!(second.status, Status::Normalized);
+    assert!(output(&first).get("transaction").is_none());
+    assert!(!local.config.paths.data.exists());
+}
+
+fn tree_bytes(root: &std::path::Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+    fn walk(
+        root: &std::path::Path,
+        path: &std::path::Path,
+        out: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>,
+    ) {
+        for item in std::fs::read_dir(path).unwrap() {
+            let item = item.unwrap();
+            let path = item.path();
+            let rel = path.strip_prefix(root).unwrap().to_path_buf();
+            if item.file_type().unwrap().is_dir() {
+                out.insert(rel, vec![]);
+                walk(root, &path, out);
+            } else {
+                out.insert(rel, std::fs::read(path).unwrap());
+            }
+        }
+    }
+    let mut result = std::collections::BTreeMap::new();
+    walk(root, root, &mut result);
+    result
+}
+#[test]
+fn missing_empty_and_incomplete_existing_roots_are_refused_without_any_initialization_or_repair() {
+    for missing in [
+        "all",
+        "empty",
+        "identity",
+        "lock",
+        "current",
+        "format",
+        "cache-owner",
+        "credential-owner",
+    ] {
+        let local = Local::new();
+        if missing == "empty" {
+            for path in [
+                &local.config.paths.data,
+                &local.config.paths.cache,
+                &local.config.paths.credentials,
+            ] {
+                std::fs::create_dir(path).unwrap();
+            }
+        } else if missing != "all" {
+            drop(Store::open(local.config.paths.clone()).unwrap());
+            let path = match missing {
+                "identity" => local.config.paths.data.join("identity.json"),
+                "lock" => local.config.paths.data.join("store.lock"),
+                "current" => local.config.paths.data.join("CURRENT"),
+                "format" => {
+                    let current: Uuid = serde_json::from_slice(
+                        &std::fs::read(local.config.paths.data.join("CURRENT")).unwrap(),
+                    )
+                    .unwrap();
+                    local
+                        .config
+                        .paths
+                        .data
+                        .join("generations")
+                        .join(current.to_string())
+                        .join("format.json")
+                }
+                "cache-owner" => local.config.paths.cache.join("owner.json"),
+                "credential-owner" => local.config.paths.credentials.join("owner.json"),
+                _ => unreachable!(),
+            };
+            assert!(path
+                .canonicalize()
+                .unwrap()
+                .starts_with(local.root.canonicalize().unwrap()));
+            std::fs::remove_file(path).unwrap();
+        }
+        let before = tree_bytes(&local.root);
+        let mut engine = Engine::new();
+        let report = run(
+            &local,
+            &request(context(Uuid::new_v4(), Uuid::new_v4())),
+            &mut engine,
+        );
+        assert_eq!(
+            report.failure,
+            Some(Failure::StorageUnavailable),
+            "{missing}"
+        );
+        assert_eq!(report.provider_attempt, Attempt::NotCalled);
+        assert!(report.context.is_none());
+        assert_eq!(engine.calls, 0);
+        assert_eq!(
+            before,
+            tree_bytes(&local.root),
+            "consumer changed {missing} storage"
+        );
+    }
+}
+#[test]
+fn actual_os_contention_is_typed_busy_and_existing_unknown_context_does_not_publish_or_clean() {
+    let local = Local::new();
+    drop(Store::open(local.config.paths.clone()).unwrap());
+    // Windows locks the store file against reads while the owner is alive.
+    let before = tree_bytes(&local.root);
+    let store = Store::open(local.config.paths.clone()).unwrap();
+    let mut engine = Engine::new();
+    let input = request(context(Uuid::new_v4(), Uuid::new_v4()));
+    let report = run(&local, &input, &mut engine);
+    assert_eq!(report.failure, Some(Failure::OwnershipBusy));
+    assert_eq!(report.provider_attempt, Attempt::NotCalled);
+    assert!(report.context.is_none());
+    assert_eq!(engine.calls, 0);
+    drop(report);
+    drop(store);
+    assert_eq!(before, tree_bytes(&local.root));
+    std::fs::write(
+        local.config.paths.data.join(".stage-preserve"),
+        b"synthetic retained stage",
+    )
+    .unwrap();
+    std::fs::write(
+        local.config.paths.data.join("capabilities.json"),
+        b"preserve exact old capability bytes",
+    )
+    .unwrap();
+    let before = tree_bytes(&local.root);
+    let report = run(&local, &input, &mut engine);
+    assert_eq!(report.failure, Some(Failure::ContextUnavailable));
+    assert_eq!(engine.calls, 0);
+    assert!(report.context.is_none());
+    assert!(Store::open(local.config.paths.clone()).is_err());
+    drop(report);
+    assert_eq!(before, tree_bytes(&local.root));
+}
+
+#[test]
+fn structured_math_roundtrip_preserves_unknown_children_and_local_provenance() {
+    let local = Local::new();
+    let input = structured_request(Value::Null);
+    let mut engine = Engine::new();
+    engine.reply = structured_reply();
+    let expected: Value = serde_json::from_str(&engine.reply).unwrap();
+    let report = run(&local, &input, &mut engine);
+    assert_eq!(report.status, Status::Structured);
+    assert_eq!(report.provider_attempt, Attempt::Called);
+    assert_eq!(engine.calls, 1);
+    assert!(report.succeeded());
+    let wire = output(&report);
+    assert_eq!(wire["transcription_version"], 3);
+    assert_eq!(wire["confirmed"], false);
+    assert!(wire["result"].is_null() && wire["partial"].is_null());
+    let result = &wire["structured_math"];
+    assert_eq!(result["spans"], expected["pages"][0]["spans"]);
+    assert_eq!(result["coverage"], "partial");
+    assert_eq!(result["document"], input["document"]);
+    assert_eq!(result["page"], 7);
+    assert_eq!(result["profile"]["protocol"], 4);
+    assert_eq!(
+        result["profile"]["prompt_revision"],
+        "transcribe-structured-math-v1"
+    );
+    assert_eq!(result["response_sha256"], digest(engine.reply.as_bytes()));
+    assert_eq!(
+        result["authority"],
+        "unverified-historical-page-image-structured-math-ocr"
+    );
+    assert_eq!(result["source_sha256"], fixture()["source_sha256"]);
+    assert_eq!(wire["target_sha256"], digest(&png()));
+    assert_eq!(
+        engine.captured.last().unwrap()["image_url"],
+        input["target_png"]
+    );
+    assert!(!local.config.paths.data.exists());
+    assert!(
+        serde_json::from_value::<crate::retrieval::NormalizedDocument>(result.clone()).is_err()
+    );
+    assert!(handwriting::parse(&mut Cursor::new(serde_json::to_vec(&wire).unwrap())).is_err());
+}
+
+#[test]
+fn structured_admission_and_legacy_receivers_refuse_cross_version_data() {
+    let local = Local::new();
+    for policy in [
+        Value::Null,
+        json!(1),
+        json!("partial-transcription"),
+        json!("partial-math-transcription"),
+    ] {
+        let mut input = structured_request(Value::Null);
+        input["policy"] = policy;
+        let mut engine = Engine::new();
+        let report = run(&local, &input, &mut engine);
+        assert_eq!(report.failure, Some(Failure::InvalidInput));
+        assert_eq!(report.provider_attempt, Attempt::NotCalled);
+        assert_eq!(engine.calls, 0);
+        let wire = output(&report);
+        assert_eq!(wire["transcription_version"], 1);
+        assert!(wire.get("partial").is_none() && wire.get("structured_math").is_none());
+    }
+    for input in [
+        request(Value::Null),
+        partial_request(Value::Null),
+        math_request(Value::Null),
+    ] {
+        let mut engine = Engine::new();
+        engine.reply = structured_reply();
+        let report = run(&local, &input, &mut engine);
+        assert_eq!(report.failure, Some(Failure::InvalidResponse));
+        assert_eq!(engine.calls, 1);
+        assert!(output(&report).get("structured_math").is_none());
+    }
+    let mut input = structured_request(Value::Null);
+    input["target_png"] = json!("not png");
+    let mut engine = Engine::new();
+    let report = run(&local, &input, &mut engine);
+    assert_eq!(report.failure, Some(Failure::InvalidImage));
+    let wire = output(&report);
+    assert_eq!(wire["transcription_version"], 3);
+    assert_eq!(wire.get("partial"), Some(&Value::Null));
+    assert_eq!(wire.get("structured_math"), Some(&Value::Null));
+    assert_eq!(engine.calls, 0);
+}
+
+#[test]
+fn structured_provider_boundary_rejects_malformed_deep_and_excessive_responses() {
+    let local = Local::new();
+    let mut bad_page: Value = serde_json::from_str(&structured_reply()).unwrap();
+    bad_page["pages"][0]["page"] = json!(8);
+    let mut invented: Value = serde_json::from_str(&structured_reply()).unwrap();
+    invented["pages"][0]["spans"][0]["root"]["children"][0]["text"] = json!("guessed");
+    let mut deep = json!({"tag":"mi","text":"x"});
+    for _ in 0..40 {
+        deep = json!({"tag":"msqrt","children":[deep]});
+    }
+    let deep =
+        json!({"pages":[{"page":7,"status":"structured","spans":[{"kind":"math","root":deep}]}]});
+    for reply in [
+        bad_page.to_string(),
+        invented.to_string(),
+        deep.to_string(),
+        structured_reply().replacen("\"page\":7", "\"page\":7,\"page\":7", 1),
+        format!("{}\n{{}}", structured_reply()),
+        " ".repeat(16385),
+    ] {
+        let mut engine = Engine::new();
+        engine.reply = reply;
+        let report = run(&local, &structured_request(Value::Null), &mut engine);
+        assert_eq!(report.failure, Some(Failure::InvalidResponse));
+        assert_eq!(report.provider_attempt, Attempt::Called);
+        assert_eq!(engine.calls, 1);
+        let wire = output(&report);
+        assert!(
+            wire["result"].is_null()
+                && wire["partial"].is_null()
+                && wire["structured_math"].is_null()
+        );
+    }
+}
+
+#[test]
+fn structured_context_custody_survives_cancel_and_output_limit_without_payload() {
+    let local = Local::new();
+    let correction = Uuid::new_v4();
+    let (_, revision) = local.confirm(correction, &png(), "original", "corrected");
+    let before = tree_bytes(&local.root);
+    let input = structured_request(context(correction, revision));
+    for cancel_at in [1, 4] {
+        let mut prepared = Prepared::admit(&serde_json::to_vec(&input).unwrap(), &mut || Ok(()));
+        prepared.capture(&local.config, &mut || Ok(()));
+        let mut engine = Engine::new();
+        engine.reply = structured_reply();
+        let mut checkpoints = 0;
+        let report = prepared.execute("model", &mut engine, &mut || {
+            checkpoints += 1;
+            anyhow::ensure!(checkpoints != cancel_at, "synthetic cancellation");
+            Ok(())
+        });
+        assert_eq!(report.status, Status::Canceled);
+        assert_eq!(engine.calls, usize::from(cancel_at != 1));
+        let wire = output(&report);
+        assert!(
+            wire["result"].is_null()
+                && wire["partial"].is_null()
+                && wire["structured_math"].is_null()
+        );
+        assert!(Store::open(local.config.paths.clone()).is_err());
+        drop(report);
+        assert_eq!(tree_bytes(&local.root), before);
+    }
+    let mut engine = Engine::new();
+    engine.reply = structured_reply();
+    let mut report = run(&local, &input, &mut engine);
+    assert_eq!(report.status, Status::Structured);
+    assert_eq!(
+        report.structured_math().unwrap().profile.prompt_revision,
+        "transcribe-structured-math-confirmed-examples-v1"
+    );
+    assert!(Store::open(local.config.paths.clone()).is_err());
+    report
+        .structured_math
+        .as_mut()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .spans = vec![notebook::StructuredSpan::Known {
+        text: "x".repeat(40000),
+    }];
+    let wire = output(&report);
+    assert_eq!(wire["failure"], "output-limit");
+    assert_eq!(wire["provider_attempt"], "called");
+    assert!(
+        wire["result"].is_null() && wire["partial"].is_null() && wire["structured_math"].is_null()
+    );
+    assert!(Store::open(local.config.paths.clone()).is_err());
+    drop(report);
+    assert_eq!(tree_bytes(&local.root), before);
+}
+
+#[test]
+fn structured_version_keeps_all_existing_whole_page_outcomes() {
+    let local = Local::new();
+    for (variant, text, status) in [
+        ("transcribed", "literal x²", Status::Normalized),
+        ("blank", "", Status::Normalized),
+        ("unreadable", "", Status::Unreadable),
+    ] {
+        let mut engine = Engine::new();
+        engine.reply = json!({"pages":[{"page":7,"status":variant,"text":text}]}).to_string();
+        let report = run(&local, &structured_request(Value::Null), &mut engine);
+        assert_eq!(report.status, status);
+        let wire = output(&report);
+        assert_eq!(wire.get("partial"), Some(&Value::Null));
+        assert_eq!(wire.get("structured_math"), Some(&Value::Null));
+        assert_eq!(wire["confirmed"], false);
+    }
+}
+
+mod runtime_handwriting;
+
+#[test]
+fn mixed_abstention_context_uses_frozen_identity_and_descriptors() {
+    let vectors: Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/writer-abstention-mixed-vectors.json"
+    ))
+    .unwrap();
+    let identity: Value = serde_json::from_str(vectors["identity_json"].as_str().unwrap()).unwrap();
+    let examples = identity["examples"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip([(Some("A1"), "Al"), (None, "B2")])
+        .map(|(value, (original, corrected))| ConfirmedExample {
+            identity: ExampleIdentity {
+                correction: serde_json::from_value(value["correction"].clone()).unwrap(),
+                record: serde_json::from_value(value["record"].clone()).unwrap(),
+                revision: serde_json::from_value(value["revision"].clone()).unwrap(),
+                sample_sha256: value["sample_sha256"].as_str().unwrap().into(),
+                original_text_sha256: original.map(|text| digest(text.as_bytes())),
+                corrected_text_sha256: digest(corrected.as_bytes()),
+            },
+            png: png(),
+            original_text: original.map(str::to_owned),
+            corrected_text: corrected.into(),
+        })
+        .collect::<Vec<_>>();
+    let local = Local::new();
+    let owner = LocalCorrections::new(
+        Arc::new(Store::open(local.config.paths.clone()).unwrap()),
+        &local.config,
+    )
+    .unwrap();
+    let context = ConfirmedContext {
+        identity: ContextIdentity {
+            profile: serde_json::from_value(identity["profile"].clone()).unwrap(),
+            examples: examples.iter().map(|e| e.identity.clone()).collect(),
+        },
+        examples,
+        _owner: owner,
+    };
+    let context_json = serde_json::to_string(context.identity()).unwrap();
+    assert_eq!(context_json, vectors["identity_json"].as_str().unwrap());
+    assert_eq!(digest(context_json.as_bytes()), vectors["identity_sha256"]);
+    for verification in [false, true] {
+        let reader =
+            crate::handwriting::runtime::reader_payload("fixture", verification, &[], &context)
+                .unwrap();
+        assert_eq!(reader[2]["text"], vectors["instruction_part"]);
+        assert_eq!(reader[3]["text"], vectors["reader_descriptor_parts"][0]);
+        assert_eq!(reader[5]["text"], vectors["reader_descriptor_parts"][1]);
+    }
+    let target = notebook::admit_target(7, png(), &mut |_| Ok(())).unwrap();
+    let mut engine = Engine::new();
+    let (result, called) = notebook::normalize_admitted(
+        Uuid::new_v4(),
+        &target,
+        "fixture",
+        Some(&context),
+        TranscriptionPolicy::WholePage,
+        &mut engine,
+        &mut |_| Ok(()),
+    );
+    assert!(called);
+    let Normalized::Page(result) = result.unwrap() else {
+        panic!("expected page");
+    };
+    assert_eq!(engine.captured[2]["text"], vectors["instruction_part"]);
+    assert_eq!(
+        engine.captured[3]["text"],
+        vectors["notebook_descriptor_parts"][0]
+    );
+    assert_eq!(
+        engine.captured[5]["text"],
+        vectors["notebook_descriptor_parts"][1]
+    );
+    let expected = &vectors["profiles"]["whole-page"];
+    assert_eq!(
+        serde_json::to_string(&result.profile).unwrap(),
+        expected["profile_json"]
+    );
+    assert_eq!(result.document.extractor_revision, expected["extractor"]);
+    for (name, policy, instruction_index) in [
+        ("partial", TranscriptionPolicy::Partial, 2),
+        ("partial-math", TranscriptionPolicy::PartialMath, 3),
+        ("structured-math", TranscriptionPolicy::StructuredMath, 2),
+    ] {
+        engine.reply = json!({"pages":[{"page":7,"status":"partial",
+            "spans":[{"kind":"known","text":"A "},{"kind":"uncertain"},{"kind":"known","text":" B"}]}]})
+            .to_string();
+        let (outcome, called) = notebook::normalize_admitted(
+            Uuid::new_v4(),
+            &target,
+            "fixture",
+            Some(&context),
+            policy,
+            &mut engine,
+            &mut |_| Ok(()),
+        );
+        assert!(called);
+        let Normalized::Partial(result) = outcome.unwrap() else {
+            panic!("expected partial result for {name}");
+        };
+        assert_eq!(
+            engine.captured[instruction_index]["text"],
+            vectors["instruction_part"]
+        );
+        assert_eq!(
+            engine.captured[instruction_index + 1]["text"],
+            vectors["notebook_descriptor_parts"][0]
+        );
+        assert_eq!(
+            engine.captured[instruction_index + 3]["text"],
+            vectors["notebook_descriptor_parts"][1]
+        );
+        assert_eq!(
+            serde_json::to_string(&result.profile).unwrap(),
+            vectors["profiles"][name]["profile_json"]
+        );
+        assert_eq!(
+            result.extractor_revision,
+            vectors["profiles"][name]["extractor"]
+        );
+    }
+}

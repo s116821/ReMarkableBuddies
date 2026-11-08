@@ -110,6 +110,115 @@ impl LocalCorrections {
             .snapshot_revisions_matching(&[Namespace::Handwriting], MAX_ITEMS, filter)
             .map_err(|_| Failure::StoreUnavailable)
     }
+    #[cfg(test)]
+    pub(crate) fn publisher_excluded_for_test(&self) -> bool {
+        self.store.legacy_publisher_lease().is_err()
+    }
+    /// Capture all selected current heads from one bounded retained snapshot.
+    /// Stricter PNG eligibility belongs to this consumer, not stored validity.
+    pub fn capture_context(
+        self,
+        profile: Uuid,
+        selected: &[ExampleSelection],
+        progress: &mut dyn FnMut() -> std::result::Result<(), ContextFailure>,
+    ) -> std::result::Result<ConfirmedContext, (ContextFailure, LocalCorrections)> {
+        let admitted = (|| -> std::result::Result<Vec<ConfirmedExample>, ContextFailure> {
+            progress()?;
+            if profile.is_nil()
+                || selected.is_empty()
+                || selected.len() > 3
+                || selected
+                    .iter()
+                    .any(|s| s.correction.is_nil() || s.revision.is_nil())
+                || selected
+                    .iter()
+                    .map(|s| s.correction)
+                    .collect::<BTreeSet<_>>()
+                    .len()
+                    != selected.len()
+            {
+                return Err(ContextFailure::Invalid);
+            }
+            self.available().map_err(|_| ContextFailure::Storage)?;
+            let keys = selected
+                .iter()
+                .map(|s| record_id(profile, s.correction))
+                .collect::<Result<BTreeSet<_>>>()
+                .map_err(|_| ContextFailure::Invalid)?;
+            let history = self
+                .retained(|e| keys.contains(&e.record_id))
+                .map_err(|_| ContextFailure::Storage)?;
+            let mut examples = Vec::new();
+            for selection in selected {
+                progress()?;
+                let record = record_id(profile, selection.correction)
+                    .map_err(|_| ContextFailure::Invalid)?;
+                let retained = history
+                    .iter()
+                    .filter(|e| e.record_id == record)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let heads = Self::heads(&retained);
+                if heads.len() > 1 {
+                    return Err(ContextFailure::Conflict);
+                }
+                let head = heads.first().ok_or(ContextFailure::Unavailable)?;
+                if head.revision_id != selection.revision {
+                    return Err(ContextFailure::Stale);
+                }
+                let value = Self::lineage(head, &retained)
+                    .map_err(|_| ContextFailure::Unavailable)?
+                    .ok_or(ContextFailure::Unavailable)?;
+                if value.profile != profile || value.correction != selection.correction {
+                    return Err(ContextFailure::Unavailable);
+                }
+                let png = self
+                    .store
+                    .read_object(&ObjectRef {
+                        sha256: value.sample.sha256.clone(),
+                        bytes: value.sample.bytes,
+                    })
+                    .map_err(|_| ContextFailure::Unavailable)?;
+                // Container framing/CRC/static checks do not decode another image.
+                crate::retrieval::notebook::static_png(&png)
+                    .map_err(|_| ContextFailure::Unavailable)?;
+                value
+                    .verify_sample(&png)
+                    .map_err(|_| ContextFailure::Unavailable)?;
+                examples.push(ConfirmedExample {
+                    identity: ExampleIdentity {
+                        correction: selection.correction,
+                        record,
+                        revision: selection.revision,
+                        sample_sha256: value.sample.sha256.clone(),
+                        original_text_sha256: value
+                            .original_text
+                            .as_ref()
+                            .map(|original| digest(original.as_bytes())),
+                        corrected_text_sha256: digest(value.corrected_text.as_bytes()),
+                    },
+                    png,
+                    original_text: value.original_text,
+                    corrected_text: value.corrected_text,
+                });
+            }
+            progress()?;
+            Ok(examples)
+        })();
+        let examples = match admitted {
+            Ok(values) => values,
+            Err(failure) => return Err((failure, self)),
+        };
+        let identity = ContextIdentity {
+            profile,
+            examples: examples.iter().map(|e| e.identity.clone()).collect(),
+        };
+        Ok(ConfirmedContext {
+            identity,
+            examples,
+            _owner: self,
+        })
+    }
     fn operations(&self, operation: Uuid) -> Result<Vec<Envelope>> {
         self.store
             .snapshot_revisions_matching(
@@ -330,23 +439,19 @@ impl LocalCorrections {
         };
         Ok(())
     }
-    fn query(&self, input: &QueryInput, report: &mut Report) -> Result<()> {
-        // One complete retained metadata snapshot, including causal closure.
-        // Store caps this at4096 envelopes/8MiB; no per-key repeated disk scans.
+    fn current_candidates(
+        &self,
+        profile: Uuid,
+        report: &mut Report,
+    ) -> Result<(Vec<(Envelope, Correction)>, u64)> {
         let history = self.retained(|_| true)?;
         report.diagnostics.scanned += history.len() as u64;
         let mut groups = BTreeMap::<Uuid, Vec<Envelope>>::new();
         for envelope in history {
             groups.entry(envelope.record_id).or_default().push(envelope);
         }
-        let words = input
-            .query_text
-            .as_deref()
-            .unwrap_or("")
-            .split_whitespace()
-            .map(str::to_lowercase)
-            .collect::<Vec<_>>();
-        let mut selected = Vec::new();
+        let mut candidates = Vec::new();
+        let mut tombstones = 0;
         for group in groups.values() {
             let heads = Self::heads(group);
             if heads.is_empty() {
@@ -356,9 +461,7 @@ impl LocalCorrections {
             let mut values = Vec::new();
             for envelope in heads.iter().copied() {
                 match Self::lineage(envelope, group) {
-                    Ok(Some(value)) if value.profile == input.profile => {
-                        values.push((envelope, value))
-                    }
+                    Ok(Some(value)) if value.profile == profile => values.push((envelope, value)),
                     Ok(_) => {}
                     Err(_) => report.diagnostics.unsupported += 1,
                 }
@@ -369,26 +472,127 @@ impl LocalCorrections {
                         decode(e)
                             .ok()
                             .flatten()
-                            .is_some_and(|v| v.profile == input.profile)
+                            .is_some_and(|v| v.profile == profile)
                     })
                 {
                     report.diagnostics.conflicted += 1;
                 }
                 continue;
             }
-            if let Some((envelope, value)) = values.pop() {
-                let haystack =
-                    format!("{}\n{}", value.original_text, value.corrected_text).to_lowercase();
-                if !words.iter().all(|w| haystack.contains(w)) {
-                    continue;
-                }
-                report.diagnostics.matched += 1;
-                if selected.len() >= input.max_matches {
-                    report.diagnostics.omitted += 1;
-                    continue;
-                }
-                selected.push((envelope.clone(), value));
+            if values.is_empty()
+                && matches!(Self::lineage(heads[0], group), Ok(None))
+                && group.iter().any(|e| {
+                    decode(e)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|v| v.profile == profile)
+                })
+            {
+                tombstones += 1;
             }
+            if let Some((envelope, value)) = values.pop() {
+                candidates.push((envelope.clone(), value));
+            }
+        }
+        Ok((candidates, tombstones))
+    }
+    pub(super) fn runtime_selection(
+        &self,
+        profile: Uuid,
+        target_hashes: &BTreeSet<String>,
+        progress: &mut dyn FnMut() -> std::result::Result<(), ContextFailure>,
+    ) -> std::result::Result<super::runtime::Selection, ContextFailure> {
+        progress()?;
+        self.available().map_err(|_| ContextFailure::Storage)?;
+        let mut report = Report::new(None);
+        let (mut candidates, tombstones) = self
+            .current_candidates(profile, &mut report)
+            .map_err(|_| ContextFailure::Storage)?;
+        let mut excluded_targets = 0;
+        candidates.retain(|(e, v)| {
+            if v.record_id().ok() != Some(e.record_id) {
+                report.diagnostics.unsupported += 1;
+                false
+            } else if target_hashes.contains(&v.sample.sha256) {
+                excluded_targets += 1;
+                false
+            } else {
+                true
+            }
+        });
+        candidates.sort_by(|(ae, av), (be, bv)| {
+            bv.confirmed_ms
+                .cmp(&av.confirmed_ms)
+                .then_with(|| ae.record_id.cmp(&be.record_id))
+                .then_with(|| ae.revision_id.cmp(&be.revision_id))
+        });
+        let eligible = candidates.len();
+        let mut selected = Vec::new();
+        let mut checked = 0;
+        let mut skipped_media = 0;
+        for (envelope, value) in candidates.into_iter().take(16) {
+            if selected.len() == 3 {
+                break;
+            }
+            progress()?;
+            checked += 1;
+            let bytes = self.store.read_object(&ObjectRef {
+                sha256: value.sample.sha256.clone(),
+                bytes: value.sample.bytes,
+            });
+            if !bytes.as_ref().is_ok_and(|png| {
+                value.verify_sample(png).is_ok()
+                    && crate::retrieval::notebook::static_png(png).is_ok()
+            }) {
+                skipped_media += 1;
+                continue;
+            }
+            selected.push(ExampleSelection {
+                correction: value.correction,
+                revision: envelope.revision_id,
+            });
+        }
+        progress()?;
+        Ok(super::runtime::Selection {
+            selected,
+            scanned: report.diagnostics.scanned,
+            eligible,
+            checked,
+            skipped_media,
+            conflicted: report.diagnostics.conflicted,
+            unsupported: report.diagnostics.unsupported,
+            unexamined: eligible - checked,
+            tombstones,
+            excluded_targets,
+        })
+    }
+    fn query(&self, input: &QueryInput, report: &mut Report) -> Result<()> {
+        // The shared traversal preserves the public query's record-ID order.
+        let (candidates, _) = self.current_candidates(input.profile, report)?;
+        let words = input
+            .query_text
+            .as_deref()
+            .unwrap_or("")
+            .split_whitespace()
+            .map(str::to_lowercase)
+            .collect::<Vec<_>>();
+        let mut selected = Vec::new();
+        for (envelope, value) in candidates {
+            let haystack = format!(
+                "{}\n{}",
+                value.original_text.as_deref().unwrap_or_default(),
+                value.corrected_text
+            )
+            .to_lowercase();
+            if !words.iter().all(|w| haystack.contains(w)) {
+                continue;
+            }
+            report.diagnostics.matched += 1;
+            if selected.len() >= input.max_matches {
+                report.diagnostics.omitted += 1;
+                continue;
+            }
+            selected.push((envelope, value));
         }
         // Reserve maximum diagnostics/status/failure/header before media reads.
         let mut candidate = Report::new(Some(&Request::Query(QueryInput {
