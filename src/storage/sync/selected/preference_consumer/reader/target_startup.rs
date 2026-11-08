@@ -31,7 +31,30 @@ struct Original {
     correspondence: Correspondence,
     remaining: SelectedReadBudget,
 }
+#[cfg(test)]
+thread_local! {static FIXTURE_CLOCK:std::cell::Cell<Option<u64>>=const{std::cell::Cell::new(None)};}
+#[cfg(test)]
+pub(super) struct FixtureClock;
+#[cfg(test)]
+impl Drop for FixtureClock {
+    fn drop(&mut self) {
+        FIXTURE_CLOCK.with(|c| c.set(None));
+    }
+}
+#[cfg(test)]
+pub(super) fn fixture_clock(now: u64) -> FixtureClock {
+    FIXTURE_CLOCK.with(|c| c.set(Some(now)));
+    FixtureClock
+}
+#[cfg(test)]
+pub(super) fn advance_fixture_clock(now: u64) {
+    FIXTURE_CLOCK.with(|c| c.set(Some(now)));
+}
 fn now() -> Result<u64> {
+    #[cfg(test)]
+    if let Some(now) = FIXTURE_CLOCK.with(|c| c.get()) {
+        return Ok(now);
+    }
     Ok(std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_millis()
@@ -46,9 +69,12 @@ impl Original {
     }
     fn basic(&self, store: &Store, config: &Config) -> Result<Binding> {
         let c = &self.correspondence;
+        // A live request window can expire; an interrupted local migration
+        // still completes its original operation. These timestamps remain
+        // immutable evidence and cannot mint a policy/model/HTTP permit here.
         ensure!(
-            now()? >= c.created_ms && now()? < c.expires_ms,
-            "original target startup expired"
+            c.created_ms <= c.expires_ms,
+            "invalid original request window"
         );
         ensure!(
             self.remaining.is_monotonic_successor(&c.initial_allowance),

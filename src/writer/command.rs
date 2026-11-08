@@ -277,17 +277,21 @@ fn run_flow(
             .personalization_snapshot()
             .map_err(|_| FlowFailure::Storage)?;
         // All required credentials are resolved before Store creation or intent admission.
-        let model = if request.model().is_some() {
+        let model = if request.requires_model() {
             let effective = config::resolve(
                 &config,
                 config::Overrides::default(),
                 config::Environment::current(),
             )
             .map_err(|_| FlowFailure::MissingCredentials)?;
-            Some(crate::OpenAI::new(
-                effective.model,
-                effective.key.into_string(),
-                effective.base_url,
+            let profile = effective.model.clone();
+            Some((
+                crate::OpenAI::new(
+                    effective.model,
+                    effective.key.into_string(),
+                    effective.base_url,
+                ),
+                profile,
             ))
         } else {
             None
@@ -296,7 +300,12 @@ fn run_flow(
         let destination =
             MemDestination::new(&token).map_err(|_| FlowFailure::MissingCredentials)?;
         let ledger = Ledger::new(Arc::new(
-            Store::open(config.paths).map_err(|_| FlowFailure::Storage)?,
+            (if request.target().is_some() {
+                Store::open_source_target_startup(&config)
+            } else {
+                Store::open(config.paths.clone())
+            })
+            .map_err(|_| FlowFailure::Storage)?,
         ));
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -306,7 +315,18 @@ fn run_flow(
         runtime.block_on(async move {
             let (sender, canceled) = tokio::sync::watch::channel(false);
             let mut worker = tokio::task::spawn_blocking(move || {
-                if let Some(mut model) = model {
+                if let Some((mut model, profile)) = model {
+                    if owned_request.target().is_some() {
+                        return writer_flow::run_regional(
+                            &ledger,
+                            &mut model,
+                            &destination,
+                            &owned_request,
+                            &config,
+                            &profile,
+                            canceled,
+                        );
+                    }
                     writer_flow::run(
                         &ledger,
                         &mut model,

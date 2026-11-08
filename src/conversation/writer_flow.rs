@@ -303,6 +303,8 @@ impl WriterExportInput {
 pub(crate) struct WriterExportGuard {
     heads: Vec<(Namespace, Uuid, Uuid)>,
     archive: Option<Box<ArchivedNormalizedSource>>,
+    regional_media: Vec<Media>,
+    regional_reads: std::sync::Mutex<crate::storage::selection::SelectedReadBudget>,
     live: Arc<Store>,
 }
 impl WriterExportGuard {
@@ -312,7 +314,11 @@ impl WriterExportGuard {
         live: Arc<Store>,
     ) -> Result<Self> {
         let mut archive = None;
+        let mut regional_media = Vec::new();
         for record in records {
+            if let Record::RegionSource(region) = Ledger::decode(record)? {
+                regional_media.extend(region.media());
+            }
             if record.namespace == Namespace::Source
                 && record.domain_schema_version == notebook::NOTEBOOK_SOURCE_SCHEMA
             {
@@ -329,6 +335,10 @@ impl WriterExportGuard {
                 .map(|e| (e.namespace, e.record_id, e.revision_id))
                 .collect(),
             archive,
+            regional_media,
+            regional_reads: std::sync::Mutex::new(
+                crate::storage::selection::SelectedReadBudget::new(0, 32, 0, 256 * 1024 * 1024),
+            ),
             live,
         })
     }
@@ -344,6 +354,24 @@ impl WriterExportGuard {
         {
             return Ok(false);
         }
+        let mut reads = self
+            .regional_reads
+            .lock()
+            .map_err(|_| anyhow::anyhow!("regional export media allowance unavailable"))?;
+        for media in &self.regional_media {
+            reads.charge(0, 1, 0, media.bytes)?;
+            if ledger
+                .store
+                .open_object(&ObjectRef {
+                    sha256: media.sha256.clone(),
+                    bytes: media.bytes,
+                })
+                .is_err()
+            {
+                return Ok(false);
+            }
+        }
+        drop(reads);
         let heads = ledger.store.snapshot_heads_matching(
             &[
                 Namespace::Conversation,
@@ -451,6 +479,9 @@ impl Ledger {
             .filter(|e| e.namespace == Namespace::Source && e.record_id == turn.sources[0])
             .collect();
         ensure!(sources.len() == 1, "source absent or conflicted");
+        if let Record::RegionSource(region) = Self::decode(sources[0])? {
+            self.regional_source_proof(&region, &mut || Ok(()))?;
+        }
         let mut selected = WriterSelection {
             root: expected,
             draft: drafts[0].clone(),
@@ -575,5 +606,11 @@ impl Ledger {
             "foreign Writer selection"
         );
         Ok(selected)
+    }
+}
+
+impl Ledger {
+    pub(crate) fn original_writer_flow(&self, operation: Uuid, fingerprint: &str) -> Result<bool> {
+        Ok(self.replay(operation, fingerprint)?.is_some())
     }
 }

@@ -315,6 +315,34 @@ impl RegionSource {
                 && valid_digest(&self.normalization_proof.response_sha256),
             "region normalized correspondence differs"
         );
+        let profile = &self.normalization_proof.profile;
+        let prefix = match (
+            profile["protocol"].as_u64(),
+            profile["prompt_revision"].as_str(),
+        ) {
+            (Some(1), Some("transcribe-visible-v2"))
+                if profile.get("confirmed_context").is_none() =>
+            {
+                "notebook-ocr-unverified-v2:"
+            }
+            (Some(2), Some("transcribe-confirmed-examples-v2"))
+                if profile["confirmed_context"].is_object() =>
+            {
+                "notebook-ocr-confirmed-v2:"
+            }
+            _ => anyhow::bail!("region requires complete-image normalization profile"),
+        };
+        ensure!(
+            profile["caller_model_profile"].as_str() == Some(self.normalization_profile.as_str())
+                && self.normalization_proof.extractor_revision
+                    == format!(
+                        "{prefix}{}",
+                        crate::storage::digest(&crate::retrieval::notebook::profile_bytes(
+                            profile
+                        )?)
+                    ),
+            "region normalization profile differs"
+        );
         self.original.validate()?;
         self.derived.validate()?;
         ensure!(
@@ -593,6 +621,20 @@ pub(crate) fn validate_links(
             let Record::SourceTarget(target) = exact(&value.target)? else {
                 anyhow::bail!("region target exact revision absent")
             };
+            let source = exact(&target.source.record)?;
+            let document = target
+                .source
+                .validate_record(&source, target.conversation)?
+                .unwrap_or_else(|| {
+                    Uuid::new_v5(
+                        &target.conversation,
+                        format!("historical-unbound:{}", target.source.record.record).as_bytes(),
+                    )
+                });
+            ensure!(
+                value.normalized.document.document == document,
+                "regional historical document differs"
+            );
             let user = turn(value.turn)?;
             ensure!(
                 target.conversation == value.conversation

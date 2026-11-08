@@ -108,6 +108,42 @@ pub struct Profile {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confirmed_context: Option<crate::handwriting::ContextIdentity>,
 }
+/// Recreate the existing profile's field order for an exact historical identity.
+/// A JSON object map must not silently change this established SHA recipe.
+pub(crate) fn profile_bytes(value: &Value) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"{\"protocol\":");
+    bytes.extend(serde_json::to_vec(&value["protocol"])?);
+    bytes.extend_from_slice(b",\"prompt_revision\":");
+    bytes.extend(serde_json::to_vec(&value["prompt_revision"])?);
+    bytes.extend_from_slice(b",\"caller_model_profile\":");
+    bytes.extend(serde_json::to_vec(&value["caller_model_profile"])?);
+    if let Some(context) = value.get("confirmed_context") {
+        // Confirmed context is already a serialized identity. Its field order
+        // is fixed below, independently from the map implementation's order.
+        #[derive(Deserialize, Serialize)]
+        #[serde(deny_unknown_fields)]
+        struct Example {
+            correction: Uuid,
+            record: Uuid,
+            revision: Uuid,
+            sample_sha256: String,
+            original_text_sha256: Option<String>,
+            corrected_text_sha256: String,
+        }
+        #[derive(Deserialize, Serialize)]
+        #[serde(deny_unknown_fields)]
+        struct Context {
+            profile: Uuid,
+            examples: Vec<Example>,
+        }
+        let context: Context = serde_json::from_value(context.clone())?;
+        bytes.extend_from_slice(b",\"confirmed_context\":");
+        bytes.extend(serde_json::to_vec(&context)?);
+    }
+    bytes.push(b'}');
+    Ok(bytes)
+}
 /// Explicit serialization only; callers decide whether to persist unverified text.
 #[derive(Serialize)]
 pub struct NotebookText {

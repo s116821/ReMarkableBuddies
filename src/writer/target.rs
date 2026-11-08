@@ -33,6 +33,16 @@ impl Request {
         } = self;
         (*conversation, *operation)
     }
+    pub(crate) fn with_root(&self, root: ExpectedHeads) -> Self {
+        let mut request = self.clone();
+        let Self::GenerateTarget { expected_root, .. } = &mut request;
+        *expected_root = root;
+        request
+    }
+    pub(crate) fn root(&self) -> &ExpectedHeads {
+        let Self::GenerateTarget { expected_root, .. } = self;
+        expected_root
+    }
     pub fn validate(&self) -> Result<()> {
         let Self::GenerateTarget {
             conversation,
@@ -74,6 +84,59 @@ fn report(request: &Request, status: Status, failure: Option<Failure>) -> Report
     }
 }
 
+/// One model slot of the original regional parent. OpenAI clamps its owned
+/// request to this deadline; no slot can be reused after any attempted submit.
+struct ModelStage<'a, E> {
+    engine: &'a mut E,
+    deadline: Instant,
+    used: bool,
+}
+impl<E: LLMEngine> LLMEngine for ModelStage<'_, E> {
+    fn guarded_timeout(&self) -> Option<Duration> {
+        self.engine.guarded_timeout()
+    }
+    fn add_text_content(&mut self, s: &str) {
+        self.engine.add_text_content(s)
+    }
+    fn add_image_content(&mut self, s: &str) {
+        self.engine.add_image_content(s)
+    }
+    fn clear_content(&mut self) {
+        self.engine.clear_content()
+    }
+    fn execute(&mut self) -> Result<String> {
+        self.execute_with_progress(&mut || Ok(()))
+    }
+    fn execute_with_progress(
+        &mut self,
+        progress: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<String> {
+        ensure!(
+            !std::mem::replace(&mut self.used, true) && Instant::now() < self.deadline,
+            "regional model slot expired or consumed"
+        );
+        #[cfg(target_os = "linux")]
+        {
+            let deadline = self.deadline;
+            let original = std::cell::RefCell::new(progress);
+            self.engine.execute_with_deadline(
+                &mut || (original.borrow_mut())(),
+                &mut |submit| {
+                    ensure!(Instant::now() < deadline, "regional model handoff expired");
+                    (original.borrow_mut())()?;
+                    submit()
+                },
+                deadline,
+            )
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = progress;
+            anyhow::bail!("regional owned model adapter unavailable")
+        }
+    }
+}
+
 /// The input owner supplies one explicit operation and exact root/target, never
 /// caller-supplied OCR or a replacement operation for an uncertain earlier call.
 pub fn run<E: LLMEngine>(
@@ -84,14 +147,40 @@ pub fn run<E: LLMEngine>(
     model_profile: &str,
     canceled: &mut dyn FnMut() -> bool,
 ) -> Report {
-    let started = Instant::now();
-    let deadline = started + Duration::from_secs(300);
-    if input.validate().is_err() || !config.admits_writer(false) {
-        return report(input, Status::Refused, Some(Failure::InvalidInput));
-    }
+    let deadline = Instant::now() + Duration::from_secs(300);
     let Some(owner) = Owner::acquire(ledger.store()) else {
         return report(input, Status::Busy, None);
     };
+    let mut produced = None;
+    run_owned(
+        ledger,
+        config,
+        engine,
+        input,
+        model_profile,
+        canceled,
+        &owner,
+        deadline,
+        &mut produced,
+    )
+}
+pub(crate) fn run_owned<E: LLMEngine>(
+    ledger: &Ledger,
+    config: &Config,
+    engine: &mut E,
+    input: &Request,
+    model_profile: &str,
+    canceled: &mut dyn FnMut() -> bool,
+    owner: &Owner<'_>,
+    deadline: Instant,
+    produced: &mut Option<crate::conversation::WriterSelection>,
+) -> Report {
+    if input.validate().is_err()
+        || !config.admits_writer(false)
+        || !std::ptr::eq(owner.0, ledger.store().as_ref())
+    {
+        return report(input, Status::Refused, Some(Failure::InvalidInput));
+    }
     let SelfParts {
         conversation,
         operation,
@@ -188,15 +277,21 @@ pub fn run<E: LLMEngine>(
             frame.check(ledger)
         };
         let document = ledger.target_document(&target)?;
+        let mut recognition = ModelStage {
+            engine,
+            deadline: deadline - Duration::from_secs(150),
+            used: false,
+        };
         let (normalized, _) = notebook::normalize_admitted(
             document,
             &admitted,
             model_profile,
             capture.as_ref().and_then(|c| c.context.as_deref()),
             notebook::TranscriptionPolicy::WholePage,
-            engine,
+            &mut recognition,
             &mut |_| progress(),
         );
+        drop(recognition);
         progress()?;
         let notebook::Normalized::Page(page) =
             normalized.map_err(|_| anyhow::anyhow!("target normalization refused"))?
@@ -249,14 +344,18 @@ pub fn run<E: LLMEngine>(
             guidance,
         };
         let preference = config.personalization_snapshot()?;
-        let mut produced = None;
         // Writer's own preparation advances root and pins its exact regional source.
         // From this point its existing currentness guard owns root progression.
         let expected = frame.expected_root();
         let mut canceled = || canceled() || Instant::now() >= deadline - Duration::from_secs(60);
+        let mut generation = ModelStage {
+            engine,
+            deadline: deadline - Duration::from_secs(60),
+            used: false,
+        };
         Ok(super::run_owned_source(
             ledger,
-            engine,
+            &mut generation,
             &request,
             &preference,
             dispatch
@@ -265,10 +364,10 @@ pub fn run<E: LLMEngine>(
                 .map(|p| p as &dyn crate::memory::Provider),
             &mut canceled,
             OwnedRun {
-                owner: &owner,
+                owner,
                 expected_root: Some(expected),
                 historical_images: false,
-                produced: &mut produced,
+                produced,
             },
             Some(regional),
         ))
@@ -310,6 +409,22 @@ mod tests {
         parts: Vec<String>,
     }
     impl LLMEngine for Model {
+        fn guarded_timeout(&self) -> Option<Duration> {
+            Some(Duration::from_secs(1))
+        }
+        fn execute_with_handoff(
+            &mut self,
+            progress: &mut dyn FnMut() -> Result<()>,
+            handoff: &mut crate::llm::ModelHandoff<'_>,
+        ) -> Result<String> {
+            progress()?;
+            let mut result = None;
+            handoff(&mut || {
+                result = Some(self.execute());
+                Ok(())
+            })?;
+            result.context("fixture submit absent")?
+        }
         fn add_text_content(&mut self, s: &str) {
             self.parts.push(s.into());
         }
@@ -459,5 +574,118 @@ mod tests {
             "region never masquerades as a legacy page source"
         );
         assert!(model.parts.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod proof_tests {
+    use super::*;
+    use crate::conversation::{target_source::tests::fixture, ContextBudget};
+    use std::io::Cursor;
+    #[test]
+    fn saved_valid_png_with_wrong_mask_refuses_even_with_consistent_normalized_input_hash() {
+        let (_f, ledger, c, _) = fixture();
+        let view = ledger
+            .context(
+                c,
+                &ContextBudget {
+                    max_text_bytes: 4096,
+                    max_turns: 8,
+                    provider_token_limit: Some(4096),
+                },
+                |_| Ok(1),
+            )
+            .unwrap();
+        let target = view.targets[0].reference.clone();
+        let original = &view.targets[0].target.source;
+        let document = ledger.target_document(&view.targets[0].target).unwrap();
+        let mut png = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            2,
+            2,
+            image::Rgb([255, 255, 255]),
+        ))
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+        let png = png.into_inner();
+        let derived = crate::storage::Media {
+            sha256: digest(&png),
+            bytes: png.len() as u64,
+            media_type: "image/png".into(),
+        };
+        // An unrelated committed image is valid data, but never proof of a region.
+        let envelope = crate::storage::Envelope {
+            envelope_version: 1,
+            namespace: Namespace::Source,
+            domain_schema_version: 1,
+            record_id: Uuid::new_v4(),
+            revision_id: Uuid::new_v4(),
+            parents: Default::default(),
+            operation_id: Uuid::new_v4(),
+            actor_id: ledger.store().actor_id,
+            kind: crate::storage::Kind::Value,
+            payload: serde_json::json!({"fixture":"unrelated historical image"}),
+            media_descriptors: vec![derived.clone()],
+        };
+        ledger
+            .store()
+            .commit(
+                vec![envelope],
+                std::collections::BTreeMap::from([(derived.sha256.clone(), png.clone())]),
+            )
+            .unwrap();
+        let admitted = notebook::admit_target(1, png, &mut |_| Ok(())).unwrap();
+        let profile = serde_json::json!({"protocol":1,"prompt_revision":"transcribe-visible-v2","caller_model_profile":"fixture"});
+        let extractor_revision = format!(
+            "notebook-ocr-unverified-v2:{}",
+            digest(&notebook::profile_bytes(&profile).unwrap())
+        );
+        let normalized = NormalizedTextSource::new(
+            c,
+            Uuid::new_v4(),
+            NormalizedDocument {
+                document,
+                format: crate::retrieval::SourceFormat::Notebook,
+                source_sha256: admitted.source_sha256().into(),
+                extractor_revision: format!(
+                    "region-v1:{}",
+                    digest(&serde_json::to_vec(&(&target, &extractor_revision)).unwrap())
+                ),
+                units: vec![crate::retrieval::SourceUnit {
+                    page: Some(1),
+                    section: None,
+                    text: "Unverified regional text".into(),
+                }],
+            },
+            TextScope::Page { page: 1 },
+            None,
+        )
+        .unwrap();
+        let region = RegionSource {
+            id: normalized.id,
+            conversation: c,
+            turn: normalized.turn,
+            target,
+            original: original.original.clone(),
+            derived,
+            dimensions: [2, 2],
+            recipe: target::geometry::RECIPE.into(),
+            normalization_profile: "fixture".into(),
+            normalized_sha256: digest(&serde_json::to_vec(&normalized.document.units).unwrap()),
+            about: "About: Original region".into(),
+            normalization_proof: target::NormalizationProof {
+                profile,
+                prompt_sha256: digest(b"fixture prompt"),
+                response_sha256: digest(b"fixture response"),
+                source_sha256: normalized.document.source_sha256.clone(),
+                extractor_revision,
+            },
+            normalized,
+        };
+        region.validate().unwrap();
+        let error = ledger
+            .regional_source_proof(&region, &mut || Ok(()))
+            .unwrap_err();
+        assert!(error.to_string().contains("mask/recipe"), "{error}");
     }
 }

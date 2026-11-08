@@ -464,3 +464,13 @@ impl ReaderPreferences {
         target_startup::resume(store, config)
     }
 }
+
+#[cfg(test)]
+impl ReaderPreferences {
+    pub(in crate::storage::sync::selected) fn target_wall_clock_fixture(now: u64) -> impl Drop {
+        target_startup::fixture_clock(now)
+    }
+    pub(in crate::storage::sync::selected) fn advance_target_wall_clock_fixture(now: u64) {
+        target_startup::advance_fixture_clock(now)
+    }
+}

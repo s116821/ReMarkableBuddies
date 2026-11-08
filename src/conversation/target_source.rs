@@ -1050,3 +1050,100 @@ impl Ledger {
         )
     }
 }
+
+impl Ledger {
+    /// Reopen/refine/export resolves the exact saved target and original capture,
+    /// reuses its established validators and verifies the deterministic mask.
+    /// No source head, active target, recognizer or model call substitutes for it.
+    pub(crate) fn regional_source_proof(
+        &self,
+        region: &RegionSource,
+        progress: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        region.validate()?;
+        ensure!(
+            self.store.ordinary_reader_family()?
+                && self.store.source_target_generation()?.is_some(),
+            "regional receiving requires ordinary target family"
+        );
+        progress()?;
+        let used = TargetUse {
+            id: TargetUse::id(region.turn),
+            conversation: region.conversation,
+            turn: region.turn,
+            action: Action::Inherit,
+            target: Some(region.target.clone()),
+            about: None,
+            inline_body_sha256: None,
+        };
+        let mut views = self.target_views(&[used])?;
+        let view = views.pop().context("regional exact target absent")?;
+        ensure!(
+            view.target.conversation == region.conversation
+                && view.target.source.original == region.original
+                && view.target.source.dimensions == region.dimensions
+                && view.target.candidate.about()? == region.about
+                && matches!(
+                    view.target.candidate.understanding,
+                    Understanding::Interpreted
+                ),
+            "regional saved target correspondence differs"
+        );
+        // One cumulative proof allowance, charged before each actual media read.
+        let mut remaining = 64 * 1024 * 1024u64;
+        let mut objects = 0usize;
+        let mut load = |media: &Media| -> Result<Vec<u8>> {
+            progress()?;
+            objects = objects
+                .checked_add(1)
+                .context("regional media work overflow")?;
+            remaining = remaining
+                .checked_sub(media.bytes)
+                .context("regional media proof byte bound")?;
+            ensure!(objects <= 16, "regional media proof object bound");
+            self.store.read_object(&ObjectRef {
+                sha256: media.sha256.clone(),
+                bytes: media.bytes,
+            })
+        };
+        let original = match view.source {
+            Record::Source(_) => load(&region.original)?,
+            Record::ResidentCapture(v) => {
+                Self::resident_images_from_evidence(*v, &mut load)?.original_png
+            }
+            Record::DevelopmentCapture(v) => {
+                Self::development_images_from_evidence(*v, &mut load)?.original_png
+            }
+            Record::Capture(v) => {
+                Self::sdk_images_from_evidence(*v, &mut load)?
+                    .native_parent
+                    .bytes
+            }
+            Record::LegacyCapture(v) => {
+                let bytes = Self::legacy_images_from_evidence(v, &mut load)?;
+                bytes.parent.unwrap_or_else(|| bytes.images[0].clone())
+            }
+            _ => bail!("regional original is not a capture"),
+        };
+        let derived = load(&region.derived)?;
+        drop(load);
+        let geometry = view
+            .target
+            .candidate
+            .geometry
+            .as_ref()
+            .context("regional bounded target absent")?;
+        let expected = geometry.mask_png(&original, region.dimensions, progress)?;
+        ensure!(
+            expected == derived,
+            "saved region mask/recipe differs from original target"
+        );
+        let admitted = crate::retrieval::notebook::admit_target(1, derived, &mut |_| progress())?;
+        ensure!(
+            admitted.source_sha256() == region.normalized.document.source_sha256,
+            "regional normalization input identity differs"
+        );
+        progress()?;
+        Ok(())
+    }
+}

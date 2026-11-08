@@ -451,6 +451,7 @@ fn run_owned_source<E: LLMEngine>(
     control: OwnedRun<'_, '_>,
     regional: Option<crate::conversation::target::RegionSource>,
 ) -> Report {
+    let operation_started = Instant::now();
     if !std::ptr::eq(control.owner.0, ledger.store().as_ref()) {
         return Report::refused(request, Failure::Storage);
     }
@@ -466,6 +467,9 @@ fn run_owned_source<E: LLMEngine>(
     {
         let prepared = (|| -> Result<PreparedNote> {
             let (draft, source) = selected(ledger, *conversation, *draft)?;
+            if let Some(region) = &source.region {
+                ledger.regional_source_proof(region, &mut || Ok(()))?;
+            }
             note_from_draft(&draft, &source, *correlation, *effect_operation)
         })();
         return match prepared {
@@ -603,7 +607,10 @@ fn run_owned_source<E: LLMEngine>(
     let mut was_canceled = false;
     let mut was_stale = false;
     let mut progress = || {
-        if canceled() || started.elapsed() >= Duration::from_secs(95) {
+        if canceled()
+            || started.elapsed() >= Duration::from_secs(95)
+            || (source.region.is_some() && operation_started.elapsed() >= Duration::from_secs(150))
+        {
             was_canceled = true;
             anyhow::bail!("Writer canceled")
         }
@@ -618,6 +625,9 @@ fn run_owned_source<E: LLMEngine>(
     };
     let mut memory_failure = None;
     let response = (|| -> Result<String> {
+        if let Some(region) = &source.region {
+            ledger.regional_source_proof(region, &mut progress)?;
+        }
         let context = if let Some(provider) = memory {
             match subject_memory::context(provider, &text, source.document.document, now()) {
                 Ok(context) => context,
@@ -654,6 +664,21 @@ fn run_owned_source<E: LLMEngine>(
         let mut report = Report::new(request, Status::Stale);
         report.failure = Some(Failure::Storage);
         return report;
+    }
+    if let Some(region) = &source.region {
+        // Original and derived objects are immutable commitments. Verify them
+        // again before publishing a result after a potentially long model wait.
+        if region.media().iter().any(|m| {
+            ledger
+                .store()
+                .open_object(&crate::storage::ObjectRef {
+                    sha256: m.sha256.clone(),
+                    bytes: m.bytes,
+                })
+                .is_err()
+        }) {
+            return Report::refused(request, Failure::Storage);
+        }
     }
     let response = response.and_then(|body| {
         if let Some(region) = &source.region {

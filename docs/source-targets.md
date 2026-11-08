@@ -68,3 +68,17 @@ These explicit commands are historical data operations. Native composer Submit,
 scope gestures, selected regional Writer ingress and supported-device presentation
 remain separate integration and acceptance gates. Scripted/localhost results do
 not establish live recognition quality or native display behavior.
+
+Joined generation/export uses the same `--writer-note` dispatch with
+`command: "generate-target-and-export"`, a nested `generation` object matching
+`generate-target` above, and distinct `outer_operation`, `correlation` and
+`effect_operation` UUIDs. It uses the configured export destination and the existing
+export/reconciliation rules. The regional recognition/generation window is300s;
+joined export is bounded by the original345s parent and the existing destination
+and request limits. It does not retry recognition or writes on replay.
+
+An expired live request does not prevent completion of an interrupted selected
+storage promotion. Local repair retains its original operation, Config/mode/source
+and selection pins, and spends its saved reserved proof allowance. It preserves
+the expired timestamps and creates no live model, policy or HTTP permit. A later
+application request must obtain its own normal admission.

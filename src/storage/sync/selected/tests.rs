@@ -500,25 +500,25 @@ fn transfer(lost_ack: bool, activation_fault: bool, use_compound: bool) {
 
 #[test]
 fn selected_writer_real_model_entry_publishes_exact_text_source_through_worker() {
-    transfer_writer_document(false, false, false, None);
+    transfer_writer_document(false, false, false, None, false);
 }
 
 #[cfg(target_os = "linux")]
 #[test]
 fn resident_reader_policy_requires_received_registration_and_current_config() {
-    transfer_writer_document(true, false, false, None);
+    transfer_writer_document(true, false, false, None, false);
 }
 
 #[cfg(target_os = "linux")]
 #[test]
 fn resident_capture_media_transfers_across_batch_one_worker_steps() {
-    transfer_writer_document(true, true, false, None);
+    transfer_writer_document(true, true, false, None, false);
 }
 
 #[cfg(target_os = "linux")]
 #[test]
 fn selected_target_promotion_carries_qualified_absence_without_another_get_or_store_lease() {
-    transfer_writer_document(true, false, true, None);
+    transfer_writer_document(true, false, true, None, false);
 }
 #[cfg(target_os = "linux")]
 #[test]
@@ -533,7 +533,21 @@ fn selected_target_original_recovery_keeps_witness_and_budget_without_http() {
         Stage::Format,
         Stage::Capabilities,
     ] {
-        transfer_writer_document(true, false, true, Some(stage));
+        transfer_writer_document(true, false, true, Some(stage), false);
+    }
+}
+#[cfg(target_os = "linux")]
+#[test]
+fn selected_target_elapsed_request_window_does_not_wedge_original_local_recovery() {
+    use crate::storage::target_generation::Stage;
+    for stage in [
+        Stage::Policy,
+        Stage::Original,
+        Stage::Marker,
+        Stage::Format,
+        Stage::Capabilities,
+    ] {
+        transfer_writer_document(true, false, true, Some(stage), true);
     }
 }
 fn transfer_writer_document(
@@ -541,6 +555,7 @@ fn transfer_writer_document(
     transfer_media: bool,
     promote_targets: bool,
     interrupted: Option<crate::storage::target_generation::Stage>,
+    elapsed_window: bool,
 ) {
     use crate::{
         conversation::*,
@@ -737,6 +752,8 @@ fn transfer_writer_document(
             let generation = super::catalog::current_generation(&first).unwrap();
             let original = local_token.clone();
             if let Some(stage) = interrupted {
+                let _clock =
+                    elapsed_window.then(|| ReaderPreferences::target_wall_clock_fixture(0));
                 let paths = first.paths.clone();
                 let result = local.promote_targets_with_hook(first, writer, local_token, |at| {
                     if at == stage {
@@ -745,6 +762,13 @@ fn transfer_writer_document(
                     Ok(())
                 });
                 assert!(result.is_err());
+                let policy_path = paths.data.join("source-target-startup-policy.json");
+                let frozen: serde_json::Value =
+                    files::json(&policy_path, MAX_RECORD as u64).unwrap();
+                if elapsed_window {
+                    let end = frozen["correspondence"]["expires_ms"].as_u64().unwrap();
+                    ReaderPreferences::advance_target_wall_clock_fixture(end + 1);
+                }
                 let config = crate::config::Config::load(Some(path.clone())).unwrap();
                 let resumed = Store::open_selected_target_preparation(&config).unwrap();
                 assert_eq!(
@@ -770,6 +794,10 @@ fn transfer_writer_document(
                     MAX_RECORD as u64,
                 )
                 .unwrap();
+                assert_eq!(
+                    receipt["correspondence"], frozen["correspondence"],
+                    "local repair must not renew the request window or replace original pins"
+                );
                 assert!(
                     receipt["remaining"]["usage"]["work_items"]
                         .as_u64()
