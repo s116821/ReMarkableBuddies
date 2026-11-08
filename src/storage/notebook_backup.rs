@@ -375,6 +375,16 @@ impl Store {
             .lock()
             .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
         self.notebook_archive_custody(&inner)?;
+        target_restore::refuse_pending(&self.paths)?;
+        if backup.target_feature.is_some()
+            || target_generation::is_target(&self.generation(inner.generation))?
+        {
+            let (backup, hash) = conditional_restore::read_archive(source)?;
+            let expected = self
+                .notebook_restore_plan(&inner, source, &backup, hash, Uuid::new_v4())?
+                .conditions;
+            return self.restore_target_locked(&mut inner, source, backup, &expected, &mut false);
+        }
         self.restore_notebook_locked(
             &mut inner,
             source,
@@ -394,6 +404,12 @@ impl Store {
         attempted: &mut bool,
     ) -> Result<()> {
         let root = self.generation(inner.generation);
+        // This is the legacy family4 activation writer. Target-family inputs
+        // require their separate plan-bound staging owner even with no records.
+        ensure!(
+            backup.target_feature.is_none() && !target_generation::is_target(&root)?,
+            "target restore requires plan-bound target activation"
+        );
         let feedback = root.join(feedback_generation::MARKER).exists() || backup.feedback_feature;
         let selected_feature =
             root.join("selection-feature.json").exists() || backup.selected_feature;
@@ -459,3 +475,10 @@ impl Store {
 #[cfg(test)]
 #[path = "notebook_backup/target_archive_tests.rs"]
 mod target_archive_tests;
+
+#[cfg(test)]
+#[path = "notebook_backup/target_restore_tests.rs"]
+mod target_restore_tests;
+
+#[path = "notebook_backup/target_restore.rs"]
+pub(in crate::storage) mod target_restore;

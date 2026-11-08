@@ -548,6 +548,13 @@ impl Store {
         self.paths.data.join("generations").join(id.to_string())
     }
     fn recover(&self, generation: Uuid) -> Result<Index> {
+        self.recover_target_restore(generation, None)
+    }
+    fn recover_target_restore(
+        &self,
+        generation: Uuid,
+        context: Option<&recovery::notebook_backup::target_restore::RestoreContext<'_>>,
+    ) -> Result<Index> {
         let root = self.generation(generation);
         let mut index = Index::default();
         let mut pending = Vec::new();
@@ -561,7 +568,14 @@ impl Store {
             }
             let result = (|| {
                 let manifest: Manifest = files::json(&path, MAX_METADATA as u64)?;
-                let records = Self::validate_objects(&root, &manifest)?;
+                let records = Self::validate_objects_context(
+                    &root,
+                    &manifest,
+                    None,
+                    context.map(|c| c.actor()),
+                    None,
+                    context,
+                )?;
                 Ok::<_, anyhow::Error>((manifest, records))
             })();
             match result {
@@ -636,10 +650,31 @@ impl Store {
     fn validate_objects_archive(
         root: &Path,
         manifest: &Manifest,
-        mut budget: Option<&mut selection::SelectedReadBudget>,
+        budget: Option<&mut selection::SelectedReadBudget>,
         notebook_archive_actor: Option<Uuid>,
         target_archive: Option<&recovery::notebook_backup::TargetArchiveContext<'_>>,
     ) -> Result<Vec<(Envelope, String)>> {
+        Self::validate_objects_context(
+            root,
+            manifest,
+            budget,
+            notebook_archive_actor,
+            target_archive,
+            None,
+        )
+    }
+    fn validate_objects_context(
+        root: &Path,
+        manifest: &Manifest,
+        mut budget: Option<&mut selection::SelectedReadBudget>,
+        notebook_archive_actor: Option<Uuid>,
+        target_archive: Option<&recovery::notebook_backup::TargetArchiveContext<'_>>,
+        target_restore: Option<&recovery::notebook_backup::target_restore::RestoreContext<'_>>,
+    ) -> Result<Vec<(Envelope, String)>> {
+        ensure!(
+            target_archive.is_none() || target_restore.is_none(),
+            "ambiguous target object admission"
+        );
         manifest.validate()?;
         Self::validate_namespace_family(root, manifest)?;
         for (item, media) in manifest
@@ -678,6 +713,8 @@ impl Store {
             if envelope.domain_schema_version == crate::conversation::target::SCHEMA {
                 if let Some(archive) = target_archive {
                     archive.validate_record(root, &envelope)?;
+                } else if let Some(restore) = target_restore {
+                    restore.validate_record(root, &envelope)?;
                 } else {
                     ensure!(
                         notebook_archive_actor.is_none(),

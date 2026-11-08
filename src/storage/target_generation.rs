@@ -58,6 +58,8 @@ impl Feature {
 struct Preparation {
     feature: Feature,
     complete: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    restore_sha256: Option<String>,
 }
 fn data(root: &Path) -> Result<&Path> {
     root.parent()
@@ -71,6 +73,13 @@ fn read_preparation(path: &Path) -> Result<Option<Preparation>> {
     }
     let original: Preparation = files::json(path, MAX_RECORD as u64)?;
     original.feature.validate()?;
+    ensure!(
+        original
+            .restore_sha256
+            .as_ref()
+            .is_none_or(|sha| valid_digest(sha) && *sha == original.feature.source_sha256),
+        "invalid target restore original reference"
+    );
     Ok(Some(original))
 }
 /// New originals belong to their generation. An older global receipt can only
@@ -91,7 +100,9 @@ fn preparation(root: &Path) -> Result<Option<Preparation>> {
         );
         if let Some(global) = &global {
             ensure!(
-                local.feature == global.feature && (local.complete || !global.complete),
+                local.feature == global.feature
+                    && local.restore_sha256 == global.restore_sha256
+                    && (local.complete || !global.complete),
                 "conflicting local/global target originals"
             );
         }
@@ -106,6 +117,13 @@ fn feature(root: &Path) -> Result<Feature> {
         original.feature == value,
         "target feature differs from original preparation"
     );
+    if let Some(sha) = &original.restore_sha256 {
+        let restored = super::recovery::notebook_backup::target_restore::read_original(root)?;
+        ensure!(
+            restored.sha256()? == *sha && restore_feature(&restored)? == value,
+            "target feature differs from original restore"
+        );
+    }
     ensure!(
         root.file_name().and_then(|p| p.to_str()) == Some(value.generation.to_string().as_str()),
         "target generation identity differs"
@@ -192,6 +210,9 @@ pub(super) struct ArchiveOrigin {
     feature: Feature,
 }
 impl ArchiveOrigin {
+    pub(super) fn validate_actor(&self, actor: Uuid) -> Result<()> {
+        self.validate(actor, self.feature.generation)
+    }
     pub(super) fn validate(&self, actor: Uuid, generation: Uuid) -> Result<()> {
         self.feature.validate()?;
         ensure!(
@@ -411,6 +432,7 @@ fn prepare_original(
                 contract_sha256: digest(CONTRACT.as_bytes()),
             },
             complete: false,
+            restore_sha256: None,
         };
         files::atomic_json(&path, &original)?;
         original
@@ -475,7 +497,12 @@ impl Store {
             config,
             config.source_snapshot.as_ref().map(|s| s.fingerprint()),
         ))?);
-        let mut store = Self::open_policy(config.paths.clone(), OpenPreparation::Targets)?
+        let mut store =
+            match super::recovery::notebook_backup::target_restore::resume_existing(&config.paths)?
+            {
+                Some(store) => store,
+                None => Self::open_policy(config.paths.clone(), OpenPreparation::Targets)?,
+            }
             .with_runtime_policy(config);
         let generation = store
             .inner
@@ -670,7 +697,11 @@ impl Store {
         }
         // Presence is pinned too: adding/removing a competing original cannot
         // evade a running request's immutable ready-generation correspondence.
-        for path in [root.join(PREPARATION), self.paths.data.join(PREPARATION)] {
+        for path in [
+            root.join(PREPARATION),
+            self.paths.data.join(PREPARATION),
+            root.join(super::recovery::notebook_backup::target_restore::ORIGINAL),
+        ] {
             reads.charge(0, 1, 0, 0)?;
             files::safe_path(&path)?;
             pins.push(if path.exists() {
@@ -685,6 +716,112 @@ impl Store {
         }
         Ok(Some(digest(&serde_json::to_vec(&pins)?)))
     }
+}
+
+fn restore_feature(
+    original: &super::recovery::notebook_backup::target_restore::Original,
+) -> Result<Feature> {
+    original.validate()?;
+    Ok(Feature {
+        format: 1,
+        operation: original.operation,
+        actor: original.actor,
+        generation: original.conditions.target_generation,
+        source_family: 4,
+        base_kind: BaseKind::OrdinaryNotebook,
+        source_sha256: original.sha256()?,
+        config_sha256: original
+            .conditions
+            .staged_configuration_sha256
+            .clone()
+            .unwrap_or_else(|| digest(b"null")),
+        mode_sha256: original.mode_sha256.clone(),
+        contract_sha256: digest(CONTRACT.as_bytes()),
+    })
+}
+pub(super) fn stage_restore(
+    store: &Store,
+    original: &super::recovery::notebook_backup::target_restore::Original,
+) -> Result<()> {
+    let value = restore_feature(original)?;
+    let root = store.generation(value.generation);
+    ensure!(
+        store.actor_id == value.actor,
+        "restore feature actor differs"
+    );
+    let path = root.join(PREPARATION);
+    let intended = Preparation {
+        feature: value.clone(),
+        complete: false,
+        restore_sha256: Some(original.sha256()?),
+    };
+    if let Some(existing) = read_preparation(&path)? {
+        ensure!(
+            existing.feature == value && existing.restore_sha256 == intended.restore_sha256,
+            "original restore feature changed"
+        );
+    } else {
+        files::atomic_json(&path, &intended)?;
+    }
+    if root.join(MARKER).exists() {
+        ensure!(
+            files::json::<Feature>(&root.join(MARKER), MAX_RECORD as u64)? == value,
+            "restore marker differs"
+        );
+    } else {
+        files::atomic_json(&root.join(MARKER), &value)?;
+    }
+    let contract = store.paths.data.join("contract-v5.json");
+    if !contract.exists() {
+        files::atomic(&contract, CONTRACT.as_bytes())?;
+    }
+    ensure!(
+        files::read(&contract, MAX_RECORD as u64)? == CONTRACT.as_bytes(),
+        "restore contract differs"
+    );
+    let family = feedback_generation::version(&root)?;
+    ensure!(
+        family == 4 || family == VERSION,
+        "restore staging family differs"
+    );
+    if family != VERSION {
+        files::atomic_json(&root.join("format.json"), &VERSION)?;
+    }
+    validate_feature(&root, value.actor, value.generation)
+}
+pub(super) fn publish_restore_capabilities(
+    store: &Store,
+    original: &super::recovery::notebook_backup::target_restore::Original,
+) -> Result<()> {
+    let generation = original.conditions.target_generation;
+    ensure!(
+        feature(&store.generation(generation))? == restore_feature(original)?,
+        "original restore feature differs"
+    );
+    files::atomic_json(
+        &store.paths.data.join("capabilities.json"),
+        &capabilities(&store.paths, store.actor_id, generation)?,
+    )?;
+    validate_ready_contents(&store.paths, store.actor_id, generation)
+}
+pub(super) fn complete_restore(
+    store: &Store,
+    original: &super::recovery::notebook_backup::target_restore::Original,
+) -> Result<()> {
+    let generation = original.conditions.target_generation;
+    validate_ready_contents(&store.paths, store.actor_id, generation)?;
+    files::atomic_json(
+        &store.generation(generation).join(PREPARATION),
+        &Preparation {
+            feature: restore_feature(original)?,
+            complete: true,
+            restore_sha256: Some(original.sha256()?),
+        },
+    )?;
+    validate_ready(&store.paths, store.actor_id, generation)
+}
+pub(super) fn restore_completed(root: &Path) -> Result<bool> {
+    Ok(preparation(root)?.is_some_and(|p| p.complete && p.restore_sha256.is_some()))
 }
 
 #[cfg(test)]
