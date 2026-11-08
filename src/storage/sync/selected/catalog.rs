@@ -83,12 +83,16 @@ fn source_admissions(
     identity: &Identity,
     pending: &CatalogPending,
 ) -> Result<Vec<SelectedAdmission>> {
-    match (&pending.registration, &pending.portable) {
-        (Some(registration), None) => {
+    match (
+        &pending.registration,
+        &pending.portable,
+        &pending.handwriting,
+    ) {
+        (Some(registration), None, None) => {
             let (catalog, aggregate) = admissions(store, identity, registration)?;
             Ok(vec![catalog, aggregate])
         }
-        (None, Some(_)) => Ok(vec![SelectedAdmission::new(
+        (None, Some(_), None) => Ok(vec![SelectedAdmission::new(
             store.clone(),
             SelectionScope {
                 group: identity.group,
@@ -96,6 +100,17 @@ fn source_admissions(
                 binding_sha256: identity.binding_sha256.clone(),
             },
         )?]),
+        (None, None, Some(correction)) => {
+            let scope = correction
+                .owner
+                .domain()?
+                .scope(identity.group, identity.binding_sha256.clone())
+                .map_err(|error| anyhow::anyhow!("invalid handwriting scope: {error:?}"))?;
+            Ok(vec![
+                corrections::catalog_gate(store, &scope, identity.profile)?,
+                SelectedAdmission::new(store.clone(), scope)?,
+            ])
+        }
         _ => anyhow::bail!("catalog original source is ambiguous"),
     }
 }
@@ -110,8 +125,12 @@ fn require_source(
         current_generation(store)? == pending.source_generation,
         "catalog source generation changed"
     );
-    match (&pending.registration, &pending.portable) {
-        (Some(registration), None) => require_registration(
+    match (
+        &pending.registration,
+        &pending.portable,
+        &pending.handwriting,
+    ) {
+        (Some(registration), None, None) => require_registration(
             store,
             identity,
             registration,
@@ -119,7 +138,7 @@ fn require_source(
             pending.source_generation,
             budget,
         ),
-        (None, Some(portable)) => preferences::require_registration(
+        (None, Some(portable), None) => preferences::require_registration(
             store,
             identity.group,
             &identity.binding_sha256,
@@ -127,6 +146,9 @@ fn require_source(
             root,
             budget,
         ),
+        (None, None, Some(correction)) => {
+            corrections::require_registration(store, identity, correction, root, budget)
+        }
         _ => anyhow::bail!("catalog original source is ambiguous"),
     }
 }
@@ -172,11 +194,17 @@ impl Engine {
                 source_generation: generation,
                 registration: Some(registration),
                 portable: None,
+                handwriting: None,
                 genesis_slot: None,
                 proposal: None,
             }));
         }
-        preferences::discover_registration(&self.store, &self.binding, view, budget)
+        if let Some(pending) =
+            preferences::discover_registration(&self.store, &self.binding, view, budget)?
+        {
+            return Ok(Some(pending));
+        }
+        corrections::discover_registration(&self.store, &identity, view, budget)
     }
     /// One bounded step in the existing worker. A missing initial catalog is
     /// handled by the caller as Joining, never as permission to seed emptiness.
@@ -385,12 +413,25 @@ impl Engine {
     }
 }
 fn validate_pending(pending: &CatalogPending, identity: &Identity) -> Result<()> {
-    match (&pending.registration, &pending.portable) {
-        (Some(registration), None) => registration.validate(identity)?,
-        (None, Some(portable)) => ensure!(
+    match (
+        &pending.registration,
+        &pending.portable,
+        &pending.handwriting,
+    ) {
+        (Some(registration), None, None) => registration.validate(identity)?,
+        (None, Some(portable), None) => ensure!(
             !portable.genesis_operation.is_nil() && valid_digest(&portable.genesis_sha256),
             "invalid portable catalog original"
         ),
+        (None, None, Some(correction)) => {
+            correction.owner.domain()?;
+            ensure!(
+                correction.owner.profile == identity.profile
+                    && !correction.genesis_operation.is_nil()
+                    && valid_digest(&correction.genesis_sha256),
+                "invalid handwriting catalog original"
+            );
+        }
         _ => anyhow::bail!("catalog original source is ambiguous"),
     }
     ensure!(

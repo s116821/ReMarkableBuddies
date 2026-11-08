@@ -342,13 +342,18 @@ impl Engine {
                 self.mark_receive_verified(key)?;
                 winner.apply(&self.store, receive.operation, expected.as_ref())?
             }
-            Owner::Preferences(_) => {
+            Owner::Preferences(_) | Owner::Handwriting(_) => {
+                let correction = match entry.owner {
+                    Owner::Handwriting(owner) => Some(owner),
+                    _ => None,
+                };
                 let winner = preferences::Winner::validate(
                     &self.store,
                     scope,
                     receive.descriptor.sha256.clone(),
                     manifest.clone(),
                     objects,
+                    correction,
                 )?;
                 self.mark_receive_verified(key)?;
                 let publication =

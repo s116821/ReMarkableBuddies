@@ -23,16 +23,20 @@ impl Owner {
         self.record
     }
 
+    pub fn key_sha256(self) -> String {
+        digest(
+            format!(
+                "urn:remarkable-buddies:global-record:v1:handwriting:{}",
+                self.record
+            )
+            .as_bytes(),
+        )
+    }
+
     pub fn scope(self, group: Uuid, binding_sha256: String) -> Result<SelectionScope> {
         let scope = SelectionScope {
             group,
-            key_sha256: digest(
-                format!(
-                    "urn:remarkable-buddies:global-record:v1:handwriting:{}",
-                    self.record
-                )
-                .as_bytes(),
-            ),
+            key_sha256: self.key_sha256(),
             binding_sha256,
         };
         scope.validate().map_err(|_| Failure::InvalidIdentity)?;

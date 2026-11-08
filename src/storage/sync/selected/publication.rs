@@ -122,6 +122,28 @@ impl Engine {
                         )?;
                     }
                 }
+                Owner::Handwriting(owner) => {
+                    let mut budget = corrections::allowance();
+                    if self.checkpoint.scopes[key].applied.is_none() {
+                        corrections::require_initial_publication(
+                            &self.store,
+                            &scope,
+                            *owner,
+                            &view.root_sha,
+                            &mut budget,
+                        )?;
+                    } else {
+                        corrections::project(
+                            &self.store,
+                            *owner,
+                            &current.transaction.selected,
+                            &mut budget,
+                        )?;
+                    }
+                    for retained in &current.transaction.retained {
+                        corrections::project(&self.store, *owner, retained, &mut budget)?;
+                    }
+                }
             }
             Ok(())
         })?;

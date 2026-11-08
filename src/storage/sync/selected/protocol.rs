@@ -10,6 +10,33 @@ pub(super) const WIRE: u32 = 1;
 pub(super) enum Owner {
     Memory(MemoryOwner),
     Preferences(PreferenceOwner),
+    Handwriting(HandwritingOwner),
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct HandwritingOwner {
+    kind: HandwritingKind,
+    pub profile: Uuid,
+    pub correction: Uuid,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum HandwritingKind {
+    HandwritingCorrection,
+}
+impl HandwritingOwner {
+    pub(super) fn new(profile: Uuid, correction: Uuid) -> Self {
+        Self {
+            kind: HandwritingKind::HandwritingCorrection,
+            profile,
+            correction,
+        }
+    }
+
+    pub(super) fn domain(self) -> Result<crate::handwriting::selected::Owner> {
+        crate::handwriting::selected::Owner::new(self.profile, self.correction)
+            .map_err(|error| anyhow::anyhow!("invalid handwriting owner: {error:?}"))
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -31,6 +58,7 @@ impl Owner {
         match self {
             Self::Memory(owner) => owner.key_sha256(),
             Self::Preferences(_) => Ok(crate::config::portable::record::key_sha256()),
+            Self::Handwriting(owner) => Ok(owner.domain()?.key_sha256()),
         }
     }
 }
@@ -87,6 +115,9 @@ impl Entry {
         ensure!(self.owner.key_sha256()? == key, "catalog owner key differs");
         if let Owner::Memory(MemoryOwner::GlobalFact { key }) = &self.owner {
             ensure!(key.profile == profile, "foreign global profile");
+        }
+        if let Owner::Handwriting(owner) = &self.owner {
+            ensure!(owner.profile == profile, "foreign handwriting profile");
         }
         drive::id(&self.genesis_slot)
     }

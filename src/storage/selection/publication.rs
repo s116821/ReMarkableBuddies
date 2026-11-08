@@ -236,20 +236,17 @@ pub(super) fn request(
     ))?))
 }
 
-/// Format5 local publication identity is Store-wide, not only target-chain-wide.
-/// Read existing accepted transaction evidence while holding the same Store
-/// mutex that will publish. Remote envelope operation IDs are deliberately absent.
-fn claim_local_operation(root: &Path, generation: Uuid, operation: Uuid) -> Result<()> {
-    if feedback_generation::version(root)? != COMPOUND_STORE_FORMAT {
-        return Ok(());
-    }
+fn visit_selection_heads(
+    root: &Path,
+    generation: Uuid,
+    budget: &mut SelectedReadBudget,
+    mut visit: impl FnMut(SelectionTransaction, &mut SelectedReadBudget) -> Result<()>,
+) -> Result<()> {
     let directory = root.join("selections");
     files::safe_path(&directory)?;
     if !directory.exists() {
         return Ok(());
     }
-    let mut budget =
-        SelectedReadBudget::new(MAX_ITEMS as u64, MAX_ITEMS as u64, MAX_METADATA as u64, 0);
     for item in fs::read_dir(directory)? {
         let path = item?.path();
         // Atomic staging is never a published receipt and is not deleted here.
@@ -260,7 +257,7 @@ fn claim_local_operation(root: &Path, generation: Uuid, operation: Uuid) -> Resu
             continue;
         }
         budget.charge(1, 1, 0, 0)?;
-        let bytes = files::read_with_budget(&path, MAX_METADATA as u64, Some(&mut budget))?;
+        let bytes = files::read_with_budget(&path, MAX_METADATA as u64, Some(budget))?;
         let current: SelectionTransaction = serde_json::from_slice(&bytes)?;
         current.validate(MAX_ITEMS)?;
         ensure!(
@@ -268,14 +265,28 @@ fn claim_local_operation(root: &Path, generation: Uuid, operation: Uuid) -> Resu
                 && path.file_name().and_then(|n| n.to_str()) == Some(&current.scope.filename()?),
             "local operation inventory identity differs"
         );
+        visit(current, budget)?;
+    }
+    Ok(())
+}
+
+/// Check accepted Store transactions under the publication mutex. Imported
+/// envelope operation IDs are deliberately absent from this inventory.
+fn claim_local_operation(root: &Path, generation: Uuid, operation: Uuid) -> Result<()> {
+    if feedback_generation::version(root)? != COMPOUND_STORE_FORMAT {
+        return Ok(());
+    }
+    let mut budget =
+        SelectedReadBudget::new(MAX_ITEMS as u64, MAX_ITEMS as u64, MAX_METADATA as u64, 0);
+    visit_selection_heads(root, generation, &mut budget, |current, budget| {
         let scope = current.scope.clone();
-        for accepted in history_with_budget(root, generation, &scope, current, Some(&mut budget))? {
+        for accepted in history_with_budget(root, generation, &scope, current, Some(budget))? {
             if accepted.operation == operation {
                 return Err(LocalOperationConflict.into());
             }
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 pub(super) fn replay(
     chain: &[SelectionTransaction],
@@ -293,6 +304,42 @@ pub(super) fn replay(
 }
 
 impl Store {
+    /// Bounded discovery hints. Callers verify reachable genesis and the
+    /// domain closure again under the applicable gates before registration.
+    pub(crate) fn selected_scope_candidates(
+        &self,
+        group: Uuid,
+        binding: &str,
+        namespace: Namespace,
+        budget: &mut SelectedReadBudget,
+    ) -> Result<Vec<SelectionScope>> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        let root = self.generation(inner.generation);
+        if feedback_generation::version(&root)? != COMPOUND_STORE_FORMAT {
+            return Ok(Vec::new());
+        }
+        compound_generation::validate_ready(&self.paths, self.actor_id, inner.generation)?;
+        let mut scopes = Vec::new();
+        visit_selection_heads(&root, inner.generation, budget, |head, _| {
+            if head.scope.group == group
+                && head.scope.binding_sha256 == binding
+                && head
+                    .selected
+                    .record_namespaces
+                    .values()
+                    .any(|n| *n == namespace)
+            {
+                scopes.push(head.scope);
+            }
+            Ok(())
+        })?;
+        scopes.sort_by(|a, b| a.key_sha256.cmp(&b.key_sha256));
+        Ok(scopes)
+    }
+
     /// Lightweight cancellation evidence only. It issues no new token and does
     /// not validate object history or authorize a handoff/publication. Those
     /// effects still require their complete current snapshot under domain gates.

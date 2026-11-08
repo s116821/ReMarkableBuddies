@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use std::time::Instant;
 mod catalog;
 mod control;
+mod corrections;
+pub(crate) use corrections::run as run_handwriting;
 mod protocol;
 pub(crate) use control::{create_group, CreateGroupRequest, GroupOutcome};
 mod preference_command;
@@ -107,6 +109,8 @@ struct CatalogPending {
     registration: Option<crate::memory::catalog::Registration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     portable: Option<PortableRegistration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    handwriting: Option<HandwritingRegistration>,
     genesis_slot: Option<String>,
     proposal: Option<CatalogProposal>,
 }
@@ -116,11 +120,19 @@ struct PortableRegistration {
     genesis_operation: Uuid,
     genesis_sha256: String,
 }
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HandwritingRegistration {
+    owner: HandwritingOwner,
+    genesis_operation: Uuid,
+    genesis_sha256: String,
+}
 impl CatalogPending {
     fn owner(&self) -> Result<Owner> {
-        match (&self.registration, &self.portable) {
-            (Some(memory), None) => Ok(Owner::Memory(memory.owner.clone())),
-            (None, Some(_)) => Ok(Owner::preferences()),
+        match (&self.registration, &self.portable, &self.handwriting) {
+            (Some(memory), None, None) => Ok(Owner::Memory(memory.owner.clone())),
+            (None, Some(_), None) => Ok(Owner::preferences()),
+            (None, None, Some(correction)) => Ok(Owner::Handwriting(correction.owner)),
             _ => anyhow::bail!("catalog original source is ambiguous"),
         }
     }
@@ -128,9 +140,10 @@ impl CatalogPending {
         self.owner()?.key_sha256()
     }
     fn genesis_operation(&self) -> Result<Uuid> {
-        match (&self.registration, &self.portable) {
-            (Some(memory), None) => Ok(memory.genesis_operation),
-            (None, Some(portable)) => Ok(portable.genesis_operation),
+        match (&self.registration, &self.portable, &self.handwriting) {
+            (Some(memory), None, None) => Ok(memory.genesis_operation),
+            (None, Some(portable), None) => Ok(portable.genesis_operation),
+            (None, None, Some(correction)) => Ok(correction.genesis_operation),
             _ => anyhow::bail!("catalog original source is ambiguous"),
         }
     }

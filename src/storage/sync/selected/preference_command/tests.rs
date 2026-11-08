@@ -586,6 +586,7 @@ fn original_custody_without_selected_data_is_unresolved_rather_than_fresh_absenc
             genesis_operation: original,
             genesis_sha256: digest(b"unresolved original"),
         }),
+        handwriting: None,
         genesis_slot: None,
         proposal: None,
     });

@@ -96,6 +96,7 @@ pub(super) fn discover_registration(
             source_generation: catalog::current_generation(store)?,
             registration: None,
             portable: Some(portable),
+            handwriting: None,
             genesis_slot: None,
             proposal: None,
         }))
@@ -130,6 +131,7 @@ pub(super) fn require_initial_publication(
 
 pub(super) struct Winner {
     scope: SelectionScope,
+    correction: Option<HandwritingOwner>,
     remote: String,
     manifest: Manifest,
     objects: BTreeMap<String, Vec<u8>>,
@@ -141,22 +143,56 @@ impl Winner {
         remote: String,
         manifest: Manifest,
         objects: BTreeMap<String, Vec<u8>>,
+        correction: Option<HandwritingOwner>,
     ) -> Result<Self> {
-        ensure!(valid_digest(&remote), "portable remote descriptor absent");
+        ensure!(valid_digest(&remote), "remote descriptor absent");
+        if correction.is_some() {
+            let generation = catalog::current_generation(store)?;
+            crate::storage::compound_generation::validate_ready(
+                &store.paths,
+                store.actor_id,
+                generation,
+            )?;
+        }
         store.stage_selected_candidate(&manifest, &objects)?;
-        record::project(&scope, &manifest, |reference| {
+        let load = |reference: &ObjectRef| {
             objects
                 .get(&reference.sha256)
                 .cloned()
-                .context("portable incoming original absent")
-        })?;
+                .context("incoming original absent")
+        };
+        if let Some(owner) = correction {
+            ensure!(
+                scope.key_sha256 == owner.domain()?.key_sha256(),
+                "correction scope differs"
+            );
+            corrections::read(owner, &manifest, load)?;
+        } else {
+            record::project(&scope, &manifest, load)?;
+        }
         Ok(Self {
             scope,
+            correction,
             remote,
             manifest,
             objects,
         })
     }
+
+    fn project(
+        &self,
+        store: &Store,
+        manifest: &Manifest,
+        budget: &mut SelectedReadBudget,
+    ) -> Result<()> {
+        if let Some(owner) = self.correction {
+            corrections::project(store, owner, manifest, budget)?;
+        } else {
+            project(store, &self.scope, manifest, budget)?;
+        }
+        Ok(())
+    }
+
     pub(super) fn apply(
         self,
         store: &Arc<Store>,
@@ -165,7 +201,13 @@ impl Winner {
     ) -> Result<SelectionPublication> {
         let admission = SelectedAdmission::new(store.clone(), self.scope.clone())?;
         let _mode = admission.reader_mode_lease()?;
-        SelectedAdmission::with_gates(&[&admission], |store| {
+        let catalog = self
+            .correction
+            .map(|owner| corrections::catalog_gate(store, &self.scope, owner.profile))
+            .transpose()?;
+        let mut gates = vec![&admission];
+        gates.extend(catalog.iter());
+        SelectedAdmission::with_gates(&gates, |store| {
             if let Some(receipt) = store.selected_receipt(&self.scope, operation)? {
                 ensure!(
                     matches!(
@@ -207,26 +249,36 @@ impl Winner {
             );
             let mut retained = vec![];
             if let Some(current) = &current {
-                project(
-                    store,
-                    &self.scope,
-                    &current.transaction.selected,
-                    &mut budget,
-                )?;
+                self.project(store, &current.transaction.selected, &mut budget)?;
                 retained.extend(current.transaction.retained.clone());
                 retained.push(current.transaction.selected.clone());
+                if self.correction.is_some() {
+                    for prior in &current.transaction.retained {
+                        self.project(store, prior, &mut budget)?;
+                    }
+                }
             }
             retained.retain(|prior| {
                 prior
                     .records
                     .iter()
                     .any(|reference| !self.manifest.records.contains(reference))
+                    || prior
+                        .media
+                        .iter()
+                        .any(|reference| !self.manifest.media.contains(reference))
+                    || prior
+                        .media_coverage
+                        .iter()
+                        .any(|coverage| !self.manifest.media_coverage.contains(coverage))
             });
             let mut seen = BTreeSet::new();
             let mut unique = vec![];
             for manifest in retained {
                 if seen.insert(digest(&serde_json::to_vec(&manifest)?)) {
-                    project(store, &self.scope, &manifest, &mut budget)?;
+                    if self.correction.is_none() {
+                        self.project(store, &manifest, &mut budget)?;
+                    }
                     unique.push(manifest);
                 }
             }
