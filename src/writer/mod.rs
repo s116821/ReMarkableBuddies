@@ -118,7 +118,7 @@ impl Request {
         Ok(())
     }
 }
-fn validate_request(request: &str) -> Result<()> {
+pub(crate) fn validate_request(request: &str) -> Result<()> {
     ensure!(
         !request.trim().is_empty() && request.len() <= MAX_REQUEST && !request.contains('\0'),
         "invalid Writer request"

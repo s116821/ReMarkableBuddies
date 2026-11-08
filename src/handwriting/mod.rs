@@ -1,5 +1,14 @@
 //! Explicit confirmed sample data. No recognition, native authority or model training.
 pub mod command;
+mod configuration;
+pub use configuration::Configuration;
+mod context;
+pub(crate) use context::ABSENT_ORIGINAL_INSTRUCTION;
+pub(crate) mod runtime;
+pub(crate) use context::ConfirmedExample;
+pub use context::{
+    ConfirmedContext, ContextFailure, ContextIdentity, ExampleIdentity, ExampleSelection,
+};
 mod provider;
 mod report;
 use crate::storage::{digest, valid_digest, Envelope, Kind, Media, Namespace, Uuid};
@@ -53,7 +62,7 @@ fn parse_id(value: &str) -> std::result::Result<Uuid, &'static str> {
     }
     Ok(id)
 }
-fn id<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<Uuid, D::Error> {
+pub(crate) fn id<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<Uuid, D::Error> {
     parse_id(&String::deserialize(d)?).map_err(D::Error::custom)
 }
 fn heads<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<Vec<Uuid>, D::Error> {
@@ -97,6 +106,7 @@ fn nullable_text<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<Option<
 #[serde(rename_all = "kebab-case")]
 pub enum ProvenanceKind {
     CallerConfirmedSample,
+    CallerConfirmedAfterAbstention,
 }
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -134,7 +144,8 @@ pub struct Correction {
     pub profile: Uuid,
     #[serde(deserialize_with = "id")]
     pub correction: Uuid,
-    pub original_text: String,
+    #[serde(deserialize_with = "nullable_text")]
+    pub original_text: Option<String>,
     pub corrected_text: String,
     pub confirmed_ms: u64,
     pub provenance: Provenance,
@@ -147,10 +158,14 @@ impl Correction {
         if self.profile.is_nil() || self.correction.is_nil() {
             return Err(Failure::InvalidIdentity);
         }
-        if !text(&self.original_text, MAX_TEXT)
-            || !text(&self.corrected_text, MAX_TEXT)
-            || self.confirmed_ms == 0
-        {
+        let original_valid = match (&self.provenance.kind, self.original_text.as_deref()) {
+            (ProvenanceKind::CallerConfirmedSample, Some(value)) => text(value, MAX_TEXT),
+            (ProvenanceKind::CallerConfirmedAfterAbstention, None) => {
+                self.provenance.source.is_some()
+            }
+            _ => false,
+        };
+        if !original_valid || !text(&self.corrected_text, MAX_TEXT) || self.confirmed_ms == 0 {
             return Err(Failure::InvalidText);
         }
         self.provenance.validate()?;
@@ -177,6 +192,7 @@ impl Correction {
         self.profile == other.profile
             && self.correction == other.correction
             && self.original_text == other.original_text
+            && self.provenance.kind == other.provenance.kind
             && self.provenance.source == other.provenance.source
             && self.sample == other.sample
             && self.width == other.width
@@ -325,7 +341,7 @@ pub fn png_dimensions(bytes: &[u8]) -> Result<(u32, u32)> {
     Ok(size)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfirmInput {
     pub handwriting_version: u32,
@@ -338,7 +354,8 @@ pub struct ConfirmInput {
     #[serde(deserialize_with = "heads")]
     pub expected_heads: Vec<Uuid>,
     pub confirmation: String,
-    pub original_text: String,
+    #[serde(deserialize_with = "legacy_original")]
+    pub original_text: Option<String>,
     pub corrected_text: String,
     pub confirmed_ms: u64,
     pub provenance: Provenance,
@@ -435,6 +452,17 @@ pub(crate) fn read_request(input: &mut impl Read) -> Result<Request> {
     })
 }
 pub fn validate_request(request: Request) -> Result<ValidatedInput> {
+    validate_confirmation_request(request, ProvenanceKind::CallerConfirmedSample)
+}
+pub(crate) fn validate_enrollment_request(request: Request) -> Result<ValidatedInput> {
+    validate_confirmation_request(request, ProvenanceKind::CallerConfirmedAfterAbstention)
+}
+fn legacy_original<'de, D: Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Option<String>, D::Error> {
+    String::deserialize(d).map(Some)
+}
+fn validate_confirmation_request(request: Request, kind: ProvenanceKind) -> Result<ValidatedInput> {
     if request.profile().is_nil()
         || request.operation().is_some_and(|id| id.is_nil())
         || (!matches!(&request, Request::Query(_)) && request.record().is_none())
@@ -465,6 +493,9 @@ pub fn validate_request(request: Request) -> Result<ValidatedInput> {
     }
     let (correction, sample) = match &request {
         Request::Confirm(v) | Request::Update(v) => {
+            if v.provenance.kind != kind {
+                return Err(Failure::InvalidProvenance);
+            }
             if v.confirmation != "user-confirmed" {
                 return Err(Failure::InvalidConfirmation);
             }

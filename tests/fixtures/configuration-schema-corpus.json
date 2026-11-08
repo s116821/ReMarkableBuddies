@@ -354,6 +354,55 @@
       "raw_utf8": "{\"reader\":{\"selection\":{\"group\":\"00000000-0000-0000-0000-000000000001\",\"key_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"binding_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"sync\":{\"enabled\":true}}",
       "schema_valid": true,
       "typed_valid": false
+    },
+    {
+      "name": "handwriting-enabled",
+      "raw_utf8": "{\"handwriting\":{\"enabled\":true,\"profile\":\"00000000-0000-4000-8000-000000000010\"}}",
+      "schema_valid": true,
+      "typed_valid": true,
+      "basis": "structural"
+    },
+    {
+      "name": "handwriting-disabled",
+      "raw_utf8": "{\"handwriting\":{\"enabled\":false,\"profile\":null}}",
+      "schema_valid": true,
+      "typed_valid": true,
+      "basis": "structural"
+    },
+    {
+      "name": "handwriting-null",
+      "raw_utf8": "{\"handwriting\":null}",
+      "schema_valid": false,
+      "typed_valid": false,
+      "basis": "structural"
+    },
+    {
+      "name": "handwriting-array",
+      "raw_utf8": "{\"handwriting\":[]}",
+      "schema_valid": false,
+      "typed_valid": false,
+      "basis": "structural"
+    },
+    {
+      "name": "handwriting-profile-required",
+      "raw_utf8": "{\"handwriting\":{\"enabled\":true}}",
+      "schema_valid": true,
+      "typed_valid": false,
+      "basis": "semantic"
+    },
+    {
+      "name": "handwriting-nil",
+      "raw_utf8": "{\"handwriting\":{\"enabled\":false,\"profile\":\"00000000-0000-0000-0000-000000000000\"}}",
+      "schema_valid": true,
+      "typed_valid": false,
+      "basis": "semantic"
+    },
+    {
+      "name": "handwriting-sync",
+      "raw_utf8": "{\"handwriting\":{\"enabled\":true,\"profile\":\"00000000-0000-4000-8000-000000000010\"},\"sync\":{\"enabled\":true}}",
+      "schema_valid": true,
+      "typed_valid": false,
+      "basis": "semantic"
     }
   ]
 }
