@@ -2,7 +2,7 @@
 use super::*;
 use crate::handwriting::{self, selected::Projection};
 use crate::memory::catalog::Identity;
-use crate::storage::selection::{SelectedReadBudget, SelectionMutation};
+use crate::storage::selection::{SelectedReadBudget, SelectedReadSnapshot, SelectionMutation};
 pub(super) mod command;
 mod query;
 pub(crate) use command::run;
@@ -72,6 +72,17 @@ fn original(
     let Some(snapshot) = store.selected_snapshot_with_budget(scope, MAX_ITEMS, budget)? else {
         return Ok(None);
     };
+    original_from_read(store, &snapshot, profile, root, budget)
+}
+
+fn original_from_read(
+    store: &Store,
+    snapshot: &SelectedReadSnapshot,
+    profile: Uuid,
+    root: &str,
+    budget: &mut SelectedReadBudget,
+) -> Result<Option<HandwritingRegistration>> {
+    let scope = snapshot.snapshot.token.scope();
     let genesis = snapshot
         .accepted_history
         .last()
@@ -105,6 +116,51 @@ fn original(
         genesis_operation: transaction.operation,
         genesis_sha256: genesis.sha256.clone(),
     }))
+}
+
+/// Verify the selected read against the accepted Worker receipt or the exact
+/// locally authored genesis before projecting a current correction.
+fn current_projection(
+    store: &Store,
+    owner: HandwritingOwner,
+    read: &SelectedReadSnapshot,
+    root: &str,
+    progress: Option<&Progress>,
+    budget: &mut SelectedReadBudget,
+) -> Result<Projection> {
+    let token = &read.snapshot.token;
+    ensure!(
+        token.scope().key_sha256 == owner.domain()?.key_sha256(),
+        "correction scope differs"
+    );
+    if let Some(applied) = progress.and_then(|progress| progress.applied.as_ref()) {
+        ensure!(
+            token.accepted_base_sha256() == applied.descriptor,
+            "correction applied base differs"
+        );
+        let receipt = read
+            .accepted_history
+            .iter()
+            .find(|entry| entry.transaction.operation == applied.operation)
+            .context("correction applied receipt absent")?;
+        ensure!(
+            matches!(
+                receipt.transaction.mutation,
+                SelectionMutation::Initialize | SelectionMutation::Activate
+            ) && receipt.transaction.accepted_base_sha256 == applied.descriptor
+                && receiving::membership(&receipt.transaction.selected)? == applied.membership,
+            "correction applied receipt differs"
+        );
+    } else {
+        let original = original_from_read(store, read, owner.profile, root, budget)?
+            .context("correction local original absent")?;
+        ensure!(
+            original.owner == owner
+                && token.accepted_base_sha256() == genesis_base(root, &token.scope().key_sha256),
+            "correction local base or owner differs"
+        );
+    }
+    project(store, owner, &read.snapshot.transaction.selected, budget)
 }
 
 pub(super) fn require_initial_publication(

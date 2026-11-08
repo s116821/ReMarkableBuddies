@@ -300,6 +300,32 @@ fn selected_handwriting_profile_query_applies_match_and_report_limits_across_sco
     assert_eq!(bounded.status, handwriting::Status::Partial);
     assert!(bounded.facts.is_empty());
     assert!(serde_json::to_vec(&bounded).unwrap().len() < 512);
+
+    let replaced =
+        f.b.selected_snapshot(&second_scope, MAX_ITEMS)
+            .unwrap()
+            .unwrap();
+    f.b.activate_selected(
+        &replaced.token,
+        crate::storage::selection::SelectionChange {
+            operation: Uuid::new_v4(),
+            accepted_base_sha256: digest(b"unverified replacement descriptor"),
+            selected: replaced.transaction.selected,
+            retained: replaced.transaction.retained,
+        },
+        BTreeMap::new(),
+    )
+    .unwrap();
+    let after = f.command(&f.b, &profile_query(f.owner.profile, Some("1O")), true);
+    assert_eq!(after.status, handwriting::Status::Partial);
+    assert_eq!(after.diagnostics.unsupported, 1);
+    assert_eq!(after.facts.len(), 1);
+    let inspect = json!({"handwriting_version": 1, "command": "inspect",
+        "profile": second.profile, "correction": second.correction});
+    assert_eq!(
+        f.command(&f.b, &inspect, false).failure,
+        Some(Failure::StoreUnavailable)
+    );
 }
 
 #[test]

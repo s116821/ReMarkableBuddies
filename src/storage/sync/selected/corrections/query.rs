@@ -155,32 +155,7 @@ fn current_fact(
     let read = store
         .selected_snapshot_with_budget(scope, MAX_ITEMS, reads)?
         .context("registered correction unreceived")?;
-    if let Some(applied) = progress.and_then(|progress| progress.applied.as_ref()) {
-        ensure!(
-            read.snapshot.token.accepted_base_sha256() == applied.descriptor,
-            "correction applied base differs"
-        );
-        let receipt = read
-            .accepted_history
-            .iter()
-            .find(|entry| entry.transaction.operation == applied.operation)
-            .context("correction applied receipt absent")?;
-        ensure!(
-            matches!(
-                receipt.transaction.mutation,
-                SelectionMutation::Initialize | SelectionMutation::Activate
-            ) && receipt.transaction.accepted_base_sha256 == applied.descriptor
-                && receiving::membership(&receipt.transaction.selected)? == applied.membership,
-            "correction applied receipt differs"
-        );
-    } else {
-        require_initial_publication(store, scope, owner, root, reads)?;
-        ensure!(
-            read.snapshot.token.accepted_base_sha256() == genesis_base(root, &scope.key_sha256),
-            "correction local base differs"
-        );
-    }
-    let projection = project(store, owner, &read.snapshot.transaction.selected, reads)?;
+    let projection = current_projection(store, owner, &read, root, progress, reads)?;
     let Some(value) = projection.current().cloned() else {
         return Ok(None);
     };

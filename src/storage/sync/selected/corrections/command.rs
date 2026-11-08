@@ -198,7 +198,10 @@ impl Admission<'_> {
         }
         if let Some(snapshot) = snapshot {
             let view = view.as_ref().ok_or(Failure::StoreUnavailable)?;
-            let projection = self.current(&snapshot, view, &mut budget)?;
+            let progress = checkpoint
+                .as_ref()
+                .and_then(|cp| cp.scopes.get(&self.scope.key_sha256));
+            let projection = self.current(&snapshot, view, progress, &mut budget)?;
             if let Some(mutation) = mutation {
                 mutation.check_predecessor(Some(&projection))?;
                 let operation = mutation.envelope().operation_id;
@@ -309,24 +312,18 @@ impl Admission<'_> {
         &self,
         read: &SelectedReadSnapshot,
         view: &CatalogView,
+        progress: Option<&Progress>,
         budget: &mut SelectedReadBudget,
     ) -> handwriting::Result<Projection> {
-        if !view.entries.contains_key(&self.scope.key_sha256) {
-            local(require_initial_publication(
-                self.store,
-                &self.scope,
-                self.owner,
-                &view.root_sha,
-                budget,
-            ))?;
-        }
         for retained in &read.snapshot.transaction.retained {
             local(project(self.store, self.owner, retained, budget))?;
         }
-        local(project(
+        local(current_projection(
             self.store,
             self.owner,
-            &read.snapshot.transaction.selected,
+            read,
+            &view.root_sha,
+            progress.filter(|_| view.entries.contains_key(&self.scope.key_sha256)),
             budget,
         ))
     }
