@@ -628,8 +628,17 @@ impl Store {
     fn validate_objects_policy(
         root: &Path,
         manifest: &Manifest,
+        budget: Option<&mut selection::SelectedReadBudget>,
+        notebook_archive_actor: Option<Uuid>,
+    ) -> Result<Vec<(Envelope, String)>> {
+        Self::validate_objects_archive(root, manifest, budget, notebook_archive_actor, None)
+    }
+    fn validate_objects_archive(
+        root: &Path,
+        manifest: &Manifest,
         mut budget: Option<&mut selection::SelectedReadBudget>,
         notebook_archive_actor: Option<Uuid>,
+        target_archive: Option<&recovery::notebook_backup::TargetArchiveContext<'_>>,
     ) -> Result<Vec<(Envelope, String)>> {
         manifest.validate()?;
         Self::validate_namespace_family(root, manifest)?;
@@ -667,7 +676,15 @@ impl Store {
                 .map_err(|_| anyhow::anyhow!("invalid or unsupported stored JSON"))?;
             envelope.validate()?;
             if envelope.domain_schema_version == crate::conversation::target::SCHEMA {
-                target_generation::validate_ready_root(root)?;
+                if let Some(archive) = target_archive {
+                    archive.validate_record(root, &envelope)?;
+                } else {
+                    ensure!(
+                        notebook_archive_actor.is_none(),
+                        "target records require explicit archive format6"
+                    );
+                    target_generation::validate_ready_root(root)?;
+                }
             }
             if envelope.namespace == Namespace::PortableConfiguration {
                 ensure!(

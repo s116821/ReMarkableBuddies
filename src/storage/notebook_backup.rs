@@ -19,6 +19,39 @@ struct NotebookBackup {
     objects: Vec<ObjectRef>,
     complete_media: bool,
     config_snapshot: Option<crate::config::Config>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_target_feature"
+    )]
+    target_feature: Option<target_generation::ArchiveOrigin>,
+}
+fn present_target_feature<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<target_generation::ArchiveOrigin>, D::Error> {
+    // An explicit null must not expand legacy format4's deny-unknown admission.
+    Ok(Some(target_generation::ArchiveOrigin::deserialize(
+        deserializer,
+    )?))
+}
+/// Only a validated closed format6 header can construct this detached context.
+/// No neighboring marker/capabilities file supplies domain4 authority.
+pub(in crate::storage) struct TargetArchiveContext<'a> {
+    archive: &'a NotebookBackup,
+    root: &'a Path,
+}
+impl TargetArchiveContext<'_> {
+    pub(in crate::storage) fn validate_record(
+        &self,
+        root: &Path,
+        envelope: &Envelope,
+    ) -> Result<()> {
+        ensure!(
+            root == self.root && envelope.actor_id == self.archive.origin_actor,
+            "target archive record origin differs"
+        );
+        Ok(())
+    }
 }
 impl NotebookBackup {
     fn build(
@@ -27,7 +60,7 @@ impl NotebookBackup {
         actor: Uuid,
         generation: Uuid,
         manifests: Vec<Manifest>,
-        budget: Option<&mut selection::SelectedReadBudget>,
+        mut budget: Option<&mut selection::SelectedReadBudget>,
     ) -> Result<Self> {
         let mut inventory = BTreeMap::new();
         for manifest in &manifests {
@@ -48,6 +81,11 @@ impl NotebookBackup {
                 .all(|coverage| inventory.contains_key(coverage.hash())),
             "incomplete notebook backup"
         );
+        if let Some(reads) = budget.as_deref_mut() {
+            // Fixed readiness/origin reads retain the command's original allowance.
+            reads.charge(0, 16, 16 * MAX_RECORD as u64, 0)?;
+        }
+        let target_feature = target_generation::archive_origin(root, actor, generation)?;
         let snapshot = paths.data.join("config.snapshot.json");
         let config_snapshot = if budget.is_some() {
             match command::regular_if_present(&snapshot)? {
@@ -65,7 +103,7 @@ impl NotebookBackup {
             config.validate()?;
         }
         Ok(Self {
-            format: 4,
+            format: if target_feature.is_some() { 6 } else { 4 },
             origin_actor: actor,
             origin_generation: generation,
             notebook_feature: 1,
@@ -75,6 +113,7 @@ impl NotebookBackup {
             objects: inventory.into_values().collect(),
             complete_media: true,
             config_snapshot,
+            target_feature,
         })
     }
 
@@ -96,15 +135,28 @@ impl NotebookBackup {
     }
 
     fn admit_format(self) -> Result<Self> {
-        let value = self;
+        self.validate_format()?;
+        Ok(self)
+    }
+    fn validate_format(&self) -> Result<()> {
         ensure!(
-            value.format == 4
-                && value.notebook_feature == 1
-                && !value.origin_actor.is_nil()
-                && !value.origin_generation.is_nil(),
+            self.notebook_feature == 1
+                && !self.origin_actor.is_nil()
+                && !self.origin_generation.is_nil(),
             "unsupported notebook backup"
         );
-        Ok(value)
+        match (self.format, &self.target_feature) {
+            (4, None) => Ok(()),
+            (6, Some(origin)) => origin.validate(self.origin_actor, self.origin_generation),
+            _ => anyhow::bail!("unsupported notebook backup"),
+        }
+    }
+    fn target_context<'a>(&'a self, root: &'a Path) -> Result<Option<TargetArchiveContext<'a>>> {
+        self.validate_format()?;
+        Ok(self.target_feature.as_ref().map(|_| TargetArchiveContext {
+            archive: self,
+            root,
+        }))
     }
     fn inspect(&self, source: &Path) -> Result<BackupInspection> {
         self.inspect_with_budget(source, None)
@@ -114,6 +166,7 @@ impl NotebookBackup {
         source: &Path,
         mut budget: Option<&mut selection::SelectedReadBudget>,
     ) -> Result<BackupInspection> {
+        let target_context = self.target_context(source)?;
         if let Some(config) = &self.config_snapshot {
             config.validate_values()?;
         }
@@ -169,13 +222,14 @@ impl NotebookBackup {
                     ensure!(bytes <= MAX_METADATA as u64, "notebook metadata bound");
                 }
             }
-            // This authority comes only from validated format4 metadata, never
-            // from arbitrary files a legacy archive could plant beside objects.
-            for (record, hash) in Store::validate_objects_policy(
+            // Authority is the closed validated archive header, never a planted
+            // neighboring owner file. Legacy format4 keeps its existing policy.
+            for (record, hash) in Store::validate_objects_archive(
                 source,
                 manifest,
                 budget.as_deref_mut(),
                 Some(self.origin_actor),
+                target_context.as_ref(),
             )? {
                 if record.namespace == Namespace::UnassociatedFeedback {
                     ensure!(
@@ -197,6 +251,7 @@ impl NotebookBackup {
         );
         let records = records.into_values().collect::<Vec<_>>();
         Store::can_apply(&Index::default(), &records)?;
+        target_generation::validate_records(&Index::default(), &records, &self.objects)?;
         notebook_generation::validate_records_with_budget(
             source,
             &Index::default(),
@@ -213,7 +268,7 @@ impl NotebookBackup {
             "incomplete notebook backup"
         );
         Ok(BackupInspection {
-            format: 4,
+            format: self.format,
             manifests: self.manifests.len(),
             objects: self.objects.len(),
             selected_scopes: 0,
@@ -400,3 +455,7 @@ impl Store {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "notebook_backup/target_archive_tests.rs"]
+mod target_archive_tests;
