@@ -1,0 +1,8 @@
+{
+  "mode": "combined-qualification",
+  "historical_source": "resident-fixture-v1",
+  "llm": {
+    "mode": "scripted"
+  },
+  "output": "../../../target/simulator/combined-qualification-resident"
+}

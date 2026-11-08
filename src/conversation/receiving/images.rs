@@ -3,13 +3,16 @@ use crate::{
     conversation::{ContextView, Ledger},
     storage::{Media, ObjectRef, Uuid},
 };
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
 const MAX_IMAGES: usize = 12;
 const MAX_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_RESIDENT_PROOF_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_RESIDENT_PROOF_PIXELS: u64 =
+    MAX_IMAGES as u64 * remarkable_open_sdk::native_adapter::MAX_CAPTURE_PIXELS;
 
 #[derive(Clone, Default)]
 pub(crate) struct Images {
@@ -76,13 +79,67 @@ pub(crate) fn resolve(ledger: &Ledger, context: &ContextView) -> Result<Images> 
                 .collect(),
         );
     }
+    let resident: BTreeMap<_, _> = context
+        .resident_captures
+        .iter()
+        .map(|capture| (capture.id, capture))
+        .collect();
+    for capture in resident.values() {
+        capture.validate()?;
+        by_source.insert(
+            capture.id,
+            capture
+                .images
+                .iter()
+                .map(|image| {
+                    (
+                        image.provider_ordinal,
+                        image.media.clone(),
+                        image.dimensions,
+                    )
+                })
+                .collect(),
+        );
+    }
 
     let mut by_digest = BTreeMap::new();
     let mut total = 0;
     let mut admitted: Vec<(Media, [u32; 2])> = Vec::new();
     let mut associations = Vec::new();
+    let mut resident_proofs = Vec::new();
+    let mut proof_bytes = 0u64;
+    let mut proof_pixels = 0u64;
     for source in context.turns.iter().flat_map(|turn| &turn.sources) {
         if let Some(images) = by_source.remove(source) {
+            if let Some(capture) = resident.get(source) {
+                ensure!(
+                    resident_proofs.len() < MAX_IMAGES,
+                    "historical resident proof count exceeded"
+                );
+                for media in std::iter::once(&capture.original_png)
+                    .chain(capture.images.iter().map(|image| &image.media))
+                {
+                    proof_bytes = proof_bytes
+                        .checked_add(media.bytes)
+                        .context("historical resident proof byte overflow")?;
+                    ensure!(
+                        proof_bytes <= MAX_RESIDENT_PROOF_BYTES,
+                        "historical resident proof byte bound exceeded"
+                    );
+                }
+                let [width, height] = capture.original_dimensions;
+                let pixels = u64::from(width)
+                    .checked_mul(u64::from(height))
+                    .context("historical resident pixel work overflow")?;
+                proof_pixels = proof_pixels
+                    .checked_add(pixels)
+                    .context("historical resident pixel work overflow")?;
+                ensure!(
+                    proof_pixels <= MAX_RESIDENT_PROOF_PIXELS,
+                    "historical resident pixel work exceeded"
+                );
+                resident_proofs.push(*capture);
+            }
             for (ordinal, media, dimensions) in images {
                 ensure!(
                     media.media_type == "image/png",
@@ -119,13 +176,35 @@ pub(crate) fn resolve(ledger: &Ledger, context: &ContextView) -> Result<Images> 
             }
         }
     }
+    // Descriptor/count/byte/pixel admission above completes before any object
+    // read or decode. This is one cumulative request allowance, counting repeat
+    // proof work even when the final provider attachments deduplicate.
+    let mut verified_resident = BTreeMap::new();
+    for capture in resident_proofs {
+        let verified = Ledger::resident_images_from_evidence(capture.clone(), |media| {
+            ledger.store().read_object(&ObjectRef {
+                sha256: media.sha256.clone(),
+                bytes: media.bytes,
+            })
+        })?;
+        for (image, bytes) in capture.images.iter().zip(verified.images) {
+            verified_resident
+                .entry(image.media.sha256.clone())
+                .or_insert(bytes);
+        }
+        // The validated original stays provenance only. Retain the actual
+        // returned derivatives through attachment rather than rereading a head.
+    }
     let attachments = admitted
         .into_iter()
         .map(|(media, [width, height])| {
-            let bytes = ledger.store().read_object(&ObjectRef {
-                sha256: media.sha256.clone(),
-                bytes: media.bytes,
-            })?;
+            let bytes = match verified_resident.remove(&media.sha256) {
+                Some(bytes) => bytes,
+                None => ledger.store().read_object(&ObjectRef {
+                    sha256: media.sha256.clone(),
+                    bytes: media.bytes,
+                })?,
+            };
             Ledger::validate_image_bytes(&media, &bytes, width, height)?;
             Ok(STANDARD.encode(bytes))
         })
