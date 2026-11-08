@@ -434,24 +434,41 @@ fn run_owned_with_memory<E: LLMEngine>(
         ledger,
         engine,
         request,
-        personalization,
-        memory,
+        ReceivingPreferences {
+            personalization,
+            memory,
+        },
         canceled,
         control,
         None,
     )
 }
+struct ReceivingPreferences<'a> {
+    personalization: &'a PersonalizationSnapshot,
+    memory: Option<&'a dyn crate::memory::Provider>,
+}
 fn run_owned_source<E: LLMEngine>(
     ledger: &Ledger,
     engine: &mut E,
     request: &Request,
-    personalization: &PersonalizationSnapshot,
-    memory: Option<&dyn crate::memory::Provider>,
+    preferences: ReceivingPreferences<'_>,
     canceled: &mut dyn FnMut() -> bool,
     control: OwnedRun<'_, '_>,
     regional: Option<crate::conversation::target::RegionSource>,
 ) -> Report {
+    let ReceivingPreferences {
+        personalization,
+        memory,
+    } = preferences;
     let operation_started = Instant::now();
+    let mut policy_reads = crate::storage::selection::SelectedReadBudget::new(
+        0,
+        16384,
+        crate::storage::MAX_RECORD as u64 * 4096,
+        0,
+    );
+    let mode_pin = ledger.store().sync_mode_snapshot().map(|m| m.token);
+    let ready_pin = ledger.store().target_runtime_pin(&mut policy_reads);
     if !std::ptr::eq(control.owner.0, ledger.store().as_ref()) {
         return Report::refused(request, Failure::Storage);
     }
@@ -539,7 +556,7 @@ fn run_owned_source<E: LLMEngine>(
         };
         let mut payload = serde_json::json!({"history":history.turns,"request":text,"explicit_guidance":source.guidance,"source_provenance":{"document":source.document.document,"source_sha256":source.document.source_sha256,"extractor_revision":source.document.extractor_revision,"normalized_sha256":digest(&serde_json::to_vec(&source.document.units)?),"selection":source.selection,"coverage":"all selected supplied units; original notebook completeness unverified"},"source_units":source.selected(),"selected_draft":prior.as_ref().and_then(|t|t.text.as_deref())});
         if let Some(region) = &source.region {
-            payload["source_provenance"] = serde_json::json!({"coverage":"all text recognized from exact masked region; unverified", "region":region});
+            payload["source_provenance"] = serde_json::json!({"coverage":"all text recognized from exact masked region; unverified", "source_units_page_labels":"Regional normalization canvas labels only, not physical notebook page numbers", "region":region});
         }
         if !history.region_sources.is_empty() {
             payload["regional_sources"] = serde_json::to_value(&history.region_sources)?;
@@ -613,6 +630,26 @@ fn run_owned_source<E: LLMEngine>(
         {
             was_canceled = true;
             anyhow::bail!("Writer canceled")
+        }
+        if ledger
+            .store()
+            .check_runtime_policy(&mut policy_reads)
+            .is_err()
+            || !mode_pin.as_ref().is_ok_and(|token| {
+                ledger
+                    .store()
+                    .sync_mode_snapshot()
+                    .is_ok_and(|m| m.token == *token)
+            })
+            || !ready_pin.as_ref().is_ok_and(|pin| {
+                ledger
+                    .store()
+                    .target_runtime_pin(&mut policy_reads)
+                    .is_ok_and(|current| current == *pin)
+            })
+        {
+            was_stale = true;
+            anyhow::bail!("Writer original policy changed");
         }
         if !ledger
             .writer_preparation_current(conversation, &prepared)

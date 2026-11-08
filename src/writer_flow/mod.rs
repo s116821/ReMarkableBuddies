@@ -271,8 +271,10 @@ pub(crate) fn run_with_events<E: LLMEngine>(
         request,
         preference,
         canceled,
-        events,
-        None,
+        FlowContext {
+            events,
+            regional: None,
+        },
     )
 }
 /// Regional recognition owns its original two-stage300s window. The existing
@@ -300,9 +302,15 @@ pub fn run_regional<E: LLMEngine>(
         request,
         &preference,
         canceled,
-        &mut |_, _| {},
-        Some((config, model_profile)),
+        FlowContext {
+            events: &mut |_, _| {},
+            regional: Some((config, model_profile)),
+        },
     )
+}
+struct FlowContext<'a, 'b> {
+    events: &'a mut Events<'b>,
+    regional: Option<(&'a crate::config::Config, &'a str)>,
 }
 fn run_with_configuration<E: LLMEngine>(
     ledger: &Ledger,
@@ -311,9 +319,9 @@ fn run_with_configuration<E: LLMEngine>(
     request: &Request,
     preference: &PersonalizationSnapshot,
     canceled: watch::Receiver<bool>,
-    events: &mut Events<'_>,
-    regional: Option<(&crate::config::Config, &str)>,
+    context: FlowContext<'_, '_>,
 ) -> Report {
+    let FlowContext { events, regional } = context;
     let started = std::time::Instant::now();
     let mut result = Report::refused(request, Failure::Storage);
     if request.preflight().is_err() {
@@ -442,13 +450,15 @@ fn run_with_configuration<E: LLMEngine>(
         let mut produced = None;
         let generated = writer::target::run_owned(
             ledger,
-            config,
             engine,
             &target.with_root(grant.root.clone()),
-            profile,
             &mut || *canceled.borrow(),
-            &writer_owner,
-            started + std::time::Duration::from_secs(300),
+            writer::target::TargetRun {
+                config,
+                model_profile: profile,
+                owner: &writer_owner,
+                deadline: started + std::time::Duration::from_secs(300),
+            },
             &mut produced,
         );
         let status = generated.status;

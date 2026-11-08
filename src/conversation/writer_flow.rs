@@ -304,6 +304,8 @@ pub(crate) struct WriterExportGuard {
     heads: Vec<(Namespace, Uuid, Uuid)>,
     archive: Option<Box<ArchivedNormalizedSource>>,
     regional_media: Vec<Media>,
+    ready_pin: Option<String>,
+    mode_pin: crate::storage::sync::mode::SyncModeToken,
     regional_reads: std::sync::Mutex<crate::storage::selection::SelectedReadBudget>,
     live: Arc<Store>,
 }
@@ -329,6 +331,15 @@ impl WriterExportGuard {
                 archive = Some(source);
             }
         }
+        let mut reads = crate::storage::selection::SelectedReadBudget::new(
+            0,
+            4096,
+            crate::storage::MAX_RECORD as u64 * 1024,
+            256 * 1024 * 1024,
+        );
+        live.check_runtime_policy(&mut reads)?;
+        let ready_pin = live.target_runtime_pin(&mut reads)?;
+        let mode_pin = live.sync_mode_snapshot()?.token;
         Ok(Self {
             heads: std::iter::once(root)
                 .chain(records)
@@ -336,9 +347,9 @@ impl WriterExportGuard {
                 .collect(),
             archive,
             regional_media,
-            regional_reads: std::sync::Mutex::new(
-                crate::storage::selection::SelectedReadBudget::new(0, 32, 0, 256 * 1024 * 1024),
-            ),
+            regional_reads: std::sync::Mutex::new(reads),
+            ready_pin,
+            mode_pin,
             live,
         })
     }
@@ -358,6 +369,12 @@ impl WriterExportGuard {
             .regional_reads
             .lock()
             .map_err(|_| anyhow::anyhow!("regional export media allowance unavailable"))?;
+        self.live.check_runtime_policy(&mut reads)?;
+        if self.live.target_runtime_pin(&mut reads)? != self.ready_pin
+            || self.live.sync_mode_snapshot()?.token != self.mode_pin
+        {
+            return Ok(false);
+        }
         for media in &self.regional_media {
             reads.charge(0, 1, 0, media.bytes)?;
             if ledger

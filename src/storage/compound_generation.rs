@@ -361,6 +361,7 @@ impl Store {
         let current = custody.generation;
         let mut store = Self {
             paths: custody.paths,
+            runtime_policy: None,
             actor_id: custody.actor,
             _lease: custody.lease,
             inner: Mutex::new(Inner {

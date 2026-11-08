@@ -5,6 +5,9 @@ use std::sync::{Arc, Weak};
 pub(crate) struct SourceFrame {
     store: Weak<Store>,
     generation: Uuid,
+    mode_pin: crate::storage::sync::mode::SyncModeToken,
+    ready_pin: Option<String>,
+    checks: std::sync::Mutex<crate::storage::selection::SelectedReadBudget>,
     state_heads: ExpectedHeads,
     pub(super) root: ExpectedHeads,
     pub(super) source: RetainedSourceRef,
@@ -118,6 +121,17 @@ impl SourceFrame {
             store.source_target_generation()? == Some(self.generation),
             "target generation changed"
         );
+        let mut reads = self
+            .checks
+            .lock()
+            .map_err(|_| anyhow::anyhow!("target original check allowance unavailable"))?;
+        store.check_runtime_policy(&mut reads)?;
+        ensure!(
+            store.target_runtime_pin(&mut reads)? == self.ready_pin
+                && store.sync_mode_snapshot()?.token == self.mode_pin,
+            "target ready policy or mode changed"
+        );
+        drop(reads);
         let heads = store
             .heads(Namespace::Conversation, self.conversation)?
             .iter()
@@ -230,7 +244,18 @@ impl Ledger {
             digest(&original) == source.original.sha256,
             "target original bytes differ"
         );
+        let mut reads = crate::storage::selection::SelectedReadBudget::new(
+            0,
+            32768,
+            crate::storage::MAX_RECORD as u64 * 8192,
+            0,
+        );
+        self.store.check_runtime_policy(&mut reads)?;
+        let ready_pin = self.store.target_runtime_pin(&mut reads)?;
         let frame = SourceFrame {
+            mode_pin: self.store.sync_mode_snapshot()?.token,
+            ready_pin,
+            checks: std::sync::Mutex::new(reads),
             store: Arc::downgrade(self.store()),
             generation,
             state_heads: self.expected(Namespace::Conversation, TargetState::id(conversation))?,
@@ -564,11 +589,13 @@ pub(crate) mod tests {
     }
     pub(crate) fn fixture() -> (Fixture, Ledger, Uuid, Uuid) {
         let f = Fixture(std::env::temp_dir().join(format!("rmb-target-{}", Uuid::new_v4())));
-        let mut config = Config::default();
-        config.paths = crate::storage::StorePaths {
-            data: f.0.join("data"),
-            cache: f.0.join("cache"),
-            credentials: f.0.join("secrets"),
+        let config = Config {
+            paths: crate::storage::StorePaths {
+                data: f.0.join("data"),
+                cache: f.0.join("cache"),
+                credentials: f.0.join("secrets"),
+            },
+            ..Default::default()
         };
         let ledger = Ledger::new(Arc::new(
             Store::open_source_target_startup(&config).unwrap(),
@@ -842,6 +869,49 @@ pub(crate) mod tests {
             "original capture and two target scopes retain associations"
         );
     }
+    #[test]
+    fn target_frame_pins_raw_loaded_config_and_ready_capabilities_across_own_root_updates() {
+        let (f, ledger, c, source) = fixture();
+        let config = crate::config::Config {
+            paths: ledger.store().paths.clone(),
+            ..Default::default()
+        };
+        let path = f.0.join("config.json");
+        let bytes = serde_json::to_vec(&config).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        drop(ledger);
+        let loaded = crate::config::Config::load(Some(path.clone())).unwrap();
+        assert_eq!(
+            serde_json::to_value(&loaded).unwrap(),
+            serde_json::to_value(&config).unwrap(),
+            "runtime file pins never change serialized configuration"
+        );
+        let ledger = Ledger::new(Arc::new(
+            Store::open_source_target_startup(&loaded).unwrap(),
+        ));
+        let frame = ledger.target_source_frame(c, source).unwrap();
+        frame.check_current().unwrap();
+        let mut changed = bytes.clone();
+        changed.extend_from_slice(b" ");
+        std::fs::write(&path, &changed).unwrap();
+        assert!(
+            frame.check_current().is_err(),
+            "even semantically equal changed Config bytes must lose original correspondence"
+        );
+        std::fs::write(&path, &bytes).unwrap();
+        frame.check_current().unwrap();
+        let capabilities = loaded.paths.data.join("capabilities.json");
+        let original = std::fs::read(&capabilities).unwrap();
+        let mut changed = original.clone();
+        changed.push(b' ');
+        std::fs::write(&capabilities, &changed).unwrap();
+        assert!(
+            frame.check_current().is_err(),
+            "ready capability mutation must not be ignored until reopen"
+        );
+        std::fs::write(&capabilities, original).unwrap();
+        frame.check_current().unwrap();
+    }
 }
 
 impl Ledger {
@@ -1092,41 +1162,43 @@ impl Ledger {
         // One cumulative proof allowance, charged before each actual media read.
         let mut remaining = 64 * 1024 * 1024u64;
         let mut objects = 0usize;
-        let mut load = |media: &Media| -> Result<Vec<u8>> {
-            progress()?;
-            objects = objects
-                .checked_add(1)
-                .context("regional media work overflow")?;
-            remaining = remaining
-                .checked_sub(media.bytes)
-                .context("regional media proof byte bound")?;
-            ensure!(objects <= 16, "regional media proof object bound");
-            self.store.read_object(&ObjectRef {
-                sha256: media.sha256.clone(),
-                bytes: media.bytes,
-            })
+        let (original, derived) = {
+            let mut load = |media: &Media| -> Result<Vec<u8>> {
+                progress()?;
+                objects = objects
+                    .checked_add(1)
+                    .context("regional media work overflow")?;
+                remaining = remaining
+                    .checked_sub(media.bytes)
+                    .context("regional media proof byte bound")?;
+                ensure!(objects <= 16, "regional media proof object bound");
+                self.store.read_object(&ObjectRef {
+                    sha256: media.sha256.clone(),
+                    bytes: media.bytes,
+                })
+            };
+            let original = match view.source {
+                Record::Source(_) => load(&region.original)?,
+                Record::ResidentCapture(v) => {
+                    Self::resident_images_from_evidence(*v, &mut load)?.original_png
+                }
+                Record::DevelopmentCapture(v) => {
+                    Self::development_images_from_evidence(*v, &mut load)?.original_png
+                }
+                Record::Capture(v) => {
+                    Self::sdk_images_from_evidence(*v, &mut load)?
+                        .native_parent
+                        .bytes
+                }
+                Record::LegacyCapture(v) => {
+                    let bytes = Self::legacy_images_from_evidence(v, &mut load)?;
+                    bytes.parent.unwrap_or_else(|| bytes.images[0].clone())
+                }
+                _ => bail!("regional original is not a capture"),
+            };
+            let derived = load(&region.derived)?;
+            (original, derived)
         };
-        let original = match view.source {
-            Record::Source(_) => load(&region.original)?,
-            Record::ResidentCapture(v) => {
-                Self::resident_images_from_evidence(*v, &mut load)?.original_png
-            }
-            Record::DevelopmentCapture(v) => {
-                Self::development_images_from_evidence(*v, &mut load)?.original_png
-            }
-            Record::Capture(v) => {
-                Self::sdk_images_from_evidence(*v, &mut load)?
-                    .native_parent
-                    .bytes
-            }
-            Record::LegacyCapture(v) => {
-                let bytes = Self::legacy_images_from_evidence(v, &mut load)?;
-                bytes.parent.unwrap_or_else(|| bytes.images[0].clone())
-            }
-            _ => bail!("regional original is not a capture"),
-        };
-        let derived = load(&region.derived)?;
-        drop(load);
         let geometry = view
             .target
             .candidate

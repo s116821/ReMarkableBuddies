@@ -35,11 +35,13 @@ impl SimulatorLedger {
         )))
     }
     fn open_targets(&self) -> Result<crate::conversation::Ledger> {
-        let mut config = crate::config::Config::default();
-        config.paths = crate::storage::StorePaths {
-            data: self.0.join("data"),
-            cache: self.0.join("cache"),
-            credentials: self.0.join("secrets"),
+        let config = crate::config::Config {
+            paths: crate::storage::StorePaths {
+                data: self.0.join("data"),
+                cache: self.0.join("cache"),
+                credentials: self.0.join("secrets"),
+            },
+            ..Default::default()
         };
         Ok(crate::conversation::Ledger::new(std::sync::Arc::new(
             crate::storage::Store::open_source_target_startup(&config)?,

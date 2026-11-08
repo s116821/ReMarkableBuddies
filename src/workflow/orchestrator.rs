@@ -896,7 +896,12 @@ impl<M: LLMEngine> Orchestrator<M> {
 
         // Parse the structured response
         // Missing fields or explicit abstention must never become typed Q&A.
-        let (header, body) = response.split_once("---")?;
+        let separator = response.match_indices("---").find_map(|(i, _)| {
+            let before = response[..i].rsplit('\n').next().unwrap_or("");
+            let after = response[i + 3..].split('\n').next().unwrap_or("");
+            (before.trim().is_empty() && after.trim().is_empty()).then_some(i)
+        })?;
+        let (header, body) = (&response[..separator], &response[separator + 3..]);
         let answer_text = body.trim().strip_prefix("ANSWER:")?.trim();
 
         // Extract question text
@@ -1356,6 +1361,20 @@ mod tests {
     use super::Orchestrator;
     use crate::OpenAI;
 
+    #[test]
+    fn source_target_header_preserves_subject_dashes_and_refuses_duplicate_candidates() {
+        let candidate = serde_json::json!({"subject":"A---B relation","geometry":{"components":[[[0,0],[1000000,0],[1000000,1000000],[0,1000000]]]},"understanding":{"status":"interpreted"}});
+        let response=format!("QUESTION: Why?\nQUESTION_BOX: 1,2,3,4\nSELECTION_CENTER: 100,100\nTARGET_JSON: {candidate}\n---\nANSWER: Because.");
+        let result = Orchestrator::<OpenAI>::parse_analysis_response(&response, vec![]).unwrap();
+        assert_eq!(result.target.unwrap().subject, "A---B relation");
+        let duplicate = response.replace("\n---", &format!("\nTARGET_JSON: {candidate}\n---"));
+        assert!(
+            Orchestrator::<OpenAI>::parse_analysis_response(&duplicate, vec![])
+                .unwrap()
+                .target
+                .is_none()
+        );
+    }
     #[test]
     fn independent_transcription_requires_the_same_words() {
         assert!(Orchestrator::<OpenAI>::transcriptions_agree(

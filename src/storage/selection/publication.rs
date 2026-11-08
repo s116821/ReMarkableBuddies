@@ -236,11 +236,11 @@ pub(super) fn request(
     ))?))
 }
 
-/// Format5 local publication identity is Store-wide, not only target-chain-wide.
+/// Compound local publication identity is Store-wide, not only target-chain-wide.
 /// Read existing accepted transaction evidence while holding the same Store
 /// mutex that will publish. Remote envelope operation IDs are deliberately absent.
 fn claim_local_operation(root: &Path, generation: Uuid, operation: Uuid) -> Result<()> {
-    if feedback_generation::version(root)? != COMPOUND_STORE_FORMAT {
+    if target_generation::base_version(root)? != COMPOUND_STORE_FORMAT {
         return Ok(());
     }
     let directory = root.join("selections");

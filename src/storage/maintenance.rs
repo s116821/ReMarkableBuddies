@@ -365,6 +365,7 @@ impl Store {
         let store = Self {
             paths,
             actor_id: actor,
+            runtime_policy: None,
             _lease: lease,
             inner: Mutex::new(Inner {
                 generation,

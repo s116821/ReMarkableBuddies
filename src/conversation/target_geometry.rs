@@ -292,3 +292,37 @@ mod tests {
             .is_err());
     }
 }
+
+#[cfg(test)]
+mod portable_vector {
+    use super::*;
+    use base64::Engine as _;
+    #[test]
+    fn source_target_mask_portable_rgb_alpha_vector() {
+        let vector: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/source_target_mask_v1.json"
+        ))
+        .unwrap();
+        assert_eq!(vector["recipe"], RECIPE);
+        let input = base64::engine::general_purpose::STANDARD
+            .decode(vector["input_png"].as_str().unwrap())
+            .unwrap();
+        let expected = base64::engine::general_purpose::STANDARD
+            .decode(vector["output_png"].as_str().unwrap())
+            .unwrap();
+        let geometry: Geometry = serde_json::from_value(vector["geometry"].clone()).unwrap();
+        let dimensions: [u32; 2] = serde_json::from_value(vector["dimensions"].clone()).unwrap();
+        let output = geometry
+            .mask_png(&input, dimensions, &mut || Ok(()))
+            .unwrap();
+        assert_eq!(output, expected);
+        assert_eq!(
+            crate::storage::digest(&output),
+            vector["sha256"].as_str().unwrap()
+        );
+        let decoded = image::load_from_memory(&output).unwrap();
+        assert_eq!(decoded.color(), image::ColorType::Rgb8);
+        let rgb: Vec<u8> = serde_json::from_value(vector["rgb"].clone()).unwrap();
+        assert_eq!(decoded.to_rgb8().as_raw(), &rgb);
+    }
+}

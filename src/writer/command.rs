@@ -60,7 +60,9 @@ pub fn run(config_path: Option<PathBuf>, input: &mut impl Read) -> Report {
                 ))
             };
             let ledger = Ledger::new(Arc::new(
-                Store::open(config.paths).map_err(|_| Failure::Storage)?,
+                Store::open(config.paths.clone())
+                    .map_err(|_| Failure::Storage)?
+                    .with_runtime_policy(&config),
             ));
             let memory = if enrich {
                 Some(
@@ -305,7 +307,8 @@ fn run_flow(
             } else {
                 Store::open(config.paths.clone())
             })
-            .map_err(|_| FlowFailure::Storage)?,
+            .map_err(|_| FlowFailure::Storage)?
+            .with_runtime_policy(&config),
         ));
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()

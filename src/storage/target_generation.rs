@@ -387,112 +387,20 @@ fn prepare_original(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    struct Fixture(PathBuf);
-    impl Fixture {
-        fn new() -> Self {
-            Self(std::env::temp_dir().join(format!("target-family-{}", Uuid::new_v4())))
-        }
-        fn paths(&self) -> StorePaths {
-            StorePaths {
-                data: self.0.join("data"),
-                cache: self.0.join("cache"),
-                credentials: self.0.join("credentials"),
-            }
-        }
-    }
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-    #[test]
-    fn ordinary_preparation_recovers_every_original_boundary_without_relocking() {
-        for stage in [
-            Stage::Original,
-            Stage::Notebook,
-            Stage::Marker,
-            Stage::Contract,
-            Stage::Format,
-            Stage::Capabilities,
-        ] {
-            let f = Fixture::new();
-            let store = Store::open(f.paths()).unwrap();
-            let actor = store.actor_id;
-            let generation = store.inner.lock().unwrap().generation;
-            drop(store);
-            let pin = digest(b"same config");
-            let mut store = Store::open_policy(f.paths(), OpenPreparation::Targets).unwrap();
-            assert!(prepare(&mut store, &pin, BaseKind::OrdinaryNotebook, |at| {
-                if at == stage {
-                    anyhow::bail!("interrupted")
-                }
-                Ok(())
-            })
-            .is_err());
-            let before = files::read(&f.paths().data.join(PREPARATION), MAX_RECORD as u64).unwrap();
-            drop(store);
-            let mut store = Store::open_policy(f.paths(), OpenPreparation::Targets).unwrap();
-            assert!(prepare(
-                &mut store,
-                &digest(b"changed config"),
-                BaseKind::OrdinaryNotebook,
-                |_| Ok(())
-            )
-            .is_err());
-            assert_eq!(
-                files::read(&f.paths().data.join(PREPARATION), MAX_RECORD as u64).unwrap(),
-                before
-            );
-            prepare(&mut store, &pin, BaseKind::OrdinaryNotebook, |_| Ok(())).unwrap();
-            assert_eq!(store.actor_id, actor);
-            assert_eq!(store.inner.lock().unwrap().generation, generation);
-            assert!(store.ordinary_reader_family().unwrap());
-            drop(store);
-            let store = Store::open(f.paths()).unwrap();
-            validate_ready(&store.paths, actor, generation).unwrap();
-            assert_eq!(
-                feedback_generation::version(&store.generation(generation)).unwrap(),
-                6
-            );
-        }
-    }
-    #[test]
-    fn unprepared_domain_four_refuses_before_object_publication() {
-        let f = Fixture::new();
-        let store = Store::open(f.paths()).unwrap();
-        let generation = store.inner.lock().unwrap().generation;
-        let root = store.generation(generation);
-        let before = fs::read_dir(root.join("objects")).unwrap().count();
-        let envelope = Envelope {
-            envelope_version: 1,
-            namespace: Namespace::Source,
-            domain_schema_version: 4,
-            record_id: Uuid::new_v4(),
-            revision_id: Uuid::new_v4(),
-            parents: BTreeSet::new(),
-            operation_id: Uuid::new_v4(),
-            actor_id: store.actor_id,
-            kind: Kind::Value,
-            payload: serde_json::json!({"record_kind":"source-target","record":{}}),
-            media_descriptors: vec![],
-        };
-        envelope.validate().unwrap();
-        assert!(store.commit(vec![envelope], BTreeMap::new()).is_err());
-        assert_eq!(fs::read_dir(root.join("objects")).unwrap().count(), before);
-    }
-}
-
 impl Store {
     pub(crate) fn open_source_target_startup(config: &crate::config::Config) -> Result<Self> {
         ensure!(
             !config.sync.enabled && config.reader.selection.is_none(),
             "target startup requires ordinary local policy"
         );
-        let pin = digest(&serde_json::to_vec(config)?);
-        let mut store = Self::open_policy(config.paths.clone(), OpenPreparation::Targets)?;
+        let pin = digest(&serde_json::to_vec(&(
+            config,
+            config.source_snapshot.as_ref().map(|s| s.fingerprint()),
+        ))?);
+        let mut store = Self::open_policy(config.paths.clone(), OpenPreparation::Targets)?
+            .with_runtime_policy(config);
+        let mut reads = selection::SelectedReadBudget::new(0, 2, MAX_RECORD as u64 * 2, 0);
+        store.check_runtime_policy(&mut reads)?;
         prepare(&mut store, &pin, BaseKind::OrdinaryNotebook, |_| Ok(()))?;
         Ok(store)
     }
@@ -627,4 +535,138 @@ pub(crate) fn selected_preparation_pending(store: &Store) -> Result<bool> {
     let original: Preparation = files::json(&path, MAX_RECORD as u64)?;
     original.feature.validate()?;
     Ok(!original.complete && original.feature.base_kind == BaseKind::CompoundSelected)
+}
+
+impl Store {
+    /// One caller-owned allowance covers every repeated policy/header check.
+    /// Ledger updates do not change these immutable ready-generation facts.
+    pub(crate) fn target_runtime_pin(
+        &self,
+        reads: &mut selection::SelectedReadBudget,
+    ) -> Result<Option<String>> {
+        let generation = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("target runtime Store unavailable"))?
+            .generation;
+        let root = self.generation(generation);
+        reads.charge(0, 1, 0, 0)?;
+        let format = files::read_with_budget(&root.join("format.json"), 64, Some(reads))?;
+        if serde_json::from_slice::<u32>(&format)? != VERSION {
+            return Ok(None);
+        }
+        let mut pins = Vec::new();
+        for path in [
+            self.paths.data.join("identity.json"),
+            self.paths.data.join("CURRENT"),
+            root.join("format.json"),
+            root.join(MARKER),
+            self.paths.data.join(PREPARATION),
+            self.paths.data.join("capabilities.json"),
+            self.paths.data.join("contract-v5.json"),
+        ] {
+            reads.charge(0, 1, 0, 0)?;
+            let bytes = files::read_with_budget(&path, MAX_RECORD as u64, Some(reads))?;
+            pins.push(digest(&bytes));
+        }
+        Ok(Some(digest(&serde_json::to_vec(&pins)?)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    struct Fixture(PathBuf);
+    impl Fixture {
+        fn new() -> Self {
+            Self(std::env::temp_dir().join(format!("target-family-{}", Uuid::new_v4())))
+        }
+        fn paths(&self) -> StorePaths {
+            StorePaths {
+                data: self.0.join("data"),
+                cache: self.0.join("cache"),
+                credentials: self.0.join("credentials"),
+            }
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    #[test]
+    fn ordinary_preparation_recovers_every_original_boundary_without_relocking() {
+        for stage in [
+            Stage::Original,
+            Stage::Notebook,
+            Stage::Marker,
+            Stage::Contract,
+            Stage::Format,
+            Stage::Capabilities,
+        ] {
+            let f = Fixture::new();
+            let store = Store::open(f.paths()).unwrap();
+            let actor = store.actor_id;
+            let generation = store.inner.lock().unwrap().generation;
+            drop(store);
+            let pin = digest(b"same config");
+            let mut store = Store::open_policy(f.paths(), OpenPreparation::Targets).unwrap();
+            assert!(prepare(&mut store, &pin, BaseKind::OrdinaryNotebook, |at| {
+                if at == stage {
+                    anyhow::bail!("interrupted")
+                }
+                Ok(())
+            })
+            .is_err());
+            let before = files::read(&f.paths().data.join(PREPARATION), MAX_RECORD as u64).unwrap();
+            drop(store);
+            let mut store = Store::open_policy(f.paths(), OpenPreparation::Targets).unwrap();
+            assert!(prepare(
+                &mut store,
+                &digest(b"changed config"),
+                BaseKind::OrdinaryNotebook,
+                |_| Ok(())
+            )
+            .is_err());
+            assert_eq!(
+                files::read(&f.paths().data.join(PREPARATION), MAX_RECORD as u64).unwrap(),
+                before
+            );
+            prepare(&mut store, &pin, BaseKind::OrdinaryNotebook, |_| Ok(())).unwrap();
+            assert_eq!(store.actor_id, actor);
+            assert_eq!(store.inner.lock().unwrap().generation, generation);
+            assert!(store.ordinary_reader_family().unwrap());
+            drop(store);
+            let store = Store::open(f.paths()).unwrap();
+            validate_ready(&store.paths, actor, generation).unwrap();
+            assert_eq!(
+                feedback_generation::version(&store.generation(generation)).unwrap(),
+                6
+            );
+        }
+    }
+    #[test]
+    fn unprepared_domain_four_refuses_before_object_publication() {
+        let f = Fixture::new();
+        let store = Store::open(f.paths()).unwrap();
+        let generation = store.inner.lock().unwrap().generation;
+        let root = store.generation(generation);
+        let before = fs::read_dir(root.join("objects")).unwrap().count();
+        let envelope = Envelope {
+            envelope_version: 1,
+            namespace: Namespace::Source,
+            domain_schema_version: 4,
+            record_id: Uuid::new_v4(),
+            revision_id: Uuid::new_v4(),
+            parents: BTreeSet::new(),
+            operation_id: Uuid::new_v4(),
+            actor_id: store.actor_id,
+            kind: Kind::Value,
+            payload: serde_json::json!({"record_kind":"source-target","record":{}}),
+            media_descriptors: vec![],
+        };
+        envelope.validate().unwrap();
+        assert!(store.commit(vec![envelope], BTreeMap::new()).is_err());
+        assert_eq!(fs::read_dir(root.join("objects")).unwrap().count(), before);
+    }
 }

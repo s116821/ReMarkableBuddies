@@ -316,6 +316,18 @@ impl RegionSource {
             "region normalized correspondence differs"
         );
         let profile = &self.normalization_proof.profile;
+        ensure!(
+            profile.as_object().is_some_and(|fields| fields.len()
+                == 3 + usize::from(fields.contains_key("confirmed_context"))
+                && fields.keys().all(|key| [
+                    "protocol",
+                    "prompt_revision",
+                    "caller_model_profile",
+                    "confirmed_context"
+                ]
+                .contains(&key.as_str()))),
+            "region normalization profile has unknown or missing fields"
+        );
         let prefix = match (
             profile["protocol"].as_u64(),
             profile["prompt_revision"].as_str(),

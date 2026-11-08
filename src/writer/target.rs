@@ -154,27 +154,38 @@ pub fn run<E: LLMEngine>(
     let mut produced = None;
     run_owned(
         ledger,
-        config,
         engine,
         input,
-        model_profile,
         canceled,
-        &owner,
-        deadline,
+        TargetRun {
+            config,
+            model_profile,
+            owner: &owner,
+            deadline,
+        },
         &mut produced,
     )
 }
+pub(crate) struct TargetRun<'a, 'store> {
+    pub(crate) config: &'a Config,
+    pub(crate) model_profile: &'a str,
+    pub(crate) owner: &'a Owner<'store>,
+    pub(crate) deadline: Instant,
+}
 pub(crate) fn run_owned<E: LLMEngine>(
     ledger: &Ledger,
-    config: &Config,
     engine: &mut E,
     input: &Request,
-    model_profile: &str,
     canceled: &mut dyn FnMut() -> bool,
-    owner: &Owner<'_>,
-    deadline: Instant,
+    context: TargetRun<'_, '_>,
     produced: &mut Option<crate::conversation::WriterSelection>,
 ) -> Report {
+    let TargetRun {
+        config,
+        model_profile,
+        owner,
+        deadline,
+    } = context;
     if input.validate().is_err()
         || !config.admits_writer(false)
         || !std::ptr::eq(owner.0, ledger.store().as_ref())
@@ -277,21 +288,22 @@ pub(crate) fn run_owned<E: LLMEngine>(
             frame.check(ledger)
         };
         let document = ledger.target_document(&target)?;
-        let mut recognition = ModelStage {
-            engine,
-            deadline: deadline - Duration::from_secs(150),
-            used: false,
+        let (normalized, _) = {
+            let mut recognition = ModelStage {
+                engine,
+                deadline: deadline - Duration::from_secs(150),
+                used: false,
+            };
+            notebook::normalize_admitted(
+                document,
+                &admitted,
+                model_profile,
+                capture.as_ref().and_then(|c| c.context.as_deref()),
+                notebook::TranscriptionPolicy::WholePage,
+                &mut recognition,
+                &mut |_| progress(),
+            )
         };
-        let (normalized, _) = notebook::normalize_admitted(
-            document,
-            &admitted,
-            model_profile,
-            capture.as_ref().and_then(|c| c.context.as_deref()),
-            notebook::TranscriptionPolicy::WholePage,
-            &mut recognition,
-            &mut |_| progress(),
-        );
-        drop(recognition);
         progress()?;
         let notebook::Normalized::Page(page) =
             normalized.map_err(|_| anyhow::anyhow!("target normalization refused"))?
@@ -357,11 +369,13 @@ pub(crate) fn run_owned<E: LLMEngine>(
             ledger,
             &mut generation,
             &request,
-            &preference,
-            dispatch
-                .local_memory()
-                .as_deref()
-                .map(|p| p as &dyn crate::memory::Provider),
+            super::ReceivingPreferences {
+                personalization: &preference,
+                memory: dispatch
+                    .local_memory()
+                    .as_deref()
+                    .map(|p| p as &dyn crate::memory::Provider),
+            },
             &mut canceled,
             OwnedRun {
                 owner,
@@ -407,6 +421,8 @@ mod tests {
     struct Model {
         calls: Vec<Vec<String>>,
         parts: Vec<String>,
+        hook: Option<(usize, Box<dyn FnOnce()>)>,
+        normalization: Option<String>,
     }
     impl LLMEngine for Model {
         fn guarded_timeout(&self) -> Option<Duration> {
@@ -436,6 +452,19 @@ mod tests {
         }
         fn execute(&mut self) -> Result<String> {
             self.calls.push(self.parts.clone());
+            if self
+                .hook
+                .as_ref()
+                .is_some_and(|(at, _)| *at == self.calls.len())
+            {
+                let (_, hook) = self.hook.take().unwrap();
+                hook();
+            }
+            if self.calls.len() == 1 {
+                if let Some(response) = self.normalization.take() {
+                    return Ok(response);
+                }
+            }
             Ok(if self.calls.len() == 1 {
                 r#"{"pages":[{"page":1,"status":"transcribed","text":"Only selected equation x = 7"}]}"#.into()
             } else {
@@ -476,6 +505,8 @@ mod tests {
         let mut model = Model {
             calls: vec![],
             parts: vec![],
+            hook: None,
+            normalization: None,
         };
         let report = run(
             &ledger,
@@ -574,6 +605,237 @@ mod tests {
             "region never masquerades as a legacy page source"
         );
         assert!(model.parts.is_empty());
+    }
+    #[test]
+    fn changed_config_or_capabilities_during_normalization_stop_before_generation() {
+        for capabilities in [false, true] {
+            let (f, ledger, c, _) = crate::conversation::target_source::tests::fixture();
+            let config = Config {
+                paths: ledger.store().paths.clone(),
+                ..Default::default()
+            };
+            let path = f.0.join("config.json");
+            std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+            drop(ledger);
+            let config = Config::load(Some(path.clone())).unwrap();
+            let ledger = Ledger::new(std::sync::Arc::new(
+                Store::open_source_target_startup(&config).unwrap(),
+            ));
+            let context = ledger
+                .context(
+                    c,
+                    &crate::conversation::ContextBudget {
+                        max_text_bytes: 4096,
+                        max_turns: 8,
+                        provider_token_limit: Some(4096),
+                    },
+                    |_| Ok(1),
+                )
+                .unwrap();
+            let request = Request::GenerateTarget {
+                conversation: c,
+                operation: Uuid::new_v4(),
+                expected_root: ledger.expected(Namespace::Conversation, c).unwrap(),
+                target: context.targets[0].reference.clone(),
+                request: "Make a note".into(),
+                guidance: None,
+            };
+            let changed = if capabilities {
+                config.paths.data.join("capabilities.json")
+            } else {
+                path
+            };
+            let mut model = Model {
+                calls: vec![],
+                parts: vec![],
+                normalization: None,
+                hook: Some((
+                    1,
+                    Box::new(move || {
+                        let mut bytes = std::fs::read(&changed).unwrap();
+                        bytes.push(b' ');
+                        std::fs::write(changed, bytes).unwrap();
+                    }),
+                )),
+            };
+            let report = run(
+                &ledger,
+                &config,
+                &mut model,
+                &request,
+                "fixture",
+                &mut || false,
+            );
+            assert_ne!(report.status, Status::Generated);
+            assert_eq!(
+                model.calls.len(),
+                1,
+                "changed original policy must not pay for the next model stage"
+            );
+            assert!(model.parts.is_empty());
+            assert!(!ledger.inspect(c,false).unwrap().iter().any(|r|matches!(r,Record::Turn(t) if t.mode==Mode::Writer && t.outcome==Outcome::Generated)));
+        }
+    }
+    #[test]
+    fn regional_target_reuses_one_confirmed_context_and_reopens_its_exact_profile_identity() {
+        use crate::{
+            conversation::{target_source::tests::fixture, ContextBudget},
+            handwriting::{self, Provider},
+        };
+        use base64::Engine as _;
+        let (_f, ledger, c, _) = fixture();
+        let profile = Uuid::new_v4();
+        let config = Config {
+            paths: ledger.store().paths.clone(),
+            handwriting: handwriting::Configuration {
+                enabled: true,
+                profile: Some(profile),
+            },
+            ..Default::default()
+        };
+        let mut sample = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(4, 4)
+            .write_to(&mut sample, image::ImageFormat::Png)
+            .unwrap();
+        let sample = base64::engine::general_purpose::STANDARD.encode(sample.into_inner());
+        let input = serde_json::json!({"handwriting_version":1,"command":"confirm","profile":profile,"correction":Uuid::new_v4(),"operation":Uuid::new_v4(),"expected_heads":[],"confirmation":"user-confirmed","original_text":"SYNTHETIC ORIGINAL","corrected_text":"SYNTHETIC CONFIRMED","confirmed_ms":1,"provenance":{"kind":"caller-confirmed-sample","description":"Synthetic regional Writer context fixture","source":null},"sample_png_base64":sample});
+        let validated = handwriting::parse(&mut std::io::Cursor::new(
+            serde_json::to_vec(&input).unwrap(),
+        ))
+        .unwrap();
+        drop(
+            handwriting::LocalCorrections::new(ledger.store().clone(), &config)
+                .unwrap()
+                .execute(validated),
+        );
+        let context = ledger
+            .context(
+                c,
+                &ContextBudget {
+                    max_text_bytes: 4096,
+                    max_turns: 8,
+                    provider_token_limit: Some(4096),
+                },
+                |_| Ok(1),
+            )
+            .unwrap();
+        let request = Request::GenerateTarget {
+            conversation: c,
+            operation: Uuid::new_v4(),
+            expected_root: ledger.expected(Namespace::Conversation, c).unwrap(),
+            target: context.targets[0].reference.clone(),
+            request: "Make a regional note".into(),
+            guidance: None,
+        };
+        let mut model = Model {
+            calls: vec![],
+            parts: vec![],
+            hook: None,
+            normalization: None,
+        };
+        let generated = run(
+            &ledger,
+            &config,
+            &mut model,
+            &request,
+            "fixture-confirmed",
+            &mut || false,
+        );
+        assert_eq!(
+            generated.status,
+            Status::Generated,
+            "{}",
+            serde_json::to_string(&generated).unwrap()
+        );
+        assert_eq!(model.calls.len(), 2);
+        assert_eq!(
+            model.calls[0]
+                .iter()
+                .filter(|p| p.starts_with("PNG:"))
+                .count(),
+            2
+        );
+        assert!(model.calls[0]
+            .iter()
+            .any(|p| p.contains("SYNTHETIC CONFIRMED")));
+        assert!(!model.calls[1]
+            .iter()
+            .any(|p| p.starts_with("PNG:") || p.contains("SYNTHETIC CONFIRMED")));
+        let region = ledger
+            .inspect(c, false)
+            .unwrap()
+            .into_iter()
+            .find_map(|r| {
+                if let Record::RegionSource(r) = r {
+                    Some(r)
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+        assert_eq!(region.normalization_proof.profile["protocol"], 2);
+        assert_eq!(
+            region.normalization_proof.profile["confirmed_context"]["profile"],
+            profile.to_string()
+        );
+        let paths = ledger.store().paths.clone();
+        drop(ledger);
+        let ledger = Ledger::new(std::sync::Arc::new(Store::open(paths).unwrap()));
+        ledger
+            .regional_source_proof(&region, &mut || Ok(()))
+            .unwrap();
+    }
+    #[test]
+    fn unreadable_and_partial_target_text_never_pay_for_generation() {
+        for response in [
+            r#"{"pages":[{"page":1,"status":"unreadable","text":""}]}"#,
+            r#"{"pages":[{"page":1,"status":"partial","spans":[{"kind":"known","text":"x"},{"kind":"uncertain"}]}]}"#,
+        ] {
+            let (_f, ledger, c, _) = crate::conversation::target_source::tests::fixture();
+            let config = Config {
+                paths: ledger.store().paths.clone(),
+                ..Default::default()
+            };
+            let context = ledger
+                .context(
+                    c,
+                    &crate::conversation::ContextBudget {
+                        max_text_bytes: 4096,
+                        max_turns: 8,
+                        provider_token_limit: Some(4096),
+                    },
+                    |_| Ok(1),
+                )
+                .unwrap();
+            let input = Request::GenerateTarget {
+                conversation: c,
+                operation: Uuid::new_v4(),
+                expected_root: ledger.expected(Namespace::Conversation, c).unwrap(),
+                target: context.targets[0].reference.clone(),
+                request: "Make regional notes".into(),
+                guidance: None,
+            };
+            let mut model = Model {
+                calls: vec![],
+                parts: vec![],
+                hook: None,
+                normalization: Some(response.into()),
+            };
+            let report = run(&ledger, &config, &mut model, &input, "fixture", &mut || {
+                false
+            });
+            assert_ne!(report.status, Status::Generated);
+            assert_eq!(model.calls.len(), 1);
+            assert!(model.parts.is_empty());
+            assert!(
+                !ledger
+                    .inspect(c, false)
+                    .unwrap()
+                    .iter()
+                    .any(|r| matches!(r, Record::RegionSource(_))),
+                "incomplete text never becomes a complete regional source"
+            );
+        }
     }
 }
 

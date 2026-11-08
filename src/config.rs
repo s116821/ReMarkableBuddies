@@ -11,6 +11,7 @@ pub mod product;
 pub mod product_settings;
 pub mod research_settings;
 pub mod schema;
+mod source_snapshot;
 use crate::conversation::receiving::memory::research::ResearchPolicy;
 use crate::{
     llm::openai::DEFAULT_MODEL,
@@ -20,6 +21,7 @@ use crate::{
 use anyhow::{ensure, Result};
 pub use personalization::{Personalization, PersonalizationSnapshot};
 use serde::{Deserialize, Serialize};
+pub use source_snapshot::SourceSnapshot;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
@@ -107,10 +109,13 @@ pub struct Config {
     pub research_policy: Option<Option<ResearchPolicy>>,
     // Append new fields to preserve legacy positional Config array prefixes.
     pub handwriting: crate::handwriting::Configuration,
+    #[serde(skip)]
+    pub source_snapshot: Option<SourceSnapshot>,
 }
 impl Default for Config {
     fn default() -> Self {
         Self {
+            source_snapshot: None,
             config_schema_version: 1,
             product_settings: None,
             model: None,
@@ -134,12 +139,14 @@ impl Config {
         let explicit = path.is_some();
         let path =
             path.unwrap_or_else(|| "/home/root/.config/remarkable-buddies/config.json".into());
-        let config = if path.exists() {
-            files::json(&path, MAX_RECORD as u64)?
+        let (mut config, observed): (Self, Option<Vec<u8>>) = if path.exists() {
+            let bytes = files::read(&path, MAX_RECORD as u64)?;
+            (serde_json::from_slice(&bytes)?, Some(bytes))
         } else {
             ensure!(!explicit, "selected configuration is missing");
-            Self::default()
+            (Self::default(), None)
         };
+        config.source_snapshot = Some(SourceSnapshot::observed(path, observed.as_deref()));
         Self::validate(&config)?;
         Ok(config)
     }

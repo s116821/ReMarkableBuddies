@@ -123,6 +123,7 @@ struct Inner {
 pub struct Store {
     pub paths: StorePaths,
     pub actor_id: Uuid,
+    runtime_policy: Option<crate::config::SourceSnapshot>,
     _lease: Lease,
     inner: Mutex<Inner>,
     wake: Mutex<Option<SyncSender<()>>>,
@@ -183,6 +184,19 @@ impl Drop for LegacyPublisherLease {
     }
 }
 impl Store {
+    pub(crate) fn with_runtime_policy(mut self, config: &crate::config::Config) -> Self {
+        self.runtime_policy = config.source_snapshot.clone();
+        self
+    }
+    pub(crate) fn check_runtime_policy(
+        &self,
+        reads: &mut selection::SelectedReadBudget,
+    ) -> Result<()> {
+        if let Some(policy) = &self.runtime_policy {
+            policy.check(reads)?;
+        }
+        Ok(())
+    }
     /// Serialize domain-owned local journal IO under the existing Store lease.
     /// The callback may perform bounded owned-file IO, never network/native work.
     pub(crate) fn with_owned_local_io<T>(
@@ -365,6 +379,7 @@ impl Store {
         };
         let store = Self {
             paths,
+            runtime_policy: None,
             actor_id: identity.actor,
             _lease: lease,
             inner: Mutex::new(Inner {

@@ -490,38 +490,6 @@ impl RequestPreferences {
     }
 }
 
-#[cfg(test)]
-mod request_budget_tests {
-    use super::*;
-    #[test]
-    fn progress_exhaustion_cannot_spend_or_replenish_completion_verification() {
-        let mut reads = RequestReads::new().unwrap();
-        let pulses = u64::try_from(
-            (Duration::from_secs(120) + crate::llm::openai::DEFAULT_TIMEOUT)
-                .as_nanos()
-                .div_ceil(crate::workflow::indicator::CADENCE.as_nanos()),
-        )
-        .unwrap()
-            + 4;
-        let mut progress = reads.progress.lock().unwrap();
-        progress.charge(0, pulses * 2, 0, 0).unwrap();
-        assert!(progress.charge(0, 1, 0, 0).is_err());
-        drop(progress);
-        reads
-            .finish
-            .lock()
-            .unwrap()
-            .charge(
-                64,
-                MAX_ITEMS as u64,
-                8 * (3 * MAX_METADATA as u64 + 64 * 1024),
-                0,
-            )
-            .unwrap();
-        assert!(reads._reservations.reserve(0, 1, 0, 0).is_err());
-    }
-}
-
 impl RequestPreferences {
     fn detach(self) -> DetachedPreferences {
         let Self {
@@ -598,5 +566,37 @@ impl DetachedPreferences {
             handoff_used,
             submitted,
         })
+    }
+}
+
+#[cfg(test)]
+mod request_budget_tests {
+    use super::*;
+    #[test]
+    fn progress_exhaustion_cannot_spend_or_replenish_completion_verification() {
+        let mut reads = RequestReads::new().unwrap();
+        let pulses = u64::try_from(
+            (Duration::from_secs(120) + crate::llm::openai::DEFAULT_TIMEOUT)
+                .as_nanos()
+                .div_ceil(crate::workflow::indicator::CADENCE.as_nanos()),
+        )
+        .unwrap()
+            + 4;
+        let mut progress = reads.progress.lock().unwrap();
+        progress.charge(0, pulses * 2, 0, 0).unwrap();
+        assert!(progress.charge(0, 1, 0, 0).is_err());
+        drop(progress);
+        reads
+            .finish
+            .lock()
+            .unwrap()
+            .charge(
+                64,
+                MAX_ITEMS as u64,
+                8 * (3 * MAX_METADATA as u64 + 64 * 1024),
+                0,
+            )
+            .unwrap();
+        assert!(reads._reservations.reserve(0, 1, 0, 0).is_err());
     }
 }

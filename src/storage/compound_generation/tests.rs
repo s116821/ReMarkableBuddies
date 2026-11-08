@@ -813,6 +813,15 @@ fn stale_source_and_wrong_original_mode_refuse_preparation_without_retargeting()
 
 #[test]
 fn compound_store_serializes_local_operation_reuse_across_real_memory_producers() {
+    check_local_operation_reuse(false);
+}
+
+#[test]
+fn promoted_target_store_serializes_local_operation_reuse_across_real_memory_producers() {
+    check_local_operation_reuse(true);
+}
+
+fn check_local_operation_reuse(promote_targets: bool) {
     use crate::memory::{
         self, catalog,
         selected::{InitializeAggregate, SelectedMemory},
@@ -820,7 +829,7 @@ fn compound_store_serializes_local_operation_reuse_across_real_memory_producers(
     use std::{sync::Barrier, thread};
     let fixture = Fixture::new();
     let request = fixture.request();
-    let store = Arc::new(Store::prepare_shared_notebook(fixture.paths(), request.clone()).unwrap());
+    let mut store = Store::prepare_shared_notebook(fixture.paths(), request.clone()).unwrap();
     store
         .set_sync_mode(
             &store.sync_mode_snapshot().unwrap().token,
@@ -832,6 +841,26 @@ fn compound_store_serializes_local_operation_reuse_across_real_memory_producers(
             },
         )
         .unwrap();
+    let generation = fixture.current();
+    if promote_targets {
+        target_generation::prepare(
+            &mut store,
+            &digest(b"synthetic target configuration"),
+            target_generation::BaseKind::CompoundSelected,
+            |_| Ok(()),
+        )
+        .unwrap();
+        target_generation::validate_ready(&store.paths, store.actor_id, generation).unwrap();
+    }
+    assert_eq!(
+        feedback_generation::version(&store.generation(generation)).unwrap(),
+        if promote_targets { 6 } else { 5 }
+    );
+    assert_eq!(
+        target_generation::base_version(&store.generation(generation)).unwrap(),
+        5
+    );
+    let store = Arc::new(store);
     let operation = Uuid::new_v4();
     let barrier = Arc::new(Barrier::new(3));
     let handles: Vec<_> = (0..2)
