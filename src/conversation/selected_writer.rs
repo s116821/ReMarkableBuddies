@@ -480,9 +480,10 @@ impl SelectedAdmission {
         accepted: &SelectionToken,
         req: &SelectedWriterPrepare,
     ) -> Result<SelectedWriterInput> {
-        self.with_current(accepted, |s| {
+        self.with_current_store(accepted, |store, s| {
             let input = source_input(&SelectedDomainProjection::from_snapshot(s)?, req)?;
             validate_document(self.scope(), &input.source)?;
+            reader_uncertainty::validate_document(store, s, input.source.document.document, None)?;
             Ok(input)
         })
     }
@@ -515,6 +516,12 @@ impl SelectedAdmission {
                 &fingerprint,
                 ms,
                 store.actor_id,
+            )?;
+            reader_uncertainty::validate_document(
+                store,
+                &snapshot,
+                input.source.document.document,
+                None,
             )?;
             // Unknown commit acknowledgment cannot mint a fresh model permit.
             let published =
@@ -594,7 +601,9 @@ impl SelectedAdmission {
             read.token == prepared.accepted,
             "Writer preparation replaced"
         );
-        prepared_input(&SelectedDomainProjection::from_snapshot(&read)?, prepared)
+        let input = prepared_input(&SelectedDomainProjection::from_snapshot(&read)?, prepared)?;
+        reader_uncertainty::validate_document(store, &read, input.source.document.document, None)?;
+        Ok(input)
     }
 }
 fn recover_completed(
@@ -880,6 +889,16 @@ impl SelectedAdmission {
                 snapshot.token == f.prepared.accepted,
                 "Writer preparation replaced"
             );
+            let input = prepared_input(
+                &SelectedDomainProjection::from_snapshot(&snapshot)?,
+                &f.prepared,
+            )?;
+            reader_uncertainty::validate_document(
+                store,
+                &snapshot,
+                input.source.document.document,
+                None,
+            )?;
             let (records, _) = finish_records(
                 store,
                 &snapshot.transaction,

@@ -540,7 +540,7 @@ fn root_envelope_binding(envelope: &Envelope) -> Result<Option<Uuid>> {
 }
 
 #[cfg(test)]
-pub(in crate::conversation) mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::storage::selection::{SelectionChange, SelectionScope};
     use crate::storage::{Manifest, Scope, StorePaths};
@@ -571,133 +571,165 @@ pub(in crate::conversation) mod tests {
                 key_sha256: digest(b"document"),
                 binding_sha256: digest(b"binding"),
             };
-            let handle = SelectedAdmission::new(store.clone(), scope).unwrap();
-            let conversation = Uuid::new_v4();
-            let turn = Uuid::new_v4();
-            let document = Uuid::new_v4();
-            let page = Uuid::new_v4();
-            let source = SourceObservation {
-                document,
-                page,
-                session: "synthetic fixture".into(),
-                visit: "synthetic fixture".into(),
-                content_revision: None,
-                order_revision: None,
-                capability_revision: "synthetic fixture".into(),
-                evidence_procedure: "no native qualification".into(),
-            };
-            let binding_id = Ledger::binding_id(document, page);
-            let mut template = Envelope {
-                envelope_version: FORMAT,
-                namespace: Namespace::Conversation,
-                domain_schema_version: SCHEMA,
-                record_id: conversation,
-                revision_id: Uuid::new_v4(),
-                parents: BTreeSet::new(),
-                operation_id: Uuid::new_v4(),
-                actor_id: Uuid::new_v4(),
-                kind: Kind::Value,
-                payload: serde_json::Value::Null,
-                media_descriptors: vec![],
-            };
-            template.payload = serde_json::to_value(Record::Root(Root {
-                id: conversation,
-                next_sequence: 1,
-                binding: Some(binding_id),
-                created_ms: 1,
-                updated_ms: 1,
-            }))
-            .unwrap();
-            let mut draft = template.clone();
-            draft.record_id = turn;
-            draft.revision_id = Uuid::new_v4();
-            draft.operation_id = Uuid::new_v4();
-            draft.payload = serde_json::to_value(Record::Turn(Turn {
-                id: turn,
-                conversation,
-                exchange: Uuid::new_v4(),
-                sequence: 0,
-                role: Role::Assistant,
-                mode: Mode::Reader,
-                outcome: Outcome::Generated,
-                text: Some("draft".into()),
-                sources: vec![],
-                correction_of: None,
-                created_ms: 1,
-                updated_ms: 1,
-                completion: None,
-            }))
-            .unwrap();
-            let mut binding = template.clone();
-            binding.record_id = binding_id;
-            binding.revision_id = Uuid::new_v4();
-            binding.operation_id = Uuid::new_v4();
-            binding.payload = serde_json::to_value(Record::Binding(Binding {
-                id: binding_id,
-                conversation,
-                receipt: BindingReceipt {
-                    acquisition: Default::default(),
-                    operation: Uuid::new_v4(),
-                    conversation,
-                    request_fingerprint: digest(b"binding fixture"),
-                    adapter_fingerprint: "synthetic".into(),
-                    source: source.clone(),
-                    intended_target: Some(page),
-                    observed_document: document,
-                    observed_page: page,
-                    expected_order: vec![page],
-                    observed_order: vec![page],
-                    persisted_revision: "synthetic".into(),
-                    observed_ms: 1,
-                    evidence_origin: "UnqualifiedSyntheticModel".into(),
-                },
-            }))
-            .unwrap();
-            let evidence = pin(&binding).unwrap();
-            let mut objects = BTreeMap::new();
-            let mut refs = vec![];
-            let mut namespaces = BTreeMap::new();
-            for envelope in [template, draft, binding] {
-                Ledger::decode(&envelope).unwrap();
-                let reference = pin(&envelope).unwrap();
-                objects.insert(
-                    reference.object.sha256.clone(),
-                    serde_json::to_vec(&envelope).unwrap(),
-                );
-                namespaces.insert(reference.object.sha256.clone(), envelope.namespace);
-                refs.push(reference.object);
-            }
-            let publication = handle
-                .initialize(
-                    SelectionChange {
-                        operation: Uuid::new_v4(),
-                        accepted_base_sha256: digest(b"base"),
-                        retained: vec![],
-                        selected: Manifest {
-                            format: FORMAT,
-                            transaction_id: Uuid::new_v4(),
-                            scope: Scope::SelectedRecords,
-                            records: refs,
-                            record_namespaces: namespaces,
-                            media: vec![],
-                            media_coverage: vec![],
-                        },
-                    },
-                    objects,
-                )
-                .unwrap();
-            let request = PendingIntentRequest {
+            seed(store, scope, Uuid::new_v4(), digest(b"base"))
+        }
+    }
+
+    fn seed(
+        store: Arc<Store>,
+        scope: SelectionScope,
+        document: Uuid,
+        base: String,
+    ) -> (
+        Arc<Store>,
+        SelectedAdmission,
+        SelectionToken,
+        PendingIntentRequest,
+    ) {
+        let handle = SelectedAdmission::new(store.clone(), scope).unwrap();
+        let conversation = Uuid::new_v4();
+        let turn = Uuid::new_v4();
+        let page = Uuid::new_v4();
+        let source = SourceObservation {
+            document,
+            page,
+            session: "synthetic fixture".into(),
+            visit: "synthetic fixture".into(),
+            content_revision: None,
+            order_revision: None,
+            capability_revision: "synthetic fixture".into(),
+            evidence_procedure: "no native qualification".into(),
+        };
+        let binding_id = Ledger::binding_id(document, page);
+        let mut template = Envelope {
+            envelope_version: FORMAT,
+            namespace: Namespace::Conversation,
+            domain_schema_version: SCHEMA,
+            record_id: conversation,
+            revision_id: Uuid::new_v4(),
+            parents: BTreeSet::new(),
+            operation_id: Uuid::new_v4(),
+            actor_id: Uuid::new_v4(),
+            kind: Kind::Value,
+            payload: serde_json::Value::Null,
+            media_descriptors: vec![],
+        };
+        template.payload = serde_json::to_value(Record::Root(Root {
+            id: conversation,
+            next_sequence: 1,
+            binding: Some(binding_id),
+            created_ms: 1,
+            updated_ms: 1,
+        }))
+        .unwrap();
+        let mut draft = template.clone();
+        draft.record_id = turn;
+        draft.revision_id = Uuid::new_v4();
+        draft.operation_id = Uuid::new_v4();
+        draft.payload = serde_json::to_value(Record::Turn(Turn {
+            id: turn,
+            conversation,
+            exchange: Uuid::new_v4(),
+            sequence: 0,
+            role: Role::Assistant,
+            mode: Mode::Reader,
+            outcome: Outcome::Generated,
+            text: Some("draft".into()),
+            sources: vec![],
+            correction_of: None,
+            created_ms: 1,
+            updated_ms: 1,
+            completion: None,
+        }))
+        .unwrap();
+        let mut binding = template.clone();
+        binding.record_id = binding_id;
+        binding.revision_id = Uuid::new_v4();
+        binding.operation_id = Uuid::new_v4();
+        binding.payload = serde_json::to_value(Record::Binding(Binding {
+            id: binding_id,
+            conversation,
+            receipt: BindingReceipt {
+                acquisition: Default::default(),
                 operation: Uuid::new_v4(),
                 conversation,
-                turn,
-                updated_ms: 2,
-                selection: IntentSelectionEvidence::from_token(&publication.token),
-                source,
-                evidence: vec![evidence],
-                media: vec![],
-            };
-            (store, handle, publication.token, request)
+                request_fingerprint: digest(b"binding fixture"),
+                adapter_fingerprint: "synthetic".into(),
+                source: source.clone(),
+                intended_target: Some(page),
+                observed_document: document,
+                observed_page: page,
+                expected_order: vec![page],
+                observed_order: vec![page],
+                persisted_revision: "synthetic".into(),
+                observed_ms: 1,
+                evidence_origin: "UnqualifiedSyntheticModel".into(),
+            },
+        }))
+        .unwrap();
+        let evidence = pin(&binding).unwrap();
+        let mut objects = BTreeMap::new();
+        let mut refs = vec![];
+        let mut namespaces = BTreeMap::new();
+        for envelope in [template, draft, binding] {
+            Ledger::decode(&envelope).unwrap();
+            let reference = pin(&envelope).unwrap();
+            objects.insert(
+                reference.object.sha256.clone(),
+                serde_json::to_vec(&envelope).unwrap(),
+            );
+            namespaces.insert(reference.object.sha256.clone(), envelope.namespace);
+            refs.push(reference.object);
         }
+        let publication = handle
+            .initialize(
+                SelectionChange {
+                    operation: Uuid::new_v4(),
+                    accepted_base_sha256: base,
+                    retained: vec![],
+                    selected: Manifest {
+                        format: FORMAT,
+                        transaction_id: Uuid::new_v4(),
+                        scope: Scope::SelectedRecords,
+                        records: refs,
+                        record_namespaces: namespaces,
+                        media: vec![],
+                        media_coverage: vec![],
+                    },
+                },
+                objects,
+            )
+            .unwrap();
+        let request = PendingIntentRequest {
+            operation: Uuid::new_v4(),
+            conversation,
+            turn,
+            updated_ms: 2,
+            selection: IntentSelectionEvidence::from_token(&publication.token),
+            source,
+            evidence: vec![evidence],
+            media: vec![],
+        };
+        (store, handle, publication.token, request)
+    }
+
+    pub(crate) fn fixture_pending_for_worker(
+        store: Arc<Store>,
+        scope: SelectionScope,
+        document: Uuid,
+        base: String,
+    ) -> (SelectionToken, Uuid) {
+        let (_, handle, token, request) = seed(store.clone(), scope, document, base);
+        let source = MockSource {
+            source: request.source.clone(),
+            calls: Cell::new(0),
+            refuse_at: None,
+        };
+        let operation = request.operation;
+        handle
+            .publish_pending(Some(&token), request, Some(&source))
+            .unwrap();
+        (token, operation)
     }
     impl Drop for Fixture {
         fn drop(&mut self) {

@@ -147,6 +147,17 @@ impl std::fmt::Debug for SlotObservation {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct MissingPreparedDescriptor;
+
+impl std::fmt::Display for MissingPreparedDescriptor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("original prepared slot descriptor is not visible")
+    }
+}
+
+impl std::error::Error for MissingPreparedDescriptor {}
+
 impl GoogleDrive {
     fn slot_descriptor(&mut self, pointer: &SlotPointer) -> Result<Vec<u8>> {
         pointer.properties()?;
@@ -221,7 +232,10 @@ impl GoogleDrive {
             "slot descriptor exceeds supported bound"
         );
         self.authorize(pointer.binding.group)?;
-        let bytes = self.slot_descriptor(&pointer)?;
+        let bytes = match self.slot_descriptor(&pointer) {
+            Err(error) if missing(&error) => return Err(MissingPreparedDescriptor.into()),
+            result => result?,
+        };
         ensure!(
             bytes.len() as u64 == reference.bytes,
             "slot descriptor size mismatch"

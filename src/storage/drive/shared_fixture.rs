@@ -29,6 +29,8 @@ struct Model {
     next: u64,
     requests: Vec<String>,
     lose_create: Option<String>,
+    fail_get_once: Option<String>,
+    slot_posts: Vec<String>,
     observer: Option<RequestObserver>,
 }
 pub(in crate::storage) struct Wire {
@@ -122,6 +124,15 @@ impl Wire {
             },
         );
     }
+    pub fn remove_fixture_object(&self, id: &str) {
+        assert!(self.model.lock().unwrap().files.remove(id).is_some());
+    }
+    pub fn fail_get_once(&self, id: &str) {
+        self.model.lock().unwrap().fail_get_once = Some(id.into());
+    }
+    pub fn slot_posts(&self) -> Vec<String> {
+        self.model.lock().unwrap().slot_posts.clone()
+    }
     pub fn requests(&self) -> Vec<String> {
         self.model.lock().unwrap().requests.clone()
     }
@@ -208,14 +219,20 @@ fn serve(mut stream: TcpStream, base: &str, model: &Arc<Mutex<Model>>) {
         (200,serde_json::to_vec(&json!({"files":model.files.values().map(|f|f.metadata.clone()).collect::<Vec<_>>()})).unwrap())
     } else if method == "GET" && path.starts_with("/drive/v3/files/") {
         let id = path.trim_start_matches("/drive/v3/files/");
-        match model.files.get(id) {
-            Some(file) if target.contains("alt=media") => (200, file.bytes.clone()),
-            Some(file) => (200, serde_json::to_vec(&file.metadata).unwrap()),
-            None => (404, b"{}".to_vec()),
+        if model.fail_get_once.as_deref() == Some(id) {
+            model.fail_get_once = None;
+            (503, b"{}".to_vec())
+        } else {
+            match model.files.get(id) {
+                Some(file) if target.contains("alt=media") => (200, file.bytes.clone()),
+                Some(file) => (200, serde_json::to_vec(&file.metadata).unwrap()),
+                None => (404, b"{}".to_vec()),
+            }
         }
     } else if method == "POST" && path == "/drive/v3/files" {
         let metadata: Value = serde_json::from_slice(body).unwrap();
         let id = metadata["id"].as_str().unwrap().to_owned();
+        model.slot_posts.push(id.clone());
         let status = if model.files.contains_key(&id) {
             409
         } else {

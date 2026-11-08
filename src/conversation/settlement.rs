@@ -90,7 +90,11 @@ fn pinned(
             Ok(serde_json::from_slice::<Envelope>(&bytes)?)
         })
         .collect::<Result<Vec<_>>>()?;
-    let projection = SelectedDomainProjection::from_pinned_records(&records, references)?;
+    let projection = SelectedDomainProjection::from_mixed_records(
+        &records,
+        references,
+        &original.transaction.scope,
+    )?;
     projection.document_ownership()?;
     // Reject a substituted receipt even when other historical record IDs agree.
     ensure!(

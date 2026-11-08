@@ -66,95 +66,183 @@ pub(super) fn validate(
             "Reader own pending fact changed"
         );
     }
-    let retained_refs: Vec<_> = snapshot
-        .transaction
-        .retained
-        .iter()
-        .flat_map(|m| &m.records)
-        .collect();
+    validate_document(store, snapshot, request.source.document, own)
+}
+
+struct PendingPair<'a> {
+    receipt: Receipt,
+    reference: &'a ObjectRef,
+    fact: &'a ObjectRef,
+    actor: Uuid,
+}
+
+fn collect_pairs<'a>(
+    scope: &crate::storage::selection::SelectionScope,
+    document: Uuid,
+    records: &[Envelope],
+    references: &'a [ObjectRef],
+    pairs: &mut BTreeMap<Uuid, PendingPair<'a>>,
+) -> Result<()> {
     ensure!(
-        retained_refs.len() == snapshot.retained_records.len(),
-        "Reader retained reference count differs"
+        records.len() == references.len(),
+        "uncertainty reference count differs"
     );
-    let mut records = snapshot.selected_records.clone();
-    let mut references = snapshot.transaction.selected.records.clone();
-    for (record, reference) in snapshot.retained_records.iter().zip(retained_refs) {
-        if !references.contains(reference) {
-            references.push(reference.clone());
-            records.push(record.clone());
-        }
-    }
-    let combined = SelectedDomainProjection::from_pinned_records(&records, &references)?;
-    let owners = combined.document_ownership()?;
-    let mut pending_operations = BTreeMap::new();
-    let mut pending_facts = BTreeSet::new();
-    for envelope in &records {
-        if envelope.kind != Kind::Value {
+    let mut receipts = Vec::new();
+    let mut facts = BTreeMap::new();
+    for (envelope, reference) in records.iter().zip(references) {
+        if envelope.namespace != Namespace::Conversation || envelope.kind != Kind::Value {
             continue;
         }
-        let record = Ledger::decode(envelope)?;
-        match &record {
-            Record::Receipt(receipt) if receipt.admitted_intent.is_some() => {}
-            Record::OutcomeFact(fact) if fact.reason == AttemptReason::OutputPending => {}
-            _ => continue,
-        }
-        let conversation = selected::conversation_id(&record);
-        let owner = owners
-            .get(&conversation)
-            .context("Reader uncertainty ownership absent")?;
-        let DocumentOwnership::Document(document) = owner else {
-            bail!("Reader uncertainty document ownership unresolved")
-        };
-        if *document != request.source.document {
-            continue;
-        }
-        match record {
+        match Ledger::decode(envelope)? {
             Record::Receipt(receipt) if receipt.admitted_intent.is_some() => {
-                let operation = receipt.acknowledgment.operation;
+                receipts.push((receipt, reference, envelope.actor_id));
+            }
+            Record::OutcomeFact(fact)
+                if fact.reason == AttemptReason::OutputPending && fact.settlement.is_none() =>
+            {
+                let id = fact.id;
                 ensure!(
-                    pending_operations.insert(operation, receipt).is_none(),
-                    "Reader duplicate original pending receipt"
+                    facts
+                        .insert(id, (fact, reference, envelope.actor_id))
+                        .is_none(),
+                    "duplicate original pending fact"
                 );
             }
-            Record::OutcomeFact(fact) if fact.reason == AttemptReason::OutputPending => {
-                pending_facts.insert(fact.id);
-            }
-            _ => {}
+            _ => (),
         }
     }
-    for fact in pending_facts {
-        ensure!(
-            pending_operations
-                .keys()
-                .any(|operation| pending::pending_id(*operation) == fact),
-            "Reader uncertainty fact has no original receipt"
-        );
+    if receipts.is_empty() && facts.is_empty() {
+        return Ok(());
     }
-    for (operation, receipt) in pending_operations {
-        if operation == request.operation && own.is_some() {
+
+    // Project each original closure independently. Sibling revisions in two
+    // manifests are alternatives and never make a combined active graph.
+    let projection = SelectedDomainProjection::from_mixed_records(records, references, scope)?;
+    let owners = projection.document_ownership()?;
+    let matches_document = |conversation| -> Result<bool> {
+        let owner = owners
+            .get(&conversation)
+            .context("uncertainty document ownership absent")?;
+        let DocumentOwnership::Document(owner) = owner else {
+            bail!("uncertainty document ownership unresolved");
+        };
+        Ok(*owner == document)
+    };
+    let mut relevant_facts = BTreeSet::new();
+    for (id, (fact, _, _)) in &facts {
+        if matches_document(fact.conversation)? {
+            relevant_facts.insert(*id);
+        }
+    }
+    for (receipt, reference, actor) in receipts {
+        let intent = receipt.admitted_intent.as_ref().unwrap();
+        if !matches_document(intent.conversation)? {
             continue;
         }
-        let original = admission::recover_original(store, snapshot.token.scope(), operation)?
-            .context("Reader uncertainty original publication absent")?;
+        let operation = intent.operation;
+        let id = pending::pending_id(operation);
+        let (fact, fact_reference, fact_actor) = facts
+            .get(&id)
+            .context("uncertainty receipt has no exact original pending fact")?;
         ensure!(
-            original.receipt == receipt,
-            "Reader uncertainty original receipt differs"
+            intent.source.document == document
+                && intent.selection.group == scope.group
+                && intent.selection.key_sha256 == scope.key_sha256
+                && intent.selection.binding_sha256 == scope.binding_sha256
+                && fact.conversation == intent.conversation
+                && fact.turn == intent.turn
+                && fact.outcome == Outcome::ReconcileRequired
+                && *fact_actor == actor,
+            "uncertainty original receipt and fact differ"
         );
+        relevant_facts.remove(&id);
+        let pair = PendingPair {
+            receipt,
+            reference,
+            fact: *fact_reference,
+            actor,
+        };
+        if let Some(previous) = pairs.insert(operation, pair) {
+            ensure!(
+                previous.reference == reference && previous.fact == *fact_reference,
+                "uncertainty original receipt is ambiguous"
+            );
+        }
+    }
+    ensure!(
+        relevant_facts.is_empty(),
+        "uncertainty fact has no original receipt"
+    );
+    Ok(())
+}
+
+/// Check the document fence under the existing domain gate. This supplies
+/// neither source admission nor a settlement capability.
+pub(crate) fn validate_document(
+    store: &Store,
+    snapshot: &SelectedSnapshot,
+    document: Uuid,
+    own: Option<&HistoricalIntent>,
+) -> Result<()> {
+    let scope = snapshot.token.scope();
+    let mut pairs = BTreeMap::new();
+    collect_pairs(
+        scope,
+        document,
+        &snapshot.selected_records,
+        &snapshot.transaction.selected.records,
+        &mut pairs,
+    )?;
+    let mut records = snapshot.retained_records.as_slice();
+    for manifest in &snapshot.transaction.retained {
+        ensure!(
+            records.len() >= manifest.records.len(),
+            "uncertainty retained reference count differs"
+        );
+        let (closure, tail) = records.split_at(manifest.records.len());
+        collect_pairs(scope, document, closure, &manifest.records, &mut pairs)?;
+        records = tail;
+    }
+    ensure!(
+        records.is_empty(),
+        "uncertainty retained reference count differs"
+    );
+
+    let mut foreign = Vec::new();
+    for (operation, pair) in pairs {
+        if pair.actor != store.actor_id {
+            ensure!(
+                store.selected_receipt(scope, operation)?.is_none(),
+                "foreign pending intent conflicts with local operation custody"
+            );
+            foreign.push((pair.reference, pair.fact));
+            continue;
+        }
+        let original = admission::recover_original(store, scope, operation)?
+            .context("uncertainty original local publication absent")?;
+        ensure!(
+            original.receipt == pair.receipt
+                && original.receipt_reference.object == *pair.reference,
+            "uncertainty original local receipt differs"
+        );
+        if own.is_some_and(|own| own.receipt_reference == original.receipt_reference) {
+            continue;
+        }
         ensure!(
             !snapshot
                 .transaction
                 .selected
                 .records
-                .contains(&original.receipt_reference.object),
-            "Reader earlier active pending intent unresolved"
+                .contains(pair.reference),
+            "earlier active pending intent unresolved"
         );
         ensure!(
             settlement::retained_uncertainty_in_store(store, snapshot, &original)?
                 != IntentUncertainty::Unresolved,
-            "Reader earlier retained pending intent unresolved"
+            "earlier retained pending intent unresolved"
         );
     }
-    Ok(())
+    crate::storage::sync::selected::verify_received_intents(store, scope, &foreign)
 }
 
 #[cfg(test)]

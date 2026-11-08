@@ -1,7 +1,9 @@
 //! Selected branch of the existing worker; fixed-slot custody, not another loop.
 use super::*;
 use crate::conversation::{shared, SelectedAdmission};
-use crate::storage::drive::slot::{AgreedSlotObservation, AgreedSlotValue, SlotBinding};
+use crate::storage::drive::slot::{
+    AgreedSlotObservation, AgreedSlotValue, SlotBinding, SlotInvalid,
+};
 use crate::storage::selection::{
     SelectedAttemptRequest, SelectedAttemptState, SelectionScope, SelectionToken,
 };
@@ -22,6 +24,7 @@ pub use preference_command::{
 };
 mod publication;
 mod receiving;
+pub(crate) use receiving::verify_received_intents;
 #[cfg(test)]
 mod tests;
 use protocol::*;
@@ -199,6 +202,8 @@ struct Receive {
     manifest: Option<Manifest>,
     original_attempt: Option<Uuid>,
     applied: bool,
+    #[serde(default)]
+    verified: bool,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -225,6 +230,22 @@ struct CatalogView {
     slot: String,
     complete: bool,
 }
+fn stronger_scope_status(current: Status, next: Status) -> Status {
+    let priority = |status| match status {
+        Status::Current => 0,
+        Status::Joining => 1,
+        Status::Pending => 2,
+        Status::IncompleteMedia => 3,
+        Status::CommittedNotApplied => 4,
+        _ => 5,
+    };
+    if priority(next) > priority(current) {
+        next
+    } else {
+        current
+    }
+}
+
 impl Engine {
     pub(super) fn step(&mut self) -> Result<Status> {
         let _mode = self.current_lease()?;
@@ -232,7 +253,10 @@ impl Engine {
             Some(Instant::now() + Duration::from_secs(60)),
             Some(self.cancel.clone()),
         );
-        let result = self.step_inner();
+        let result = match self.step_inner() {
+            Err(error) if error.is::<SlotInvalid>() => Ok(Status::UnsupportedOrCorrupt),
+            result => result,
+        };
         self.transport.set_request_window(None, None);
         result
     }
@@ -253,31 +277,63 @@ impl Engine {
         let mut status = Status::Current;
         for (key, entry) in &view.entries {
             if budget == 0 {
-                return Ok(Status::Pending);
+                return Ok(stronger_scope_status(status, Status::Pending));
             }
             self.checkpoint.scopes.entry(key.clone()).or_default();
             let next = self.scope_step(key, entry, &view, &mut budget)?;
-            if next != Status::Current {
-                status = next;
-            }
+            status = stronger_scope_status(status, next);
         }
         self.save()?;
         Ok(status)
     }
     pub(super) fn health(&self, status: Status) -> serde_json::Value {
-        let scopes: Vec<_> = self
-            .checkpoint
-            .scopes
-            .iter()
-            .map(|(key, p)| {
-                json!({
-                    "key":key, "committed":p.chain.last().map(|r| &r.sha256),
-                    "applied":p.applied.as_ref().map(|p| &p.descriptor),
-                    "pending_original":p.pending.as_ref().map(|p| p.operation),
-                    "receiving_original":p.receive.as_ref().map(|p| p.operation),
-                })
+        let mut status = status;
+        let scopes: Vec<_> = self.checkpoint.scopes.iter().map(|(key, progress)| {
+            let scope = SelectionScope {
+                group: self.binding.group,
+                key_sha256: key.clone(),
+                binding_sha256: self.binding.digest.clone(),
+            };
+            let applied = progress.applied.as_ref().and_then(|applied| {
+                let receipt = self.store.selected_receipt(&scope, applied.operation).ok()??;
+                (receipt.accepted_base_sha256 == applied.descriptor
+                    && receiving::membership(&receipt.selected).ok().as_ref() == Some(&applied.membership))
+                    .then_some(receipt)
+            });
+            if status == Status::Current && progress.applied.is_some() && applied.is_none() {
+                status = Status::RecoveryRequired;
+            }
+            let candidate = progress.receive.as_ref();
+            if candidate.is_some_and(|receive| receive.verified && !receive.applied)
+                && matches!(status, Status::Current | Status::Joining | Status::Pending)
+            {
+                status = Status::CommittedNotApplied;
+            }
+            let committed = candidate.filter(|receive| receive.verified || receive.applied)
+                .map(|receive| &receive.descriptor.sha256)
+                .or_else(|| progress.chain.last().map(|record| &record.sha256));
+            let media = candidate.and_then(|receive| receive.manifest.as_ref())
+                .or_else(|| applied.as_ref().map(|receipt| &receipt.selected))
+                .map(|manifest| json!({
+                    "included": manifest.media.len(),
+                    "omitted": manifest.media_coverage.iter().filter(|coverage| matches!(coverage, Coverage::Omitted { .. })).count(),
+                }));
+            json!({
+                "key": key,
+                "observed_candidate": candidate.map(|receive| &receive.descriptor.sha256),
+                "committed": committed,
+                "applied": applied.as_ref().map(|receipt| &receipt.accepted_base_sha256),
+                "applied_local": applied.as_ref().map(|receipt| json!({
+                    "operation": receipt.operation,
+                    "store_generation": receipt.store_generation,
+                    "aggregate_generation": receipt.aggregate_generation,
+                    "manifest": receipt.selected.transaction_id,
+                })),
+                "pending_original": progress.pending.as_ref().map(|pending| pending.operation),
+                "receiving_original": candidate.map(|receive| receive.operation),
+                "media": media,
             })
-            .collect();
+        }).collect();
         json!({"report_version":1,"status":status,"mode":"shared-group","group":self.binding.group,
             "root":self.binding.root_id,"binding_sha256":self.binding.digest,"scopes":scopes,
             "production_qualification":"unexecuted"})
@@ -418,7 +474,7 @@ impl Engine {
         match self.transport.observe_agreed_slot(&self.slot(key, slot))? {
             AgreedSlotObservation::Present(value) => Ok(Some(Recorded::from(value)?)),
             AgreedSlotObservation::Absent => Ok(None),
-            AgreedSlotObservation::Invalid(_) => anyhow::bail!("agreed occupied slot is invalid"),
+            AgreedSlotObservation::Invalid(reason) => Err(reason.into()),
         }
     }
     fn view(&self) -> Result<Option<CatalogView>> {

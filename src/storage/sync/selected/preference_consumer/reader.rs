@@ -132,7 +132,9 @@ impl ReaderPreferences {
         root: &str,
         reads: &mut SelectedReadBudget,
     ) -> Result<(Registration, Entry, SelectionToken)> {
-        inner.registered_document(identity, reader, store, root, reads)
+        let (registration, entry, snapshot) =
+            inner.registered_document(identity, reader, store, root, reads)?;
+        Ok((registration, entry, snapshot.token))
     }
 
     pub(crate) fn config(&self) -> &Config {

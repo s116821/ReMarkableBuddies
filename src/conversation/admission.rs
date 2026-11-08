@@ -419,8 +419,11 @@ pub(super) fn recover_original(
         envelopes.push(serde_json::from_slice::<Envelope>(&bytes)?);
         original_objects.insert(reference.sha256.clone(), bytes);
     }
-    let projection =
-        SelectedDomainProjection::from_pinned_records(&envelopes, &transaction.selected.records)?;
+    let projection = SelectedDomainProjection::from_mixed_records(
+        &envelopes,
+        &transaction.selected.records,
+        scope,
+    )?;
     let (envelope, Some(Record::Receipt(receipt))) = projection
         .head(Namespace::Conversation, Ledger::receipt_id(operation))
         .context("original intent receipt missing")?

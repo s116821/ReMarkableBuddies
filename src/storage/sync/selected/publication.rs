@@ -1,5 +1,5 @@
 use super::*;
-use crate::storage::drive::slot::AgreedSlotValue;
+use crate::storage::drive::slot::{AgreedSlotValue, MissingPreparedDescriptor};
 
 impl Engine {
     pub(super) fn upload(
@@ -67,21 +67,27 @@ impl Engine {
     }
     pub(super) fn publish_scope(
         &mut self,
-        key: &str,
         entry: &Entry,
         view: &CatalogView,
         slot: String,
         base: String,
         budget: &mut usize,
+        snapshot: Option<crate::storage::selection::SelectedSnapshot>,
     ) -> Result<Status> {
-        let scope = SelectionScope {
-            group: self.binding.group,
-            key_sha256: key.into(),
-            binding_sha256: self.binding.digest.clone(),
-        };
-        let Some(snapshot) = self.store.selected_snapshot(&scope, MAX_ITEMS)? else {
+        let Some(snapshot) = snapshot else {
             return Ok(Status::Joining);
         };
+        let scope = snapshot.token.scope().clone();
+        let key = scope.key_sha256.as_str();
+        if let Some(pending) = &self.checkpoint.scopes[key].pending {
+            ensure!(
+                pending.slot == slot,
+                "original attempt cannot move to a successor"
+            );
+            if !pending.pins.matches(&snapshot.token) {
+                return Ok(Status::Pending);
+            }
+        }
         let admission = SelectedAdmission::new(self.store.clone(), scope.clone())?;
         // Even an unchanged applied membership is not product readiness when
         // its exact local registration or typed ownership is unavailable.
@@ -136,7 +142,19 @@ impl Engine {
                     "local scope has no applied remote base"
                 );
                 if local_membership == applied.membership {
-                    return Ok(Status::Current);
+                    return Ok(
+                        if snapshot
+                            .transaction
+                            .selected
+                            .media_coverage
+                            .iter()
+                            .any(|coverage| matches!(coverage, Coverage::Omitted { .. }))
+                        {
+                            Status::IncompleteMedia
+                        } else {
+                            Status::Current
+                        },
+                    );
                 }
                 ensure!(
                     snapshot.transaction.mutation
@@ -168,15 +186,6 @@ impl Engine {
             .pending
             .clone()
             .context("original pending absent")?;
-        ensure!(
-            pending.slot == slot,
-            "original attempt cannot move to a successor"
-        );
-        if !pending.pins.matches(&snapshot.token) {
-            // scope_step already observed this exact agreed slot as not visible.
-            // Stale recovery never stages, creates or replaces its candidate.
-            return Ok(Status::Pending);
-        }
         let original = self
             .store
             .selected_receipt(&scope, pending.selection_operation)?
@@ -292,6 +301,12 @@ impl Engine {
         let pending = self.checkpoint.scopes[key].pending.clone().unwrap();
         let descriptor = pending.descriptor.as_ref().unwrap();
         descriptor.check(&slot)?;
+        let commit: Commit = serde_json::from_slice(&descriptor.bytes)?;
+        commit.validate(&view.root, &view.root_sha, key, entry, &slot, &base)?;
+        ensure!(
+            commit.operation == pending.operation && commit.actor == self.store.actor_id,
+            "prepared descriptor does not identify the original local operation"
+        );
         let request = SelectedAttemptRequest {
             operation: pending.operation,
             slot_id: slot.clone(),
@@ -343,11 +358,37 @@ impl Engine {
             .unwrap()
             .outbox_prepared = Some(true);
         self.save()?;
-        let prepared = self.transport.prepare_slot(
-            self.slot(key.into(), slot.clone()),
-            request.descriptor_id,
-            request.descriptor,
-        )?;
+        let binding = self.slot(key.into(), slot.clone());
+        let prepared =
+            match self
+                .transport
+                .prepare_slot(binding, request.descriptor_id, request.descriptor)
+            {
+                Ok(prepared) => prepared,
+                Err(error) if error.is::<MissingPreparedDescriptor>() => {
+                    admission.with_current(&snapshot.token, |current| {
+                        self.store
+                            .current_selected_attempt(&current.token, pending.operation)?;
+                        Ok(())
+                    })?;
+                    let original = self
+                        .checkpoint
+                        .uploads
+                        .get_mut(&descriptor.sha256)
+                        .context("original descriptor upload custody absent")?;
+                    ensure!(
+                        original.id == descriptor.descriptor_id,
+                        "original descriptor upload ID differs"
+                    );
+                    original.complete = false;
+                    self.save()?;
+                    // Restore only the already allocated object from its exact bytes.
+                    // A subsequent step revalidates current admission before create.
+                    self.upload(descriptor.bytes.clone(), budget)?;
+                    return Ok(Status::Pending);
+                }
+                Err(error) => return Err(error),
+            };
         let result = admission.with_current(&snapshot.token, |current| {
             self.store
                 .current_selected_attempt(&current.token, pending.operation)?;
@@ -385,6 +426,7 @@ impl Engine {
             manifest: None,
             original_attempt: Some(pending.operation),
             applied: false,
+            verified: false,
         });
         self.save()?;
         Ok(Status::Pending)

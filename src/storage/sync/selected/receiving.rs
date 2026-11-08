@@ -140,15 +140,33 @@ impl Engine {
         if *budget == 0 {
             return Ok(Status::Pending);
         }
+        let scope = SelectionScope {
+            group: self.binding.group,
+            key_sha256: key.into(),
+            binding_sha256: self.binding.digest.clone(),
+        };
+        // A current original with staged descriptor bytes can retry its exact
+        // create. An observation of absence is neither required nor a grant.
+        let current = self.store.selected_snapshot(&scope, MAX_ITEMS)?;
+        if let Some(pending) = &self.checkpoint.scopes[key].pending {
+            let current_original = pending.descriptor.is_some()
+                && current
+                    .as_ref()
+                    .is_some_and(|snapshot| pending.pins.matches(&snapshot.token));
+            if current_original
+                && (pending.outbox_prepared == Some(false)
+                    || self
+                        .store
+                        .inspect_selected_attempt(pending.operation)?
+                        .is_some())
+            {
+                return self.publish_scope(entry, view, slot, base, budget, current);
+            }
+        }
         if let Some(winner) = self.observe(key.into(), slot.clone())? {
             *budget -= 1;
             let commit: Commit = serde_json::from_slice(&winner.bytes)?;
             commit.validate(&view.root, &view.root_sha, key, entry, &slot, &base)?;
-            let scope = SelectionScope {
-                group: self.binding.group,
-                key_sha256: key.into(),
-                binding_sha256: self.binding.digest.clone(),
-            };
             let current = self.store.selected_snapshot(&scope, MAX_ITEMS)?;
             let receive = Receive {
                 operation: Uuid::new_v4(),
@@ -160,12 +178,13 @@ impl Engine {
                     .as_ref()
                     .map(|p| p.operation),
                 applied: false,
+                verified: false,
             };
             self.checkpoint.scopes.get_mut(key).unwrap().receive = Some(receive);
             self.save()?;
             return self.finish_receive(key, entry, view, budget);
         }
-        self.publish_scope(key, entry, view, slot, base, budget)
+        self.publish_scope(entry, view, slot, base, budget, current)
     }
     fn finish_receive(
         &mut self,
@@ -213,14 +232,13 @@ impl Engine {
             previous
         } else {
             let current = self.store.selected_snapshot(&scope, MAX_ITEMS)?;
-            ensure!(
-                match (&receive.expected, &current) {
-                    (None, None) => true,
-                    (Some(p), Some(s)) => p.matches(&s.token),
-                    _ => false,
-                },
-                "original receive was superseded locally"
-            );
+            if !match (&receive.expected, &current) {
+                (None, None) => true,
+                (Some(p), Some(s)) => p.matches(&s.token),
+                _ => false,
+            } {
+                return Ok(Status::RecoveryRequired);
+            }
             current.map(|s| s.token)
         };
         if receive.manifest.is_none() {
@@ -300,17 +318,20 @@ impl Engine {
                     manifest.clone(),
                     objects,
                 )?;
+                self.mark_receive_verified(key)?;
                 winner.apply(&self.store, receive.operation, expected.as_ref())?
             }
             Owner::Preferences(_) => {
-                let publication = preferences::Winner::validate(
+                let winner = preferences::Winner::validate(
                     &self.store,
                     scope,
                     receive.descriptor.sha256.clone(),
                     manifest.clone(),
                     objects,
-                )?
-                .apply(&self.store, receive.operation, expected.as_ref())?;
+                )?;
+                self.mark_receive_verified(key)?;
+                let publication =
+                    winner.apply(&self.store, receive.operation, expected.as_ref())?;
                 shared::SharedAdoption::Applied(Box::new(publication.transaction))
             }
         };
@@ -331,6 +352,7 @@ impl Engine {
                 });
                 let mut completed = receive.clone();
                 completed.applied = true;
+                completed.verified = true;
                 progress.receipts.push(completed.clone());
                 progress.receive = Some(completed.clone());
                 // Receipt/checkpoint first, then local-only outbound withdrawal.
@@ -364,6 +386,22 @@ impl Engine {
             }
         }
     }
+    fn mark_receive_verified(&mut self, key: &str) -> Result<()> {
+        let receive = self
+            .checkpoint
+            .scopes
+            .get_mut(key)
+            .unwrap()
+            .receive
+            .as_mut()
+            .context("verified original receive absent")?;
+        if !receive.verified {
+            receive.verified = true;
+            self.save()?;
+        }
+        Ok(())
+    }
+
     fn retire_applied_receive(&mut self, key: &str, receive: Receive) -> Result<Status> {
         let scope = SelectionScope {
             group: self.binding.group,
@@ -446,6 +484,16 @@ impl Engine {
         progress.pending = None;
         progress.receive = None;
         self.save()?;
+        let current = self.store.selected_snapshot(&scope, MAX_ITEMS)?;
+        let Some(current) = current else {
+            return Ok(Status::RecoveryRequired);
+        };
+        if current.token.accepted_base_sha256() != receive.descriptor.sha256 {
+            return Ok(Status::RecoveryRequired);
+        }
+        if !shared::same_membership(&current.transaction.selected, manifest) {
+            return Ok(Status::Pending);
+        }
         Ok(
             if manifest
                 .media_coverage
@@ -466,4 +514,131 @@ pub(super) fn membership(manifest: &Manifest) -> Result<String> {
         &manifest.media,
         &manifest.media_coverage,
     ))?))
+}
+
+/// Exact historical Worker custody only. A generic imported manifest or a
+/// foreign actor ID is insufficient, and this check grants no local authority.
+pub(crate) fn verify_received_intents(
+    store: &Store,
+    scope: &SelectionScope,
+    pairs: &[(&ObjectRef, &ObjectRef)],
+) -> Result<()> {
+    if pairs.is_empty() {
+        return Ok(());
+    }
+    let path = store.paths.data.join("sync/state.json");
+    let state: State = files::json(&path, MAX_METADATA as u64)
+        .context("foreign pending intent has no verified Worker custody")?;
+    ensure!(
+        state.format == FORMAT,
+        "foreign intent checkpoint format differs"
+    );
+    let selected = state.selected.context("foreign intent checkpoint absent")?;
+    ensure!(
+        selected.format == 1,
+        "foreign intent selected checkpoint format differs"
+    );
+    let mut unproven = pairs.to_vec();
+    for (epoch, checkpoint) in selected.epochs {
+        if checkpoint.actor != store.actor_id
+            || checkpoint.group != scope.group
+            || checkpoint.binding != scope.binding_sha256
+        {
+            continue;
+        }
+        ensure!(
+            checkpoint.format == 1 && checkpoint.epoch == epoch,
+            "foreign intent checkpoint identity differs"
+        );
+        let Some(progress) = checkpoint.scopes.get(&scope.key_sha256) else {
+            continue;
+        };
+        let binding = Binding {
+            group: scope.group,
+            root_id: checkpoint.root_id.clone(),
+            digest: scope.binding_sha256.clone(),
+        };
+        let view =
+            catalog_view(&binding, &checkpoint)?.context("foreign intent root custody absent")?;
+        let entry = view
+            .entries
+            .get(&scope.key_sha256)
+            .context("foreign intent scope not registered")?;
+        let mut slot = entry.genesis_slot.clone();
+        let mut base = genesis_base(&view.root_sha, &scope.key_sha256);
+        let mut seen = BTreeSet::new();
+        for recorded in &progress.chain {
+            ensure!(
+                seen.insert(slot.clone()),
+                "foreign intent receiving ancestry cycle"
+            );
+            recorded.check(&slot)?;
+            let commit: Commit = serde_json::from_slice(&recorded.bytes)?;
+            commit.validate(
+                &view.root,
+                &view.root_sha,
+                &scope.key_sha256,
+                entry,
+                &slot,
+                &base,
+            )?;
+            slot = commit.next_slot;
+            base.clone_from(&recorded.sha256);
+            for receive in progress.receipts.iter().filter(|receive| {
+                receive.applied
+                    && receive.descriptor.sha256 == recorded.sha256
+                    && receive.descriptor.bytes == recorded.bytes
+                    && receive.descriptor.slot == recorded.slot
+                    && receive.descriptor.descriptor_id == recorded.descriptor_id
+            }) {
+                let manifest = receive
+                    .manifest
+                    .as_ref()
+                    .context("foreign intent applied manifest absent")?;
+                if !unproven.iter().any(|(receipt, fact)| {
+                    manifest.records.contains(receipt) && manifest.records.contains(fact)
+                }) {
+                    continue;
+                }
+                let wire = serde_json::to_vec(manifest)?;
+                ensure!(
+                    wire.len() as u64 == commit.manifest.bytes
+                        && digest(&wire) == commit.manifest.sha256,
+                    "foreign intent manifest does not match the original descriptor"
+                );
+                let local = store
+                    .selected_receipt(scope, receive.operation)?
+                    .context("foreign intent applied receipt absent")?;
+                ensure!(
+                    local.accepted_base_sha256 == recorded.sha256
+                        && shared::same_membership(&local.selected, manifest),
+                    "foreign intent applied closure differs"
+                );
+                match &receive.expected {
+                    Some(pins) => {
+                        let predecessor = store
+                            .historical_predecessor_token(scope, receive.operation)?
+                            .context("foreign intent original predecessor absent")?;
+                        ensure!(
+                            local.mutation
+                                == crate::storage::selection::SelectionMutation::Activate
+                                && pins.matches(&predecessor),
+                            "foreign intent activation predecessor differs"
+                        );
+                    }
+                    None => ensure!(
+                        local.mutation == crate::storage::selection::SelectionMutation::Initialize,
+                        "foreign intent initialization receipt differs"
+                    ),
+                }
+                unproven.retain(|(receipt, fact)| {
+                    !manifest.records.contains(receipt) || !manifest.records.contains(fact)
+                });
+                if unproven.is_empty() {
+                    return Ok(());
+                }
+            }
+        }
+    }
+    anyhow::bail!("foreign pending intent lacks exact applied Worker custody")
 }

@@ -633,6 +633,7 @@ fn outbox_preparation_crash_reopens_original_custody_and_refuses_a_missing_journ
             .iter()
             .filter(|r| r.starts_with("POST "))
             .count();
+        let slot_posts = wire.slot_posts().len();
         if remove_journal {
             let mut refused = false;
             for _ in 0..100 {
@@ -675,8 +676,14 @@ fn outbox_preparation_crash_reopens_original_custody_and_refuses_a_missing_journ
                 .iter()
                 .filter(|r| r.starts_with("POST "))
                 .count(),
-            posts
+            posts + usize::from(!remove_journal)
         );
+        let retries = wire.slot_posts();
+        if remove_journal {
+            assert_eq!(retries.len(), slot_posts);
+        } else {
+            assert_eq!(&retries[slot_posts..], [prepared_request.slot_id]);
+        }
     }
 }
 

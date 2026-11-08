@@ -279,7 +279,11 @@ impl RequestPreferences {
         store: &Store,
         root: &str,
         reads: &mut SelectedReadBudget,
-    ) -> Result<(crate::memory::catalog::Registration, Entry, SelectionToken)> {
+    ) -> Result<(
+        crate::memory::catalog::Registration,
+        Entry,
+        crate::storage::selection::SelectedSnapshot,
+    )> {
         use crate::memory::catalog::{Catalog, Owner as DocumentOwner};
         let key = &document.scope().key_sha256;
         let checkpoint = command::checkpoint(store, &self.binding, self.guard.mode_epoch, reads)?
@@ -326,7 +330,7 @@ impl RequestPreferences {
             .accepted_history
             .last()
             .context("selected document local genesis absent")?;
-        let token = read.snapshot.token;
+        let token = &read.snapshot.token;
         if let Some(applied) = checkpoint.scopes.get(key).and_then(|p| p.applied.as_ref()) {
             ensure!(
                 token.accepted_base_sha256() == applied.descriptor
@@ -351,7 +355,7 @@ impl RequestPreferences {
                 "selected document original genesis differs"
             );
         }
-        Ok((registration.clone(), entry.clone(), token))
+        Ok((registration.clone(), entry.clone(), read.snapshot))
     }
 
     pub(crate) fn notebook_progress(
@@ -410,11 +414,17 @@ impl RequestPreferences {
                     return Err(NotebookSelectionChanged.into());
                 }
             }
-            let (_, _, current) =
+            let (registration, _, current) =
                 self.registered_document(&identity, writer, store, &self.catalog_root, &mut reads)?;
-            if expected.is_some_and(|expected| current != *expected) {
+            if expected.is_some_and(|expected| current.token != *expected) {
                 return Err(NotebookSelectionChanged.into());
             }
+            let crate::memory::catalog::Owner::Document { document } = registration.owner else {
+                anyhow::bail!("notebook registration owner changed");
+            };
+            crate::conversation::reader_uncertainty::validate_document(
+                store, &current, document, None,
+            )?;
             operation
                 .take()
                 .context("notebook phase already consumed")?(store, &mut reads)

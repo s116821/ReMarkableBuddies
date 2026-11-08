@@ -584,6 +584,7 @@ fn reject_bad_notebook_variants(
         Status::IncompleteMedia
     );
     assert!(receiver.checkpoint.scopes[key].applied.is_some());
+    assert_eq!(receiver.step().unwrap(), Status::IncompleteMedia);
     let adopted = store.selected_snapshot(scope, MAX_ITEMS).unwrap().unwrap();
     assert!(adopted
         .transaction

@@ -18,10 +18,12 @@ pub mod feedback;
 mod historical_association;
 mod pending;
 #[cfg(test)]
+pub(crate) use pending::tests::fixture_pending_for_worker;
+#[cfg(test)]
 mod reader_dispatch;
 mod reader_plan;
 #[cfg(test)]
-mod reader_uncertainty;
+pub(crate) mod reader_uncertainty;
 pub mod receiving;
 pub mod resolution;
 mod selected;
