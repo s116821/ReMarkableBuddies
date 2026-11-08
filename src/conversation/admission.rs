@@ -1,8 +1,8 @@
 //! Canonical in-process selected admission. This is not native qualification.
 use super::{IntentRecordRef, Ledger, Receipt, Record, SelectedDomainProjection};
 use crate::storage::selection::{
-    SelectedSnapshot, SelectionChange, SelectionMutation, SelectionPublication, SelectionScope,
-    SelectionToken, SelectionTransaction,
+    SelectedReadBudget, SelectedSnapshot, SelectionChange, SelectionMutation, SelectionPublication,
+    SelectionScope, SelectionToken, SelectionTransaction,
 };
 use crate::storage::{Envelope, Namespace, Store, Uuid, MAX_ITEMS};
 use anyhow::{ensure, Context, Result};
@@ -405,7 +405,17 @@ pub(super) fn recover_original(
     scope: &SelectionScope,
     operation: Uuid,
 ) -> Result<Option<HistoricalIntent>> {
-    let Some(transaction) = store.selected_receipt(scope, operation)? else {
+    recover_original_with_reads(store, scope, operation, None)
+}
+
+pub(super) fn recover_original_with_reads(
+    store: &Store,
+    scope: &SelectionScope,
+    operation: Uuid,
+    mut reads: Option<&mut SelectedReadBudget>,
+) -> Result<Option<HistoricalIntent>> {
+    let Some(transaction) = store.selected_receipt_inner(scope, operation, reads.as_deref_mut())?
+    else {
         return Ok(None);
     };
     ensure!(
@@ -415,7 +425,7 @@ pub(super) fn recover_original(
     let mut envelopes = Vec::new();
     let mut original_objects = BTreeMap::new();
     for reference in &transaction.selected.records {
-        let bytes = store.read_object(reference)?;
+        let bytes = store.read_selected_proof_record(reference, reads.as_deref_mut())?;
         envelopes.push(serde_json::from_slice::<Envelope>(&bytes)?);
         original_objects.insert(reference.sha256.clone(), bytes);
     }
@@ -449,7 +459,7 @@ pub(super) fn recover_original(
         "original intent selection differs from publication"
     );
     let predecessor = store
-        .selected_predecessor(scope, operation)?
+        .selected_predecessor_inner(scope, operation, reads)?
         .context("original intent predecessor absent")?;
     ensure!(
         intent.selection.aggregate_generation == predecessor.aggregate_generation

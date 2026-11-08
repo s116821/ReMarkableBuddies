@@ -328,6 +328,233 @@ fn register_document(
         .unwrap();
 }
 
+#[test]
+fn selected_reader_policy_fences_active_and_retained_local_originals() {
+    use crate::conversation::{fixture_defer_pending_for_worker, fixture_pending_for_worker};
+    use crate::storage::selection::SelectionChange;
+
+    let paths = Fixture::new();
+    let wire = Wire::new();
+    let group = Uuid::new_v4();
+    let profile = Uuid::new_v4();
+    let origin = paths.store("reader-policy");
+    let binding = wire
+        .client(origin.paths.credentials.join("drive.json"), group)
+        .binding_digest();
+    let origin = compound(origin, group, &binding);
+    choose(&origin, group, &binding);
+    let identity = catalog::Identity {
+        group,
+        profile,
+        binding_sha256: binding.clone(),
+    };
+    let document = Uuid::new_v4();
+    let owner = catalog::Owner::Document { document };
+    let scope = identity.aggregate_scope(&owner).unwrap();
+    let root = existing_group(
+        &wire,
+        group,
+        binding.clone(),
+        profile,
+        &scope,
+        owner.clone(),
+    );
+    let other_document = Uuid::new_v4();
+    let other_owner = catalog::Owner::Document {
+        document: other_document,
+    };
+    let other_scope = identity.aggregate_scope(&other_owner).unwrap();
+    let mut other_fact = fact(profile);
+    other_fact.key.scope = memory::Scope::Document {
+        document: other_document,
+    };
+    let memory = selected_memory::SelectedMemory::new(origin.clone(), identity.clone()).unwrap();
+    let other = memory
+        .initialize_aggregate(selected_memory::InitializeAggregate {
+            operation: Uuid::new_v4(),
+            accepted_base_sha256: genesis_base(&root, &other_scope.key_sha256),
+            fact: other_fact,
+        })
+        .unwrap();
+    let mut engine = fixture_engine(&wire, origin.clone(), group, 32);
+    let mut items = 32;
+    let view = engine.refresh_root_catalog(&mut items).unwrap().unwrap();
+    let mut entries = view.entries;
+    entries.insert(
+        other_scope.key_sha256.clone(),
+        Entry {
+            owner: other_owner.into(),
+            genesis_slot: "other-document-first".into(),
+        },
+    );
+    let successor = Catalog {
+        schema: WIRE,
+        group,
+        root_sha256: root.clone(),
+        base_sha256: view.base,
+        slot: view.slot.clone(),
+        operation: Uuid::new_v4(),
+        entries,
+        next_slot: "reader-catalog-next".into(),
+    };
+    wire.slot(
+        &SlotBinding {
+            group,
+            scope_sha256: catalog_key(group),
+            slot_id: view.slot,
+        },
+        "reader-catalog-successor",
+        serde_json::to_vec(&successor).unwrap(),
+    );
+    engine.refresh_root_catalog(&mut items).unwrap().unwrap();
+    drop(engine);
+    let base = genesis_base(&root, &scope.key_sha256);
+    let (_, operation, publish) =
+        fixture_defer_pending_for_worker(origin.clone(), scope.clone(), document, base.clone());
+    register_document(origin.clone(), &identity, owner, &root);
+    memory
+        .register_selection(selected_memory::RegisterSelection {
+            operation: Uuid::new_v4(),
+            registration: other.registration.unwrap(),
+        })
+        .unwrap();
+    let config_path = paths.0.join("reader-policy.json");
+    let open = || reader_policy(&origin, &scope, &config_path, &wire);
+    let (policy, reader, acquired) = open().unwrap();
+    assert!(policy.config().reader_enabled());
+    assert_eq!(
+        policy.mode_token(),
+        &origin.sync_mode_snapshot().unwrap().token
+    );
+    verify_reader_policy(
+        &policy,
+        &reader,
+        &acquired,
+        super::super::preference_consumer::reader::ReaderPhase::Acquisition,
+    )
+    .unwrap();
+    policy.check_progress(&reader, &acquired).unwrap();
+    publish();
+    let blocked = verify_reader_policy(
+        &policy,
+        &reader,
+        &acquired,
+        super::super::preference_consumer::reader::ReaderPhase::Submission,
+    )
+    .unwrap_err();
+    assert!(
+        blocked
+            .to_string()
+            .contains("earlier active pending intent unresolved"),
+        "{blocked:#}"
+    );
+    let active = open().err().map(|e| format!("{e:#}"));
+    reader_policy(
+        &origin,
+        &other_scope,
+        &paths.0.join("other-reader.json"),
+        &wire,
+    )
+    .unwrap();
+    let original = origin
+        .selected_snapshot(&scope, MAX_ITEMS)
+        .unwrap()
+        .unwrap();
+    let sibling = compound(paths.store("same-document-sibling"), group, &binding);
+    choose(&sibling, group, &binding);
+    let (_, sibling_operation) =
+        fixture_pending_for_worker(sibling.clone(), scope.clone(), document, base.clone());
+    let predecessor = sibling
+        .selected_predecessor(&scope, sibling_operation)
+        .unwrap()
+        .unwrap();
+    let objects = predecessor
+        .selected
+        .records
+        .iter()
+        .map(|reference| {
+            (
+                reference.sha256.clone(),
+                sibling.read_object(reference).unwrap(),
+            )
+        })
+        .collect();
+    assert!(origin
+        .selected_receipt(&scope, operation)
+        .unwrap()
+        .is_some());
+    origin
+        .activate_selected(
+            &original.token,
+            SelectionChange {
+                operation: Uuid::new_v4(),
+                accepted_base_sha256: base,
+                selected: predecessor.selected,
+                retained: vec![original.transaction.selected],
+            },
+            objects,
+        )
+        .unwrap();
+    let retained = open().err().map(|e| format!("{e:#}"));
+    assert!(
+        active
+            .as_deref()
+            .is_some_and(|error| error.contains("earlier active pending intent unresolved"))
+            && retained
+                .as_deref()
+                .is_some_and(|error| error.contains("earlier retained pending intent unresolved")),
+        "Reader admission results: active={active:?}, retained={retained:?}"
+    );
+}
+
+fn reader_policy(
+    store: &Arc<Store>,
+    scope: &SelectionScope,
+    config: &std::path::Path,
+    wire: &Wire,
+) -> Result<(
+    super::super::preference_consumer::reader::ReaderPreferences,
+    SelectedAdmission,
+    SelectionToken,
+)> {
+    use super::super::preference_consumer::reader::ReaderPreferences;
+    files::atomic_json(
+        config,
+        &serde_json::json!({
+            "paths": store.paths,
+            "reader": { "selection": scope },
+            "product_settings": { "reader_enabled": true }
+        }),
+    )?;
+    let reader = SelectedAdmission::new(store.clone(), scope.clone())?;
+    let (policy, token) = ReaderPreferences::from_binding(
+        store.clone(),
+        config.into(),
+        &reader,
+        Instant::now(),
+        Binding {
+            group: scope.group,
+            root_id: "shared-root".into(),
+            digest: scope.binding_sha256.clone(),
+        },
+        |store| Ok(wire.client(store.paths.credentials.join("drive.json"), scope.group)),
+    )?;
+    Ok((policy, reader, token))
+}
+
+fn verify_reader_policy(
+    policy: &super::super::preference_consumer::reader::ReaderPreferences,
+    reader: &SelectedAdmission,
+    token: &SelectionToken,
+    phase: super::super::preference_consumer::reader::ReaderPhase,
+) -> Result<()> {
+    let [catalog, preferences] = policy.gates();
+    let mut reads = policy.reads(phase)?;
+    SelectedAdmission::with_gates(&[reader, catalog, preferences], |store| {
+        policy.verify_locked(store, reader, token, &mut reads)
+    })
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WinnerCase {
     Own,
@@ -851,6 +1078,17 @@ fn worker_unresolved_winner(case: WinnerCase) {
         files::object(&incoming, &imported.manifest.sha256, &raw).unwrap();
         check_writer_fence(b.clone(), &scope, document).unwrap();
         assert_eq!(wire.requests().len(), requests);
+        let (policy, reader, token) =
+            reader_policy(&b, &scope, &paths.0.join("foreign-reader.json"), &wire).unwrap();
+        policy.start_model_wait().unwrap();
+        policy.finish_model_wait();
+        verify_reader_policy(
+            &policy,
+            &reader,
+            &token,
+            super::super::preference_consumer::reader::ReaderPhase::Result,
+        )
+        .unwrap();
         assert!(SelectedAdmission::new(b.clone(), scope.clone())
             .unwrap()
             .recover_original_intent(operation)

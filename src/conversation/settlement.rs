@@ -1,7 +1,7 @@
 //! Late retained facts and uncertainty. Historical state never grants an effect.
 use super::*;
 use crate::storage::selection::{
-    RetainedCommit, SelectionPublication, SelectionToken, SelectionTransaction,
+    RetainedCommit, SelectedReadBudget, SelectionPublication, SelectionToken, SelectionTransaction,
 };
 use crate::storage::MAX_RECORD;
 use serde::{Deserialize, Serialize};
@@ -82,11 +82,12 @@ fn pinned(
     store: &Store,
     original: &HistoricalIntent,
     references: &[ObjectRef],
+    mut reads: Option<&mut SelectedReadBudget>,
 ) -> Result<SelectedDomainProjection> {
     let records = references
         .iter()
         .map(|reference| {
-            let bytes = store.read_object(reference)?;
+            let bytes = store.read_selected_proof_record(reference, reads.as_deref_mut())?;
             Ok(serde_json::from_slice::<Envelope>(&bytes)?)
         })
         .collect::<Result<Vec<_>>>()?;
@@ -108,6 +109,7 @@ fn current_fact(
     store: &Store,
     snapshot: &crate::storage::selection::SelectedSnapshot,
     original: &HistoricalIntent,
+    mut reads: Option<&mut SelectedReadBudget>,
 ) -> Result<(Envelope, OutcomeFact, Vec<ObjectRef>)> {
     ensure!(
         !snapshot
@@ -145,7 +147,7 @@ fn current_fact(
             refs.push(reference.clone());
         }
     }
-    let projection = pinned(store, original, &refs)?;
+    let projection = pinned(store, original, &refs, reads.as_deref_mut())?;
     let (head, Some(Record::OutcomeFact(fact))) = projection
         .head(Namespace::Conversation, id)
         .context("retained pending fact absent")?
@@ -179,9 +181,13 @@ fn current_fact(
             );
         }
         let publication = store
-            .selected_receipt(snapshot.token.scope(), head.operation_id)?
+            .selected_receipt_inner(
+                snapshot.token.scope(),
+                head.operation_id,
+                reads.as_deref_mut(),
+            )?
             .context("retained settlement publication absent")?;
-        let reference = projection_reference(&projection, head, &refs, store)?;
+        let reference = projection_reference(&projection, head, &refs, store, reads)?;
         ensure!(
             publication.mutation == crate::storage::selection::SelectionMutation::Retained
                 && publication
@@ -204,9 +210,10 @@ fn projection_reference(
     envelope: &Envelope,
     refs: &[ObjectRef],
     store: &Store,
+    mut reads: Option<&mut SelectedReadBudget>,
 ) -> Result<IntentRecordRef> {
     for reference in refs {
-        let bytes = store.read_object(reference)?;
+        let bytes = store.read_selected_proof_record(reference, reads.as_deref_mut())?;
         let item: Envelope = serde_json::from_slice(&bytes)?;
         if item.revision_id == envelope.revision_id {
             let pin = IntentRecordRef {
@@ -257,8 +264,12 @@ impl SelectedAdmission {
                 admission::recover_original(store, self.scope(), request.original_operation)?
                     .context("original intent absent")?;
             let expected_fact = fact(&original, &request)?;
-            let original_projection =
-                pinned(store, &original, &original.transaction.selected.records)?;
+            let original_projection = pinned(
+                store,
+                &original,
+                &original.transaction.selected.records,
+                None,
+            )?;
             for reference in &request.evidence {
                 ensure!(
                     selected::conversation_id(original_projection.exact_reference(reference)?)
@@ -325,7 +336,7 @@ impl SelectedAdmission {
                 snapshot.token == *accepted,
                 "retained selection stale or replaced"
             );
-            let (prior, previous_fact, _) = current_fact(store, &snapshot, &original)?;
+            let (prior, previous_fact, _) = current_fact(store, &snapshot, &original, None)?;
             ensure!(
                 previous_fact
                     .settlement
@@ -392,7 +403,16 @@ pub(super) fn retained_uncertainty_in_store(
     snapshot: &crate::storage::selection::SelectedSnapshot,
     original: &HistoricalIntent,
 ) -> Result<IntentUncertainty> {
-    let (_, fact, _) = current_fact(store, snapshot, original)?;
+    retained_uncertainty_with_reads(store, snapshot, original, None)
+}
+
+pub(super) fn retained_uncertainty_with_reads(
+    store: &Store,
+    snapshot: &crate::storage::selection::SelectedSnapshot,
+    original: &HistoricalIntent,
+    reads: Option<&mut SelectedReadBudget>,
+) -> Result<IntentUncertainty> {
+    let (_, fact, _) = current_fact(store, snapshot, original, reads)?;
     Ok(match fact.settlement.map(|s| s.state) {
         None | Some(IntentSettlementState::Unknown) => IntentUncertainty::Unresolved,
         Some(IntentSettlementState::VerifiedSubmitted) => IntentUncertainty::VerifiedSubmitted,
@@ -839,7 +859,7 @@ mod tests {
             .selected_snapshot(handle.scope(), MAX_ITEMS)
             .unwrap()
             .unwrap();
-        let (prior, _, _) = current_fact(&store, &snapshot, &original).unwrap();
+        let (prior, _, _) = current_fact(&store, &snapshot, &original, None).unwrap();
         let envelope = Envelope {
             envelope_version: FORMAT,
             namespace: Namespace::Conversation,

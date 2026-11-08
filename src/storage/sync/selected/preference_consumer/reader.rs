@@ -24,7 +24,7 @@ pub(crate) enum ReaderPhase {
 }
 
 impl ReaderPreferences {
-    #[cfg(test)]
+    #[cfg(all(target_os = "linux", test))]
     pub(crate) fn cap_fixture_windows(&mut self, acquisition: Duration, parent: Duration) {
         let now = Instant::now();
         self.inner.deadline = self.inner.deadline.min(now + parent);
@@ -34,6 +34,7 @@ impl ReaderPreferences {
             .min(now + acquisition)
             .min(self.inner.deadline);
     }
+    #[cfg(target_os = "linux")]
     pub(crate) fn open(
         store: Arc<Store>,
         path: PathBuf,
@@ -134,6 +135,16 @@ impl ReaderPreferences {
     ) -> Result<(Registration, Entry, SelectionToken)> {
         let (registration, entry, snapshot) =
             inner.registered_document(identity, reader, store, root, reads)?;
+        let crate::memory::catalog::Owner::Document { document } = registration.owner else {
+            anyhow::bail!("Reader registration owner changed");
+        };
+        crate::conversation::reader_uncertainty::validate_document_with_reads(
+            store,
+            &snapshot,
+            document,
+            None,
+            Some(reads),
+        )?;
         Ok((registration, entry, snapshot.token))
     }
 

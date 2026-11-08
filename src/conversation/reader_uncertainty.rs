@@ -1,6 +1,6 @@
 //! Locked reads only; never reacquire the canonical admission gate here.
 use super::*;
-use crate::storage::selection::SelectedSnapshot;
+use crate::storage::selection::{SelectedReadBudget, SelectedSnapshot};
 
 #[cfg(test)]
 pub(super) fn validate(
@@ -185,6 +185,16 @@ pub(crate) fn validate_document(
     document: Uuid,
     own: Option<&HistoricalIntent>,
 ) -> Result<()> {
+    validate_document_with_reads(store, snapshot, document, own, None)
+}
+
+pub(crate) fn validate_document_with_reads(
+    store: &Store,
+    snapshot: &SelectedSnapshot,
+    document: Uuid,
+    own: Option<&HistoricalIntent>,
+    mut reads: Option<&mut SelectedReadBudget>,
+) -> Result<()> {
     let scope = snapshot.token.scope();
     let mut pairs = BTreeMap::new();
     collect_pairs(
@@ -213,14 +223,17 @@ pub(crate) fn validate_document(
     for (operation, pair) in pairs {
         if pair.actor != store.actor_id {
             ensure!(
-                store.selected_receipt(scope, operation)?.is_none(),
+                store
+                    .selected_receipt_inner(scope, operation, reads.as_deref_mut())?
+                    .is_none(),
                 "foreign pending intent conflicts with local operation custody"
             );
             foreign.push((pair.reference, pair.fact));
             continue;
         }
-        let original = admission::recover_original(store, scope, operation)?
-            .context("uncertainty original local publication absent")?;
+        let original =
+            admission::recover_original_with_reads(store, scope, operation, reads.as_deref_mut())?
+                .context("uncertainty original local publication absent")?;
         ensure!(
             original.receipt == pair.receipt
                 && original.receipt_reference.object == *pair.reference,
@@ -238,12 +251,16 @@ pub(crate) fn validate_document(
             "earlier active pending intent unresolved"
         );
         ensure!(
-            settlement::retained_uncertainty_in_store(store, snapshot, &original)?
-                != IntentUncertainty::Unresolved,
+            settlement::retained_uncertainty_with_reads(
+                store,
+                snapshot,
+                &original,
+                reads.as_deref_mut()
+            )? != IntentUncertainty::Unresolved,
             "earlier retained pending intent unresolved"
         );
     }
-    crate::storage::sync::selected::verify_received_intents(store, scope, &foreign)
+    crate::storage::sync::selected::verify_received_intents(store, scope, &foreign, reads)
 }
 
 #[cfg(test)]

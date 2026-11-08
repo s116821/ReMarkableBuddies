@@ -5,8 +5,8 @@ use crate::config::{portable::record, Config};
 use crate::storage::selection::{SelectedReadBudget, SelectionToken};
 use std::{path::PathBuf, sync::Mutex};
 
-#[cfg(target_os = "linux")]
-mod reader;
+#[cfg(any(target_os = "linux", test))]
+pub(super) mod reader;
 #[cfg(target_os = "linux")]
 pub(crate) use reader::{ReaderPhase, ReaderPreferences};
 

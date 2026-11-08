@@ -157,12 +157,37 @@ pub struct SelectionToken {
     selection_sha256: String,
 }
 impl Store {
+    pub(crate) fn read_selected_proof_record(
+        &self,
+        reference: &ObjectRef,
+        reads: Option<&mut SelectedReadBudget>,
+    ) -> Result<Vec<u8>> {
+        ensure!(
+            reference.bytes <= MAX_RECORD as u64,
+            "selected proof record too large"
+        );
+        if let Some(reads) = reads {
+            // Reachability and integrity verification stream once before the
+            // content read. Account for the final verification buffer too.
+            reads.charge(0, 1, 2 * reference.bytes + 64 * 1024, 0)?;
+        }
+        self.read_object(reference)
+    }
+
     pub(crate) fn historical_predecessor_token(
         &self,
         scope: &SelectionScope,
         operation: Uuid,
     ) -> Result<Option<SelectionToken>> {
-        self.selected_predecessor(scope, operation)?
+        self.historical_predecessor_token_inner(scope, operation, None)
+    }
+    pub(crate) fn historical_predecessor_token_inner(
+        &self,
+        scope: &SelectionScope,
+        operation: Uuid,
+        reads: Option<&mut SelectedReadBudget>,
+    ) -> Result<Option<SelectionToken>> {
+        self.selected_predecessor_inner(scope, operation, reads)?
             .as_ref()
             .map(publication::token)
             .transpose()

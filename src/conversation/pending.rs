@@ -719,6 +719,18 @@ pub(crate) mod tests {
         document: Uuid,
         base: String,
     ) -> (SelectionToken, Uuid) {
+        let (token, operation, publish) =
+            fixture_defer_pending_for_worker(store, scope, document, base);
+        publish();
+        (token, operation)
+    }
+
+    pub(crate) fn fixture_defer_pending_for_worker(
+        store: Arc<Store>,
+        scope: SelectionScope,
+        document: Uuid,
+        base: String,
+    ) -> (SelectionToken, Uuid, impl FnOnce()) {
         let (_, handle, token, request) = seed(store.clone(), scope, document, base);
         let source = MockSource {
             source: request.source.clone(),
@@ -726,10 +738,13 @@ pub(crate) mod tests {
             refuse_at: None,
         };
         let operation = request.operation;
-        handle
-            .publish_pending(Some(&token), request, Some(&source))
-            .unwrap();
-        (token, operation)
+        let accepted = token.clone();
+        let publish = move || {
+            handle
+                .publish_pending(Some(&accepted), request, Some(&source))
+                .unwrap();
+        };
+        (token, operation, publish)
     }
     impl Drop for Fixture {
         fn drop(&mut self) {

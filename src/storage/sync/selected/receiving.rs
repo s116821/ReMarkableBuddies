@@ -280,6 +280,7 @@ impl Engine {
             &commit.manifest,
             &receive,
             manifest,
+            None,
         )?;
         let media_total = manifest.media.iter().try_fold(0u64, |n, r| {
             n.checked_add(r.bytes).context("receiving media overflow")
@@ -550,6 +551,7 @@ fn verify_manifest_custody(
     expected: &ObjectRef,
     receive: &Receive,
     manifest: &Manifest,
+    reads: Option<&mut crate::storage::selection::SelectedReadBudget>,
 ) -> Result<()> {
     ensure!(
         valid_digest(key)
@@ -557,10 +559,15 @@ fn verify_manifest_custody(
             && (1..=MAX_METADATA as u64).contains(&expected.bytes),
         "original manifest custody bounds differ"
     );
+    let mut reads = reads;
+    if let Some(reads) = reads.as_deref_mut() {
+        reads.charge(0, 1, 0, 0)?;
+    }
     let raw = if let Some(reference) = &receive.manifest_reference {
         ensure!(reference == expected, "original manifest reference differs");
         let path = manifest_custody_path(store, epoch, key, reference);
-        files::read(&path, reference.bytes).context("original manifest custody unavailable")?
+        files::read_with_budget(&path, reference.bytes, reads)
+            .context("original manifest custody unavailable")?
     } else {
         let incoming = store
             .paths
@@ -571,7 +578,7 @@ fn verify_manifest_custody(
             .join(&expected.sha256);
         files::safe_path(&incoming)?;
         if incoming.try_exists()? {
-            files::read(&incoming, expected.bytes)?
+            files::read_with_budget(&incoming, expected.bytes, reads)?
         } else {
             // Older checkpoints may have cleaned their incoming bytes.
             // Only an exact digest match can prove the old encoding.
@@ -596,13 +603,18 @@ pub(crate) fn verify_received_intents(
     store: &Store,
     scope: &SelectionScope,
     pairs: &[(&ObjectRef, &ObjectRef)],
+    mut reads: Option<&mut crate::storage::selection::SelectedReadBudget>,
 ) -> Result<()> {
     if pairs.is_empty() {
         return Ok(());
     }
     let path = store.paths.data.join("sync/state.json");
-    let state: State = files::json(&path, MAX_METADATA as u64)
+    if let Some(reads) = reads.as_deref_mut() {
+        reads.charge(0, 1, 0, 0)?;
+    }
+    let bytes = files::read_with_budget(&path, MAX_METADATA as u64, reads.as_deref_mut())
         .context("foreign pending intent has no verified Worker custody")?;
+    let state: State = serde_json::from_slice(&bytes)?;
     ensure!(
         state.format == FORMAT,
         "foreign intent checkpoint format differs"
@@ -681,9 +693,10 @@ pub(crate) fn verify_received_intents(
                     &commit.manifest,
                     receive,
                     manifest,
+                    reads.as_deref_mut(),
                 )?;
                 let local = store
-                    .selected_receipt(scope, receive.operation)?
+                    .selected_receipt_inner(scope, receive.operation, reads.as_deref_mut())?
                     .context("foreign intent applied receipt absent")?;
                 ensure!(
                     local.accepted_base_sha256 == recorded.sha256
@@ -693,7 +706,11 @@ pub(crate) fn verify_received_intents(
                 match &receive.expected {
                     Some(pins) => {
                         let predecessor = store
-                            .historical_predecessor_token(scope, receive.operation)?
+                            .historical_predecessor_token_inner(
+                                scope,
+                                receive.operation,
+                                reads.as_deref_mut(),
+                            )?
                             .context("foreign intent original predecessor absent")?;
                         ensure!(
                             local.mutation

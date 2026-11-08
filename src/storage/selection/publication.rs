@@ -396,7 +396,7 @@ impl Store {
         self.selected_receipt_inner(scope, operation, Some(budget))
     }
 
-    fn selected_receipt_inner(
+    pub(crate) fn selected_receipt_inner(
         &self,
         scope: &SelectionScope,
         operation: Uuid,
@@ -449,7 +449,7 @@ impl Store {
         self.selected_predecessor_inner(scope, original_operation, Some(budget))
     }
 
-    fn selected_predecessor_inner(
+    pub(crate) fn selected_predecessor_inner(
         &self,
         scope: &SelectionScope,
         original_operation: Uuid,

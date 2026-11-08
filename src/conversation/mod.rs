@@ -18,7 +18,7 @@ pub mod feedback;
 mod historical_association;
 mod pending;
 #[cfg(test)]
-pub(crate) use pending::tests::fixture_pending_for_worker;
+pub(crate) use pending::tests::{fixture_defer_pending_for_worker, fixture_pending_for_worker};
 #[cfg(test)]
 mod reader_dispatch;
 mod reader_plan;
