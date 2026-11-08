@@ -52,6 +52,18 @@ fn launch(wire: &Wire, store: Arc<Store>, group: Uuid, batch: usize) -> Worker {
             self.0.health(status)
         }
     }
+    let engine = fixture_engine(wire, store.clone(), group, batch);
+    Worker::launch(
+        store,
+        engine.policy.clone(),
+        engine.cancel.clone(),
+        Observed(engine),
+    )
+    .unwrap()
+    .unwrap()
+}
+
+fn fixture_engine(wire: &Wire, store: Arc<Store>, group: Uuid, batch: usize) -> Engine {
     let transport = wire.client(store.paths.credentials.join("drive.json"), group);
     let binding = Binding {
         group,
@@ -64,17 +76,52 @@ fn launch(wire: &Wire, store: Arc<Store>, group: Uuid, batch: usize) -> Worker {
         ..Default::default()
     };
     let cancel = Arc::new(AtomicBool::new(false));
-    let engine = Engine::new(
-        store.clone(),
-        policy.clone(),
-        transport,
-        binding,
-        cancel.clone(),
-    )
-    .unwrap();
-    Worker::launch(store, policy, cancel, Observed(engine))
-        .unwrap()
-        .unwrap()
+    Engine::new(store, policy, transport, binding, cancel).unwrap()
+}
+
+fn step_resident_media_transfer(mut engine: Engine, key: &str, steps: usize, publisher: bool) {
+    let started = Instant::now();
+    let mut saw_partial_receive = false;
+    let mut last_cached = 0;
+    for step in 1..=steps {
+        let status = engine.step().unwrap_or_else(|error| {
+            panic!("resident media Worker step {step} failed: {error:#}");
+        });
+        let progress = engine.checkpoint.scopes.get(key);
+        let pending = progress.is_some_and(|progress| progress.pending.is_some());
+        let receive = progress.and_then(|progress| progress.receive.as_ref());
+        let manifest = receive.is_some_and(|receive| receive.manifest.is_some());
+        let applied = progress.is_some_and(|progress| progress.applied.is_some());
+        let incoming = engine
+            .store
+            .paths
+            .data
+            .join("sync/incoming")
+            .join(engine.checkpoint.epoch.to_string())
+            .join(key);
+        let cached = fs::read_dir(incoming).map_or(0, |entries| entries.count());
+        let uploaded = engine
+            .checkpoint
+            .uploads
+            .values()
+            .filter(|entry| entry.complete)
+            .count();
+        eprintln!(
+            "resident media Worker publisher={publisher} step={step} {status:?} uploaded={uploaded} pending={pending} receiving={} manifest={manifest} cached={cached} applied={applied} elapsed_ms={}",
+            receive.is_some(), started.elapsed().as_millis()
+        );
+        saw_partial_receive |= manifest && last_cached > 0 && cached == last_cached + 1 && !applied;
+        last_cached = cached;
+        if applied && receive.is_none() {
+            assert!(
+                saw_partial_receive,
+                "batch of one must make partial receiving progress"
+            );
+            assert_eq!(status, Status::Current);
+            return;
+        }
+    }
+    panic!("resident media transfer exceeded its item-derived step bound");
 }
 
 fn until(worker: &Worker, mut condition: impl FnMut() -> bool) {
@@ -453,16 +500,22 @@ fn transfer(lost_ack: bool, activation_fault: bool, use_compound: bool) {
 
 #[test]
 fn selected_writer_real_model_entry_publishes_exact_text_source_through_worker() {
-    transfer_writer_document(false);
+    transfer_writer_document(false, false);
 }
 
 #[cfg(target_os = "linux")]
 #[test]
 fn resident_reader_policy_requires_received_registration_and_current_config() {
-    transfer_writer_document(true);
+    transfer_writer_document(true, false);
 }
 
-fn transfer_writer_document(ready_reader: bool) {
+#[cfg(target_os = "linux")]
+#[test]
+fn resident_capture_media_transfers_across_batch_one_worker_steps() {
+    transfer_writer_document(true, true);
+}
+
+fn transfer_writer_document(ready_reader: bool, transfer_media: bool) {
     use crate::{
         conversation::*,
         retrieval::{NormalizedDocument, SourceFormat, SourceUnit},
@@ -649,7 +702,7 @@ fn transfer_writer_document(ready_reader: bool) {
         )
     };
     #[cfg(target_os = "linux")]
-    if ready_reader {
+    let capture = if ready_reader {
         files::atomic_json(&path, &config(&first, writer.scope(), true)).unwrap();
         let (local, local_token) = open(&first, &writer).unwrap();
         assert_eq!(
@@ -657,26 +710,68 @@ fn transfer_writer_document(ready_reader: bool) {
             genesis_base(&root_sha, &writer.scope().key_sha256)
         );
         local.check_progress(&writer, &local_token).unwrap();
-    }
+        if transfer_media {
+            Some(
+                resident_reader_fixture_generated(
+                    &first,
+                    &writer,
+                    local,
+                    local_token,
+                    document,
+                    ReaderTiming::Immediate,
+                )
+                .1,
+            )
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let sent = first.selected_snapshot(&scope, MAX_ITEMS).unwrap().unwrap();
-    let publisher = launch(&wire, first.clone(), group, 1);
-    until(&publisher, || {
-        first
+    let step_bound =
+        2 * (sent.transaction.selected.records.len() + sent.transaction.selected.media.len()) + 16;
+    if transfer_media {
+        step_resident_media_transfer(
+            fixture_engine(&wire, first.clone(), group, 1),
+            &scope.key_sha256,
+            step_bound,
+            true,
+        );
+        assert!(first
             .selected_attempt_inventory()
             .unwrap()
             .iter()
-            .any(|a| a.state == SelectedAttemptState::Withdrawn)
-    });
-    drop(publisher);
+            .any(|attempt| attempt.state == SelectedAttemptState::Withdrawn));
+    } else {
+        let publisher = launch(&wire, first.clone(), group, 1);
+        until(&publisher, || {
+            first
+                .selected_attempt_inventory()
+                .unwrap()
+                .iter()
+                .any(|a| a.state == SelectedAttemptState::Withdrawn)
+        });
+        drop(publisher);
+    }
     let before = wire.requests().len();
-    let receiver = launch(&wire, second.clone(), group, 1);
-    until(&receiver, || {
-        second
-            .selected_snapshot(&identity.scope().unwrap(), MAX_ITEMS)
-            .unwrap()
-            .is_some()
-    });
-    drop(receiver);
+    if transfer_media {
+        step_resident_media_transfer(
+            fixture_engine(&wire, second.clone(), group, 1),
+            &scope.key_sha256,
+            step_bound,
+            false,
+        );
+    } else {
+        let receiver = launch(&wire, second.clone(), group, 1);
+        until(&receiver, || {
+            second
+                .selected_snapshot(&identity.scope().unwrap(), MAX_ITEMS)
+                .unwrap()
+                .is_some()
+        });
+        drop(receiver);
+    }
     let received = second
         .selected_snapshot(&scope, MAX_ITEMS)
         .unwrap()
@@ -685,7 +780,21 @@ fn transfer_writer_document(ready_reader: bool) {
         sent.transaction.selected.records,
         received.transaction.selected.records
     );
-    for reference in &sent.transaction.selected.records {
+    assert_eq!(
+        sent.transaction.selected.media,
+        received.transaction.selected.media
+    );
+    assert_eq!(
+        sent.transaction.selected.media_coverage,
+        received.transaction.selected.media_coverage
+    );
+    for reference in sent
+        .transaction
+        .selected
+        .records
+        .iter()
+        .chain(&sent.transaction.selected.media)
+    {
         assert_eq!(
             first.read_object(reference).unwrap(),
             second.read_object(reference).unwrap()
@@ -703,6 +812,35 @@ fn transfer_writer_document(ready_reader: bool) {
     assert!(wire.requests()[before..]
         .iter()
         .all(|r| r.starts_with("GET ")));
+
+    #[cfg(target_os = "linux")]
+    if let Some(capture) = capture {
+        use crate::conversation::SelectedCaptureImages;
+        assert!(!received.transaction.selected.media.is_empty());
+        let publisher = first
+            .selected_snapshot(writer.scope(), MAX_ITEMS)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            publisher.token.accepted_base_sha256(),
+            received.token.accepted_base_sha256()
+        );
+        let SelectedCaptureImages::Resident(original) =
+            writer.capture_images(&publisher.token, capture).unwrap()
+        else {
+            panic!("publisher lost resident capture type");
+        };
+        let SelectedCaptureImages::Resident(transfer) =
+            reader.capture_images(&received.token, capture).unwrap()
+        else {
+            panic!("receiver lost resident capture type");
+        };
+        assert_eq!(original.evidence, transfer.evidence);
+        assert_eq!(original.original_png, transfer.original_png);
+        assert_eq!(original.images, transfer.images);
+        assert_eq!(transfer.images.len(), 4);
+        return;
+    }
 
     #[cfg(target_os = "linux")]
     if ready_reader {
@@ -730,7 +868,7 @@ fn transfer_writer_document(ready_reader: bool) {
                 result
             });
         }
-        let pure = resident_reader_fixture_generated(
+        let (pure, _) = resident_reader_fixture_generated(
             &second,
             &reader,
             policy,
@@ -839,7 +977,7 @@ fn resident_reader_fixture_generated(
     token: SelectionToken,
     document: Uuid,
     timing: ReaderTiming,
-) -> SelectionToken {
+) -> (SelectionToken, Uuid) {
     use crate::conversation::{
         resident_capture::tests::capture_for, selected_reader_prepare::ResidentPrepared, Ledger,
         Outcome, Record, SelectedDomainProjection,
@@ -859,6 +997,7 @@ fn resident_reader_fixture_generated(
         .unwrap()
     };
     let root = acknowledgment.root.record_id;
+    let capture_id = acknowledgment.capture.record_id;
     let enriched = policy.config().memory.enabled;
     let expires = matches!(timing, ReaderTiming::ExpireParent);
     let requests_expected = if expires {
@@ -958,5 +1097,5 @@ fn resident_reader_fixture_generated(
     assert_eq!(projection.inspect(root).unwrap().iter().any(|record| {
         matches!(record, Record::Turn(turn) if turn.outcome == Outcome::Generated && turn.text.as_ref().is_some_and(|text| text.contains("x = 7")))
     }), !expires);
-    selected.token
+    (selected.token, capture_id)
 }
