@@ -39,11 +39,19 @@ pub(crate) struct Scenario {
     output: PathBuf,
     #[serde(default)]
     memory: Option<MemoryFixture>,
+    #[serde(default)]
+    historical_source: Option<HistoricalSource>,
 }
 #[derive(Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum MemoryFixture {
     LocalFixtureV1,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum HistoricalSource {
+    ResidentFixtureV1,
 }
 
 fn memory_config(ledger: &Ledger, document: Uuid, enabled: bool) -> Result<Config> {
@@ -281,7 +289,19 @@ fn seed(
     conversation: Uuid,
     source: &SourceObservation,
     png: &[u8],
+    historical_source: Option<HistoricalSource>,
 ) -> Result<Value> {
+    if historical_source.is_some() {
+        let (capture, _) = super::resident::seed(ledger, conversation, source, png.to_vec())?;
+        let mut indices = std::collections::BTreeMap::new();
+        let mut associations = Vec::new();
+        for image in &capture.images {
+            let next = indices.len();
+            let index = *indices.entry(image.media.sha256.clone()).or_insert(next);
+            associations.push(json!({"source":capture.id,"ordinal":image.provider_ordinal,"dimensions":image.dimensions,"attachment_index":index,"sha256":image.media.sha256}));
+        }
+        return Ok(json!(associations));
+    }
     use image::GenericImageView;
     let (width, height) = image::load_from_memory(png)?.dimensions();
     let (id, _) = seed_image_bytes(ledger, conversation, source, png.to_vec(), 0)?;
@@ -311,21 +331,47 @@ fn check_call(
         actual == history,
         "actual returned history was rewritten or omitted"
     );
-    ensure!(
-        model.calls[index].attachments.len() == 1
-            && model.calls[index].attachments[0].sha256 == IMAGE_SHA,
-        "historical attachment changed"
-    );
+    check_attachments(model, index, associations)?;
     Ok(())
 }
 
-fn ordinary(model: &mut CheckedModel, png: &[u8], memory: bool) -> Result<Value> {
+fn check_attachments(model: &CheckedModel, index: usize, associations: &Value) -> Result<()> {
+    let mut expected = std::collections::BTreeMap::new();
+    for association in associations.as_array().context("associations absent")? {
+        let index = association["attachment_index"]
+            .as_u64()
+            .context("attachment index absent")? as usize;
+        let sha = association["sha256"]
+            .as_str()
+            .context("attachment digest absent")?;
+        if let Some(prior) = expected.insert(index, sha) {
+            ensure!(prior == sha, "conflicting expected attachment");
+        }
+    }
+    ensure!(
+        model.calls[index].attachments.len() == expected.len(),
+        "historical attachment count changed"
+    );
+    for (ordinal, attachment) in model.calls[index].attachments.iter().enumerate() {
+        ensure!(
+            expected.get(&ordinal) == Some(&attachment.sha256.as_str()),
+            "historical attachment changed"
+        );
+    }
+    Ok(())
+}
+fn ordinary(
+    model: &mut CheckedModel,
+    png: &[u8],
+    memory: bool,
+    historical_source: Option<HistoricalSource>,
+) -> Result<Value> {
     let fixture = SimulatorLedger::new();
     let ledger = fixture.open()?;
     let conversation = Uuid::new_v4();
     ledger.create(conversation, Uuid::new_v4(), 1)?;
     let source = fixture_source(Uuid::new_v4());
-    let associations = seed(&ledger, conversation, &source, png)?;
+    let associations = seed(&ledger, conversation, &source, png, historical_source)?;
     let config = memory_config(&ledger, source.document, memory)?;
     let mut dispatch = Dispatch::local(&config, &ledger)?;
     let mut history = vec!["Earlier image question?".into()];
@@ -401,7 +447,12 @@ fn ordinary(model: &mut CheckedModel, png: &[u8], memory: bool) -> Result<Value>
     )
 }
 
-fn notebook(model: &mut CheckedModel, png: &[u8], memory: bool) -> Result<Value> {
+fn notebook(
+    model: &mut CheckedModel,
+    png: &[u8],
+    memory: bool,
+    historical_source: Option<HistoricalSource>,
+) -> Result<Value> {
     use crate::conversation::notebook::{notebook_input_digest, NotebookStageKind, REDUCE_PROMPT};
     use writer::notebook::{
         command::{Generate, Request},
@@ -418,7 +469,7 @@ fn notebook(model: &mut CheckedModel, png: &[u8], memory: bool) -> Result<Value>
     let conversation = Uuid::new_v4();
     ledger.create(conversation, Uuid::new_v4(), 1)?;
     let source = fixture_source(Uuid::new_v4());
-    let associations = seed(&ledger, conversation, &source, png)?;
+    let associations = seed(&ledger, conversation, &source, png, historical_source)?;
     let config = memory_config(&ledger, source.document, memory)?;
     let mut dispatch = Dispatch::local(&config, &ledger)?;
     let admitted = scope(&ledger, conversation, &source)?;
@@ -455,14 +506,17 @@ fn notebook(model: &mut CheckedModel, png: &[u8], memory: bool) -> Result<Value>
         "map received historical images"
     );
     ensure!(
-        model.calls[5].attachments.len() == 1
-            && reduce["request"] == NOTEBOOK_REQUEST
+        reduce["request"] == NOTEBOOK_REQUEST
             && reduce["historical_images"] == associations
             && reduce["historical_png_base64_sha256"]
-                == json!([model.calls[5].attachments[0].encoded_sha256])
-            && model.calls[5].attachments[0].sha256 == IMAGE_SHA,
+                == json!(model.calls[5]
+                    .attachments
+                    .iter()
+                    .map(|image| &image.encoded_sha256)
+                    .collect::<Vec<_>>()),
         "reducer image binding changed"
     );
+    check_attachments(model, 5, &associations)?;
     let input_digest = notebook_input_digest(REDUCE_PROMPT, &model.calls[5].text_parts)?;
     ensure!(ledger.inspect(conversation,false)?.iter().any(|record|matches!(record,Record::NotebookStage(stage) if stage.kind==NotebookStageKind::Reduce && stage.input_digest==input_digest)),"actual reducer input digest not persisted");
     let draft = report.draft.context("notebook draft absent")?;
@@ -618,20 +672,33 @@ pub(crate) fn save(scenario: Scenario, root: &Path) -> Result<()> {
     let mut model = CheckedModel::new(inner);
     model.deadline = started + Duration::from_secs(720);
     let result: Result<Value> = (|| {
-        let ordinary = ordinary(&mut model, &png, scenario.memory.is_some())?;
-        let notebook = notebook(&mut model, &png, scenario.memory.is_some())?;
+        let ordinary = ordinary(
+            &mut model,
+            &png,
+            scenario.memory.is_some(),
+            scenario.historical_source,
+        )?;
+        let notebook = notebook(
+            &mut model,
+            &png,
+            scenario.memory.is_some(),
+            scenario.historical_source,
+        )?;
         ensure!(
             model.calls.len() == CALLS,
             "qualification sequence incomplete"
         );
         Ok(json!({"ordinary":ordinary,"notebook":notebook}))
     })();
-    let report = json!({"report_version":1,"mode":"combined-qualification","model_mode":mode,"source_revision":env!("VERGEN_GIT_SHA"),"source_dirty":option_env!("VERGEN_GIT_DIRTY"),"build_version":env!("READER_BUDDY_VERSION"),"elapsed_ms":started.elapsed().as_millis(),
+    let mut report = json!({"report_version":1,"mode":"combined-qualification","model_mode":mode,"source_revision":env!("VERGEN_GIT_SHA"),"source_dirty":option_env!("VERGEN_GIT_DIRTY"),"build_version":env!("READER_BUDDY_VERSION"),"elapsed_ms":started.elapsed().as_millis(),
         "fixture_sha256":IMAGE_SHA,"configuration":identity,"limits":{"max_calls":7,"max_completion_tokens":4000,"per_request_seconds":90,"overall_seconds":720,"automatic_retries":false},
         "calls":model.calls,"sequence":result.as_ref().ok(),"status":if result.is_ok(){"completed"}else{"failed"},
         "failure":result.as_ref().err().map(|_|"receiving qualification failed; no retry"),
         "external_exports":0,"native_effects":0,"optional_subject_memory":scenario.memory,
         "semantic_review":"required separately; scripted replies are not live evidence"});
+    if let Some(source) = scenario.historical_source {
+        report["historical_source"] = json!(source);
+    }
     let bytes = serde_json::to_vec_pretty(&report)?;
     ensure!(
         bytes.len() <= 1024 * 1024,
@@ -695,6 +762,7 @@ mod tests {
                 llm: ModelConfig::Scripted,
                 output: "run".into(),
                 memory: None,
+                historical_source: None,
             },
             &root,
         )?;
@@ -861,8 +929,8 @@ mod tests {
             .join("docs/validation/images/selected-memory/source-page.png");
         let png = files::read(&image, 16 * 1024 * 1024)?;
         let mut model = CheckedModel::new(Box::new(scripted()));
-        let ordinary = ordinary(&mut model, &png, true)?;
-        let notebook = notebook(&mut model, &png, true)?;
+        let ordinary = ordinary(&mut model, &png, true, None)?;
+        let notebook = notebook(&mut model, &png, true, None)?;
         ensure!(
             ordinary["memory_queries"] == 4 && notebook["memory_queries"] == 2,
             "query counts changed"
@@ -916,7 +984,8 @@ mod tests {
                         timeout_seconds: seconds
                     },
                     output: "run".into(),
-                    memory: None
+                    memory: None,
+                    historical_source: None,
                 })
                 .is_err(),
                 "invalid live allowance admitted"
@@ -928,6 +997,50 @@ mod tests {
             model.execute().is_err() && model.calls.is_empty(),
             "expired request dispatched"
         );
+        Ok(())
+    }
+    #[test]
+    fn resident_qualification_runs_actual_reader_writer_refine_and_notebook_receivers() -> Result<()>
+    {
+        let root = std::env::temp_dir().join(format!("resident-qualification-{}", Uuid::new_v4()));
+        std::fs::create_dir(&root)?;
+        save(
+            Scenario {
+                mode: "combined-qualification".into(),
+                llm: ModelConfig::Scripted,
+                output: "run".into(),
+                memory: None,
+                historical_source: Some(HistoricalSource::ResidentFixtureV1),
+            },
+            &root,
+        )?;
+        let report: Value = serde_json::from_slice(&std::fs::read(root.join("run/report.json"))?)?;
+        ensure!(
+            report["status"] == "completed" && report["historical_source"] == "resident-fixture-v1",
+            "resident sequence failed"
+        );
+        let png = include_bytes!("../../../docs/validation/images/selected-memory/source-page.png");
+        let expected = crate::device::screenshot::Screenshot::reader_images_from_owned_png(png)?
+            .iter()
+            .map(|bytes| digest(bytes))
+            .collect::<Vec<_>>();
+        for (index, call) in report["calls"].as_array().unwrap().iter().enumerate() {
+            let hashes = call["attachments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item["sha256"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>();
+            if index == 4 {
+                ensure!(hashes.is_empty(), "map attached resident history");
+            } else {
+                ensure!(
+                    hashes == expected && !hashes.iter().any(|hash| hash == IMAGE_SHA),
+                    "resident original/derivative identity changed"
+                );
+            }
+        }
+        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }
