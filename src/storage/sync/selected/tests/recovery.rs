@@ -725,6 +725,27 @@ fn worker_unresolved_winner(case: WinnerCase) {
     );
     assert_eq!(wire.slot_posts(), before);
     if case == WinnerCase::Own {
+        let saved = resumed.checkpoint.scopes[key].receive.as_ref().unwrap();
+        let manifest = saved.manifest.as_ref().unwrap();
+        let raw = serde_json::to_vec_pretty(manifest).unwrap();
+        let canonical = serde_json::to_vec(manifest).unwrap();
+        assert_ne!(digest(&raw), digest(&canonical));
+        let mut imported = winner;
+        imported.manifest_id = "pretty-manifest".into();
+        imported.manifest = ObjectRef {
+            sha256: digest(&raw),
+            bytes: raw.len() as u64,
+        };
+        wire.object(&imported.manifest_id, group, raw.clone());
+        wire.slot(
+            &SlotBinding {
+                group,
+                scope_sha256: key.clone(),
+                slot_id: imported.slot.clone(),
+            },
+            "pretty-manifest-descriptor",
+            serde_json::to_vec(&imported).unwrap(),
+        );
         let mut peer = fixture_engine(&wire, b.clone(), group, 32);
         drive_applied(&mut peer, key);
         assert!(b
@@ -737,7 +758,99 @@ fn worker_unresolved_winner(case: WinnerCase) {
             .contains(&receipt));
         assert_eq!(b.read_object(&receipt).unwrap(), original_bytes);
         retain_foreign_sibling(&a, &b, &scope, operation);
+        let receipt = peer.checkpoint.scopes[key].receipts.last().unwrap();
+        assert_eq!(
+            receipt.manifest_reference.as_ref(),
+            Some(&imported.manifest)
+        );
+        let path = b
+            .paths
+            .data
+            .join("sync/incoming")
+            .join(peer.checkpoint.epoch.to_string())
+            .join("manifest-custody")
+            .join(key)
+            .join(&imported.manifest.sha256);
+        assert_eq!(files::read(&path, imported.manifest.bytes).unwrap(), raw);
+        let requests = wire.requests().len();
         check_writer_fence(b.clone(), &scope, document).unwrap();
+
+        // Change only whitespace at the same length and leave the parsed value
+        // identical. The descriptor must still reject these substituted bytes.
+        let mut substituted = raw.clone();
+        let offset = substituted.iter().position(|byte| *byte == b' ').unwrap();
+        substituted[offset] = b'\t';
+        assert_eq!(
+            serde_json::from_slice::<Manifest>(&substituted).unwrap(),
+            *receipt.manifest.as_ref().unwrap()
+        );
+        files::atomic(&path, &substituted).unwrap();
+        let error = check_writer_fence(b.clone(), &scope, document).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("manifest does not match the original descriptor"),
+            "{error:#}"
+        );
+        files::atomic(&path, &raw).unwrap();
+
+        // A receipt with the right immutable bytes cannot substitute the saved
+        // parsed manifest, even where its membership would still match.
+        let receipt = peer
+            .checkpoint
+            .scopes
+            .get_mut(key)
+            .unwrap()
+            .receipts
+            .last_mut()
+            .unwrap();
+        let manifest_id = receipt.manifest.as_ref().unwrap().transaction_id;
+        receipt.manifest.as_mut().unwrap().transaction_id = Uuid::new_v4();
+        peer.save().unwrap();
+        let error = check_writer_fence(b.clone(), &scope, document).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("original manifest differs from saved parsed correspondence"),
+            "{error:#}"
+        );
+        peer.checkpoint
+            .scopes
+            .get_mut(key)
+            .unwrap()
+            .receipts
+            .last_mut()
+            .unwrap()
+            .manifest
+            .as_mut()
+            .unwrap()
+            .transaction_id = manifest_id;
+        peer.save().unwrap();
+        check_writer_fence(b.clone(), &scope, document).unwrap();
+
+        // An older checkpoint can still prove a noncanonical original if its
+        // incoming cache survived. Without those bytes it must fail closed.
+        let receipt = peer
+            .checkpoint
+            .scopes
+            .get_mut(key)
+            .unwrap()
+            .receipts
+            .last_mut()
+            .unwrap();
+        receipt.manifest_reference = None;
+        peer.save().unwrap();
+        assert!(check_writer_fence(b.clone(), &scope, document).is_err());
+        let incoming = b
+            .paths
+            .data
+            .join("sync/incoming")
+            .join(peer.checkpoint.epoch.to_string())
+            .join(key)
+            .join(&imported.manifest.sha256);
+        files::object(&incoming, &imported.manifest.sha256, &raw).unwrap();
+        check_writer_fence(b.clone(), &scope, document).unwrap();
+        assert_eq!(wire.requests().len(), requests);
         assert!(SelectedAdmission::new(b.clone(), scope.clone())
             .unwrap()
             .recover_original_intent(operation)

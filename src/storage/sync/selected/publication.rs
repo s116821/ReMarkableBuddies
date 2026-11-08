@@ -424,6 +424,7 @@ impl Engine {
             expected: now.as_ref().map(|s| Pins::from(&s.token)),
             descriptor: recorded,
             manifest: None,
+            manifest_reference: None,
             original_attempt: Some(pending.operation),
             applied: false,
             verified: false,

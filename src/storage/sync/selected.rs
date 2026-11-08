@@ -200,6 +200,8 @@ struct Receive {
     expected: Option<Pins>,
     descriptor: Recorded,
     manifest: Option<Manifest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    manifest_reference: Option<ObjectRef>,
     original_attempt: Option<Uuid>,
     applied: bool,
     #[serde(default)]

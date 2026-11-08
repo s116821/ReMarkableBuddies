@@ -173,6 +173,7 @@ impl Engine {
                 expected: current.as_ref().map(|s| Pins::from(&s.token)),
                 descriptor: winner,
                 manifest: None,
+                manifest_reference: None,
                 original_attempt: self.checkpoint.scopes[key]
                     .pending
                     .as_ref()
@@ -241,7 +242,7 @@ impl Engine {
             }
             current.map(|s| s.token)
         };
-        if receive.manifest.is_none() {
+        if receive.manifest_reference.is_none() {
             let Some(raw) = self.fetch(key, &commit.manifest, Some(&commit.manifest_id), budget)?
             else {
                 return Ok(Status::Pending);
@@ -252,6 +253,18 @@ impl Engine {
                 manifest.scope == Scope::SelectedRecords,
                 "shared manifest is not a selected closure"
             );
+            ensure!(
+                receive
+                    .manifest
+                    .as_ref()
+                    .is_none_or(|saved| *saved == manifest),
+                "original received manifest differs from saved manifest"
+            );
+            let path =
+                manifest_custody_path(&self.store, self.checkpoint.epoch, key, &commit.manifest);
+            files::directory(path.parent().context("manifest custody directory absent")?)?;
+            files::object(&path, &commit.manifest.sha256, &raw)?;
+            receive.manifest_reference = Some(commit.manifest.clone());
             receive.manifest = Some(manifest);
             self.checkpoint.scopes.get_mut(key).unwrap().receive = Some(receive.clone());
             self.save()?;
@@ -260,6 +273,14 @@ impl Engine {
             .manifest
             .as_ref()
             .context("receiving manifest absent")?;
+        verify_manifest_custody(
+            &self.store,
+            self.checkpoint.epoch,
+            key,
+            &commit.manifest,
+            &receive,
+            manifest,
+        )?;
         let media_total = manifest.media.iter().try_fold(0u64, |n, r| {
             n.checked_add(r.bytes).context("receiving media overflow")
         })?;
@@ -357,7 +378,7 @@ impl Engine {
                 progress.receive = Some(completed.clone());
                 // Receipt/checkpoint first, then local-only outbound withdrawal.
                 self.save()?;
-                self.retire_applied_receive(key, completed)?;
+                let status = self.retire_applied_receive(key, completed)?;
                 for reference in manifest
                     .records
                     .iter()
@@ -372,17 +393,7 @@ impl Engine {
                         Err(e) => return Err(e.into()),
                     }
                 }
-                Ok(
-                    if manifest
-                        .media_coverage
-                        .iter()
-                        .any(|c| matches!(c, Coverage::Omitted { .. }))
-                    {
-                        Status::IncompleteMedia
-                    } else {
-                        Status::Current
-                    },
-                )
+                Ok(status)
             }
         }
     }
@@ -516,6 +527,64 @@ pub(super) fn membership(manifest: &Manifest) -> Result<String> {
     ))?))
 }
 
+fn manifest_custody_path(store: &Store, epoch: Uuid, key: &str, reference: &ObjectRef) -> PathBuf {
+    store
+        .paths
+        .data
+        .join("sync/incoming")
+        .join(epoch.to_string())
+        .join("manifest-custody")
+        .join(key)
+        .join(&reference.sha256)
+}
+
+fn verify_manifest_custody(
+    store: &Store,
+    epoch: Uuid,
+    key: &str,
+    expected: &ObjectRef,
+    receive: &Receive,
+    manifest: &Manifest,
+) -> Result<()> {
+    ensure!(
+        valid_digest(key)
+            && valid_digest(&expected.sha256)
+            && (1..=MAX_METADATA as u64).contains(&expected.bytes),
+        "original manifest custody bounds differ"
+    );
+    let raw = if let Some(reference) = &receive.manifest_reference {
+        ensure!(reference == expected, "original manifest reference differs");
+        let path = manifest_custody_path(store, epoch, key, reference);
+        files::read(&path, reference.bytes).context("original manifest custody unavailable")?
+    } else {
+        let incoming = store
+            .paths
+            .data
+            .join("sync/incoming")
+            .join(epoch.to_string())
+            .join(key)
+            .join(&expected.sha256);
+        files::safe_path(&incoming)?;
+        if incoming.try_exists()? {
+            files::read(&incoming, expected.bytes)?
+        } else {
+            // Older checkpoints may have cleaned their incoming bytes.
+            // Only an exact digest match can prove the old encoding.
+            serde_json::to_vec(manifest)?
+        }
+    };
+    ensure!(
+        raw.len() as u64 == expected.bytes && digest(&raw) == expected.sha256,
+        "foreign intent manifest does not match the original descriptor"
+    );
+    let original: Manifest = serde_json::from_slice(&raw)?;
+    ensure!(
+        original == *manifest,
+        "original manifest differs from saved parsed correspondence"
+    );
+    Ok(())
+}
+
 /// Exact historical Worker custody only. A generic imported manifest or a
 /// foreign actor ID is insufficient, and this check grants no local authority.
 pub(crate) fn verify_received_intents(
@@ -600,12 +669,14 @@ pub(crate) fn verify_received_intents(
                 }) {
                     continue;
                 }
-                let wire = serde_json::to_vec(manifest)?;
-                ensure!(
-                    wire.len() as u64 == commit.manifest.bytes
-                        && digest(&wire) == commit.manifest.sha256,
-                    "foreign intent manifest does not match the original descriptor"
-                );
+                verify_manifest_custody(
+                    store,
+                    epoch,
+                    &scope.key_sha256,
+                    &commit.manifest,
+                    receive,
+                    manifest,
+                )?;
                 let local = store
                     .selected_receipt(scope, receive.operation)?
                     .context("foreign intent applied receipt absent")?;
