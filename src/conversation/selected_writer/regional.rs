@@ -76,7 +76,10 @@ impl SelectedAdmission {
         let Record::TargetState(value) = current(&p, &state)? else {
             bail!("regional state variant")
         };
-        let Record::TargetUse(used) = current(&p, &pin(&value.use_reference))? else {
+        // State pins the introducing use, whose presentation hash can advance
+        // independently after a Generated answer. Intent still comes from this
+        // exact immutable member of the selected closure, not its later head.
+        let Record::TargetUse(used) = p.exact_reference(&pin(&value.use_reference))? else {
             bail!("regional use variant")
         };
         ensure!(

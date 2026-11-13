@@ -33,6 +33,7 @@ enum Case {
     RegionalSibling,
     ForeignParent,
     ForeignAfterChild,
+    ReaderCompleted,
 }
 
 #[test]
@@ -73,6 +74,11 @@ fn regional_foreign_parent_collision_refuses_before_submission() {
 #[test]
 fn regional_foreign_parent_after_child_refuses_before_submission() {
     run_cases(&[Case::ForeignAfterChild]);
+}
+
+#[test]
+fn regional_writer_keeps_target_after_real_reader_generated_presentation() {
+    run_cases(&[Case::ReaderCompleted]);
 }
 
 fn run_cases(cases: &[Case]) {
@@ -139,6 +145,29 @@ fn run_cases(cases: &[Case]) {
         let SelectedReaderPublication::Published { acknowledgment, .. } = interpreted else {
             panic!("fresh interpretation")
         };
+        if case == Case::ReaderCompleted {
+            let current = f.a.selected_snapshot(&scope, MAX_ITEMS).unwrap().unwrap();
+            let generated = writer
+                .publish_reader_text(
+                    &current.token,
+                    SelectedReaderWrite {
+                        operation: Uuid::new_v4(),
+                        root: acknowledgment.root.clone(),
+                        user: acknowledgment.turn.clone(),
+                        updated_ms: 4,
+                        text: "About: Left concept\nReader answer about the selected concept."
+                            .into(),
+                        kind: SelectedReaderText::Generate {
+                            assistant: Uuid::new_v4(),
+                        },
+                    },
+                )
+                .unwrap();
+            assert!(matches!(
+                generated,
+                SelectedReaderPublication::Published { .. }
+            ));
+        }
         let registered_correction = if case == Case::ForeignAfterChild {
             let revision = observed(f.command(&f.a, &confirm(f.owner, Uuid::new_v4()), true));
             f.drive(&mut f.engine(&f.a), revision);
@@ -582,7 +611,7 @@ fn run_cases(cases: &[Case]) {
             }
             _ => None,
         });
-        if matches!(case, Case::Good | Case::Delayed) {
+        if matches!(case, Case::Good | Case::Delayed | Case::ReaderCompleted) {
             let report = result.unwrap();
             assert_eq!(report.report.status, writer::Status::Generated, "{case:?}");
             assert_eq!(model.calls.len(), 2);
