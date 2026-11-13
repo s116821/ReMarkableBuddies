@@ -2,6 +2,7 @@ use super::*;
 use crate::memory::{self, catalog, selected as selected_memory, Provider};
 use crate::storage::drive::shared_fixture::Wire;
 mod corrections;
+mod writer_image;
 
 struct Fixture(PathBuf);
 impl Fixture {
