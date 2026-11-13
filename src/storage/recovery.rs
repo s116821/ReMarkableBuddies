@@ -319,13 +319,13 @@ impl Store {
             "backup metadata exceeds supported restore bound"
         );
         // Reserve the path exclusively so concurrent attempts cannot share it.
-        let mut reservation = fs::DirBuilder::new();
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;
-            reservation.mode(0o700);
+            fs::DirBuilder::new().mode(0o700).create(destination)?;
         }
-        reservation.create(destination)?;
+        #[cfg(not(unix))]
+        fs::create_dir(destination)?;
         files::sync_dir(destination.parent().context("export parent missing")?)?;
         files::directory(&destination.join("objects"))?;
         let report = self.export_write_locked(
