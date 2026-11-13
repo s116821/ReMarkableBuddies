@@ -119,6 +119,24 @@ impl SelectedAdmission {
                 .is_some_and(|reference| reference.bytes == item.bytes)
         })
     }
+
+    pub(crate) fn writer_context_locked(
+        snapshot: &SelectedSnapshot,
+        conversation: Uuid,
+        budget: &super::ContextBudget,
+        token_count: impl Fn(&[super::Turn]) -> Result<usize>,
+    ) -> Result<super::ContextView> {
+        Ledger::context_token_limit(None, budget)?;
+        let records = SelectedDomainProjection::from_snapshot(snapshot)?.inspect(conversation)?;
+        Ledger::context_from_records(records, None, budget, token_count, |item| {
+            snapshot
+                .transaction
+                .selected
+                .media
+                .iter()
+                .any(|reference| reference.sha256 == item.sha256 && reference.bytes == item.bytes)
+        })
+    }
     /// Return exact historical capture bytes from one current selected closure.
     /// Saved SDK/development correspondence never reconstructs effect authority.
     pub fn capture_images(

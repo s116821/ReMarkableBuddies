@@ -55,7 +55,6 @@ pub(crate) enum ContextOwner {
     Selected(crate::storage::sync::selected::SelectedContextOwner),
 }
 
-#[cfg(any(target_os = "linux", test))]
 pub(crate) struct SelectedCapture {
     pub(crate) context: ConfirmedContext,
     pub(crate) selection: super::runtime::Selection,
@@ -71,7 +70,6 @@ impl ConfirmedContext {
         &self.identity
     }
 
-    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn selected_owner(
         &self,
     ) -> anyhow::Result<&crate::storage::sync::selected::SelectedContextOwner> {

@@ -7,7 +7,6 @@ pub(crate) use context::ABSENT_ORIGINAL_INSTRUCTION;
 pub(crate) mod runtime;
 pub(crate) use context::ConfirmedExample;
 pub(crate) use context::ContextOwner;
-#[cfg(any(target_os = "linux", test))]
 pub(crate) use context::SelectedCapture;
 pub use context::{
     ConfirmedContext, ContextFailure, ContextIdentity, ExampleIdentity, ExampleSelection,
