@@ -628,7 +628,7 @@ fn selected_handwriting_writer_normalizes_only_current_images_and_never_replays(
             _ => None,
         };
         let report = run_image(
-            &writer,
+            writer,
             &selection,
             &input,
             &mut model,
@@ -638,7 +638,7 @@ fn selected_handwriting_writer_normalizes_only_current_images_and_never_replays(
         );
         assert_eq!(model.calls.len(), [2, 0, 2, 0, 1, 2][index]);
         assert_eq!(
-            f.a.selected_receipt(&scope, input.preparation())
+            f.a.selected_receipt(scope, input.preparation())
                 .unwrap()
                 .is_some(),
             index != 1
@@ -658,14 +658,14 @@ fn selected_handwriting_writer_normalizes_only_current_images_and_never_replays(
         } else {
             assert!(report.is_err() || report.unwrap().publication.is_none());
             assert_eq!(
-                f.a.selected_receipt(&scope, input.operation)
+                f.a.selected_receipt(scope, input.operation)
                     .unwrap()
                     .is_some(),
                 index == 5
             );
             assert!(f
                 .a
-                .selected_receipt(&scope, writer::stage(input.operation, "finish"))
+                .selected_receipt(scope, writer::stage(input.operation, "finish"))
                 .unwrap()
                 .is_none());
             if index == 1 {
@@ -673,7 +673,7 @@ fn selected_handwriting_writer_normalizes_only_current_images_and_never_replays(
             }
             revision = next.get().unwrap();
             let before = model.calls.len();
-            let snapshot = f.a.selected_snapshot(&scope, MAX_ITEMS).unwrap().unwrap();
+            let snapshot = f.a.selected_snapshot(scope, MAX_ITEMS).unwrap().unwrap();
             let root = crate::conversation::SelectedDomainProjection::from_snapshot(&snapshot)
                 .unwrap()
                 .current_reference(Namespace::Conversation, selection.root.record_id)
@@ -684,7 +684,7 @@ fn selected_handwriting_writer_normalizes_only_current_images_and_never_replays(
                 refine: None,
             };
             assert!(run_image(
-                &writer,
+                writer,
                 &latest,
                 &input,
                 &mut model,
@@ -706,7 +706,7 @@ fn selected_handwriting_writer_normalizes_only_current_images_and_never_replays(
     };
     let mut model = fixture.model(&input);
     let error = run_image(
-        &writer,
+        writer,
         &selection,
         &input,
         &mut model,
@@ -720,7 +720,7 @@ fn selected_handwriting_writer_normalizes_only_current_images_and_never_replays(
     assert!(model.calls.is_empty());
     assert!(f
         .a
-        .selected_receipt(&scope, input.preparation())
+        .selected_receipt(scope, input.preparation())
         .unwrap()
         .is_none());
 }
