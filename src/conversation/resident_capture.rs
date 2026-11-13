@@ -566,6 +566,14 @@ pub(crate) mod tests {
         capture_for(Uuid::new_v4())
     }
 
+    #[cfg(all(
+        target_os = "linux",
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    pub(crate) fn fixture_original(capture: &ResidentSourceCapture) -> Vec<u8> {
+        capture.capture.png().to_vec()
+    }
     pub(crate) fn capture_for(document: Uuid) -> ResidentSourceCapture {
         capture_with_pixels(
             document,

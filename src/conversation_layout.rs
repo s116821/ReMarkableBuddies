@@ -74,6 +74,67 @@ pub struct HistoricalFeedbackPlan<'a> {
     pub exchange: Uuid,
     pub description: FeedbackDescription,
 }
+/// Read-only About metadata projection, including unbound retained-source
+/// previews. This carries neither a presentation binding nor native authority.
+pub(crate) fn about_entries(
+    conversation: Uuid,
+    context: &ContextView,
+) -> Result<Vec<AboutEntry<'_>>> {
+    ensure!(
+        !conversation.is_nil()
+            && context.turns.len() <= MAX_ITEMS
+            && context
+                .turns
+                .iter()
+                .all(|turn| turn.conversation == conversation),
+        "foreign or oversized About context"
+    );
+    let mut about = Vec::new();
+    let mut used_turns = BTreeSet::new();
+    for used in &context.target_uses {
+        used.validate()?;
+        ensure!(
+            used.conversation == conversation && used_turns.insert(used.turn),
+            "foreign or duplicate target use"
+        );
+        let user = context
+            .turns
+            .iter()
+            .find(|turn| turn.id == used.turn && turn.role == Role::User)
+            .ok_or_else(|| anyhow::anyhow!("target About user absent"))?;
+        let Some(text) = used.about.as_deref() else {
+            continue;
+        };
+        let inline = context
+            .turns
+            .iter()
+            .filter(|turn| turn.exchange == user.exchange && turn.role == Role::Assistant)
+            .any(|turn| {
+                used.inline_body_sha256.as_ref().is_some_and(|expected| {
+                    turn.text.as_deref().is_some_and(|body| {
+                        crate::storage::digest(body.as_bytes()) == *expected
+                            && ((turn.mode == crate::conversation::Mode::Reader
+                                && body.starts_with(&format!("{text}\n")))
+                                || (turn.mode == crate::conversation::Mode::Writer
+                                    && turn.outcome == crate::conversation::Outcome::Generated
+                                    && crate::writer::regional_body_has_about(body, text)))
+                    })
+                })
+            });
+        if !inline {
+            about.push(AboutEntry {
+                turn: user.id,
+                target: used
+                    .target
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("About target reference absent"))?,
+                text,
+            });
+        }
+    }
+    Ok(about)
+}
+
 /// Project an already validated domain context. No pixel/OCR/cache/device inputs,
 /// I/O, model calls, draft changes or native operations exist in this interface.
 /// The caller retains responsibility for About interpretation and current binding
@@ -149,45 +210,7 @@ pub fn plan<'a>(
     exchanges.sort_by_key(|exchange| {
         std::cmp::Reverse(exchange.turns.last().expect("nonempty exchange").sequence)
     });
-    let mut about = Vec::new();
-    let mut used_turns = BTreeSet::new();
-    for used in &context.target_uses {
-        used.validate()?;
-        ensure!(
-            used.conversation == conversation && used_turns.insert(used.turn),
-            "foreign or duplicate target use"
-        );
-        let user = context
-            .turns
-            .iter()
-            .find(|turn| turn.id == used.turn && turn.role == Role::User)
-            .ok_or_else(|| anyhow::anyhow!("target About user absent"))?;
-        let Some(text) = used.about.as_deref() else {
-            continue;
-        };
-        let inline = context
-            .turns
-            .iter()
-            .filter(|turn| turn.exchange == user.exchange && turn.role == Role::Assistant)
-            .any(|turn| {
-                used.inline_body_sha256.as_ref().is_some_and(|expected| {
-                    turn.text.as_deref().is_some_and(|body| {
-                        crate::storage::digest(body.as_bytes()) == *expected
-                            && body.starts_with(&format!("{text}\n"))
-                    })
-                })
-            });
-        if !inline {
-            about.push(AboutEntry {
-                turn: user.id,
-                target: used
-                    .target
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("About target reference absent"))?,
-                text,
-            });
-        }
-    }
+    let about = about_entries(conversation, context)?;
     let region = |start, end| Region {
         x: 0.0,
         y: start,

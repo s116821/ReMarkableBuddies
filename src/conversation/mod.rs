@@ -1798,6 +1798,27 @@ impl Ledger {
         self.complete_target_view(&mut context)?;
         Ok(context)
     }
+    /// Read-only history includes Generated Writer bodies; model context keeps
+    /// its existing Completed/Interpreted filter and cannot select this recipe.
+    pub(crate) fn presentation_context(
+        &self,
+        conversation: Uuid,
+        budget: &ContextBudget,
+        token_count: impl Fn(&[Turn]) -> Result<usize>,
+    ) -> Result<ContextView> {
+        let records = self.inspect(conversation, false)?;
+        let mut context = Self::presentation_from_records(records, budget, token_count, |media| {
+            self.store
+                .open_object(&ObjectRef {
+                    sha256: media.sha256.clone(),
+                    bytes: media.bytes,
+                })
+                .is_ok()
+        })?;
+        self.complete_target_view(&mut context)?;
+        Ok(context)
+    }
+
     pub(super) fn context_token_limit(
         selection: Option<TurnRange>,
         budget: &ContextBudget,
@@ -1835,12 +1856,51 @@ impl Ledger {
         token_count: Option<&TurnCounter<'_>>,
         media_available: impl Fn(&Media) -> bool,
     ) -> Result<ContextView> {
+        Self::context_records_for(
+            records,
+            selection,
+            budget,
+            token_count,
+            media_available,
+            ContextPurpose::Model,
+        )
+    }
+
+    pub(super) fn presentation_from_records(
+        records: Vec<Record>,
+        budget: &ContextBudget,
+        token_count: impl Fn(&[Turn]) -> Result<usize>,
+        media_available: impl Fn(&Media) -> bool,
+    ) -> Result<ContextView> {
+        Self::context_records_for(
+            records,
+            None,
+            budget,
+            Some(&token_count),
+            media_available,
+            ContextPurpose::Presentation,
+        )
+    }
+
+    fn context_records_for(
+        records: Vec<Record>,
+        selection: Option<TurnRange>,
+        budget: &ContextBudget,
+        token_count: Option<&TurnCounter<'_>>,
+        media_available: impl Fn(&Media) -> bool,
+        purpose: ContextPurpose,
+    ) -> Result<ContextView> {
         let token_limit = Self::context_token_limit(selection, budget)?;
         let turns: Vec<Turn> = records
             .iter()
             .filter_map(|r| match r {
                 Record::Turn(t)
-                    if (t.outcome == Outcome::Completed || t.outcome == Outcome::Interpreted)
+                    if (t.outcome == Outcome::Completed
+                        || t.outcome == Outcome::Interpreted
+                        || (matches!(purpose, ContextPurpose::Presentation)
+                            && t.mode == Mode::Writer
+                            && t.role == Role::Assistant
+                            && t.outcome == Outcome::Generated))
                         && selection.is_none_or(|range| {
                             t.sequence >= range.start && t.sequence < range.end_exclusive
                         }) =>
@@ -2076,3 +2136,9 @@ impl Ledger {
 
 #[cfg(test)]
 mod append_replay_tests;
+
+#[derive(Clone, Copy)]
+enum ContextPurpose {
+    Model,
+    Presentation,
+}

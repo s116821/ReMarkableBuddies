@@ -20,6 +20,13 @@ impl Fixture {
         }
         Self(path)
     }
+    pub(crate) fn declare_source(&self, document: StoreUuid, page: StoreUuid) {
+        fs::write(
+            self.0.join("declared-source.json"),
+            serde_json::to_vec(&(document, page)).unwrap(),
+        )
+        .unwrap();
+    }
     fn store(&self) -> Arc<Store> {
         Arc::new(
             Store::open(StorePaths {

@@ -88,8 +88,12 @@ connections = set()
 handshakes = set()
 count = 0
 # Explicit owned source-handoff model, never native current-page authority.
-source_page = uuid.uuid4().bytes
-source_facts = uuid.uuid4().bytes + source_page + struct.pack(">H", 1) + source_page
+declared_source = root.parent / "declared-source.json"
+if declared_source.is_file():
+    source_document, source_page = [uuid.UUID(value).bytes for value in json.loads(declared_source.read_text())]
+else:
+    source_document, source_page = uuid.uuid4().bytes, uuid.uuid4().bytes
+source_facts = source_document + source_page + struct.pack(">H", 1) + source_page
 while True:
     peer, _ = listener.accept()
     # The companion-startup fixture must outlive its five-second readiness

@@ -7,6 +7,12 @@ use crate::conversation::{
 use crate::storage::selection::{SelectionToken, SelectionTransaction};
 
 mod image;
+#[cfg(all(
+    target_os = "linux",
+    feature = "development-resident-bootstrap",
+    feature = "development-input-diagnostics"
+))]
+pub(crate) use image::fresh::FreshOperation;
 #[cfg(test)]
 pub(crate) use image::regional::{
     advance_at_admission_recheck_for_test, advance_for_test, clock_for_test,
