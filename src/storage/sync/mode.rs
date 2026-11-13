@@ -85,6 +85,34 @@ pub(crate) struct ModeState {
     actor: Uuid,
     device: Uuid,
     transitions: Vec<SyncModeReceipt>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    isolated_operations: BTreeMap<Uuid, IsolatedReservation>,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct IsolatedReservation {
+    pub backup: Uuid,
+    pub epoch: Uuid,
+}
+
+#[derive(Serialize)]
+struct ModeHistory<'a> {
+    format: u32,
+    actor: Uuid,
+    device: Uuid,
+    transitions: &'a [SyncModeReceipt],
+}
+
+impl ModeState {
+    fn history(&self, transitions: usize) -> ModeHistory<'_> {
+        ModeHistory {
+            format: self.format,
+            actor: self.actor,
+            device: self.device,
+            transitions: &self.transitions[..transitions],
+        }
+    }
 }
 fn fresh_identity(state: &ModeState) -> Uuid {
     loop {
@@ -244,6 +272,28 @@ fn load_at(
         }
         previous = Some(&receipt.mode);
     }
+    let isolated_epochs: BTreeMap<_, _> = state
+        .transitions
+        .iter()
+        .filter_map(|receipt| match receipt.mode {
+            SyncMode::IsolatedBackup { backup, .. } => Some((receipt.epoch, backup)),
+            _ => None,
+        })
+        .collect();
+    let mut reserved_epochs = BTreeSet::new();
+    ensure!(
+        state.isolated_operations.len() <= state.transitions.len(),
+        "too many isolated reservations"
+    );
+    for (operation, reservation) in &state.isolated_operations {
+        ensure!(
+            !operation.is_nil()
+                && !operations.contains(operation)
+                && reserved_epochs.insert(reservation.epoch)
+                && isolated_epochs.get(&reservation.epoch) == Some(&reservation.backup),
+            "invalid isolated reservation"
+        );
+    }
     Ok(Some(state))
 }
 
@@ -263,9 +313,196 @@ fn snapshot(store: &Store, state: &Option<ModeState>) -> Result<SyncModeSnapshot
         mode: current.map(|r| r.mode.clone()),
         token: SyncModeToken {
             actor: store.actor_id,
-            sha256: digest(&serde_json::to_vec(&(store.actor_id, state))?),
+            sha256: history_digest(
+                store.actor_id,
+                state
+                    .as_ref()
+                    .map(|state| state.history(state.transitions.len())),
+            )?,
         },
     })
+}
+
+fn history_digest(actor: Uuid, history: Option<ModeHistory<'_>>) -> Result<String> {
+    Ok(digest(&serde_json::to_vec(&(actor, history))?))
+}
+
+pub(super) struct IsolatedOriginal {
+    pub device: Uuid,
+    pub backup: Uuid,
+    pub epoch: Uuid,
+    pub grant: String,
+    pub token: SyncModeToken,
+    pub current: bool,
+    pub reserved: bool,
+}
+
+pub(super) struct IsolatedHistory {
+    state: ModeState,
+    indices: BTreeMap<Uuid, usize>,
+}
+
+impl IsolatedHistory {
+    pub fn verify(
+        &self,
+        operation: Uuid,
+        expected: &SyncModeToken,
+        (backup, device, grant, epoch): (Uuid, Uuid, &str, Uuid),
+    ) -> Result<()> {
+        let reservation = self
+            .state
+            .isolated_operations
+            .get(&operation)
+            .context("isolated reservation absent")?;
+        let index = self
+            .indices
+            .get(&reservation.epoch)
+            .copied()
+            .context("isolated epoch absent")?;
+        let receipt = &self.state.transitions[index];
+        ensure!(
+            expected.actor == self.state.actor
+                && device == self.state.device
+                && reservation.epoch == epoch
+                && reservation.backup == backup
+                && matches!(&receipt.mode, SyncMode::IsolatedBackup { binding_sha256, .. } if binding_sha256 == grant)
+                && expected.sha256
+                    == history_digest(self.state.actor, Some(self.state.history(index + 1)))?,
+            "isolated history mismatch"
+        );
+        Ok(())
+    }
+}
+
+pub(super) fn isolated_history(store: &Store) -> Result<IsolatedHistory> {
+    let _inner = store
+        .inner
+        .lock()
+        .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+    let state = load(store)?.context("isolated mode ledger unavailable")?;
+    let indices = state
+        .transitions
+        .iter()
+        .enumerate()
+        .map(|(index, receipt)| (receipt.epoch, index))
+        .collect();
+    Ok(IsolatedHistory { state, indices })
+}
+
+pub(super) fn isolated_original(
+    store: &Store,
+    operation: Uuid,
+    expected: &SyncModeToken,
+) -> Result<Option<IsolatedOriginal>> {
+    let _inner = store
+        .inner
+        .lock()
+        .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+    let Some(state) = load(store)? else {
+        return Ok(None);
+    };
+    let reserved = state.isolated_operations.get(&operation);
+    let index = match reserved {
+        Some(entry) => state
+            .transitions
+            .iter()
+            .position(|receipt| receipt.epoch == entry.epoch)
+            .context("isolated reservation has no history")?,
+        None => state.transitions.len() - 1,
+    };
+    let receipt = &state.transitions[index];
+    let token = SyncModeToken {
+        actor: state.actor,
+        sha256: history_digest(state.actor, Some(state.history(index + 1)))?,
+    };
+    if &token != expected {
+        return Ok(None);
+    }
+    let SyncMode::IsolatedBackup {
+        backup,
+        binding_sha256,
+    } = &receipt.mode
+    else {
+        return Ok(None);
+    };
+    if reserved.is_none()
+        && (state
+            .transitions
+            .iter()
+            .any(|receipt| receipt.operation == operation)
+            || state
+                .isolated_operations
+                .values()
+                .any(|entry| entry.epoch == receipt.epoch))
+    {
+        return Ok(None);
+    }
+    Ok(Some(IsolatedOriginal {
+        device: state.device,
+        backup: *backup,
+        epoch: receipt.epoch,
+        grant: binding_sha256.clone(),
+        token,
+        current: index + 1 == state.transitions.len(),
+        reserved: reserved.is_some(),
+    }))
+}
+
+pub(super) fn isolated_reservations(store: &Store, backup: Uuid) -> Result<BTreeMap<Uuid, Uuid>> {
+    let _inner = store
+        .inner
+        .lock()
+        .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+    let state = load(store)?.context("isolated mode ledger unavailable")?;
+    Ok(state
+        .isolated_operations
+        .into_iter()
+        .filter_map(|(operation, entry)| {
+            (entry.backup == backup).then_some((operation, entry.epoch))
+        })
+        .collect())
+}
+
+pub(super) fn reserve_isolated(
+    store: &Store,
+    operation: Uuid,
+    original: &IsolatedOriginal,
+) -> Result<()> {
+    let _inner = store
+        .inner
+        .lock()
+        .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+    let mut state = load(store)?.context("isolated mode ledger unavailable")?;
+    let current = snapshot(store, &Some(state.clone()))?;
+    ensure!(
+        current.token == original.token
+            && current.epoch == Some(original.epoch)
+            && !operation.is_nil()
+            && !state
+                .transitions
+                .iter()
+                .any(|receipt| receipt.operation == operation),
+        "stale isolated reservation"
+    );
+    let reservation = IsolatedReservation {
+        backup: original.backup,
+        epoch: original.epoch,
+    };
+    if let Some(existing) = state.isolated_operations.get(&operation) {
+        ensure!(existing == &reservation, "isolated reservation differs");
+        return Ok(());
+    }
+    ensure!(
+        !state
+            .isolated_operations
+            .values()
+            .any(|entry| entry.epoch == original.epoch),
+        "isolated epoch is already reserved"
+    );
+    state.isolated_operations.insert(operation, reservation);
+    let bytes = serde_json::to_vec(&state)?;
+    ensure!(bytes.len() <= MAX_METADATA, "mode history exceeds bound");
+    files::atomic(&path(store), &bytes)
 }
 pub(crate) fn shared_epoch(
     store: &Store,
@@ -388,6 +625,12 @@ impl Store {
             compound_generation::validate_ready(&self.paths, self.actor_id, inner.generation)?;
         }
         let original = load(self)?;
+        ensure!(
+            original
+                .as_ref()
+                .is_none_or(|state| !state.isolated_operations.contains_key(&operation)),
+            "mode operation collision"
+        );
         let fingerprint = digest(&serde_json::to_vec(&(
             self.actor_id,
             &expected.sha256,
@@ -421,6 +664,7 @@ impl Store {
                 }
             },
             transitions: vec![],
+            isolated_operations: BTreeMap::new(),
         });
         let mode = match choice {
             SyncModeChoice::LocalOnly => SyncMode::LocalOnly,
@@ -565,6 +809,55 @@ mod tests {
                 choice,
             )
             .unwrap()
+    }
+
+    #[test]
+    fn isolated_reservation_preserves_exact_legacy_absent_and_history_tokens() {
+        #[derive(Serialize)]
+        struct LegacyMode {
+            format: u32,
+            actor: Uuid,
+            device: Uuid,
+            transitions: Vec<SyncModeReceipt>,
+        }
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        let old_none: Option<LegacyMode> = None;
+        let old_bytes = serde_json::to_vec(&(store.actor_id, old_none)).unwrap();
+        assert_eq!(
+            store.sync_mode_snapshot().unwrap().token.sha256,
+            digest(&old_bytes)
+        );
+        let chosen = set(
+            &store,
+            SyncModeChoice::IsolatedBackup {
+                binding_sha256: digest(b"grant"),
+            },
+        );
+        let before = store.sync_mode_snapshot().unwrap();
+        let old = LegacyMode {
+            format: FORMAT,
+            actor: store.actor_id,
+            device: before.device.unwrap(),
+            transitions: vec![chosen],
+        };
+        let old_bytes = serde_json::to_vec(&(store.actor_id, Some(old))).unwrap();
+        assert_eq!(before.token.sha256, digest(&old_bytes));
+        let operation = Uuid::new_v4();
+        let original = isolated_original(&store, operation, &before.token)
+            .unwrap()
+            .unwrap();
+        reserve_isolated(&store, operation, &original).unwrap();
+        assert_eq!(
+            store.sync_mode_snapshot().unwrap().token.sha256,
+            digest(&old_bytes)
+        );
+        set(&store, SyncModeChoice::LocalOnly);
+        let reopened = isolated_original(&store, operation, &before.token)
+            .unwrap()
+            .unwrap();
+        assert!(reopened.reserved && !reopened.current);
+        assert_eq!(reopened.token.sha256, digest(&old_bytes));
     }
     fn backup(receipt: &SyncModeReceipt) -> Uuid {
         match receipt.mode {

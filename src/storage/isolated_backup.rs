@@ -297,6 +297,14 @@ fn capture_saved(
     allow(dead_code, reason = "worker and Manager integration are separate")
 )]
 impl Store {
+    pub(in crate::storage) fn check_isolated_saved_config(
+        &self,
+        path: &Path,
+        staging: &Path,
+    ) -> Result<()> {
+        capture_saved(self, path, staging).map(|_| ())
+    }
+
     pub(crate) fn ordinary_isolated_family(&self) -> Result<bool> {
         let inner = self
             .inner

@@ -60,6 +60,114 @@ fn validated(value: &Value) -> Validated {
 }
 
 #[test]
+fn provision_command_uses_original_and_preserves_the_inspect_shape() {
+    use crate::storage::drive::shared_fixture::Wire;
+    let fixture = Fixture::new();
+    let store = fixture.store();
+    let wire = Wire::new();
+    let group = Uuid::new_v4();
+    let credential = store.paths.credentials.join("drive.json");
+    let grant = wire.install_grant(credential.clone(), group);
+    let receipt = set(
+        &store,
+        SyncModeChoice::IsolatedBackup {
+            binding_sha256: grant,
+        },
+    );
+    let config = fixture.0.join("config.json");
+    files::atomic_json(&config, &json!({"paths":fixture.paths()})).unwrap();
+    let bytes = serde_json::to_vec(&json!({
+        "control_version":1, "operation":Uuid::new_v4(), "expected":store.sync_mode_snapshot().unwrap().token,
+    })).unwrap();
+    let operation = Operation::ProvisionIsolatedBackup;
+    let capture = |label: &str, report: Report| -> Value {
+        let mut frame = Vec::new();
+        report.write_to(&mut frame).unwrap();
+        assert!(frame.ends_with(b"\n"));
+        println!(
+            "isolated-wire {label} {}",
+            std::str::from_utf8(&frame).unwrap().trim_end_matches('\n')
+        );
+        serde_json::from_slice(&frame).unwrap()
+    };
+    println!(
+        "isolated-wire request {}",
+        std::str::from_utf8(&bytes).unwrap()
+    );
+    let invoke = |mut data: &[u8]| {
+        run_with_provision(
+            operation,
+            Some(Path::new("-")),
+            Some(config.clone()),
+            &mut data,
+            |store, request| {
+                isolated_provision::run_with(
+                    store,
+                    request,
+                    Ok(wire.client(credential.clone(), group)),
+                )
+            },
+        )
+    };
+    let busy = report_value(invoke(&bytes));
+    assert_eq!(busy["status"], "busy");
+    drop(store);
+    let gate = capture(
+        "unqualified",
+        run(
+            operation,
+            Some(Path::new("-")),
+            Some(config.clone()),
+            &mut bytes.as_slice(),
+        ),
+    );
+    assert_eq!(
+        gate["data"]["isolated_root"]["outcome"],
+        "provider-binding-unqualified"
+    );
+    assert!(wire.requests().is_empty());
+    assert_eq!(
+        report_value(invoke(br#"{"control_version":1,"control_version":1}"#))["status"],
+        "invalid-input"
+    );
+    let valid = capture("current", invoke(&bytes));
+    assert_eq!(valid["status"], "ok");
+    assert_eq!(valid["data"]["isolated_root"]["outcome"], "root-verified");
+    assert_eq!(
+        valid["data"]["isolated_root"]["epoch"],
+        receipt.epoch.to_string()
+    );
+    assert!(valid["data"]["receipt"].is_null());
+    assert_eq!(valid["activation_performed"], false);
+    assert!(!valid.to_string().contains("generated-1"));
+    let reopened = fixture.store();
+    set(&reopened, SyncModeChoice::LocalOnly);
+    drop(reopened);
+    let historical = capture("historical", invoke(&bytes));
+    assert_eq!(historical["status"], "ok");
+    assert_eq!(
+        historical["data"]["isolated_root"]["currency"],
+        "historical"
+    );
+    assert_eq!(
+        historical["data"]["current_snapshot"]["mode"]["kind"],
+        "local-only"
+    );
+    assert_eq!(wire.slot_posts().len(), 1);
+    let different = serde_json::to_vec(&json!({
+        "control_version":1,"operation":Uuid::new_v4(),
+        "expected":serde_json::from_slice::<Value>(&bytes).unwrap()["expected"],
+    }))
+    .unwrap();
+    let stale = report_value(invoke(&different));
+    assert_eq!(stale["status"], "conflict");
+    assert!(stale["data"].is_object() && stale["data"].get("isolated_root").is_none());
+    let inspect = report_value(run(Operation::Inspect, None, Some(config), &mut &[][..]));
+    assert!(inspect["data"].get("isolated_root").is_none());
+    assert_eq!(inspect["status"], "ok");
+}
+
+#[test]
 fn output_holds_current_mode_and_whole_store_through_success_or_prefix_failure() {
     struct Writer {
         store: Arc<Store>,

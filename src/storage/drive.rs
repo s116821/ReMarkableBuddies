@@ -13,7 +13,7 @@ use std::{
 #[cfg(feature = "drive-slot-qualification")]
 pub mod qualification;
 #[cfg(test)]
-pub(in crate::storage) mod shared_fixture;
+pub(crate) mod shared_fixture;
 /// Experimental REM-52 pointer transport; not connected to the sync worker.
 pub mod slot;
 
@@ -166,6 +166,16 @@ impl std::fmt::Display for TransportFailure {
 }
 impl std::error::Error for TransportFailure {}
 
+pub(super) fn isolated_authorization_required() -> anyhow::Error {
+    TransportFailure {
+        status: 403,
+        retry_after_seconds: None,
+        retryable: false,
+        authorization_required: true,
+    }
+    .into()
+}
+
 pub trait DriveTransport: Send {
     fn authorize(&mut self, collection: Uuid) -> Result<()>;
     fn start_token(&mut self) -> Result<String>;
@@ -204,6 +214,7 @@ pub struct GoogleDrive {
     token_url: String,
     request_deadline: Option<std::time::Instant>,
     request_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    isolated_credential_revision: Option<String>,
 }
 fn now() -> u64 {
     SystemTime::now()
@@ -342,6 +353,7 @@ impl GoogleDrive {
             token_url: "https://oauth2.googleapis.com/token".into(),
             request_deadline: None,
             request_cancel: None,
+            isolated_credential_revision: None,
         })
     }
     pub(in crate::storage) fn set_request_window(
@@ -377,6 +389,11 @@ impl GoogleDrive {
             .build())
     }
     fn token(&mut self) -> Result<String> {
+        if let Some(revision) = &self.isolated_credential_revision {
+            if !read_secret_file(&self.credential_path).is_ok_and(|raw| digest(&raw) == *revision) {
+                return Err(isolated_authorization_required());
+            }
+        }
         if self.credentials.expires_at <= now() + 60 {
             ensure!(
                 !self.credentials.refresh_token.is_empty(),
@@ -395,16 +412,25 @@ impl GoogleDrive {
                 .send_form(fields)
                 .map_err(|_| anyhow::anyhow!("Drive token transport failed"))?;
             let value = json_response(response)?;
+            if let Some(revision) = &self.isolated_credential_revision {
+                if !read_secret_file(&self.credential_path)
+                    .is_ok_and(|raw| digest(&raw) == *revision)
+                {
+                    return Err(isolated_authorization_required());
+                }
+            }
             let token = value
                 .get("access_token")
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| anyhow::anyhow!("Drive token response missing credential"))?;
             if let Some(scopes) = value.get("scope").and_then(Value::as_str) {
-                ensure!(
-                    scopes.split_whitespace().any(|s| s == APP_SCOPE),
-                    "Drive grant lacks required scope"
-                );
+                if !scopes.split_whitespace().any(|s| s == APP_SCOPE) {
+                    if self.isolated_credential_revision.is_some() {
+                        return Err(isolated_authorization_required());
+                    }
+                    anyhow::bail!("Drive grant lacks required scope");
+                }
             }
             self.credentials.access_token = token.into();
             self.credentials.expires_at = now()
@@ -416,7 +442,9 @@ impl GoogleDrive {
             if let Some(refresh) = value.get("refresh_token").and_then(Value::as_str) {
                 self.credentials.refresh_token = refresh.into();
             }
-            files::atomic_json(&self.credential_path, &self.credentials)?;
+            if self.isolated_credential_revision.is_none() {
+                files::atomic_json(&self.credential_path, &self.credentials)?;
+            }
         }
         Ok(format!("Bearer {}", self.credentials.access_token))
     }
@@ -489,13 +517,87 @@ impl GoogleDrive {
         }
         Ok(())
     }
+    pub(super) fn qualify_isolated_grant(&mut self, binding: &str) -> Result<()> {
+        if self.isolated_credential_revision.is_none() {
+            let raw = read_secret_file(&self.credential_path)
+                .map_err(|_| isolated_authorization_required())?;
+            let credentials: Credentials =
+                parse(&raw).map_err(|_| isolated_authorization_required())?;
+            credentials
+                .validate()
+                .map_err(|_| isolated_authorization_required())?;
+            if credentials.binding_digest() != binding || credentials.refresh_token.is_empty() {
+                return Err(isolated_authorization_required());
+            }
+            self.credentials = credentials;
+            self.isolated_credential_revision = Some(digest(&raw));
+            self.credentials.expires_at = 0;
+        }
+        self.authorize_grant(binding)
+    }
     pub(super) fn original_grant_present(&self, binding: &str) -> bool {
         self.binding_digest() == binding
-            && read_secret_file(&self.credential_path)
-                .and_then(|raw| parse::<Credentials>(&raw))
-                .is_ok_and(|credentials| {
-                    credentials.validate().is_ok() && credentials.binding_digest() == binding
-                })
+            && read_secret_file(&self.credential_path).is_ok_and(|raw| {
+                self.isolated_credential_revision
+                    .as_ref()
+                    .is_none_or(|original| digest(&raw) == *original)
+                    && parse::<Credentials>(&raw).is_ok_and(|credentials| {
+                        credentials.validate().is_ok() && credentials.binding_digest() == binding
+                    })
+            })
+    }
+    pub(super) fn observe_isolated_root(
+        &mut self,
+        id_value: &str,
+        properties: &BTreeMap<String, String>,
+    ) -> Result<bool> {
+        id(id_value)?;
+        validate_properties(properties)?;
+        let token = self.token()?;
+        let response = self
+            .bounded(self.agent.get(format!("{}/files/{}", self.api, id_value)))?
+            .query("fields", "id,appProperties,trashed,spaces,mimeType,size")
+            .header("Authorization", token)
+            .call()
+            .map_err(|_| anyhow::anyhow!("Drive root observation failed"))?;
+        if response.status().as_u16() == 404 {
+            return Ok(false);
+        }
+        let value = json_response(response)?;
+        let existing: RemoteFile =
+            serde_json::from_value(value.clone()).map_err(|_| InvalidRemoteData)?;
+        if existing.id != id_value
+            || existing.trashed
+            || existing.app_properties != *properties
+            || value["spaces"] != json!(["appDataFolder"])
+            || value["mimeType"] != "application/octet-stream"
+            || value["size"] != "0"
+        {
+            return Err(InvalidRemoteData.into());
+        }
+        Ok(true)
+    }
+    pub(super) fn create_isolated_root(
+        &mut self,
+        candidate: &str,
+        properties: &BTreeMap<String, String>,
+        before_send: impl FnOnce(&Self) -> Result<()>,
+    ) -> Result<()> {
+        id(candidate)?;
+        validate_properties(properties)?;
+        let bytes = serde_json::to_vec(&json!({
+            "id":candidate,"name":"buddy-isolated-root","mimeType":"application/octet-stream",
+            "parents":["appDataFolder"],"appProperties":properties
+        }))?;
+        let token = self.token()?;
+        before_send(self)?;
+        if let Some(mut response) = self.send_slot_request(&token, bytes)? {
+            let status = response.status().as_u16();
+            if status != 409 && !(500..600).contains(&status) {
+                check(&mut response)?;
+            }
+        }
+        Ok(())
     }
     pub(super) fn list_properties(
         &mut self,
