@@ -26,6 +26,7 @@ const MAX_INPUT: usize = 256 * 1024;
 pub enum Operation {
     Inspect,
     Generate,
+    GenerateImage,
     Refine,
     Recover,
 }
@@ -34,6 +35,7 @@ impl Operation {
         match self {
             Self::Inspect => "writer-inspect",
             Self::Generate => "writer-generate",
+            Self::GenerateImage => "writer-generate-image",
             Self::Refine => "writer-refine",
             Self::Recover => "writer-recover",
         }
@@ -59,6 +61,24 @@ pub struct Input {
     pub root: IntentRecordRef,
     pub refine: Option<RefineReferences>,
     pub request: Request,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImageInput {
+    wire_version: u32,
+    expected: Expected,
+    root: IntentRecordRef,
+    request: selected::WriterImageRequest,
+}
+impl ImageInput {
+    fn validate(&self) -> Result<()> {
+        self.expected.selection.validate()?;
+        ensure!(
+            self.wire_version == 1 && storage::valid_digest(&self.expected.raw_head_sha256),
+            "invalid selected Writer image wire evidence"
+        );
+        self.request.validate(&self.root)
+    }
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -341,7 +361,15 @@ pub fn run(
     } else {
         None
     };
-    let input = if inspect.is_none() {
+    let image = if op == Operation::GenerateImage {
+        match serde_json::from_slice::<ImageInput>(&bytes) {
+            Ok(i) if i.validate().is_ok() => Some(i),
+            _ => return Report::new(op, "invalid-input"),
+        }
+    } else {
+        None
+    };
+    let input = if inspect.is_none() && image.is_none() {
         match serde_json::from_slice::<Input>(&bytes) {
             Ok(i) if prepare(&i, op).is_ok() => Some(i),
             _ => return Report::new(op, "invalid-input"),
@@ -358,9 +386,13 @@ pub fn run(
         let selected_scope = inspect
             .as_ref()
             .map(|i| i.scope.clone())
+            .or_else(|| image.as_ref().map(|i| scope(&i.expected.selection)))
             .unwrap_or_else(|| scope(&input.as_ref().unwrap().expected.selection));
         let mode = shared(&store, &selected_scope)?;
         let writer = SelectedAdmission::new(store.clone(), selected_scope)?;
+        if let Some(image) = image {
+            return run_image_command(op, config_path.clone(), store, writer, mode, image);
+        }
         if let Some(i) = inspect {
             let read = SelectedAdmission::with_gates(&[&writer], |s| {
                 let mut b = allowance();
@@ -461,49 +493,159 @@ pub fn run(
             Some(preferences)=>selected::run_with_preferences(&worker_writer,&selection,&mut engine,&i.request,preferences,memory.as_deref(),&mut||canceled.load(Ordering::Acquire)),
             None=>selected::run(&worker_writer,&selection,&mut engine,&i.request,&preference,memory.as_deref(),&mut||canceled.load(Ordering::Acquire)),
         });tokio::select!{r=&mut worker=>r,_=tokio::signal::ctrl_c()=>{flag.store(true,Ordering::Release);worker.await}}})?;
-        let mut report = Report::new(
-            op,
-            match received.report.status {
-                WriterStatus::Generated => "generated",
-                WriterStatus::HistoricalGenerated => "historical",
-                WriterStatus::Failed => "failed",
-                WriterStatus::Canceled => "canceled",
-                WriterStatus::HistoricalPending => "historical-pending",
-                WriterStatus::Busy => "busy",
-                _ => "refused",
-            },
-        );
-        let mut current = None;
-        let data = match received.publication {
-            Some(SelectedWriterPublication::Published {
-                publication,
-                acknowledgment,
-            }) => {
-                current = Some(publication.token);
-                serde_json::json!({"report":received.report,"transaction":publication.transaction,"receipt":acknowledgment.receipt,"draft":acknowledgment.written,"handles":null,"disposition":"published"})
-            }
-            Some(SelectedWriterPublication::Historical {
-                transaction,
-                acknowledgment,
-            }) => {
-                report.status = "historical";
-                serde_json::json!({"report":received.report,"transaction":transaction,"receipt":acknowledgment.receipt,"draft":acknowledgment.written,"handles":null,"disposition":"historical"})
-            }
-            None => {
-                serde_json::json!({"report":received.report,"preparation":received.historical_preparation,"handles":null})
-            }
-        };
-        report.data = Some(data);
-        report.mode = Some(mode);
-        if let Some(token) = current {
-            if attach_current(&mut report, writer, token, conversation).is_err() {
-                report.status = "historical";
-                report.data.as_mut().unwrap()["disposition"] = serde_json::json!("historical");
-            }
-        }
-        Ok(report)
+        receiving_report(op, received, writer, mode, conversation)
     })();
     result.unwrap_or_else(|_| Report::new(op, "unavailable"))
+}
+
+fn receiving_report(
+    op: Operation,
+    received: selected::SelectedReport,
+    writer: SelectedAdmission,
+    mode: SyncModeLease,
+    conversation: Uuid,
+) -> Result<Report> {
+    let mut report = Report::new(
+        op,
+        match received.report.status {
+            WriterStatus::Generated => "generated",
+            WriterStatus::HistoricalGenerated => "historical",
+            WriterStatus::Failed => "failed",
+            WriterStatus::Canceled => "canceled",
+            WriterStatus::HistoricalPending => "historical-pending",
+            WriterStatus::Busy => "busy",
+            _ => "refused",
+        },
+    );
+    let mut current = None;
+    let data = match received.publication {
+        Some(SelectedWriterPublication::Published {
+            publication,
+            acknowledgment,
+        }) => {
+            current = Some(publication.token);
+            serde_json::json!({"report":received.report,"transaction":publication.transaction,"receipt":acknowledgment.receipt,"draft":acknowledgment.written,"handles":null,"disposition":"published"})
+        }
+        Some(SelectedWriterPublication::Historical {
+            transaction,
+            acknowledgment,
+        }) => {
+            report.status = "historical";
+            serde_json::json!({"report":received.report,"transaction":transaction,"receipt":acknowledgment.receipt,"draft":acknowledgment.written,"handles":null,"disposition":"historical"})
+        }
+        None => {
+            serde_json::json!({"report":received.report,"preparation":received.historical_preparation,"handles":null})
+        }
+    };
+    report.data = Some(data);
+    report.mode = Some(mode);
+    if let Some(token) = current {
+        if attach_current(&mut report, writer, token, conversation).is_err() {
+            report.status = "historical";
+            report.data.as_mut().unwrap()["disposition"] = serde_json::json!("historical");
+        }
+    }
+    Ok(report)
+}
+
+fn run_image_command(
+    op: Operation,
+    config_path: Option<PathBuf>,
+    store: Arc<Store>,
+    writer: SelectedAdmission,
+    mode: SyncModeLease,
+    input: ImageInput,
+) -> Result<Report> {
+    let mut reads = allowance();
+    // An acknowledged original is terminal, even when the saved selection is stale.
+    let original = SelectedAdmission::with_gates(&[&writer], |store| {
+        writer.recover_writer_normalization_locked(
+            store,
+            input.request.preparation(),
+            &input.expected.selection,
+            &input.expected.raw_head_sha256,
+            &input
+                .request
+                .preparation_fingerprint(&input.root, &input.expected.selection)?,
+            &mut reads,
+        )
+    })?;
+    if let Some(preparation) = original {
+        let mut report = Report::new(op, "historical-pending");
+        report.mode = Some(mode);
+        report.data =
+            Some(serde_json::json!({"preparation":preparation,"disposition":"historical"}));
+        return Ok(report);
+    }
+    let preferences = crate::storage::sync::selected::RequestPreferences::open_writer_image(
+        store.clone(),
+        config_path.unwrap_or_else(|| "/home/root/.config/remarkable-buddies/config.json".into()),
+    )?;
+    let accepted = SelectedAdmission::with_gates(&[&writer], |store| {
+        let read = store
+            .selected_snapshot_with_budget(writer.scope(), MAX_ITEMS, &mut reads)?
+            .context("Writer image selection absent")?;
+        ensure!(
+            IntentSelectionEvidence::from_token(&read.snapshot.token) == input.expected.selection
+                && read.accepted_history[0].sha256 == input.expected.raw_head_sha256,
+            "Writer image expected selection differs"
+        );
+        Ok(read.snapshot.token)
+    })?;
+    let config = preferences.config();
+    ensure!(
+        config.admits_writer(false),
+        "Writer configuration unsupported"
+    );
+    let memory = config
+        .memory
+        .enabled
+        .then(|| crate::memory::configured(store, &config.memory))
+        .transpose()?;
+    let effective = config::resolve(
+        config,
+        config::Overrides::default(),
+        config::Environment::current(),
+    )?;
+    let mut engine = crate::OpenAI::new(
+        effective.model,
+        effective.key.into_string(),
+        effective.base_url,
+    )
+    .with_single_request();
+    let conversation = input.root.record_id;
+    let selection = selected::Selection {
+        accepted,
+        root: input.root,
+        refine: None,
+    };
+    let worker_writer = writer.clone();
+    let flag = Arc::new(AtomicBool::new(false));
+    let canceled = flag.clone();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let received = runtime.block_on(async move {
+        let mut work = tokio::task::spawn_blocking(move || {
+            selected::run_image(
+                &worker_writer,
+                &selection,
+                &input.request,
+                &mut engine,
+                preferences,
+                memory.as_deref(),
+                &mut || canceled.load(Ordering::Acquire),
+            )
+        });
+        tokio::select! {
+            result = &mut work => result,
+            _ = tokio::signal::ctrl_c() => {
+                flag.store(true, Ordering::Release);
+                work.await
+            }
+        }
+    })??;
+    receiving_report(op, received, writer, mode, conversation)
 }
 
 #[cfg(test)]

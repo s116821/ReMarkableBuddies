@@ -169,6 +169,91 @@ impl DetachedPreferences {
     }
 }
 impl RequestPreferences {
+    pub(crate) fn open_writer_image(store: Arc<Store>, path: PathBuf) -> Result<Self> {
+        ensure!(
+            !store.ordinary_reader_family()?,
+            "selected Writer image requires shared Store"
+        );
+        let current = store.sync_mode_snapshot()?;
+        let binding = Binding::qualified(
+            current
+                .mode
+                .as_ref()
+                .context("Writer image shared mode absent")?,
+        )?;
+        Self::writer_image_from_binding(store, path, binding, |store| {
+            GoogleDrive::open(store.paths.credentials.join("drive.json"))
+        })
+    }
+
+    pub(in crate::storage::sync::selected) fn writer_image_from_binding(
+        store: Arc<Store>,
+        path: PathBuf,
+        binding: Binding,
+        transport: impl FnOnce(&Store) -> Result<GoogleDrive>,
+    ) -> Result<Self> {
+        let started = Instant::now();
+        let lifetime = Duration::from_secs(300);
+        Self::from_binding_at(
+            store,
+            path,
+            binding,
+            transport,
+            (started + Duration::from_secs(60), started + lifetime),
+            RequestReads::for_lifetime(lifetime, 16, MAX_MEDIA * 16, true)?,
+        )
+    }
+
+    pub(crate) fn writer_image_deadline(&self) -> Instant {
+        self.deadline
+    }
+
+    pub(crate) fn capture_writer_handwriting(
+        &self,
+        writer: &SelectedAdmission,
+        token: &SelectionToken,
+        target: &str,
+    ) -> Result<Option<crate::handwriting::ConfirmedContext>> {
+        self.require_writer(writer)?;
+        let config = &self.effective.handwriting;
+        if !config.enabled {
+            return Ok(None);
+        }
+        ensure!(
+            Instant::now() < self.admission_deadline,
+            "Writer image admission expired"
+        );
+        let profile = config
+            .profile
+            .context("Writer handwriting profile absent")?;
+        let mut reads = self
+            .reads
+            .admission
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Writer handwriting allowance unavailable"))?;
+        let captured = SelectedContextOwner::capture_profile(
+            &self.store,
+            &self.binding,
+            profile,
+            &BTreeSet::from([target.to_owned()]),
+            &[writer, &self.admission],
+            &mut reads,
+            |store, reads| {
+                self.verify_locked(store, reads)?;
+                ensure!(
+                    store.selection_unchanged_for_progress(writer.scope(), Some(token), reads)?,
+                    "Writer image selection changed"
+                );
+                Ok(())
+            },
+        )?;
+        ensure!(
+            captured.selection.status() != "partial-empty",
+            "selected handwriting context incomplete"
+        );
+        Ok(Some(captured.context))
+    }
+
     /// Ordinary families retain their delivered local preference path. Only the
     /// actual qualified format5 source can construct a shared request snapshot.
     pub(crate) fn open(store: Arc<Store>, path: PathBuf) -> Result<Option<Self>> {
@@ -474,6 +559,22 @@ impl RequestPreferences {
         )>,
         operation: impl FnOnce(&Store, &mut SelectedReadBudget) -> Result<T>,
     ) -> Result<T> {
+        self.with_document_phase(writer, expected, phase, memory, None, operation)
+    }
+
+    pub(crate) fn with_document_phase<T>(
+        &self,
+        writer: &SelectedAdmission,
+        expected: Option<&SelectionToken>,
+        phase: NotebookPhase,
+        memory: Option<(
+            &dyn crate::memory::Provider,
+            &crate::memory::QueryResult,
+            &SelectionToken,
+        )>,
+        handwriting: Option<&crate::handwriting::ConfirmedContext>,
+        operation: impl FnOnce(&Store, &mut SelectedReadBudget) -> Result<T>,
+    ) -> Result<T> {
         self.require_writer(writer)?;
         let budget = match phase {
             NotebookPhase::Admission => {
@@ -495,8 +596,18 @@ impl RequestPreferences {
             binding_sha256: self.binding.digest.clone(),
         };
         let catalog = SelectedAdmission::new(self.store.clone(), identity.scope()?)?;
+        let owner = handwriting
+            .map(crate::handwriting::ConfirmedContext::selected_owner)
+            .transpose()?;
+        let mut additional = vec![&self.admission, &catalog];
+        if let Some(owner) = owner {
+            owner.join_gates(&mut additional);
+        }
         let mut operation = Some(operation);
         let mut run = |store: &Store| -> Result<T> {
+            let _checkpoint = owner
+                .map(|owner| owner.verify_locked(store, &mut reads))
+                .transpose()?;
             self.verify_locked(store, &mut reads)?;
             if let Some(expected) = expected {
                 if !store.selection_unchanged_for_progress(
@@ -515,9 +626,17 @@ impl RequestPreferences {
             let crate::memory::catalog::Owner::Document { document } = registration.owner else {
                 anyhow::bail!("notebook registration owner changed");
             };
-            crate::conversation::reader_uncertainty::validate_document(
-                store, &current, document, None,
+            crate::conversation::reader_uncertainty::validate_document_with_reads(
+                store,
+                &current,
+                document,
+                None,
+                Some(&mut reads),
             )?;
+            ensure!(
+                Instant::now() < self.deadline,
+                "selected document phase expired"
+            );
             operation
                 .take()
                 .context("notebook phase already consumed")?(store, &mut reads)
@@ -527,7 +646,7 @@ impl RequestPreferences {
             memory.with_selected_notebook_phase(
                 view,
                 writer,
-                &[&self.admission, &catalog],
+                &additional,
                 crate::memory::NotebookMemorySelection {
                     original,
                     current: expected.context("notebook memory requires a document selection")?,
@@ -539,7 +658,12 @@ impl RequestPreferences {
             )?;
             result.context("notebook memory guard did not execute")
         } else {
-            SelectedAdmission::with_ready_gate_set(&[writer, &self.admission, &catalog], run)
+            additional.push(writer);
+            if handwriting.is_some() {
+                SelectedAdmission::with_gates(&additional, run)
+            } else {
+                SelectedAdmission::with_ready_gate_set(&additional, run)
+            }
         }
     }
 

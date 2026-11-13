@@ -613,6 +613,327 @@ fn png() -> Vec<u8> {
     bytes.into_inner()
 }
 
+#[test]
+fn selected_handwriting_writer_normalizes_only_current_images_and_never_replays() {
+    use crate::{
+        conversation::{
+            fixture_defer_pending_for_worker, resident_capture::tests::capture_for,
+            selected_reader_prepare::ResidentPrepared, SelectedWriterImage,
+        },
+        llm::ModelHandoff,
+        writer::{
+            self,
+            selected::{run_image, Selection, WriterImageRequest},
+        },
+        LLMEngine,
+    };
+
+    struct Model<'a> {
+        writer: &'a SelectedAdmission,
+        store: &'a Store,
+        input: &'a WriterImageRequest,
+        before: Option<&'a dyn Fn()>,
+        after: Option<(usize, &'a dyn Fn())>,
+        calls: Vec<Vec<String>>,
+        current: Vec<String>,
+    }
+
+    impl LLMEngine for Model<'_> {
+        fn guarded_timeout(&self) -> Option<Duration> {
+            Some(Duration::from_secs(1))
+        }
+        fn add_text_content(&mut self, _: &str) {}
+        fn add_image_content(&mut self, value: &str) {
+            self.current.push(value.to_owned());
+        }
+        fn clear_content(&mut self) {
+            self.current.clear();
+        }
+        fn execute(&mut self) -> Result<String> {
+            panic!("unguarded selected Writer")
+        }
+        fn execute_with_handoff(
+            &mut self,
+            progress: &mut dyn FnMut() -> Result<()>,
+            handoff: &mut ModelHandoff<'_>,
+        ) -> Result<String> {
+            progress()?;
+            let ordinal = self.calls.len();
+            assert!(self
+                .store
+                .selected_receipt(self.writer.scope(), self.input.preparation())?
+                .is_some());
+            if ordinal == 0 {
+                if let Some(change) = self.before {
+                    change();
+                }
+            }
+            handoff(&mut || {
+                self.calls.push(self.current.clone());
+                Ok(())
+            })?;
+            if let Some((_, change)) = self.after.filter(|(stage, _)| *stage == ordinal) {
+                change();
+            }
+            if ordinal == 0 {
+                Ok(r#"{"pages":[{"page":1,"status":"transcribed","text":"x = 7"}]}"#.into())
+            } else {
+                assert!(self
+                    .store
+                    .selected_receipt(self.writer.scope(), self.input.operation)?
+                    .is_some());
+                Ok("# Draft\n\nx = 7".into())
+            }
+        }
+    }
+
+    let f = CorrectionFixture::new();
+    let identity = catalog::Identity {
+        group: f.binding.group,
+        profile: f.owner.profile,
+        binding_sha256: f.binding.digest.clone(),
+    };
+    let document_owner = catalog::Owner::Document {
+        document: f.document,
+    };
+    let scope = identity.aggregate_scope(&document_owner).unwrap();
+    let mut items = 32;
+    let genesis = f
+        .engine(&f.a)
+        .refresh_root_catalog(&mut items)
+        .unwrap()
+        .unwrap()
+        .root_sha;
+    let (token, _, _) = fixture_defer_pending_for_worker(
+        f.a.clone(),
+        scope.clone(),
+        f.document,
+        genesis_base(&genesis, &scope.key_sha256),
+    );
+    super::recovery::register_document(f.a.clone(), &identity, document_owner, &genesis);
+    let capture =
+        ResidentPrepared::new(&f.a, &token, &capture_for(f.document), Uuid::new_v4(), 2).unwrap();
+    let writer = SelectedAdmission::new(f.a.clone(), scope.clone()).unwrap();
+    let (_, capture) = SelectedAdmission::with_gates(&[&writer], |store| {
+        capture.publish_locked(store, &token, &mut route::allowance())
+    })
+    .unwrap();
+    let path = f.storage.0.join("selected-recognition-writer.json");
+    files::atomic_json(
+        &path,
+        &json!({"paths":f.a.paths, "handwriting":{"enabled":true,"profile":f.owner.profile}}),
+    )
+    .unwrap();
+    preference_command::set_fixture_preference(
+        f.a.clone(),
+        &path,
+        f.binding.clone(),
+        &f.wire,
+        json!({"product_settings":{"writer_enabled":true}}),
+    )
+    .unwrap();
+    let policy = || {
+        preference_consumer::RequestPreferences::writer_image_from_binding(
+            f.a.clone(),
+            path.clone(),
+            f.binding.clone(),
+            |_| panic!("selected Writer opened transport"),
+        )
+        .unwrap()
+    };
+    let selection = || {
+        let snapshot = f.a.selected_snapshot(&scope, MAX_ITEMS).unwrap().unwrap();
+        let root = crate::conversation::SelectedDomainProjection::from_snapshot(&snapshot)
+            .unwrap()
+            .current_reference(Namespace::Conversation, capture.root.record_id)
+            .unwrap();
+        Selection {
+            accepted: snapshot.token,
+            root,
+            refine: None,
+        }
+    };
+    let image = SelectedWriterImage {
+        source: capture.capture,
+        turn: capture.user,
+        ordinal: 0,
+        page: 1,
+    };
+    let target_png = match writer
+        .capture_images(&selection().accepted, image.source.record_id)
+        .unwrap()
+    {
+        crate::conversation::SelectedCaptureImages::Resident(capture) => capture.images[0].clone(),
+        _ => panic!("expected resident fixture capture"),
+    };
+    let mut target_correction = confirm(f.owner, Uuid::new_v4());
+    target_correction["sample_png_base64"] = json!(STANDARD.encode(&target_png));
+    let owner = HandwritingOwner::new(f.owner.profile, Uuid::new_v4());
+    let first = confirm(owner, Uuid::new_v4());
+    let mut revision = Uuid::nil();
+    for index in 0..6 {
+        match index {
+            0 => {
+                let target_revision = observed(f.command(&f.a, &target_correction, true));
+                f.drive(&mut f.engine(&f.a), target_revision);
+            }
+            1 => revision = observed(f.command(&f.a, &first, true)),
+            2 => {
+                let mut sender = f.engine(&f.a);
+                let key = owner.domain().unwrap().key_sha256().to_owned();
+                for _ in 0..16 {
+                    sender.step().unwrap();
+                    if sender.view().unwrap().unwrap().entries.contains_key(&key) {
+                        break;
+                    }
+                }
+                let mut items = 32;
+                assert!(sender
+                    .refresh_root_catalog(&mut items)
+                    .unwrap()
+                    .unwrap()
+                    .entries
+                    .contains_key(&key));
+            }
+            _ => {}
+        }
+        let selection = selection();
+        let input = WriterImageRequest {
+            operation: Uuid::new_v4(),
+            request: "Make a note".into(),
+            image: image.clone(),
+            guidance: None,
+            model_profile: "fixture".into(),
+        };
+        let next = std::cell::Cell::new(None);
+        let previous = revision;
+        let replace = || {
+            let mut update = first.clone();
+            update["command"] = json!("update");
+            update["operation"] = json!(Uuid::new_v4());
+            update["expected_heads"] = json!([previous]);
+            update["corrected_text"] = json!(format!("replacement {index}"));
+            next.set(Some(observed(f.command(&f.a, &update, false))));
+        };
+        let mut model = Model {
+            writer: &writer,
+            store: &f.a,
+            input: &input,
+            calls: Vec::new(),
+            current: Vec::new(),
+            before: (index == 3).then_some(&replace as &dyn Fn()),
+            after: match index {
+                4 => Some((0, &replace as &dyn Fn())),
+                5 => Some((1, &replace as &dyn Fn())),
+                _ => None,
+            },
+        };
+        let report = run_image(
+            &writer,
+            &selection,
+            &input,
+            &mut model,
+            policy(),
+            None,
+            &mut || false,
+        );
+        assert_eq!(model.calls.len(), [2, 0, 2, 0, 1, 2][index]);
+        assert_eq!(
+            f.a.selected_receipt(&scope, input.preparation())
+                .unwrap()
+                .is_some(),
+            index != 1
+        );
+        if index == 0 || index == 2 {
+            let report = report.unwrap();
+            assert_eq!(report.report.status, writer::Status::Generated);
+            assert_eq!(model.calls[0].len(), if index == 0 { 1 } else { 2 });
+            if index == 2 {
+                assert!(model.calls[0][0].ends_with(&STANDARD.encode(png())));
+            }
+            assert!(model.calls[0]
+                .last()
+                .unwrap()
+                .ends_with(&STANDARD.encode(&target_png)));
+            assert!(model.calls[1].is_empty());
+        } else {
+            assert!(report.is_err() || report.unwrap().publication.is_none());
+            assert_eq!(
+                f.a.selected_receipt(&scope, input.operation)
+                    .unwrap()
+                    .is_some(),
+                index == 5
+            );
+            assert!(f
+                .a
+                .selected_receipt(&scope, writer::stage(input.operation, "finish"))
+                .unwrap()
+                .is_none());
+            if index == 1 {
+                continue;
+            }
+            revision = next.get().unwrap();
+            let before = model.calls.len();
+            let snapshot = f.a.selected_snapshot(&scope, MAX_ITEMS).unwrap().unwrap();
+            let root = crate::conversation::SelectedDomainProjection::from_snapshot(&snapshot)
+                .unwrap()
+                .current_reference(Namespace::Conversation, selection.root.record_id)
+                .unwrap();
+            let latest = Selection {
+                accepted: snapshot.token,
+                root,
+                refine: None,
+            };
+            assert!(run_image(
+                &writer,
+                &latest,
+                &input,
+                &mut model,
+                policy(),
+                None,
+                &mut || false
+            )
+            .is_err());
+            assert_eq!(model.calls.len(), before);
+        }
+    }
+    let selection = selection();
+    let input = WriterImageRequest {
+        operation: Uuid::new_v4(),
+        request: "Make a note".into(),
+        image: SelectedWriterImage { page: 2, ..image },
+        guidance: None,
+        model_profile: "fixture".into(),
+    };
+    let mut model = Model {
+        writer: &writer,
+        store: &f.a,
+        input: &input,
+        calls: Vec::new(),
+        current: Vec::new(),
+        before: None,
+        after: None,
+    };
+    let error = run_image(
+        &writer,
+        &selection,
+        &input,
+        &mut model,
+        policy(),
+        None,
+        &mut || false,
+    )
+    .err()
+    .expect("wrong page was admitted");
+    assert!(error.to_string().contains("capture page differs"));
+    assert!(model.calls.is_empty());
+    assert!(f
+        .a
+        .selected_receipt(&scope, input.preparation())
+        .unwrap()
+        .is_none());
+}
+
 fn confirm(owner: HandwritingOwner, operation: Uuid) -> Value {
     json!({
         "handwriting_version": 1, "command": "confirm", "profile": owner.profile,
