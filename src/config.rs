@@ -164,8 +164,8 @@ impl Config {
         self.memory.validate()?;
         self.handwriting.validate()?;
         ensure!(
-            !self.handwriting.enabled || (!self.sync.enabled && self.reader.selection.is_none()),
-            "handwriting requires ordinary local configuration"
+            !self.handwriting.enabled || !self.sync.enabled,
+            "handwriting requires local or selected admission without legacy sync"
         );
         self.reader.validate()?;
         ensure!(

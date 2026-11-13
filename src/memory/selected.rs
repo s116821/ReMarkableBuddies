@@ -57,7 +57,7 @@ const MEMORY_READ_ITEMS: u64 = 4096;
 const MEMORY_READ_METADATA: u64 = 8 * 1024 * 1024;
 const MEMORY_READ_MEDIA: u64 = 32 * 1024 * 1024;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn reserve_reader_query(parent: &mut SelectedReadBudget) -> Result<SelectedReadBudget> {
     parent.reserve(
         MEMORY_READ_AGGREGATES,
@@ -675,7 +675,7 @@ impl SelectedMemory {
             witness_composed_panic(validation.is_ok());
             validation
         };
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", test))]
         if let Some(reads) = admission.1 {
             return reader.publish_resident_reader_text_joined(
                 accepted,
@@ -925,7 +925,7 @@ impl Provider for SelectedMemory {
             &mut |_, _| Ok(()),
         )
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", test))]
     fn with_selected_reader_handoff(
         &self,
         result: &QueryResult,
@@ -936,7 +936,7 @@ impl Provider for SelectedMemory {
     ) -> Result<()> {
         self.with_memory_handoff(result, reader, additional, verify, submit, true)
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", test))]
     fn publish_selected_reader_text_joined(
         &self,
         result: &QueryResult,
@@ -996,7 +996,7 @@ impl Provider for SelectedMemory {
     fn query(&self, query: &Query) -> Result<QueryResult> {
         self.query_with_budget(query, budget())
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", test))]
     fn query_selected_reader(
         &self,
         query: &Query,

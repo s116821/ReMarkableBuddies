@@ -197,16 +197,36 @@ pub(super) fn validate_closure(
 pub(super) fn validate_closure_with_budget(
     root: &Path,
     transaction: &SelectionTransaction,
+    budget: Option<&mut SelectedReadBudget>,
+) -> Result<Vec<ValidatedManifest>> {
+    validate_closure_for_read(root, transaction, budget, true)
+}
+
+pub(super) fn validate_closure_for_read(
+    root: &Path,
+    transaction: &SelectionTransaction,
     mut budget: Option<&mut SelectedReadBudget>,
+    verify_media: bool,
 ) -> Result<Vec<ValidatedManifest>> {
     transaction.validate(MAX_ITEMS)?;
-    let active =
-        Store::validate_objects_with_budget(root, &transaction.selected, budget.as_deref_mut())?;
+    let active = Store::validate_objects_inner(
+        root,
+        &transaction.selected,
+        budget.as_deref_mut(),
+        None,
+        verify_media,
+    )?;
     closure_index(&active, true)?;
     let mut combined = active.clone();
     let mut parts = vec![(transaction.selected.clone(), active)];
     for manifest in &transaction.retained {
-        let records = Store::validate_objects_with_budget(root, manifest, budget.as_deref_mut())?;
+        let records = Store::validate_objects_inner(
+            root,
+            manifest,
+            budget.as_deref_mut(),
+            None,
+            verify_media,
+        )?;
         combined.extend(records.clone());
         parts.push((manifest.clone(), records));
     }

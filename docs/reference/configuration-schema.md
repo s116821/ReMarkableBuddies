@@ -55,8 +55,10 @@ The development checker is not a runtime dependency or an installer.
 
 
 The optional handwriting object defaults to `{"enabled":false,"profile":null}`.
-Enabled use requires a canonical nonnil active profile and ordinary local runtime;
-configured sync or selected Reader refuses. Disabled/unset keeps existing recognition
+Enabled use requires a canonical nonnil active profile. Ordinary local runtime and
+the admitted shared Reader path support it. Legacy sync refuses it. A selected
+Reader uses the explicitly declared profile after shared Store and Reader admission.
+Disabled/unset keeps existing recognition
 payloads. Runtime selection prefers current user-confirmed revisions by asserted
 confirmation/update time, checking at most16 candidates for at most3 examples.
 Caller clock skew is a limitation, not freshness authority. The setting is captured

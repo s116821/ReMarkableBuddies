@@ -193,7 +193,7 @@ impl Capture {
 }
 
 impl Selection {
-    fn status(&self) -> &'static str {
+    pub(crate) fn status(&self) -> &'static str {
         let partial = self.unexamined > 0
             || self.skipped_media > 0
             || self.conflicted > 0

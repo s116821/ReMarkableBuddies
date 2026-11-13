@@ -46,6 +46,16 @@ pub(super) fn project(
     manifest: &Manifest,
     budget: &mut SelectedReadBudget,
 ) -> Result<Projection> {
+    project_with_media(store, owner, manifest, budget, true)
+}
+
+fn project_with_media(
+    store: &Store,
+    owner: HandwritingOwner,
+    manifest: &Manifest,
+    budget: &mut SelectedReadBudget,
+    verify_media: bool,
+) -> Result<Projection> {
     let generation = catalog::current_generation(store)?;
     let objects = store
         .paths
@@ -53,7 +63,7 @@ pub(super) fn project(
         .join("generations")
         .join(generation.to_string())
         .join("objects");
-    read(owner, manifest, |reference| {
+    let load = |reference: &ObjectRef| {
         let path = objects.join(&reference.sha256);
         if manifest.media.contains(reference) {
             budget.charge(0, 1, 0, reference.bytes)?;
@@ -61,7 +71,13 @@ pub(super) fn project(
         }
         budget.charge(0, 1, 0, 0)?;
         files::read_with_budget(&path, reference.bytes, Some(budget))
-    })
+    };
+    if verify_media {
+        read(owner, manifest, load)
+    } else {
+        Projection::read_metadata(owner.domain()?, manifest, load)
+            .map_err(|error| anyhow::anyhow!("invalid handwriting metadata: {error:?}"))
+    }
 }
 
 fn original(
@@ -74,7 +90,7 @@ fn original(
     let Some(snapshot) = store.selected_snapshot_with_budget(scope, MAX_ITEMS, budget)? else {
         return Ok(None);
     };
-    original_from_read(store, &snapshot, profile, root, budget)
+    original_from_read(store, &snapshot, profile, root, budget, true)
 }
 
 fn original_from_read(
@@ -83,6 +99,7 @@ fn original_from_read(
     profile: Uuid,
     root: &str,
     budget: &mut SelectedReadBudget,
+    verify_media: bool,
 ) -> Result<Option<HandwritingRegistration>> {
     let scope = snapshot.snapshot.token.scope();
     let genesis = snapshot
@@ -112,7 +129,7 @@ fn original_from_read(
         value.profile == profile && owner.domain()?.key_sha256() == scope.key_sha256,
         "correction genesis owner differs"
     );
-    project(store, owner, &transaction.selected, budget)?;
+    project_with_media(store, owner, &transaction.selected, budget, verify_media)?;
     Ok(Some(HandwritingRegistration {
         owner,
         genesis_operation: transaction.operation,
@@ -129,6 +146,18 @@ fn current_projection(
     root: &str,
     progress: Option<&Progress>,
     budget: &mut SelectedReadBudget,
+) -> Result<Projection> {
+    current_projection_with_media(store, owner, read, root, progress, budget, true)
+}
+
+fn current_projection_with_media(
+    store: &Store,
+    owner: HandwritingOwner,
+    read: &SelectedReadSnapshot,
+    root: &str,
+    progress: Option<&Progress>,
+    budget: &mut SelectedReadBudget,
+    verify_media: bool,
 ) -> Result<Projection> {
     let token = &read.snapshot.token;
     ensure!(
@@ -154,7 +183,7 @@ fn current_projection(
             "correction applied receipt differs"
         );
     } else {
-        let original = original_from_read(store, read, owner.profile, root, budget)?
+        let original = original_from_read(store, read, owner.profile, root, budget, verify_media)?
             .context("correction local original absent")?;
         ensure!(
             original.owner == owner
@@ -162,7 +191,13 @@ fn current_projection(
             "correction local base or owner differs"
         );
     }
-    project(store, owner, &read.snapshot.transaction.selected, budget)
+    project_with_media(
+        store,
+        owner,
+        &read.snapshot.transaction.selected,
+        budget,
+        verify_media,
+    )
 }
 
 pub(super) fn require_initial_publication(

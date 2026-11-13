@@ -7,7 +7,7 @@ use std::{path::PathBuf, sync::Mutex};
 
 #[cfg(any(target_os = "linux", test))]
 pub(super) mod reader;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 pub(crate) use reader::{ReaderPhase, ReaderPreferences};
 
 #[derive(Clone, Copy)]

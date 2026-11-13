@@ -61,7 +61,24 @@ impl Projection {
     pub fn read(
         owner: Owner,
         manifest: &Manifest,
+        read: impl FnMut(&ObjectRef) -> anyhow::Result<Vec<u8>>,
+    ) -> Result<Self> {
+        Self::read_inner(owner, manifest, read, true)
+    }
+
+    pub(crate) fn read_metadata(
+        owner: Owner,
+        manifest: &Manifest,
+        read: impl FnMut(&ObjectRef) -> anyhow::Result<Vec<u8>>,
+    ) -> Result<Self> {
+        Self::read_inner(owner, manifest, read, false)
+    }
+
+    fn read_inner(
+        owner: Owner,
+        manifest: &Manifest,
         mut read: impl FnMut(&ObjectRef) -> anyhow::Result<Vec<u8>>,
+        verify_sample: bool,
     ) -> Result<Self> {
         manifest
             .validate()
@@ -111,9 +128,13 @@ impl Projection {
             if manifest.media.as_slice() != std::slice::from_ref(&reference) {
                 return Err(Failure::UnsupportedRecord);
             }
-            let bytes = read_exact(&mut read, &reference).ok_or(Failure::MediaUnavailable)?;
-            original.verify_sample(&bytes)?;
-            current.as_ref().map(|_| bytes)
+            if verify_sample {
+                let bytes = read_exact(&mut read, &reference).ok_or(Failure::MediaUnavailable)?;
+                original.verify_sample(&bytes)?;
+                current.as_ref().map(|_| bytes)
+            } else {
+                None
+            }
         } else {
             None
         };

@@ -309,7 +309,7 @@ impl Store {
         limit: usize,
     ) -> Result<Option<SelectedSnapshot>> {
         Ok(self
-            .selected_snapshot_inner(scope, limit, None)?
+            .selected_snapshot_inner(scope, limit, None, true)?
             .map(|read| read.snapshot))
     }
 
@@ -323,7 +323,17 @@ impl Store {
         limit: usize,
         budget: &mut SelectedReadBudget,
     ) -> Result<Option<SelectedReadSnapshot>> {
-        self.selected_snapshot_inner(scope, limit, Some(budget))
+        self.selected_snapshot_inner(scope, limit, Some(budget), true)
+    }
+
+    // Metadata-only historical evidence for handwriting ranking. Callers
+    // verify the selected sample independently before admitting an example.
+    pub(crate) fn selected_handwriting_metadata(
+        &self,
+        scope: &SelectionScope,
+        budget: &mut SelectedReadBudget,
+    ) -> Result<Option<SelectedReadSnapshot>> {
+        self.selected_snapshot_inner(scope, MAX_ITEMS, Some(budget), false)
     }
 
     fn selected_snapshot_inner(
@@ -331,6 +341,7 @@ impl Store {
         scope: &SelectionScope,
         limit: usize,
         mut budget: Option<&mut SelectedReadBudget>,
+        verify_media: bool,
     ) -> Result<Option<SelectedReadSnapshot>> {
         scope.validate()?;
         ensure!(
@@ -389,10 +400,11 @@ impl Store {
         let mut accepted_history = Vec::new();
         let mut sha256 = head_sha256;
         for transaction in history {
-            let parts = publication::validate_closure_with_budget(
+            let parts = publication::validate_closure_for_read(
                 &root,
                 &transaction,
                 budget.as_deref_mut(),
+                verify_media,
             )?;
             let previous = transaction.previous_sha256.clone();
             if keep_history {
@@ -417,22 +429,33 @@ impl Store {
             };
             sha256 = previous;
         }
-        let selected_records = Self::validate_objects_with_budget(
+        let selected_records = Self::validate_objects_inner(
             &root,
             &transaction.selected,
             budget.as_deref_mut(),
+            None,
+            verify_media,
         )?;
         publication::closure_index(&selected_records, true)?;
         let mut retained_records = Vec::new();
         for manifest in &transaction.retained {
             retained_records.extend(
-                Self::validate_objects_with_budget(&root, manifest, budget.as_deref_mut())?
-                    .into_iter()
-                    .map(|(record, _)| record),
+                Self::validate_objects_inner(
+                    &root,
+                    manifest,
+                    budget.as_deref_mut(),
+                    None,
+                    verify_media,
+                )?
+                .into_iter()
+                .map(|(record, _)| record),
             );
         }
         let mut media = BTreeMap::new();
-        for manifest in std::iter::once(&transaction.selected).chain(&transaction.retained) {
+        for manifest in std::iter::once(&transaction.selected)
+            .chain(&transaction.retained)
+            .filter(|_| verify_media)
+        {
             for reference in &manifest.media {
                 if let Some(existing) = media.get(&reference.sha256) {
                     let existing: &files::Source = existing;

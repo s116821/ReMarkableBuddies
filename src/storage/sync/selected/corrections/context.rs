@@ -1,5 +1,7 @@
 //! Explicit example capture and guarded revalidation for shared corrections.
 use super::*;
+#[cfg(any(target_os = "linux", test))]
+use crate::handwriting::{runtime::Selection, Correction, SelectedCapture};
 use crate::handwriting::{
     ConfirmedContext, ConfirmedExample, ContextFailure, ContextOwner, ExampleSelection,
 };
@@ -11,15 +13,134 @@ pub(crate) struct SelectedContextOwner {
     root: String,
     tail: String,
     corrections: Vec<CorrectionPin>,
+    #[cfg(any(target_os = "linux", test))]
+    inventory: Option<Vec<String>>,
 }
 
 struct CorrectionPin {
     owner: HandwritingOwner,
     admission: SelectedAdmission,
-    token: SelectionToken,
+    token: Option<SelectionToken>,
+    included: bool,
+    progress: (bool, Option<Applied>),
 }
 
 impl SelectedContextOwner {
+    #[cfg(any(target_os = "linux", test))]
+    pub(in crate::storage::sync::selected) fn capture_profile(
+        store: &Arc<Store>,
+        binding: &Binding,
+        profile: Uuid,
+        targets: &BTreeSet<String>,
+        additional: &[&SelectedAdmission],
+        reads: &mut SelectedReadBudget,
+        verify: impl FnOnce(&Store, &mut SelectedReadBudget) -> Result<()>,
+    ) -> Result<SelectedCapture> {
+        let mode = store.sync_mode_snapshot()?;
+        require_mode(&mode, binding)?;
+        let lease = store.sync_mode_lease(&mode.token)?;
+        let catalog = SelectedAdmission::new(
+            store.clone(),
+            Identity {
+                group: binding.group,
+                profile,
+                binding_sha256: binding.digest.clone(),
+            }
+            .scope()?,
+        )?;
+        let (_, expected) = catalog_state(store, &lease, binding, reads)?;
+        ensure!(
+            expected.root.profile == profile,
+            "selected handwriting profile differs"
+        );
+        let mut corrections = expected
+            .entries
+            .values()
+            .filter_map(|entry| match entry.owner {
+                Owner::Handwriting(owner) => Some(owner),
+                _ => None,
+            })
+            .map(|owner| {
+                let scope = owner
+                    .domain()?
+                    .scope(binding.group, binding.digest.clone())
+                    .map_err(|error| anyhow::anyhow!("invalid handwriting scope: {error:?}"))?;
+                let admission = SelectedAdmission::new(store.clone(), scope)?;
+                Ok(CorrectionPin {
+                    owner,
+                    admission,
+                    token: None,
+                    included: false,
+                    progress: (false, None),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut gates = additional.to_vec();
+        gates.push(&catalog);
+        gates.extend(corrections.iter().map(|pin| &pin.admission));
+        let (inventory, examples, selection, pins) =
+            SelectedAdmission::with_gates(&gates, |store| {
+                let _checkpoint = store.selected_checkpoint_read()?;
+                verify(store, reads)?;
+                let (checkpoint, view) = catalog_state(store, &lease, binding, reads)?;
+                ensure!(
+                    view.root_sha == expected.root_sha
+                        && view.base == expected.base
+                        && checkpoint.observed_catalog_tail.as_ref() == Some(&view.base),
+                    "selected handwriting catalog tail unobserved or changed"
+                );
+                let inventory = inventory(store, binding, reads)?;
+                let unknown_local = inventory
+                    .iter()
+                    .filter(|key| !view.entries.contains_key(*key))
+                    .count();
+                let mut selection = Selection {
+                    selected: Vec::new(),
+                    scanned: corrections.len() as u64,
+                    eligible: 0,
+                    checked: 0,
+                    skipped_media: 0,
+                    conflicted: 0,
+                    unsupported: unknown_local as u64,
+                    unexamined: 0,
+                    tombstones: 0,
+                    excluded_targets: 0,
+                };
+                let (examples, pins) = rank(
+                    store,
+                    &checkpoint,
+                    &view,
+                    &corrections,
+                    targets,
+                    reads,
+                    &mut selection,
+                )?;
+                Ok((inventory, examples, selection, pins))
+            })?;
+        for (pin, (token, included, progress)) in corrections.iter_mut().zip(pins) {
+            pin.token = token;
+            pin.included = included;
+            pin.progress = progress;
+        }
+        let owner = Self {
+            mode: lease,
+            binding: binding.clone(),
+            catalog,
+            root: expected.root_sha,
+            tail: expected.base,
+            corrections,
+            inventory: Some(inventory),
+        };
+        Ok(SelectedCapture {
+            context: ConfirmedContext::from_examples(
+                profile,
+                examples,
+                ContextOwner::Selected(owner),
+            ),
+            selection,
+        })
+    }
+
     pub(crate) fn capture(
         store: Arc<Store>,
         profile: Uuid,
@@ -87,6 +208,7 @@ impl SelectedContextOwner {
         let mut gates = vec![&catalog];
         gates.extend(admissions.iter().map(|(_, admission)| admission));
         let result = SelectedAdmission::with_gates(&gates, |store| {
+            let _checkpoint = store.selected_checkpoint_read()?;
             let (checkpoint, view) = catalog_state(store, &lease, &binding, reads)?;
             ensure!(
                 view.root.profile == profile,
@@ -131,7 +253,9 @@ impl SelectedContextOwner {
             .map(|((owner, admission), token)| CorrectionPin {
                 owner,
                 admission,
-                token,
+                token: Some(token),
+                included: true,
+                progress: (false, None),
             })
             .collect();
         Ok(ConfirmedContext::from_examples(
@@ -144,6 +268,8 @@ impl SelectedContextOwner {
                 root: view.root_sha,
                 tail: view.base,
                 corrections,
+                #[cfg(any(target_os = "linux", test))]
+                inventory: None,
             }),
         ))
     }
@@ -155,16 +281,45 @@ impl SelectedContextOwner {
         run: impl FnOnce(&Store) -> Result<T>,
     ) -> Result<T> {
         let mut ordered = gates.to_vec();
-        ordered.push(&self.catalog);
-        ordered.extend(self.corrections.iter().map(|pin| &pin.admission));
+        self.join_gates(&mut ordered);
         SelectedAdmission::with_gates(&ordered, |store| {
-            self.mode.require_shared_scope(self.catalog.scope())?;
-            let (checkpoint, view) = catalog_state(store, &self.mode, &self.binding, reads)?;
+            let _checkpoint = self.verify_locked(store, reads)?;
+            run(store)
+        })
+    }
+
+    pub(crate) fn join_gates<'a>(&'a self, gates: &mut Vec<&'a SelectedAdmission>) {
+        gates.push(&self.catalog);
+        gates.extend(self.corrections.iter().map(|pin| &pin.admission));
+    }
+
+    pub(crate) fn verify_locked(
+        &self,
+        store: &Store,
+        reads: &mut SelectedReadBudget,
+    ) -> Result<std::sync::RwLockReadGuard<'_, ()>> {
+        let owner_store = self.catalog.writer_store();
+        ensure!(
+            std::ptr::eq(store, owner_store.as_ref()),
+            "foreign handwriting Store"
+        );
+        let guard = owner_store.selected_checkpoint_read()?;
+        self.mode.require_shared_scope(self.catalog.scope())?;
+        let (checkpoint, view) = catalog_state(store, &self.mode, &self.binding, reads)?;
+        ensure!(
+            view.root_sha == self.root && view.base == self.tail,
+            "selected handwriting catalog changed"
+        );
+        #[cfg(any(target_os = "linux", test))]
+        if let Some(expected) = &self.inventory {
             ensure!(
-                view.root_sha == self.root && view.base == self.tail,
-                "selected handwriting catalog changed"
+                checkpoint.observed_catalog_tail.as_ref() == Some(&view.base)
+                    && inventory(store, &self.binding, reads)? == *expected,
+                "selected handwriting inventory changed"
             );
-            for pin in &self.corrections {
+        }
+        for pin in &self.corrections {
+            if pin.included {
                 let (token, projection) = correction(
                     store,
                     pin.owner,
@@ -174,13 +329,170 @@ impl SelectedContextOwner {
                     reads,
                 )?;
                 ensure!(
-                    token == pin.token && projection.sample().is_some(),
+                    pin.token.as_ref() == Some(&token) && projection.sample().is_some(),
                     "selected handwriting example changed"
                 );
+            } else {
+                ensure!(
+                    pin.progress == correction_progress(&checkpoint, pin.admission.scope())
+                        && store.selection_unchanged_for_progress(
+                            pin.admission.scope(),
+                            pin.token.as_ref(),
+                            reads
+                        )?,
+                    "selected handwriting inventory changed"
+                );
             }
-            run(store)
-        })
+        }
+        Ok(guard)
     }
+}
+
+fn correction_progress(checkpoint: &Checkpoint, scope: &SelectionScope) -> (bool, Option<Applied>) {
+    checkpoint
+        .scopes
+        .get(&scope.key_sha256)
+        .map_or((false, None), |progress| {
+            (progress.receive.is_some(), progress.applied.clone())
+        })
+}
+
+#[cfg(any(target_os = "linux", test))]
+type RankedPin = (Option<SelectionToken>, bool, (bool, Option<Applied>));
+#[cfg(any(target_os = "linux", test))]
+type RankedCapture = (Vec<ConfirmedExample>, Vec<RankedPin>);
+
+#[cfg(any(target_os = "linux", test))]
+fn rank(
+    store: &Store,
+    checkpoint: &Checkpoint,
+    view: &CatalogView,
+    corrections: &[CorrectionPin],
+    targets: &BTreeSet<String>,
+    reads: &mut SelectedReadBudget,
+    selection: &mut Selection,
+) -> Result<RankedCapture> {
+    let mut candidates = Vec::<(usize, Correction, Uuid, Uuid, bool)>::new();
+    let mut pins = Vec::new();
+    for (position, item) in corrections.iter().enumerate() {
+        let scope = item.admission.scope();
+        let read = store.selected_handwriting_metadata(scope, reads)?;
+        let token = read.as_ref().map(|read| read.snapshot.token.clone());
+        pins.push((token, false, correction_progress(checkpoint, scope)));
+        let progress = checkpoint.scopes.get(&scope.key_sha256);
+        let Some(read) =
+            read.filter(|_| progress.is_none_or(|progress| progress.receive.is_none()))
+        else {
+            selection.unsupported += 1;
+            continue;
+        };
+        let projection = match current_projection_with_media(
+            store,
+            item.owner,
+            &read,
+            &view.root_sha,
+            progress,
+            reads,
+            false,
+        ) {
+            Ok(projection) => projection,
+            Err(_) if !reads.exhausted() => {
+                selection.unsupported += 1;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let Some(value) = projection.current() else {
+            selection.tombstones += 1;
+            continue;
+        };
+        if targets.contains(&value.sample.sha256) {
+            selection.excluded_targets += 1;
+            continue;
+        }
+        candidates.push((
+            position,
+            value.clone(),
+            item.owner.domain()?.record_id(),
+            projection.head(),
+            matches!(projection.coverage(), Coverage::Included { .. }),
+        ));
+    }
+    candidates.sort_by(|a, b| {
+        b.1.confirmed_ms
+            .cmp(&a.1.confirmed_ms)
+            .then_with(|| a.2.cmp(&b.2))
+            .then_with(|| a.3.cmp(&b.3))
+    });
+    selection.eligible = candidates.len();
+    let mut examples = Vec::new();
+    for (position, value, _, revision, included) in candidates.into_iter().take(16) {
+        if examples.len() == 3 {
+            break;
+        }
+        selection.checked += 1;
+        if !included {
+            selection.skipped_media += 1;
+            continue;
+        }
+        let pin = &corrections[position];
+        let verified = correction(
+            store,
+            pin.owner,
+            pin.admission.scope(),
+            checkpoint,
+            view,
+            reads,
+        );
+        let (token, projection) = match verified {
+            Ok(verified) => verified,
+            Err(_) if !reads.exhausted() => {
+                selection.skipped_media += 1;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        ensure!(
+            pins[position].0.as_ref() == Some(&token) && revision == projection.head(),
+            "selected handwriting correction changed"
+        );
+        let Some(sample) = projection
+            .sample()
+            .filter(|png| crate::retrieval::notebook::static_png(png).is_ok())
+        else {
+            selection.skipped_media += 1;
+            continue;
+        };
+        selection.selected.push(ExampleSelection {
+            correction: value.correction,
+            revision,
+        });
+        examples.push(
+            ConfirmedExample::from_verified(value, revision, sample.to_vec())
+                .map_err(|error| anyhow::anyhow!("invalid handwriting example: {error:?}"))?,
+        );
+        pins[position].1 = true;
+    }
+    selection.unexamined = selection.eligible - selection.checked;
+    Ok((examples, pins))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn inventory(
+    store: &Store,
+    binding: &Binding,
+    reads: &mut SelectedReadBudget,
+) -> Result<Vec<String>> {
+    Ok(store
+        .selected_scope_candidates(
+            binding.group,
+            &binding.digest,
+            Namespace::Handwriting,
+            reads,
+        )?
+        .into_iter()
+        .map(|scope| scope.key_sha256)
+        .collect())
 }
 
 fn catalog_state(

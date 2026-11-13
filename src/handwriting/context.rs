@@ -54,6 +54,12 @@ pub(crate) enum ContextOwner {
     Local { _corrections: LocalCorrections },
     Selected(crate::storage::sync::selected::SelectedContextOwner),
 }
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) struct SelectedCapture {
+    pub(crate) context: ConfirmedContext,
+    pub(crate) selection: super::runtime::Selection,
+}
 /// Private fields prevent unchecked text/images from impersonating a retained capture.
 pub struct ConfirmedContext {
     pub(crate) identity: ContextIdentity,
@@ -63,6 +69,16 @@ pub struct ConfirmedContext {
 impl ConfirmedContext {
     pub fn identity(&self) -> &ContextIdentity {
         &self.identity
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn selected_owner(
+        &self,
+    ) -> anyhow::Result<&crate::storage::sync::selected::SelectedContextOwner> {
+        match &self.owner {
+            ContextOwner::Selected(owner) => Ok(owner),
+            ContextOwner::Local { .. } => anyhow::bail!("selected handwriting context required"),
+        }
     }
 
     pub(crate) fn from_examples(

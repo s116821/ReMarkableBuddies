@@ -131,7 +131,7 @@ impl SelectedAdmission {
         })
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn capture_images_locked(
         store: &Store,
         accepted: &SelectionToken,

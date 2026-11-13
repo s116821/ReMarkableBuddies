@@ -31,7 +31,7 @@ pub trait LLMEngine {
     ) -> Result<String> {
         anyhow::bail!("model adapter does not support guarded submission")
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", test))]
     fn execute_with_deadline(
         &mut self,
         progress: &mut dyn FnMut() -> Result<()>,
