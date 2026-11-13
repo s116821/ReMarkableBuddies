@@ -251,9 +251,15 @@ fn checkpoint_dir(store: &Store, backup: Uuid) -> PathBuf {
         .join(backup.to_string())
 }
 fn publisher_lock(directory: &Path) -> Result<File> {
-    files::directory(directory)?;
+    publisher_directory(directory)?;
     let lock_path = directory.join("publisher.lock");
     files::safe_path(&lock_path)?;
+    if !absent(&lock_path)? {
+        ensure!(
+            fs::symlink_metadata(&lock_path)?.is_file(),
+            "invalid publisher lock"
+        );
+    }
     let file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -262,6 +268,17 @@ fn publisher_lock(directory: &Path) -> Result<File> {
         .open(lock_path)?;
     file.try_lock()?;
     Ok(file)
+}
+
+fn publisher_directory(path: &Path) -> Result<()> {
+    if absent(path)? {
+        return files::directory(path);
+    }
+    ensure!(
+        fs::symlink_metadata(path)?.is_dir(),
+        "invalid publisher directory"
+    );
+    Ok(())
 }
 
 fn map_provider(error: anyhow::Error, unknown: bool) -> State {
@@ -559,12 +576,11 @@ pub(in crate::storage::sync) fn launch_rooted(
     );
     let directory = checkpoint_dir(&store, backup);
     let path = directory.join("publisher.json");
-    let no_checkpoint = absent(&path)?;
     let reservations = mode::isolated_reservations(&store, backup)?;
-    let state = if no_checkpoint {
-        None
-    } else {
-        Some(read_private::<Custody>(&path))
+    let state = match absent(&path) {
+        Ok(true) => None,
+        Ok(false) => Some(read_private::<Custody>(&path)),
+        Err(error) => Some(Err(error)),
     };
     let (state, reason, status) = match state {
         Some(Ok(Custody::Publisher(publisher))) => {
@@ -619,22 +635,36 @@ pub(in crate::storage::sync) fn launch_rooted(
         if state.binding.matches(&store, &snapshot) {
             let binding = state.binding.clone();
             let lease = store.sync_mode_lease(&snapshot.token)?;
-            let exclusive = publisher_lock(&directory)?;
-            let parent = store
-                .paths
-                .data
-                .parent()
-                .context("Store parent unavailable")?;
-            let staging = parent
-                .join(format!(".buddy-isolated-{}", store.actor_id))
-                .join(backup.to_string());
-            let sessions = store
-                .paths
-                .credentials
-                .join("isolated")
-                .join(backup.to_string());
-            files::directory(&staging)?;
-            files::directory(&sessions)?;
+            let local = (|| -> Result<_> {
+                let exclusive = publisher_lock(&directory)?;
+                let parent = store
+                    .paths
+                    .data
+                    .parent()
+                    .context("Store parent unavailable")?;
+                let staging = parent
+                    .join(format!(".buddy-isolated-{}", store.actor_id))
+                    .join(backup.to_string());
+                let sessions = store
+                    .paths
+                    .credentials
+                    .join("isolated")
+                    .join(backup.to_string());
+                publisher_directory(&staging)?;
+                publisher_directory(&sessions)?;
+                Ok((exclusive, staging, sessions))
+            })();
+            let Ok((exclusive, staging, sessions)) = local else {
+                unavailable_health(
+                    &store,
+                    &snapshot,
+                    backup,
+                    Some(state),
+                    Status::RecoveryRequired,
+                    "publisher-storage-unavailable",
+                );
+                return Ok(None);
+            };
             let cancel = Arc::new(AtomicBool::new(false));
             let engine = Engine {
                 store: store.clone(),
@@ -659,7 +689,19 @@ pub(in crate::storage::sync) fn launch_rooted(
             return Worker::launch(store, policy, cancel, engine);
         }
     }
-    let latest = state.and_then(|state| state.latest).map(|latest| {
+    unavailable_health(&store, &snapshot, backup, state.as_ref(), status, reason);
+    Ok(None)
+}
+
+fn unavailable_health(
+    store: &Store,
+    snapshot: &mode::SyncModeSnapshot,
+    backup: Uuid,
+    state: Option<&Checkpoint>,
+    status: Status,
+    reason: &str,
+) {
+    let latest = state.and_then(|state| state.latest.as_ref()).map(|latest| {
         json!({
             "marker_sha256":latest.marker.sha256,"complete_media":latest.complete_media,
             "verified_at_unix_seconds":latest.verified_at_unix_seconds,
@@ -672,7 +714,6 @@ pub(in crate::storage::sync) fn launch_rooted(
             "device":snapshot.device,"backup":backup,"latest_verified":latest,
         }),
     );
-    Ok(None)
 }
 
 #[cfg(test)]

@@ -270,3 +270,125 @@ fn current_epoch_cannot_rebind_unsettled_package_or_adopt_foreign_root() {
     let health: Value = files::json(&test.store.paths.data.join("sync/health.json"), 8192).unwrap();
     assert_eq!(health["reason"], "root-admission-stale");
 }
+
+#[test]
+fn rooted_worker_keeps_local_store_usable_when_private_paths_are_blocked() {
+    for blocked_path in [
+        "checkpoint-parent",
+        "checkpoint",
+        "lock",
+        "staging",
+        "sessions",
+    ] {
+        let test = Setup::new();
+        let request = test.isolated();
+        let snapshot = test.store.sync_mode_snapshot().unwrap();
+        let Some(mode::SyncMode::IsolatedBackup { backup, .. }) = snapshot.mode else {
+            panic!("isolated fixture mode unavailable");
+        };
+        let directory = checkpoint_dir(&test.store, backup);
+        if !matches!(blocked_path, "checkpoint-parent" | "checkpoint") {
+            let verified = test.execute(&request);
+            assert_eq!(verified.outcome, State::RootVerified);
+            let path = test.checkpoint(&verified);
+            let mut state: Checkpoint = read_private(&path).unwrap();
+            state.latest = Some(Revision {
+                id: "marker-fixture".into(),
+                predecessor: state.binding.root.clone(),
+                marker: ObjectRef {
+                    sha256: digest(b"last marker"),
+                    bytes: 11,
+                },
+                complete_media: true,
+                source: PublicationSource {
+                    generation: Uuid::new_v4(),
+                    history: digest(b"history"),
+                    config_path: digest(b"path"),
+                    config_sha256: digest(b"config"),
+                },
+                verified_at_unix_seconds: 17,
+            });
+            write_private(&path, &state).unwrap();
+        }
+        if !matches!(blocked_path, "checkpoint-parent" | "checkpoint") {
+            assert_eq!(
+                test.health()["latest_verified"]["marker_sha256"],
+                digest(b"last marker")
+            );
+        }
+        let obstruction = match blocked_path {
+            "checkpoint-parent" => test.store.paths.data.join("sync/isolated"),
+            "checkpoint" => directory.join("publisher.json"),
+            "lock" => directory.join("publisher.lock"),
+            "staging" => test
+                .root
+                .root
+                .join(format!(".buddy-isolated-{}", test.store.actor_id)),
+            "sessions" => test.store.paths.credentials.join("isolated"),
+            _ => unreachable!(),
+        };
+        if blocked_path == "checkpoint" {
+            files::directory(&obstruction).unwrap();
+            let sentinel = obstruction.join("keep");
+            fs::write(&sentinel, b"PRIVATE_BLOCKED_PATH").unwrap();
+            assert!(test.launch_without_provider().is_none());
+            assert_eq!(test.health()["reason"], "root-custody-invalid");
+            assert_eq!(fs::read(sentinel).unwrap(), b"PRIVATE_BLOCKED_PATH");
+        } else if blocked_path == "lock" {
+            // Use the real lock owner to refuse a competing publisher without
+            // altering the legitimate file.
+            let lock = publisher_lock(&directory).unwrap();
+            assert!(test.launch_without_provider().is_none());
+            let health = test.health();
+            assert_eq!(health["status"], "recovery-required");
+            assert_eq!(health["reason"], "publisher-storage-unavailable");
+            assert!(obstruction.is_file());
+            drop(lock);
+        } else {
+            fs::write(&obstruction, b"PRIVATE_BLOCKED_PATH").unwrap();
+            assert!(test.launch_without_provider().is_none());
+            let health = test.health();
+            assert_eq!(health["status"], "recovery-required");
+            assert_eq!(
+                health["reason"],
+                if blocked_path == "checkpoint-parent" {
+                    "root-custody-invalid"
+                } else {
+                    "publisher-storage-unavailable"
+                }
+            );
+            assert!(!health.to_string().contains("PRIVATE"));
+            assert_eq!(fs::read(&obstruction).unwrap(), b"PRIVATE_BLOCKED_PATH");
+        }
+        let entry = record(&test.store);
+        test.store
+            .commit(vec![entry.clone()], BTreeMap::new())
+            .unwrap();
+        assert_eq!(
+            test.store
+                .heads(entry.namespace, entry.record_id)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+}
+
+impl Setup {
+    fn launch_without_provider(&self) -> Option<Worker> {
+        let before = self.wire.requests();
+        let worker = launch_rooted(
+            self.store.clone(),
+            SyncPolicy::default(),
+            &self.root.root.join("config.json"),
+            Ok(self.client()),
+        )
+        .unwrap();
+        assert_eq!(self.wire.requests(), before);
+        worker
+    }
+
+    fn health(&self) -> Value {
+        files::json(&self.store.paths.data.join("sync/health.json"), 8192).unwrap()
+    }
+}

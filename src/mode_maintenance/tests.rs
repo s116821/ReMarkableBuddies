@@ -80,6 +80,20 @@ fn provision_command_uses_original_and_preserves_the_inspect_shape() {
         "control_version":1, "operation":Uuid::new_v4(), "expected":store.sync_mode_snapshot().unwrap().token,
     })).unwrap();
     let operation = Operation::ProvisionIsolatedBackup;
+    let capture = |label: &str, report: Report| -> Value {
+        let mut frame = Vec::new();
+        report.write_to(&mut frame).unwrap();
+        assert!(frame.ends_with(b"\n"));
+        println!(
+            "isolated-wire {label} {}",
+            std::str::from_utf8(&frame).unwrap().trim_end_matches('\n')
+        );
+        serde_json::from_slice(&frame).unwrap()
+    };
+    println!(
+        "isolated-wire request {}",
+        std::str::from_utf8(&bytes).unwrap()
+    );
     let invoke = |mut data: &[u8]| {
         run_with_provision(
             operation,
@@ -98,12 +112,15 @@ fn provision_command_uses_original_and_preserves_the_inspect_shape() {
     let busy = report_value(invoke(&bytes));
     assert_eq!(busy["status"], "busy");
     drop(store);
-    let gate = report_value(run(
-        operation,
-        Some(Path::new("-")),
-        Some(config.clone()),
-        &mut bytes.as_slice(),
-    ));
+    let gate = capture(
+        "unqualified",
+        run(
+            operation,
+            Some(Path::new("-")),
+            Some(config.clone()),
+            &mut bytes.as_slice(),
+        ),
+    );
     assert_eq!(
         gate["data"]["isolated_root"]["outcome"],
         "provider-binding-unqualified"
@@ -113,7 +130,7 @@ fn provision_command_uses_original_and_preserves_the_inspect_shape() {
         report_value(invoke(br#"{"control_version":1,"control_version":1}"#))["status"],
         "invalid-input"
     );
-    let valid = report_value(invoke(&bytes));
+    let valid = capture("current", invoke(&bytes));
     assert_eq!(valid["status"], "ok");
     assert_eq!(valid["data"]["isolated_root"]["outcome"], "root-verified");
     assert_eq!(
@@ -126,7 +143,7 @@ fn provision_command_uses_original_and_preserves_the_inspect_shape() {
     let reopened = fixture.store();
     set(&reopened, SyncModeChoice::LocalOnly);
     drop(reopened);
-    let historical = report_value(invoke(&bytes));
+    let historical = capture("historical", invoke(&bytes));
     assert_eq!(historical["status"], "ok");
     assert_eq!(
         historical["data"]["isolated_root"]["currency"],

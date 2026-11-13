@@ -6,7 +6,9 @@ use super::{
 use crate::{
     conversation::{Ledger, Record},
     storage::{
-        inspection::{InspectionStatus, StorageKind},
+        inspection::{
+            isolated_backup_directory, isolated_checkpoint_kind, InspectionStatus, StorageKind,
+        },
         *,
     },
 };
@@ -141,6 +143,20 @@ impl Scan {
                 );
             } else {
                 self.issue("unsafe-entry");
+            }
+        }
+    }
+    fn isolated_checkpoints(&mut self, root: &Path) {
+        for backup in self.entries(root) {
+            if !isolated_backup_directory(&backup) {
+                self.issue("unexpected-entry");
+                continue;
+            }
+            for child in self.entries(&backup) {
+                match isolated_checkpoint_kind(&child) {
+                    Some(kind) => self.file(&child, kind),
+                    None => self.issue("unexpected-entry"),
+                }
             }
         }
     }
@@ -819,6 +835,7 @@ pub(super) fn inspect(paths: &StorePaths) -> Inspection {
                         "state.json" | "health.json" | "mode.json" => {
                             scan.file(&child, StorageKind::Structural)
                         }
+                        "isolated" => scan.isolated_checkpoints(&child),
                         "incoming" => scan.opaque(&child, StorageKind::Staging),
                         _ if stage(&child) => scan.file(&child, StorageKind::Staging),
                         _ => scan.issue("unexpected-entry"),
