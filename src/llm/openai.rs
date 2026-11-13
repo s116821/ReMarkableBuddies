@@ -99,7 +99,6 @@ impl LLMEngine for OpenAI {
     ) -> Result<String> {
         self.execute_guarded(progress, handoff, None)
     }
-    #[cfg(target_os = "linux")]
     fn execute_with_deadline(
         &mut self,
         progress: &mut dyn FnMut() -> Result<()>,

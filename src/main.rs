@@ -24,6 +24,7 @@ enum ConversationOperation {
     RecoverPending,
     WriterInspect,
     WriterGenerate,
+    WriterGenerateImage,
     WriterRefine,
     WriterRecover,
     TargetChange,
@@ -383,6 +384,9 @@ fn main() -> Result<()> {
         let writer_operation = match operation {
             ConversationOperation::WriterInspect => Some(selected_writer::Operation::Inspect),
             ConversationOperation::WriterGenerate => Some(selected_writer::Operation::Generate),
+            ConversationOperation::WriterGenerateImage => {
+                Some(selected_writer::Operation::GenerateImage)
+            }
             ConversationOperation::WriterRefine => Some(selected_writer::Operation::Refine),
             ConversationOperation::WriterRecover => Some(selected_writer::Operation::Recover),
             _ => None,

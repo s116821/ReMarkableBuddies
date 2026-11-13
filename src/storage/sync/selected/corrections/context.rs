@@ -1,6 +1,5 @@
 //! Explicit example capture and guarded revalidation for shared corrections.
 use super::*;
-#[cfg(any(target_os = "linux", test))]
 use crate::handwriting::{runtime::Selection, Correction, SelectedCapture};
 use crate::handwriting::{
     ConfirmedContext, ConfirmedExample, ContextFailure, ContextOwner, ExampleSelection,
@@ -13,7 +12,6 @@ pub(crate) struct SelectedContextOwner {
     root: String,
     tail: String,
     corrections: Vec<CorrectionPin>,
-    #[cfg(any(target_os = "linux", test))]
     inventory: Option<Vec<String>>,
 }
 
@@ -26,7 +24,6 @@ struct CorrectionPin {
 }
 
 impl SelectedContextOwner {
-    #[cfg(any(target_os = "linux", test))]
     pub(in crate::storage::sync::selected) fn capture_profile(
         store: &Arc<Store>,
         binding: &Binding,
@@ -268,7 +265,6 @@ impl SelectedContextOwner {
                 root: view.root_sha,
                 tail: view.base,
                 corrections,
-                #[cfg(any(target_os = "linux", test))]
                 inventory: None,
             })),
         ))
@@ -310,7 +306,6 @@ impl SelectedContextOwner {
             view.root_sha == self.root && view.base == self.tail,
             "selected handwriting catalog changed"
         );
-        #[cfg(any(target_os = "linux", test))]
         if let Some(expected) = &self.inventory {
             ensure!(
                 checkpoint.observed_catalog_tail.as_ref() == Some(&view.base)
@@ -357,12 +352,9 @@ fn correction_progress(checkpoint: &Checkpoint, scope: &SelectionScope) -> (bool
         })
 }
 
-#[cfg(any(target_os = "linux", test))]
 type RankedPin = (Option<SelectionToken>, bool, (bool, Option<Applied>));
-#[cfg(any(target_os = "linux", test))]
 type RankedCapture = (Vec<ConfirmedExample>, Vec<RankedPin>);
 
-#[cfg(any(target_os = "linux", test))]
 fn rank(
     store: &Store,
     checkpoint: &Checkpoint,
@@ -477,7 +469,6 @@ fn rank(
     Ok((examples, pins))
 }
 
-#[cfg(any(target_os = "linux", test))]
 fn inventory(
     store: &Store,
     binding: &Binding,

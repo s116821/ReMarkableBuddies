@@ -511,6 +511,32 @@ pub(crate) fn normalize_admitted(
     engine: &mut dyn LLMEngine,
     progress: &mut dyn FnMut(Progress) -> Result<()>,
 ) -> (std::result::Result<Normalized, NormalizeFailure>, bool) {
+    normalize_admitted_with(
+        document,
+        target,
+        model_profile,
+        context,
+        policy,
+        engine,
+        progress,
+        &mut |engine, progress| engine.execute_with_progress(progress),
+    )
+}
+
+type ExecuteNormalization<'a> =
+    dyn FnMut(&mut dyn LLMEngine, &mut dyn FnMut() -> Result<()>) -> Result<String> + 'a;
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn normalize_admitted_with(
+    document: Uuid,
+    target: &AdmittedTarget,
+    model_profile: &str,
+    context: Option<&crate::handwriting::ConfirmedContext>,
+    policy: TranscriptionPolicy,
+    engine: &mut dyn LLMEngine,
+    progress: &mut dyn FnMut(Progress) -> Result<()>,
+    execute: &mut ExecuteNormalization<'_>,
+) -> (std::result::Result<Normalized, NormalizeFailure>, bool) {
     let mut trace = Trace::default();
     let mut canceled = false;
     let result = normalize_inner(
@@ -533,6 +559,7 @@ pub(crate) fn normalize_admitted(
         context,
         policy,
         &mut trace,
+        execute,
     );
     let outcome = if canceled {
         Err(NormalizeFailure::Canceled)
@@ -568,6 +595,7 @@ pub fn normalize(
         None,
         TranscriptionPolicy::WholePage,
         &mut Trace::default(),
+        &mut |engine, progress| engine.execute_with_progress(progress),
     )?;
     let Normalized::Page(page) = outcome else {
         anyhow::bail!("invalid notebook outcome");
@@ -587,6 +615,7 @@ fn normalize_inner(
     context: Option<&crate::handwriting::ConfirmedContext>,
     policy: TranscriptionPolicy,
     trace: &mut Trace,
+    execute: &mut ExecuteNormalization<'_>,
 ) -> Result<Normalized> {
     let owned = Content(engine);
     owned.0.clear_content();
@@ -756,7 +785,7 @@ fn normalize_inner(
     let mut failed = false;
     trace.phase = Phase::Provider;
     trace.called = true;
-    let returned = owned.0.execute_with_progress(&mut || {
+    let returned = execute(&mut *owned.0, &mut || {
         if failed || progress(Progress::EngineProgress).is_err() {
             failed = true;
             anyhow::bail!("notebook progress refused");
