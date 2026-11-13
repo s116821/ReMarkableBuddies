@@ -633,7 +633,7 @@ impl Store {
             Self::validate_namespace_family(root, manifest)?;
         }
         claim_local_operation(root, inner.generation, transaction.operation)?;
-        if feedback_generation::version(root)? == compound_generation::VERSION {
+        if target_generation::base_version(root)? == compound_generation::VERSION {
             compound_generation::validate_ready(&self.paths, self.actor_id, inner.generation)?;
         }
         ensure!(

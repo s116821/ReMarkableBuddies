@@ -975,4 +975,41 @@ fn check_local_operation_reuse(promote_targets: bool) {
         )
         .is_err());
     assert!(exhausted.exhausted());
+
+    // Public Store publication must retain the inherited readiness guard, even
+    // when the new operation carries only pre-upgrade memory records.
+    let selected = store
+        .selected_snapshot(&scopes[0], MAX_ITEMS)
+        .unwrap()
+        .unwrap();
+    let change = selection::SelectionChange {
+        operation: Uuid::new_v4(),
+        accepted_base_sha256: selected.transaction.accepted_base_sha256.clone(),
+        selected: selected.transaction.selected.clone(),
+        retained: selected.transaction.retained.clone(),
+    };
+    let capabilities = store.paths.data.join("capabilities.json");
+    let original_capabilities = fs::read(&capabilities).unwrap();
+    fs::write(&capabilities, b"{}").unwrap();
+    let refused = store.activate_selected(&selected.token, change.clone(), BTreeMap::new());
+    fs::write(&capabilities, original_capabilities).unwrap();
+    assert!(
+        refused.is_err(),
+        "incomplete capabilities admitted publication"
+    );
+    assert_eq!(
+        store
+            .selected_snapshot(&scopes[0], MAX_ITEMS)
+            .unwrap()
+            .unwrap()
+            .token,
+        selected.token,
+        "refused publication changed the winning selection"
+    );
+    assert!(
+        !store
+            .activate_selected(&selected.token, change, BTreeMap::new())
+            .unwrap()
+            .replayed
+    );
 }
