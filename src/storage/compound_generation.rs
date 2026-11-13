@@ -85,7 +85,16 @@ impl Preparation {
 }
 
 pub(crate) fn validate_feature(root: &Path, actor: Uuid, generation: Uuid) -> Result<()> {
-    let feature: Preparation = files::json(&root.join(MARKER), MAX_RECORD as u64)?;
+    validate_feature_with_budget(root, actor, generation, None)
+}
+pub(super) fn validate_feature_with_budget(
+    root: &Path,
+    actor: Uuid,
+    generation: Uuid,
+    mut budget: Option<&mut selection::SelectedReadBudget>,
+) -> Result<()> {
+    let feature: Preparation =
+        files::json_with_budget(&root.join(MARKER), MAX_RECORD as u64, budget.as_deref_mut())?;
     feature.validate()?;
     ensure!(
         feature.request.actor == actor && feature.target_generation == generation,
@@ -96,11 +105,15 @@ pub(crate) fn validate_feature(root: &Path, actor: Uuid, generation: Uuid) -> Re
         .and_then(Path::parent)
         .context("invalid compound generation root")?;
     ensure!(
-        files::json::<Preparation>(&data.join(PREPARATION), MAX_RECORD as u64)? == feature,
+        files::json_with_budget::<Preparation>(
+            &data.join(PREPARATION),
+            MAX_RECORD as u64,
+            budget.as_deref_mut()
+        )? == feature,
         "compound feature differs from its original preparation"
     );
     ensure!(
-        target_generation::base_version(root)? == VERSION,
+        target_generation::base_version_with_budget(root, budget)? == VERSION,
         "compound generation format differs"
     );
     ensure!(
@@ -110,19 +123,26 @@ pub(crate) fn validate_feature(root: &Path, actor: Uuid, generation: Uuid) -> Re
     Ok(())
 }
 
-pub(crate) fn validate_portable_generation(root: &Path) -> Result<()> {
+pub(super) fn validate_portable_generation(
+    root: &Path,
+    mut budget: Option<&mut selection::SelectedReadBudget>,
+) -> Result<()> {
     let data = root
         .parent()
         .and_then(Path::parent)
         .context("invalid compound generation root")?;
-    let identity: Identity = files::json(&data.join("identity.json"), MAX_RECORD as u64)?;
+    let identity: Identity = files::json_with_budget(
+        &data.join("identity.json"),
+        MAX_RECORD as u64,
+        budget.as_deref_mut(),
+    )?;
     ensure!(identity.format == FORMAT, "compound owner identity differs");
     let generation = Uuid::parse_str(
         root.file_name()
             .and_then(|n| n.to_str())
             .context("invalid compound generation name")?,
     )?;
-    validate_feature(root, identity.actor, generation)
+    validate_feature_with_budget(root, identity.actor, generation, budget)
 }
 
 pub(super) fn validate_owned_staging(root: &Path, actor: Uuid, generation: Uuid) -> Result<()> {
@@ -157,25 +177,42 @@ pub(crate) fn capabilities(paths: &StorePaths, actor: Uuid, generation: Uuid) ->
     result
 }
 pub(crate) fn validate_ready(paths: &StorePaths, actor: Uuid, generation: Uuid) -> Result<()> {
+    validate_ready_with_budget(paths, actor, generation, None)
+}
+pub(super) fn validate_ready_with_budget(
+    paths: &StorePaths,
+    actor: Uuid,
+    generation: Uuid,
+    mut budget: Option<&mut selection::SelectedReadBudget>,
+) -> Result<()> {
     let target_root = paths.data.join("generations").join(generation.to_string());
-    if target_generation::is_target(&target_root)? {
-        return target_generation::validate_ready(paths, actor, generation);
+    if files::json_with_budget::<u32>(&target_root.join("format.json"), 64, budget.as_deref_mut())?
+        == target_generation::VERSION
+    {
+        return target_generation::validate_ready_with_budget(paths, actor, generation, budget);
     }
     ensure!(
-        files::json::<Uuid>(&paths.data.join("CURRENT"), 128)? == generation,
+        files::json_with_budget::<Uuid>(&paths.data.join("CURRENT"), 128, budget.as_deref_mut())?
+            == generation,
         "compound current changed"
     );
     let root = paths.data.join("generations").join(generation.to_string());
-    validate_feature(&root, actor, generation)?;
-    selection::validate_generation(&root, actor, generation)?;
+    validate_feature_with_budget(&root, actor, generation, budget.as_deref_mut())?;
+    selection::validate_generation_with_budget(&root, actor, generation, budget.as_deref_mut())?;
     ensure!(
-        files::read(&paths.data.join("contract-v4.json"), MAX_RECORD as u64)?
-            == CONTRACT.as_bytes(),
+        files::read_with_budget(
+            &paths.data.join("contract-v4.json"),
+            MAX_RECORD as u64,
+            budget.as_deref_mut()
+        )? == CONTRACT.as_bytes(),
         "compound contract differs"
     );
     ensure!(
-        files::read(&paths.data.join("capabilities.json"), MAX_RECORD as u64)?
-            == serde_json::to_vec(&capabilities(paths, actor, generation))?,
+        files::read_with_budget(
+            &paths.data.join("capabilities.json"),
+            MAX_RECORD as u64,
+            budget
+        )? == serde_json::to_vec(&capabilities(paths, actor, generation))?,
         "incomplete compound capabilities"
     );
     Ok(())

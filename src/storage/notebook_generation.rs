@@ -42,15 +42,16 @@ pub(super) fn create(
     files::atomic_json(&root.join("format.json"), &VERSION)
 }
 
-pub(crate) fn validate_version(
+pub(super) fn validate_version(
     root: &Path,
     actor: Uuid,
     generation: Uuid,
     version: u32,
     preparing: bool,
+    mut budget: Option<&mut selection::SelectedReadBudget>,
 ) -> Result<()> {
     let version = if version == target_generation::VERSION {
-        target_generation::base_version(root)?
+        target_generation::base_version_with_budget(root, budget.as_deref_mut())?
     } else {
         version
     };
@@ -58,7 +59,7 @@ pub(crate) fn validate_version(
     files::safe_path(&path)?;
     if version == VERSION || version == compound_generation::VERSION || path.exists() {
         ensure!(
-            files::json::<Feature>(&path, MAX_RECORD as u64)?
+            files::json_with_budget::<Feature>(&path, MAX_RECORD as u64, budget.as_deref_mut())?
                 == Feature {
                     format: 1,
                     actor,
@@ -70,7 +71,10 @@ pub(crate) fn validate_version(
             version == VERSION
                 || preparing
                 || (version == compound_generation::VERSION
-                    && compound_generation::validate_feature(root, actor, generation).is_ok()),
+                    && compound_generation::validate_feature_with_budget(
+                        root, actor, generation, budget
+                    )
+                    .is_ok()),
             "interrupted notebook preparation"
         );
     }

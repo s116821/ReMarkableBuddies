@@ -623,6 +623,13 @@ impl Store {
         Self::validate_objects_with_budget(root, manifest, None)
     }
     fn validate_namespace_family(root: &Path, manifest: &Manifest) -> Result<()> {
+        Self::validate_namespace_family_with_budget(root, manifest, None)
+    }
+    fn validate_namespace_family_with_budget(
+        root: &Path,
+        manifest: &Manifest,
+        mut budget: Option<&mut selection::SelectedReadBudget>,
+    ) -> Result<()> {
         if manifest
             .record_namespaces
             .values()
@@ -630,10 +637,11 @@ impl Store {
         {
             ensure!(
                 manifest.scope == Scope::SelectedRecords
-                    && target_generation::base_version(root)? == compound_generation::VERSION,
+                    && target_generation::base_version_with_budget(root, budget.as_deref_mut())?
+                        == compound_generation::VERSION,
                 "portable configuration requires compound selected storage"
             );
-            compound_generation::validate_portable_generation(root)?;
+            compound_generation::validate_portable_generation(root, budget)?;
         }
         Ok(())
     }
@@ -701,7 +709,7 @@ impl Store {
             "ambiguous target object admission"
         );
         manifest.validate()?;
-        Self::validate_namespace_family(root, manifest)?;
+        Self::validate_namespace_family_with_budget(root, manifest, budget.as_deref_mut())?;
         ensure!(
             verify_media
                 || manifest
@@ -754,16 +762,22 @@ impl Store {
                         notebook_archive_actor.is_none(),
                         "target records require explicit archive format6"
                     );
-                    target_generation::validate_ready_root(root)?;
+                    target_generation::validate_ready_root_with_budget(
+                        root,
+                        budget.as_deref_mut(),
+                    )?;
                 }
             }
             if envelope.namespace == Namespace::PortableConfiguration {
                 ensure!(
                     manifest.scope == Scope::SelectedRecords
-                        && target_generation::base_version(root)? == compound_generation::VERSION,
+                        && target_generation::base_version_with_budget(
+                            root,
+                            budget.as_deref_mut()
+                        )? == compound_generation::VERSION,
                     "portable configuration requires compound selected storage"
                 );
-                compound_generation::validate_portable_generation(root)?;
+                compound_generation::validate_portable_generation(root, budget.as_deref_mut())?;
                 crate::config::portable::selected::Artifact::from_value(envelope.payload.clone())
                     .map_err(|_| anyhow::anyhow!("invalid portable configuration declaration"))?;
             }
@@ -773,11 +787,14 @@ impl Store {
                         envelope.actor_id == actor,
                         "notebook archive actor mismatch"
                     );
-                } else if target_generation::base_version(root)? == compound_generation::VERSION {
-                    compound_generation::validate_portable_generation(root)?;
+                } else if target_generation::base_version_with_budget(root, budget.as_deref_mut())?
+                    == compound_generation::VERSION
+                {
+                    compound_generation::validate_portable_generation(root, budget.as_deref_mut())?;
                 } else {
                     ensure!(
-                        target_generation::base_version(root)? == notebook_generation::VERSION,
+                        target_generation::base_version_with_budget(root, budget.as_deref_mut())?
+                            == notebook_generation::VERSION,
                         "notebook records require adopted generation4"
                     );
                     let generation = Uuid::parse_str(
@@ -791,6 +808,7 @@ impl Store {
                         generation,
                         notebook_generation::VERSION,
                         false,
+                        budget.as_deref_mut(),
                     )?;
                 }
                 if let crate::conversation::Record::ArchivedNormalizedSource(source) =

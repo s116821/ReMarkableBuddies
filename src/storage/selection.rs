@@ -516,28 +516,36 @@ struct SelectionFeature {
     generation: Uuid,
 }
 pub(crate) fn validate_generation(root: &Path, actor: Uuid, generation: Uuid) -> Result<()> {
-    validate_generation_policy(root, actor, generation, false, false, false)
+    validate_generation_with_budget(root, actor, generation, None)
+}
+pub(super) fn validate_generation_with_budget(
+    root: &Path,
+    actor: Uuid,
+    generation: Uuid,
+    budget: Option<&mut SelectedReadBudget>,
+) -> Result<()> {
+    validate_generation_policy(root, actor, generation, false, false, false, budget)
 }
 pub(crate) fn validate_generation_preparing(
     root: &Path,
     actor: Uuid,
     generation: Uuid,
 ) -> Result<()> {
-    validate_generation_policy(root, actor, generation, true, false, false)
+    validate_generation_policy(root, actor, generation, true, false, false, None)
 }
 pub(crate) fn validate_generation_preparing_notebook(
     root: &Path,
     actor: Uuid,
     generation: Uuid,
 ) -> Result<()> {
-    validate_generation_policy(root, actor, generation, false, true, false)
+    validate_generation_policy(root, actor, generation, false, true, false, None)
 }
 pub(crate) fn validate_generation_preparing_targets(
     root: &Path,
     actor: Uuid,
     generation: Uuid,
 ) -> Result<()> {
-    validate_generation_policy(root, actor, generation, false, true, true)
+    validate_generation_policy(root, actor, generation, false, true, true, None)
 }
 fn validate_generation_policy(
     root: &Path,
@@ -546,18 +554,25 @@ fn validate_generation_policy(
     preparing: bool,
     preparing_notebook: bool,
     preparing_targets: bool,
+    mut budget: Option<&mut SelectedReadBudget>,
 ) -> Result<()> {
     ensure!(
         !actor.is_nil() && !generation.is_nil(),
         "nil selected store identity"
     );
-    let raw_version: u32 = files::json(&root.join("format.json"), 64)?;
+    let raw_version: u32 =
+        files::json_with_budget(&root.join("format.json"), 64, budget.as_deref_mut())?;
     if raw_version == target_generation::VERSION {
-        target_generation::validate_feature(root, actor, generation)?;
+        target_generation::validate_feature_with_budget(
+            root,
+            actor,
+            generation,
+            budget.as_deref_mut(),
+        )?;
     } else if root.join(target_generation::MARKER).exists() {
         ensure!(preparing_targets, "interrupted source-target preparation");
     }
-    let version = target_generation::base_version(root)?;
+    let version = target_generation::base_version_with_budget(root, budget.as_deref_mut())?;
     ensure!(
         matches!(
             version,
@@ -569,8 +584,22 @@ fn validate_generation_policy(
         ),
         "unsupported generation format"
     );
-    feedback_generation::validate_version(root, actor, generation, version, preparing)?;
-    notebook_generation::validate_version(root, actor, generation, version, preparing_notebook)?;
+    feedback_generation::validate_version_with_budget(
+        root,
+        actor,
+        generation,
+        version,
+        preparing,
+        budget.as_deref_mut(),
+    )?;
+    notebook_generation::validate_version(
+        root,
+        actor,
+        generation,
+        version,
+        preparing_notebook,
+        budget.as_deref_mut(),
+    )?;
     if version == FORMAT {
         ensure!(
             !has_selected(root)?,
@@ -584,7 +613,7 @@ fn validate_generation_policy(
         || feature.exists()
     {
         ensure!(
-            files::json::<SelectionFeature>(&feature, MAX_RECORD as u64)?
+            files::json_with_budget::<SelectionFeature>(&feature, MAX_RECORD as u64, budget)?
                 == SelectionFeature {
                     format: FORMAT,
                     actor,
@@ -596,8 +625,16 @@ fn validate_generation_policy(
     Ok(())
 }
 pub(crate) fn prepare_generation(root: &Path, actor: Uuid, generation: Uuid) -> Result<()> {
-    validate_generation(root, actor, generation)?;
-    let version = files::json::<u32>(&root.join("format.json"), 64)?;
+    prepare_generation_with_budget(root, actor, generation, None)
+}
+fn prepare_generation_with_budget(
+    root: &Path,
+    actor: Uuid,
+    generation: Uuid,
+    mut budget: Option<&mut SelectedReadBudget>,
+) -> Result<()> {
+    validate_generation_with_budget(root, actor, generation, budget.as_deref_mut())?;
+    let version = files::json_with_budget::<u32>(&root.join("format.json"), 64, budget)?;
     ensure!(
         version != notebook_generation::VERSION,
         "selected notebook storage unsupported"

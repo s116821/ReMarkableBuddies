@@ -989,6 +989,202 @@ fn selected_handwriting_command_transfers_exact_bytes_and_keeps_original_replay(
 }
 
 #[test]
+fn selected_handwriting_cross_producer_operation_custody() {
+    use crate::config::portable::{record, selected::Artifact};
+    use preference_command::Operation;
+
+    for promote in [false, true] {
+        for preference_first in [false, true] {
+            let mut f = CorrectionFixture::new();
+            if promote {
+                crate::storage::target_generation::prepare(
+                    Arc::get_mut(&mut f.a).unwrap(),
+                    &digest(b"cross-producer fixture"),
+                    crate::storage::target_generation::BaseKind::CompoundSelected,
+                    |_| Ok(()),
+                )
+                .unwrap();
+            }
+            let context = (promote, preference_first);
+            assert_eq!(f.a.source_target_generation().unwrap().is_some(), promote);
+            let path = f.storage.0.join("cross-producer-config.json");
+            files::atomic_json(&path, &json!({"paths": f.a.paths})).unwrap();
+            preference_command::set_fixture_preference(
+                f.a.clone(),
+                &path,
+                f.binding.clone(),
+                &f.wire,
+                json!({"product_settings":{"writer_enabled":true}}),
+            )
+            .unwrap();
+            let preference_scope = SelectionScope {
+                group: f.binding.group,
+                key_sha256: record::key_sha256(),
+                binding_sha256: f.binding.digest.clone(),
+            };
+            let snapshot = |scope: &SelectionScope| {
+                f.a.selected_snapshot(scope, MAX_ITEMS)
+                    .unwrap()
+                    .map(|snapshot| snapshot.token)
+            };
+            let preference_before = snapshot(&preference_scope);
+            assert!(preference_before.is_some());
+            assert!(snapshot(&f.scope).is_none());
+
+            let preference = |op, body: &Value| {
+                preference_command::fixture_preference_command(
+                    f.a.clone(),
+                    &path,
+                    f.binding.clone(),
+                    &f.wire,
+                    op,
+                    &serde_json::to_vec(body).unwrap(),
+                )
+            };
+            let mut bytes = Vec::new();
+            preference(
+                Operation::Inspect,
+                &json!({"shared_preferences_version":1, "reveal_text":false}),
+            )
+            .unwrap()
+            .write_to(&mut bytes)
+            .unwrap();
+            let inspect: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(inspect["status"], "ok");
+            assert_eq!(inspect["guard"]["selection"]["kind"], "selected");
+            let operation = Uuid::new_v4();
+            let patch = json!({"portable_configuration_version":1,"settings":{"product_settings":{"writer_enabled":false}}});
+            let edit = json!({"shared_preferences_version":1,"operation":operation,
+                "guard":inspect["guard"],"patch":patch});
+            let confirmation = confirm(f.owner, operation);
+            let mut wrong_owner = f.owner;
+            wrong_owner.profile = Uuid::new_v4();
+            let wrong = f.command(&f.a, &confirm(wrong_owner, operation), false);
+            assert_eq!(wrong.failure, Some(Failure::InvalidIdentity), "{context:?}");
+            assert!(wrong.facts.is_empty());
+            drop(wrong);
+            let wrong_scope = wrong_owner
+                .domain()
+                .unwrap()
+                .scope(f.binding.group, f.binding.digest.clone())
+                .unwrap();
+            assert!(snapshot(&wrong_scope).is_none());
+            assert_eq!(snapshot(&preference_scope), preference_before);
+            assert!(snapshot(&f.scope).is_none());
+            assert!(f
+                .a
+                .selected_receipt(&preference_scope, operation)
+                .unwrap()
+                .is_none());
+            assert!(f.a.selected_receipt(&f.scope, operation).unwrap().is_none());
+
+            let hand = if preference_first {
+                let mut bytes = Vec::new();
+                preference(Operation::Edit, &edit)
+                    .unwrap()
+                    .write_to(&mut bytes)
+                    .unwrap();
+                let report: Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(report["disposition"], "local-committed", "{context:?}");
+                let failure = f.command(&f.a, &confirmation, true);
+                assert_eq!(
+                    failure.failure,
+                    Some(Failure::OperationConflict),
+                    "{context:?}"
+                );
+                assert!(failure.facts.is_empty());
+                assert!(snapshot(&f.scope).is_none());
+                None
+            } else {
+                let revision = observed(f.command(&f.a, &confirmation, true));
+                let error = preference(Operation::Edit, &edit)
+                    .err()
+                    .expect("colliding preference Edit");
+                assert_eq!(
+                    error.to_string(),
+                    "selected record identity already committed",
+                    "{context:?}"
+                );
+                assert_eq!(
+                    snapshot(&preference_scope),
+                    preference_before,
+                    "{context:?}"
+                );
+                Some(revision)
+            };
+            let mut status = json!({"handwriting_version":1,"command":"status",
+                "profile":f.owner.profile,"correction":f.owner.correction,"operation":operation});
+            let report = f.command(&f.a, &status, false);
+            if let Some(revision) = hand {
+                assert!(report.historical);
+                assert_eq!(observed(report), revision);
+            } else {
+                assert!(!report.historical && report.facts.is_empty());
+                drop(report);
+            }
+            status["profile"] = json!(wrong_owner.profile);
+            let report = f.command(&f.a, &status, false);
+            assert_eq!(
+                report.failure,
+                Some(Failure::InvalidIdentity),
+                "{context:?}"
+            );
+            assert!(report.facts.is_empty());
+            drop(report);
+            let expected = [&preference_scope, &f.scope]
+                .map(|scope| f.a.selected_receipt(scope, operation).unwrap().is_some());
+            assert_eq!(
+                expected,
+                [preference_first, !preference_first],
+                "{context:?}"
+            );
+
+            let query = json!({"shared_preferences_version":1,"operation":operation,
+                "guard":inspect["guard"],"patch_sha256":Artifact::from_value(patch).unwrap().sha256()});
+            let dataset = f.a.paths.clone();
+            drop(f.a);
+            let body = serde_json::to_vec(&query).unwrap();
+            let mut out = Vec::new();
+            preference_command::run(
+                Operation::Status,
+                std::path::Path::new("-"),
+                Some(path),
+                &mut body.as_slice(),
+            )
+            .write_to(&mut out)
+            .unwrap();
+            let report: Value = serde_json::from_slice(&out).unwrap();
+            assert_eq!(
+                report["disposition"],
+                if preference_first {
+                    "local-committed"
+                } else {
+                    "unknown"
+                },
+                "{context:?}: {report}"
+            );
+            assert_eq!(report["original_operation"], query["operation"]);
+            assert_eq!(report["patch_sha256"], query["patch_sha256"]);
+            assert_eq!(report["guard"], query["guard"]);
+            let reopened = Store::open_existing_for_mode(dataset).unwrap();
+            assert_eq!(
+                [&preference_scope, &f.scope].map(|scope| {
+                    reopened
+                        .selected_receipt(scope, operation)
+                        .unwrap()
+                        .is_some()
+                }),
+                expected
+            );
+            assert!(reopened
+                .selected_snapshot(&wrong_scope, MAX_ITEMS)
+                .unwrap()
+                .is_none());
+        }
+    }
+}
+
+#[test]
 fn selected_handwriting_competing_correction_commands_reuse_one_local_operation() {
     let f = CorrectionFixture::new();
     let operation = Uuid::new_v4();
