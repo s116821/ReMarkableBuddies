@@ -25,18 +25,23 @@ struct Model<'a> {
     after: Option<(usize, &'a dyn Fn())>,
     calls: Vec<Vec<String>>,
     current: Vec<String>,
+    sent_text: Vec<Vec<String>>,
+    text: Vec<String>,
 }
 
 impl LLMEngine for Model<'_> {
     fn guarded_timeout(&self) -> Option<Duration> {
         Some(Duration::from_secs(1))
     }
-    fn add_text_content(&mut self, _: &str) {}
+    fn add_text_content(&mut self, value: &str) {
+        self.text.push(value.to_owned());
+    }
     fn add_image_content(&mut self, value: &str) {
         self.current.push(value.to_owned());
     }
     fn clear_content(&mut self) {
         self.current.clear();
+        self.text.clear();
     }
     fn execute(&mut self) -> Result<String> {
         panic!("unguarded selected Writer")
@@ -57,6 +62,7 @@ impl LLMEngine for Model<'_> {
         }
         handoff(&mut || {
             self.calls.push(self.current.clone());
+            self.sent_text.push(self.text.clone());
             Ok(())
         })?;
         if let Some((_, change)) = self.after.filter(|(stage, _)| *stage == ordinal) {
@@ -253,6 +259,8 @@ impl WriterFixture {
             after: None,
             calls: Vec::new(),
             current: Vec::new(),
+            sent_text: Vec::new(),
+            text: Vec::new(),
         }
     }
 }
@@ -297,6 +305,103 @@ fn selected_writer_image_stale_source_and_preference_refuse_submission_or_result
         assert!(fixture.has_receipt(input.preparation()));
         assert_eq!(fixture.has_receipt(input.operation), stage == 1);
         assert!(!fixture.has_receipt(writer::stage(input.operation, "finish")));
+    }
+}
+
+#[test]
+fn selected_writer_image_retains_one_joined_memory_view() {
+    for change_stage in [None, Some(0), Some(1)] {
+        let fixture = WriterFixture::new(false);
+        let f = &fixture.correction;
+        let identity = catalog::Identity {
+            group: f.binding.group,
+            profile: f.owner.profile,
+            binding_sha256: f.binding.digest.clone(),
+        };
+        let provider = selected_memory::SelectedMemory::new(f.a.clone(), identity.clone()).unwrap();
+        let mut original = fact(identity.profile);
+        original.claim = "note convention".into();
+        original.subject = "note".into();
+        original.value = "fixture original shared convention".into();
+        let registration = provider
+            .initialize_aggregate(selected_memory::InitializeAggregate {
+                operation: Uuid::new_v4(),
+                accepted_base_sha256: digest(b"independent Writer image memory"),
+                fact: original.clone(),
+            })
+            .unwrap()
+            .registration
+            .unwrap();
+        provider
+            .register_selection(selected_memory::RegisterSelection {
+                operation: Uuid::new_v4(),
+                registration,
+            })
+            .unwrap();
+        let mut config: serde_json::Value =
+            files::json(&fixture.path, MAX_METADATA as u64).unwrap();
+        config["memory"] = json!({"enabled":true,"profile":identity.profile,"selection":identity});
+        files::atomic_json(&fixture.path, &config).unwrap();
+        let input = fixture.request();
+        let entered = std::cell::Cell::new(false);
+        let change = || {
+            assert!(!entered.replace(true));
+            let document = fixture.selection().accepted;
+            let expected = provider
+                .inspect(&original.key)
+                .unwrap()
+                .into_iter()
+                .map(|record| record.revision_id)
+                .collect();
+            let mut edited = original.clone();
+            edited.value = "fixture independently changed convention".into();
+            provider
+                .put(memory::Mutation {
+                    operation: Uuid::new_v4(),
+                    expected,
+                    fact: edited,
+                })
+                .unwrap();
+            assert_eq!(fixture.selection().accepted, document);
+        };
+        let mut model = fixture.model(&input);
+        model.after = change_stage.map(|stage| (stage, &change as &dyn Fn()));
+        let result = run_image(
+            &fixture.writer,
+            &fixture.selection(),
+            &input,
+            &mut model,
+            fixture.policy(),
+            Some(&provider),
+            &mut || false,
+        );
+        assert_eq!(entered.get(), change_stage.is_some());
+        assert_eq!(
+            model.calls.len(),
+            if change_stage == Some(0) { 1 } else { 2 }
+        );
+        assert!(model.sent_text[0]
+            .iter()
+            .all(|part| !part.contains(&original.value)));
+        if model.calls.len() == 2 {
+            assert!(model.sent_text[1]
+                .iter()
+                .any(|part| part.contains(&original.value)));
+        }
+        assert!(fixture.has_receipt(input.preparation()));
+        assert_eq!(
+            fixture.has_receipt(input.operation),
+            change_stage != Some(0)
+        );
+        assert_eq!(
+            fixture.has_receipt(writer::stage(input.operation, "finish")),
+            change_stage.is_none()
+        );
+        if change_stage.is_none() {
+            assert_eq!(result.unwrap().report.status, writer::Status::Generated);
+        } else {
+            assert!(result.is_err() || result.unwrap().publication.is_none());
+        }
     }
 }
 
@@ -515,18 +620,12 @@ fn selected_handwriting_writer_normalizes_only_current_images_and_never_replays(
             update["corrected_text"] = json!(format!("replacement {index}"));
             next.set(Some(observed(f.command(&f.a, &update, false))));
         };
-        let mut model = Model {
-            writer: &writer,
-            store: &f.a,
-            input: &input,
-            calls: Vec::new(),
-            current: Vec::new(),
-            before: (index == 3).then_some((0, &replace as &dyn Fn())),
-            after: match index {
-                4 => Some((0, &replace as &dyn Fn())),
-                5 => Some((1, &replace as &dyn Fn())),
-                _ => None,
-            },
+        let mut model = fixture.model(&input);
+        model.before = (index == 3).then_some((0, &replace as &dyn Fn()));
+        model.after = match index {
+            4 => Some((0, &replace as &dyn Fn())),
+            5 => Some((1, &replace as &dyn Fn())),
+            _ => None,
         };
         let report = run_image(
             &writer,
@@ -605,15 +704,7 @@ fn selected_handwriting_writer_normalizes_only_current_images_and_never_replays(
         guidance: None,
         model_profile: "fixture".into(),
     };
-    let mut model = Model {
-        writer: &writer,
-        store: &f.a,
-        input: &input,
-        calls: Vec::new(),
-        current: Vec::new(),
-        before: None,
-        after: None,
-    };
+    let mut model = fixture.model(&input);
     let error = run_image(
         &writer,
         &selection,
