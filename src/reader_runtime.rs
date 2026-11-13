@@ -255,6 +255,16 @@ fn ordinary_mode(store: &Store, config: &Config) -> std::result::Result<(), Ordi
         None => Ok(()),
         Some(SyncMode::LocalOnly) if !config.sync.enabled => Ok(()),
         Some(SyncMode::LocalOnly) => Err(OrdinaryModeRefusal::LegacySync),
+        Some(SyncMode::IsolatedBackup { .. })
+            if !config.sync.enabled
+                && config.reader.selection.is_none()
+                && config.memory.selection.is_none()
+                && store
+                    .ordinary_isolated_family()
+                    .map_err(|_| OrdinaryModeRefusal::Unavailable)? =>
+        {
+            Ok(())
+        }
         _ => Err(OrdinaryModeRefusal::Nonordinary),
     }
 }

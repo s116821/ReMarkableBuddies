@@ -810,7 +810,13 @@ fn main() -> Result<()> {
     sleep(Duration::from_millis(1000));
     let _sync_worker = match route {
         RuntimeRoute::ExistingReader => Worker::google(store.clone(), config.sync.clone())?,
-        RuntimeRoute::OrdinaryLocal => None,
+        RuntimeRoute::OrdinaryLocal => Worker::isolated(
+            store.clone(),
+            config.sync.clone(),
+            config
+                .saved_path()
+                .expect("loaded Config has a source path"),
+        )?,
     };
     #[cfg(target_os = "linux")]
     let workflow = {

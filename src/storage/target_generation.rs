@@ -615,6 +615,21 @@ impl Store {
         }
         let mut reads = selection::SelectedReadBudget::new(0, 2, MAX_RECORD as u64 * 2, 0);
         store.check_runtime_policy(&mut reads)?;
+        // Isolated publication currently packages ordinary format 1. Admit
+        // its local runtime without starting an automatic target promotion.
+        if matches!(
+            store.sync_mode_snapshot()?.mode,
+            Some(sync::mode::SyncMode::IsolatedBackup { .. })
+        ) {
+            ensure!(
+                config.memory.selection.is_none()
+                    && store.ordinary_isolated_family()?
+                    && preparation(&root)?.is_none()
+                    && read_preparation(&store.paths.data.join(PREPARATION))?.is_none(),
+                "isolated local runtime requires ordinary format 1 with no target preparation"
+            );
+            return Ok(store);
+        }
         // Historical selected data in an explicit LocalOnly Store keeps its
         // delivered ordinary route. It is not eligible for notebook/target
         // preparation. Never use this path to bypass an existing original or

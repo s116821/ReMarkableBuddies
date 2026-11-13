@@ -6,7 +6,7 @@ pub(crate) mod ordinary_export;
 pub(crate) mod ordinary_restore;
 
 #[path = "isolated_backup.rs"]
-mod isolated_backup;
+pub(super) mod isolated_backup;
 #[path = "notebook_backup.rs"]
 pub(crate) mod notebook_backup;
 

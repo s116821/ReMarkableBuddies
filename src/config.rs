@@ -135,6 +135,12 @@ impl Default for Config {
     }
 }
 impl Config {
+    pub fn saved_path(&self) -> Option<&Path> {
+        self.source_snapshot
+            .as_ref()
+            .map(|source| source.fingerprint().0)
+    }
+
     pub fn load(path: Option<PathBuf>) -> Result<Self> {
         let explicit = path.is_some();
         let path =

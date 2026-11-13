@@ -405,8 +405,13 @@ pub struct OrdinaryLifetime {
 
 pub(crate) struct LocalDispatchLifetime {
     store: Arc<Store>,
-    _mode: OrdinaryModeLease,
+    _mode: LocalDispatchMode,
     _data: storage::LocalDomainLease,
+}
+
+enum LocalDispatchMode {
+    Ordinary { _mode: OrdinaryModeLease },
+    Isolated { _mode: SyncModeLease },
 }
 
 impl LocalDispatchLifetime {
@@ -419,7 +424,35 @@ pub(crate) fn admit_local_dispatch(store: &Arc<Store>) -> Result<LocalDispatchLi
     let current = store.sync_mode_snapshot()?;
     Ok(LocalDispatchLifetime {
         store: store.clone(),
-        _mode: store.ordinary_mode_lease(&current.token)?,
+        _mode: LocalDispatchMode::Ordinary {
+            _mode: store.ordinary_mode_lease(&current.token)?,
+        },
+        _data: store.local_domain_lease()?,
+    })
+}
+pub(crate) fn admit_isolated_local_dispatch(
+    store: &Arc<Store>,
+    config: &Config,
+) -> Result<LocalDispatchLifetime> {
+    ensure!(
+        !config.sync.enabled
+            && config.reader.selection.is_none()
+            && config.memory.selection.is_none(),
+        "isolated ordinary runtime requires local Reader and memory configuration"
+    );
+    let current = store.sync_mode_snapshot()?;
+    ensure!(
+        matches!(current.mode, Some(mode::SyncMode::IsolatedBackup { .. })),
+        "isolated mode required"
+    );
+    let lease = store.sync_mode_lease(&current.token)?;
+    ensure!(
+        store.ordinary_isolated_family()?,
+        "isolated ordinary runtime requires format 1"
+    );
+    Ok(LocalDispatchLifetime {
+        store: store.clone(),
+        _mode: LocalDispatchMode::Isolated { _mode: lease },
         _data: store.local_domain_lease()?,
     })
 }

@@ -1,4 +1,9 @@
 //! Durable selected-record projections and a bounded background worker.
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "isolated provider binding is unqualified")
+)]
+mod isolated;
 pub mod mode;
 pub(crate) mod selected;
 use super::{drive::*, *};
@@ -809,13 +814,8 @@ impl Worker {
                 )?;
                 return Self::launch(store, policy, cancel, engine);
             }
-            Some(mode::SyncMode::IsolatedBackup { .. }) => {
-                files::atomic_json(
-                    &store.paths.data.join("sync/health.json"),
-                    &json!({"status":Status::UnsupportedOrCorrupt,
-                    "mode":"isolated-backup","reason":"selected-backup-worker-unavailable"}),
-                )?;
-                return Ok(None);
+            Some(mode::SyncMode::IsolatedBackup { backup, .. }) => {
+                return Self::isolated_unavailable(&store, snapshot.device, *backup);
             }
             None => {}
         }
@@ -842,6 +842,42 @@ impl Worker {
                 Ok(None)
             }
         }
+    }
+
+    fn isolated_unavailable(
+        store: &Store,
+        device: Option<Uuid>,
+        backup: Uuid,
+    ) -> Result<Option<Self>> {
+        if files::atomic_json(
+            &store.paths.data.join("sync/health.json"),
+            &json!({"version":1,"status":Status::UnsupportedOrCorrupt,
+                "mode":"isolated-backup","reason":"provider-binding-unqualified",
+                "device":device,"backup":backup}),
+        )
+        .is_err()
+        {
+            log::warn!("Could not write isolated backup availability");
+        }
+        Ok(None)
+    }
+
+    pub fn isolated(
+        store: Arc<Store>,
+        policy: SyncPolicy,
+        _saved_config: &Path,
+    ) -> Result<Option<Self>> {
+        // Production provisioning must establish exact provider custody before
+        // any credential access or construction of the isolated upload engine.
+        let snapshot = store.sync_mode_snapshot()?;
+        let Some(mode::SyncMode::IsolatedBackup { backup, .. }) = snapshot.mode else {
+            return Ok(None);
+        };
+        ensure!(
+            !policy.enabled,
+            "isolated mode requires legacy sync disabled"
+        );
+        Self::isolated_unavailable(&store, snapshot.device, backup)
     }
 }
 impl Drop for Worker {

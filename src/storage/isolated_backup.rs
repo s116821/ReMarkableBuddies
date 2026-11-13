@@ -2,7 +2,7 @@
 use super::*;
 use crate::config::{self, portable};
 
-const MARKER: &str = "isolated-backup.json";
+pub(in crate::storage) const MARKER: &str = "isolated-backup.json";
 const DATA: &str = "data";
 const BACKUP: &str = "backup.json";
 const OBJECTS: &str = "objects";
@@ -111,6 +111,14 @@ fn inspect_components(root: &Path, marker_bytes: &[u8]) -> Result<VerifiedPackag
     Ok(VerifiedPackage {
         inspection,
         artifact,
+        largest_media: backup
+            .manifests
+            .iter()
+            .flat_map(|manifest| &manifest.media)
+            .map(|item| item.bytes)
+            .max()
+            .unwrap_or(0),
+        objects: backup.objects,
     })
 }
 
@@ -118,6 +126,112 @@ struct VerifiedPackage {
     inspection: PackageInspection,
     // The verified handoff retains the exact parsed value from the hashed read.
     artifact: portable::selected::Artifact,
+    objects: Vec<ObjectRef>,
+    largest_media: u64,
+}
+
+pub(in crate::storage) struct PackageMembers {
+    pub marker: ObjectRef,
+    pub objects: Vec<(PathBuf, ObjectRef)>,
+    pub complete_media: bool,
+    pub largest_media: u64,
+}
+
+pub(in crate::storage) fn package_members(root: &Path, marker: &str) -> Result<PackageMembers> {
+    members(root, [DATA, PREFERENCES, MARKER])?;
+    let bytes = files::read(&root.join(MARKER), MAX_MARKER)?;
+    ensure!(
+        digest(&bytes) == marker,
+        "isolated package marker differs from original"
+    );
+    let package = inspect_components(root, &bytes)?;
+    let data = PathBuf::from(DATA);
+    let mut objects = vec![
+        (data.join(BACKUP), package.inspection.data_backup),
+        (
+            PathBuf::from(PREFERENCES),
+            package.inspection.portable_configuration,
+        ),
+    ];
+    objects.extend(
+        package
+            .objects
+            .into_iter()
+            .map(|reference| (data.join(OBJECTS).join(&reference.sha256), reference)),
+    );
+    Ok(PackageMembers {
+        marker: reference(&bytes),
+        objects,
+        complete_media: package.inspection.data.complete_media,
+        largest_media: package.largest_media,
+    })
+}
+
+pub(in crate::storage) fn release_package(root: &Path) -> Result<()> {
+    // Fixed layout in an exclusively reserved private publisher directory.
+    // Check the whole remaining layout before removing any staged files.
+    fn inventory(root: &Path, depth: u8, paths: &mut Vec<PathBuf>) -> Result<()> {
+        files::safe_path(root)?;
+        match fs::symlink_metadata(root) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Ok(metadata) => ensure!(metadata.is_dir(), "invalid settled package directory"),
+            Err(error) => return Err(error.into()),
+        }
+        for entry in fs::read_dir(root)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_str().context("invalid settled package member")?;
+            let path = entry.path();
+            if matches!((depth, name), (0, DATA) | (1, OBJECTS)) {
+                inventory(&path, depth + 1, paths)?;
+            } else {
+                files::safe_path(&path)?;
+                ensure!(
+                    entry.file_type()?.is_file()
+                        && (matches!((depth, name), (0, MARKER | PREFERENCES) | (1, BACKUP))
+                            || (depth == 2 && valid_digest(name))),
+                    "unexpected settled package member"
+                );
+                paths.push(path);
+            }
+            ensure!(
+                paths.len() <= MAX_ITEMS + 6,
+                "settled package exceeds inventory bound"
+            );
+        }
+        paths.push(root.to_owned());
+        Ok(())
+    }
+    let mut paths = Vec::new();
+    inventory(root, 0, &mut paths)?;
+    for path in paths {
+        if fs::symlink_metadata(&path)?.is_dir() {
+            fs::remove_dir(&path)?;
+        } else {
+            fs::remove_file(&path)?;
+        }
+    }
+    files::sync_dir(root.parent().context("settled staging parent missing")?)
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(in crate::storage) struct PublicationSource {
+    pub generation: Uuid,
+    pub history: String,
+    pub config_path: String,
+    pub config_sha256: String,
+}
+
+fn publication_source(inner: &Inner, path: &Path, sha256: &str) -> Result<PublicationSource> {
+    Ok(PublicationSource {
+        generation: inner.generation,
+        history: digest(&serde_json::to_vec(
+            &inner.index.manifests.keys().collect::<Vec<_>>(),
+        )?),
+        config_path: digest(&serde_json::to_vec(path)?),
+        config_sha256: sha256.into(),
+    })
 }
 
 fn canonical_store_matches(actual: &StorePaths, declared: &StorePaths) -> Result<()> {
@@ -166,6 +280,19 @@ fn capture_saved(
     allow(dead_code, reason = "worker and Manager integration are separate")
 )]
 impl Store {
+    pub(crate) fn ordinary_isolated_family(&self) -> Result<bool> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        let current: Uuid = files::json(&self.paths.data.join("CURRENT"), 128)?;
+        ensure!(
+            current == inner.generation,
+            "isolated Store generation changed"
+        );
+        Ok(feedback_generation::version(&self.generation(current))? == FORMAT)
+    }
+
     /// Inspect the explicit package root. Ordinary archive readers still accept
     /// the data child by its own path. To reconcile a possible publication,
     /// supply its original expected marker digest.
@@ -216,8 +343,62 @@ impl Store {
             destination,
             saved_config,
             attempted_marker,
-            |_| Ok(()),
+            |_, _| Ok(()),
         )
+    }
+
+    pub(in crate::storage) fn freeze_isolated_package(
+        &self,
+        lease: &sync::mode::SyncModeLease,
+        destination: &Path,
+        saved_config: &Path,
+    ) -> Result<Option<(PublicationSource, String)>> {
+        let mut source = None;
+        let result = self.export_isolated_package_with(
+            lease,
+            destination,
+            saved_config,
+            &mut None,
+            |_, captured| {
+                source = Some(captured);
+                Ok(())
+            },
+        )?;
+        result
+            .map(|inspection| {
+                Ok((
+                    source.context("package source unavailable")?,
+                    inspection.marker_sha256,
+                ))
+            })
+            .transpose()
+    }
+
+    pub(in crate::storage) fn isolated_publication_source(
+        &self,
+        lease: &sync::mode::SyncModeLease,
+        saved_config: &Path,
+    ) -> Result<Option<PublicationSource>> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        lease.require_isolated_locked(self)?;
+        let current: Uuid = files::json(&self.paths.data.join("CURRENT"), 128)?;
+        ensure!(
+            current == inner.generation && inner.index.unavailable == 0,
+            "isolated source custody changed"
+        );
+        ensure!(
+            feedback_generation::version(&self.generation(current))? == FORMAT,
+            "isolated publication requires ordinary format 1"
+        );
+        if inner.index.manifests.is_empty() {
+            return Ok(None);
+        }
+        let path = canonical_archive_path(saved_config)?;
+        let value = files::read(saved_config, MAX_RECORD as u64)?;
+        publication_source(&inner, &path, &digest(&value)).map(Some)
     }
 
     fn export_isolated_package_with(
@@ -226,7 +407,7 @@ impl Store {
         destination: &Path,
         saved_config: &Path,
         attempted_marker: &mut Option<String>,
-        before_marker: impl FnOnce(&Path) -> Result<()>,
+        before_marker: impl FnOnce(&Path, PublicationSource) -> Result<()>,
     ) -> Result<Option<PackageInspection>> {
         ensure!(
             attempted_marker.is_none(),
@@ -253,7 +434,10 @@ impl Store {
             let mut config_refused = false;
             let result = files::atomic_json_guarded(&destination.join(MARKER), &marker, || {
                 let check = (|| -> Result<()> {
-                    before_marker(destination)?;
+                    before_marker(
+                        destination,
+                        publication_source(inner, &saved_path, &original)?,
+                    )?;
                     ensure!(
                         canonical_archive_path(saved_config)? == saved_path
                             && digest(&files::read(saved_config, MAX_RECORD as u64)?) == original,
@@ -541,7 +725,7 @@ mod tests {
         fs::write(&conf, &exact).unwrap();
 
         assert!(source
-            .export_isolated_package_with(&lease, &root, &conf, &mut attempted, |path| {
+            .export_isolated_package_with(&lease, &root, &conf, &mut attempted, |path, _| {
                 assert!(path.join(DATA).join(BACKUP).is_file());
                 assert!(path.join(PREFERENCES).is_file());
                 assert!(!path.join(MARKER).exists());

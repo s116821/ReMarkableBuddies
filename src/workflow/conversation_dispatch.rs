@@ -50,9 +50,13 @@ impl<'a> Dispatch<'a> {
             "unified dispatch requires ordinary local configuration"
         );
         config.memory.validate()?;
-        let local = Arc::new(crate::mode_maintenance::admit_local_dispatch(
-            ledger.store(),
-        )?);
+        let store = ledger.store();
+        let local = Arc::new(match store.sync_mode_snapshot()?.mode {
+            Some(crate::storage::sync::mode::SyncMode::IsolatedBackup { .. }) => {
+                crate::mode_maintenance::admit_isolated_local_dispatch(store, config)?
+            }
+            _ => crate::mode_maintenance::admit_local_dispatch(store)?,
+        });
         let memory = if config.memory.enabled {
             Some(Arc::new(crate::memory::LocalMemory::admitted_local(
                 ledger.store().clone(),

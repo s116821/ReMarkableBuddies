@@ -31,6 +31,10 @@ struct Model {
     lose_create: Option<String>,
     fail_get_once: Option<String>,
     slot_posts: Vec<String>,
+    uploads_sent: Vec<(String, Value)>,
+    expire_once: bool,
+    lose_marker_once: bool,
+    about_status: Option<u16>,
     observer: Option<RequestObserver>,
 }
 pub(in crate::storage) struct Wire {
@@ -111,6 +115,27 @@ impl Wire {
                 bytes,
             },
         );
+    }
+    pub fn immutable(&self, id: &str, properties: &BTreeMap<String, String>, bytes: Vec<u8>) {
+        self.model.lock().unwrap().files.insert(
+            id.into(),
+            File {
+                metadata: json!({"id":id,"appProperties":properties,"trashed":false}),
+                bytes,
+            },
+        );
+    }
+    pub fn uploads_sent(&self) -> Vec<(String, Value)> {
+        self.model.lock().unwrap().uploads_sent.clone()
+    }
+    pub fn lose_marker_once(&self) {
+        self.model.lock().unwrap().lose_marker_once = true;
+    }
+    pub fn expire_once(&self) {
+        self.model.lock().unwrap().expire_once = true;
+    }
+    pub fn about_status(&self, status: u16) {
+        self.model.lock().unwrap().about_status = Some(status);
     }
     pub fn slot(&self, binding: &slot::SlotBinding, id: &str, bytes: Vec<u8>) {
         self.object(id, binding.group, bytes.clone());
@@ -206,7 +231,7 @@ fn serve(mut stream: TcpStream, base: &str, model: &Arc<Mutex<Model>>) {
     let mut extra = Vec::<(String, String)>::new();
     let (status, response) = if method == "GET" && path == "/drive/v3/about" {
         (
-            200,
+            model.about_status.unwrap_or(200),
             serde_json::to_vec(&json!({"user":{"permissionId":"shared-wire-account"}})).unwrap(),
         )
     } else if method == "GET" && path == "/drive/v3/files/generateIds" {
@@ -216,7 +241,44 @@ fn serve(mut stream: TcpStream, base: &str, model: &Arc<Mutex<Model>>) {
             serde_json::to_vec(&json!({"ids":[format!("generated-{}",model.next)]})).unwrap(),
         )
     } else if method == "GET" && path == "/drive/v3/files" {
-        (200,serde_json::to_vec(&json!({"files":model.files.values().map(|f|f.metadata.clone()).collect::<Vec<_>>()})).unwrap())
+        let query = target.split_once('?').and_then(|(_, parameters)| {
+            parameters
+                .split('&')
+                .find_map(|part| part.strip_prefix("q="))
+        });
+        // Drop the fixed trashed predicate before splitting private properties.
+        let filters: Vec<_> = if let Some(query) = query {
+            let decoded = query.replace('+', " ");
+            let decoded = percent_encoding::percent_decode_str(&decoded)
+                .decode_utf8()
+                .unwrap();
+            decoded
+                .strip_prefix("trashed = false and ")
+                .unwrap()
+                .split(" } and ")
+                .map(|part| {
+                    let part = part
+                        .trim_end_matches(" }")
+                        .strip_prefix("appProperties has { key='")
+                        .unwrap();
+                    let (key, value) = part.split_once("' and value='").unwrap();
+                    (key.to_owned(), value.trim_end_matches('\'').to_owned())
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let entries: Vec<_> = model
+            .files
+            .values()
+            .filter(|file| {
+                filters
+                    .iter()
+                    .all(|(key, value)| file.metadata["appProperties"][key].as_str() == Some(value))
+            })
+            .map(|file| file.metadata.clone())
+            .collect();
+        (200, serde_json::to_vec(&json!({"files":entries})).unwrap())
     } else if method == "GET" && path.starts_with("/drive/v3/files/") {
         let id = path.trim_start_matches("/drive/v3/files/");
         if model.fail_get_once.as_deref() == Some(id) {
@@ -270,6 +332,10 @@ fn serve(mut stream: TcpStream, base: &str, model: &Arc<Mutex<Model>>) {
         assert!(body.ends_with(ending.as_bytes()));
         let data = body[data_start..body.len() - ending.len()].to_vec();
         let id = metadata["id"].as_str().unwrap().to_owned();
+        let kind = metadata["appProperties"]["kind"].clone();
+        model
+            .uploads_sent
+            .push((id.clone(), metadata["appProperties"].clone()));
         let status = if model.files.contains_key(&id) {
             409
         } else {
@@ -282,6 +348,10 @@ fn serve(mut stream: TcpStream, base: &str, model: &Arc<Mutex<Model>>) {
             );
             200
         };
+        if kind == "marker" && model.lose_marker_once {
+            model.lose_marker_once = false;
+            return;
+        }
         (status, serde_json::to_vec(&json!({"id":id})).unwrap())
     } else if method == "POST"
         && path == "/upload/drive/v3/files"
@@ -289,6 +359,9 @@ fn serve(mut stream: TcpStream, base: &str, model: &Arc<Mutex<Model>>) {
     {
         let metadata: Value = serde_json::from_slice(body).unwrap();
         let id = metadata["id"].as_str().unwrap().to_owned();
+        model
+            .uploads_sent
+            .push((id.clone(), metadata["appProperties"].clone()));
         if model.files.contains_key(&id) {
             (409, b"{}".to_vec())
         } else {
@@ -311,6 +384,10 @@ fn serve(mut stream: TcpStream, base: &str, model: &Arc<Mutex<Model>>) {
         let id = path
             .trim_start_matches("/upload/drive/v3/session/")
             .to_owned();
+        if model.expire_once {
+            model.expire_once = false;
+            model.uploads.remove(&id);
+        }
         if let Some(upload) = model.uploads.get_mut(&id) {
             let range = header("content-range").unwrap();
             if !range.starts_with("bytes */") {
