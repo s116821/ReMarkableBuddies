@@ -314,6 +314,23 @@ impl SyncModeLease {
     pub fn snapshot(&self) -> &SyncModeSnapshot {
         &self.current
     }
+    // The archive caller holds the Store mutex from this check through publication.
+    pub(in crate::storage) fn require_isolated_locked(&self, store: &Store) -> Result<()> {
+        ensure!(
+            std::ptr::eq(Arc::as_ptr(&self.store), store),
+            "isolated mode lease belongs to another store"
+        );
+        ensure!(
+            matches!(self.current.mode, Some(SyncMode::IsolatedBackup { .. })),
+            "isolated mode lease required"
+        );
+        let current = snapshot(store, &load(store)?)?;
+        ensure!(
+            current.token == self.current.token,
+            "isolated mode lease no longer matches persisted custody"
+        );
+        Ok(())
+    }
     pub fn require_shared_scope(&self, scope: &selection::SelectionScope) -> Result<()> {
         scope.validate()?;
         let _inner = self
