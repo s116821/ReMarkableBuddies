@@ -473,7 +473,7 @@ fn actual_normal_startup_refuses_nonordinary_mode_before_runtime_constructors() 
         let f = Fixture::new();
         let initial = f.initialize();
         assert_eq!(f.choose(&request(&initial, mode))["status"], "ok");
-        assert_ordinary_refuses(&f, "ordinary mode requires absent or LocalOnly choice");
+        assert_ordinary_refuses(&f, "ordinary Reader startup unsupported");
     }
     let f = Fixture::new();
     let initial = f.initialize();
