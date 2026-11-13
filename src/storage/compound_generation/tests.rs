@@ -37,7 +37,10 @@ impl Drop for Fixture {
     }
 }
 
-fn produce_notebook(store: Arc<Store>) -> Uuid {
+pub(in crate::storage) fn produce_notebook(store: Arc<Store>) -> Uuid {
+    produce_notebook_with_conversation(store).1
+}
+pub(in crate::storage) fn produce_notebook_with_conversation(store: Arc<Store>) -> (Uuid, Uuid) {
     use crate::{
         conversation::{notebook::*, *},
         retrieval::{NormalizedDocument, SourceFormat, SourceUnit},
@@ -142,7 +145,7 @@ fn produce_notebook(store: Arc<Store>) -> Uuid {
     let result = runner::run(&ledger, &mut model, input, &mut || false);
     assert_eq!(result.report.status, Status::Generated);
     assert_eq!(model.0, 2);
-    document_id
+    (conversation, document_id)
 }
 
 #[test]
@@ -446,14 +449,18 @@ fn ready_compound_never_enters_ordinary_reader_startup_or_fallback() {
     use crate::reader_runtime::{self, StartupDecision};
     let fixture = Fixture::new();
     let request = fixture.request();
-    let config = crate::config::Config {
-        paths: fixture.paths(),
+    let ordinary_fixture = Fixture::new();
+    ordinary_fixture.request();
+    let mut config = crate::config::Config {
+        paths: ordinary_fixture.paths(),
         ..Default::default()
     };
     let StartupDecision::Ordinary(Some(ordinary)) = reader_runtime::startup(&config) else {
-        panic!("format4 ordinary control must remain supported");
+        panic!("ordinary control must remain supported through target startup");
     };
+    assert!(ordinary.source_target_generation().unwrap().is_some());
     drop(ordinary);
+    config.paths = fixture.paths();
     drop(Store::prepare_shared_notebook(fixture.paths(), request).unwrap());
     let StartupDecision::Report(report) = reader_runtime::startup(&config) else {
         panic!("format5 requires an explicit selected route before credentials");
