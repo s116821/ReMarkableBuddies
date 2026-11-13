@@ -956,6 +956,58 @@ impl Store {
     }
 }
 
+#[cfg(target_os = "linux")]
+impl Store {
+    /// Same Store mutex as configuration/data publication; no credential-specific owner.
+    pub(crate) fn publish_declared_model_credential(
+        &self,
+        path: &std::path::Path,
+        intent: &crate::config::model_credential::linux::Intent,
+        change: &crate::config::model_credential::linux::Change,
+    ) -> crate::config::model_credential::Report {
+        self.with_credential_mutex(|| {
+            crate::config::model_credential::linux::publish_locked(
+                path,
+                &self.paths,
+                intent,
+                change,
+            )
+        })
+    }
+    fn with_credential_mutex(
+        &self,
+        publish: impl FnOnce() -> crate::config::model_credential::Report,
+    ) -> crate::config::model_credential::Report {
+        let Ok(_inner) = self.inner.lock() else {
+            return crate::config::model_credential::Report::refusal(
+                crate::config::model_credential::Operation::Apply,
+                crate::config::basic::Status::Unavailable,
+            );
+        };
+        publish()
+    }
+    #[cfg(test)]
+    pub(crate) fn credential_publication_test_hook(
+        &self,
+        path: &std::path::Path,
+        intent: &crate::config::model_credential::linux::Intent,
+        change: &crate::config::model_credential::linux::Change,
+        hook: impl FnMut(
+            crate::config::model_credential::linux::Phase,
+        ) -> std::result::Result<(), crate::config::basic::Status>,
+    ) -> crate::config::model_credential::Report {
+        self.with_credential_mutex(|| {
+            crate::config::model_credential::linux::publish_with(
+                path,
+                &self.paths,
+                intent,
+                change,
+                hook,
+            )
+        })
+    }
+}
+
 #[cfg(test)]
 mod isolated_snapshot_tests {
     use super::ordinary_restore::tests::{record, Fixture};
@@ -1234,57 +1286,5 @@ mod isolated_snapshot_tests {
         fs::remove_file(bytes_path).unwrap();
         assert!(store.export_isolated_snapshot(&lease, &path).is_err());
         assert!(!path.exists());
-    }
-}
-
-#[cfg(target_os = "linux")]
-impl Store {
-    /// Same Store mutex as configuration/data publication; no credential-specific owner.
-    pub(crate) fn publish_declared_model_credential(
-        &self,
-        path: &std::path::Path,
-        intent: &crate::config::model_credential::linux::Intent,
-        change: &crate::config::model_credential::linux::Change,
-    ) -> crate::config::model_credential::Report {
-        self.with_credential_mutex(|| {
-            crate::config::model_credential::linux::publish_locked(
-                path,
-                &self.paths,
-                intent,
-                change,
-            )
-        })
-    }
-    fn with_credential_mutex(
-        &self,
-        publish: impl FnOnce() -> crate::config::model_credential::Report,
-    ) -> crate::config::model_credential::Report {
-        let Ok(_inner) = self.inner.lock() else {
-            return crate::config::model_credential::Report::refusal(
-                crate::config::model_credential::Operation::Apply,
-                crate::config::basic::Status::Unavailable,
-            );
-        };
-        publish()
-    }
-    #[cfg(test)]
-    pub(crate) fn credential_publication_test_hook(
-        &self,
-        path: &std::path::Path,
-        intent: &crate::config::model_credential::linux::Intent,
-        change: &crate::config::model_credential::linux::Change,
-        hook: impl FnMut(
-            crate::config::model_credential::linux::Phase,
-        ) -> std::result::Result<(), crate::config::basic::Status>,
-    ) -> crate::config::model_credential::Report {
-        self.with_credential_mutex(|| {
-            crate::config::model_credential::linux::publish_with(
-                path,
-                &self.paths,
-                intent,
-                change,
-                hook,
-            )
-        })
     }
 }
