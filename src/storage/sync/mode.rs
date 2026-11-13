@@ -360,7 +360,7 @@ impl Store {
             .lock()
             .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
         let root = self.generation(inner.generation);
-        let version = feedback_generation::version(&root)?;
+        let version = target_generation::base_version(&root)?;
         ensure!(
             version != notebook_generation::VERSION
                 && (!root.join(notebook_generation::MARKER).exists()

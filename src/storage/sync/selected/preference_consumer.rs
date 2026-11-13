@@ -99,6 +99,73 @@ impl RequestReads {
     }
 }
 
+struct DetachedPreferences {
+    binding: Binding,
+    capture: Capture,
+    guard: record::Condition,
+    selected: Option<SelectionToken>,
+    absence: Option<(String, String, String)>,
+    effective: Config,
+    admission_deadline: Instant,
+    deadline: Instant,
+    reads: RequestReads,
+    handoff_used: AtomicBool,
+    submitted: AtomicBool,
+    mode_token: mode::SyncModeToken,
+    scope: SelectionScope,
+}
+impl DetachedPreferences {
+    fn verify_locked(&self, store: &Store, reads: &mut SelectedReadBudget) -> Result<()> {
+        ensure!(Instant::now() < self.deadline, "preference request expired");
+        let current = store.sync_mode_snapshot()?;
+        require_mode(&current, &self.binding)?;
+        ensure!(
+            current.token == self.mode_token
+                && current.epoch == Some(self.guard.mode_epoch)
+                && catalog::current_generation(store)? == self.guard.store_generation,
+            "preference mode or generation changed"
+        );
+        self.capture.check(reads)?;
+        let current = store.selected_snapshot_with_budget(&self.scope, MAX_ITEMS, reads)?;
+        match (&self.selected, current) {
+            (Some(expected), Some(read)) => ensure!(
+                read.snapshot.token == *expected,
+                "preference selection changed"
+            ),
+            (None, None) => {
+                let (root, base, slot) = self
+                    .absence
+                    .as_ref()
+                    .context("qualified preference absence absent")?;
+                let cp = command::checkpoint(store, &self.binding, self.guard.mode_epoch, reads)?
+                    .context("preference root custody absent")?;
+                let view = catalog_view(&self.binding, &cp)?.context("preference root absent")?;
+                ensure!(
+                    !cp.catalog.is_empty()
+                        && view.root_sha == *root
+                        && view.base == *base
+                        && view.slot == *slot
+                        && !view.entries.contains_key(&record::key_sha256())
+                        && cp
+                            .catalog_pending
+                            .as_ref()
+                            .map(CatalogPending::key)
+                            .transpose()?
+                            .as_deref()
+                            != Some(record::key_sha256().as_str())
+                        && !cp.scopes.contains_key(&record::key_sha256())
+                        && !cp
+                            .retired_catalog
+                            .iter()
+                            .any(|p| p.key == record::key_sha256()),
+                    "qualified preference absence changed"
+                );
+            }
+            _ => anyhow::bail!("preference selection or absence changed"),
+        }
+        Ok(())
+    }
+}
 impl RequestPreferences {
     /// Ordinary families retain their delivered local preference path. Only the
     /// actual qualified format5 source can construct a shared request snapshot.
@@ -284,12 +351,36 @@ impl RequestPreferences {
         Entry,
         crate::storage::selection::SelectedSnapshot,
     )> {
+        Self::registered_document_bound(
+            &self.binding,
+            self.guard.mode_epoch,
+            identity,
+            document.scope(),
+            store,
+            root,
+            reads,
+        )
+    }
+
+    fn registered_document_bound(
+        binding: &Binding,
+        epoch: Uuid,
+        identity: &crate::memory::catalog::Identity,
+        scope: &SelectionScope,
+        store: &Store,
+        root: &str,
+        reads: &mut SelectedReadBudget,
+    ) -> Result<(
+        crate::memory::catalog::Registration,
+        Entry,
+        crate::storage::selection::SelectedSnapshot,
+    )> {
         use crate::memory::catalog::{Catalog, Owner as DocumentOwner};
-        let key = &document.scope().key_sha256;
-        let checkpoint = command::checkpoint(store, &self.binding, self.guard.mode_epoch, reads)?
+        let key = &scope.key_sha256;
+        let checkpoint = command::checkpoint(store, binding, epoch, reads)?
             .context("selected document accepted catalog absent")?;
-        let view = catalog_view(&self.binding, &checkpoint)?
-            .context("selected document catalog root absent")?;
+        let view =
+            catalog_view(binding, &checkpoint)?.context("selected document catalog root absent")?;
         ensure!(
             view.root_sha == root && view.root.profile == identity.profile,
             "selected document catalog root changed"
@@ -302,7 +393,7 @@ impl RequestPreferences {
             anyhow::bail!("selected selected document owner is not a document");
         };
         ensure!(
-            identity.aggregate_scope(owner)? == *document.scope(),
+            identity.aggregate_scope(owner)? == *scope,
             "selected selected document owner differs"
         );
         let local = store
@@ -318,7 +409,7 @@ impl RequestPreferences {
             "selected document local registration owner differs"
         );
         let read = store
-            .selected_snapshot_with_budget(document.scope(), MAX_ITEMS, reads)?
+            .selected_snapshot_with_budget(scope, MAX_ITEMS, reads)?
             .context("selected document registered document is unreceived")?;
         crate::memory::aggregate::Aggregate::project(
             identity,
@@ -667,6 +758,85 @@ impl RequestPreferences {
                 self.verify_locked(store, &mut reads)
             })
         }
+    }
+}
+
+impl RequestPreferences {
+    fn detach(self) -> DetachedPreferences {
+        let Self {
+            store,
+            admission,
+            mode,
+            binding,
+            capture,
+            guard,
+            selected,
+            absence,
+            effective,
+            admission_deadline,
+            deadline,
+            reads,
+            handoff_used,
+            submitted,
+        } = self;
+        let mode_token = mode.snapshot().token.clone();
+        let scope = admission.scope().clone();
+        drop(admission);
+        drop(mode);
+        drop(store);
+        DetachedPreferences {
+            binding,
+            capture,
+            guard,
+            selected,
+            absence,
+            effective,
+            admission_deadline,
+            deadline,
+            reads,
+            handoff_used,
+            submitted,
+            mode_token,
+            scope,
+        }
+    }
+}
+impl DetachedPreferences {
+    fn attach(self, store: Arc<Store>) -> Result<RequestPreferences> {
+        let Self {
+            binding,
+            capture,
+            guard,
+            selected,
+            absence,
+            effective,
+            admission_deadline,
+            deadline,
+            reads,
+            handoff_used,
+            submitted,
+            mode_token,
+            scope,
+        } = self;
+        let mode = store.sync_mode_lease(&mode_token)?;
+        mode.require_shared_scope(&scope)?;
+        let admission = SelectedAdmission::new(store.clone(), scope)?;
+        Ok(RequestPreferences {
+            store,
+            admission,
+            mode,
+            binding,
+            capture,
+            guard,
+            selected,
+            absence,
+            effective,
+            admission_deadline,
+            deadline,
+            reads,
+            handoff_used,
+            submitted,
+        })
     }
 }
 

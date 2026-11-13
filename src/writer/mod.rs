@@ -4,6 +4,7 @@ pub mod notebook;
 pub mod selected;
 pub mod selected_command;
 mod subject_memory;
+pub mod target;
 use crate::{
     config::PersonalizationSnapshot,
     conversation::{Ledger, Mode, NormalizedTextSource, Outcome, Record, Role, TextScope, Turn},
@@ -255,7 +256,11 @@ pub fn parse_draft(text: &str) -> Result<(&str, &str)> {
     );
     Ok((title, body))
 }
-fn selected(ledger: &Ledger, conversation: Uuid, id: Uuid) -> Result<(Turn, NormalizedTextSource)> {
+fn selected(
+    ledger: &Ledger,
+    conversation: Uuid,
+    id: Uuid,
+) -> Result<(Turn, crate::conversation::WriterSource)> {
     let records = ledger.inspect(conversation, false)?;
     let draft = records
         .iter()
@@ -274,11 +279,13 @@ fn selected(ledger: &Ledger, conversation: Uuid, id: Uuid) -> Result<(Turn, Norm
     parse_draft(draft.text.as_deref().context("draft text absent")?)?;
     let source = records
         .into_iter()
-        .find_map(|record| match record {
-            Record::NormalizedText(source) if draft.sources == vec![source.id] => Some(*source),
-            _ => None,
+        .find(|record| match record {
+            Record::NormalizedText(v) => draft.sources == vec![v.id],
+            Record::RegionSource(v) => draft.sources == vec![v.id],
+            _ => false,
         })
         .context("draft source absent")?;
+    let source = crate::conversation::WriterSource::decode(source)?;
     Ok((draft, source))
 }
 fn history(ledger: &Ledger, conversation: Uuid) -> Result<crate::conversation::ContextView> {
@@ -423,6 +430,45 @@ fn run_owned_with_memory<E: LLMEngine>(
     canceled: &mut dyn FnMut() -> bool,
     control: OwnedRun<'_, '_>,
 ) -> Report {
+    run_owned_source(
+        ledger,
+        engine,
+        request,
+        ReceivingPreferences {
+            personalization,
+            memory,
+        },
+        canceled,
+        control,
+        None,
+    )
+}
+struct ReceivingPreferences<'a> {
+    personalization: &'a PersonalizationSnapshot,
+    memory: Option<&'a dyn crate::memory::Provider>,
+}
+fn run_owned_source<E: LLMEngine>(
+    ledger: &Ledger,
+    engine: &mut E,
+    request: &Request,
+    preferences: ReceivingPreferences<'_>,
+    canceled: &mut dyn FnMut() -> bool,
+    control: OwnedRun<'_, '_>,
+    regional: Option<crate::conversation::target::RegionSource>,
+) -> Report {
+    let ReceivingPreferences {
+        personalization,
+        memory,
+    } = preferences;
+    let operation_started = Instant::now();
+    let mut policy_reads = crate::storage::selection::SelectedReadBudget::new(
+        0,
+        16384,
+        crate::storage::MAX_RECORD as u64 * 4096,
+        0,
+    );
+    let mode_pin = ledger.store().sync_mode_snapshot().map(|m| m.token);
+    let ready_pin = ledger.store().target_runtime_pin(&mut policy_reads);
     if !std::ptr::eq(control.owner.0, ledger.store().as_ref()) {
         return Report::refused(request, Failure::Storage);
     }
@@ -438,6 +484,9 @@ fn run_owned_with_memory<E: LLMEngine>(
     {
         let prepared = (|| -> Result<PreparedNote> {
             let (draft, source) = selected(ledger, *conversation, *draft)?;
+            if let Some(region) = &source.region {
+                ledger.regional_source_proof(region, &mut || Ok(()))?;
+            }
             note_from_draft(&draft, &source, *correlation, *effect_operation)
         })();
         return match prepared {
@@ -471,13 +520,26 @@ fn run_owned_with_memory<E: LLMEngine>(
                 ..
             } => (
                 request.clone(),
-                NormalizedTextSource::new(
-                    conversation,
-                    stage(operation, "user"),
-                    document.clone(),
-                    selection.clone(),
-                    guidance.clone(),
-                )?,
+                if let Some(region) = &regional {
+                    region.validate()?;
+                    ensure!(
+                        region.conversation == conversation
+                            && region.turn == stage(operation, "user"),
+                        "regional Writer identity differs"
+                    );
+                    crate::conversation::WriterSource {
+                        normalized: region.normalized.clone(),
+                        region: Some(region.clone()),
+                    }
+                } else {
+                    crate::conversation::WriterSource::ordinary(NormalizedTextSource::new(
+                        conversation,
+                        stage(operation, "user"),
+                        document.clone(),
+                        selection.clone(),
+                        guidance.clone(),
+                    )?)
+                },
                 None,
             ),
             Request::Refine { request, draft, .. } => {
@@ -487,12 +549,22 @@ fn run_owned_with_memory<E: LLMEngine>(
             _ => unreachable!(),
         };
         let history = history(ledger, conversation)?;
-        let images = if control.historical_images {
+        let images = if control.historical_images && source.region.is_none() {
             crate::conversation::receiving::images::resolve(ledger, &history)?
         } else {
             crate::conversation::receiving::images::Images::default()
         };
         let mut payload = serde_json::json!({"history":history.turns,"request":text,"explicit_guidance":source.guidance,"source_provenance":{"document":source.document.document,"source_sha256":source.document.source_sha256,"extractor_revision":source.document.extractor_revision,"normalized_sha256":digest(&serde_json::to_vec(&source.document.units)?),"selection":source.selection,"coverage":"all selected supplied units; original notebook completeness unverified"},"source_units":source.selected(),"selected_draft":prior.as_ref().and_then(|t|t.text.as_deref())});
+        if let Some(region) = &source.region {
+            payload["source_provenance"] = serde_json::json!({"coverage":"all text recognized from exact masked region; unverified", "source_units_page_labels":"Regional normalization canvas labels only, not physical notebook page numbers", "region":region});
+        }
+        if !history.region_sources.is_empty() {
+            payload["regional_sources"] = serde_json::to_value(&history.region_sources)?;
+        }
+        if !history.target_uses.is_empty() {
+            payload["target_uses"] = serde_json::to_value(&history.target_uses)?;
+            payload["targets"] = serde_json::to_value(&history.targets)?;
+        }
         if control.historical_images {
             payload["historical_images"] = serde_json::to_value(&images.associations)?;
         }
@@ -552,9 +624,32 @@ fn run_owned_with_memory<E: LLMEngine>(
     let mut was_canceled = false;
     let mut was_stale = false;
     let mut progress = || {
-        if canceled() || started.elapsed() >= Duration::from_secs(95) {
+        if canceled()
+            || started.elapsed() >= Duration::from_secs(95)
+            || (source.region.is_some() && operation_started.elapsed() >= Duration::from_secs(150))
+        {
             was_canceled = true;
             anyhow::bail!("Writer canceled")
+        }
+        if ledger
+            .store()
+            .check_runtime_policy(&mut policy_reads)
+            .is_err()
+            || !mode_pin.as_ref().is_ok_and(|token| {
+                ledger
+                    .store()
+                    .sync_mode_snapshot()
+                    .is_ok_and(|m| m.token == *token)
+            })
+            || !ready_pin.as_ref().is_ok_and(|pin| {
+                ledger
+                    .store()
+                    .target_runtime_pin(&mut policy_reads)
+                    .is_ok_and(|current| current == *pin)
+            })
+        {
+            was_stale = true;
+            anyhow::bail!("Writer original policy changed");
         }
         if !ledger
             .writer_preparation_current(conversation, &prepared)
@@ -567,6 +662,9 @@ fn run_owned_with_memory<E: LLMEngine>(
     };
     let mut memory_failure = None;
     let response = (|| -> Result<String> {
+        if let Some(region) = &source.region {
+            ledger.regional_source_proof(region, &mut progress)?;
+        }
         let context = if let Some(provider) = memory {
             match subject_memory::context(provider, &text, source.document.document, now()) {
                 Ok(context) => context,
@@ -604,6 +702,33 @@ fn run_owned_with_memory<E: LLMEngine>(
         report.failure = Some(Failure::Storage);
         return report;
     }
+    if let Some(region) = &source.region {
+        // Original and derived objects are immutable commitments. Verify them
+        // again before publishing a result after a potentially long model wait.
+        if region.media().iter().any(|m| {
+            ledger
+                .store()
+                .open_object(&crate::storage::ObjectRef {
+                    sha256: m.sha256.clone(),
+                    bytes: m.bytes,
+                })
+                .is_err()
+        }) {
+            return Report::refused(request, Failure::Storage);
+        }
+    }
+    let response = response.and_then(|body| {
+        if let Some(region) = &source.region {
+            let (title, markdown) = parse_draft(&body)?;
+            ensure!(
+                !markdown.lines().any(|line| line.starts_with("About: ")),
+                "model supplied reserved About presentation"
+            );
+            Ok(format!("# {title}\n\n{}\n\n{markdown}", region.about))
+        } else {
+            Ok(body)
+        }
+    });
     let (outcome, body, failure, status) = if was_canceled {
         (Outcome::Canceled, None, None, Status::Canceled)
     } else {
@@ -652,7 +777,7 @@ fn run_owned_with_memory<E: LLMEngine>(
 
 pub(crate) fn note_from_draft(
     draft: &Turn,
-    source: &NormalizedTextSource,
+    source: &crate::conversation::WriterSource,
     correlation: Uuid,
     effect_operation: Uuid,
 ) -> Result<PreparedNote> {
@@ -661,14 +786,7 @@ pub(crate) fn note_from_draft(
         conversation: draft.conversation,
         correlation,
         effect_operation,
-        source_scope: format!(
-            "normalized-document:{}:{}",
-            source.document.document,
-            match source.selection {
-                TextScope::Page { page } => format!("page:{page}"),
-                TextScope::SuppliedNotebook => "supplied-notebook".into(),
-            }
-        ),
+        source_scope: source.scope(),
         source_revision: digest(&serde_json::to_vec(&(
             source,
             draft.id,

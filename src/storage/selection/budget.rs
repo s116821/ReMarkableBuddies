@@ -1,7 +1,7 @@
 //! One receiving request's cumulative content-I/O allowance; no domain policy.
 use super::*;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelectedReadUsage {
     pub aggregates: u64,
     pub work_items: u64,
@@ -11,7 +11,17 @@ pub struct SelectedReadUsage {
 
 /// Share one budget across catalogue and aggregate reads. Exhaustion is sticky;
 /// the caller must discard an incomplete multi-aggregate receiving result.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SelectedReadBudget {
+    limits: SelectedReadUsage,
+    usage: SelectedReadUsage,
+    exhausted: bool,
+    total_bytes: Option<u64>,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SelectedReadCheckpoint {
     limits: SelectedReadUsage,
     usage: SelectedReadUsage,
     exhausted: bool,
@@ -35,6 +45,28 @@ impl SelectedReadBudget {
         let mut budget = Self::new(0, work_items, bytes, bytes);
         budget.total_bytes = Some(bytes);
         budget
+    }
+    // A checkpoint is inert bookkeeping, not another spendable budget.
+    pub(crate) fn checkpoint(&self) -> SelectedReadCheckpoint {
+        SelectedReadCheckpoint {
+            limits: self.limits,
+            usage: self.usage,
+            exhausted: self.exhausted,
+            total_bytes: self.total_bytes,
+        }
+    }
+    pub(crate) fn is_monotonic_successor(&self, initial: &SelectedReadCheckpoint) -> bool {
+        self.limits == initial.limits
+            && self.total_bytes == initial.total_bytes
+            && (!initial.exhausted || self.exhausted)
+            && self.usage.aggregates >= initial.usage.aggregates
+            && self.usage.aggregates <= self.limits.aggregates
+            && self.usage.work_items >= initial.usage.work_items
+            && self.usage.work_items <= self.limits.work_items
+            && self.usage.metadata_bytes >= initial.usage.metadata_bytes
+            && self.usage.metadata_bytes <= self.limits.metadata_bytes
+            && self.usage.media_bytes >= initial.usage.media_bytes
+            && self.usage.media_bytes <= self.limits.media_bytes
     }
     pub fn usage(&self) -> SelectedReadUsage {
         self.usage

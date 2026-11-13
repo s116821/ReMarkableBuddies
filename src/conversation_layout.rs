@@ -45,6 +45,12 @@ pub struct Exchange<'a> {
     pub turns: Vec<&'a Turn>,
 }
 #[derive(Debug)]
+pub struct AboutEntry<'a> {
+    pub turn: Uuid,
+    pub target: &'a crate::conversation::target::RecordRef,
+    pub text: &'a str,
+}
+#[derive(Debug)]
 pub struct PagePlan<'a> {
     pub conversation: Uuid,
     pub document: Uuid,
@@ -57,6 +63,7 @@ pub struct PagePlan<'a> {
     pub history: Region,
     /// Newest exchange first. Full original text and source links stay borrowed.
     pub exchanges: Vec<Exchange<'a>>,
+    pub about: Vec<AboutEntry<'a>>,
 }
 /// One explicit historical description linked to an original exchange and turn.
 /// The page retains original borrowed content; this is not an inserted error
@@ -142,6 +149,45 @@ pub fn plan<'a>(
     exchanges.sort_by_key(|exchange| {
         std::cmp::Reverse(exchange.turns.last().expect("nonempty exchange").sequence)
     });
+    let mut about = Vec::new();
+    let mut used_turns = BTreeSet::new();
+    for used in &context.target_uses {
+        used.validate()?;
+        ensure!(
+            used.conversation == conversation && used_turns.insert(used.turn),
+            "foreign or duplicate target use"
+        );
+        let user = context
+            .turns
+            .iter()
+            .find(|turn| turn.id == used.turn && turn.role == Role::User)
+            .ok_or_else(|| anyhow::anyhow!("target About user absent"))?;
+        let Some(text) = used.about.as_deref() else {
+            continue;
+        };
+        let inline = context
+            .turns
+            .iter()
+            .filter(|turn| turn.exchange == user.exchange && turn.role == Role::Assistant)
+            .any(|turn| {
+                used.inline_body_sha256.as_ref().is_some_and(|expected| {
+                    turn.text.as_deref().is_some_and(|body| {
+                        crate::storage::digest(body.as_bytes()) == *expected
+                            && body.starts_with(&format!("{text}\n"))
+                    })
+                })
+            });
+        if !inline {
+            about.push(AboutEntry {
+                turn: user.id,
+                target: used
+                    .target
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("About target reference absent"))?,
+                text,
+            });
+        }
+    }
     let region = |start, end| Region {
         x: 0.0,
         y: start,
@@ -159,5 +205,6 @@ pub fn plan<'a>(
         status: region(input_end, status_end),
         history: region(status_end, 1.0),
         exchanges,
+        about,
     })
 }

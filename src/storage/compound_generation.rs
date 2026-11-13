@@ -100,7 +100,7 @@ pub(crate) fn validate_feature(root: &Path, actor: Uuid, generation: Uuid) -> Re
         "compound feature differs from its original preparation"
     );
     ensure!(
-        feedback_generation::version(root)? == VERSION,
+        target_generation::base_version(root)? == VERSION,
         "compound generation format differs"
     );
     ensure!(
@@ -157,6 +157,10 @@ pub(crate) fn capabilities(paths: &StorePaths, actor: Uuid, generation: Uuid) ->
     result
 }
 pub(crate) fn validate_ready(paths: &StorePaths, actor: Uuid, generation: Uuid) -> Result<()> {
+    let target_root = paths.data.join("generations").join(generation.to_string());
+    if target_generation::is_target(&target_root)? {
+        return target_generation::validate_ready(paths, actor, generation);
+    }
     ensure!(
         files::json::<Uuid>(&paths.data.join("CURRENT"), 128)? == generation,
         "compound current changed"
@@ -336,7 +340,11 @@ impl Store {
             .inner
             .lock()
             .map_err(|_| anyhow::anyhow!("Store mutex unavailable"))?;
-        Ok(feedback_generation::version(&self.generation(inner.generation))? != VERSION)
+        match target_generation::base_version(&self.generation(inner.generation))? {
+            1..=4 => Ok(true),
+            5 => Ok(false),
+            _ => anyhow::bail!("unsupported runtime Store family"),
+        }
     }
     pub fn prepare_shared_notebook(paths: StorePaths, request: Request) -> Result<Self> {
         Self::prepare_shared_notebook_with(paths, request, |_| Ok(()))
@@ -353,6 +361,7 @@ impl Store {
         let current = custody.generation;
         let mut store = Self {
             paths: custody.paths,
+            runtime_policy: None,
             actor_id: custody.actor,
             _lease: custody.lease,
             inner: Mutex::new(Inner {

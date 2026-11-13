@@ -265,12 +265,22 @@ pub fn ordinary_store(
                 fresh_auxiliary_roots(config)
                     .map_err(|_| Box::new(Report::new("startup", Status::Unavailable)))?;
             }
-            Arc::new(Store::open(config.paths.clone()).map_err(|error| {
-                Box::new(Report::new(
-                    "startup",
-                    admission_status(crate::memory::maintenance::store_open_status(&error)),
-                ))
-            })?)
+            Arc::new(
+                (if config.reader_enabled()
+                    && !config.sync.enabled
+                    && config.reader.selection.is_none()
+                {
+                    Store::open_source_target_startup(config)
+                } else {
+                    Store::open(config.paths.clone())
+                })
+                .map_err(|error| {
+                    Box::new(Report::new(
+                        "startup",
+                        admission_status(crate::memory::maintenance::store_open_status(&error)),
+                    ))
+                })?,
+            )
         }
     };
     ordinary_mode(&store, config).map_err(|refusal| Box::new(refusal.report()))?;
@@ -305,6 +315,26 @@ fn selected_mode(
 /// Called from actual startup after final dotenv/config selection, before secrets
 /// or RealDevice/provider construction. No native query can occur in this platform.
 pub fn startup(config: &Config) -> StartupDecision {
+    // A pending target promotion must enter before ready-only preflight/open.
+    // Legacy sync retains its supported non-target route.
+    if config.reader.selection.is_none()
+        && config.reader_enabled()
+        && !config.sync.enabled
+        && config.paths.data.join("identity.json").exists()
+    {
+        return match Store::open_source_target_startup(config) {
+            Ok(store) => {
+                let store = Arc::new(store);
+                match ordinary_mode(&store, config) {
+                    Ok(()) => StartupDecision::Ordinary(Some(store)),
+                    Err(refusal) => StartupDecision::Report(Box::new(refusal.report())),
+                }
+            }
+            Err(error) => StartupDecision::refused(admission_status(
+                crate::memory::maintenance::store_open_status(&error),
+            )),
+        };
+    }
     if config.reader.selection.is_none() {
         use crate::memory::maintenance::{preflight_state, StoreReadiness};
         match preflight_state(config, true) {
@@ -412,15 +442,11 @@ pub fn run_installed_selected(
         return Ok(true);
     };
     let admitted = (|| -> Result<_> {
-        let store =
-            open(&config).map_err(|_| anyhow::anyhow!("selected Reader Store unavailable"))?;
+        let store = Arc::new(Store::open_selected_target_preparation(&config)?);
         let reader = Arc::new(SelectedAdmission::new(store.clone(), scope.clone())?);
-        let (policy, token) = ReaderPreferences::open(
-            store.clone(),
-            config_path.as_path().to_owned(),
-            &reader,
-            started,
-        )?;
+        let (policy, token) =
+            ReaderPreferences::open(store.clone(), config_path.clone(), &reader, started)?;
+        let (store, reader, policy, token) = policy.promote_targets(store, reader, token)?;
         let health = NotificationEnvironment::capture()
             .connect()?
             .context("selected Reader service health unavailable")?;

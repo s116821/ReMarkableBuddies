@@ -1,12 +1,12 @@
 //! Model-facing historical derivatives. Acquisition parents remain provenance.
 use crate::{
-    conversation::{ContextView, Ledger},
+    conversation::{ContextView, Ledger, Record},
     storage::{Media, ObjectRef, Uuid},
 };
 use anyhow::{ensure, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const MAX_IMAGES: usize = 12;
 const MAX_BYTES: u64 = 16 * 1024 * 1024;
@@ -86,7 +86,7 @@ pub(crate) fn resolve_with(
                 .collect(),
         );
     }
-    let resident: BTreeMap<_, _> = context
+    let mut resident: BTreeMap<_, _> = context
         .resident_captures
         .iter()
         .map(|capture| (capture.id, capture))
@@ -109,6 +109,70 @@ pub(crate) fn resolve_with(
         );
     }
 
+    // Target aliases name actual retained SourceTarget records. They preserve the
+    // original capture metadata and associations without inventing another capture.
+    for view in &context.targets {
+        let images = match &view.source {
+            Record::Source(v) => vec![(v.ordinal, v.image.clone(), [v.width, v.height])],
+            Record::Capture(v) => v
+                .facts
+                .images
+                .iter()
+                .enumerate()
+                .map(|(n, i)| (n as u32, i.media(), i.dimensions))
+                .collect(),
+            Record::LegacyCapture(v) => v
+                .images
+                .iter()
+                .enumerate()
+                .map(|(n, i)| (n as u32, i.media.clone(), i.dimensions))
+                .collect(),
+            Record::DevelopmentCapture(v) => v
+                .images
+                .iter()
+                .enumerate()
+                .map(|(n, i)| (n as u32, i.media.clone(), i.dimensions))
+                .collect(),
+            Record::ResidentCapture(v) => {
+                v.validate()?;
+                if let Some(prior) = resident.insert(view.target.id, v) {
+                    ensure!(
+                        serde_json::to_vec(prior)? == serde_json::to_vec(v)?,
+                        "target alias has conflicting resident evidence"
+                    );
+                }
+                v.images
+                    .iter()
+                    .map(|i| (i.provider_ordinal, i.media.clone(), i.dimensions))
+                    .collect()
+            }
+            _ => anyhow::bail!("target historical source is not a capture"),
+        };
+        if let Some(prior) = by_source.insert(view.target.id, images.clone()) {
+            ensure!(
+                prior == images,
+                "target alias has conflicting image descriptors"
+            );
+        }
+    }
+    let mut ordered_sources = Vec::new();
+    for turn in &context.turns {
+        ordered_sources.extend(turn.sources.iter().copied());
+        for used in context
+            .target_uses
+            .iter()
+            .filter(|used| used.turn == turn.id)
+        {
+            if let Some(reference) = &used.target {
+                let view = context
+                    .targets
+                    .iter()
+                    .find(|view| &view.reference == reference)
+                    .context("inherited target evidence absent")?;
+                ordered_sources.push(view.target.id);
+            }
+        }
+    }
     let mut by_digest = BTreeMap::new();
     let mut total = 0;
     let mut admitted: Vec<(Media, [u32; 2])> = Vec::new();
@@ -116,9 +180,16 @@ pub(crate) fn resolve_with(
     let mut resident_proofs = Vec::new();
     let mut proof_bytes = 0u64;
     let mut proof_pixels = 0u64;
-    for source in context.turns.iter().flat_map(|turn| &turn.sources) {
+    let mut proven_captures = BTreeSet::new();
+    for source in &ordered_sources {
         if let Some(images) = by_source.remove(source) {
-            if let Some(capture) = resident.get(source) {
+            let capture = resident.get(source).copied();
+            let proof = capture.map(serde_json::to_vec).transpose()?;
+            if let Some(capture) = capture.filter(|_| {
+                // Target aliases of the same frozen capture share one proof.
+                // Different capture metadata still consumes independent work.
+                proven_captures.insert(proof.expect("capture descriptor encoded"))
+            }) {
                 ensure!(
                     resident_proofs.len() < MAX_IMAGES,
                     "historical resident proof count exceeded"
@@ -145,7 +216,7 @@ pub(crate) fn resolve_with(
                     proof_pixels <= MAX_RESIDENT_PROOF_PIXELS,
                     "historical resident pixel work exceeded"
                 );
-                resident_proofs.push(*capture);
+                resident_proofs.push(capture);
             }
             for (ordinal, media, dimensions) in images {
                 ensure!(

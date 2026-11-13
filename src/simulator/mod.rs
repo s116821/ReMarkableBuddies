@@ -34,6 +34,19 @@ impl SimulatorLedger {
             crate::storage::Uuid::new_v4()
         )))
     }
+    fn open_targets(&self) -> Result<crate::conversation::Ledger> {
+        let config = crate::config::Config {
+            paths: crate::storage::StorePaths {
+                data: self.0.join("data"),
+                cache: self.0.join("cache"),
+                credentials: self.0.join("secrets"),
+            },
+            ..Default::default()
+        };
+        Ok(crate::conversation::Ledger::new(std::sync::Arc::new(
+            crate::storage::Store::open_source_target_startup(&config)?,
+        )))
+    }
     fn open(&self) -> Result<crate::conversation::Ledger> {
         Ok(crate::conversation::Ledger::new(std::sync::Arc::new(
             crate::storage::Store::open(crate::storage::StorePaths {
@@ -174,6 +187,8 @@ pub struct Report {
     pub errors: Vec<String>,
     pub assertion_failures: Vec<String>,
     pub trace: Vec<Event>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_records: Option<Vec<crate::storage::Envelope>>,
 }
 pub struct Run {
     pub report: Report,
@@ -220,7 +235,13 @@ fn execute_with_model<M: LLMEngine>(
 ) -> Result<Run> {
     let workflow = Workflow::with_device(Box::new(SimDevice(state.clone())), false);
     let ledger_fixture = SimulatorLedger::new();
-    let mut orchestrator = Orchestrator::new(workflow, model, ledger_fixture.open()?);
+    let ledger = if scenario.source_targets {
+        ledger_fixture.open_targets()?
+    } else {
+        ledger_fixture.open()?
+    };
+    let evidence_store = ledger.store().clone();
+    let mut orchestrator = Orchestrator::new(workflow, model, ledger);
     orchestrator.set_personalization(scenario.personalization.snapshot()?);
     let mut errors = Vec::new();
     for (index, iteration) in scenario.iterations.iter().enumerate() {
@@ -237,6 +258,18 @@ fn execute_with_model<M: LLMEngine>(
         }
         history_actions(&iteration.actions, &state, &mut orchestrator, &mut errors)?;
     }
+    let target_records = if scenario.source_targets {
+        Some(evidence_store.snapshot_heads_matching(
+            &[
+                crate::storage::Namespace::Conversation,
+                crate::storage::Namespace::Source,
+            ],
+            crate::storage::MAX_ITEMS,
+            |e| e.domain_schema_version == crate::conversation::target::SCHEMA,
+        )?)
+    } else {
+        None
+    };
     let history = orchestrator.history_state();
     let state = state.borrow();
     let images: Vec<_> = state.pages.iter().map(device::Page::image).collect();
@@ -347,6 +380,7 @@ fn execute_with_model<M: LLMEngine>(
     }
     Ok(Run {
         report: Report {
+            target_records,
             history,
             name: scenario.name.clone(),
             model_mode,

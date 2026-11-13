@@ -1,5 +1,6 @@
 //! Domain-opaque atomic selected references. No domain/native admission or worker.
 mod budget;
+pub(crate) use budget::SelectedReadCheckpoint;
 pub use budget::{SelectedReadBudget, SelectedReadUsage};
 mod outbox;
 pub(crate) mod portable;
@@ -287,7 +288,7 @@ impl Store {
             .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
         let root = self.generation(inner.generation);
         Self::validate_namespace_family(&root, manifest)?;
-        if feedback_generation::version(&root)? == compound_generation::VERSION {
+        if target_generation::base_version(&root)? == compound_generation::VERSION {
             compound_generation::validate_ready(&self.paths, self.actor_id, inner.generation)?;
         }
         for (hash, bytes) in objects {
@@ -296,6 +297,7 @@ impl Store {
         let records = Self::validate_objects(&root, manifest)?;
         publication::closure_index(&records, true)?;
         notebook_generation::validate_records(&root, &Index::default(), &records)?;
+        target_generation::validate_records(&Index::default(), &records, &manifest.records)?;
         Ok(records.into_iter().map(|(envelope, _)| envelope).collect())
     }
 
@@ -345,7 +347,7 @@ impl Store {
             .lock()
             .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
         let root = self.generation(inner.generation);
-        if feedback_generation::version(&root)? == compound_generation::VERSION {
+        if target_generation::base_version(&root)? == compound_generation::VERSION {
             compound_generation::validate_ready(&self.paths, self.actor_id, inner.generation)?;
         }
         let path = root.join("selections").join(scope.filename()?);
@@ -491,21 +493,28 @@ struct SelectionFeature {
     generation: Uuid,
 }
 pub(crate) fn validate_generation(root: &Path, actor: Uuid, generation: Uuid) -> Result<()> {
-    validate_generation_policy(root, actor, generation, false, false)
+    validate_generation_policy(root, actor, generation, false, false, false)
 }
 pub(crate) fn validate_generation_preparing(
     root: &Path,
     actor: Uuid,
     generation: Uuid,
 ) -> Result<()> {
-    validate_generation_policy(root, actor, generation, true, false)
+    validate_generation_policy(root, actor, generation, true, false, false)
 }
 pub(crate) fn validate_generation_preparing_notebook(
     root: &Path,
     actor: Uuid,
     generation: Uuid,
 ) -> Result<()> {
-    validate_generation_policy(root, actor, generation, false, true)
+    validate_generation_policy(root, actor, generation, false, true, false)
+}
+pub(crate) fn validate_generation_preparing_targets(
+    root: &Path,
+    actor: Uuid,
+    generation: Uuid,
+) -> Result<()> {
+    validate_generation_policy(root, actor, generation, false, true, true)
 }
 fn validate_generation_policy(
     root: &Path,
@@ -513,12 +522,19 @@ fn validate_generation_policy(
     generation: Uuid,
     preparing: bool,
     preparing_notebook: bool,
+    preparing_targets: bool,
 ) -> Result<()> {
     ensure!(
         !actor.is_nil() && !generation.is_nil(),
         "nil selected store identity"
     );
-    let version: u32 = files::json(&root.join("format.json"), 64)?;
+    let raw_version: u32 = files::json(&root.join("format.json"), 64)?;
+    if raw_version == target_generation::VERSION {
+        target_generation::validate_feature(root, actor, generation)?;
+    } else if root.join(target_generation::MARKER).exists() {
+        ensure!(preparing_targets, "interrupted source-target preparation");
+    }
+    let version = target_generation::base_version(root)?;
     ensure!(
         matches!(
             version,
@@ -627,8 +643,9 @@ pub(crate) fn recover_selected(root: &Path, generation: Uuid) -> Result<Vec<Vali
         let scope = current.scope.clone();
         for transaction in publication::history(root, generation, &scope, current)? {
             let parts = publication::validate_closure(root, &transaction)?;
-            for (_, records) in &parts {
+            for (manifest, records) in &parts {
                 notebook_generation::validate_records(root, &Index::default(), records)?;
+                target_generation::validate_records(&Index::default(), records, &manifest.records)?;
             }
             pending.extend(parts);
         }

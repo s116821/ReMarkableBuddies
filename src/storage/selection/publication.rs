@@ -273,7 +273,7 @@ fn visit_selection_heads(
 /// Check accepted Store transactions under the publication mutex. Imported
 /// envelope operation IDs are deliberately absent from this inventory.
 fn claim_local_operation(root: &Path, generation: Uuid, operation: Uuid) -> Result<()> {
-    if feedback_generation::version(root)? != COMPOUND_STORE_FORMAT {
+    if target_generation::base_version(root)? != COMPOUND_STORE_FORMAT {
         return Ok(());
     }
     let mut budget =
@@ -318,7 +318,7 @@ impl Store {
             .lock()
             .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
         let root = self.generation(inner.generation);
-        if feedback_generation::version(&root)? != COMPOUND_STORE_FORMAT {
+        if target_generation::base_version(&root)? != COMPOUND_STORE_FORMAT {
             return Ok(Vec::new());
         }
         compound_generation::validate_ready(&self.paths, self.actor_id, inner.generation)?;
@@ -671,8 +671,9 @@ impl Store {
         let parts = validate_closure(root, &transaction)?;
         // Live publication and reopen validate identical notebook closure
         // semantics. A retained original is its own complete historical graph.
-        for (_, records) in &parts {
+        for (manifest, records) in &parts {
             notebook_generation::validate_records(root, &Index::default(), records)?;
+            target_generation::validate_records(&Index::default(), records, &manifest.records)?;
         }
         let records: Vec<_> = parts
             .iter()
