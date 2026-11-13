@@ -248,7 +248,17 @@ impl Controller {
     }
     fn persist(&mut self, control: &GroupControl) -> Result<()> {
         control.validate(self.store.actor_id)?;
-        let selected = self.state.selected.get_or_insert_with(|| SelectedState {
+        let _checkpoint = self
+            .store
+            .selected_checkpoint
+            .write()
+            .map_err(|_| anyhow::anyhow!("selected checkpoint unavailable"))?;
+        let (mut state, _) = read_state(&self.store)?;
+        ensure!(
+            state.format == FORMAT,
+            "CreateGroup worker checkpoint format differs"
+        );
+        let selected = state.selected.get_or_insert_with(|| SelectedState {
             format: 1,
             ..Default::default()
         });
@@ -260,11 +270,14 @@ impl Controller {
         selected
             .controls
             .insert(control.request.operation, control.clone());
+        validate_controls(selected, self.store.actor_id)?;
         ensure!(
-            serde_json::to_vec(&self.state)?.len() <= MAX_METADATA,
+            serde_json::to_vec(&state)?.len() <= MAX_METADATA,
             "CreateGroup checkpoint byte bound"
         );
-        files::atomic_json(&self.store.paths.data.join("sync/state.json"), &self.state)
+        files::atomic_json(&self.store.paths.data.join("sync/state.json"), &state)?;
+        self.state = state;
+        Ok(())
     }
     fn run(
         &mut self,

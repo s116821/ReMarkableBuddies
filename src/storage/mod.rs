@@ -127,6 +127,9 @@ pub struct Store {
     _lease: Lease,
     inner: Mutex<Inner>,
     wake: Mutex<Option<SyncSender<()>>>,
+    // Selected recognition holds a read guard across local proof and its effect.
+    // Checkpoint writers take the write guard without acquiring domain gates.
+    selected_checkpoint: std::sync::RwLock<()>,
     // Process-local export invocation exclusion, shared by every Ledger over
     // this Store. Independent of the index mutex; no index lock spans HTTP.
     pub(crate) export_active: std::sync::atomic::AtomicBool,
@@ -392,6 +395,7 @@ impl Store {
                 local_domain_handles: 0,
             }),
             wake: Mutex::new(None),
+            selected_checkpoint: std::sync::RwLock::new(()),
             export_active: std::sync::atomic::AtomicBool::new(false),
             writer_active: std::sync::atomic::AtomicBool::new(false),
         };
@@ -575,6 +579,7 @@ impl Store {
                     context.map(|c| c.actor()),
                     None,
                     context,
+                    true,
                 )?;
                 Ok::<_, anyhow::Error>((manifest, records))
             })();
@@ -647,6 +652,24 @@ impl Store {
     ) -> Result<Vec<(Envelope, String)>> {
         Self::validate_objects_archive(root, manifest, budget, notebook_archive_actor, None)
     }
+
+    fn validate_objects_inner(
+        root: &Path,
+        manifest: &Manifest,
+        budget: Option<&mut selection::SelectedReadBudget>,
+        notebook_archive_actor: Option<Uuid>,
+        verify_media: bool,
+    ) -> Result<Vec<(Envelope, String)>> {
+        Self::validate_objects_context(
+            root,
+            manifest,
+            budget,
+            notebook_archive_actor,
+            None,
+            None,
+            verify_media,
+        )
+    }
     fn validate_objects_archive(
         root: &Path,
         manifest: &Manifest,
@@ -661,6 +684,7 @@ impl Store {
             notebook_archive_actor,
             target_archive,
             None,
+            true,
         )
     }
     fn validate_objects_context(
@@ -670,6 +694,7 @@ impl Store {
         notebook_archive_actor: Option<Uuid>,
         target_archive: Option<&recovery::notebook_backup::TargetArchiveContext<'_>>,
         target_restore: Option<&recovery::notebook_backup::target_restore::RestoreContext<'_>>,
+        verify_media: bool,
     ) -> Result<Vec<(Envelope, String)>> {
         ensure!(
             target_archive.is_none() || target_restore.is_none(),
@@ -677,12 +702,21 @@ impl Store {
         );
         manifest.validate()?;
         Self::validate_namespace_family(root, manifest)?;
-        for (item, media) in manifest
-            .records
-            .iter()
-            .map(|r| (r, false))
-            .chain(manifest.media.iter().map(|r| (r, true)))
-        {
+        ensure!(
+            verify_media
+                || manifest
+                    .record_namespaces
+                    .values()
+                    .all(|ns| *ns == Namespace::Handwriting),
+            "handwriting discovery cannot read another namespace"
+        );
+        for (item, media) in manifest.records.iter().map(|r| (r, false)).chain(
+            manifest
+                .media
+                .iter()
+                .filter(|_| verify_media)
+                .map(|r| (r, true)),
+        ) {
             if let Some(budget) = budget.as_deref_mut() {
                 budget.charge(0, 1, 0, 0)?;
             }

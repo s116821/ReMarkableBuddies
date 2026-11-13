@@ -393,7 +393,7 @@ fn recover(
     )))
 }
 impl SelectedAdmission {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn recover_reader_text(
         &self,
         accepted: &SelectionToken,
@@ -438,7 +438,7 @@ impl SelectedAdmission {
         })
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn publish_resident_reader_text_joined(
         &self,
         accepted: &SelectionToken,

@@ -418,7 +418,7 @@ pub trait Provider: Send + Sync {
     ) -> Result<crate::conversation::SelectedReaderPublication> {
         anyhow::bail!("subject memory provider does not support selected Reader publication")
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", test))]
     fn with_selected_reader_handoff(
         &self,
         _result: &QueryResult,
@@ -429,7 +429,7 @@ pub trait Provider: Send + Sync {
     ) -> Result<()> {
         anyhow::bail!("memory provider does not support guarded Reader submission")
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", test))]
     fn publish_selected_reader_text_joined(
         &self,
         _result: &QueryResult,
@@ -451,7 +451,7 @@ pub trait Provider: Send + Sync {
     fn forget(&self, mutation: Forget) -> Result<Uuid>;
     fn inspect(&self, key: &Key) -> Result<Vec<Envelope>>;
     fn query(&self, query: &Query) -> Result<QueryResult>;
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", test))]
     fn query_selected_reader(
         &self,
         _query: &Query,

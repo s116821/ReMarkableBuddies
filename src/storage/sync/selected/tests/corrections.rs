@@ -13,6 +13,7 @@ struct CorrectionFixture {
     binding: Binding,
     owner: HandwritingOwner,
     scope: SelectionScope,
+    document: Uuid,
     storage: Fixture,
 }
 
@@ -31,9 +32,8 @@ impl CorrectionFixture {
             .unwrap()
             .scope(group, digest.clone())
             .unwrap();
-        let seed_owner = catalog::Owner::Document {
-            document: Uuid::new_v4(),
-        };
+        let document = Uuid::new_v4();
+        let seed_owner = catalog::Owner::Document { document };
         let identity = catalog::Identity {
             group,
             profile,
@@ -60,6 +60,7 @@ impl CorrectionFixture {
             wire,
             owner,
             scope,
+            document,
             binding: Binding {
                 group,
                 root_id: "shared-root".into(),
@@ -94,6 +95,23 @@ impl CorrectionFixture {
 
     fn engine(&self, store: &Arc<Store>) -> Engine {
         fixture_engine(&self.wire, store.clone(), self.binding.group, 32)
+    }
+
+    fn capture_profile(
+        &self,
+        store: &Arc<Store>,
+        targets: &BTreeSet<String>,
+        reads: &mut crate::storage::selection::SelectedReadBudget,
+    ) -> Result<handwriting::SelectedCapture> {
+        route::SelectedContextOwner::capture_profile(
+            store,
+            &self.binding,
+            self.owner.profile,
+            targets,
+            &[],
+            reads,
+            |_, _| Ok(()),
+        )
     }
 
     fn drive(&self, engine: &mut Engine, revision: Uuid) {
@@ -223,6 +241,11 @@ fn selected_handwriting_worker_distinguishes_omitted_and_missing_samples() {
     assert_eq!(query.status, handwriting::Status::Partial);
     assert_eq!(query.diagnostics.missing_media, 1);
     assert!(query.facts.is_empty());
+    let automatic = f
+        .capture_profile(&peer, &BTreeSet::new(), &mut route::allowance())
+        .unwrap();
+    assert_eq!(automatic.selection.status(), "partial-empty");
+    assert_eq!(automatic.selection.skipped_media, 1);
     let request = [handwriting::ExampleSelection {
         correction: f.owner.correction,
         revision,
@@ -238,6 +261,309 @@ fn selected_handwriting_worker_distinguishes_omitted_and_missing_samples() {
         .err(),
         Some(handwriting::ContextFailure::Unavailable),
     );
+}
+
+#[test]
+fn selected_handwriting_automatic_capture_distinguishes_pending_local_from_empty() {
+    let f = CorrectionFixture::new();
+    let mut engine = f.engine(&f.a);
+    let targets = BTreeSet::new();
+    assert!(f
+        .capture_profile(&f.a, &targets, &mut route::allowance())
+        .is_err());
+    let mut items = 32;
+    engine.refresh_root_catalog(&mut items).unwrap().unwrap();
+    let mut reads = route::allowance();
+    let empty = f.capture_profile(&f.a, &targets, &mut reads).unwrap();
+    assert_eq!(empty.selection.status(), "complete-empty");
+    empty
+        .context
+        .with_selected_phase(&[], &mut reads, |store| {
+            assert!(matches!(
+                store.selected_checkpoint.try_write(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ));
+            Ok(())
+        })
+        .unwrap();
+    assert!(f.a.selected_checkpoint.try_write().is_ok());
+    observed(f.command(&f.a, &confirm(f.owner, Uuid::new_v4()), true));
+    assert!(empty
+        .context
+        .with_selected_phase::<()>(&[], &mut reads, |_| panic!("new local scope admitted"))
+        .is_err());
+    let pending = f.capture_profile(&f.a, &targets, &mut reads).unwrap();
+    assert_eq!(pending.selection.status(), "partial-empty");
+    assert_eq!(pending.selection.unsupported, 1);
+}
+
+#[test]
+fn selected_handwriting_checkpoint_rejects_a_stale_engine_write() {
+    let f = CorrectionFixture::new();
+    let mut engine = f.engine(&f.a);
+    let mut stale = f.engine(&f.a);
+    let mut items = 32;
+    let view = engine.refresh_root_catalog(&mut items).unwrap().unwrap();
+    let before = std::fs::read(f.a.paths.data.join("sync/state.json")).unwrap();
+    let error = stale.save().unwrap_err();
+    assert!(error.to_string().contains("advanced before save"));
+    assert_eq!(
+        std::fs::read(f.a.paths.data.join("sync/state.json")).unwrap(),
+        before
+    );
+    stale.step().unwrap();
+    assert_eq!(
+        stale.checkpoint.observed_catalog_tail.as_ref(),
+        Some(&view.base)
+    );
+}
+
+#[test]
+fn selected_handwriting_automatic_ranks_metadata_before_capped_sample_reads() {
+    let f = CorrectionFixture::new();
+    let mut expected = Vec::new();
+    for confirmed_ms in 1..=5 {
+        let owner = HandwritingOwner::new(f.owner.profile, Uuid::new_v4());
+        let mut request = confirm(owner, Uuid::new_v4());
+        request["confirmed_ms"] = json!(confirmed_ms);
+        expected.push(observed(f.command(&f.a, &request, true)));
+    }
+    let mut engine = f.engine(&f.a);
+    for _ in 0..20 {
+        engine.step().unwrap();
+        if engine.view().unwrap().unwrap().entries.len() == 6 {
+            break;
+        }
+    }
+    let mut items = 32;
+    engine.refresh_root_catalog(&mut items).unwrap().unwrap();
+    let mut reads = route::allowance();
+    let targets = BTreeSet::from([digest(&png())]);
+    let empty = f.capture_profile(&f.a, &targets, &mut reads).unwrap();
+    assert_eq!(empty.selection.status(), "complete-empty");
+    assert_eq!(empty.selection.excluded_targets, 5);
+    assert_eq!(reads.usage().media_bytes, 0);
+    let ranked = f
+        .capture_profile(&f.a, &BTreeSet::new(), &mut reads)
+        .unwrap();
+    assert_eq!(ranked.selection.status(), "partial");
+    assert_eq!(ranked.selection.checked, 3);
+    assert_eq!(ranked.selection.unexamined, 2);
+    assert_eq!(
+        ranked
+            .context
+            .identity()
+            .examples
+            .iter()
+            .map(|example| example.revision)
+            .collect::<Vec<_>>(),
+        expected.into_iter().rev().take(3).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn selected_handwriting_reader_uses_same_examples_and_refuses_stale_submission_and_result() {
+    use crate::conversation::{
+        fixture_defer_pending_for_worker, resident_capture::tests::capture_for,
+        selected_reader_prepare::ResidentPrepared, Ledger, Outcome, Record,
+        SelectedDomainProjection,
+    };
+    use crate::storage::sync::selected::{ReaderPhase, ReaderPreferences};
+    use crate::workflow::{orchestrator::Orchestrator, Workflow};
+    use crate::{llm::ModelHandoff, LLMEngine};
+
+    #[derive(Clone, Copy)]
+    enum Change {
+        None,
+        BeforeVerification,
+        BeforeResult,
+    }
+
+    struct ScriptedReader<'a> {
+        change: Change,
+        replace: &'a dyn Fn(),
+        payload: Vec<String>,
+        proof: &'a std::cell::RefCell<Vec<Vec<String>>>,
+    }
+    impl LLMEngine for ScriptedReader<'_> {
+        fn guarded_timeout(&self) -> Option<Duration> {
+            Some(Duration::from_secs(1))
+        }
+        fn add_text_content(&mut self, _: &str) {}
+        fn add_image_content(&mut self, image: &str) {
+            self.payload.push(image.into());
+        }
+        fn clear_content(&mut self) {
+            self.payload.clear();
+        }
+        fn execute(&mut self) -> Result<String> {
+            panic!("unguarded selected Reader submission")
+        }
+        fn execute_with_handoff(
+            &mut self,
+            progress: &mut dyn FnMut() -> Result<()>,
+            handoff: &mut ModelHandoff<'_>,
+        ) -> Result<String> {
+            progress()?;
+            let stage = self.proof.borrow().len();
+            handoff(&mut || {
+                self.proof.borrow_mut().push(self.payload.clone());
+                Ok(())
+            })?;
+            if matches!(
+                (self.change, stage),
+                (Change::BeforeVerification, 0) | (Change::BeforeResult, 1)
+            ) {
+                (self.replace)();
+            }
+            Ok(if stage == 0 {
+                "QUESTION: What is x?\nQUESTION_BOX: 10,10,100,100\nSELECTION_CENTER: 100,100\n---\nANSWER: x = 7"
+            } else {
+                "TRANSCRIPTION: What is x?"
+            }.into())
+        }
+    }
+
+    let f = CorrectionFixture::new();
+    let identity = catalog::Identity {
+        group: f.binding.group,
+        profile: f.owner.profile,
+        binding_sha256: f.binding.digest.clone(),
+    };
+    let document_owner = catalog::Owner::Document {
+        document: f.document,
+    };
+    let document_scope = identity.aggregate_scope(&document_owner).unwrap();
+    let mut items = 32;
+    let genesis = f
+        .engine(&f.a)
+        .refresh_root_catalog(&mut items)
+        .unwrap()
+        .unwrap()
+        .root_sha;
+    let _ = fixture_defer_pending_for_worker(
+        f.a.clone(),
+        document_scope.clone(),
+        f.document,
+        genesis_base(&genesis, &document_scope.key_sha256),
+    );
+    super::recovery::register_document(f.a.clone(), &identity, document_owner, &genesis);
+    let first = confirm(f.owner, Uuid::new_v4());
+    let mut revision = observed(f.command(&f.a, &first, true));
+    let mut sender = f.engine(&f.a);
+    f.drive(&mut sender, revision);
+    drop(sender);
+    let path = f.storage.0.join("selected-recognition-reader.json");
+    files::atomic_json(
+        &path,
+        &json!({
+            "paths": f.a.paths,
+            "reader": {"selection": document_scope},
+            "product_settings": {"reader_enabled": true},
+            "handwriting": {"enabled": true, "profile": f.owner.profile},
+        }),
+    )
+    .unwrap();
+    preference_command::set_fixture_preference(
+        f.a.clone(),
+        &path,
+        f.binding.clone(),
+        &f.wire,
+        json!({"product_settings": {"reader_enabled": true, "writer_enabled": false}}),
+    )
+    .unwrap();
+    let reader = Arc::new(SelectedAdmission::new(f.a.clone(), document_scope.clone()).unwrap());
+    let requests_before = f.wire.requests().len();
+    for (i, change) in [
+        Change::None,
+        Change::BeforeVerification,
+        Change::BeforeResult,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (policy, token) = ReaderPreferences::from_binding(
+            f.a.clone(),
+            path.clone(),
+            &reader,
+            Instant::now(),
+            f.binding.clone(),
+            |_| panic!("already selected Reader opened transport"),
+        )
+        .unwrap_or_else(|error| panic!("Reader preference admission failed: {error:#}"));
+        let prepared =
+            ResidentPrepared::new(&f.a, &token, &capture_for(f.document), Uuid::new_v4(), 1)
+                .unwrap();
+        let (token, acknowledgment) = {
+            let mut reads = policy.reads(ReaderPhase::Acquisition).unwrap();
+            let [catalog, preferences] = policy.gates();
+            SelectedAdmission::with_gates(&[&reader, catalog, preferences], |store| {
+                policy.verify_locked(store, &reader, &token, &mut reads)?;
+                prepared.publish_locked(store, &token, &mut reads)
+            })
+            .unwrap()
+        };
+        let root = acknowledgment.root.record_id;
+        let mut update = first.clone();
+        update["command"] = json!("update");
+        update["operation"] = json!(Uuid::new_v4());
+        update["expected_heads"] = json!([revision]);
+        update["confirmed_ms"] = json!(i + 2);
+        update["corrected_text"] = json!(format!("10 N {i}"));
+        let replacement = std::cell::Cell::new(None);
+        let replace = || replacement.set(Some(observed(f.command(&f.a, &update, false))));
+        let proof = std::cell::RefCell::new(Vec::new());
+        let model = ScriptedReader {
+            change,
+            replace: &replace,
+            payload: Vec::new(),
+            proof: &proof,
+        };
+        let workflow = Workflow::selected_owned_reader_fixture(reader.clone());
+        let mut receiver = Orchestrator::new(workflow, model, Ledger::new(f.a.clone()));
+        let result = receiver.receive_resident_prepared(token, acknowledgment, policy);
+        drop(receiver);
+        let proof = proof.into_inner();
+        let fixture_image = STANDARD.encode(png());
+        assert!(proof.iter().all(|batch| batch
+            .first()
+            .is_some_and(|image| image.ends_with(&fixture_image))));
+        let snapshot =
+            f.a.selected_snapshot(&document_scope, MAX_ITEMS)
+                .unwrap()
+                .unwrap();
+        let generated = SelectedDomainProjection::from_snapshot(&snapshot)
+            .unwrap()
+            .inspect(root)
+            .unwrap()
+            .iter()
+            .any(
+                |record| matches!(record, Record::Turn(turn) if turn.outcome == Outcome::Generated),
+            );
+        if matches!(change, Change::None) {
+            result.unwrap();
+            assert_eq!(proof.len(), 2);
+            assert_eq!(proof[0], proof[1]);
+            assert!(generated);
+        } else {
+            assert_eq!(
+                proof.len(),
+                if matches!(change, Change::BeforeResult) {
+                    2
+                } else {
+                    1
+                }
+            );
+            assert!(!generated);
+            if matches!(change, Change::BeforeResult) {
+                assert!(format!("{:#}", result.unwrap_err()).contains("example changed"));
+            }
+            revision = replacement.get().unwrap();
+            assert!(!snapshot.selected_records.iter().any(|record| matches!(Ledger::decode(record),
+                Ok(Record::Turn(turn)) if turn.conversation == root && turn.outcome == Outcome::Interpreted)));
+        }
+    }
+    assert_eq!(f.wire.requests().len(), requests_before);
 }
 
 fn png() -> Vec<u8> {

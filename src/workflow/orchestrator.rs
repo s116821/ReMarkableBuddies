@@ -86,7 +86,7 @@ enum RenderOutcome {
 }
 
 impl<M: LLMEngine> Orchestrator<M> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn receive_resident_prepared(
         &mut self,
         token: crate::storage::selection::SelectionToken,
@@ -475,6 +475,14 @@ impl<M: LLMEngine> Orchestrator<M> {
             .clone();
         let encoded: Vec<String> = images.iter().map(|bytes| STANDARD.encode(bytes)).collect();
         let screenshot_base64 = &encoded[0];
+        #[cfg(any(target_os = "linux", test))]
+        if attempt.selected_resident() {
+            let targets = images
+                .iter()
+                .map(|image| crate::storage::digest(image))
+                .collect();
+            attempt.capture_selected_handwriting(&targets)?;
+        }
         let handwriting = self.handwriting.as_ref().map(|runtime| {
             let targets = images
                 .iter()
@@ -814,6 +822,8 @@ impl<M: LLMEngine> Orchestrator<M> {
         details: &[String],
         context: Option<&crate::handwriting::ConfirmedContext>,
     ) -> Result<Option<AnalysisResult>> {
+        #[cfg(any(target_os = "linux", test))]
+        let context = context.or_else(|| attempt.selected_handwriting());
         attempt.check_selected()?;
         info!("Sending analysis + answer proposal");
 
@@ -966,6 +976,8 @@ impl<M: LLMEngine> Orchestrator<M> {
         images: &[String],
         context: Option<&crate::handwriting::ConfirmedContext>,
     ) -> Result<Option<Failure>> {
+        #[cfg(any(target_os = "linux", test))]
+        let context = context.or_else(|| attempt.selected_handwriting());
         attempt.check_selected()?;
         let Some(bounds) = &result._question_box else {
             return Ok(Some(Failure::Transcription));
@@ -1129,7 +1141,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                 && !view.context.facts.is_empty()
         });
         let workflow = &mut self.workflow;
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", test))]
         if attempt.selected_resident() {
             let joined = self.memory.as_deref().zip(retrieved.as_ref());
             result.answer = crate::memory::context::answer_with_resident_handoff(

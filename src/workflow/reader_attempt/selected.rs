@@ -2,9 +2,9 @@
 use super::*;
 use crate::storage::selection::SelectionToken;
 use crate::storage::sync::mode::SyncModeLease;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 use crate::storage::sync::selected::{ReaderPhase, ReaderPreferences};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 use crate::storage::Store;
 use std::sync::Arc;
 
@@ -23,10 +23,12 @@ pub(super) struct Selected {
     mode: Option<SyncModeLease>,
     interpretation: Option<Frozen>,
     generation: Option<Frozen>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", test))]
     resident: Option<ReaderPreferences>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", test))]
     model_stage: std::cell::Cell<u8>,
+    #[cfg(any(target_os = "linux", test))]
+    handwriting: Option<crate::handwriting::ConfirmedContext>,
 }
 impl Selected {
     #[cfg(test)]
@@ -81,10 +83,12 @@ impl Selected {
             mode: None,
             interpretation: None,
             generation: None,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", test))]
             resident: None,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", test))]
             model_stage: std::cell::Cell::new(0),
+            #[cfg(any(target_os = "linux", test))]
+            handwriting: None,
         })
     }
 
@@ -144,7 +148,7 @@ impl Selected {
         Ok(user.clone())
     }
     pub(super) fn check(&self) -> Result<()> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", test))]
         if let Some(policy) = &self.resident {
             return self.with_resident(policy, ReaderPhase::Result, |_, _| Ok(()));
         }
@@ -158,7 +162,7 @@ impl Selected {
                 _ => None,
             })
         };
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", test))]
         if let Some(policy) = &self.resident {
             return self.with_resident(policy, ReaderPhase::Result, |store, reads| {
                 let snapshot = store
@@ -180,7 +184,7 @@ impl Selected {
         self.admission.with_current(&self.token, document)
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", test))]
     pub(super) fn query_memory(
         &self,
         memory: &dyn crate::memory::Provider,
@@ -208,7 +212,7 @@ impl Selected {
     }
 
     fn capture_images(&self) -> Result<SelectedCaptureImages> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", test))]
         if let Some(policy) = &self.resident {
             return self.with_resident(policy, ReaderPhase::Result, |store, reads| {
                 SelectedAdmission::capture_images_locked(store, &self.token, self.capture, reads)
@@ -220,7 +224,7 @@ impl Selected {
         Ok(images)
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", test))]
     pub(super) fn new_resident(
         ledger: &Ledger,
         workflow: &super::super::Workflow,
@@ -267,12 +271,61 @@ impl Selected {
         Ok((selected, turn))
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", test))]
     pub(super) fn is_resident(&self) -> bool {
         self.resident.is_some()
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", test))]
+    pub(super) fn capture_handwriting(
+        &mut self,
+        targets: &std::collections::BTreeSet<String>,
+    ) -> Result<()> {
+        if let Some(policy) = &self.resident {
+            anyhow::ensure!(
+                self.handwriting.is_none(),
+                "selected handwriting already captured"
+            );
+            if let Some(captured) =
+                policy.capture_handwriting(&self.admission, &self.token, targets)?
+            {
+                log::debug!(
+                    "Selected handwriting selection {}",
+                    serde_json::json!({
+                        "policy": crate::handwriting::runtime::POLICY,
+                        "selection": captured.selection,
+                        "selection_status": captured.selection.status(),
+                        "context": captured.context.identity(),
+                    })
+                );
+                anyhow::ensure!(
+                    captured.selection.status() != "partial-empty",
+                    "selected handwriting context incomplete"
+                );
+                self.handwriting = Some(captured.context);
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    pub(super) fn handwriting(&self) -> Option<&crate::handwriting::ConfirmedContext> {
+        self.handwriting
+            .as_ref()
+            .filter(|context| !context.identity().examples.is_empty())
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    fn handwriting_owner(
+        &self,
+    ) -> Result<Option<&crate::storage::sync::selected::SelectedContextOwner>> {
+        self.handwriting
+            .as_ref()
+            .map(crate::handwriting::ConfirmedContext::selected_owner)
+            .transpose()
+    }
+
+    #[cfg(any(target_os = "linux", test))]
     fn with_resident<T>(
         &self,
         policy: &ReaderPreferences,
@@ -288,7 +341,7 @@ impl Selected {
         })
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", test))]
     pub(super) fn progress(&self) -> Result<()> {
         if let Some(policy) = &self.resident {
             return policy.check_progress(&self.admission, &self.token);
@@ -296,7 +349,7 @@ impl Selected {
         self.check()
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", test))]
     pub(super) fn execute_model(
         &self,
         engine: &mut dyn crate::LLMEngine,
@@ -331,19 +384,37 @@ impl Selected {
                     submitted = true;
                     Ok(())
                 };
+                let mut reads = policy.reads(ReaderPhase::Submission)?;
+                let mut gates = policy.gates().to_vec();
+                let handwriting = self.handwriting_owner()?;
+                if let Some(owner) = handwriting {
+                    owner.join_gates(&mut gates);
+                }
+                let mut checkpoint = None;
+                let mut verify = |store: &Store| {
+                    anyhow::ensure!(
+                        checkpoint.is_none(),
+                        "selected Reader proof already verified"
+                    );
+                    checkpoint = handwriting
+                        .map(|owner| owner.verify_locked(store, &mut reads))
+                        .transpose()?;
+                    policy.verify_locked(store, &self.admission, &self.token, &mut reads)
+                };
                 if let Some((provider, view)) = memory {
-                    let mut reads = policy.reads(ReaderPhase::Submission)?;
                     provider.with_selected_reader_handoff(
                         view,
                         &self.admission,
-                        &policy.gates(),
-                        &mut |store| {
-                            policy.verify_locked(store, &self.admission, &self.token, &mut reads)
-                        },
+                        &gates,
+                        &mut verify,
                         &mut submit_once,
                     )
                 } else {
-                    self.with_resident(policy, ReaderPhase::Submission, |_, _| submit_once())
+                    gates.push(&self.admission);
+                    SelectedAdmission::with_gates(&gates, |store| {
+                        verify(store)?;
+                        submit_once()
+                    })
                 }
             },
             policy.deadline(),
@@ -433,7 +504,7 @@ impl Selected {
             self.interpretation.as_ref()
         }
         .unwrap();
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", test))]
         let guarded = if let Some(policy) = &self.resident {
             let mut reads = policy.reads(ReaderPhase::Result)?;
             anyhow::ensure!(
@@ -448,12 +519,24 @@ impl Selected {
                 self.model_stage.get() >= 2,
                 "selected Reader verification not submitted"
             );
+            let handwriting = self.handwriting_owner()?;
+            let mut checkpoint = None;
             let mut verify =
                 |store: &Store, reads: &mut crate::storage::selection::SelectedReadBudget| {
+                    anyhow::ensure!(
+                        checkpoint.is_none(),
+                        "selected Reader proof already verified"
+                    );
+                    checkpoint = handwriting
+                        .map(|owner| owner.verify_locked(store, reads))
+                        .transpose()?;
                     policy.verify_locked(store, &self.admission, &frozen.accepted, reads)?;
                     policy.require_result_time()
                 };
-            let gates = policy.gates();
+            let mut gates = policy.gates().to_vec();
+            if let Some(owner) = handwriting {
+                owner.join_gates(&mut gates);
+            }
             Some(match memory {
                 Some((provider, view)) => provider.publish_selected_reader_text_joined(
                     view,
@@ -474,7 +557,7 @@ impl Selected {
         } else {
             None
         };
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", test)))]
         let guarded = None;
         let result = if let Some(result) = guarded {
             result

@@ -109,14 +109,12 @@ impl Workflow {
         Self::with_selected(facade, debug_dump)
     }
 
-    #[cfg(all(test, target_os = "linux"))]
+    #[cfg(test)]
     pub(crate) fn selected_owned_reader_fixture(
         admission: std::sync::Arc<crate::conversation::SelectedAdmission>,
     ) -> Self {
         let mut workflow = Self::selected_runtime(admission, false);
-        workflow.device = Box::new(selected_backend::RefusingBackend::with_resident_releases(
-            vec![],
-        ));
+        workflow.device = Box::new(selected_backend::RefusingBackend::with_owned_fixture());
         workflow
     }
     pub fn new(

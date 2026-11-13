@@ -83,7 +83,7 @@ type AnswerExecution<'a> =
     dyn FnMut(&mut dyn LLMEngine, &mut dyn FnMut() -> Result<()>) -> Result<String> + 'a;
 
 /// The selected resident receiver owns the joined submission for this payload.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn answer_with_resident_handoff(
     model: &mut dyn LLMEngine,
     question: &str,

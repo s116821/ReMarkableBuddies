@@ -19,7 +19,7 @@ pub(crate) use control::{create_group, CreateGroupRequest, GroupOutcome};
 mod preference_command;
 mod preference_consumer;
 pub(crate) use preference_consumer::{NotebookPhase, NotebookSelectionChanged, RequestPreferences};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 pub(crate) use preference_consumer::{ReaderPhase, ReaderPreferences};
 mod preferences;
 pub use preference_command::{
@@ -65,6 +65,8 @@ pub(super) struct Checkpoint {
     binding: String,
     root: Option<Recorded>,
     catalog: Vec<Recorded>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    observed_catalog_tail: Option<String>,
     scopes: BTreeMap<String, Progress>,
     uploads: BTreeMap<String, Upload>,
     catalog_pending: Option<CatalogPending>,
@@ -221,7 +223,7 @@ struct Receive {
     #[serde(default)]
     verified: bool,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Applied {
     descriptor: String,
@@ -236,6 +238,7 @@ pub(super) struct Engine {
     binding: Binding,
     cancel: Arc<AtomicBool>,
     state: State,
+    state_sha: Option<String>,
     checkpoint: Checkpoint,
 }
 struct CatalogView {
@@ -265,6 +268,7 @@ fn stronger_scope_status(current: Status, next: Status) -> Status {
 impl Engine {
     pub(super) fn step(&mut self) -> Result<Status> {
         let _mode = self.current_lease()?;
+        self.refresh_saved_state()?;
         self.transport.set_request_window(
             Some(Instant::now() + Duration::from_secs(60)),
             Some(self.cancel.clone()),
@@ -369,15 +373,7 @@ impl Engine {
         let current = store.sync_mode_snapshot()?;
         let epoch = current.epoch.context("shared mode epoch absent")?;
         require_mode(&current, &binding)?;
-        let path = store.paths.data.join("sync/state.json");
-        let state: State = if path.exists() {
-            files::json(&path, MAX_METADATA as u64)?
-        } else {
-            State {
-                format: FORMAT,
-                ..Default::default()
-            }
-        };
+        let (state, state_sha) = read_state(&store)?;
         ensure!(state.format == FORMAT, "worker checkpoint format differs");
         if let Some(selected) = &state.selected {
             control::validate_controls(selected, store.actor_id)?;
@@ -396,6 +392,7 @@ impl Engine {
                 binding: binding.digest.clone(),
                 root: None,
                 catalog: vec![],
+                observed_catalog_tail: None,
                 scopes: BTreeMap::new(),
                 uploads: BTreeMap::new(),
                 catalog_pending: None,
@@ -417,10 +414,38 @@ impl Engine {
             binding,
             cancel,
             state,
+            state_sha,
             checkpoint,
         };
         engine.check_bounds()?;
         Ok(engine)
+    }
+    fn refresh_saved_state(&mut self) -> Result<()> {
+        let _checkpoint = self.store.selected_checkpoint_read()?;
+        let (state, state_sha) = read_state(&self.store)?;
+        if self.state_sha != state_sha {
+            let checkpoint = state
+                .selected
+                .as_ref()
+                .and_then(|selected| selected.epochs.get(&self.checkpoint.epoch))
+                .context("selected checkpoint disappeared")?;
+            ensure!(
+                state.format == FORMAT
+                    && checkpoint.format == 1
+                    && checkpoint.actor == self.store.actor_id
+                    && checkpoint.epoch == self.checkpoint.epoch
+                    && checkpoint.group == self.binding.group
+                    && checkpoint.root_id == self.binding.root_id
+                    && checkpoint.binding == self.binding.digest,
+                "selected checkpoint binding differs"
+            );
+            control::validate_controls(state.selected.as_ref().unwrap(), self.store.actor_id)?;
+            self.checkpoint = checkpoint.clone();
+            self.state = state;
+            self.state_sha = state_sha;
+            self.check_bounds()?;
+        }
+        Ok(())
     }
     fn check_bounds(&self) -> Result<()> {
         ensure!(
@@ -444,6 +469,16 @@ impl Engine {
     }
     fn save(&mut self) -> Result<()> {
         self.check_bounds()?;
+        let _checkpoint = self
+            .store
+            .selected_checkpoint
+            .write()
+            .map_err(|_| anyhow::anyhow!("selected checkpoint unavailable"))?;
+        let path = self.store.paths.data.join("sync/state.json");
+        ensure!(
+            state_bytes(&path)?.as_deref().map(digest) == self.state_sha,
+            "selected checkpoint advanced before save"
+        );
         let selected = self.state.selected.get_or_insert_with(|| SelectedState {
             format: 1,
             ..Default::default()
@@ -456,11 +491,11 @@ impl Engine {
         selected
             .epochs
             .insert(self.checkpoint.epoch, self.checkpoint.clone());
-        ensure!(
-            serde_json::to_vec(&self.state)?.len() <= MAX_METADATA,
-            "worker checkpoint byte bound"
-        );
-        files::atomic_json(&self.store.paths.data.join("sync/state.json"), &self.state)
+        let bytes = serde_json::to_vec(&self.state)?;
+        ensure!(bytes.len() <= MAX_METADATA, "worker checkpoint byte bound");
+        files::atomic(&path, &bytes)?;
+        self.state_sha = Some(digest(&bytes));
+        Ok(())
     }
     fn current_lease(&self) -> Result<mode::SyncModeLease> {
         ensure!(
@@ -557,6 +592,10 @@ impl Engine {
                 &mut reads,
             )?
             else {
+                if self.checkpoint.observed_catalog_tail.as_ref() != Some(&view.base) {
+                    self.checkpoint.observed_catalog_tail = Some(view.base.clone());
+                    self.save()?;
+                }
                 view.complete = true;
                 break;
             };
@@ -570,10 +609,39 @@ impl Engine {
                 &view.entries,
             )?;
             self.checkpoint.catalog.push(recorded);
+            self.checkpoint.observed_catalog_tail = None;
             self.save()?;
             view = self.view()?.context("catalog view absent")?;
         }
         Ok(Some(view))
+    }
+}
+
+impl Store {
+    fn selected_checkpoint_read(&self) -> Result<std::sync::RwLockReadGuard<'_, ()>> {
+        self.selected_checkpoint
+            .read()
+            .map_err(|_| anyhow::anyhow!("selected checkpoint unavailable"))
+    }
+}
+
+fn state_bytes(path: &std::path::Path) -> Result<Option<Vec<u8>>> {
+    path.exists()
+        .then(|| files::read(path, MAX_METADATA as u64))
+        .transpose()
+}
+
+fn read_state(store: &Store) -> Result<(State, Option<String>)> {
+    let path = store.paths.data.join("sync/state.json");
+    match state_bytes(&path)? {
+        Some(bytes) => Ok((serde_json::from_slice(&bytes)?, Some(digest(&bytes)))),
+        None => Ok((
+            State {
+                format: FORMAT,
+                ..Default::default()
+            },
+            None,
+        )),
     }
 }
 fn require_mode(snapshot: &mode::SyncModeSnapshot, binding: &Binding) -> Result<()> {

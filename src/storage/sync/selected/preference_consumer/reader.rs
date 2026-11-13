@@ -173,6 +173,34 @@ impl ReaderPreferences {
         self.inner.config()
     }
 
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn capture_handwriting(
+        &self,
+        reader: &SelectedAdmission,
+        token: &SelectionToken,
+        targets: &BTreeSet<String>,
+    ) -> Result<Option<crate::handwriting::SelectedCapture>> {
+        let config = &self.config().handwriting;
+        if !config.enabled {
+            return Ok(None);
+        }
+        let profile = config
+            .profile
+            .context("selected handwriting profile absent")?;
+        let mut reads = self.reads(ReaderPhase::Acquisition)?;
+        let [catalog, preferences] = self.gates();
+        SelectedContextOwner::capture_profile(
+            &self.inner.store,
+            &self.inner.binding,
+            profile,
+            targets,
+            &[reader, catalog, preferences],
+            &mut reads,
+            |store, reads| self.verify_locked(store, reader, token, reads),
+        )
+        .map(Some)
+    }
+
     pub(crate) fn deadline(&self) -> Instant {
         self.inner.deadline
     }

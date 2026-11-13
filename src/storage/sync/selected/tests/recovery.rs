@@ -293,7 +293,7 @@ fn selected_worker_recovery_stale_original_observes_only_and_old_epoch_stops() {
     assert_eq!(fixture.wire.requests().len(), before);
 }
 
-fn register_document(
+pub(super) fn register_document(
     store: Arc<Store>,
     identity: &catalog::Identity,
     owner: catalog::Owner,

@@ -200,7 +200,7 @@ impl Attempt {
             .as_ref()
             .map_or(Ok(()), |selected| selected.check())
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", test))]
     pub(super) fn prepare_resident(
         ledger: &Ledger,
         workflow: &super::Workflow,
@@ -215,21 +215,39 @@ impl Attempt {
     }
 
     pub(super) fn selected_resident(&self) -> bool {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", test))]
         return self
             .selected
             .as_ref()
             .is_some_and(selected::Selected::is_resident);
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", test)))]
         false
     }
 
     pub(super) fn model_progress(&self) -> Result<()> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", test))]
         if let Some(selected) = &self.selected {
             return selected.progress();
         }
         self.check_selected()
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    pub(super) fn capture_selected_handwriting(
+        &mut self,
+        targets: &std::collections::BTreeSet<String>,
+    ) -> Result<()> {
+        if let Some(selected) = &mut self.selected {
+            selected.capture_handwriting(targets)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    pub(super) fn selected_handwriting(&self) -> Option<&crate::handwriting::ConfirmedContext> {
+        self.selected
+            .as_ref()
+            .and_then(selected::Selected::handwriting)
     }
 
     pub(super) fn query_memory(
@@ -237,7 +255,7 @@ impl Attempt {
         memory: &dyn crate::memory::Provider,
         query: &crate::memory::Query,
     ) -> Result<crate::memory::QueryResult> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", test))]
         if let Some(selected) = &self.selected {
             return selected.query_memory(memory, query);
         }
@@ -249,14 +267,14 @@ impl Attempt {
         engine: &mut dyn crate::LLMEngine,
         progress: &mut dyn FnMut() -> Result<()>,
     ) -> Result<String> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", test))]
         if let Some(selected) = &self.selected {
             return selected.execute_model(engine, progress, None);
         }
         engine.execute_with_progress(progress)
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", test))]
     pub(super) fn execute_enrichment(
         &self,
         engine: &mut dyn crate::LLMEngine,
