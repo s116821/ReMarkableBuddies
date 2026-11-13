@@ -631,6 +631,7 @@ pub(in crate::storage) fn resume_existing(paths: &StorePaths) -> Result<Option<S
             local_domain_handles: 0,
         }),
         wake: Mutex::new(None),
+        selected_checkpoint: std::sync::RwLock::new(()),
         export_active: std::sync::atomic::AtomicBool::new(false),
         writer_active: std::sync::atomic::AtomicBool::new(false),
     };
